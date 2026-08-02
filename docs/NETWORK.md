@@ -43,6 +43,7 @@ A single `iroh::Endpoint` per node carries every content-addressed payload Tenzr
 - **Agent memory archives** — `MemoryManager::archive()` submits the canonical payload to iroh-blobs when the resolver is bound, falling back to the inline backend otherwise
 - **Model-weight distribution** — `BlobFetcher` trait with `IrohBlobFetcher` adapter; provider downloads are peer-first via `PeerHint`, fall back to HuggingFace Hub
 - **A2A and MCP over iroh** — two ALPNs on the shared endpoint: `tenzro/a2a` for A2A JSON-RPC 2.0 (peer-to-peer agent), `tenzro/mcp` for MCP Streamable HTTP JSON-RPC 2.0 (tool invocation)
+- **Confined shell over iroh** — `tenzro/shell` carries an interactive session against hardware a renter leased. No inbound port is opened: the session rides a connection the node already established, which is the move GCP's IAP and AWS's SSM Session Manager make. The ALPN is advertised only when a handler is installed and a confinement boundary is configured
 - **Direct `tenzro://blob/<hash>` URI fetches** — the same endpoint services any URI lookup
 
 The data plane lets agents on a public network connect peer-to-peer without an HTTP router in the middle and without trusting a central content service.
@@ -312,3 +313,53 @@ These Prometheus metrics let operators monitor mesh size, dial rate-limit pressu
 - Iroh A2A + MCP ALPNs: `crates/tenzro-iroh/src/jsonrpc.rs`, `crates/tenzro-iroh/src/lib.rs`
 
 For the consensus algorithm that runs over this network layer, see [`SPECIFICATION.md`](SPECIFICATION.md) §5. For the agent surfaces (MCP / A2A) that ride this network layer, see [`SPECIFICATION.md`](SPECIFICATION.md) §14. For the AI workloads (inference, MoE, training) carried over this network layer, see [`AI.md`](AI.md).
+
+## Node addressing
+
+A node carries five identifiers. Until the DID Document existed, a caller
+holding one had no documented path to the others.
+
+| Identifier | What it is | Derives from |
+|---|---|---|
+| TDIP DID | `did:tenzro:machine:<uuid>` — the on-chain identity | provisioned identity |
+| Ed25519 public key | the node's signing key | its keystore |
+| iroh `EndpointId` | QUIC, NAT-traversing transport identity | **byte-identical** to the Ed25519 key since Phase C2 |
+| libp2p `PeerId` | gossip and consensus mesh identity | a separate p2p keypair |
+| Pkarr record | DNS-over-DHT address record | signed by the Ed25519 key |
+
+Resolving the DID yields all of them plus the RPC/MCP/A2A/web service URLs, so
+DID resolution is the single entry point rather than one of five things a
+caller has to already know.
+
+```bash
+tenzro node did-document                       # via JSON-RPC
+curl https://your-node.example/.well-known/did.json   # generic DID resolvers
+```
+
+The document is served with `Content-Type: application/did+json` at the W3C
+well-known path, so a resolver that knows nothing Tenzro-specific can read it.
+
+### Why the node signs it itself
+
+The Ed25519 key and the iroh `EndpointId` are the same key material. A document
+signed by that key is therefore self-certifying for the transport half: a
+resolver that verifies the signature has, by that act, verified that the
+endpoint it is about to dial belongs to the DID it asked about. This is the
+property Phase C2 was built to create, and Pkarr publication composes with it.
+
+### What it deliberately omits
+
+Bind addresses that are not routable. `0.0.0.0:8545` is what the node listens
+on, not where anyone can reach it — publishing it costs the caller a timeout
+and tells them nothing, so wildcard and loopback addresses are dropped from
+both the service URLs and the libp2p multiaddrs. A node behind NAT with no
+dialable multiaddr still publishes its bare `PeerId`, which a peer already on
+the mesh can route to.
+
+Likewise, an ALPN appears only when a handler is actually installed. A renter
+who dialled `tenzro/shell` on a node that merely registered the ALPN would get
+a refusal, and the document would have promised them something.
+
+A node with no provisioned identity publishes nothing and returns 404. A
+document for a DID that resolves to nothing anywhere else is worse than saying
+there is none.

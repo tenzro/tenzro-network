@@ -337,7 +337,12 @@ impl ResourceCatalog {
 mod tests {
     use super::*;
 
-    fn requirement(scheme: &str, network: &str, asset: &str, resource: &str) -> X402PaymentRequirement {
+    fn requirement(
+        scheme: &str,
+        network: &str,
+        asset: &str,
+        resource: &str,
+    ) -> X402PaymentRequirement {
         X402PaymentRequirement::new(
             scheme,
             network,
@@ -351,7 +356,15 @@ mod tests {
         )
     }
 
-    fn listing(seller: &str, scheme: &str, network: &str, asset: &str, resource: &str, tags: &[&str], ts: u64) -> X402ResourceListing {
+    fn listing(
+        seller: &str,
+        scheme: &str,
+        network: &str,
+        asset: &str,
+        resource: &str,
+        tags: &[&str],
+        ts: u64,
+    ) -> X402ResourceListing {
         X402ResourceListing::new(
             seller,
             requirement(scheme, network, asset, resource),
@@ -372,7 +385,15 @@ mod tests {
     #[test]
     fn register_rederives_id_and_is_idempotent() {
         let cat = ResourceCatalog::new();
-        let mut l = listing("did:s", "upto", "eip155:1337", "USDC", "https://x/r", &["ai"], 1);
+        let mut l = listing(
+            "did:s",
+            "upto",
+            "eip155:1337",
+            "USDC",
+            "https://x/r",
+            &["ai"],
+            1,
+        );
         // Spoof a bogus id — register must overwrite it with the derived one.
         l.listing_id = "attacker-supplied".to_string();
         let id = cat.register(l).unwrap();
@@ -380,7 +401,15 @@ mod tests {
         assert_eq!(cat.len(), 1);
         // Re-register the same resource → same id, still one entry.
         let id2 = cat
-            .register(listing("did:s", "upto", "eip155:1337", "USDC", "https://x/r", &["ai"], 2))
+            .register(listing(
+                "did:s",
+                "upto",
+                "eip155:1337",
+                "USDC",
+                "https://x/r",
+                &["ai"],
+                2,
+            ))
             .unwrap();
         assert_eq!(id, id2);
         assert_eq!(cat.len(), 1);
@@ -391,25 +420,65 @@ mod tests {
     fn register_rejects_empty_seller_or_resource() {
         let cat = ResourceCatalog::new();
         let mut l = listing("", "upto", "eip155:1337", "USDC", "https://x/r", &[], 1);
-        assert!(matches!(cat.register(l).unwrap_err(), PaymentError::ChallengeError(_)));
+        assert!(matches!(
+            cat.register(l).unwrap_err(),
+            PaymentError::ChallengeError(_)
+        ));
         l = listing("did:s", "upto", "eip155:1337", "USDC", "", &[], 1);
-        assert!(matches!(cat.register(l).unwrap_err(), PaymentError::ChallengeError(_)));
+        assert!(matches!(
+            cat.register(l).unwrap_err(),
+            PaymentError::ChallengeError(_)
+        ));
     }
 
     #[test]
     fn discover_filters_by_scheme_network_asset_and_tags() {
         let cat = ResourceCatalog::new();
-        cat.register(listing("did:s", "upto", "eip155:1337", "USDC", "https://x/a", &["ai", "vision"], 3)).unwrap();
-        cat.register(listing("did:s", "batch-settlement", "eip155:1337", "USDC", "https://x/b", &["ai"], 2)).unwrap();
-        cat.register(listing("did:s", "upto", "eip155:8453", "EURC", "https://x/c", &["storage"], 1)).unwrap();
+        cat.register(listing(
+            "did:s",
+            "upto",
+            "eip155:1337",
+            "USDC",
+            "https://x/a",
+            &["ai", "vision"],
+            3,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:s",
+            "batch-settlement",
+            "eip155:1337",
+            "USDC",
+            "https://x/b",
+            &["ai"],
+            2,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:s",
+            "upto",
+            "eip155:8453",
+            "EURC",
+            "https://x/c",
+            &["storage"],
+            1,
+        ))
+        .unwrap();
 
         // scheme filter
-        let q = ResourceQuery { scheme: Some("upto".into()), ..Default::default() };
+        let q = ResourceQuery {
+            scheme: Some("upto".into()),
+            ..Default::default()
+        };
         let r = cat.discover(&q);
         assert_eq!(r.len(), 2);
 
         // scheme + tag filter
-        let q = ResourceQuery { scheme: Some("upto".into()), tags: vec!["vision".into()], ..Default::default() };
+        let q = ResourceQuery {
+            scheme: Some("upto".into()),
+            tags: vec!["vision".into()],
+            ..Default::default()
+        };
         let r = cat.discover(&q);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].listing.requirement.resource, "https://x/a");
@@ -417,26 +486,62 @@ mod tests {
         assert_eq!(r[0].seller_reputation, None);
 
         // asset filter
-        let q = ResourceQuery { asset: Some("EURC".into()), ..Default::default() };
+        let q = ResourceQuery {
+            asset: Some("EURC".into()),
+            ..Default::default()
+        };
         assert_eq!(cat.discover(&q).len(), 1);
 
         // network filter
-        let q = ResourceQuery { network: Some("eip155:1337".into()), ..Default::default() };
+        let q = ResourceQuery {
+            network: Some("eip155:1337".into()),
+            ..Default::default()
+        };
         assert_eq!(cat.discover(&q).len(), 2);
     }
 
     #[test]
     fn discover_sorts_fresh_first_and_honors_limit() {
         let cat = ResourceCatalog::new();
-        cat.register(listing("did:s", "upto", "n", "USDC", "https://x/old", &[], 1)).unwrap();
-        cat.register(listing("did:s", "upto", "n", "USDC", "https://x/new", &[], 9)).unwrap();
-        cat.register(listing("did:s", "upto", "n", "USDC", "https://x/mid", &[], 5)).unwrap();
+        cat.register(listing(
+            "did:s",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/old",
+            &[],
+            1,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:s",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/new",
+            &[],
+            9,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:s",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/mid",
+            &[],
+            5,
+        ))
+        .unwrap();
 
         let all = cat.discover(&ResourceQuery::default());
         assert_eq!(all[0].listing.requirement.resource, "https://x/new");
         assert_eq!(all[2].listing.requirement.resource, "https://x/old");
 
-        let limited = cat.discover(&ResourceQuery { limit: 2, ..Default::default() });
+        let limited = cat.discover(&ResourceQuery {
+            limit: 2,
+            ..Default::default()
+        });
         assert_eq!(limited.len(), 2);
         assert_eq!(limited[0].listing.requirement.resource, "https://x/new");
         assert_eq!(limited[1].listing.requirement.resource, "https://x/mid");
@@ -454,16 +559,46 @@ mod tests {
     #[test]
     fn discover_joins_reputation_and_ranks_scored_sellers_first() {
         let resolver = MapResolver(
-            [("did:high".to_string(), 900u64), ("did:low".to_string(), 200u64)]
-                .into_iter()
-                .collect(),
+            [
+                ("did:high".to_string(), 900u64),
+                ("did:low".to_string(), 200u64),
+            ]
+            .into_iter()
+            .collect(),
         );
         let cat = ResourceCatalog::new().with_reputation_resolver(Arc::new(resolver));
         // Freshest listing belongs to the LOW-reputation seller — reputation
         // must win over freshness.
-        cat.register(listing("did:low", "upto", "n", "USDC", "https://x/low", &[], 9)).unwrap();
-        cat.register(listing("did:high", "upto", "n", "USDC", "https://x/high", &[], 1)).unwrap();
-        cat.register(listing("did:unscored", "upto", "n", "USDC", "https://x/unscored", &[], 5)).unwrap();
+        cat.register(listing(
+            "did:low",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/low",
+            &[],
+            9,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:high",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/high",
+            &[],
+            1,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:unscored",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/unscored",
+            &[],
+            5,
+        ))
+        .unwrap();
 
         let r = cat.discover(&ResourceQuery::default());
         assert_eq!(r.len(), 3);
@@ -479,23 +614,65 @@ mod tests {
     #[test]
     fn min_reputation_floor_excludes_low_and_unscored_sellers() {
         let resolver = MapResolver(
-            [("did:high".to_string(), 900u64), ("did:low".to_string(), 200u64)]
-                .into_iter()
-                .collect(),
+            [
+                ("did:high".to_string(), 900u64),
+                ("did:low".to_string(), 200u64),
+            ]
+            .into_iter()
+            .collect(),
         );
         let cat = ResourceCatalog::new().with_reputation_resolver(Arc::new(resolver));
-        cat.register(listing("did:high", "upto", "n", "USDC", "https://x/high", &[], 1)).unwrap();
-        cat.register(listing("did:low", "upto", "n", "USDC", "https://x/low", &[], 2)).unwrap();
-        cat.register(listing("did:unscored", "upto", "n", "USDC", "https://x/unscored", &[], 3)).unwrap();
+        cat.register(listing(
+            "did:high",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/high",
+            &[],
+            1,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:low",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/low",
+            &[],
+            2,
+        ))
+        .unwrap();
+        cat.register(listing(
+            "did:unscored",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/unscored",
+            &[],
+            3,
+        ))
+        .unwrap();
 
-        let q = ResourceQuery { min_reputation: Some(500), ..Default::default() };
+        let q = ResourceQuery {
+            min_reputation: Some(500),
+            ..Default::default()
+        };
         let r = cat.discover(&q);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].listing.seller_did, "did:high");
 
         // Floor with no resolver wired → nothing can prove reputation.
         let bare = ResourceCatalog::new();
-        bare.register(listing("did:high", "upto", "n", "USDC", "https://x/high", &[], 1)).unwrap();
+        bare.register(listing(
+            "did:high",
+            "upto",
+            "n",
+            "USDC",
+            "https://x/high",
+            &[],
+            1,
+        ))
+        .unwrap();
         assert!(bare.discover(&q).is_empty());
     }
 
@@ -503,7 +680,15 @@ mod tests {
     fn deregister_is_seller_scoped() {
         let cat = ResourceCatalog::new();
         let id = cat
-            .register(listing("did:owner", "upto", "n", "USDC", "https://x/r", &[], 1))
+            .register(listing(
+                "did:owner",
+                "upto",
+                "n",
+                "USDC",
+                "https://x/r",
+                &[],
+                1,
+            ))
             .unwrap();
         // Wrong seller is refused.
         assert!(matches!(
@@ -524,7 +709,9 @@ mod tests {
     }
     impl ResourceCatalogStore for MemStore {
         fn put(&self, listing: &X402ResourceListing) -> Result<()> {
-            self.rows.write().insert(listing.listing_id.clone(), listing.clone());
+            self.rows
+                .write()
+                .insert(listing.listing_id.clone(), listing.clone());
             Ok(())
         }
         fn remove(&self, listing_id: &str) -> Result<bool> {
@@ -540,7 +727,8 @@ mod tests {
         let store = Arc::new(MemStore::default());
         {
             let cat = ResourceCatalog::with_store(store.clone()).unwrap();
-            cat.register(listing("did:s", "upto", "n", "USDC", "https://x/r", &[], 1)).unwrap();
+            cat.register(listing("did:s", "upto", "n", "USDC", "https://x/r", &[], 1))
+                .unwrap();
             assert_eq!(store.rows.read().len(), 1);
         }
         // A fresh catalog over the same store hydrates the prior listing.

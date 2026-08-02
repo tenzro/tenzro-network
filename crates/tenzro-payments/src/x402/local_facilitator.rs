@@ -147,21 +147,20 @@ impl LocalFacilitatorVerifier {
         payload_b64: &str,
         requirements_b64: &str,
     ) -> Result<(X402PaymentPayload, X402PaymentRequirement)> {
-        let payload_json = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            payload_b64,
-        )
-        .map_err(|e| PaymentError::VerificationFailed(format!("payload base64 invalid: {}", e)))?;
-        let payload: X402PaymentPayload = serde_json::from_slice(&payload_json)
-            .map_err(|e| PaymentError::VerificationFailed(format!("payload JSON invalid: {}", e)))?;
-
-        let req_json = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            requirements_b64,
-        )
-        .map_err(|e| {
-            PaymentError::VerificationFailed(format!("requirements base64 invalid: {}", e))
+        let payload_json =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload_b64)
+                .map_err(|e| {
+                    PaymentError::VerificationFailed(format!("payload base64 invalid: {}", e))
+                })?;
+        let payload: X402PaymentPayload = serde_json::from_slice(&payload_json).map_err(|e| {
+            PaymentError::VerificationFailed(format!("payload JSON invalid: {}", e))
         })?;
+
+        let req_json =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, requirements_b64)
+                .map_err(|e| {
+                    PaymentError::VerificationFailed(format!("requirements base64 invalid: {}", e))
+                })?;
         // Requirements may arrive as a single requirement or the full
         // `X402PaymentRequired` envelope; accept either.
         let requirement = if let Ok(single) =
@@ -173,15 +172,11 @@ impl LocalFacilitatorVerifier {
                 serde_json::from_slice(&req_json).map_err(|e| {
                     PaymentError::VerificationFailed(format!("requirements JSON invalid: {}", e))
                 })?;
-            required
-                .accepts
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    PaymentError::VerificationFailed(
-                        "requirements envelope carries no accepts entry".to_string(),
-                    )
-                })?
+            required.accepts.into_iter().next().ok_or_else(|| {
+                PaymentError::VerificationFailed(
+                    "requirements envelope carries no accepts entry".to_string(),
+                )
+            })?
         };
         Ok((payload, requirement))
     }
@@ -252,7 +247,9 @@ impl LocalFacilitatorVerifier {
         //   TRANSFER_WITH_AUTHORIZATION_TYPEHASH, from, to, value, validAfter,
         //   validBefore, nonce))
         let mut sbuf = Vec::with_capacity(32 * 7);
-        sbuf.extend_from_slice(&keccak256(TransferWithAuthorization::type_hash().as_bytes()));
+        sbuf.extend_from_slice(&keccak256(
+            TransferWithAuthorization::type_hash().as_bytes(),
+        ));
         sbuf.extend_from_slice(&address_word(&parse_address(&auth.from)?));
         sbuf.extend_from_slice(&address_word(&parse_address(&auth.to)?));
         sbuf.extend_from_slice(&uint256_word(parse_u128(&auth.value)?));
@@ -375,10 +372,7 @@ impl LocalFacilitatorVerifier {
             .eth_call(&token, &calldata, Some(&relayer))
             .await?;
 
-        Ok(AdmittedTransfer {
-            token,
-            calldata,
-        })
+        Ok(AdmittedTransfer { token, calldata })
     }
 }
 
@@ -461,8 +455,7 @@ fn parse_bytes32(s: &str) -> Result<[u8; 32]> {
 /// Parse arbitrary `0x`-prefixed hex bytes.
 fn parse_hex(s: &str) -> Result<Vec<u8>> {
     let clean = s.strip_prefix("0x").unwrap_or(s);
-    hex::decode(clean)
-        .map_err(|e| PaymentError::VerificationFailed(format!("hex invalid: {}", e)))
+    hex::decode(clean).map_err(|e| PaymentError::VerificationFailed(format!("hex invalid: {}", e)))
 }
 
 /// Parse a decimal string into u128.
@@ -542,7 +535,12 @@ mod tests {
         SigningKey::from_slice(&bytes).unwrap()
     }
 
-    fn requirement(pay_to: &str, asset: &str, amount: &str, network: &str) -> X402PaymentRequirement {
+    fn requirement(
+        pay_to: &str,
+        asset: &str,
+        amount: &str,
+        network: &str,
+    ) -> X402PaymentRequirement {
         X402PaymentRequirement {
             scheme: "exact-eip3009".to_string(),
             network: network.to_string(),
@@ -584,8 +582,12 @@ mod tests {
 
     #[test]
     fn word_bool_and_u128_parse() {
-        assert!(!word_is_true("0x0000000000000000000000000000000000000000000000000000000000000000"));
-        assert!(word_is_true("0x0000000000000000000000000000000000000000000000000000000000000001"));
+        assert!(!word_is_true(
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+        assert!(word_is_true(
+            "0x0000000000000000000000000000000000000000000000000000000000000001"
+        ));
         assert_eq!(
             parse_word_u128("0x00000000000000000000000000000000000000000000000000000000000f4240")
                 .unwrap(),

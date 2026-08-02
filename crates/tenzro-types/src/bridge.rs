@@ -146,12 +146,7 @@ pub struct BridgeTransfer {
 
 impl BridgeTransfer {
     /// Creates a new bridge transfer
-    pub fn new(
-        message: BridgeMessage,
-        asset_id: String,
-        amount: u64,
-        bridge_fee: u64,
-    ) -> Self {
+    pub fn new(message: BridgeMessage, asset_id: String, amount: u64, bridge_fee: u64) -> Self {
         Self {
             transfer_id: uuid::Uuid::new_v4().to_string(),
             message,
@@ -305,7 +300,10 @@ impl BridgeRelayConfig {
     /// Checks if a route is supported
     pub fn supports_route(&self, source: &str, destination: &str) -> bool {
         self.supported_source_chains.iter().any(|c| c == source)
-            && self.supported_destination_chains.iter().any(|c| c == destination)
+            && self
+                .supported_destination_chains
+                .iter()
+                .any(|c| c == destination)
     }
 }
 

@@ -12,9 +12,9 @@
 //! - `tenzro insurance pool` — show insurance-pool balance and counters
 //!   (`tenzro_getInsurancePoolBalance`)
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Insurance claim commands (Spec 9)
 #[derive(Debug, Subcommand)]
@@ -109,7 +109,7 @@ impl InsuranceClaimCmd {
         println!();
         output::print_warning(
             "Payout is governance-adjudicated. If approved, a PayInsuranceClaim \
-             transaction will settle the claim against the deterministic vault."
+             transaction will settle the claim against the deterministic vault.",
         );
         Ok(())
     }

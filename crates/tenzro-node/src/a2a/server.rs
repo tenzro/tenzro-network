@@ -6,13 +6,13 @@
 //! - `POST /a2a/stream` — SSE streaming for task updates
 
 use axum::{
+    Json, Router,
     extract::State,
     response::{
-        sse::{Event, Sse},
         IntoResponse,
+        sse::{Event, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -26,9 +26,7 @@ use tenzro_storage::KvStore;
 
 use super::agent_card::{self, AgentCard};
 use super::did_envelope;
-use super::task_manager::{
-    MessagePart, TaskArtifact, TaskManager, TaskMessage, TaskState,
-};
+use super::task_manager::{MessagePart, TaskArtifact, TaskManager, TaskMessage, TaskState};
 use super::x402_extension::{self, MessageMetadataExt};
 use crate::node::TenzroNode;
 use crate::web::handlers::WebState;
@@ -225,10 +223,9 @@ fn extract_envelope_metadata(
         .and_then(|m| m.get("metadata"))
         .or_else(|| params.get("metadata"));
     match candidate {
-        Some(serde_json::Value::Object(map)) => map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
+        Some(serde_json::Value::Object(map)) => {
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        }
         _ => std::collections::HashMap::new(),
     }
 }
@@ -316,10 +313,14 @@ async fn agent_card_handler(
     State(state): State<Arc<A2aState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse;
     use super::agent_card::SignedAgentCard;
+    use axum::response::IntoResponse;
 
-    if params.get("signed").map(|v| v == "1" || v == "true").unwrap_or(false) {
+    if params
+        .get("signed")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+    {
         let card = state.agent_card.clone();
         let canonical_hash = SignedAgentCard::canonical_card_hash(&card);
         // Signing: the JWS leg is added once the
@@ -382,11 +383,7 @@ async fn jsonrpc_handler(
 /// JSON-RPC `error` envelopes.
 pub(crate) fn dispatch_jsonrpc(state: &Arc<A2aState>, req: JsonRpcRequest) -> JsonRpcResponse {
     if req.jsonrpc != "2.0" {
-        return JsonRpcResponse::error(
-            req.id,
-            -32600,
-            "Invalid JSON-RPC version, expected 2.0",
-        );
+        return JsonRpcResponse::error(req.id, -32600, "Invalid JSON-RPC version, expected 2.0");
     }
 
     // Tenzro DID envelope gate — fail-closed authorization for all A2A
@@ -396,22 +393,21 @@ pub(crate) fn dispatch_jsonrpc(state: &Arc<A2aState>, req: JsonRpcRequest) -> Js
     if did_envelope::requires_envelope(&req.method) {
         let metadata = extract_envelope_metadata(&req.params);
         let task_id = extract_envelope_task_id(&req.method, &req.params);
-        match did_envelope::verify_envelope(
-            &state.node,
-            &req.method,
-            &task_id,
-            &metadata,
-        ) {
+        match did_envelope::verify_envelope(&state.node, &req.method, &task_id, &metadata) {
             Ok(sender_did) => {
                 tracing::debug!(
                     "A2A envelope verified: method={} task_id={} sender={}",
-                    req.method, task_id, sender_did
+                    req.method,
+                    task_id,
+                    sender_did
                 );
             }
             Err(err) => {
                 warn!(
                     "A2A envelope rejected: method={} task_id={} reason={}",
-                    req.method, task_id, err.message()
+                    req.method,
+                    task_id,
+                    err.message()
                 );
                 return JsonRpcResponse::error(req.id, -32001, err.message());
             }
@@ -453,15 +449,14 @@ async fn stream_handler(
         if did_envelope::requires_envelope(&req.method) {
             let metadata = extract_envelope_metadata(&req.params);
             let task_id = extract_envelope_task_id(&req.method, &req.params);
-            if let Err(err) = did_envelope::verify_envelope(
-                &state_clone.node,
-                &req.method,
-                &task_id,
-                &metadata,
-            ) {
+            if let Err(err) =
+                did_envelope::verify_envelope(&state_clone.node, &req.method, &task_id, &metadata)
+            {
                 warn!(
                     "A2A SSE envelope rejected: method={} task_id={} reason={}",
-                    req.method, task_id, err.message()
+                    req.method,
+                    task_id,
+                    err.message()
                 );
                 let rejected = JsonRpcResponse::error(req.id.clone(), -32001, err.message());
                 let event = Event::default()
@@ -487,43 +482,41 @@ async fn stream_handler(
         if let Some(result_value) = &result.result
             && let Some(task_id) = result_value.get("id").and_then(|v| v.as_str())
         {
-                // Mark as working
-                if let Some(task) = state_clone.task_manager.update_status(
-                    task_id,
-                    TaskState::Working,
-                    None,
-                ) {
-                    let event = Event::default()
-                        .event("task")
-                        .json_data(&task)
-                        .unwrap_or_else(|_| Event::default().data("error"));
-                    let _ = tx.send(Ok(event)).await;
-                }
+            // Mark as working
+            if let Some(task) =
+                state_clone
+                    .task_manager
+                    .update_status(task_id, TaskState::Working, None)
+            {
+                let event = Event::default()
+                    .event("task")
+                    .json_data(&task)
+                    .unwrap_or_else(|_| Event::default().data("error"));
+                let _ = tx.send(Ok(event)).await;
+            }
 
-                // Process the task (execute via node)
-                let response = execute_task(&state_clone, task_id).await;
+            // Process the task (execute via node)
+            let response = execute_task(&state_clone, task_id).await;
 
-                // Send completion
-                let response_msg = TaskMessage {
-                    role: "agent".to_string(),
-                    parts: vec![MessagePart::text(response)],
-                };
-                if let Some(task) = state_clone.task_manager.update_status(
-                    task_id,
-                    TaskState::Completed,
-                    Some(response_msg),
-                ) {
-                    let event = Event::default()
-                        .event("task")
-                        .json_data(&task)
-                        .unwrap_or_else(|_| Event::default().data("error"));
-                    let _ = tx.send(Ok(event)).await;
-                }
+            // Send completion
+            let response_msg = TaskMessage {
+                role: "agent".to_string(),
+                parts: vec![MessagePart::text(response)],
+            };
+            if let Some(task) = state_clone.task_manager.update_status(
+                task_id,
+                TaskState::Completed,
+                Some(response_msg),
+            ) {
+                let event = Event::default()
+                    .event("task")
+                    .json_data(&task)
+                    .unwrap_or_else(|_| Event::default().data("error"));
+                let _ = tx.send(Ok(event)).await;
+            }
 
-                // Send done sentinel
-                let _ = tx
-                    .send(Ok(Event::default().event("done").data("")))
-                    .await;
+            // Send done sentinel
+            let _ = tx.send(Ok(Event::default().event("done").data(""))).await;
         }
     });
 
@@ -579,100 +572,97 @@ fn handle_send_message(
         if existing.status.state == TaskState::InputRequired
             && let Some(requirements) = existing.metadata.get_payment_required()
         {
-                let Some(payload) = inbound_metadata.get_payment_payload() else {
-                    return JsonRpcResponse::error(
-                        id,
-                        -32004,
-                        "task is awaiting x402.payment.payload in message.metadata".to_string(),
-                    );
-                };
+            let Some(payload) = inbound_metadata.get_payment_payload() else {
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    "task is awaiting x402.payment.payload in message.metadata".to_string(),
+                );
+            };
 
-                match state.payment_verifier.verify_and_settle(
-                    &task_id,
-                    &requirements,
-                    &payload,
-                ) {
-                    Ok(receipts) => {
-                        // Record the submission, then mark settled and
-                        // resume the task to `working`. The original
-                        // request text was captured at hold time and is
-                        // still in `task.history`.
-                        state.task_manager.update_metadata(&task_id, |md| {
-                            md.submit_x402(payload.clone());
-                            md.complete_x402(receipts.clone());
-                        });
-                        state
-                            .task_manager
-                            .update_status(&task_id, TaskState::Working, Some(msg));
-                        // Run the original handler now that payment cleared.
-                        let response_text = execute_task_sync(state, &task_id);
-                        let response_msg = TaskMessage {
-                            role: "agent".to_string(),
-                            parts: vec![
-                                MessagePart::text(&response_text),
-                                MessagePart::data(
-                                    serde_json::json!({ "response": &response_text }),
-                                    "application/json",
-                                ),
-                            ],
-                        };
-                        let artifact = TaskArtifact {
-                            name: "response".to_string(),
-                            parts: vec![MessagePart::data(
-                                serde_json::json!({
-                                    "response": &response_text,
-                                    "task_id": &task_id,
-                                }),
+            match state
+                .payment_verifier
+                .verify_and_settle(&task_id, &requirements, &payload)
+            {
+                Ok(receipts) => {
+                    // Record the submission, then mark settled and
+                    // resume the task to `working`. The original
+                    // request text was captured at hold time and is
+                    // still in `task.history`.
+                    state.task_manager.update_metadata(&task_id, |md| {
+                        md.submit_x402(payload.clone());
+                        md.complete_x402(receipts.clone());
+                    });
+                    state
+                        .task_manager
+                        .update_status(&task_id, TaskState::Working, Some(msg));
+                    // Run the original handler now that payment cleared.
+                    let response_text = execute_task_sync(state, &task_id);
+                    let response_msg = TaskMessage {
+                        role: "agent".to_string(),
+                        parts: vec![
+                            MessagePart::text(&response_text),
+                            MessagePart::data(
+                                serde_json::json!({ "response": &response_text }),
                                 "application/json",
-                            )],
-                            index: Some(0),
-                        };
-                        state.task_manager.add_artifact(&task_id, artifact);
-                        return match state.task_manager.update_status(
-                            &task_id,
-                            TaskState::Completed,
-                            Some(response_msg),
-                        ) {
-                            Some(task) => {
-                                JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap())
-                            }
-                            None => JsonRpcResponse::internal_error(id, "Failed to update task"),
-                        };
-                    }
-                    Err(failure) => {
-                        // Verification or settlement failed — record the
-                        // submission, write the terminal status, and
-                        // transition the task to `failed`.
-                        let terminal = failure.terminal_status();
-                        let reason = failure.message();
-                        state.task_manager.update_metadata(&task_id, |md| {
-                            md.submit_x402(payload.clone());
-                            md.fail_x402(terminal);
-                        });
-                        let failure_msg = TaskMessage {
-                            role: "agent".to_string(),
-                            parts: vec![MessagePart::text(format!("payment failed: {}", reason))],
-                        };
-                        return match state.task_manager.update_status(
-                            &task_id,
-                            TaskState::Failed,
-                            Some(failure_msg),
-                        ) {
-                            Some(task) => {
-                                JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap())
-                            }
-                            None => JsonRpcResponse::internal_error(id, "Failed to update task"),
-                        };
-                    }
+                            ),
+                        ],
+                    };
+                    let artifact = TaskArtifact {
+                        name: "response".to_string(),
+                        parts: vec![MessagePart::data(
+                            serde_json::json!({
+                                "response": &response_text,
+                                "task_id": &task_id,
+                            }),
+                            "application/json",
+                        )],
+                        index: Some(0),
+                    };
+                    state.task_manager.add_artifact(&task_id, artifact);
+                    return match state.task_manager.update_status(
+                        &task_id,
+                        TaskState::Completed,
+                        Some(response_msg),
+                    ) {
+                        Some(task) => {
+                            JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap())
+                        }
+                        None => JsonRpcResponse::internal_error(id, "Failed to update task"),
+                    };
                 }
+                Err(failure) => {
+                    // Verification or settlement failed — record the
+                    // submission, write the terminal status, and
+                    // transition the task to `failed`.
+                    let terminal = failure.terminal_status();
+                    let reason = failure.message();
+                    state.task_manager.update_metadata(&task_id, |md| {
+                        md.submit_x402(payload.clone());
+                        md.fail_x402(terminal);
+                    });
+                    let failure_msg = TaskMessage {
+                        role: "agent".to_string(),
+                        parts: vec![MessagePart::text(format!("payment failed: {}", reason))],
+                    };
+                    return match state.task_manager.update_status(
+                        &task_id,
+                        TaskState::Failed,
+                        Some(failure_msg),
+                    ) {
+                        Some(task) => {
+                            JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap())
+                        }
+                        None => JsonRpcResponse::internal_error(id, "Failed to update task"),
+                    };
+                }
+            }
         }
 
         // Add message to existing task and re-process
-        state.task_manager.update_status(
-            &task_id,
-            TaskState::Working,
-            Some(msg),
-        );
+        state
+            .task_manager
+            .update_status(&task_id, TaskState::Working, Some(msg));
 
         // Execute synchronously for non-streaming
         let response_text = execute_task_sync(state, &task_id);
@@ -698,11 +688,11 @@ fn handle_send_message(
         };
         state.task_manager.add_artifact(&task_id, artifact);
 
-        if let Some(task) = state.task_manager.update_status(
-            &task_id,
-            TaskState::Completed,
-            Some(response_msg),
-        ) {
+        if let Some(task) =
+            state
+                .task_manager
+                .update_status(&task_id, TaskState::Completed, Some(response_msg))
+        {
             return JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap());
         }
         return JsonRpcResponse::success(id, serde_json::to_value(&existing).unwrap());
@@ -711,11 +701,9 @@ fn handle_send_message(
     // Create new task — use simple path when no metadata, metadata path otherwise
     let caller_metadata = params.message.metadata.unwrap_or_default();
     let _task = if caller_metadata.is_empty() {
-        state.task_manager.create_task(
-            task_id.clone(),
-            params.message.context_id,
-            msg,
-        )
+        state
+            .task_manager
+            .create_task(task_id.clone(), params.message.context_id, msg)
     } else {
         state.task_manager.create_task_with_metadata(
             task_id.clone(),
@@ -766,11 +754,10 @@ fn handle_send_message(
     };
     state.task_manager.add_artifact(&task_id, artifact);
 
-    match state.task_manager.update_status(
-        &task_id,
-        TaskState::Completed,
-        Some(response_msg),
-    ) {
+    match state
+        .task_manager
+        .update_status(&task_id, TaskState::Completed, Some(response_msg))
+    {
         Some(task) => JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap()),
         None => JsonRpcResponse::internal_error(id, "Failed to update task"),
     }
@@ -806,13 +793,10 @@ fn handle_list_tasks(
     params: serde_json::Value,
     id: serde_json::Value,
 ) -> JsonRpcResponse {
-    let params: ListTasksParams = serde_json::from_value(params).unwrap_or(ListTasksParams {
-        context_id: None,
-    });
+    let params: ListTasksParams =
+        serde_json::from_value(params).unwrap_or(ListTasksParams { context_id: None });
 
-    let tasks = state
-        .task_manager
-        .list_tasks(params.context_id.as_deref());
+    let tasks = state.task_manager.list_tasks(params.context_id.as_deref());
     JsonRpcResponse::success(id, serde_json::to_value(&tasks).unwrap())
 }
 
@@ -971,10 +955,14 @@ fn handle_ap2_execute(
             "application/json",
         )],
     };
-    state.task_manager.update_status(&task_key, TaskState::Completed, Some(exec_msg));
+    state
+        .task_manager
+        .update_status(&task_key, TaskState::Completed, Some(exec_msg));
 
     // Extract the original amount/currency from the creation message
-    let amount = task.history.first()
+    let amount = task
+        .history
+        .first()
         .and_then(|m| m.parts.first())
         .and_then(|p| p.data.as_ref())
         .and_then(|d| d.get("amount"))
@@ -1019,7 +1007,9 @@ fn handle_ap2_status(
             };
 
             // Extract payment details from history
-            let details = task.history.first()
+            let details = task
+                .history
+                .first()
                 .and_then(|m| m.parts.first())
                 .and_then(|p| p.data.clone())
                 .unwrap_or(serde_json::json!({}));
@@ -1068,7 +1058,10 @@ fn handle_ap2_cancel(
         None => JsonRpcResponse::error(
             id,
             -32001,
-            format!("Payment not found or already completed: {}", params.payment_id),
+            format!(
+                "Payment not found or already completed: {}",
+                params.payment_id
+            ),
         ),
     }
 }
@@ -1084,11 +1077,7 @@ fn execute_task_sync(state: &A2aState, task_id: &str) -> String {
     };
 
     // Get the latest user message
-    let last_user_msg = task
-        .history
-        .iter()
-        .rev()
-        .find(|m| m.role == "user");
+    let last_user_msg = task.history.iter().rev().find(|m| m.role == "user");
 
     let text = match last_user_msg {
         Some(msg) => msg
@@ -1110,14 +1099,30 @@ fn execute_task_sync(state: &A2aState, task_id: &str) -> String {
     // matchers ("node", "network", "status") are checked LAST.
 
     // --- Tier 1: Multi-word / compound phrases (highest priority) ----------
-    if text_lower.contains("join") || text_lower.contains("micronode") || text_lower.contains("onboard") || text_lower.contains("participate") {
+    if text_lower.contains("join")
+        || text_lower.contains("micronode")
+        || text_lower.contains("onboard")
+        || text_lower.contains("participate")
+    {
         // "join" is very specific intent — check before "network"/"node" can steal it
         handle_join_query(state, &text)
-    } else if text_lower.contains("agent template") || text_lower.contains("agent marketplace") || text_lower.contains("list") && text_lower.contains("template") {
+    } else if text_lower.contains("agent template")
+        || text_lower.contains("agent marketplace")
+        || text_lower.contains("list") && text_lower.contains("template")
+    {
         handle_agent_marketplace_query(state)
-    } else if text_lower.contains("task marketplace") || text_lower.contains("post task") || text_lower.contains("open task") || (text_lower.contains("task") && text_lower.contains("marketplace")) || (text_lower.contains("task") && text_lower.contains("list")) {
+    } else if text_lower.contains("task marketplace")
+        || text_lower.contains("post task")
+        || text_lower.contains("open task")
+        || (text_lower.contains("task") && text_lower.contains("marketplace"))
+        || (text_lower.contains("task") && text_lower.contains("list"))
+    {
         handle_task_marketplace_query(state)
-    } else if text_lower.contains("spawn") || text_lower.contains("child agent") || text_lower.contains("sub-agent") || text_lower.contains("subagent") {
+    } else if text_lower.contains("spawn")
+        || text_lower.contains("child agent")
+        || text_lower.contains("sub-agent")
+        || text_lower.contains("subagent")
+    {
         handle_spawn_query(state)
     } else if text_lower.contains("swarm") || text_lower.contains("orchestrat") {
         handle_swarm_query(state)
@@ -1125,57 +1130,132 @@ fn execute_task_sync(state: &A2aState, task_id: &str) -> String {
     // --- Tier 1b: Execution-layer roles (storage / compute / MoE / LAN) -----
     // These are RPC-backed; route here before the generic "node"/"network"/
     // "model" keywords below can steal them.
-    } else if text_lower.contains("shard map") || text_lower.contains("expert") || text_lower.contains("moe") {
+    } else if text_lower.contains("shard map")
+        || text_lower.contains("expert")
+        || text_lower.contains("moe")
+    {
         handle_moe_query(state)
-    } else if text_lower.contains("lan cluster") || text_lower.contains("cluster plan") || text_lower.contains("pipeline") || (text_lower.contains("local") && text_lower.contains("peer")) || text_lower.contains("reachability") || text_lower.contains("hardware profile") {
+    } else if text_lower.contains("lan cluster")
+        || text_lower.contains("cluster plan")
+        || text_lower.contains("pipeline")
+        || (text_lower.contains("local") && text_lower.contains("peer"))
+        || text_lower.contains("reachability")
+        || text_lower.contains("hardware profile")
+    {
         handle_discovery_query(state)
-    } else if text_lower.contains("storage deal") || text_lower.contains("byte-epoch") || text_lower.contains("retrievability") || (text_lower.contains("store") && text_lower.contains("object")) {
+    } else if text_lower.contains("storage deal")
+        || text_lower.contains("byte-epoch")
+        || text_lower.contains("retrievability")
+        || (text_lower.contains("store") && text_lower.contains("object"))
+    {
         handle_storage_query(state)
-    } else if text_lower.contains("compute rental") || text_lower.contains("book rental") || text_lower.contains("rent compute") || text_lower.contains("settle epoch") {
+    } else if text_lower.contains("compute rental")
+        || text_lower.contains("book rental")
+        || text_lower.contains("rent compute")
+        || text_lower.contains("settle epoch")
+    {
         handle_compute_query(state)
 
     // --- Tier 2: Token sub-commands (multi-keyword, before single "token") --
-    } else if text_lower.contains("token") && (text_lower.contains("create") || text_lower.contains("mint")) {
+    } else if text_lower.contains("token")
+        && (text_lower.contains("create") || text_lower.contains("mint"))
+    {
         handle_create_token(state, &text, &task.metadata)
-    } else if text_lower.contains("token") && (text_lower.contains("info") || text_lower.contains("details") || text_lower.contains("lookup")) {
+    } else if text_lower.contains("token")
+        && (text_lower.contains("info")
+            || text_lower.contains("details")
+            || text_lower.contains("lookup"))
+    {
         handle_get_token_info(state, &text)
     } else if text_lower.contains("token") && text_lower.contains("balance") {
         handle_token_balance(state, &text)
-    } else if (text_lower.contains("cross") && text_lower.contains("vm")) || (text_lower.contains("transfer") && (text_lower.contains("evm") || text_lower.contains("svm") || text_lower.contains("daml"))) {
+    } else if (text_lower.contains("cross") && text_lower.contains("vm"))
+        || (text_lower.contains("transfer")
+            && (text_lower.contains("evm")
+                || text_lower.contains("svm")
+                || text_lower.contains("daml")))
+    {
         handle_cross_vm_transfer(state, &text)
     } else if text_lower.contains("wrap") && text_lower.contains("tnzo") {
         handle_wrap_tnzo(state, &text)
 
     // --- Tier 3: Single-keyword domain routes (medium specificity) ----------
-    } else if text_lower.contains("token") || text_lower.contains("erc20") || text_lower.contains("erc-20") || (text_lower.contains("list") && text_lower.contains("token")) || (text_lower.contains("registered") && text_lower.contains("token")) {
+    } else if text_lower.contains("token")
+        || text_lower.contains("erc20")
+        || text_lower.contains("erc-20")
+        || (text_lower.contains("list") && text_lower.contains("token"))
+        || (text_lower.contains("registered") && text_lower.contains("token"))
+    {
         handle_list_tokens(state, &text)
-    } else if text_lower.contains("deploy") || text_lower.contains("contract") || text_lower.contains("bytecode") {
+    } else if text_lower.contains("deploy")
+        || text_lower.contains("contract")
+        || text_lower.contains("bytecode")
+    {
         handle_deploy_contract(state, &text)
-    } else if text_lower.contains("identity") || text_lower.contains("did") || text_lower.contains("register identity") || text_lower.contains("resolve") || text_lower.contains("username") {
+    } else if text_lower.contains("identity")
+        || text_lower.contains("did")
+        || text_lower.contains("register identity")
+        || text_lower.contains("resolve")
+        || text_lower.contains("username")
+    {
         handle_identity_query(state, &text)
-    } else if text_lower.contains("balance") || text_lower.contains("wallet") || text_lower.contains("send") {
+    } else if text_lower.contains("balance")
+        || text_lower.contains("wallet")
+        || text_lower.contains("send")
+    {
         handle_balance_query(state, &text)
     } else if text_lower.contains("faucet") {
         handle_faucet_info(state)
-    } else if text_lower.contains("model") || text_lower.contains("inference") || text_lower.contains("ai") || text_lower.contains("chat") {
+    } else if text_lower.contains("model")
+        || text_lower.contains("inference")
+        || text_lower.contains("ai")
+        || text_lower.contains("chat")
+    {
         handle_model_query(state)
-    } else if text_lower.contains("stake") || text_lower.contains("staking") || text_lower.contains("unstake") || text_lower.contains("validator") {
+    } else if text_lower.contains("stake")
+        || text_lower.contains("staking")
+        || text_lower.contains("unstake")
+        || text_lower.contains("validator")
+    {
         handle_staking_query(state)
-    } else if text_lower.contains("provider") || text_lower.contains("serving") || text_lower.contains("earnings") {
+    } else if text_lower.contains("provider")
+        || text_lower.contains("serving")
+        || text_lower.contains("earnings")
+    {
         handle_provider_query(state)
-    } else if text_lower.contains("payment") || text_lower.contains("challenge") || text_lower.contains("mpp") || text_lower.contains("x402") || text_lower.contains("ap2") {
+    } else if text_lower.contains("payment")
+        || text_lower.contains("challenge")
+        || text_lower.contains("mpp")
+        || text_lower.contains("x402")
+        || text_lower.contains("ap2")
+    {
         handle_payment_query(state)
-    } else if text_lower.contains("verify") || text_lower.contains("proof") || text_lower.contains("attestation") || text_lower.contains("zk") {
+    } else if text_lower.contains("verify")
+        || text_lower.contains("proof")
+        || text_lower.contains("attestation")
+        || text_lower.contains("zk")
+    {
         handle_verification_query(state)
-    } else if text_lower.contains("bridge") || text_lower.contains("cross-chain") || text_lower.contains("layerzero") || text_lower.contains("ccip") || text_lower.contains("debridge") {
+    } else if text_lower.contains("bridge")
+        || text_lower.contains("cross-chain")
+        || text_lower.contains("layerzero")
+        || text_lower.contains("ccip")
+        || text_lower.contains("debridge")
+    {
         handle_bridge_query(state)
-    } else if text_lower.contains("block") || text_lower.contains("height") || text_lower.contains("transaction") {
+    } else if text_lower.contains("block")
+        || text_lower.contains("height")
+        || text_lower.contains("transaction")
+    {
         handle_block_query(state)
 
     // --- Tier 4: Most generic single keywords (lowest priority) ------------
     } else if text_lower.contains("peer") || text_lower.contains("network") {
         handle_network_query(state)
-    } else if text_lower.contains("status") || text_lower.contains("health") || text_lower.contains("node") {
+    } else if text_lower.contains("status")
+        || text_lower.contains("health")
+        || text_lower.contains("node")
+    {
         handle_status_query(state)
     } else {
         "I'm the Tenzro Network Agent. I can help with:\n\
@@ -1198,7 +1278,8 @@ fn execute_task_sync(state: &A2aState, task_id: &str) -> String {
              - Verification (ZK, TEE, signatures)\n\
              - Cross-chain bridges\n\
              - AP2 payments (payments/create, payments/execute, etc.)\n\n\
-             What would you like to do?".to_string()
+             What would you like to do?"
+            .to_string()
     }
 }
 
@@ -1210,7 +1291,9 @@ fn handle_balance_query(state: &A2aState, text: &str) -> String {
     // Try to extract an address from the text, stripping trailing punctuation
     let address_raw = text
         .split_whitespace()
-        .find(|w| w.starts_with("0x") || w.trim_end_matches(|c: char| !c.is_alphanumeric()).len() == 64)
+        .find(|w| {
+            w.starts_with("0x") || w.trim_end_matches(|c: char| !c.is_alphanumeric()).len() == 64
+        })
         .unwrap_or("(no address provided)");
     let address = address_raw.trim_end_matches(['?', '!', '.', ',', ';', ':']);
 
@@ -1219,18 +1302,17 @@ fn handle_balance_query(state: &A2aState, text: &str) -> String {
             Ok(Some(data)) => {
                 let bytes: &[u8] = &data;
                 let balance = if bytes.len() >= 16 {
-                    u128::from_be_bytes(
-                        bytes[..16].try_into().unwrap_or([0u8; 16]),
-                    )
+                    u128::from_be_bytes(bytes[..16].try_into().unwrap_or([0u8; 16]))
                 } else if bytes.len() >= 8 {
-                    u64::from_be_bytes(
-                        bytes[..8].try_into().unwrap_or([0u8; 8]),
-                    ) as u128
+                    u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0u8; 8])) as u128
                 } else {
                     0u128
                 };
                 let tnzo = balance as f64 / 1e18;
-                format!("Balance for {}: {:.6} TNZO ({} wei)", address, tnzo, balance)
+                format!(
+                    "Balance for {}: {:.6} TNZO ({} wei)",
+                    address, tnzo, balance
+                )
             }
             _ => format!(
                 "No balance found for {}. The account may not exist yet. \
@@ -1249,7 +1331,8 @@ fn handle_block_query(state: &A2aState) -> String {
             Ok(Some(data)) => {
                 let bytes: &[u8] = &data;
                 let height = u64::from_be_bytes(
-                    bytes.get(..8)
+                    bytes
+                        .get(..8)
                         .and_then(|s: &[u8]| s.try_into().ok())
                         .unwrap_or([0u8; 8]),
                 );
@@ -1296,7 +1379,11 @@ fn handle_identity_query(state: &A2aState, text: &str) -> String {
                          - Status: {:?}\n\
                          - Created: {:?}",
                         identity.did_string(),
-                        if identity.is_human() { "Human" } else { "Machine" },
+                        if identity.is_human() {
+                            "Human"
+                        } else {
+                            "Machine"
+                        },
                         identity.status,
                         identity.created_at,
                     )
@@ -1306,12 +1393,14 @@ fn handle_identity_query(state: &A2aState, text: &str) -> String {
         } else {
             "Identity registry not available.".to_string()
         }
-    } else if text_lower.contains("register") && (text_lower.contains("identity") || text_lower.contains("did")) {
+    } else if text_lower.contains("register")
+        && (text_lower.contains("identity") || text_lower.contains("did"))
+    {
         // Extract a display name: take the last meaningful word that isn't a stop word
         let stop_words = [
-            "register", "a", "an", "the", "new", "identity", "named", "called",
-            "with", "name", "as", "create", "did", "human", "machine", "for",
-            "please", "me", "my", "i", "want", "to",
+            "register", "a", "an", "the", "new", "identity", "named", "called", "with", "name",
+            "as", "create", "did", "human", "machine", "for", "please", "me", "my", "i", "want",
+            "to",
         ];
         let display_name = text
             .split_whitespace()
@@ -1326,12 +1415,12 @@ fn handle_identity_query(state: &A2aState, text: &str) -> String {
         // Actually register the identity via the registry
         if let Some(registry) = state.node.identity_registry() {
             // Generate a fresh Ed25519 keypair for the new identity
-            let keypair = match tenzro_crypto::keys::KeyPair::generate(
-                tenzro_crypto::keys::KeyType::Ed25519,
-            ) {
-                Ok(kp) => kp,
-                Err(e) => return format!("Failed to generate keypair: {}", e),
-            };
+            let keypair =
+                match tenzro_crypto::keys::KeyPair::generate(tenzro_crypto::keys::KeyType::Ed25519)
+                {
+                    Ok(kp) => kp,
+                    Err(e) => return format!("Failed to generate keypair: {}", e),
+                };
             let pk_bytes = keypair.public_key().to_bytes();
 
             // register_human_with_fee is async — run it on the current runtime
@@ -1401,18 +1490,19 @@ fn handle_model_query(state: &A2aState) -> String {
         for svc in &services {
             out.push_str(&format!(
                 "  - {} ({}) — {} [{}]\n    API: {}\n",
-                svc.model_name, svc.model_id, svc.status, svc.location,
-                svc.api_endpoint,
+                svc.model_name, svc.model_id, svc.status, svc.location, svc.api_endpoint,
             ));
         }
     }
 
-    out.push_str("\nRPC methods:\n\
+    out.push_str(
+        "\nRPC methods:\n\
          - `tenzro_listModels` — list available models\n\
          - `tenzro_listModelEndpoints` — list active service endpoints\n\
          - `tenzro_requestInference` — run inference\n\
          - `tenzro_chat` — chat completion\n\
-         - `tenzro_registerModelEndpoint` — register external endpoint");
+         - `tenzro_registerModelEndpoint` — register external endpoint",
+    );
     out
 }
 
@@ -1516,7 +1606,11 @@ fn handle_provider_query(state: &A2aState) -> String {
     let staking_info = if let Some(staking) = state.node.staking() {
         let all_stakes = staking.get_all_stakes();
         let total_staked: u128 = all_stakes.iter().map(|(_, s)| s.amount).sum();
-        format!("{:.6} TNZO across {} stakers", total_staked as f64 / 1e18, all_stakes.len())
+        format!(
+            "{:.6} TNZO across {} stakers",
+            total_staked as f64 / 1e18,
+            all_stakes.len()
+        )
     } else {
         "N/A".to_string()
     };
@@ -1572,48 +1666,56 @@ fn handle_create_token(
     let words: Vec<&str> = text.split_whitespace().collect();
 
     // Find a symbol in parentheses, e.g. "(MTK)"
-    let symbol = words.iter()
+    let symbol = words
+        .iter()
         .find(|w| w.starts_with('(') && w.ends_with(')'))
         .map(|w| w.trim_matches(|c| c == '(' || c == ')'))
         .or_else(|| {
             // Find uppercase 2-5 letter words that look like ticker symbols
-            words.iter()
+            words
+                .iter()
                 .find(|w| {
                     let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
-                    clean.len() >= 2 && clean.len() <= 5
+                    clean.len() >= 2
+                        && clean.len() <= 5
                         && clean.chars().all(|c| c.is_ascii_uppercase())
-                        && clean != "TNZO" && clean != "EVM" && clean != "SVM"
-                        && clean != "VM" && clean != "AI"
+                        && clean != "TNZO"
+                        && clean != "EVM"
+                        && clean != "SVM"
+                        && clean != "VM"
+                        && clean != "AI"
                 })
                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         });
 
     // Find a name — the word(s) immediately before the symbol, or after "called"/"named"
-    let name = text.to_lowercase()
+    let name = text
+        .to_lowercase()
         .find("called ")
         .map(|i| {
             let after = &text[i + 7..];
-            after.split(['(', ',', ' '])
+            after
+                .split(['(', ',', ' '])
                 .next()
                 .unwrap_or("MyToken")
                 .trim()
         })
         .map(|s| s.to_string())
         .or_else(|| {
-            text.to_lowercase()
-                .find("named ")
-                .map(|i| {
-                    let after = &text[i + 6..];
-                    after.split(['(', ',', ' '])
-                        .next()
-                        .unwrap_or("MyToken")
-                        .trim()
-                        .to_string()
-                })
+            text.to_lowercase().find("named ").map(|i| {
+                let after = &text[i + 6..];
+                after
+                    .split(['(', ',', ' '])
+                    .next()
+                    .unwrap_or("MyToken")
+                    .trim()
+                    .to_string()
+            })
         });
 
     // Find a supply number
-    let supply_str = words.iter()
+    let supply_str = words
+        .iter()
         .find(|w| {
             let clean = w.trim_matches(|c: char| !c.is_ascii_digit());
             !clean.is_empty() && clean.chars().all(|c| c.is_ascii_digit())
@@ -1650,16 +1752,17 @@ fn handle_create_token(
         }
     }
 
-    if !authenticated
-        && let Some(agent_id) = task_metadata.get("agent_id").and_then(|v| v.as_str()) {
-            // Try to resolve the agent's wallet address from the agent runtime
-            if let Some(agent_runtime) = state.node.agent_runtime()
-                && let Ok(agent) = agent_runtime.get_agent(agent_id) {
-                    let addr_bytes = agent.wallet_address.0;
-                    creator.copy_from_slice(&addr_bytes);
-                    authenticated = true;
-                }
+    if !authenticated && let Some(agent_id) = task_metadata.get("agent_id").and_then(|v| v.as_str())
+    {
+        // Try to resolve the agent's wallet address from the agent runtime
+        if let Some(agent_runtime) = state.node.agent_runtime()
+            && let Ok(agent) = agent_runtime.get_agent(agent_id)
+        {
+            let addr_bytes = agent.wallet_address.0;
+            creator.copy_from_slice(&addr_bytes);
+            authenticated = true;
         }
+    }
 
     if !authenticated {
         // Legacy fallback: deterministic creator address derived from the symbol
@@ -1784,8 +1887,12 @@ fn handle_get_token_info(state: &A2aState, text: &str) -> String {
                 d.decimals,
                 display_supply,
                 d.token_type,
-                d.vm_addresses.evm_hex().unwrap_or_else(|| "N/A".to_string()),
-                d.vm_addresses.svm_hex().unwrap_or_else(|| "N/A".to_string()),
+                d.vm_addresses
+                    .evm_hex()
+                    .unwrap_or_else(|| "N/A".to_string()),
+                d.vm_addresses
+                    .svm_hex()
+                    .unwrap_or_else(|| "N/A".to_string()),
                 hex::encode(d.creator),
             )
         }
@@ -1812,7 +1919,10 @@ fn handle_list_tokens(state: &A2aState, text: &str) -> String {
     let text_lower = text.to_lowercase();
 
     // Check for VM type filter
-    let vm_filter = if text_lower.contains("tempo") || text_lower.contains("tip20") || text_lower.contains("tip-20") {
+    let vm_filter = if text_lower.contains("tempo")
+        || text_lower.contains("tip20")
+        || text_lower.contains("tip-20")
+    {
         Some(tenzro_token::TokenVmType::TempoTip20)
     } else if text_lower.contains("evm") {
         Some(tenzro_token::TokenVmType::Evm)
@@ -1845,7 +1955,9 @@ fn handle_list_tokens(state: &A2aState, text: &str) -> String {
             d.symbol,
             display_supply,
             d.token_type,
-            d.vm_addresses.evm_hex().unwrap_or_else(|| "N/A".to_string()),
+            d.vm_addresses
+                .evm_hex()
+                .unwrap_or_else(|| "N/A".to_string()),
         ));
     }
 
@@ -1898,12 +2010,7 @@ fn handle_token_balance(state: &A2aState, text: &str) -> String {
          - SVM wTNZO: {} (9 decimals)\n\
          - DAML Holding: {:.18}\n\n\
          All representations share the same underlying balance (pointer model).",
-        address_str,
-        native_balance,
-        display,
-        native_balance,
-        spl_balance,
-        display,
+        address_str, native_balance, display, native_balance, spl_balance, display,
     )
 }
 
@@ -1946,21 +2053,24 @@ fn handle_cross_vm_transfer(state: &A2aState, text: &str) -> String {
     };
 
     // Look for "from X to Y" pattern
-    let from_vm = ["evm", "svm", "daml", "native", "ethereum", "solana", "canton"]
-        .iter()
-        .find(|vm| {
-            text_lower.contains(&format!("from {}", vm))
-                || text_lower.contains(&format!("from the {}", vm))
-        })
-        .and_then(|vm| parse_vm(vm));
+    let from_vm = [
+        "evm", "svm", "daml", "native", "ethereum", "solana", "canton",
+    ]
+    .iter()
+    .find(|vm| {
+        text_lower.contains(&format!("from {}", vm))
+            || text_lower.contains(&format!("from the {}", vm))
+    })
+    .and_then(|vm| parse_vm(vm));
 
-    let to_vm = ["evm", "svm", "daml", "native", "ethereum", "solana", "canton"]
-        .iter()
-        .find(|vm| {
-            text_lower.contains(&format!("to {}", vm))
-                || text_lower.contains(&format!("to the {}", vm))
-        })
-        .and_then(|vm| parse_vm(vm));
+    let to_vm = [
+        "evm", "svm", "daml", "native", "ethereum", "solana", "canton",
+    ]
+    .iter()
+    .find(|vm| {
+        text_lower.contains(&format!("to {}", vm)) || text_lower.contains(&format!("to the {}", vm))
+    })
+    .and_then(|vm| parse_vm(vm));
 
     if addresses.len() < 2 || amount_str.is_none() || from_vm.is_none() || to_vm.is_none() {
         return "Cross-VM Transfer requires:\n\
@@ -1969,7 +2079,8 @@ fn handle_cross_vm_transfer(state: &A2aState, text: &str) -> String {
              - amount\n\
              - source VM (evm, svm, daml, native)\n\
              - target VM (evm, svm, daml, native)\n\n\
-             Example: \"Transfer 100 TNZO from EVM 0xabc... to SVM 0xdef...\"".to_string();
+             Example: \"Transfer 100 TNZO from EVM 0xabc... to SVM 0xdef...\""
+            .to_string();
     }
 
     let amount_raw = amount_str
@@ -2090,7 +2201,10 @@ fn handle_wrap_tnzo(state: &A2aState, text: &str) -> String {
     let amount: u128 = amount_str
         .and_then(|s| {
             let clean = s.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
-            clean.parse::<u128>().ok().map(|v| v.saturating_mul(10u128.pow(18)))
+            clean
+                .parse::<u128>()
+                .ok()
+                .map(|v| v.saturating_mul(10u128.pow(18)))
                 .or_else(|| clean.parse::<f64>().ok().map(|f| (f * 1e18) as u128))
         })
         .unwrap_or(balance);
@@ -2134,7 +2248,8 @@ fn handle_deploy_contract(state: &A2aState, text: &str) -> String {
     // Check if there's actual bytecode to deploy
     let bytecode_str = words.iter().find(|w| {
         let clean = w.strip_prefix("0x").unwrap_or(w);
-        clean.len() >= 4 && clean.chars().all(|c| c.is_ascii_hexdigit())
+        clean.len() >= 4
+            && clean.chars().all(|c| c.is_ascii_hexdigit())
             && !clean.chars().all(|c| c.is_ascii_uppercase()) // exclude symbols
     });
 
@@ -2163,7 +2278,11 @@ fn handle_deploy_contract(state: &A2aState, text: &str) -> String {
                  \"gas_limit\": 3000000\n\
                }}\n\
              }}",
-            if vm_runtime_available { "Available" } else { "Not initialized" },
+            if vm_runtime_available {
+                "Available"
+            } else {
+                "Not initialized"
+            },
         );
     }
 
@@ -2350,17 +2469,34 @@ fn handle_join_query(_state: &A2aState, text: &str) -> String {
     // Try to extract a display name from the text
     // e.g. "Join the Tenzro Network as Alice" → "Alice"
     let stop_words = [
-        "join", "the", "tenzro", "network", "as", "a", "an", "micronode",
-        "micro-node", "onboard", "create", "new", "identity", "on", "with",
-        "username", "me", "i", "want", "to", "please", "node",
+        "join",
+        "the",
+        "tenzro",
+        "network",
+        "as",
+        "a",
+        "an",
+        "micronode",
+        "micro-node",
+        "onboard",
+        "create",
+        "new",
+        "identity",
+        "on",
+        "with",
+        "username",
+        "me",
+        "i",
+        "want",
+        "to",
+        "please",
+        "node",
     ];
-    let display_name = text
-        .split_whitespace()
-        .find(|w| {
-            let w_lower = w.to_lowercase();
-            let clean = w_lower.trim_matches(|c: char| !c.is_alphanumeric());
-            !stop_words.contains(&clean) && clean.len() > 1
-        });
+    let display_name = text.split_whitespace().find(|w| {
+        let w_lower = w.to_lowercase();
+        let clean = w_lower.trim_matches(|c: char| !c.is_alphanumeric());
+        !stop_words.contains(&clean) && clean.len() > 1
+    });
 
     format!(
         "Join the Tenzro Network as a MicroNode\n\n\
@@ -2407,14 +2543,17 @@ fn handle_agent_marketplace_query(state: &A2aState) -> String {
              - `tenzro_listAgentTemplates` — list available templates\n\
              - `tenzro_registerAgentTemplate` — register a new template\n\
              - `tenzro_getAgentTemplate` — get template details\n\n\
-             CLI: tenzro marketplace list | tenzro marketplace register".to_string()
+             CLI: tenzro marketplace list | tenzro marketplace register"
+                .to_string()
         } else {
             let mut out = format!("Agent Marketplace ({} templates):\n", templates.len());
             for t in &templates {
                 out.push_str(&format!("  - {}\n", t));
             }
-            out.push_str("\nRPC: `tenzro_listAgentTemplates`, `tenzro_getAgentTemplate`\n\
-                          CLI: tenzro marketplace list");
+            out.push_str(
+                "\nRPC: `tenzro_listAgentTemplates`, `tenzro_getAgentTemplate`\n\
+                          CLI: tenzro marketplace list",
+            );
             out
         }
     } else {
@@ -2423,7 +2562,8 @@ fn handle_agent_marketplace_query(state: &A2aState) -> String {
          RPC methods:\n\
          - `tenzro_listAgentTemplates` — list available templates\n\
          - `tenzro_registerAgentTemplate` — register a new template\n\
-         - `tenzro_getAgentTemplate` — get template details".to_string()
+         - `tenzro_getAgentTemplate` — get template details"
+            .to_string()
     }
 }
 
@@ -2447,14 +2587,17 @@ fn handle_task_marketplace_query(state: &A2aState) -> String {
              - `tenzro_getTask` — get task details\n\
              - `tenzro_cancelTask` — cancel a task\n\
              - `tenzro_quoteTask` — submit a quote for a task\n\n\
-             CLI: tenzro task list | tenzro task post".to_string()
+             CLI: tenzro task list | tenzro task post"
+                .to_string()
         } else {
             let mut out = format!("Task Marketplace ({} tasks):\n", tasks.len());
             for t in &tasks {
                 out.push_str(&format!("  - {}\n", t));
             }
-            out.push_str("\nRPC: `tenzro_listTasks`, `tenzro_postTask`, `tenzro_quoteTask`\n\
-                          CLI: tenzro task list");
+            out.push_str(
+                "\nRPC: `tenzro_listTasks`, `tenzro_postTask`, `tenzro_quoteTask`\n\
+                          CLI: tenzro task list",
+            );
             out
         }
     } else {
@@ -2463,7 +2606,8 @@ fn handle_task_marketplace_query(state: &A2aState) -> String {
          RPC methods:\n\
          - `tenzro_listTasks` — list open tasks\n\
          - `tenzro_postTask` — post a new task\n\
-         - `tenzro_getTask` — get task details".to_string()
+         - `tenzro_getTask` — get task details"
+            .to_string()
     }
 }
 
@@ -2480,7 +2624,8 @@ fn handle_payment_query(_state: &A2aState) -> String {
      - `tenzro_listPaymentSessions` — list active sessions\n\
      - `tenzro_paymentGatewayInfo` — gateway configuration\n\n\
      CLI: tenzro payment challenge | tenzro payment pay\n\
-     MCP tools: create_payment_challenge, verify_payment".to_string()
+     MCP tools: create_payment_challenge, verify_payment"
+        .to_string()
 }
 
 fn handle_verification_query(_state: &A2aState) -> String {
@@ -2508,7 +2653,8 @@ fn handle_bridge_query(_state: &A2aState) -> String {
      - `tenzro_bridgeTokens` — bridge tokens between chains\n\
      - `tenzro_getBridgeRoutes` — available routes with fees\n\n\
      MCP tools: bridge_tokens, get_bridge_routes, list_bridge_adapters\n\
-     CLI: tenzro bridge".to_string()
+     CLI: tenzro bridge"
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -2559,11 +2705,14 @@ pub async fn start_a2a_server_with_shutdown(
     state: Arc<A2aState>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> crate::error::Result<()> {
-
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+
+    // Operator admission gate for the A2A surface. Captured before the state
+    // is moved into the router.
+    let admission_gate = state.node.admission_gate().clone();
 
     let app = Router::new()
         .route("/.well-known/agent.json", get(agent_card_handler))
@@ -2574,6 +2723,12 @@ pub async fn start_a2a_server_with_shutdown(
         .route("/a2a", post(jsonrpc_handler))
         .route("/a2a/stream", post(stream_handler))
         .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            admission_gate,
+            |st, req, next| {
+                crate::admission::gate_request(tenzro_auth::ServiceSurface::A2a, st, req, next)
+            },
+        ))
         .layer(cors)
         // EU AI Act Art. 50(1): every A2A response is the output of an
         // AI agent. Mirror the MCP-side header so peer agents see the
@@ -2620,10 +2775,8 @@ mod tests {
 
     #[test]
     fn test_jsonrpc_response_success() {
-        let resp = JsonRpcResponse::success(
-            serde_json::json!(1),
-            serde_json::json!({"status": "ok"}),
-        );
+        let resp =
+            JsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"status": "ok"}));
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
         assert_eq!(resp.jsonrpc, "2.0");
@@ -2639,10 +2792,7 @@ mod tests {
 
     #[test]
     fn test_jsonrpc_invalid_params() {
-        let resp = JsonRpcResponse::invalid_params(
-            serde_json::json!(1),
-            "missing field 'id'",
-        );
+        let resp = JsonRpcResponse::invalid_params(serde_json::json!(1), "missing field 'id'");
         assert_eq!(resp.error.as_ref().unwrap().code, -32602);
     }
 

@@ -196,7 +196,10 @@ impl GovernanceEngine {
                         warn!("Failed to persist proposal {}: {}", proposal.proposal_id, e);
                     }
                 }
-                Err(e) => warn!("Failed to serialize proposal {}: {}", proposal.proposal_id, e),
+                Err(e) => warn!(
+                    "Failed to serialize proposal {}: {}",
+                    proposal.proposal_id, e
+                ),
             }
         }
     }
@@ -219,7 +222,11 @@ impl GovernanceEngine {
     /// Persists a delegation to storage
     fn persist_delegation(&self, delegator: &Address, delegation: &VotingDelegation) {
         if let Some(ref storage) = self.storage {
-            let key = [GOVERNANCE_DELEGATION_PREFIX, format!("{}", delegator).as_bytes()].concat();
+            let key = [
+                GOVERNANCE_DELEGATION_PREFIX,
+                format!("{}", delegator).as_bytes(),
+            ]
+            .concat();
             match bincode::serialize(delegation) {
                 Ok(data) => {
                     if let Err(e) = storage.put(CF_GOVERNANCE, &key, &data) {
@@ -239,7 +246,8 @@ impl GovernanceEngine {
         };
 
         // Load proposals
-        let proposal_keys = storage.get_keys_with_prefix(CF_GOVERNANCE, GOVERNANCE_PROPOSAL_PREFIX)?;
+        let proposal_keys =
+            storage.get_keys_with_prefix(CF_GOVERNANCE, GOVERNANCE_PROPOSAL_PREFIX)?;
         for key in &proposal_keys {
             if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key)
                 && let Ok(proposal) = bincode::deserialize::<GovernanceProposal>(&data)
@@ -255,13 +263,15 @@ impl GovernanceEngine {
             if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key)
                 && let Ok(votes) = bincode::deserialize::<Vec<GovernanceVote>>(&data)
             {
-                let proposal_id = String::from_utf8_lossy(&key[GOVERNANCE_VOTE_PREFIX.len()..]).to_string();
+                let proposal_id =
+                    String::from_utf8_lossy(&key[GOVERNANCE_VOTE_PREFIX.len()..]).to_string();
                 self.votes.insert(proposal_id, votes);
             }
         }
 
         // Load delegations
-        let delegation_keys = storage.get_keys_with_prefix(CF_GOVERNANCE, GOVERNANCE_DELEGATION_PREFIX)?;
+        let delegation_keys =
+            storage.get_keys_with_prefix(CF_GOVERNANCE, GOVERNANCE_DELEGATION_PREFIX)?;
         for key in &delegation_keys {
             if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key)
                 && let Ok(delegation) = bincode::deserialize::<VotingDelegation>(&data)
@@ -287,7 +297,8 @@ impl GovernanceEngine {
 
     /// Returns total staked amount from staking manager
     pub fn total_staked(&self) -> u128 {
-        self.staking_manager.as_ref()
+        self.staking_manager
+            .as_ref()
             .map(|sm| sm.get_total_staked_all())
             .unwrap_or(0)
     }
@@ -398,10 +409,12 @@ impl GovernanceEngine {
         voting_power: u128,
     ) -> Result<()> {
         // Get proposal
-        let mut proposal = self.proposals.get_mut(proposal_id)
-            .ok_or_else(|| TokenError::ProposalNotFound {
-                proposal_id: proposal_id.to_string(),
-            })?;
+        let mut proposal =
+            self.proposals
+                .get_mut(proposal_id)
+                .ok_or_else(|| TokenError::ProposalNotFound {
+                    proposal_id: proposal_id.to_string(),
+                })?;
 
         // Check if voting is open
         if !proposal.is_voting_open() {
@@ -464,23 +477,23 @@ impl GovernanceEngine {
         let effective_power = self.get_effective_voting_power(&voter, verified_power);
 
         // Create vote
-        let vote = GovernanceVote::new(
-            proposal_id.to_string(),
-            voter,
-            vote_type,
-            effective_power,
-        );
+        let vote = GovernanceVote::new(proposal_id.to_string(), voter, vote_type, effective_power);
 
         // Update proposal tallies
         match vote_type {
             VoteType::For => {
-                proposal.votes_for = proposal.votes_for.checked_add(effective_power)
-                    .ok_or_else(|| TokenError::ArithmeticOverflow {
-                        operation: "governance votes_for".to_string(),
-                    })?;
+                proposal.votes_for =
+                    proposal
+                        .votes_for
+                        .checked_add(effective_power)
+                        .ok_or_else(|| TokenError::ArithmeticOverflow {
+                            operation: "governance votes_for".to_string(),
+                        })?;
             }
             VoteType::Against => {
-                proposal.votes_against = proposal.votes_against.checked_add(effective_power)
+                proposal.votes_against = proposal
+                    .votes_against
+                    .checked_add(effective_power)
                     .ok_or_else(|| TokenError::ArithmeticOverflow {
                         operation: "governance votes_against".to_string(),
                     })?;
@@ -489,7 +502,9 @@ impl GovernanceEngine {
                 // Abstain votes count toward quorum but not approval
             }
         }
-        proposal.total_voting_power = proposal.total_voting_power.checked_add(effective_power)
+        proposal.total_voting_power = proposal
+            .total_voting_power
+            .checked_add(effective_power)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "governance total_voting_power".to_string(),
             })?;
@@ -518,10 +533,12 @@ impl GovernanceEngine {
     /// * `proposal_id` - Proposal to tally
     /// * `total_supply` - Total TNZO supply for quorum calculation
     pub fn tally_votes(&self, proposal_id: &str, total_supply: u128) -> Result<ProposalStatus> {
-        let mut proposal = self.proposals.get_mut(proposal_id)
-            .ok_or_else(|| TokenError::ProposalNotFound {
-                proposal_id: proposal_id.to_string(),
-            })?;
+        let mut proposal =
+            self.proposals
+                .get_mut(proposal_id)
+                .ok_or_else(|| TokenError::ProposalNotFound {
+                    proposal_id: proposal_id.to_string(),
+                })?;
 
         // Check if voting period has ended
         if Timestamp::now() < proposal.voting_end {
@@ -530,11 +547,7 @@ impl GovernanceEngine {
 
         // Check quorum
         let quorum = self.quorum_requirements.read();
-        let quorum_met = quorum.is_met(
-            proposal.votes_for,
-            proposal.votes_against,
-            total_supply,
-        );
+        let quorum_met = quorum.is_met(proposal.votes_for, proposal.votes_against, total_supply);
 
         if !quorum_met {
             proposal.status = ProposalStatus::Failed;
@@ -574,10 +587,12 @@ impl GovernanceEngine {
         // executor (or any path it calls) reads back into governance
         // state.
         let snapshot = {
-            let proposal_ref = self.proposals.get(proposal_id)
-                .ok_or_else(|| TokenError::ProposalNotFound {
-                    proposal_id: proposal_id.to_string(),
-                })?;
+            let proposal_ref =
+                self.proposals
+                    .get(proposal_id)
+                    .ok_or_else(|| TokenError::ProposalNotFound {
+                        proposal_id: proposal_id.to_string(),
+                    })?;
 
             if proposal_ref.status == ProposalStatus::Executed {
                 return Err(TokenError::ProposalAlreadyExecuted {
@@ -597,12 +612,12 @@ impl GovernanceEngine {
         // operator fixes whatever blocked the apply.
         let executor_handle = self.executor.read().clone();
         if let Some(executor) = executor_handle {
-            executor
-                .apply_proposal(&snapshot)
-                .map_err(|e| TokenError::ProposalExecutionFailed {
+            executor.apply_proposal(&snapshot).map_err(|e| {
+                TokenError::ProposalExecutionFailed {
                     proposal_id: proposal_id.to_string(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
         } else {
             warn!(
                 "execute_proposal({}): no ProposalExecutor wired; status \
@@ -651,16 +666,26 @@ impl GovernanceEngine {
     /// * `delegator` - Address delegating voting power
     /// * `delegate` - Address receiving delegation
     /// * `voting_power` - Amount of voting power to delegate
-    pub fn delegate(&self, delegator: Address, delegate: Address, voting_power: u128) -> Result<()> {
+    pub fn delegate(
+        &self,
+        delegator: Address,
+        delegate: Address,
+        voting_power: u128,
+    ) -> Result<()> {
         if voting_power == 0 {
-            return Err(TokenError::InvalidAmount("Voting power must be greater than zero".to_string()));
+            return Err(TokenError::InvalidAmount(
+                "Voting power must be greater than zero".to_string(),
+            ));
         }
 
         let delegation = VotingDelegation::new(delegator, delegate, voting_power);
         self.persist_delegation(&delegator, &delegation);
         self.delegations.insert(delegator, delegation);
 
-        info!("Delegated {} voting power from {} to {}", voting_power, delegator, delegate);
+        info!(
+            "Delegated {} voting power from {} to {}",
+            voting_power, delegator, delegate
+        );
         Ok(())
     }
 
@@ -704,7 +729,10 @@ impl GovernanceEngine {
 
     /// Returns votes for a proposal
     pub fn get_votes(&self, proposal_id: &str) -> Vec<GovernanceVote> {
-        self.votes.get(proposal_id).map(|v| v.clone()).unwrap_or_default()
+        self.votes
+            .get(proposal_id)
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -724,14 +752,18 @@ mod tests {
         let proposer = Address::new([1u8; 32]);
         let stake = 100_000 * 1_000_000_000_000_000_000u128; // 100k TNZO
 
-        let proposal_id = engine.create_proposal(
-            "Test Proposal".to_string(),
-            "Description".to_string(),
-            proposer,
-            ProposalType::Custom { proposal_data: vec![] },
-            7 * 24 * 60 * 60 * 1000, // 7 days
-            stake,
-        ).unwrap();
+        let proposal_id = engine
+            .create_proposal(
+                "Test Proposal".to_string(),
+                "Description".to_string(),
+                proposer,
+                ProposalType::Custom {
+                    proposal_data: vec![],
+                },
+                7 * 24 * 60 * 60 * 1000, // 7 days
+                stake,
+            )
+            .unwrap();
 
         let proposal = engine.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.status, ProposalStatus::Active);
@@ -744,16 +776,22 @@ mod tests {
         let voter = Address::new([2u8; 32]);
         let stake = 100_000 * 1_000_000_000_000_000_000u128;
 
-        let proposal_id = engine.create_proposal(
-            "Test Proposal".to_string(),
-            "Description".to_string(),
-            proposer,
-            ProposalType::Custom { proposal_data: vec![] },
-            7 * 24 * 60 * 60 * 1000,
-            stake,
-        ).unwrap();
+        let proposal_id = engine
+            .create_proposal(
+                "Test Proposal".to_string(),
+                "Description".to_string(),
+                proposer,
+                ProposalType::Custom {
+                    proposal_data: vec![],
+                },
+                7 * 24 * 60 * 60 * 1000,
+                stake,
+            )
+            .unwrap();
 
-        engine.vote(&proposal_id, voter, VoteType::For, stake).unwrap();
+        engine
+            .vote(&proposal_id, voter, VoteType::For, stake)
+            .unwrap();
 
         let votes = engine.get_votes(&proposal_id);
         assert_eq!(votes.len(), 1);

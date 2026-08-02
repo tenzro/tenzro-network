@@ -146,11 +146,7 @@ impl TransactionValidator {
     }
 
     /// Validate a transaction with a known expected nonce.
-    pub fn validate_with_nonce(
-        &self,
-        tx: &Transaction,
-        expected_nonce: Nonce,
-    ) -> Result<()> {
+    pub fn validate_with_nonce(&self, tx: &Transaction, expected_nonce: Nonce) -> Result<()> {
         let mut errors = Vec::new();
 
         self.validate_chain_id(tx, &mut errors);
@@ -163,10 +159,7 @@ impl TransactionValidator {
         if self.config.strict_nonce && tx.nonce != expected_nonce {
             errors.push(ValidationError {
                 field: "nonce".to_string(),
-                message: format!(
-                    "expected nonce {}, got {}",
-                    expected_nonce.0, tx.nonce.0
-                ),
+                message: format!("expected nonce {}, got {}", expected_nonce.0, tx.nonce.0),
             });
         }
 
@@ -183,20 +176,14 @@ impl TransactionValidator {
     }
 
     /// Validate with balance check.
-    pub fn validate_with_balance(
-        &self,
-        tx: &Transaction,
-        available_balance: u128,
-    ) -> Result<()> {
+    pub fn validate_with_balance(&self, tx: &Transaction, available_balance: u128) -> Result<()> {
         self.validate(tx)?;
 
         // Calculate total cost: value + gas
         let gas_cost = (tx.gas_limit as u128)
             .checked_mul(tx.gas_price as u128)
             .ok_or_else(|| {
-                WalletError::TransactionValidationFailed(
-                    "gas cost overflow".to_string(),
-                )
+                WalletError::TransactionValidationFailed("gas cost overflow".to_string())
             })?;
 
         let value = match &tx.tx_type {
@@ -206,13 +193,9 @@ impl TransactionValidator {
             _ => 0,
         };
 
-        let total_cost = value
-            .checked_add(gas_cost)
-            .ok_or_else(|| {
-                WalletError::TransactionValidationFailed(
-                    "total cost overflow".to_string(),
-                )
-            })?;
+        let total_cost = value.checked_add(gas_cost).ok_or_else(|| {
+            WalletError::TransactionValidationFailed("total cost overflow".to_string())
+        })?;
 
         if available_balance < total_cost {
             return Err(WalletError::InsufficientBalance {
@@ -262,7 +245,8 @@ impl TransactionValidator {
                 _ => {
                     errors.push(ValidationError {
                         field: "to".to_string(),
-                        message: "recipient address cannot be zero for this transaction type".to_string(),
+                        message: "recipient address cannot be zero for this transaction type"
+                            .to_string(),
                     });
                 }
             }
@@ -377,7 +361,10 @@ impl TransactionValidator {
                     });
                 }
             }
-            TransactionType::ProviderStake { amount, provider_type } => {
+            TransactionType::ProviderStake {
+                amount,
+                provider_type,
+            } => {
                 if *amount == 0 {
                     errors.push(ValidationError {
                         field: "amount".to_string(),
@@ -638,7 +625,9 @@ mod tests {
         assert!(validator.validate_with_balance(&tx, sufficient).is_ok());
 
         let insufficient = 100u128;
-        let err = validator.validate_with_balance(&tx, insufficient).unwrap_err();
+        let err = validator
+            .validate_with_balance(&tx, insufficient)
+            .unwrap_err();
         assert!(err.to_string().contains("Insufficient"));
     }
 

@@ -1,9 +1,9 @@
 //! Visa TAP client for agent-side HTTP requests
 
-use std::sync::Arc;
-use chrono::Utc;
-use tracing::{debug, info};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chrono::Utc;
+use std::sync::Arc;
+use tracing::{debug, info};
 
 use crate::error::{PaymentError, Result};
 use hex;
@@ -54,17 +54,20 @@ impl VisaTapClient {
         let parsed_url = reqwest::Url::parse(url)
             .map_err(|e| PaymentError::VisaTapError(format!("Invalid URL: {}", e)))?;
 
-        let authority = parsed_url.host_str()
+        let authority = parsed_url
+            .host_str()
             .ok_or_else(|| PaymentError::VisaTapError("Missing host in URL".to_string()))?
             .to_string();
 
         let path = parsed_url.path().to_string();
 
         // Create signed headers
-        let (signature_input, signature) = self.create_signed_headers("GET", &authority, &path).await?;
+        let (signature_input, signature) =
+            self.create_signed_headers("GET", &authority, &path).await?;
 
         // Make request with signed headers
-        let response = self.http_client
+        let response = self
+            .http_client
             .get(url)
             .header("Signature-Input", signature_input)
             .header("Signature", signature)
@@ -110,7 +113,9 @@ impl VisaTapClient {
         // Sign with wallet if available, otherwise generate an ephemeral Ed25519 keypair.
         // Hybrid cascade: wallet returns a hybrid signature; the RFC 9421
         // signature-input header only carries the classical leg today.
-        let signature_bytes = if let (Some(wallet_service), Some(wallet_id)) = (&self.wallet_service, &self.wallet_id) {
+        let signature_bytes = if let (Some(wallet_service), Some(wallet_id)) =
+            (&self.wallet_service, &self.wallet_id)
+        {
             let hybrid_sig = wallet_service
                 .sign_data(wallet_id, signature_base.as_bytes())
                 .await
@@ -121,10 +126,12 @@ impl VisaTapClient {
             // The public key is embedded in the key_id field of the signature-input so the
             // verifier can always locate the correct key, even for ephemeral signers.
             debug!("No wallet configured, signing with ephemeral Ed25519 keypair");
-            let ephemeral_signer = Ed25519SignerImpl::generate()
-                .map_err(|e| PaymentError::CryptoError(format!("Failed to generate ephemeral key: {}", e)))?;
-            let sig = Signer::sign(&ephemeral_signer, signature_base.as_bytes())
-                .map_err(|e| PaymentError::CryptoError(format!("Failed to sign with ephemeral key: {}", e)))?;
+            let ephemeral_signer = Ed25519SignerImpl::generate().map_err(|e| {
+                PaymentError::CryptoError(format!("Failed to generate ephemeral key: {}", e))
+            })?;
+            let sig = Signer::sign(&ephemeral_signer, signature_base.as_bytes()).map_err(|e| {
+                PaymentError::CryptoError(format!("Failed to sign with ephemeral key: {}", e))
+            })?;
             sig.to_bytes()
         };
 
@@ -146,7 +153,9 @@ impl VisaTapClient {
             .headers()
             .get("WWW-Authenticate")
             .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| PaymentError::ChallengeError("Missing WWW-Authenticate header".to_string()))?;
+            .ok_or_else(|| {
+                PaymentError::ChallengeError("Missing WWW-Authenticate header".to_string())
+            })?;
 
         debug!("Received payment challenge: {}", www_authenticate);
 
@@ -162,7 +171,9 @@ impl VisaTapClient {
             .split("challenge_id=\"")
             .nth(1)
             .and_then(|s| s.split('"').next())
-            .ok_or_else(|| PaymentError::ChallengeError("Missing challenge_id in WWW-Authenticate".to_string()))?;
+            .ok_or_else(|| {
+                PaymentError::ChallengeError("Missing challenge_id in WWW-Authenticate".to_string())
+            })?;
 
         info!(
             "Processing payment challenge: {} for agent: {}",
@@ -178,16 +189,14 @@ impl VisaTapClient {
         //   5. Retry the original request with the credential attached
 
         // Generate keypair for this credential
-        let credential_signer = Ed25519SignerImpl::generate()
-            .map_err(|e| PaymentError::CryptoError(format!("Failed to generate credential key: {}", e)))?;
+        let credential_signer = Ed25519SignerImpl::generate().map_err(|e| {
+            PaymentError::CryptoError(format!("Failed to generate credential key: {}", e))
+        })?;
         let credential_pubkey = Signer::public_key(&credential_signer);
         let pubkey_hex = hex::encode(credential_pubkey.to_bytes());
 
         // Build canonical credential message
-        let credential_message = format!(
-            "{}:{}:{}",
-            challenge_id, self.agent_did, pubkey_hex
-        );
+        let credential_message = format!("{}:{}:{}", challenge_id, self.agent_did, pubkey_hex);
 
         // Sign the credential message
         let credential_sig = Signer::sign(&credential_signer, credential_message.as_bytes())
@@ -209,7 +218,8 @@ impl VisaTapClient {
         );
 
         // Retry the original request with the credential
-        let retry_response = self.http_client
+        let retry_response = self
+            .http_client
             .get(url)
             .header("Authorization", authorization)
             .header("X-VisaTAP-Agent-DID", &self.agent_did)
@@ -227,10 +237,8 @@ mod tests {
 
     #[test]
     fn test_client_creation() {
-        let client = VisaTapClient::new(
-            "did:tenzro:machine:test".to_string(),
-            "key-123".to_string(),
-        );
+        let client =
+            VisaTapClient::new("did:tenzro:machine:test".to_string(), "key-123".to_string());
         assert_eq!(client.agent_did, "did:tenzro:machine:test");
         assert_eq!(client.key_id, "key-123");
         assert!(client.wallet_service.is_none());
@@ -238,10 +246,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_signed_headers() {
-        let client = VisaTapClient::new(
-            "did:tenzro:machine:test".to_string(),
-            "key-123".to_string(),
-        );
+        let client =
+            VisaTapClient::new("did:tenzro:machine:test".to_string(), "key-123".to_string());
 
         let (signature_input, signature) = client
             .create_signed_headers("GET", "api.example.com", "/resource")

@@ -140,7 +140,12 @@ impl TaskManager {
         context_id: Option<String>,
         message: TaskMessage,
     ) -> A2aTask {
-        self.create_task_with_metadata(task_id, context_id, message, std::collections::HashMap::new())
+        self.create_task_with_metadata(
+            task_id,
+            context_id,
+            message,
+            std::collections::HashMap::new(),
+        )
     }
 
     /// Create a new task from a user message with caller metadata

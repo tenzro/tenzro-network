@@ -61,12 +61,12 @@ pub mod pricing;
 pub mod runtime;
 
 pub use access_control::{
-    AccessPolicy, ConfidentialSeal, WrappedDataKey, DEFAULT_READ_ACTION, DEFAULT_WRITE_ACTION,
-    WRAP_ALG,
+    AccessPolicy, ConfidentialSeal, DEFAULT_READ_ACTION, DEFAULT_WRITE_ACTION, WRAP_ALG,
+    WrappedDataKey,
 };
 pub use catalog::{
-    engine_by_id, engine_catalog, engine_ids, DataModel, EngineEntry, EngineKind,
-    ExternalDependency, NativeClusterSpec, NativeRole, NativeRoleSlot, ShardingModel,
+    DataModel, EngineEntry, EngineKind, ExternalDependency, NativeClusterSpec, NativeRole,
+    NativeRoleSlot, ShardingModel, engine_by_id, engine_catalog, engine_ids,
 };
 pub use database::{
     ClusterRole, DatabaseDescriptor, DatabaseRegistry, PartitionPlacement,
@@ -78,14 +78,14 @@ pub use engine_config::{
 };
 pub use error::{DatabaseError, Result};
 pub use gossip::{
-    decode_for_topic, encode_registered, encode_rescaled, DatabaseGossipMessage, DATABASES_TOPIC,
+    DATABASES_TOPIC, DatabaseGossipMessage, decode_for_topic, encode_registered, encode_rescaled,
 };
 pub use placement::{
-    partition_key, select_holders, select_tiered_holders, should_replicate,
-    should_replicate_tiered, MemberReachability, TieredCandidate, TieredHolders,
+    MemberReachability, TieredCandidate, TieredHolders, partition_key, select_holders,
+    select_tiered_holders, should_replicate, should_replicate_tiered,
 };
 pub use pricing::{DatabasePricing, DatabaseUsageMeter, DatabaseUsageStats};
 pub use runtime::{
-    DatabaseEngine, HolderDispatch, PartitionHandle, PartitionHealth, QueryRequest,
-    QueryResponse, QueryRouter, WriteConsistency, WriteReceipt,
+    DatabaseEngine, HolderDispatch, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
+    QueryRouter, WriteConsistency, WriteReceipt,
 };

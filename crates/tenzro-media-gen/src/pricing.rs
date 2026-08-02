@@ -52,8 +52,10 @@ impl MediaGenPricing {
 
     /// Price in attoTNZO for the given job shape.
     pub fn quote(&self, kind: MediaGenKind, params: &MediaGenParams) -> u128 {
-        self.base_fee
-            .saturating_add(self.per_pixel_step.saturating_mul(pixel_steps(kind, params)))
+        self.base_fee.saturating_add(
+            self.per_pixel_step
+                .saturating_mul(pixel_steps(kind, params)),
+        )
     }
 }
 
@@ -176,8 +178,8 @@ mod tests {
     fn quote_includes_the_base_fee() {
         let pricing = MediaGenPricing::default();
         let p = image_params();
-        let expected = DEFAULT_BASE_FEE
-            + DEFAULT_PER_PIXEL_STEP * pixel_steps(MediaGenKind::Text2Image, &p);
+        let expected =
+            DEFAULT_BASE_FEE + DEFAULT_PER_PIXEL_STEP * pixel_steps(MediaGenKind::Text2Image, &p);
         assert_eq!(pricing.quote(MediaGenKind::Text2Image, &p), expected);
     }
 
@@ -194,7 +196,8 @@ mod tests {
         MediaGenAssignment {
             worker_did: format!(
                 "did:tenzro:machine:{}",
-                role.map(|r| r.to_string()).unwrap_or_else(|| "whole".into())
+                role.map(|r| r.to_string())
+                    .unwrap_or_else(|| "whole".into())
             ),
             worker_address: Address::new([share_bps as u8; 32]),
             role,

@@ -2,10 +2,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router, Json, ServerHandler,
+    Json, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use tracing::info;
@@ -68,17 +66,29 @@ const GET_SUPPORTED_CHAINS_SELECTOR: &str = "c4bffe2b"; // TokenPool.getSupporte
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CcipGetFeeParams {
-    #[schemars(description = "Source chain identifier: 'ethereum', 'base', 'arbitrum', or a chain ID number")]
+    #[schemars(
+        description = "Source chain identifier: 'ethereum', 'base', 'arbitrum', or a chain ID number"
+    )]
     pub src_chain_id: String,
-    #[schemars(description = "Destination CCIP chain selector (uint64). E.g. 4949039107694359620 for Arbitrum")]
+    #[schemars(
+        description = "Destination CCIP chain selector (uint64). E.g. 4949039107694359620 for Arbitrum"
+    )]
     pub dst_chain_selector: String,
-    #[schemars(description = "Hex-encoded receiver address on the destination chain (with or without 0x prefix)")]
+    #[schemars(
+        description = "Hex-encoded receiver address on the destination chain (with or without 0x prefix)"
+    )]
     pub receiver: String,
-    #[schemars(description = "Hex-encoded data payload to send (with or without 0x prefix). Use '0x' or '' for empty")]
+    #[schemars(
+        description = "Hex-encoded data payload to send (with or without 0x prefix). Use '0x' or '' for empty"
+    )]
     pub data_hex: Option<String>,
-    #[schemars(description = "Token amounts to transfer as JSON array of {token, amount} objects. Empty array for message-only")]
+    #[schemars(
+        description = "Token amounts to transfer as JSON array of {token, amount} objects. Empty array for message-only"
+    )]
     pub token_amounts: Option<Vec<TokenAmountParam>>,
-    #[schemars(description = "Fee token address. Use zero address (0x0000...0000) for native gas token payment")]
+    #[schemars(
+        description = "Fee token address. Use zero address (0x0000...0000) for native gas token payment"
+    )]
     pub fee_token: Option<String>,
 }
 
@@ -116,7 +126,9 @@ pub struct CcipTrackMessageParams {
     pub message_id: String,
     #[schemars(description = "Destination chain: 'ethereum', 'base', 'arbitrum', or chain ID")]
     pub dst_chain_id: String,
-    #[schemars(description = "OffRamp contract address on the destination chain (hex with 0x prefix)")]
+    #[schemars(
+        description = "OffRamp contract address on the destination chain (hex with 0x prefix)"
+    )]
     pub offramp_address: String,
 }
 
@@ -144,15 +156,21 @@ pub struct CcipGetLanesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ChainlinkGetPriceParams {
-    #[schemars(description = "Chainlink data feed contract address (hex with 0x prefix). E.g. 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419 for ETH/USD")]
+    #[schemars(
+        description = "Chainlink data feed contract address (hex with 0x prefix). E.g. 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419 for ETH/USD"
+    )]
     pub feed_address: String,
-    #[schemars(description = "Chain to query: 'ethereum', 'arbitrum', 'base', or a chain ID. Defaults to 'ethereum'")]
+    #[schemars(
+        description = "Chain to query: 'ethereum', 'arbitrum', 'base', or a chain ID. Defaults to 'ethereum'"
+    )]
     pub chain_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ChainlinkListFeedsParams {
-    #[schemars(description = "Optional chain to list feeds for: 'ethereum', 'arbitrum', 'base'. Defaults to 'ethereum'")]
+    #[schemars(
+        description = "Optional chain to list feeds for: 'ethereum', 'arbitrum', 'base'. Defaults to 'ethereum'"
+    )]
     pub chain: Option<String>,
 }
 
@@ -160,9 +178,13 @@ pub struct ChainlinkListFeedsParams {
 pub struct ChainlinkCheckUpkeepParams {
     #[schemars(description = "Address of the Automation-compatible contract (hex with 0x prefix)")]
     pub contract_address: String,
-    #[schemars(description = "Chain to query: 'ethereum', 'arbitrum', 'base', or chain ID. Defaults to 'ethereum'")]
+    #[schemars(
+        description = "Chain to query: 'ethereum', 'arbitrum', 'base', or chain ID. Defaults to 'ethereum'"
+    )]
     pub chain_id: Option<String>,
-    #[schemars(description = "Hex-encoded check data to pass to checkUpkeep (with or without 0x prefix). Defaults to empty")]
+    #[schemars(
+        description = "Hex-encoded check data to pass to checkUpkeep (with or without 0x prefix). Defaults to empty"
+    )]
     pub check_data: Option<String>,
 }
 
@@ -172,7 +194,9 @@ pub struct ChainlinkGetUpkeepInfoParams {
     pub upkeep_id: String,
     #[schemars(description = "Automation Registry address (hex with 0x prefix)")]
     pub registry_address: String,
-    #[schemars(description = "Chain to query: 'ethereum', 'arbitrum', 'base', or chain ID. Defaults to 'ethereum'")]
+    #[schemars(
+        description = "Chain to query: 'ethereum', 'arbitrum', 'base', or chain ID. Defaults to 'ethereum'"
+    )]
     pub chain_id: Option<String>,
 }
 
@@ -204,7 +228,9 @@ pub struct ChainlinkGetSubscriptionParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DsGetReportParams {
-    #[schemars(description = "Data Streams feed ID (hex string, e.g. '0x000359843a543ee2fe414dc14c7e7920ef10f4372990b79d6361cdc0dd1ba782' for ETH/USD)")]
+    #[schemars(
+        description = "Data Streams feed ID (hex string, e.g. '0x000359843a543ee2fe414dc14c7e7920ef10f4372990b79d6361cdc0dd1ba782' for ETH/USD)"
+    )]
     pub feed_id: String,
     #[schemars(description = "Unix timestamp to query (optional — latest if omitted)")]
     pub timestamp: Option<u64>,
@@ -212,7 +238,9 @@ pub struct DsGetReportParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DsListFeedsParams {
-    #[schemars(description = "Filter by asset class: 'crypto', 'forex', 'equities', 'commodities' (optional)")]
+    #[schemars(
+        description = "Filter by asset class: 'crypto', 'forex', 'equities', 'commodities' (optional)"
+    )]
     pub asset_class: Option<String>,
 }
 
@@ -248,7 +276,9 @@ pub struct VrfRequestRandomParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PorGetReserveParams {
-    #[schemars(description = "Proof of Reserve feed contract address (hex). Well-known: WBTC=0xa81FE04086865e63E12dD3776978E49DEEa2ea4e, USDC=0x9a177Bb065A0636C7972C6D27Abcd4B1e5EDb65c")]
+    #[schemars(
+        description = "Proof of Reserve feed contract address (hex). Well-known: WBTC=0xa81FE04086865e63E12dD3776978E49DEEa2ea4e, USDC=0x9a177Bb065A0636C7972C6D27Abcd4B1e5EDb65c"
+    )]
     pub feed_address: String,
     #[schemars(description = "Chain: 'ethereum'. Defaults to 'ethereum'")]
     pub chain: Option<String>,
@@ -275,7 +305,9 @@ pub struct CcipGetRateLimitsParams {
     pub pool_address: String,
     #[schemars(description = "Remote chain selector (uint64) to query rate limits for")]
     pub remote_chain_selector: String,
-    #[schemars(description = "Chain the pool is deployed on: 'ethereum', 'base', 'arbitrum'. Defaults to 'ethereum'")]
+    #[schemars(
+        description = "Chain the pool is deployed on: 'ethereum', 'base', 'arbitrum'. Defaults to 'ethereum'"
+    )]
     pub chain: Option<String>,
 }
 
@@ -283,7 +315,9 @@ pub struct CcipGetRateLimitsParams {
 pub struct ChainlinkBroadcastTxParams {
     #[schemars(description = "Source chain to broadcast on: 'ethereum', 'base', 'arbitrum'")]
     pub chain: String,
-    #[schemars(description = "Pre-signed RLP-encoded transaction as hex (0x-prefixed). Build via ccip_send_message → external signer, or vrf_request_random → external signer.")]
+    #[schemars(
+        description = "Pre-signed RLP-encoded transaction as hex (0x-prefixed). Build via ccip_send_message → external signer, or vrf_request_random → external signer."
+    )]
     pub signed_tx_hex: String,
 }
 
@@ -330,7 +364,9 @@ fn err_internal(msg: impl Into<String>) -> ErrorData {
     ErrorData::internal_error(msg.into(), None)
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn json_result(
+    value: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
@@ -338,7 +374,9 @@ fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthro
 ///
 /// Used by tools that return a single textual value such as a transaction
 /// hash from a CCIP / VRF broadcast.
-fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn text_result(
+    text: impl Into<String>,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput {
         result: serde_json::json!({ "message": text.into() }),
     }))
@@ -536,10 +574,7 @@ async fn eth_call(
         return Err(err_internal(format!("eth_call error: {}", msg)));
     }
 
-    let result_hex = body
-        .get("result")
-        .and_then(|r| r.as_str())
-        .unwrap_or("0x");
+    let result_hex = body.get("result").and_then(|r| r.as_str()).unwrap_or("0x");
 
     parse_hex(result_hex)
 }
@@ -578,7 +613,10 @@ async fn eth_send_raw_tx(
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown error");
-        return Err(err_internal(format!("eth_sendRawTransaction error: {}", msg)));
+        return Err(err_internal(format!(
+            "eth_sendRawTransaction error: {}",
+            msg
+        )));
     }
 
     body.get("result")
@@ -655,9 +693,7 @@ fn encode_evm2any_message(
     encoded.extend_from_slice(&data_encoded);
 
     // Tail: tokenAmounts array
-    encoded.extend_from_slice(&pad_left_32(
-        &(token_amounts.len() as u64).to_be_bytes(),
-    ));
+    encoded.extend_from_slice(&pad_left_32(&(token_amounts.len() as u64).to_be_bytes()));
     for ta in token_amounts {
         encoded.extend_from_slice(&encode_address(&ta.token)?);
         encoded.extend_from_slice(&encode_uint256_decimal(&ta.amount)?);
@@ -678,7 +714,8 @@ fn build_get_fee_calldata(
     fee_token: &str,
 ) -> std::result::Result<Vec<u8>, ErrorData> {
     let selector_bytes = hex::decode(GET_FEE_SELECTOR).unwrap();
-    let message_encoded = encode_evm2any_message(receiver, data_hex, token_amounts, fee_token, 200_000)?;
+    let message_encoded =
+        encode_evm2any_message(receiver, data_hex, token_amounts, fee_token, 200_000)?;
 
     let mut calldata = Vec::new();
     calldata.extend_from_slice(&selector_bytes); // 4 bytes function selector
@@ -731,7 +768,9 @@ impl ChainlinkMcpServer {
 
     // ─── CCIP Cross-Chain Tools ───
 
-    #[tool(description = "Estimate CCIP cross-chain messaging fee via Router.getFee() eth_call. Returns the native fee required to send a CCIP message from the source chain to the destination chain. Supports Ethereum, Base, and Arbitrum as source chains.")]
+    #[tool(
+        description = "Estimate CCIP cross-chain messaging fee via Router.getFee() eth_call. Returns the native fee required to send a CCIP message from the source chain to the destination chain. Supports Ethereum, Base, and Arbitrum as source chains."
+    )]
     async fn ccip_get_fee(
         &self,
         Parameters(params): Parameters<CcipGetFeeParams>,
@@ -744,13 +783,14 @@ impl ChainlinkMcpServer {
             )));
         }
 
-        let dst_selector: u64 = params
-            .dst_chain_selector
-            .parse()
-            .or_else(|_| {
-                resolve_chain_selector(&params.dst_chain_selector)
-                    .ok_or_else(|| err_invalid(format!("Invalid destination chain selector: {}", params.dst_chain_selector)))
-            })?;
+        let dst_selector: u64 = params.dst_chain_selector.parse().or_else(|_| {
+            resolve_chain_selector(&params.dst_chain_selector).ok_or_else(|| {
+                err_invalid(format!(
+                    "Invalid destination chain selector: {}",
+                    params.dst_chain_selector
+                ))
+            })
+        })?;
 
         let data_hex = params.data_hex.as_deref().unwrap_or("");
         let fee_token = params
@@ -784,7 +824,9 @@ impl ChainlinkMcpServer {
 
         // Router.getFee returns a single uint256 (the native fee in wei)
         if result.len() < 32 {
-            return Err(err_internal("Unexpected response length from Router.getFee()"));
+            return Err(err_internal(
+                "Unexpected response length from Router.getFee()",
+            ));
         }
 
         let fee_bytes = &result[..32];
@@ -807,7 +849,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Send a CCIP cross-chain message via Router.ccipSend(). Submits a signed transaction to the source chain's CCIP Router to send a message and/or tokens to the destination chain. Returns the transaction hash.")]
+    #[tool(
+        description = "Send a CCIP cross-chain message via Router.ccipSend(). Submits a signed transaction to the source chain's CCIP Router to send a message and/or tokens to the destination chain. Returns the transaction hash."
+    )]
     async fn ccip_send_message(
         &self,
         Parameters(params): Parameters<CcipSendMessageParams>,
@@ -820,13 +864,14 @@ impl ChainlinkMcpServer {
             )));
         }
 
-        let dst_selector: u64 = params
-            .dst_chain_selector
-            .parse()
-            .or_else(|_| {
-                resolve_chain_selector(&params.dst_chain_selector)
-                    .ok_or_else(|| err_invalid(format!("Invalid destination chain selector: {}", params.dst_chain_selector)))
-            })?;
+        let dst_selector: u64 = params.dst_chain_selector.parse().or_else(|_| {
+            resolve_chain_selector(&params.dst_chain_selector).ok_or_else(|| {
+                err_invalid(format!(
+                    "Invalid destination chain selector: {}",
+                    params.dst_chain_selector
+                ))
+            })
+        })?;
 
         let data_hex = params.data_hex.as_deref().unwrap_or("");
         let fee_token = params
@@ -912,7 +957,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Track the execution status of a CCIP cross-chain message on the destination chain. Calls OffRamp.getExecutionState() to check message delivery status. States: 0=UNTOUCHED (not yet processed), 1=IN_PROGRESS (being executed), 2=SUCCESS (delivered), 3=FAILURE (execution failed).")]
+    #[tool(
+        description = "Track the execution status of a CCIP cross-chain message on the destination chain. Calls OffRamp.getExecutionState() to check message delivery status. States: 0=UNTOUCHED (not yet processed), 1=IN_PROGRESS (being executed), 2=SUCCESS (delivered), 3=FAILURE (execution failed)."
+    )]
     async fn ccip_track_message(
         &self,
         Parameters(params): Parameters<CcipTrackMessageParams>,
@@ -950,10 +997,22 @@ impl ChainlinkMcpServer {
         let state = if result.len() >= 32 { result[31] } else { 0u8 };
 
         let (state_name, state_description) = match state {
-            0 => ("UNTOUCHED", "Message has not been processed yet on the destination chain"),
-            1 => ("IN_PROGRESS", "Message is currently being executed on the destination chain"),
-            2 => ("SUCCESS", "Message was successfully delivered and executed on the destination chain"),
-            3 => ("FAILURE", "Message execution failed on the destination chain"),
+            0 => (
+                "UNTOUCHED",
+                "Message has not been processed yet on the destination chain",
+            ),
+            1 => (
+                "IN_PROGRESS",
+                "Message is currently being executed on the destination chain",
+            ),
+            2 => (
+                "SUCCESS",
+                "Message was successfully delivered and executed on the destination chain",
+            ),
+            3 => (
+                "FAILURE",
+                "Message execution failed on the destination chain",
+            ),
             _ => ("UNKNOWN", "Unrecognized execution state"),
         };
 
@@ -967,7 +1026,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Get supported chains for Chainlink CCIP from the Chainlink REST API. Returns chain names, selectors, and network details.")]
+    #[tool(
+        description = "Get supported chains for Chainlink CCIP from the Chainlink REST API. Returns chain names, selectors, and network details."
+    )]
     async fn ccip_get_supported_chains(
         &self,
         Parameters(params): Parameters<CcipGetSupportedChainsParams>,
@@ -1002,7 +1063,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Get supported tokens for Chainlink CCIP from the Chainlink REST API. Returns token addresses, symbols, and supported lanes.")]
+    #[tool(
+        description = "Get supported tokens for Chainlink CCIP from the Chainlink REST API. Returns token addresses, symbols, and supported lanes."
+    )]
     async fn ccip_get_supported_tokens(
         &self,
         Parameters(params): Parameters<CcipGetSupportedTokensParams>,
@@ -1037,7 +1100,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Get available CCIP lanes (source-destination chain pairs) from the Chainlink REST API. Optionally filter by source or destination chain selector.")]
+    #[tool(
+        description = "Get available CCIP lanes (source-destination chain pairs) from the Chainlink REST API. Optionally filter by source or destination chain selector."
+    )]
     async fn ccip_get_lanes(
         &self,
         Parameters(params): Parameters<CcipGetLanesParams>,
@@ -1081,7 +1146,9 @@ impl ChainlinkMcpServer {
 
     // ─── Data Feed Tools ───
 
-    #[tool(description = "Get the latest price from a Chainlink data feed by calling AggregatorV3Interface.latestRoundData(). Returns the price, round ID, timestamps, and decimal precision. Common feeds on Ethereum: ETH/USD = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419, BTC/USD = 0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c.")]
+    #[tool(
+        description = "Get the latest price from a Chainlink data feed by calling AggregatorV3Interface.latestRoundData(). Returns the price, round ID, timestamps, and decimal precision. Common feeds on Ethereum: ETH/USD = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419, BTC/USD = 0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c."
+    )]
     async fn chainlink_get_price(
         &self,
         Parameters(params): Parameters<ChainlinkGetPriceParams>,
@@ -1179,7 +1246,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "List popular Chainlink data feed addresses for a given chain. Returns feed pairs, addresses, and decimal precision.")]
+    #[tool(
+        description = "List popular Chainlink data feed addresses for a given chain. Returns feed pairs, addresses, and decimal precision."
+    )]
     async fn chainlink_list_feeds(
         &self,
         Parameters(params): Parameters<ChainlinkListFeedsParams>,
@@ -1233,7 +1302,9 @@ impl ChainlinkMcpServer {
 
     // ─── Automation Tools ───
 
-    #[tool(description = "Check if a Chainlink Automation upkeep needs to be performed by dry-running checkUpkeep(bytes) on the target contract. Returns whether upkeep is needed and the perform data.")]
+    #[tool(
+        description = "Check if a Chainlink Automation upkeep needs to be performed by dry-running checkUpkeep(bytes) on the target contract. Returns whether upkeep is needed and the perform data."
+    )]
     async fn chainlink_check_upkeep(
         &self,
         Parameters(params): Parameters<ChainlinkCheckUpkeepParams>,
@@ -1316,7 +1387,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Get information about a Chainlink Automation upkeep from the registry. Returns the upkeep target, balance, gas limit, and execution status.")]
+    #[tool(
+        description = "Get information about a Chainlink Automation upkeep from the registry. Returns the upkeep target, balance, gas limit, and execution status."
+    )]
     async fn chainlink_get_upkeep_info(
         &self,
         Parameters(params): Parameters<ChainlinkGetUpkeepInfoParams>,
@@ -1394,7 +1467,9 @@ impl ChainlinkMcpServer {
 
     // ─── Functions Tools ───
 
-    #[tool(description = "Estimate the cost of a Chainlink Functions request. Calculates the approximate LINK cost based on callback gas limit, gas price, and the Functions premium. Returns the estimated total cost in LINK.")]
+    #[tool(
+        description = "Estimate the cost of a Chainlink Functions request. Calculates the approximate LINK cost based on callback gas limit, gas price, and the Functions premium. Returns the estimated total cost in LINK."
+    )]
     async fn chainlink_estimate_functions_cost(
         &self,
         Parameters(params): Parameters<ChainlinkEstimateFunctionsCostParams>,
@@ -1431,7 +1506,13 @@ impl ChainlinkMcpServer {
         // on Ethereum mainnet (18 decimals: answer = ETH per 1 LINK).
         let eth_chain = resolve_chain("ethereum")?;
         let calldata = hex::decode(LATEST_ROUND_DATA_SELECTOR).unwrap();
-        let result = eth_call(&self.http_client, &eth_chain.rpc_url, FEED_LINK_ETH, &calldata).await?;
+        let result = eth_call(
+            &self.http_client,
+            &eth_chain.rpc_url,
+            FEED_LINK_ETH,
+            &calldata,
+        )
+        .await?;
         if result.len() < 160 {
             return Err(err_internal(format!(
                 "LINK/ETH feed returned short response: {} bytes",
@@ -1485,7 +1566,9 @@ impl ChainlinkMcpServer {
 
     // ─── Data Streams Tools ───
 
-    #[tool(description = "Get a Data Streams report for a specific feed ID. Data Streams provide sub-second, low-latency market data for crypto, forex, equities, and commodities. Returns benchmarkPrice, bid, ask, timestamps, and fee info. Common feed IDs: ETH/USD = 0x000359843a543ee2fe414dc14c7e7920ef10f4372990b79d6361cdc0dd1ba782, BTC/USD = 0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439.")]
+    #[tool(
+        description = "Get a Data Streams report for a specific feed ID. Data Streams provide sub-second, low-latency market data for crypto, forex, equities, and commodities. Returns benchmarkPrice, bid, ask, timestamps, and fee info. Common feed IDs: ETH/USD = 0x000359843a543ee2fe414dc14c7e7920ef10f4372990b79d6361cdc0dd1ba782, BTC/USD = 0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439."
+    )]
     async fn ds_get_report(
         &self,
         Parameters(params): Parameters<DsGetReportParams>,
@@ -1497,7 +1580,10 @@ impl ChainlinkMcpServer {
         };
 
         let url = if let Some(ts) = params.timestamp {
-            format!("{}/reports?feedID={}&timestamp={}", DATA_STREAMS_API, feed_id, ts)
+            format!(
+                "{}/reports?feedID={}&timestamp={}",
+                DATA_STREAMS_API, feed_id, ts
+            )
         } else {
             format!("{}/reports/latest?feedID={}", DATA_STREAMS_API, feed_id)
         };
@@ -1546,7 +1632,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "List available Chainlink Data Streams feeds. Returns feed IDs, pairs, and asset classes (crypto, forex, equities, commodities). Data Streams provide sub-second latency market data — distinct from the slower on-chain Data Feeds.")]
+    #[tool(
+        description = "List available Chainlink Data Streams feeds. Returns feed IDs, pairs, and asset classes (crypto, forex, equities, commodities). Data Streams provide sub-second latency market data — distinct from the slower on-chain Data Feeds."
+    )]
     async fn ds_list_feeds(
         &self,
         Parameters(params): Parameters<DsListFeedsParams>,
@@ -1564,12 +1652,15 @@ impl ChainlinkMcpServer {
         // If API requires auth, return well-known feeds
         let feeds = match resp {
             Ok(r) if r.status().is_success() => {
-                let body_text = r
-                    .text()
-                    .await
-                    .map_err(|e| err_internal(format!("Failed to read Data Streams feeds response: {}", e)))?;
-                serde_json::from_str::<serde_json::Value>(&body_text)
-                    .map_err(|e| err_internal(format!("Failed to parse Data Streams feeds response: {}", e)))?
+                let body_text = r.text().await.map_err(|e| {
+                    err_internal(format!("Failed to read Data Streams feeds response: {}", e))
+                })?;
+                serde_json::from_str::<serde_json::Value>(&body_text).map_err(|e| {
+                    err_internal(format!(
+                        "Failed to parse Data Streams feeds response: {}",
+                        e
+                    ))
+                })?
             }
             _ => {
                 // The /feeds endpoint requires authentication. Without it, list
@@ -1610,14 +1701,19 @@ impl ChainlinkMcpServer {
 
     // ─── VRF v2.5 Tools ───
 
-    #[tool(description = "Build transaction calldata for a VRF v2.5 random words request. Returns the hex-encoded calldata for VRFCoordinatorV2_5.requestRandomWords(). The caller must sign and submit the transaction from a consumer contract. VRF v2.5 supports payment in LINK or native token.")]
+    #[tool(
+        description = "Build transaction calldata for a VRF v2.5 random words request. Returns the hex-encoded calldata for VRFCoordinatorV2_5.requestRandomWords(). The caller must sign and submit the transaction from a consumer contract. VRF v2.5 supports payment in LINK or native token."
+    )]
     async fn vrf_request_random(
         &self,
         Parameters(params): Parameters<VrfRequestRandomParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = params.chain.as_deref().unwrap_or("ethereum");
         let coordinator = vrf_coordinator(chain).ok_or_else(|| {
-            err_invalid(format!("No VRF v2.5 coordinator for '{}'. Supported: ethereum, arbitrum, base", chain))
+            err_invalid(format!(
+                "No VRF v2.5 coordinator for '{}'. Supported: ethereum, arbitrum, base",
+                chain
+            ))
         })?;
 
         let sub_id = encode_uint256_decimal(&params.subscription_id)?;
@@ -1641,7 +1737,9 @@ impl ChainlinkMcpServer {
         let mut extra_args = Vec::new();
         extra_args.extend_from_slice(&[0x92, 0xfd, 0x13, 0x38]); // V1 tag
         let mut native_word = [0u8; 32];
-        if native_payment { native_word[31] = 1; }
+        if native_payment {
+            native_word[31] = 1;
+        }
         extra_args.extend_from_slice(&native_word);
 
         // ABI encode the struct as a tuple
@@ -1680,14 +1778,19 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Get VRF v2.5 subscription details from the VRFCoordinatorV2_5 contract. Returns balance, owner, authorized consumers, and pending requests. Supports Ethereum, Arbitrum, and Base.")]
+    #[tool(
+        description = "Get VRF v2.5 subscription details from the VRFCoordinatorV2_5 contract. Returns balance, owner, authorized consumers, and pending requests. Supports Ethereum, Arbitrum, and Base."
+    )]
     async fn vrf_get_subscription(
         &self,
         Parameters(params): Parameters<VrfGetSubscriptionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_name = params.chain.as_deref().unwrap_or("ethereum");
         let coordinator = vrf_coordinator(chain_name).ok_or_else(|| {
-            err_invalid(format!("No VRF v2.5 coordinator for '{}'. Supported: ethereum, arbitrum, base", chain_name))
+            err_invalid(format!(
+                "No VRF v2.5 coordinator for '{}'. Supported: ethereum, arbitrum, base",
+                chain_name
+            ))
         })?;
         let chain = resolve_chain(chain_name)?;
 
@@ -1706,7 +1809,8 @@ impl ChainlinkMcpServer {
         //   address subOwner, address[] consumers)
         if result.len() < 160 {
             return Err(err_internal(format!(
-                "Unexpected VRF subscription response: {} bytes", result.len()
+                "Unexpected VRF subscription response: {} bytes",
+                result.len()
             )));
         }
 
@@ -1742,7 +1846,9 @@ impl ChainlinkMcpServer {
 
     // ─── Proof of Reserve Tools ───
 
-    #[tool(description = "Read a Chainlink Proof of Reserve feed to verify asset reserves onchain. Uses the same AggregatorV3Interface as price feeds but returns reserve amounts instead of prices. Well-known PoR feeds on Ethereum: WBTC = 0xa81FE04086865e63E12dD3776978E49DEEa2ea4e, USDC = 0x9a177Bb065A0636C7972C6D27Abcd4B1e5EDb65c, TUSD = 0x478f4c42b877c697C4b19E396865D5437Ef4E08B.")]
+    #[tool(
+        description = "Read a Chainlink Proof of Reserve feed to verify asset reserves onchain. Uses the same AggregatorV3Interface as price feeds but returns reserve amounts instead of prices. Well-known PoR feeds on Ethereum: WBTC = 0xa81FE04086865e63E12dD3776978E49DEEa2ea4e, USDC = 0x9a177Bb065A0636C7972C6D27Abcd4B1e5EDb65c, TUSD = 0x478f4c42b877c697C4b19E396865D5437Ef4E08B."
+    )]
     async fn por_get_reserve(
         &self,
         Parameters(params): Parameters<PorGetReserveParams>,
@@ -1754,11 +1860,18 @@ impl ChainlinkMcpServer {
 
         info!(feed = %params.feed_address, chain = %chain.chain_name, "Querying Proof of Reserve feed");
 
-        let result = eth_call(&self.http_client, &chain.rpc_url, &params.feed_address, &selector_bytes).await?;
+        let result = eth_call(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.feed_address,
+            &selector_bytes,
+        )
+        .await?;
 
         if result.len() < 160 {
             return Err(err_internal(format!(
-                "Unexpected PoR response length: {} bytes", result.len()
+                "Unexpected PoR response length: {} bytes",
+                result.len()
             )));
         }
 
@@ -1803,7 +1916,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "List well-known Chainlink Proof of Reserve feeds. Returns feed addresses, asset names, and descriptions for verifying reserve backing of wrapped/synthetic assets.")]
+    #[tool(
+        description = "List well-known Chainlink Proof of Reserve feeds. Returns feed addresses, asset names, and descriptions for verifying reserve backing of wrapped/synthetic assets."
+    )]
     async fn por_list_feeds(
         &self,
         Parameters(_params): Parameters<PorListFeedsParams>,
@@ -1821,7 +1936,9 @@ impl ChainlinkMcpServer {
 
     // ─── CCIP Token Pool Tools ───
 
-    #[tool(description = "Get information about a CCIP Token Pool contract. Returns the pool type (Lock/Release or Burn/Mint), the token address, supported remote chains, and rate limiter config. Token Pools are part of the Cross-Chain Token (CCT) standard in CCIP v1.6+.")]
+    #[tool(
+        description = "Get information about a CCIP Token Pool contract. Returns the pool type (Lock/Release or Burn/Mint), the token address, supported remote chains, and rate limiter config. Token Pools are part of the Cross-Chain Token (CCT) standard in CCIP v1.6+."
+    )]
     async fn ccip_get_token_pool(
         &self,
         Parameters(params): Parameters<CcipGetTokenPoolParams>,
@@ -1832,7 +1949,13 @@ impl ChainlinkMcpServer {
         // Get the token address: token() -> address
         // selector: 0xfc0c546a
         let token_selector = hex::decode("fc0c546a").unwrap();
-        let token_result = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &token_selector).await?;
+        let token_result = eth_call(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.pool_address,
+            &token_selector,
+        )
+        .await?;
 
         let token_address = if token_result.len() >= 32 {
             format!("0x{}", hex::encode(&token_result[12..32]))
@@ -1844,7 +1967,13 @@ impl ChainlinkMcpServer {
         // ITypeAndVersion, e.g. "BurnMintTokenPool 1.6.0", "LockReleaseTokenPool 1.6.0",
         // "USDCTokenPool 1.6.0").
         let tv_selector = hex::decode(TYPE_AND_VERSION_SELECTOR).unwrap();
-        let tv_result = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &tv_selector).await;
+        let tv_result = eth_call(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.pool_address,
+            &tv_selector,
+        )
+        .await;
         let type_and_version = match tv_result {
             Ok(r) if r.len() >= 64 => {
                 let mut len_bytes = [0u8; 8];
@@ -1870,7 +1999,13 @@ impl ChainlinkMcpServer {
 
         // Supported remote chains via getSupportedChains() -> uint64[]
         let sc_selector = hex::decode(GET_SUPPORTED_CHAINS_SELECTOR).unwrap();
-        let sc_result = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &sc_selector).await;
+        let sc_result = eth_call(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.pool_address,
+            &sc_selector,
+        )
+        .await;
         let supported_chains: Vec<serde_json::Value> = match sc_result {
             Ok(r) if r.len() >= 64 => {
                 let mut count_bytes = [0u8; 8];
@@ -1898,7 +2033,13 @@ impl ChainlinkMcpServer {
         // Get owner: owner() -> address
         // selector: 0x8da5cb5b
         let owner_selector = hex::decode("8da5cb5b").unwrap();
-        let owner_result = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &owner_selector).await;
+        let owner_result = eth_call(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.pool_address,
+            &owner_selector,
+        )
+        .await;
         let owner = match owner_result {
             Ok(r) if r.len() >= 32 => format!("0x{}", hex::encode(&r[12..32])),
             _ => "unknown".to_string(),
@@ -1916,7 +2057,9 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Get CCIP Token Pool rate limiter configuration for a specific remote chain. Returns inbound and outbound rate limits (tokens per second, capacity) that control the maximum cross-chain transfer throughput. Part of CCIP v1.6+ security model.")]
+    #[tool(
+        description = "Get CCIP Token Pool rate limiter configuration for a specific remote chain. Returns inbound and outbound rate limits (tokens per second, capacity) that control the maximum cross-chain transfer throughput. Part of CCIP v1.6+ security model."
+    )]
     async fn ccip_get_rate_limits(
         &self,
         Parameters(params): Parameters<CcipGetRateLimitsParams>,
@@ -1924,13 +2067,14 @@ impl ChainlinkMcpServer {
         let chain_id = params.chain.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
-        let remote_selector: u64 = params
-            .remote_chain_selector
-            .parse()
-            .or_else(|_| {
-                resolve_chain_selector(&params.remote_chain_selector)
-                    .ok_or_else(|| err_invalid(format!("Invalid chain selector: {}", params.remote_chain_selector)))
-            })?;
+        let remote_selector: u64 = params.remote_chain_selector.parse().or_else(|_| {
+            resolve_chain_selector(&params.remote_chain_selector).ok_or_else(|| {
+                err_invalid(format!(
+                    "Invalid chain selector: {}",
+                    params.remote_chain_selector
+                ))
+            })
+        })?;
 
         // getCurrentOutboundRateLimiterState(uint64 remoteChainSelector)
         // selector: 0x5765cd58 (approximate — exact selector may vary by pool version)
@@ -1941,7 +2085,13 @@ impl ChainlinkMcpServer {
         calldata.extend_from_slice(&selector);
         calldata.extend_from_slice(&encode_uint64(remote_selector));
 
-        let outbound = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &calldata).await;
+        let outbound = eth_call(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.pool_address,
+            &calldata,
+        )
+        .await;
 
         // getCurrentInboundRateLimiterState(uint64 remoteChainSelector)
         // selector: 0xe5889e42
@@ -1950,7 +2100,13 @@ impl ChainlinkMcpServer {
         in_calldata.extend_from_slice(&in_selector);
         in_calldata.extend_from_slice(&encode_uint64(remote_selector));
 
-        let inbound = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &in_calldata).await;
+        let inbound = eth_call(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.pool_address,
+            &in_calldata,
+        )
+        .await;
 
         let parse_bucket = |result: &[u8]| -> serde_json::Value {
             if result.len() < 160 {
@@ -2002,7 +2158,9 @@ impl ChainlinkMcpServer {
 
     // ─── Functions Tools (continued) ───
 
-    #[tool(description = "Get Chainlink Functions subscription details including balance, owner, authorized consumers, and request counts. Queries the Functions Router contract on-chain.")]
+    #[tool(
+        description = "Get Chainlink Functions subscription details including balance, owner, authorized consumers, and request counts. Queries the Functions Router contract on-chain."
+    )]
     async fn chainlink_get_subscription(
         &self,
         Parameters(params): Parameters<ChainlinkGetSubscriptionParams>,
@@ -2091,8 +2249,10 @@ impl ChainlinkMcpServer {
                     // Cap at 20 consumers
                     let addr_start = offset + 32 + (i * 32) + 12;
                     if addr_start + 20 <= result.len() {
-                        consumers
-                            .push(format!("0x{}", hex::encode(&result[addr_start..addr_start + 20])));
+                        consumers.push(format!(
+                            "0x{}",
+                            hex::encode(&result[addr_start..addr_start + 20])
+                        ));
                     }
                 }
             }
@@ -2112,18 +2272,16 @@ impl ChainlinkMcpServer {
         }))
     }
 
-    #[tool(description = "Broadcast a pre-signed Ethereum transaction (CCIP Router.ccipSend, VRF requestRandomWords, Functions request, etc.) to the chosen chain via eth_sendRawTransaction. Returns the resulting transaction hash as plain text. Sign the tx externally — typically built via ccip_send_message or vrf_request_random and signed with the operator key.")]
+    #[tool(
+        description = "Broadcast a pre-signed Ethereum transaction (CCIP Router.ccipSend, VRF requestRandomWords, Functions request, etc.) to the chosen chain via eth_sendRawTransaction. Returns the resulting transaction hash as plain text. Sign the tx externally — typically built via ccip_send_message or vrf_request_random and signed with the operator key."
+    )]
     async fn chainlink_broadcast_signed_tx(
         &self,
         Parameters(params): Parameters<ChainlinkBroadcastTxParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = resolve_chain(&params.chain)?;
-        let tx_hash = eth_send_raw_tx(
-            &self.http_client,
-            &chain.rpc_url,
-            &params.signed_tx_hex,
-        )
-        .await?;
+        let tx_hash =
+            eth_send_raw_tx(&self.http_client, &chain.rpc_url, &params.signed_tx_hex).await?;
         text_result(tx_hash)
     }
 }
@@ -2206,7 +2364,7 @@ pub async fn start_chainlink_mcp_server_with_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let config = StreamableHttpServerConfig::default()
@@ -2229,7 +2387,9 @@ pub async fn start_chainlink_mcp_server_with_shutdown(
     let app = axum::Router::new()
         .nest_service("/mcp", service)
         .layer(tower::limit::ConcurrencyLimitLayer::new(100))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            2 * 1024 * 1024,
+        ));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     info!(addr = %listen_addr, tools = 12, "Chainlink MCP Server listening");

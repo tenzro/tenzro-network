@@ -2,9 +2,9 @@
 //!
 //! Supports TDIP (Tenzro Decentralized Identity Protocol) identities.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output::{self};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Identity management commands (TDIP)
 #[derive(Debug, Subcommand)]
@@ -102,11 +102,16 @@ impl IdentityRegisterCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_registerIdentity", serde_json::json!([{
-            "display_name": self.name,
-            "identity_type": self.identity_type,
-            "controller": self.controller.as_deref()
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_registerIdentity",
+                serde_json::json!([{
+                    "display_name": self.name,
+                    "identity_type": self.identity_type,
+                    "controller": self.controller.as_deref()
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -157,7 +162,10 @@ impl IdentityResolveCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc
-            .call("tenzro_resolveIdentity", serde_json::json!({"did": self.did}))
+            .call(
+                "tenzro_resolveIdentity",
+                serde_json::json!({"did": self.did}),
+            )
             .await?;
 
         spinner.finish_and_clear();
@@ -221,7 +229,9 @@ impl IdentityListCmd {
         spinner.finish_and_clear();
 
         if identities.is_empty() {
-            output::print_info("No identities found. Register one with: tenzro-cli identity register --name <name>");
+            output::print_info(
+                "No identities found. Register one with: tenzro-cli identity register --name <name>",
+            );
             return Ok(());
         }
 
@@ -256,10 +266,26 @@ impl IdentityListCmd {
             let mut rows = Vec::new();
             for identity in &identities {
                 rows.push(vec![
-                    identity.get("did").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                    identity.get("identity_type").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                    identity.get("display_name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
-                    identity.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                    identity
+                        .get("did")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    identity
+                        .get("identity_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    identity
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                    identity
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
                 ]);
             }
             output::print_table(&headers, &rows);
@@ -294,7 +320,10 @@ impl IdentityDocumentCmd {
 
         // First resolve the identity to get its data
         let identity: serde_json::Value = rpc
-            .call("tenzro_resolveIdentity", serde_json::json!({"did": self.did}))
+            .call(
+                "tenzro_resolveIdentity",
+                serde_json::json!({"did": self.did}),
+            )
             .await?;
 
         spinner.finish_and_clear();
@@ -437,15 +466,20 @@ impl IdentityAddCredentialCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_addCredential", serde_json::json!([{
-            "did": self.did,
-            "type": self.credential_type,
-            "issuer": self.issuer,
-            "claims": claims_value,
-            "envelope": envelope,
-            "proof_value": hex::encode(proof_value),
-            "proof_type": "Ed25519Signature2020",
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_addCredential",
+                serde_json::json!([{
+                    "did": self.did,
+                    "type": self.credential_type,
+                    "issuer": self.issuer,
+                    "claims": claims_value,
+                    "envelope": envelope,
+                    "proof_value": hex::encode(proof_value),
+                    "proof_type": "Ed25519Signature2020",
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -515,12 +549,17 @@ impl IdentityAddServiceCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_addService", serde_json::json!([{
-            "did": self.did,
-            "type": self.service_type,
-            "endpoint": self.endpoint,
-            "envelope": envelope,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_addService",
+                serde_json::json!([{
+                    "did": self.did,
+                    "type": self.service_type,
+                    "endpoint": self.endpoint,
+                    "envelope": envelope,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -556,13 +595,23 @@ impl IdentityResolveDidCmd {
         output::print_header("Resolve DID");
         let spinner = output::create_spinner("Resolving...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_resolveDid", serde_json::json!([self.did])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_resolveDid", serde_json::json!([self.did]))
+            .await?;
         spinner.finish_and_clear();
         output::print_field("DID", &self.did);
-        if let Some(v) = result.get("identity_type").and_then(|v| v.as_str()) { output::print_field("Type", v); }
-        if let Some(v) = result.get("status").and_then(|v| v.as_str()) { output::print_field("Status", v); }
-        if let Some(v) = result.get("display_name").and_then(|v| v.as_str()) { output::print_field("Name", v); }
-        if let Some(v) = result.get("wallet_address").and_then(|v| v.as_str()) { output::print_field("Wallet", v); }
+        if let Some(v) = result.get("identity_type").and_then(|v| v.as_str()) {
+            output::print_field("Type", v);
+        }
+        if let Some(v) = result.get("status").and_then(|v| v.as_str()) {
+            output::print_field("Status", v);
+        }
+        if let Some(v) = result.get("display_name").and_then(|v| v.as_str()) {
+            output::print_field("Name", v);
+        }
+        if let Some(v) = result.get("wallet_address").and_then(|v| v.as_str()) {
+            output::print_field("Wallet", v);
+        }
         Ok(())
     }
 }
@@ -584,7 +633,10 @@ impl IdentityResolveDocumentCmd {
         let spinner = output::create_spinner("Resolving...");
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
-            .call("tenzro_resolveDidDocument", serde_json::json!({"did": self.did}))
+            .call(
+                "tenzro_resolveDidDocument",
+                serde_json::json!({"did": self.did}),
+            )
             .await?;
         spinner.finish_and_clear();
         println!();
@@ -638,7 +690,9 @@ impl IdentitySetDelegationCmd {
             let chains: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
             params["allowed_chains"] = serde_json::json!(chains);
         }
-        let _result: serde_json::Value = rpc.call("tenzro_setDelegationScope", serde_json::json!([params])).await?;
+        let _result: serde_json::Value = rpc
+            .call("tenzro_setDelegationScope", serde_json::json!([params]))
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Delegation scope updated!");
         output::print_field("DID", &self.did);
@@ -678,12 +732,21 @@ impl IdentityRegisterMachineCmd {
             let caps: Vec<&str> = caps.split(',').map(|s| s.trim()).collect();
             params["capabilities"] = serde_json::json!(caps);
         }
-        let result: serde_json::Value = rpc.call("tenzro_registerMachineIdentity", serde_json::json!([params])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_registerMachineIdentity",
+                serde_json::json!([params]),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Machine identity registered!");
-        if let Some(v) = result.get("did").and_then(|v| v.as_str()) { output::print_field("DID", v); }
+        if let Some(v) = result.get("did").and_then(|v| v.as_str()) {
+            output::print_field("DID", v);
+        }
         output::print_field("Controller", &self.controller);
-        if let Some(v) = result.get("wallet_address").and_then(|v| v.as_str()) { output::print_field("Wallet", v); }
+        if let Some(v) = result.get("wallet_address").and_then(|v| v.as_str()) {
+            output::print_field("Wallet", v);
+        }
         Ok(())
     }
 }
@@ -705,7 +768,9 @@ impl IdentityJwksCmd {
         use crate::rpc::RpcClient;
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_listAgentJwks", serde_json::json!([])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_listAgentJwks", serde_json::json!([]))
+            .await?;
 
         if self.json {
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -714,7 +779,11 @@ impl IdentityJwksCmd {
 
         output::print_header("Public JWK Set");
 
-        let keys = result.get("keys").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let keys = result
+            .get("keys")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         if keys.is_empty() {
             output::print_info("No published keys.");
             return Ok(());
@@ -819,9 +888,16 @@ pub struct IdentityRevokeCmd {
     reason: Option<String>,
 
     /// DID recorded as the revoker inside the signed revocation entry
-    /// (defaults to `did:tenzro:system:tenzro-network` on the node)
+    /// (defaults to `did:tenzro:system:tenzro-network` on the node).
+    /// An audit annotation, not a credential — see --did-envelope.
     #[arg(long)]
     revoked_by: Option<String>,
+
+    /// Hex DID envelope proving control of the DID being revoked, or of
+    /// its controller when the DID names a machine. Must be bound to
+    /// method `tenzro_revokeDid` with the DID string as the params hash.
+    #[arg(long)]
+    did_envelope: String,
 
     /// Operator admin token (sent as X-Tenzro-Admin-Token; falls back
     /// to the TENZRO_ADMIN_TOKEN env var when omitted)
@@ -841,7 +917,10 @@ impl IdentityRevokeCmd {
         let spinner = output::create_spinner("Revoking DID...");
 
         let rpc = RpcClient::new(&self.rpc).with_admin_token(&self.admin_token);
-        let mut params = serde_json::json!({ "did": self.did });
+        let mut params = serde_json::json!({
+            "did": self.did,
+            "did_envelope": self.did_envelope,
+        });
         if let Some(reason) = &self.reason {
             params["reason"] = serde_json::Value::String(reason.clone());
         }
@@ -870,7 +949,11 @@ impl IdentityRevokeCmd {
 /// Revoke a single JWT by its `jti`. Unlike `revoke` (which invalidates
 /// every token in an entire DID's act-chain), this targets one specific
 /// token id — the revocation still cascades transitively to any tokens
-/// that were issued *by* the revoked token's act-chain. Admin-token-gated.
+/// that were issued *by* the revoked token's act-chain.
+///
+/// Requires a signed DID envelope from the token's bearer or its
+/// controller. A `jti` is not a secret, so knowing one is not authority
+/// to destroy it.
 #[derive(Debug, Parser)]
 pub struct IdentityRevokeJwtCmd {
     /// The JWT id (`jti`) to revoke.
@@ -879,6 +962,12 @@ pub struct IdentityRevokeJwtCmd {
     /// Optional reason for revocation (recorded in the audit log).
     #[arg(long)]
     reason: Option<String>,
+
+    /// Hex DID envelope proving control of the token's bearer DID or of
+    /// the controller DID that authorized it. Must be bound to method
+    /// `tenzro_revokeJwt` with the jti as the params hash.
+    #[arg(long)]
+    did_envelope: String,
 
     /// Operator admin token (sent as X-Tenzro-Admin-Token; falls back
     /// to the TENZRO_ADMIN_TOKEN env var when omitted)
@@ -898,7 +987,10 @@ impl IdentityRevokeJwtCmd {
         let spinner = output::create_spinner("Revoking token...");
 
         let rpc = RpcClient::new(&self.rpc).with_admin_token(&self.admin_token);
-        let mut params = serde_json::json!({ "jti": self.jti });
+        let mut params = serde_json::json!({
+            "jti": self.jti,
+            "did_envelope": self.did_envelope,
+        });
         if let Some(reason) = &self.reason {
             params["reason"] = serde_json::Value::String(reason.clone());
         }
@@ -1032,7 +1124,10 @@ impl IdentityForgetCmd {
 
         let rpc = RpcClient::new(&self.rpc).with_admin_token(&self.admin_token);
         let result: serde_json::Value = rpc
-            .call("tenzro_forgetIdentity", serde_json::json!({ "did": self.did }))
+            .call(
+                "tenzro_forgetIdentity",
+                serde_json::json!({ "did": self.did }),
+            )
             .await?;
 
         spinner.finish_and_clear();
@@ -1079,7 +1174,10 @@ impl IdentityExportCarCmd {
 
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
-            .call("tenzro_exportIdentityCar", serde_json::json!({ "did": self.did }))
+            .call(
+                "tenzro_exportIdentityCar",
+                serde_json::json!({ "did": self.did }),
+            )
             .await?;
 
         let car_base64 = result

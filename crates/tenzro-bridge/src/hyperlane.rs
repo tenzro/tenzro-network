@@ -187,8 +187,7 @@ impl HyperlaneValidatorSet {
                 self.threshold
             )));
         }
-        let mut seen: std::collections::HashSet<[u8; 20]> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
         let mut valid_count = 0;
         for (claimed_addr, sig_bytes) in signatures {
             if !self.validators.contains(claimed_addr) {
@@ -214,11 +213,8 @@ impl HyperlaneValidatorSet {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let recovered = match VerifyingKey::recover_from_prehash(
-                message_id,
-                &sig,
-                recovery_id,
-            ) {
+            let recovered = match VerifyingKey::recover_from_prehash(message_id, &sig, recovery_id)
+            {
                 Ok(vk) => vk,
                 Err(_) => continue,
             };
@@ -265,8 +261,7 @@ pub struct HyperlaneAdapter {
     /// Pinned per-origin-domain validator sets. When configured,
     /// inbound `receive_message` runs full multisig ISM verification
     /// against the matching set. Absent → fail-closed (reject).
-    validator_sets:
-        Arc<RwLock<std::collections::HashMap<u32, HyperlaneValidatorSet>>>,
+    validator_sets: Arc<RwLock<std::collections::HashMap<u32, HyperlaneValidatorSet>>>,
     /// Optional write-through persistence for the replay cache.
     seen_storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
@@ -287,9 +282,7 @@ impl HyperlaneAdapter {
             inbound_nonce_tracker: Arc::new(NonceTracker::new()),
             transfers: Arc::new(DashMap::new()),
             signer: Arc::new(RwLock::new(None)),
-            validator_sets: Arc::new(RwLock::new(
-                std::collections::HashMap::new(),
-            )),
+            validator_sets: Arc::new(RwLock::new(std::collections::HashMap::new())),
             seen_storage: None,
         }
     }
@@ -297,10 +290,7 @@ impl HyperlaneAdapter {
     /// Attach RocksDB persistence: hydrates the replay cache from
     /// `CF_SETTLEMENTS / bridge_seen:hyperlane:*` and swaps the inbound
     /// nonce tracker to its persistent variant.
-    pub fn with_storage(
-        mut self,
-        storage: Arc<dyn tenzro_storage::KvStore>,
-    ) -> Self {
+    pub fn with_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
         for key in crate::message_format::load_seen_keys(&storage, "hyperlane") {
             if let Ok(bytes) = hex::decode(&key)
                 && bytes.len() == 32
@@ -391,7 +381,8 @@ impl HyperlaneAdapter {
         let id = message.message_id();
         let id_hex = hex::encode(id.as_bytes());
         self.outbound.insert(id_hex.clone(), message);
-        self.transfers.insert(id_hex.clone(), TransferStatus::Pending);
+        self.transfers
+            .insert(id_hex.clone(), TransferStatus::Pending);
         debug!("hyperlane: dispatched message id=0x{}", id_hex);
         Ok(id)
     }
@@ -492,16 +483,14 @@ impl BridgeAdapter for HyperlaneAdapter {
         // `body || u8 sig_count || sig_count * (addr20 || sig65)`. A
         // validator set MUST be installed for the originating domain;
         // without it the adapter refuses the payload.
-        let set_opt = self
-            .validator_sets
-            .read()
-            .get(&source_domain)
-            .cloned();
-        let set = set_opt.ok_or_else(|| BridgeError::AdapterError(format!(
-            "Hyperlane adapter has no validator set installed for origin \
+        let set_opt = self.validator_sets.read().get(&source_domain).cloned();
+        let set = set_opt.ok_or_else(|| {
+            BridgeError::AdapterError(format!(
+                "Hyperlane adapter has no validator set installed for origin \
              domain {source_domain} — inbound traffic refused. Call \
              install_validator_set at startup."
-        )))?;
+            ))
+        })?;
         let n = payload.len();
         if n < 1 {
             return Err(BridgeError::InvalidParameter(
@@ -517,8 +506,7 @@ impl BridgeAdapter for HyperlaneAdapter {
             ));
         }
         let body = &payload[..n - trailer_len];
-        let mut signatures: Vec<([u8; 20], [u8; 65])> =
-            Vec::with_capacity(sig_count);
+        let mut signatures: Vec<([u8; 20], [u8; 65])> = Vec::with_capacity(sig_count);
         for i in 0..sig_count {
             let off = n - trailer_len + i * sig_record_len;
             let mut a = [0u8; 20];

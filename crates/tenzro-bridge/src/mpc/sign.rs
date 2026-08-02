@@ -47,11 +47,11 @@ use std::sync::Arc;
 use dkls23_core::protocols::sign_session::SignSession as DklsSignSession;
 use dkls23_core::protocols::signature::EcdsaSignature;
 use dkls23_core::protocols::signing::{
-    verify_ecdsa_signature, Broadcast3to4, SignData, TransmitPhase1to2, TransmitPhase2to3,
+    Broadcast3to4, SignData, TransmitPhase1to2, TransmitPhase2to3, verify_ecdsa_signature,
 };
 use dkls23_core::protocols::{Abort, AbortKind, Party, PartyIndex};
-use k256::elliptic_curve::sec1::{FromSec1Point, Sec1Point};
 use k256::Secp256k1;
+use k256::elliptic_curve::sec1::{FromSec1Point, Sec1Point};
 use serde::{Deserialize, Serialize};
 
 use crate::mpc::abort::{MpcAbortEvidence, MpcAbortReporter};
@@ -249,7 +249,10 @@ pub enum SignError {
     MalformedPayload { from_did: String, detail: String },
     /// Inbound message arrived in the wrong logical phase or round.
     #[error("unexpected payload kind in {expected:?}: got {got}")]
-    UnexpectedPayloadKind { expected: MpcPhase, got: &'static str },
+    UnexpectedPayloadKind {
+        expected: MpcPhase,
+        got: &'static str,
+    },
     /// Inbound message did not match the active `InstanceId` — cross-session
     /// splice attempt or routing bug.
     #[error("instance id mismatch on inbound message")]
@@ -424,10 +427,7 @@ where
         let local_index = self.cfg.local_party_index()?;
 
         // -------------------- Fetch + unseal local share -------------------
-        let envelope = self
-            .store
-            .get(&self.cfg.group_id, self.cfg.epoch)
-            .await?;
+        let envelope = self.store.get(&self.cfg.group_id, self.cfg.epoch).await?;
         if envelope.group_id != self.cfg.group_id {
             return Err(SignError::EnvelopeGroupMismatch);
         }
@@ -451,8 +451,8 @@ where
                 &envelope.sealed_payload,
             )
             .await?;
-        let party: Party<Secp256k1> = bincode::deserialize(&party_bytes)
-            .map_err(|e| SignError::PartyCodec(e.to_string()))?;
+        let party: Party<Secp256k1> =
+            bincode::deserialize(&party_bytes).map_err(|e| SignError::PartyCodec(e.to_string()))?;
         drop(party_bytes); // best-effort scrub the encoded plaintext
 
         // -------------------- Build SignData -------------------------------
@@ -468,9 +468,7 @@ where
         // committee selection in task #22.
         let counterparties: Vec<PartyIndex> = (1..=self.cfg.parameters.threshold)
             .filter(|&i| i != local_index)
-            .map(|i| {
-                PartyIndex::new(i).map_err(|e| SignError::InvalidParameters(e.to_string()))
-            })
+            .map(|i| PartyIndex::new(i).map_err(|e| SignError::InvalidParameters(e.to_string())))
             .collect::<Result<_, _>>()?;
         let sign_data = SignData {
             sign_id: self.cfg.instance_id.as_bytes().to_vec(),
@@ -605,12 +603,8 @@ where
             .ok_or_else(|| SignError::MalformedGroupPublicKey("not on curve".to_string()))?;
         let r_hex = hex::encode(ecdsa_sig.r);
         let s_hex = hex::encode(ecdsa_sig.s);
-        if !verify_ecdsa_signature::<Secp256k1>(
-            &self.cfg.message_hash,
-            &pk_affine,
-            &r_hex,
-            &s_hex,
-        ) {
+        if !verify_ecdsa_signature::<Secp256k1>(&self.cfg.message_hash, &pk_affine, &r_hex, &s_hex)
+        {
             return Err(SignError::OutputSignatureInvalid);
         }
 
@@ -626,8 +620,8 @@ where
         round_index: u32,
         to_index: u8,
     ) -> Result<(), SignError> {
-        let bytes = bincode::serialize(payload)
-            .map_err(|e| SignError::PartyCodec(e.to_string()))?;
+        let bytes =
+            bincode::serialize(payload).map_err(|e| SignError::PartyCodec(e.to_string()))?;
         let to_did = self.cfg.quorum_dids[(to_index - 1) as usize].clone();
         let msg = MpcRoundMessage {
             instance_id: self.cfg.instance_id,
@@ -687,7 +681,11 @@ mod tests {
 
     fn make_instance_id(tag: u8) -> InstanceId {
         let block = Hash::from_bytes(&[tag; 32]).unwrap();
-        InstanceId::derive(&block, &[0u8; 32], &[tag.wrapping_add(1); SESSION_NONCE_LEN])
+        InstanceId::derive(
+            &block,
+            &[0u8; 32],
+            &[tag.wrapping_add(1); SESSION_NONCE_LEN],
+        )
     }
 
     fn sorted_dids(n: u8) -> Vec<String> {
@@ -725,8 +723,7 @@ mod tests {
 
     impl MockTransport {
         fn fan_out(dids: &[String]) -> Vec<Self> {
-            let mut inboxes_map: HashMap<String, UnboundedSender<MpcRoundMessage>> =
-                HashMap::new();
+            let mut inboxes_map: HashMap<String, UnboundedSender<MpcRoundMessage>> = HashMap::new();
             let mut my_rxs: Vec<(String, UnboundedReceiver<MpcRoundMessage>)> =
                 Vec::with_capacity(dids.len());
             for d in dids {
@@ -796,7 +793,10 @@ mod tests {
         };
         assert!(matches!(
             cfg.validate(),
-            Err(SignError::QuorumSizeMismatch { got: 3, expected: 2 })
+            Err(SignError::QuorumSizeMismatch {
+                got: 3,
+                expected: 2
+            })
         ));
     }
 
@@ -915,8 +915,7 @@ mod tests {
         // Cross-verify externally against the group pubkey to confirm the
         // driver's internal verification matches a standalone check.
         let encoded = Sec1Point::<Secp256k1>::from_bytes(&group_pk).unwrap();
-        let pk_affine: k256::AffinePoint =
-            k256::AffinePoint::from_sec1_point(&encoded).unwrap();
+        let pk_affine: k256::AffinePoint = k256::AffinePoint::from_sec1_point(&encoded).unwrap();
         assert!(verify_ecdsa_signature::<Secp256k1>(
             &message_hash,
             &pk_affine,
@@ -978,5 +977,4 @@ mod tests {
             Err(SignError::DuplicateQuorumMember(_))
         ));
     }
-
 }

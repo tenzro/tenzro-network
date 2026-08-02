@@ -129,7 +129,12 @@ mod tests {
 
     #[test]
     fn phase_discriminants_distinct() {
-        let phases = [MpcPhase::Dkg, MpcPhase::Sign, MpcPhase::Refresh, MpcPhase::ReKey];
+        let phases = [
+            MpcPhase::Dkg,
+            MpcPhase::Sign,
+            MpcPhase::Refresh,
+            MpcPhase::ReKey,
+        ];
         let mut seen = std::collections::HashSet::new();
         for p in phases {
             let encoded = serde_json::to_string(&p).unwrap();

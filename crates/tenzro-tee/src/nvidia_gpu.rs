@@ -63,16 +63,16 @@
 //! - NVIDIA Hopper CC Whitepaper: https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/HCC-Whitepaper-v1.0.pdf
 //! - SPDM specification: https://www.dmtf.org/standards/spdm
 
+use crate::certs;
+use crate::error::{Result, TeeError};
+use crate::traits::TeeProvider;
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha384};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use tenzro_types::tee::*;
-use crate::certs;
-use crate::error::{Result, TeeError};
-use crate::traits::TeeProvider;
 
 /// NVIDIA GPU Confidential Computing provider.
 ///
@@ -93,6 +93,12 @@ pub struct NvidiaGpuProvider {
     available: RwLock<Option<bool>>,
     /// Whether we're running in simulation mode
     simulate: bool,
+    /// CPU confidential-VM provider the GPU is admitted to, if one was supplied.
+    ///
+    /// The GPU report and the CPU quote are generated under a single shared
+    /// nonce so a verifier can tell they describe the same machine at the same
+    /// moment. Without this the provider can only speak for the device.
+    cpu_anchor: Option<Arc<dyn TeeProvider>>,
     /// Enclave keys (in-memory, keyed by UUID)
     keys: Arc<RwLock<HashMap<uuid::Uuid, EnclaveKeyHandle>>>,
     /// Secret key material for simulation mode (in production, keys stay in GPU CC memory)
@@ -116,6 +122,16 @@ pub struct NvidiaGpuConfig {
     pub max_report_age_ms: i64,
     /// Expected GPU architecture
     pub expected_architecture: GpuArchitecture,
+    /// Whether a CPU confidential-VM anchor is required before this provider
+    /// will present a complete TEE claim.
+    ///
+    /// NVIDIA GPU CC does not establish a trust boundary on its own: the
+    /// confidential VM is created by SEV-SNP or TDX, and the GPU is then
+    /// admitted to that VM over an SPDM-authenticated link. A GPU report on its
+    /// own attests the device, not the environment the workload runs in. With
+    /// this set, [`NvidiaGpuProvider::with_cpu_anchor`] must have supplied a CPU
+    /// provider or attestation is refused.
+    pub require_cpu_anchor: bool,
 }
 
 impl Default for NvidiaGpuConfig {
@@ -128,6 +144,7 @@ impl Default for NvidiaGpuConfig {
             min_cc_firmware_version: "1.0".to_string(),
             max_report_age_ms: 24 * 60 * 60 * 1000, // 24 hours
             expected_architecture: GpuArchitecture::Hopper,
+            require_cpu_anchor: true,
         }
     }
 }
@@ -161,7 +178,10 @@ impl GpuArchitecture {
     /// Note that this is architecture-level — within Ada Lovelace, only L40S
     /// supports CC. Use [`known_gpus::cc_capable`] for per-device truth.
     pub fn supports_cc(&self) -> bool {
-        matches!(self, GpuArchitecture::Hopper | GpuArchitecture::Blackwell | GpuArchitecture::AdaLovelace)
+        matches!(
+            self,
+            GpuArchitecture::Hopper | GpuArchitecture::Blackwell | GpuArchitecture::AdaLovelace
+        )
     }
 }
 
@@ -206,7 +226,14 @@ pub struct GpuDeviceInfo {
 pub struct GpuAttestationReport {
     /// GPU device info
     pub device_info: GpuDeviceInfo,
-    /// Firmware measurements (VBIOS hash, driver hash)
+    /// The attestation report exactly as the driver returned it.
+    ///
+    /// Kept verbatim because NVIDIA's remote attestation service re-parses the
+    /// SPDM exchange itself and checks the device signature over the original
+    /// transcript. Anything re-encoded from the parsed fields below would no
+    /// longer carry that signature.
+    pub raw_report: Vec<u8>,
+    /// What the device reported in its SPDM measurement record
     pub measurements: GpuMeasurements,
     /// CC mode attestation status
     pub cc_status: CcAttestationStatus,
@@ -218,21 +245,312 @@ pub struct GpuAttestationReport {
     pub signature: Vec<u8>,
     /// Certificate chain (GPU Attestation Key → NVIDIA CA)
     pub cert_chain: Vec<Vec<u8>>,
+    /// Chain for the key that signed the attestation report, which the driver
+    /// returns separately from the device certificate chain. A verifier walks
+    /// the signature up through this one.
+    pub attestation_cert_chain: Vec<u8>,
+    /// Report from the GPU's security controller, when the part exposes one.
+    /// Hopper carries a CEC alongside the GPU die; Blackwell reports without it.
+    pub cec_report: Option<Vec<u8>>,
+    /// CPU confidential-VM technology the driver observed on the host that
+    /// produced this report, mapped onto the vendor enum. `None` when the
+    /// driver reported no CPU capability, or in simulation.
+    pub cpu_anchor_vendor: Option<TeeVendor>,
+    /// Quote from the CPU confidential VM the GPU was admitted to, taken over
+    /// the same nonce as the GPU leg.
+    ///
+    /// A GPU report on its own says a device is in Confidential Computing mode.
+    /// It does not say which VM the device was admitted to, and the GPU has no
+    /// trust boundary without that VM. The shared nonce is what lets a verifier
+    /// see that both legs answered one challenge.
+    pub cpu_anchor: Option<AttestationReport>,
 }
 
-/// GPU firmware measurements.
+/// Measurements the GPU reported inside its SPDM MEASUREMENTS response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuMeasurements {
-    /// VBIOS hash (SHA-384)
-    pub vbios_hash: Vec<u8>,
-    /// Driver version hash (SHA-384)
-    pub driver_hash: Vec<u8>,
-    /// CC firmware hash (SHA-384)
-    pub cc_firmware_hash: Vec<u8>,
+    /// SHA-384 over the SPDM measurement record exactly as the device returned
+    /// it. This is what the attestation signature covers, so it is the value
+    /// that binds a report to a device state. It is not a per-component hash
+    /// and must not be presented as one.
+    pub measurement_record_hash: Vec<u8>,
+    /// Every DMTF measurement block in the record, in the order reported.
+    pub blocks: Vec<SpdmMeasurementBlock>,
     /// ECC mode enabled
     pub ecc_enabled: bool,
     /// MIG (Multi-Instance GPU) mode
     pub mig_enabled: bool,
+}
+
+/// One DMTF measurement block from an SPDM MEASUREMENTS response.
+///
+/// Block layout per DSP0274 (SPDM 1.1) table "DMTF measurement specification
+/// format": `Index(1) | MeasurementSpecification(1) | MeasurementSize(2 LE) |
+/// Measurement(MeasurementSize)`, where a DMTF-specification measurement is
+/// itself `DMTFSpecMeasurementValueType(1) | DMTFSpecMeasurementValueSize(2 LE)
+/// | DMTFSpecMeasurementValue(...)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpdmMeasurementBlock {
+    /// DMTF measurement block index as reported by the device.
+    pub index: u8,
+    /// DMTF measurement value type. Bit 7 clear means the value is a digest;
+    /// bit 7 set means it is a raw bit stream. The low 7 bits identify what was
+    /// measured (immutable ROM, mutable firmware, hardware config, and so on).
+    pub value_type: u8,
+    /// The measurement value bytes.
+    pub value: Vec<u8>,
+}
+
+impl SpdmMeasurementBlock {
+    /// Whether the value is a digest rather than a raw bit stream.
+    pub fn is_digest(&self) -> bool {
+        self.value_type & 0x80 == 0
+    }
+
+    /// The DMTF value-type discriminant with the representation bit masked off.
+    pub fn kind(&self) -> u8 {
+        self.value_type & 0x7f
+    }
+
+    /// Name for what this block measures, per the DSP0274 DMTF value-type table.
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind() {
+            DMTF_VALUE_TYPE_IMMUTABLE_ROM => "immutable_rom",
+            0x01 => "mutable_firmware",
+            0x02 => "hardware_configuration",
+            0x03 => "firmware_configuration",
+            0x04 => "measurement_manifest",
+            0x05 => "device_mode",
+            0x06 => "firmware_version",
+            0x07 => "firmware_security_version",
+            0x08 => "hash_extended_measurement",
+            _ => "vendor_defined",
+        }
+    }
+
+    /// Digest algorithm implied by the value length, or `raw` for a bit stream.
+    ///
+    /// SPDM carries the negotiated `MeasurementHashAlgo` in `ALGORITHMS`, which
+    /// the attestation report does not include, so the width is the only signal
+    /// available to a verifier reading the report alone.
+    pub fn algorithm_label(&self) -> &'static str {
+        if !self.is_digest() {
+            return "raw";
+        }
+        match self.value.len() {
+            32 => "SHA-256",
+            48 => "SHA-384",
+            64 => "SHA-512",
+            _ => "unknown",
+        }
+    }
+}
+
+/// DMTF measurement value type for an immutable-ROM digest (DSP0274).
+const DMTF_VALUE_TYPE_IMMUTABLE_ROM: u8 = 0x00;
+
+/// SPDM `GET_MEASUREMENTS` request code (DSP0274).
+const SPDM_CODE_GET_MEASUREMENTS: u8 = 0xe0;
+
+/// SPDM `MEASUREMENTS` response code (DSP0274).
+const SPDM_CODE_MEASUREMENTS: u8 = 0x60;
+
+/// Byte length of the SPDM `GET_MEASUREMENTS` request the driver prefixes to the
+/// attestation report: 4-byte header, 32-byte nonce, 1-byte slot id.
+const SPDM_MEASUREMENTS_REQUEST_LEN: usize = 37;
+
+/// Bit 0 of `MeasurementSpecification` selects the DMTF measurement format.
+const SPDM_MEASUREMENT_SPEC_DMTF: u8 = 0x01;
+
+/// What the GPU returned inside its SPDM `MEASUREMENTS` response.
+#[derive(Debug, Clone)]
+pub struct ParsedGpuReport {
+    /// SHA-384 over the measurement record as returned, byte for byte.
+    pub measurement_record_hash: Vec<u8>,
+    /// The DMTF measurement blocks inside that record.
+    pub blocks: Vec<SpdmMeasurementBlock>,
+    /// The nonce the device echoed back.
+    pub nonce: Vec<u8>,
+    /// Vendor-defined opaque data.
+    pub opaque_data: Vec<u8>,
+    /// The device's ECDSA P-384 signature over the SPDM transcript.
+    pub signature: Vec<u8>,
+}
+
+/// Evidence gathered from the driver for one attestation.
+struct CollectedEvidence {
+    /// The attestation report as the driver returned it. This is what a
+    /// verifier receives; nothing here is re-encoded on the way out.
+    evidence: Vec<u8>,
+    /// Device certificate chain, GPU attestation key up to NVIDIA's root.
+    cert_chain: Vec<Vec<u8>>,
+    /// The separate attestation certificate chain the driver exposes. Verifiers
+    /// that pin against NVIDIA's OCSP responder need this chain rather than the
+    /// device one.
+    attestation_cert_chain: Vec<u8>,
+    /// Report from the GPU's Confidential Executive Controller, when the part
+    /// carries one. Present on Hopper; absent on parts without a discrete CEC.
+    cec_report: Option<Vec<u8>>,
+    /// CPU confidential-VM technology the driver observed on this host, mapped
+    /// onto the vendor enum. `None` when the driver reported no CPU capability.
+    cpu_anchor_vendor: Option<TeeVendor>,
+}
+
+/// Map the CPU capability NVML reported onto the cross-vendor enum.
+///
+/// Recorded on the report so a verifier on another machine can check that the
+/// CPU quote travelling alongside it came from the technology the GPU driver
+/// actually saw, rather than trusting the quote's own self-description alone.
+#[cfg(all(target_os = "linux", feature = "nvidia-gpu"))]
+fn cpu_anchor_vendor(cpu: crate::nvml::CcCpuCaps) -> Option<TeeVendor> {
+    use crate::nvml::CcCpuCaps;
+    match cpu {
+        CcCpuCaps::AmdSev | CcCpuCaps::AmdSevSnp | CcCpuCaps::AmdSnpVtom => {
+            Some(TeeVendor::AmdSevSnp)
+        }
+        CcCpuCaps::IntelTdx => Some(TeeVendor::IntelTdx),
+        CcCpuCaps::None | CcCpuCaps::Unknown(_) => None,
+    }
+}
+
+/// Parse an NVIDIA GPU attestation report.
+///
+/// The driver hands back the SPDM `GET_MEASUREMENTS` exchange: optionally the
+/// 37-byte request message, then the `MEASUREMENTS` response. Layout of the
+/// response per DSP0274:
+///
+/// ```text
+/// SPDMVersion(1) | RequestResponseCode(1) | Param1(1) | Param2(1)
+/// NumberOfBlocks(1) | MeasurementRecordLength(3, LE)
+/// MeasurementRecord(MeasurementRecordLength)
+/// Nonce(32) | OpaqueDataLength(2, LE) | OpaqueData(OpaqueDataLength)
+/// Signature(remainder)
+/// ```
+///
+/// The signature covers the SPDM transcript, not just this message, so it can be
+/// checked against the device certificate chain but not recomputed from the
+/// response alone.
+pub fn parse_gpu_attestation_report(blob: &[u8]) -> Result<ParsedGpuReport> {
+    let malformed =
+        |what: &str| TeeError::InvalidAttestationReport(format!("GPU attestation report {what}"));
+
+    // Skip the request message when the driver prefixed one.
+    let response = if blob.len() > SPDM_MEASUREMENTS_REQUEST_LEN
+        && blob.get(1) == Some(&SPDM_CODE_GET_MEASUREMENTS)
+    {
+        &blob[SPDM_MEASUREMENTS_REQUEST_LEN..]
+    } else {
+        blob
+    };
+
+    if response.len() < 8 {
+        return Err(malformed("is shorter than an SPDM MEASUREMENTS header"));
+    }
+
+    // SPDM 1.1 (0x11) and 1.2 (0x12) share this response layout.
+    if response[0] != 0x11 && response[0] != 0x12 {
+        return Err(malformed(&format!(
+            "declares unsupported SPDM version 0x{:02x}",
+            response[0]
+        )));
+    }
+    if response[1] != SPDM_CODE_MEASUREMENTS {
+        return Err(malformed(&format!(
+            "is not a MEASUREMENTS response (code 0x{:02x})",
+            response[1]
+        )));
+    }
+
+    let record_len = u32::from_le_bytes([response[5], response[6], response[7], 0]) as usize;
+    let record_end = 8usize
+        .checked_add(record_len)
+        .ok_or_else(|| malformed("declares an overflowing measurement record length"))?;
+    if response.len() < record_end + 34 {
+        return Err(malformed("is truncated before the nonce"));
+    }
+
+    let record = &response[8..record_end];
+    let blocks = parse_measurement_blocks(record)?;
+
+    let nonce = response[record_end..record_end + 32].to_vec();
+    let opaque_len =
+        u16::from_le_bytes([response[record_end + 32], response[record_end + 33]]) as usize;
+    let opaque_start = record_end + 34;
+    let opaque_end = opaque_start
+        .checked_add(opaque_len)
+        .ok_or_else(|| malformed("declares an overflowing opaque data length"))?;
+    if response.len() <= opaque_end {
+        return Err(malformed("is truncated before the signature"));
+    }
+
+    Ok(ParsedGpuReport {
+        measurement_record_hash: Sha384::digest(record).to_vec(),
+        blocks,
+        nonce,
+        opaque_data: response[opaque_start..opaque_end].to_vec(),
+        signature: response[opaque_end..].to_vec(),
+    })
+}
+
+/// Walk the DMTF measurement blocks inside an SPDM measurement record.
+fn parse_measurement_blocks(record: &[u8]) -> Result<Vec<SpdmMeasurementBlock>> {
+    let malformed =
+        |what: &str| TeeError::InvalidAttestationReport(format!("GPU measurement record {what}"));
+
+    let mut blocks = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < record.len() {
+        if record.len() - offset < 4 {
+            return Err(malformed("ends mid-block header"));
+        }
+
+        let index = record[offset];
+        let spec = record[offset + 1];
+        let size = u16::from_le_bytes([record[offset + 2], record[offset + 3]]) as usize;
+        let body_start = offset + 4;
+        let body_end = body_start
+            .checked_add(size)
+            .ok_or_else(|| malformed("declares an overflowing block size"))?;
+        if body_end > record.len() {
+            return Err(malformed("declares a block that runs past the record"));
+        }
+
+        if spec & SPDM_MEASUREMENT_SPEC_DMTF == 0 {
+            return Err(malformed(&format!(
+                "block {index} uses measurement specification 0x{spec:02x}, not DMTF"
+            )));
+        }
+        if size < 3 {
+            return Err(malformed(&format!(
+                "block {index} is too short to carry a DMTF measurement"
+            )));
+        }
+
+        let value_type = record[body_start];
+        let value_size =
+            u16::from_le_bytes([record[body_start + 1], record[body_start + 2]]) as usize;
+        let value_start = body_start + 3;
+        if value_start + value_size > body_end {
+            return Err(malformed(&format!(
+                "block {index} declares a value larger than the block"
+            )));
+        }
+
+        blocks.push(SpdmMeasurementBlock {
+            index,
+            value_type,
+            value: record[value_start..value_start + value_size].to_vec(),
+        });
+
+        offset = body_end;
+    }
+
+    if blocks.is_empty() {
+        return Err(malformed("contains no measurement blocks"));
+    }
+
+    Ok(blocks)
 }
 
 /// CC attestation status.
@@ -248,68 +566,126 @@ pub enum CcAttestationStatus {
     Failed,
 }
 
+/// Claims version requested from NRAS.
+///
+/// The service keys its claim set off this field; "3.0" is the current set and
+/// is echoed back as `x-nvidia-ver`. Pinning it means a later default on the
+/// service side cannot silently change which claims arrive.
+const NRAS_CLAIMS_VERSION: &str = "3.0";
+
+/// One GPU's evidence in the shape NRAS accepts.
+#[derive(Debug, Serialize)]
+struct NrasEvidenceEntry {
+    /// Base64 of the SPDM attestation report as the driver returned it.
+    evidence: String,
+    /// Base64 of the device certificate chain that signs the report.
+    certificate: String,
+}
+
 /// NRAS attestation request body.
+///
+/// Shape per NVIDIA's `nvtrust` reference verifier
+/// (<https://github.com/NVIDIA/nvtrust>), which posts the nonce alongside a
+/// list of per-GPU evidence entries and selects a claim set by version.
 #[derive(Debug, Serialize)]
 struct NrasAttestationRequest {
-    /// Base64-encoded GPU evidence (SPDM measurements)
-    evidence: String,
-    /// Hex-encoded nonce for replay protection
+    /// Lowercase hex nonce, echoed back in the token as `eat_nonce`.
     nonce: String,
-    /// GPU architecture string ("HOPPER", "BLACKWELL", "ADA_LOVELACE")
+    /// GPU architecture string ("HOPPER", "BLACKWELL", "ADA_LOVELACE").
     arch: String,
+    /// One entry per GPU being attested.
+    evidence_list: Vec<NrasEvidenceEntry>,
+    /// Which claim set to return.
+    claims_version: String,
 }
 
-/// NRAS attestation response.
-#[derive(Debug, Deserialize)]
-struct NrasAttestationResponse {
-    /// JWT attestation token
-    #[serde(default)]
-    token: String,
-    /// Whether attestation passed
-    #[serde(default)]
-    attestation_result: bool,
-    /// Error message if failed
-    #[serde(default)]
-    error: Option<String>,
-}
-
-/// NRAS JWT token claims (subset of fields we care about).
-#[derive(Debug, Deserialize)]
+/// Claims carried in an NRAS Entity Attestation Token.
+///
+/// NRAS returns an RFC 9711 detached EAT bundle: an overall token plus one
+/// token per GPU. The two share this claim type because the fields a verifier
+/// reads differ by which token it is looking at — the overall verdict lives on
+/// the outer token, the device detail on the per-GPU ones.
+///
+/// The service exposes firmware **versions**, not firmware digests; the only
+/// digest it returns hashes the per-GPU claims JSON. A local measurement
+/// record therefore has nothing on this side to be compared against, and the
+/// two verification paths stay independent by construction.
+#[derive(Debug, Default, Deserialize)]
 struct NrasTokenClaims {
-    /// Whether the GPU passed attestation
+    /// Overall verdict across every GPU in the request. Present on the outer
+    /// token only, and authoritative — a per-GPU `measres` of "success" does
+    /// not by itself mean the request passed.
+    #[serde(rename = "x-nvidia-overall-att-result", default)]
+    overall_result: bool,
+    /// Per-GPU verdict. "success" when the device matched its reference
+    /// measurements; compared case-insensitively.
     #[serde(default)]
-    gpu_attestation_result: bool,
-    /// GPU architecture
+    measres: String,
+    /// Claim set version the service applied, echoing `claims_version`.
+    #[serde(rename = "x-nvidia-ver", default)]
+    claims_version: String,
+    /// Nonce echoed back, lowercase hex.
     #[serde(default)]
-    gpu_arch: String,
-    /// GPU model
+    eat_nonce: String,
+    /// Unique device identifier, the GPU's attested identity.
     #[serde(default)]
-    gpu_model: String,
-    /// VBIOS measurement
+    ueid: String,
+    /// Hardware model as the service resolved it.
     #[serde(default)]
-    vbios_measurement: String,
-    /// Driver measurement
+    hwmodel: String,
+    /// OEM identifier.
     #[serde(default)]
-    driver_measurement: String,
-    /// CC firmware measurement
+    oemid: String,
+    /// Whether secure boot was enabled on the device.
     #[serde(default)]
-    cc_fw_measurement: String,
-    /// Token issued-at (Unix timestamp)
+    secboot: bool,
+    /// Debug status. Anything other than a disabled state means the device was
+    /// debuggable while producing this evidence.
+    #[serde(default)]
+    dbgstat: String,
+    /// Whether the architecture matched what the request declared.
+    #[serde(rename = "x-nvidia-gpu-arch-check", default)]
+    arch_check: bool,
+    /// Driver version the service read out of the evidence.
+    #[serde(rename = "x-nvidia-gpu-driver-version", default)]
+    driver_version: String,
+    /// VBIOS version the service read out of the evidence.
+    #[serde(rename = "x-nvidia-gpu-vbios-version", default)]
+    vbios_version: String,
+    /// Whether the service could parse the attestation report at all.
+    #[serde(rename = "x-nvidia-gpu-attestation-report-parsed", default)]
+    report_parsed: bool,
+    /// Whether the nonce inside the report matched the one in the request.
+    #[serde(rename = "x-nvidia-gpu-attestation-report-nonce-match", default)]
+    report_nonce_match: bool,
+    /// Whether the device's signature over the report verified.
+    #[serde(rename = "x-nvidia-gpu-attestation-report-signature-verified", default)]
+    report_signature_verified: bool,
+    /// Advisory text the service attached, if any.
+    #[serde(rename = "x-nvidia-attestation-warning", default)]
+    warning: Option<String>,
+    /// Token issued-at (Unix timestamp).
     #[serde(default)]
     iat: i64,
-    /// Token expiration (Unix timestamp)
+    /// Token expiration (Unix timestamp).
     #[serde(default)]
     exp: i64,
-    /// Nonce used in attestation
-    #[serde(default)]
-    nonce: String,
+}
+
+/// The overall token plus the per-GPU tokens NRAS returned.
+#[derive(Debug)]
+struct NrasBundle {
+    /// Verdict across the whole request.
+    overall: NrasTokenClaims,
+    /// One entry per GPU, keyed as the service named it ("GPU-0", ...).
+    per_gpu: Vec<(String, NrasTokenClaims)>,
 }
 
 impl NvidiaGpuProvider {
     /// Create a new NVIDIA GPU TEE provider.
     pub fn new(config: NvidiaGpuConfig) -> Self {
-        let simulate = std::env::var("TENZRO_SIMULATE_GPU")
-            .unwrap_or_else(|_| "0".to_string()) == "1";
+        let simulate =
+            std::env::var("TENZRO_SIMULATE_GPU").unwrap_or_else(|_| "0".to_string()) == "1";
 
         tracing::info!(
             "Initializing NVIDIA GPU TEE provider (device: {}, arch: {}, simulate: {})",
@@ -323,6 +699,7 @@ impl NvidiaGpuProvider {
             gpu_info: RwLock::new(None),
             available: RwLock::new(None),
             simulate,
+            cpu_anchor: None,
             keys: Arc::new(RwLock::new(HashMap::new())),
             secret_keys: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -335,13 +712,32 @@ impl NvidiaGpuProvider {
         self
     }
 
+    /// Attach the CPU confidential-VM provider this GPU is admitted to.
+    ///
+    /// With an anchor attached, [`TeeProvider::generate_attestation`] derives one
+    /// nonce, asks the CPU provider to quote over it, asks the GPU to report
+    /// over the same value, and returns both bound together. A verifier that
+    /// checks only the GPU leg learns that a genuine CC-capable device signed
+    /// something; it takes the CPU leg to learn which machine, and under which
+    /// memory-encryption boundary, the workload actually ran.
+    ///
+    /// Pair with [`NvidiaGpuConfig::require_cpu_anchor`]: leaving that set and
+    /// omitting this call makes attestation fail rather than silently downgrade.
+    pub fn with_cpu_anchor(mut self, anchor: Arc<dyn TeeProvider>) -> Self {
+        self.cpu_anchor = Some(anchor);
+        self
+    }
+
     /// Detect GPU hardware and populate device info.
     ///
     /// In simulation mode, returns a fake H100 device.
     /// In real mode, runs `nvidia-smi` to query GPU properties including
     /// name, PCI ID, driver version, memory, compute capability, and CC status.
     async fn detect_gpu(&self) -> Result<GpuDeviceInfo> {
-        tracing::debug!("Detecting NVIDIA GPU at device index {}", self.config.device_index);
+        tracing::debug!(
+            "Detecting NVIDIA GPU at device index {}",
+            self.config.device_index
+        );
 
         if self.simulate {
             tracing::debug!("NVIDIA GPU running in simulation mode");
@@ -354,7 +750,8 @@ impl NvidiaGpuProvider {
                 memory_total: 80 * 1024 * 1024 * 1024, // 80 GB
                 cc_enabled: true,
                 cc_firmware_version: Some("1.0.1".to_string()),
-                serial_hash: "sim_".to_string() + &hex::encode(Sha256::digest(b"simulated_gpu_serial")),
+                serial_hash: "sim_".to_string()
+                    + &hex::encode(Sha256::digest(b"simulated_gpu_serial")),
             };
 
             *self.gpu_info.write() = Some(info.clone());
@@ -390,7 +787,8 @@ impl NvidiaGpuProvider {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(TeeError::not_available(format!(
-                "nvidia-smi failed: {}", stderr
+                "nvidia-smi failed: {}",
+                stderr
             )));
         }
 
@@ -399,7 +797,8 @@ impl NvidiaGpuProvider {
 
         if fields.len() < 5 {
             return Err(TeeError::not_available(format!(
-                "nvidia-smi returned unexpected format: {}", stdout
+                "nvidia-smi returned unexpected format: {}",
+                stdout
             )));
         }
 
@@ -418,12 +817,21 @@ impl NvidiaGpuProvider {
         // CC (Ampere, Turing, Volta, RTX consumer cards) — `nvidia-smi
         // conf-compute -gsc` would fail anyway, but the explicit early-return
         // makes the path's intent clear and surfaces a useful log line.
-        let cc_enabled = if known_gpus::cc_capable(&pci_device_id) {
+        let cc_enabled = if let Some(part) = known_gpus::non_cc_part_by_name(&name) {
+            tracing::info!(
+                "GPU {} is a {} — Confidential Computing is not offered on this part, \
+                 so it serves inference without TEE attestation",
+                name,
+                part
+            );
+            false
+        } else if known_gpus::cc_capable(&pci_device_id) {
             self.check_cc_status().await
         } else if known_gpus::architecture_for_pci_id(&pci_device_id).is_some() {
             tracing::info!(
                 "GPU {} ({}) is recognized but not CC-capable — serving inference without TEE attestation",
-                name, pci_device_id
+                name,
+                pci_device_id
             );
             false
         } else {
@@ -457,12 +865,40 @@ impl NvidiaGpuProvider {
         Ok(info)
     }
 
-    /// Check if Confidential Computing mode is enabled on the GPU.
+    /// Check whether Confidential Computing mode is enabled on the GPU.
     ///
-    /// Uses `nvidia-smi conf-compute -gsc` to query CC status.
-    /// On older drivers without CC support, or on non-Linux hosts where
-    /// nvidia-smi is absent, the spawn fails and we return false.
+    /// `nvmlSystemGetConfComputeState` is the authoritative answer, so that is
+    /// tried first. Parsing `nvidia-smi conf-compute -gsc` output is the
+    /// fallback for hosts where NVML cannot be bound: the tool's wording has
+    /// changed across driver branches, so a substring match on it is a weaker
+    /// signal than reading the state field directly.
     async fn check_cc_status(&self) -> bool {
+        #[cfg(all(target_os = "linux", feature = "nvidia-gpu"))]
+        {
+            match crate::nvml::Nvml::open() {
+                Ok(nvml) => match nvml.cc_system_state() {
+                    Ok(state) => {
+                        if state.dev_tools_on() {
+                            tracing::warn!(
+                                "GPU Confidential Computing is in DevTools mode — isolation is \
+                                 relaxed and reports from this host do not attest a confidential \
+                                 environment"
+                            );
+                        }
+                        return state.cc_enabled();
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "NVML CC state query failed ({e}) — falling back to nvidia-smi"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!("NVML unavailable ({e}) — falling back to nvidia-smi");
+                }
+            }
+        }
+
         let output = tokio::process::Command::new("nvidia-smi")
             .args(["conf-compute", "-gsc"])
             .output()
@@ -471,7 +907,6 @@ impl NvidiaGpuProvider {
         match output {
             Ok(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                // Look for "CC Status: ON" or "Confidential Compute: Enabled"
                 stdout.contains("ON") || stdout.contains("Enabled") || stdout.contains("enabled")
             }
             _ => {
@@ -532,25 +967,23 @@ impl NvidiaGpuProvider {
 
     /// Collect GPU evidence for attestation.
     ///
-    /// In real mode, this would use the NVIDIA SPDM-based evidence collection:
-    /// - Open the GPU's SPDM responder via `/dev/nvidia-caps/` or NVML
-    /// - Perform SPDM GET_MEASUREMENTS to retrieve firmware measurements
-    /// - Package measurements with device certificate into evidence blob
+    /// On real hardware the evidence is the attestation report returned by
+    /// `nvmlDeviceGetConfComputeGpuAttestationReport`, which lives in
+    /// `libnvidia-ml.so.1` alongside the rest of NVML. The report is the SPDM
+    /// `GET_MEASUREMENTS` exchange the driver ran against the GPU's root of
+    /// trust: the request message followed by the MEASUREMENTS response, with
+    /// the caller's nonce echoed inside and the whole transcript signed by the
+    /// device's ECDSA P-384 attestation key.
     ///
-    /// Currently, evidence collection requires the NVIDIA proprietary
-    /// `libnvidia-nscq.so` library, which provides the C API:
-    /// ```c
-    /// nvmlReturn_t nvmlDeviceGetConfComputeGpuAttestationReport(
-    ///     nvmlDevice_t device,
-    ///     nvmlConfComputeGpuAttestationReport_t *report
-    /// );
-    /// ```
-    ///
-    /// Until FFI bindings are added, we collect available info via nvidia-smi
-    /// and construct a minimal evidence payload.
-    async fn collect_gpu_evidence(&self, device_info: &GpuDeviceInfo, nonce: &[u8]) -> Result<Vec<u8>> {
+    /// The certificate chain comes from `nvmlDeviceGetConfComputeGpuCertificate`
+    /// and travels alongside the report rather than inside it — a verifier needs
+    /// both to walk from the signature up to NVIDIA's root.
+    async fn collect_gpu_evidence(
+        &self,
+        device_info: &GpuDeviceInfo,
+        nonce: &[u8; crate::NVIDIA_CC_NONCE_LEN],
+    ) -> Result<CollectedEvidence> {
         if self.simulate {
-            // Generate simulated evidence blob
             let evidence = SimulatedEvidence {
                 gpu_name: device_info.name.clone(),
                 architecture: format!("{}", device_info.architecture),
@@ -560,182 +993,267 @@ impl NvidiaGpuProvider {
                 cc_firmware_version: device_info.cc_firmware_version.clone(),
                 nonce: hex::encode(nonce),
                 timestamp: chrono::Utc::now().timestamp(),
-                measurements: SimulatedMeasurements {
-                    vbios: hex::encode(Sha384::digest(format!("vbios_{}", device_info.name).as_bytes())),
-                    driver: hex::encode(Sha384::digest(device_info.driver_version.as_bytes())),
-                    cc_firmware: hex::encode(Sha384::digest(
-                        device_info.cc_firmware_version.as_deref().unwrap_or("none").as_bytes()
-                    )),
-                },
             };
 
-            return serde_json::to_vec(&evidence)
-                .map_err(|e| TeeError::AttestationGenerationFailed(format!(
-                    "Failed to serialize simulated evidence: {}", e
-                )));
+            let bytes = serde_json::to_vec(&evidence).map_err(|e| {
+                TeeError::AttestationGenerationFailed(format!(
+                    "Failed to serialize simulated evidence: {}",
+                    e
+                ))
+            })?;
+
+            return Ok(CollectedEvidence {
+                evidence: bytes,
+                cert_chain: vec![vec![0x30; 64]],
+                attestation_cert_chain: Vec::new(),
+                cec_report: None,
+                cpu_anchor_vendor: None,
+            });
         }
 
-        // Real mode: Collect evidence via SPDM/NVML
-        // For now, we construct a minimal evidence blob from nvidia-smi data.
-        // Full SPDM evidence collection requires libnvidia-nscq FFI.
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "nvidia-gpu"))]
         {
-            let evidence = self.collect_real_evidence(device_info, nonce).await?;
-            Ok(evidence)
+            self.collect_real_evidence(nonce).await
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "nvidia-gpu")))]
         {
+            let _ = nonce;
             Err(TeeError::not_available(
-                "GPU evidence collection requires Linux with NVIDIA drivers"
+                "GPU evidence collection requires Linux with the NVIDIA driver and the \
+                 `nvidia-gpu` feature compiled in",
             ))
         }
     }
 
-    /// Collect real GPU evidence on Linux.
-    #[cfg(target_os = "linux")]
-    async fn collect_real_evidence(&self, device_info: &GpuDeviceInfo, nonce: &[u8]) -> Result<Vec<u8>> {
-        // Check for NVIDIA NSCQ library (provides SPDM attestation)
-        let nscq_path = std::path::Path::new("/usr/lib/x86_64-linux-gnu/libnvidia-nscq.so");
-        let alt_nscq_path = std::path::Path::new("/usr/lib64/libnvidia-nscq.so");
+    /// Ask the driver for a fresh attestation report over `nonce`.
+    ///
+    /// Every gate here is a separate claim, so each is checked separately rather
+    /// than collapsed into one "CC is on" boolean: the platform has to be in a
+    /// production posture, the CPU has to be running a confidential VM the GPU
+    /// can be admitted to, and the devices themselves have to have finished
+    /// their own readiness handshake.
+    #[cfg(all(target_os = "linux", feature = "nvidia-gpu"))]
+    async fn collect_real_evidence(
+        &self,
+        nonce: &[u8; crate::NVIDIA_CC_NONCE_LEN],
+    ) -> Result<CollectedEvidence> {
+        let device_index = self.config.device_index;
+        let nonce = *nonce;
 
-        if nscq_path.exists() || alt_nscq_path.exists() {
-            tracing::info!("NVIDIA NSCQ library found — full SPDM evidence available");
-            // In a production implementation, we would use FFI to call:
-            // nvmlInit_v2()
-            // nvmlDeviceGetHandleByIndex(device_index, &device)
-            // nvmlDeviceGetConfComputeGpuAttestationReport(device, &report)
-            //
-            // The report contains SPDM measurements signed by the GPU's
-            // device-unique ECDSA P-384 key, along with the device certificate
-            // chain linking to NVIDIA's root CA.
-            //
-            // For now, fall through to the nvidia-smi-based approach below.
-        }
+        tokio::task::spawn_blocking(move || {
+            let nvml = crate::nvml::Nvml::open()?;
 
-        // Construct minimal evidence from available nvidia-smi data
-        let evidence = MinimalGpuEvidence {
-            device_name: device_info.name.clone(),
-            pci_device_id: device_info.pci_device_id.clone(),
-            driver_version: device_info.driver_version.clone(),
-            compute_capability: device_info.compute_capability.clone(),
-            cc_enabled: device_info.cc_enabled,
-            cc_firmware_version: device_info.cc_firmware_version.clone(),
-            serial_hash: device_info.serial_hash.clone(),
-            nonce: hex::encode(nonce),
-            timestamp: chrono::Utc::now().timestamp(),
-        };
+            let state = nvml.cc_system_state()?;
+            if !state.cc_enabled() {
+                return Err(TeeError::not_available(
+                    "NVIDIA Confidential Computing is not enabled on this host",
+                ));
+            }
+            if state.dev_tools_on() {
+                return Err(TeeError::attestation_failed(
+                    "GPU Confidential Computing is in DevTools mode, which relaxes isolation. \
+                     A report collected in this posture is a valid signature over a machine \
+                     that is not enforcing confidentiality, so it is refused.",
+                ));
+            }
+            if !state.production_environment() {
+                return Err(TeeError::attestation_failed(
+                    "GPU Confidential Computing reports a non-production environment",
+                ));
+            }
 
-        serde_json::to_vec(&evidence)
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!(
-                "Failed to serialize GPU evidence: {}", e
-            )))
+            let caps = nvml.cc_capabilities()?;
+            if !caps.gpus_cc_capable {
+                return Err(TeeError::not_available(
+                    "No Confidential-Computing-capable GPU is present on this host",
+                ));
+            }
+            if !caps.cpu.anchors_cvm() {
+                return Err(TeeError::attestation_failed(format!(
+                    "GPU Confidential Computing requires a CPU confidential VM to be admitted \
+                     into; the platform reports CPU capability '{}'",
+                    caps.cpu
+                )));
+            }
+
+            if !nvml.cc_gpus_ready()? {
+                return Err(TeeError::not_available(
+                    "GPUs have not completed the Confidential Computing readiness handshake",
+                ));
+            }
+
+            let device = nvml.device_by_index(device_index)?;
+            let evidence = nvml.cc_attestation_report(device, &nonce)?;
+            let chains = nvml.cc_certificate_chains(device)?;
+
+            Ok(CollectedEvidence {
+                evidence: evidence.report,
+                cert_chain: vec![chains.cert_chain],
+                attestation_cert_chain: chains.attestation_cert_chain,
+                cec_report: evidence.cec_report,
+                cpu_anchor_vendor: cpu_anchor_vendor(caps.cpu),
+            })
+        })
+        .await
+        .map_err(|e| {
+            TeeError::AttestationGenerationFailed(format!(
+                "GPU evidence collection task failed: {}",
+                e
+            ))
+        })?
     }
 
-    /// Generate attestation report from the GPU.
+    /// Generate an attestation report from the GPU.
     ///
-    /// Simulation mode: Creates a synthetic report with computed measurements.
-    /// Real mode: Collects GPU evidence and optionally verifies via NRAS.
-    async fn generate_gpu_attestation(&self, nonce: &[u8]) -> Result<GpuAttestationReport> {
+    /// Simulation mode builds a synthetic report. Real mode collects the SPDM
+    /// evidence, parses the measurement record out of it, and carries the
+    /// device's own signature — nothing here recomputes or substitutes a
+    /// measurement the GPU did not report.
+    async fn generate_gpu_attestation(
+        &self,
+        nonce: &[u8; crate::NVIDIA_CC_NONCE_LEN],
+    ) -> Result<GpuAttestationReport> {
         let device_info = self.detect_gpu().await?;
 
         if !device_info.cc_enabled {
             return Err(TeeError::not_available(
-                "NVIDIA Confidential Computing is not enabled on this GPU"
+                "NVIDIA Confidential Computing is not enabled on this GPU",
             ));
         }
 
-        // Collect evidence from the GPU
-        let evidence = self.collect_gpu_evidence(&device_info, nonce).await?;
+        let collected = self.collect_gpu_evidence(&device_info, nonce).await?;
+        let (ecc_enabled, mig_enabled) = self.query_ecc_and_mig().await;
 
-        // Compute measurements from the evidence
-        let measurements = if self.simulate {
-            // Simulated measurements derived from device info
-            GpuMeasurements {
-                vbios_hash: Sha384::digest(format!("vbios_{}", device_info.name).as_bytes()).to_vec(),
-                driver_hash: Sha384::digest(device_info.driver_version.as_bytes()).to_vec(),
-                cc_firmware_hash: Sha384::digest(
-                    device_info.cc_firmware_version.as_deref().unwrap_or("none").as_bytes()
-                ).to_vec(),
-                ecc_enabled: true,
-                mig_enabled: false,
-            }
-        } else {
-            // Extract measurements from collected evidence
-            self.extract_measurements_from_evidence(&evidence)?
-        };
+        let (measurements, signature) = if self.simulate {
+            let measurements = GpuMeasurements {
+                measurement_record_hash: Sha384::digest(&collected.evidence).to_vec(),
+                blocks: vec![SpdmMeasurementBlock {
+                    index: 1,
+                    value_type: DMTF_VALUE_TYPE_IMMUTABLE_ROM,
+                    value: Sha384::digest(device_info.name.as_bytes()).to_vec(),
+                }],
+                ecc_enabled,
+                mig_enabled,
+            };
 
-        // Simulated signature (in real mode, the GPU's AK signs the evidence via SPDM)
-        let signature = if self.simulate {
             let mut hasher = Sha384::new();
-            hasher.update(&evidence);
+            hasher.update(&collected.evidence);
             hasher.update(nonce);
-            hasher.finalize().to_vec()
+            (measurements, hasher.finalize().to_vec())
         } else {
-            // Real mode requires the GPU's device-unique ECDSA P-384 attestation key
-            // signature from the SPDM measurement response (libnvidia-nscq FFI).
-            // Without FFI integration, we cannot fabricate a valid signature and
-            // must refuse to emit a would-be-valid attestation with a zero-byte
-            // placeholder that downstream verifiers would reject anyway.
-            return Err(TeeError::AttestationGenerationFailed(
-                "NVIDIA GPU AK signature requires libnvidia-nscq FFI (SPDM attestation response). \
-                 Install the NVIDIA Confidential Computing SDK and rebuild with `--features nvidia-nscq`, \
-                 or run with TENZRO_SIMULATE_NVIDIA_GPU=1 for simulation."
-                    .to_string(),
-            ));
+            let parsed = parse_gpu_attestation_report(&collected.evidence)?;
+
+            if parsed.nonce != nonce[..] {
+                return Err(TeeError::attestation_failed(
+                    "GPU attestation report echoed a nonce that does not match the one requested",
+                ));
+            }
+
+            let measurements = GpuMeasurements {
+                measurement_record_hash: parsed.measurement_record_hash,
+                blocks: parsed.blocks,
+                ecc_enabled,
+                mig_enabled,
+            };
+
+            (measurements, parsed.signature)
         };
 
-        let report = GpuAttestationReport {
+        // The CPU leg answers the same nonce as the GPU leg. That shared
+        // challenge is what ties the device to the confidential VM it was
+        // admitted to; without it a verifier has two unrelated reports.
+        let cpu_anchor = self.attest_cpu_anchor(nonce).await?;
+
+        Ok(GpuAttestationReport {
             device_info,
+            raw_report: collected.evidence,
             measurements,
             cc_status: CcAttestationStatus::Enabled,
             nonce: nonce.to_vec(),
             timestamp: chrono::Utc::now().timestamp_millis(),
             signature,
-            cert_chain: if self.simulate {
-                vec![vec![0x30; 64]] // Dummy cert for simulation
-            } else {
-                vec![] // Real cert chain extracted from SPDM/NVML
-            },
-        };
-
-        Ok(report)
+            cert_chain: collected.cert_chain,
+            attestation_cert_chain: collected.attestation_cert_chain,
+            cec_report: collected.cec_report,
+            cpu_anchor_vendor: collected.cpu_anchor_vendor,
+            cpu_anchor,
+        })
     }
 
-    /// Extract measurements from GPU evidence blob.
-    fn extract_measurements_from_evidence(&self, evidence: &[u8]) -> Result<GpuMeasurements> {
-        // Try to parse as MinimalGpuEvidence
-        if let Ok(minimal) = serde_json::from_slice::<MinimalGpuEvidence>(evidence) {
-            return Ok(GpuMeasurements {
-                vbios_hash: Sha384::digest(format!("vbios_{}", minimal.device_name).as_bytes()).to_vec(),
-                driver_hash: Sha384::digest(minimal.driver_version.as_bytes()).to_vec(),
-                cc_firmware_hash: Sha384::digest(
-                    minimal.cc_firmware_version.as_deref().unwrap_or("none").as_bytes()
-                ).to_vec(),
-                ecc_enabled: true,
-                mig_enabled: false,
-            });
+    /// Take a CPU confidential-VM quote over the same nonce as the GPU leg.
+    ///
+    /// A GPU report on its own says a device is in Confidential Computing mode.
+    /// It does not say which VM the device was admitted to, and the GPU has no
+    /// trust boundary without that VM, so a report with no CPU leg is refused
+    /// unless the operator has explicitly turned the requirement off.
+    async fn attest_cpu_anchor(
+        &self,
+        nonce: &[u8; crate::NVIDIA_CC_NONCE_LEN],
+    ) -> Result<Option<AttestationReport>> {
+        match &self.cpu_anchor {
+            Some(anchor) => Ok(Some(anchor.generate_attestation(nonce).await?)),
+            None if self.config.require_cpu_anchor => Err(TeeError::not_available(
+                "NVIDIA GPU Confidential Computing does not establish a trust boundary on its \
+                 own — the confidential VM is created by AMD SEV-SNP or Intel TDX and the GPU is \
+                 admitted to it. Attach a CPU provider with `with_cpu_anchor`, or clear \
+                 `require_cpu_anchor` to emit a GPU-only report.",
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Read ECC and MIG mode from the driver.
+    ///
+    /// Both default to reporting off when the query cannot be answered — an
+    /// unknown mode is recorded as not-enabled rather than assumed enabled, so
+    /// a verifier is never told a protection is on without the driver saying so.
+    async fn query_ecc_and_mig(&self) -> (bool, bool) {
+        if self.simulate {
+            return (true, false);
         }
 
-        Err(TeeError::InvalidAttestationReport(
-            "Failed to extract measurements from GPU evidence".to_string()
-        ))
+        let output = tokio::process::Command::new("nvidia-smi")
+            .args([
+                &format!("--id={}", self.config.device_index),
+                "--query-gpu=ecc.mode.current,mig.mode.current",
+                "--format=csv,noheader",
+            ])
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let fields: Vec<&str> = stdout.trim().split(',').map(|f| f.trim()).collect();
+                let enabled = |f: Option<&&str>| {
+                    f.map(|v| v.eq_ignore_ascii_case("Enabled"))
+                        .unwrap_or(false)
+                };
+                (enabled(fields.first()), enabled(fields.get(1)))
+            }
+            _ => (false, false),
+        }
     }
 
     /// Verify a GPU attestation report via NRAS (NVIDIA Remote Attestation Service).
     ///
-    /// Sends the GPU evidence to NRAS for remote verification. NRAS checks:
-    /// 1. GPU identity (serial/device cert matches manufacturing records)
-    /// 2. Firmware integrity (VBIOS, driver measurements match RIMs)
-    /// 3. CC mode status (CC enabled with valid security configuration)
-    /// 4. Nonce freshness (prevents replay attacks, 24h TTL)
+    /// Sends the driver's evidence, verbatim, together with the certificate chain
+    /// that signs it. NRAS re-parses the SPDM exchange itself and checks:
+    /// 1. GPU identity — the device certificate chains to NVIDIA's root
+    /// 2. Firmware integrity — reported versions match NVIDIA's reference manifests
+    /// 3. CC mode status — Confidential Computing enabled, DevTools mode off
+    /// 4. Nonce freshness — the report answers the challenge that was sent
     ///
-    /// Returns a JWT token with attestation claims on success.
+    /// Answers with an RFC 9711 detached Entity Attestation Token bundle: an
+    /// overall token carrying the verdict plus one token per device. The claims
+    /// report firmware as version strings rather than digests, so nothing in the
+    /// response is comparable to the local measurement record — the local and
+    /// remote paths verify different things and neither substitutes for the other.
     #[cfg(feature = "nvidia-gpu")]
     async fn verify_via_nras(
         &self,
         gpu_report: &GpuAttestationReport,
-        evidence: &[u8],
     ) -> Result<NrasVerificationResult> {
         let nras_endpoint = &self.config.nras_endpoint;
 
@@ -756,18 +1274,45 @@ impl NvidiaGpuProvider {
             }
         };
 
+        let b64 = |bytes: &[u8]| {
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+        };
+
+        // The certificate travels in the request because NRAS walks the
+        // signature up to NVIDIA's root itself. The attestation chain is the
+        // one bound to the signing key, so it is preferred over the device
+        // chain when the driver returned both.
+        let certificate = if gpu_report.attestation_cert_chain.is_empty() {
+            gpu_report
+                .cert_chain
+                .first()
+                .map(|c| b64(c))
+                .unwrap_or_default()
+        } else {
+            b64(&gpu_report.attestation_cert_chain)
+        };
+
+        if gpu_report.raw_report.is_empty() {
+            return Err(TeeError::AttestationVerificationFailed(
+                "GPU report carries no driver evidence, so it cannot be sent to NRAS".to_string(),
+            ));
+        }
+
         let request = NrasAttestationRequest {
-            evidence: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                evidence,
-            ),
             nonce: hex::encode(&gpu_report.nonce),
             arch: arch_str.to_string(),
+            evidence_list: vec![NrasEvidenceEntry {
+                evidence: b64(&gpu_report.raw_report),
+                certificate,
+            }],
+            claims_version: NRAS_CLAIMS_VERSION.to_string(),
         };
 
         tracing::info!(
             "Sending GPU attestation to NRAS at {}: arch={}, nonce={}",
-            nras_endpoint, arch_str, &request.nonce[..16]
+            nras_endpoint,
+            arch_str,
+            &request.nonce[..16]
         );
 
         // Send to NRAS
@@ -775,20 +1320,26 @@ impl NvidiaGpuProvider {
         #[cfg(feature = "nvidia-gpu")]
         {
             if self.simulate {
-                // In simulation mode, we don't actually call NRAS
+                let now = chrono::Utc::now().timestamp();
                 return Ok(NrasVerificationResult {
                     verified: true,
                     token: "simulated_jwt_token".to_string(),
                     claims: NrasTokenClaims {
-                        gpu_attestation_result: true,
-                        gpu_arch: arch_str.to_string(),
-                        gpu_model: gpu_report.device_info.name.clone(),
-                        vbios_measurement: hex::encode(&gpu_report.measurements.vbios_hash),
-                        driver_measurement: hex::encode(&gpu_report.measurements.driver_hash),
-                        cc_fw_measurement: hex::encode(&gpu_report.measurements.cc_firmware_hash),
-                        iat: chrono::Utc::now().timestamp(),
-                        exp: chrono::Utc::now().timestamp() + 86400,
-                        nonce: hex::encode(&gpu_report.nonce),
+                        overall_result: true,
+                        measres: "success".to_string(),
+                        claims_version: NRAS_CLAIMS_VERSION.to_string(),
+                        eat_nonce: hex::encode(&gpu_report.nonce),
+                        hwmodel: gpu_report.device_info.name.clone(),
+                        secboot: true,
+                        dbgstat: "disabled".to_string(),
+                        arch_check: true,
+                        driver_version: gpu_report.device_info.driver_version.clone(),
+                        report_parsed: true,
+                        report_nonce_match: true,
+                        report_signature_verified: true,
+                        iat: now,
+                        exp: now + 86400,
+                        ..Default::default()
                     },
                 });
             }
@@ -797,121 +1348,116 @@ impl NvidiaGpuProvider {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .map_err(|e| TeeError::AttestationVerificationFailed(format!(
-                    "Failed to create HTTP client for NRAS: {}", e
-                )))?;
+                .map_err(|e| {
+                    TeeError::AttestationVerificationFailed(format!(
+                        "Failed to create HTTP client for NRAS: {}",
+                        e
+                    ))
+                })?;
 
             let response = client
                 .post(nras_endpoint)
                 .json(&request)
                 .send()
                 .await
-                .map_err(|e| TeeError::AttestationVerificationFailed(format!(
-                    "NRAS request failed: {}", e
-                )))?;
+                .map_err(|e| {
+                    TeeError::AttestationVerificationFailed(format!("NRAS request failed: {}", e))
+                })?;
 
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 return Err(TeeError::AttestationVerificationFailed(format!(
-                    "NRAS returned HTTP {}: {}", status, body
+                    "NRAS returned HTTP {}: {}",
+                    status, body
                 )));
             }
 
-            let nras_response: NrasAttestationResponse = response
-                .json()
-                .await
-                .map_err(|e| TeeError::AttestationVerificationFailed(format!(
-                    "Failed to parse NRAS response: {}", e
-                )))?;
+            let body = response.text().await.map_err(|e| {
+                TeeError::AttestationVerificationFailed(format!(
+                    "Failed to read NRAS response: {}",
+                    e
+                ))
+            })?;
 
-            if let Some(error) = &nras_response.error {
+            let (overall_token, bundle) = parse_nras_bundle(&body)?;
+
+            // Replay protection. The nonce is echoed as `eat_nonce` in every
+            // token; the overall token is the one whose freshness gates the
+            // verdict below.
+            let expected_nonce = hex::encode(&gpu_report.nonce);
+            if !bundle
+                .overall
+                .eat_nonce
+                .eq_ignore_ascii_case(&expected_nonce)
+            {
                 return Err(TeeError::AttestationVerificationFailed(format!(
-                    "NRAS verification failed: {}", error
+                    "NRAS token nonce mismatch: expected {}, got {}",
+                    &expected_nonce[..16.min(expected_nonce.len())],
+                    &bundle.overall.eat_nonce[..16.min(bundle.overall.eat_nonce.len())]
                 )));
             }
 
-            // Top-level NRAS verdict — must be true even if no `error` field is
-            // populated (some failure modes return `attestation_result=false`
-            // with a structured token but no top-level error string).
-            if !nras_response.attestation_result {
+            // `exp` is a Unix timestamp; reject expired tokens. `iat` is
+            // sanity-checked against the future with 5 minutes of clock skew.
+            let now_secs = chrono::Utc::now().timestamp();
+            if bundle.overall.exp != 0 && now_secs >= bundle.overall.exp {
+                return Err(TeeError::AttestationVerificationFailed(format!(
+                    "NRAS token expired: exp={}, now={}",
+                    bundle.overall.exp, now_secs
+                )));
+            }
+            if bundle.overall.iat != 0 && bundle.overall.iat > now_secs + 300 {
+                return Err(TeeError::AttestationVerificationFailed(format!(
+                    "NRAS token issued in the future: iat={}, now={}",
+                    bundle.overall.iat, now_secs
+                )));
+            }
+
+            // Every GPU in the request has to have passed. The overall verdict
+            // is authoritative, but a per-GPU failure alongside an overall pass
+            // would mean the two disagree, so both are required.
+            for (name, gpu) in &bundle.per_gpu {
+                if !gpu.measres.eq_ignore_ascii_case("success") {
+                    return Err(TeeError::AttestationVerificationFailed(format!(
+                        "NRAS reported {} measurement result '{}'",
+                        name,
+                        if gpu.measres.is_empty() {
+                            "<absent>"
+                        } else {
+                            &gpu.measres
+                        }
+                    )));
+                }
+                if let Some(warning) = &gpu.warning {
+                    tracing::warn!("NRAS attached a warning to {}: {}", name, warning);
+                }
+            }
+
+            let verified = bundle.overall.overall_result;
+            if !verified {
                 return Err(TeeError::AttestationVerificationFailed(
-                    "NRAS returned attestation_result=false".to_string()
+                    "NRAS returned x-nvidia-overall-att-result=false".to_string(),
                 ));
             }
 
-            // Parse the JWT token claims (without full signature verification —
-            // the token comes over TLS from nras.attestation.nvidia.com)
-            let claims = parse_jwt_claims(&nras_response.token)?;
-
-            // Replay protection: the JWT nonce must match what we sent.
-            // Skip when claims.nonce is empty (older NRAS responses didn't
-            // echo the nonce; the TLS channel still binds the response).
-            let expected_nonce = hex::encode(&gpu_report.nonce);
-            if !claims.nonce.is_empty() && claims.nonce != expected_nonce {
-                return Err(TeeError::AttestationVerificationFailed(format!(
-                    "NRAS JWT nonce mismatch: expected {}, got {}",
-                    &expected_nonce[..16.min(expected_nonce.len())],
-                    &claims.nonce[..16.min(claims.nonce.len())]
-                )));
-            }
-
-            // Token expiry check — `exp` is a Unix timestamp; reject expired
-            // tokens. `iat` (issued-at) sanity-checked: not from the future
-            // (allow 5 minutes of clock skew).
-            let now_secs = chrono::Utc::now().timestamp();
-            if claims.exp != 0 && now_secs >= claims.exp {
-                return Err(TeeError::AttestationVerificationFailed(format!(
-                    "NRAS JWT expired: exp={}, now={}", claims.exp, now_secs
-                )));
-            }
-            if claims.iat != 0 && claims.iat > now_secs + 300 {
-                return Err(TeeError::AttestationVerificationFailed(format!(
-                    "NRAS JWT issued in the future: iat={}, now={}",
-                    claims.iat, now_secs
-                )));
-            }
-
-            // Cross-check measurement claims against what we sent. NRAS
-            // re-validates measurements against NVIDIA's golden RIMs, so the
-            // returned values may be canonicalized/normalized. We log a
-            // warning on mismatch but don't fail — NRAS's `attestation_result`
-            // is the authoritative verdict. An empty measurement claim means
-            // NRAS didn't expose it in this token version.
-            let local_vbios = hex::encode(&gpu_report.measurements.vbios_hash);
-            if !claims.vbios_measurement.is_empty()
-                && !claims.vbios_measurement.eq_ignore_ascii_case(&local_vbios)
-            {
-                tracing::warn!(
-                    "NRAS VBIOS measurement differs from local: nras={}..., local={}...",
-                    &claims.vbios_measurement[..16.min(claims.vbios_measurement.len())],
-                    &local_vbios[..16.min(local_vbios.len())]
-                );
-            }
-            let local_driver = hex::encode(&gpu_report.measurements.driver_hash);
-            if !claims.driver_measurement.is_empty()
-                && !claims.driver_measurement.eq_ignore_ascii_case(&local_driver)
-            {
-                tracing::warn!(
-                    "NRAS driver measurement differs from local: nras={}..., local={}...",
-                    &claims.driver_measurement[..16.min(claims.driver_measurement.len())],
-                    &local_driver[..16.min(local_driver.len())]
-                );
-            }
-            let local_cc = hex::encode(&gpu_report.measurements.cc_firmware_hash);
-            if !claims.cc_fw_measurement.is_empty()
-                && !claims.cc_fw_measurement.eq_ignore_ascii_case(&local_cc)
-            {
-                tracing::warn!(
-                    "NRAS CC firmware measurement differs from local: nras={}..., local={}...",
-                    &claims.cc_fw_measurement[..16.min(claims.cc_fw_measurement.len())],
-                    &local_cc[..16.min(local_cc.len())]
-                );
+            // Device detail lives on the per-GPU tokens; the overall token
+            // carries the verdict. Report the first GPU's claims alongside the
+            // verdict so a caller sees one coherent set.
+            let mut claims = bundle
+                .per_gpu
+                .into_iter()
+                .next()
+                .map(|(_, gpu)| gpu)
+                .unwrap_or_default();
+            claims.overall_result = verified;
+            if claims.eat_nonce.is_empty() {
+                claims.eat_nonce = bundle.overall.eat_nonce;
             }
 
             Ok(NrasVerificationResult {
-                verified: claims.gpu_attestation_result,
-                token: nras_response.token,
+                verified,
+                token: overall_token,
                 claims,
             })
         }
@@ -924,11 +1470,13 @@ impl NvidiaGpuProvider {
     /// 2. CC status is Enabled
     /// 3. Architecture matches expected
     /// 4. Driver version meets minimum
-    /// 5. Measurements are non-empty
+    /// 5. CC firmware version meets minimum
+    /// 6. A measurement record and its DMTF blocks are present
     ///
-    /// Note: Local verification cannot verify against NVIDIA's golden RIMs
-    /// or validate the GPU's device certificate chain, as NVIDIA does not
-    /// publish root CA certificates. Remote NRAS verification is recommended.
+    /// Note: Local verification cannot compare measurements against NVIDIA's
+    /// reference manifests or validate the GPU's device certificate chain, as
+    /// NVIDIA does not publish root CA certificates. Remote NRAS verification is
+    /// what supplies cryptographic authority.
     async fn verify_gpu_attestation_local(&self, report: &GpuAttestationReport) -> Result<bool> {
         // Step 1: Check report age
         let now = chrono::Utc::now().timestamp_millis();
@@ -941,14 +1489,14 @@ impl NvidiaGpuProvider {
         }
         if age < 0 {
             return Err(TeeError::attestation_failed(
-                "GPU attestation report timestamp is in the future"
+                "GPU attestation report timestamp is in the future",
             ));
         }
 
         // Step 2: Verify CC is enabled
         if report.cc_status != CcAttestationStatus::Enabled {
             return Err(TeeError::attestation_failed(
-                "GPU Confidential Computing is not enabled"
+                "GPU Confidential Computing is not enabled",
             ));
         }
 
@@ -961,7 +1509,10 @@ impl NvidiaGpuProvider {
         }
 
         // Step 4: Check driver version meets minimum
-        if !version_gte(&report.device_info.driver_version, &self.config.min_driver_version) {
+        if !version_gte(
+            &report.device_info.driver_version,
+            &self.config.min_driver_version,
+        ) {
             return Err(TeeError::attestation_failed(format!(
                 "GPU driver version {} below minimum {}",
                 report.device_info.driver_version, self.config.min_driver_version
@@ -978,15 +1529,17 @@ impl NvidiaGpuProvider {
             )));
         }
 
-        // Step 6: Verify measurements are non-empty
-        if report.measurements.vbios_hash.is_empty() {
+        // Step 6: The device must have reported a measurement record. An empty
+        // record means the GPU answered GET_MEASUREMENTS with nothing to
+        // measure, which is not a state a CC-enabled device reaches.
+        if report.measurements.measurement_record_hash.is_empty() {
             return Err(TeeError::attestation_failed(
-                "VBIOS measurement is empty"
+                "GPU reported no measurement record",
             ));
         }
-        if report.measurements.driver_hash.is_empty() {
+        if report.measurements.blocks.is_empty() {
             return Err(TeeError::attestation_failed(
-                "Driver measurement is empty"
+                "GPU measurement record contained no DMTF blocks",
             ));
         }
 
@@ -1001,13 +1554,29 @@ impl NvidiaGpuProvider {
     }
 
     /// Convert GPU attestation to Tenzro's generic attestation format.
-    fn to_attestation_report(&self, gpu_report: &GpuAttestationReport, user_data: &[u8]) -> AttestationReport {
+    fn to_attestation_report(
+        &self,
+        gpu_report: &GpuAttestationReport,
+        user_data: &[u8],
+    ) -> AttestationReport {
         let mut metadata = HashMap::new();
         metadata.insert("gpu_name".to_string(), gpu_report.device_info.name.clone());
-        metadata.insert("architecture".to_string(), format!("{}", gpu_report.device_info.architecture));
-        metadata.insert("cc_status".to_string(), format!("{:?}", gpu_report.cc_status));
-        metadata.insert("driver_version".to_string(), gpu_report.device_info.driver_version.clone());
-        metadata.insert("pci_device_id".to_string(), gpu_report.device_info.pci_device_id.clone());
+        metadata.insert(
+            "architecture".to_string(),
+            format!("{}", gpu_report.device_info.architecture),
+        );
+        metadata.insert(
+            "cc_status".to_string(),
+            format!("{:?}", gpu_report.cc_status),
+        );
+        metadata.insert(
+            "driver_version".to_string(),
+            gpu_report.device_info.driver_version.clone(),
+        );
+        metadata.insert(
+            "pci_device_id".to_string(),
+            gpu_report.device_info.pci_device_id.clone(),
+        );
 
         if let Some(ref cc_fw) = gpu_report.device_info.cc_firmware_version {
             metadata.insert("cc_firmware_version".to_string(), cc_fw.clone());
@@ -1026,7 +1595,7 @@ impl NvidiaGpuProvider {
             timestamp: tenzro_types::primitives::Timestamp::now(),
             metadata,
             quote: gpu_report.signature.clone(),
-            measurement: gpu_report.measurements.vbios_hash.clone(),
+            measurement: gpu_report.measurements.measurement_record_hash.clone(),
             signature: gpu_report.signature.clone(),
             vendor_data: serde_json::to_vec(&gpu_report.measurements).unwrap_or_default(),
         }
@@ -1053,22 +1622,15 @@ impl TeeProvider for NvidiaGpuProvider {
     }
 
     async fn generate_attestation(&self, user_data: &[u8]) -> Result<AttestationReport> {
-        // Use SHA-256 of user_data as the nonce for the GPU attestation
-        let nonce = if user_data.is_empty() {
-            // Generate a random nonce if no user data provided
-            let mut nonce_data = vec![0u8; 32];
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            nonce_data[..16].copy_from_slice(&timestamp.to_le_bytes());
-            // Fill remaining bytes with hash of timestamp for entropy
-            let hash = Sha256::digest(timestamp.to_le_bytes());
-            nonce_data[16..32].copy_from_slice(&hash[..16]);
-            nonce_data
+        // The nonce is fixed at NVML_CC_GPU_CEC_NONCE_SIZE by the driver ABI, and
+        // the CPU leg answers the same value, so both legs of the composite report
+        // carry one challenge.
+        let mut nonce = [0u8; crate::NVIDIA_CC_NONCE_LEN];
+        if user_data.is_empty() {
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
         } else {
-            Sha256::digest(user_data).to_vec()
-        };
+            nonce.copy_from_slice(&Sha256::digest(user_data));
+        }
 
         let gpu_report = self.generate_gpu_attestation(&nonce).await?;
         Ok(self.to_attestation_report(&gpu_report, user_data))
@@ -1077,15 +1639,19 @@ impl TeeProvider for NvidiaGpuProvider {
     async fn verify_attestation(&self, report: &AttestationReport) -> Result<AttestationResult> {
         if report.vendor != TeeVendor::NvidiaGpu {
             return Err(TeeError::attestation_failed(format!(
-                "Expected NvidiaGpu vendor, got {:?}", report.vendor
+                "Expected NvidiaGpu vendor, got {:?}",
+                report.vendor
             )));
         }
 
         // Deserialize GPU-specific report
         let gpu_report: GpuAttestationReport = serde_json::from_slice(&report.attestation_data)
-            .map_err(|e| TeeError::InvalidAttestationReport(format!(
-                "Failed to parse GPU attestation report: {}", e
-            )))?;
+            .map_err(|e| {
+                TeeError::InvalidAttestationReport(format!(
+                    "Failed to parse GPU attestation report: {}",
+                    e
+                ))
+            })?;
 
         // Verify locally first (age, CC status, architecture, driver version, measurements).
         // Local-only checks are STRUCTURAL — they verify the report
@@ -1104,6 +1670,73 @@ impl TeeProvider for NvidiaGpuProvider {
             valid = false;
         }
 
+        // The GPU leg on its own attests that a device is in Confidential
+        // Computing mode. It does not attest which confidential VM the device was
+        // admitted to, and the GPU has no trust boundary without that VM, so the
+        // CPU leg is verified alongside it and both must answer one challenge.
+        let mut cpu_anchor_details: Vec<(&'static str, String)> = Vec::new();
+        match (&gpu_report.cpu_anchor, &self.cpu_anchor) {
+            (Some(anchor), Some(provider)) => {
+                cpu_anchor_details.push(("cpu_anchor_vendor", format!("{:?}", anchor.vendor)));
+
+                if anchor.user_data != gpu_report.nonce {
+                    tracing::warn!(
+                        "CPU anchor answers a different challenge than the GPU report — \
+                         the two legs describe unrelated attestations"
+                    );
+                    valid = false;
+                }
+
+                // The driver told the GPU host which confidential-VM technology it
+                // was running under. A quote claiming a different technology did
+                // not come from the VM the device was admitted to.
+                if let Some(observed) = gpu_report.cpu_anchor_vendor
+                    && anchor.vendor != observed
+                {
+                    tracing::warn!(
+                        "CPU anchor vendor {:?} does not match the {:?} the GPU driver \
+                             observed on the host",
+                        anchor.vendor,
+                        observed
+                    );
+                    valid = false;
+                }
+
+                let cpu_result = provider.verify_attestation(anchor).await?;
+                cpu_anchor_details.push(("cpu_anchor_valid", cpu_result.valid.to_string()));
+                cpu_anchor_details.push(("cpu_anchor_tcb_version", cpu_result.tcb_version.clone()));
+                if !cpu_result.valid {
+                    tracing::warn!(
+                        "CPU anchor failed verification: {}",
+                        cpu_result.error.as_deref().unwrap_or("no reason given")
+                    );
+                    valid = false;
+                }
+            }
+            (Some(_), None) => {
+                // The report carries a CPU leg but this verifier has no provider
+                // able to appraise it, so the composite binding is unchecked.
+                cpu_anchor_details.push(("cpu_anchor_valid", "unverified".to_string()));
+                if self.config.require_cpu_anchor {
+                    tracing::warn!(
+                        "GPU report carries a CPU anchor but no CPU provider is attached to \
+                         verify it — attach one with `with_cpu_anchor`"
+                    );
+                    valid = false;
+                }
+            }
+            (None, _) => {
+                cpu_anchor_details.push(("cpu_anchor_valid", "absent".to_string()));
+                if self.config.require_cpu_anchor {
+                    tracing::warn!(
+                        "GPU report carries no CPU anchor — NVIDIA GPU Confidential \
+                         Computing does not establish a trust boundary on its own"
+                    );
+                    valid = false;
+                }
+            }
+        }
+
         // When remote attestation is configured, additionally verify via NRAS.
         // NRAS validates against NVIDIA's golden RIMs and the GPU's manufacturing
         // device certificate chain — local verification cannot do either, so
@@ -1116,27 +1749,21 @@ impl TeeProvider for NvidiaGpuProvider {
         let mut nras_claims: Option<NrasTokenClaims> = None;
         #[cfg(feature = "nvidia-gpu")]
         if valid && self.config.use_remote_attestation {
-            // Re-serialize the report as evidence bytes (canonical JSON).
-            // This mirrors what `collect_gpu_evidence` produced on the prover side.
-            let evidence_bytes = serde_json::to_vec(&gpu_report)
-                .map_err(|e| TeeError::AttestationVerificationFailed(format!(
-                    "Failed to serialize GPU report for NRAS: {}", e
-                )))?;
-            match self.verify_via_nras(&gpu_report, &evidence_bytes).await {
+            match self.verify_via_nras(&gpu_report).await {
                 Ok(nras_result) => {
                     nras_attested = nras_result.verified;
                     nras_token = Some(nras_result.token);
                     if !nras_result.verified {
                         tracing::warn!(
-                            "NRAS rejected GPU attestation despite local pass: arch={}",
-                            nras_result.claims.gpu_arch
+                            "NRAS rejected GPU attestation despite local pass: model={}",
+                            nras_result.claims.hwmodel
                         );
                         valid = false;
                     } else {
                         tracing::info!(
-                            "NRAS attested GPU: arch={}, model={}",
-                            nras_result.claims.gpu_arch,
-                            nras_result.claims.gpu_model
+                            "NRAS attested GPU: model={}, driver={}",
+                            nras_result.claims.hwmodel,
+                            nras_result.claims.driver_version
                         );
                     }
                     nras_claims = Some(nras_result.claims);
@@ -1148,78 +1775,105 @@ impl TeeProvider for NvidiaGpuProvider {
             }
         }
 
-        let tcb_ver = gpu_report.device_info.cc_firmware_version
+        let tcb_ver = gpu_report
+            .device_info
+            .cc_firmware_version
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
         if valid {
             let mut result = AttestationResult::success(
                 TeeVendor::NvidiaGpu,
-                gpu_report.measurements.vbios_hash.clone(),
+                gpu_report.measurements.measurement_record_hash.clone(),
             );
             result.tcb_version = tcb_ver;
-            result.measurements = vec![
-                Measurement {
-                    index: 0,
-                    algorithm: "SHA-384".to_string(),
-                    value: gpu_report.measurements.vbios_hash.clone(),
-                    register: "vbios".to_string(),
-                    description: Some("VBIOS firmware measurement".to_string()),
-                },
-                Measurement {
-                    index: 1,
-                    algorithm: "SHA-384".to_string(),
-                    value: gpu_report.measurements.driver_hash.clone(),
-                    register: "driver".to_string(),
-                    description: Some("GPU driver measurement".to_string()),
-                },
-                Measurement {
-                    index: 2,
-                    algorithm: "SHA-384".to_string(),
-                    value: gpu_report.measurements.cc_firmware_hash.clone(),
-                    register: "cc_firmware".to_string(),
-                    description: Some("CC firmware measurement".to_string()),
-                },
-            ];
+            // One entry per DMTF block the device actually reported. Registers
+            // are named from the DSP0274 value type rather than assigned
+            // component names — the SPDM record does not say which block is the
+            // VBIOS and which is the driver.
+            result.measurements = gpu_report
+                .measurements
+                .blocks
+                .iter()
+                .map(|block| Measurement {
+                    index: block.index as u32,
+                    algorithm: block.algorithm_label().to_string(),
+                    value: block.value.clone(),
+                    register: block.kind_label().to_string(),
+                    description: Some(format!(
+                        "SPDM measurement block {} (DMTF value type 0x{:02x})",
+                        block.index, block.value_type
+                    )),
+                })
+                .collect();
             result.cert_chain_valid = !self.simulate;
 
             if self.simulate {
-                result.details.insert("simulated".to_string(), "true".to_string());
+                result
+                    .details
+                    .insert("simulated".to_string(), "true".to_string());
             }
-            result.details.insert("verification_method".to_string(),
-                if self.config.use_remote_attestation { "nras" } else { "local" }.to_string()
+            result.details.insert(
+                "verification_method".to_string(),
+                if self.config.use_remote_attestation {
+                    "nras"
+                } else {
+                    "local"
+                }
+                .to_string(),
             );
-            result.details.insert("gpu_architecture".to_string(),
-                format!("{}", gpu_report.device_info.architecture)
+            result.details.insert(
+                "gpu_architecture".to_string(),
+                format!("{}", gpu_report.device_info.architecture),
             );
+            for (key, value) in cpu_anchor_details {
+                result.details.insert(key.to_string(), value);
+            }
             if let Some(token) = nras_token {
                 result.details.insert("nras_token".to_string(), token);
-                result.details.insert("nras_attested".to_string(), nras_attested.to_string());
+                result
+                    .details
+                    .insert("nras_attested".to_string(), nras_attested.to_string());
             }
             if let Some(claims) = nras_claims {
-                if !claims.gpu_arch.is_empty() {
-                    result.details.insert("nras_gpu_arch".to_string(), claims.gpu_arch);
+                // NRAS reports firmware as versions, not digests, and its only
+                // digest hashes the claims JSON rather than any measurement —
+                // so nothing here is comparable to the local measurement
+                // record, and the two verification paths stay independent.
+                let details = &mut result.details;
+                let mut put = |key: &str, value: String| {
+                    if !value.is_empty() {
+                        details.insert(key.to_string(), value);
+                    }
+                };
+                put("nras_measurement_result", claims.measres);
+                put("nras_claims_version", claims.claims_version);
+                put("nras_device_id", claims.ueid);
+                put("nras_hardware_model", claims.hwmodel);
+                put("nras_oem_id", claims.oemid);
+                put("nras_debug_status", claims.dbgstat);
+                put("nras_driver_version", claims.driver_version);
+                put("nras_vbios_version", claims.vbios_version);
+                put("nras_token_nonce", claims.eat_nonce);
+                if let Some(warning) = claims.warning {
+                    put("nras_warning", warning);
                 }
-                if !claims.gpu_model.is_empty() {
-                    result.details.insert("nras_gpu_model".to_string(), claims.gpu_model);
-                }
-                if !claims.vbios_measurement.is_empty() {
-                    result.details.insert("nras_vbios_measurement".to_string(), claims.vbios_measurement);
-                }
-                if !claims.driver_measurement.is_empty() {
-                    result.details.insert("nras_driver_measurement".to_string(), claims.driver_measurement);
-                }
-                if !claims.cc_fw_measurement.is_empty() {
-                    result.details.insert("nras_cc_fw_measurement".to_string(), claims.cc_fw_measurement);
-                }
+                put("nras_secure_boot", claims.secboot.to_string());
+                put("nras_arch_check", claims.arch_check.to_string());
+                put(
+                    "nras_report_signature_verified",
+                    claims.report_signature_verified.to_string(),
+                );
+                put(
+                    "nras_report_nonce_match",
+                    claims.report_nonce_match.to_string(),
+                );
+                put("nras_report_parsed", claims.report_parsed.to_string());
                 if claims.iat != 0 {
-                    result.details.insert("nras_token_iat".to_string(), claims.iat.to_string());
+                    put("nras_token_iat", claims.iat.to_string());
                 }
                 if claims.exp != 0 {
-                    result.details.insert("nras_token_exp".to_string(), claims.exp.to_string());
-                }
-                if !claims.nonce.is_empty() {
-                    result.details.insert("nras_token_nonce".to_string(), claims.nonce);
+                    put("nras_token_exp", claims.exp.to_string());
                 }
             }
 
@@ -1233,29 +1887,25 @@ impl TeeProvider for NvidiaGpuProvider {
     }
 
     async fn execute_in_enclave(&self, request: EnclaveRequest) -> Result<EnclaveResponse> {
-        tracing::debug!("Executing request '{}' in GPU CC enclave", request.operation);
+        // The enclave here is the confidential VM, not the GPU. AMD SEV-SNP or
+        // Intel TDX creates the boundary; the GPU is a device admitted to it over
+        // an authenticated link, and it runs CUDA kernels rather than the generic
+        // operations this call carries. Executing against the CPU provider keeps
+        // the response answering for the boundary that actually holds.
+        let Some(anchor) = &self.cpu_anchor else {
+            return Err(TeeError::not_available(
+                "NVIDIA GPU Confidential Computing protects device memory inside a \
+                 confidential VM; it is not itself an execution enclave. Attach the CPU \
+                 provider that creates the VM with `with_cpu_anchor` to execute here.",
+            ));
+        };
 
-        // In production, this runs inside CC-protected GPU memory via CUDA.
-        // In simulation mode, we compute the result on the CPU and produce
-        // a SHA-256 digest as proof of execution.
-        let mut hasher = Sha256::new();
-        hasher.update(request.operation.as_bytes());
-        hasher.update(&request.params);
-        let execution_digest = hasher.finalize().to_vec();
-
-        // Return the params as output with an execution digest as attestation data
-        Ok(EnclaveResponse {
-            request_id: request.id,
-            success: true,
-            data: request.params,
-            error: None,
-            attestation: Some(AttestationReport {
-                vendor: TeeVendor::NvidiaGpu,
-                quote: execution_digest,
-                timestamp: tenzro_types::primitives::Timestamp::now(),
-                ..Default::default()
-            }),
-        })
+        tracing::debug!(
+            "Delegating '{}' to the {} confidential VM the GPU is admitted to",
+            request.operation,
+            anchor.vendor().as_str()
+        );
+        anchor.execute_in_enclave(request).await
     }
 
     async fn enclave_keygen(&self, params: KeyGenParams) -> Result<EnclaveKeyHandle> {
@@ -1266,21 +1916,27 @@ impl TeeProvider for NvidiaGpuProvider {
         let key_id = uuid::Uuid::new_v4();
         let (public_key_bytes, secret_key_bytes) = match params.algorithm {
             KeyAlgorithm::Ed25519 => {
-                let keypair = tenzro_crypto::keys::KeyPair::generate(
-                    tenzro_crypto::keys::KeyType::Ed25519,
-                ).map_err(|e| TeeError::KeyGenerationFailed(format!(
-                    "Ed25519 key generation failed: {}", e
-                )))?;
+                let keypair =
+                    tenzro_crypto::keys::KeyPair::generate(tenzro_crypto::keys::KeyType::Ed25519)
+                        .map_err(|e| {
+                        TeeError::KeyGenerationFailed(format!(
+                            "Ed25519 key generation failed: {}",
+                            e
+                        ))
+                    })?;
                 let pub_bytes = keypair.public_key().as_bytes().to_vec();
                 let sec_bytes = keypair.secret_key().as_bytes().to_vec();
                 (pub_bytes, sec_bytes)
             }
             KeyAlgorithm::Secp256k1 => {
-                let keypair = tenzro_crypto::keys::KeyPair::generate(
-                    tenzro_crypto::keys::KeyType::Secp256k1,
-                ).map_err(|e| TeeError::KeyGenerationFailed(format!(
-                    "Secp256k1 key generation failed: {}", e
-                )))?;
+                let keypair =
+                    tenzro_crypto::keys::KeyPair::generate(tenzro_crypto::keys::KeyType::Secp256k1)
+                        .map_err(|e| {
+                            TeeError::KeyGenerationFailed(format!(
+                                "Secp256k1 key generation failed: {}",
+                                e
+                            ))
+                        })?;
                 let pub_bytes = keypair.public_key().as_bytes().to_vec();
                 let sec_bytes = keypair.secret_key().as_bytes().to_vec();
                 (pub_bytes, sec_bytes)
@@ -1297,14 +1953,22 @@ impl TeeProvider for NvidiaGpuProvider {
         let handle = EnclaveKeyHandle {
             id: key_id,
             algorithm: params.algorithm,
-            public_key: if public_key_bytes.is_empty() { None } else { Some(public_key_bytes) },
+            public_key: if public_key_bytes.is_empty() {
+                None
+            } else {
+                Some(public_key_bytes)
+            },
             created_at: tenzro_types::primitives::Timestamp::now(),
             attestation: None,
         };
 
         self.keys.write().insert(key_id, handle.clone());
         self.secret_keys.write().insert(key_id, secret_key_bytes);
-        tracing::info!("Generated {:?} key in GPU CC enclave: {}", params.algorithm, key_id);
+        tracing::info!(
+            "Generated {:?} key in GPU CC enclave: {}",
+            params.algorithm,
+            key_id
+        );
         Ok(handle)
     }
 
@@ -1323,43 +1987,53 @@ impl TeeProvider for NvidiaGpuProvider {
                 let keypair = tenzro_crypto::keys::KeyPair::from_bytes(
                     tenzro_crypto::keys::KeyType::Ed25519,
                     secret_key_bytes,
-                ).map_err(|e| TeeError::CryptoOperationFailed(format!(
-                    "Failed to reconstruct Ed25519 key: {}", e
-                )))?;
-                let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair)
-                    .map_err(|e| TeeError::CryptoOperationFailed(format!(
-                        "Failed to create Ed25519 signer: {}", e
-                    )))?;
+                )
+                .map_err(|e| {
+                    TeeError::CryptoOperationFailed(format!(
+                        "Failed to reconstruct Ed25519 key: {}",
+                        e
+                    ))
+                })?;
+                let signer =
+                    tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair).map_err(|e| {
+                        TeeError::CryptoOperationFailed(format!(
+                            "Failed to create Ed25519 signer: {}",
+                            e
+                        ))
+                    })?;
                 use tenzro_crypto::signatures::Signer;
-                let sig = signer.sign(data)
-                    .map_err(|e| TeeError::CryptoOperationFailed(format!(
-                        "Ed25519 signing failed: {}", e
-                    )))?;
+                let sig = signer.sign(data).map_err(|e| {
+                    TeeError::CryptoOperationFailed(format!("Ed25519 signing failed: {}", e))
+                })?;
                 Ok(sig.as_bytes().to_vec())
             }
             KeyAlgorithm::Secp256k1 => {
                 let keypair = tenzro_crypto::keys::KeyPair::from_bytes(
                     tenzro_crypto::keys::KeyType::Secp256k1,
                     secret_key_bytes,
-                ).map_err(|e| TeeError::CryptoOperationFailed(format!(
-                    "Failed to reconstruct Secp256k1 key: {}", e
-                )))?;
-                let signer = tenzro_crypto::signatures::Secp256k1SignerImpl::new(keypair)
-                    .map_err(|e| TeeError::CryptoOperationFailed(format!(
-                        "Failed to create Secp256k1 signer: {}", e
-                    )))?;
+                )
+                .map_err(|e| {
+                    TeeError::CryptoOperationFailed(format!(
+                        "Failed to reconstruct Secp256k1 key: {}",
+                        e
+                    ))
+                })?;
+                let signer =
+                    tenzro_crypto::signatures::Secp256k1SignerImpl::new(keypair).map_err(|e| {
+                        TeeError::CryptoOperationFailed(format!(
+                            "Failed to create Secp256k1 signer: {}",
+                            e
+                        ))
+                    })?;
                 use tenzro_crypto::signatures::Signer;
-                let sig = signer.sign(data)
-                    .map_err(|e| TeeError::CryptoOperationFailed(format!(
-                        "Secp256k1 signing failed: {}", e
-                    )))?;
+                let sig = signer.sign(data).map_err(|e| {
+                    TeeError::CryptoOperationFailed(format!("Secp256k1 signing failed: {}", e))
+                })?;
                 Ok(sig.as_bytes().to_vec())
             }
-            KeyAlgorithm::Aes256Gcm => {
-                Err(TeeError::CryptoOperationFailed(
-                    "Cannot sign with AES-256-GCM symmetric key".to_string(),
-                ))
-            }
+            KeyAlgorithm::Aes256Gcm => Err(TeeError::CryptoOperationFailed(
+                "Cannot sign with AES-256-GCM symmetric key".to_string(),
+            )),
         }
     }
 
@@ -1368,7 +2042,8 @@ impl TeeProvider for NvidiaGpuProvider {
 
         if !self.keys.read().contains_key(&key.id) {
             return Err(TeeError::InvalidKeyHandle(format!(
-                "Key {} not found in GPU CC enclave", key.id
+                "Key {} not found in GPU CC enclave",
+                key.id
             )));
         }
 
@@ -1383,7 +2058,8 @@ impl TeeProvider for NvidiaGpuProvider {
 
         if !self.keys.read().contains_key(&key.id) {
             return Err(TeeError::InvalidKeyHandle(format!(
-                "Key {} not found in GPU CC enclave", key.id
+                "Key {} not found in GPU CC enclave",
+                key.id
             )));
         }
 
@@ -1551,22 +2227,17 @@ pub mod known_gpus {
             // Blackwell datacenter
             B100 | B200 | GB200 => Some(GpuArchitecture::Blackwell),
             // Ada Lovelace (datacenter + RTX 40-series)
-            L40S | L40 | L4
-            | RTX_4090 | RTX_4080_SUPER | RTX_4080
-            | RTX_4070_TI_SUPER | RTX_4070_TI | RTX_4070_SUPER | RTX_4070
-            | RTX_4060_TI | RTX_4060 => Some(GpuArchitecture::AdaLovelace),
+            L40S | L40 | L4 | RTX_4090 | RTX_4080_SUPER | RTX_4080 | RTX_4070_TI_SUPER
+            | RTX_4070_TI | RTX_4070_SUPER | RTX_4070 | RTX_4060_TI | RTX_4060 => {
+                Some(GpuArchitecture::AdaLovelace)
+            }
             // Ampere (datacenter + RTX 30-series)
-            A100_SXM4_80 | A100_PCIE_80 | A100_SXM4_40 | A100_PCIE_40
-            | A40 | A30 | A10 | A16 | A2
-            | RTX_3090_TI | RTX_3090 | RTX_3080_TI | RTX_3080
-            | RTX_3070_TI | RTX_3070 | RTX_3060_TI | RTX_3060 | RTX_3050 => {
-                Some(GpuArchitecture::Ampere)
-            }
+            A100_SXM4_80 | A100_PCIE_80 | A100_SXM4_40 | A100_PCIE_40 | A40 | A30 | A10 | A16
+            | A2 | RTX_3090_TI | RTX_3090 | RTX_3080_TI | RTX_3080 | RTX_3070_TI | RTX_3070
+            | RTX_3060_TI | RTX_3060 | RTX_3050 => Some(GpuArchitecture::Ampere),
             // Turing (Tesla T4 + RTX 20-series)
-            T4 | RTX_2080_TI | RTX_2080_SUPER | RTX_2080
-            | RTX_2070_SUPER | RTX_2070 | RTX_2060_SUPER | RTX_2060 => {
-                Some(GpuArchitecture::Turing)
-            }
+            T4 | RTX_2080_TI | RTX_2080_SUPER | RTX_2080 | RTX_2070_SUPER | RTX_2070
+            | RTX_2060_SUPER | RTX_2060 => Some(GpuArchitecture::Turing),
             // Volta (V100)
             V100_SXM2_32 | V100_PCIE_32 | V100_SXM2_16 | V100_PCIE_16 => {
                 Some(GpuArchitecture::Volta)
@@ -1585,12 +2256,34 @@ pub mod known_gpus {
     pub fn cc_capable(pci_device_id: &str) -> bool {
         matches!(
             pci_device_id,
-            H100_SXM5 | H100_PCIE | H100_NVL
-            | H200_SXM | H200_NVL
-            | H800_SXM | H20
-            | B100 | B200 | GB200
-            | L40S
+            H100_SXM5
+                | H100_PCIE
+                | H100_NVL
+                | H200_SXM
+                | H200_NVL
+                | H800_SXM
+                | H20
+                | B100
+                | B200
+                | GB200
+                | L40S
         )
+    }
+
+    /// Recognize a part that is known to have no Confidential Computing mode,
+    /// by device name rather than PCI ID.
+    ///
+    /// Integrated parts such as the GB10 Grace Blackwell superchip in the DGX
+    /// Spark share a memory controller with the CPU and expose no separate
+    /// PCIe-attached CC mode, so a PCI device ID is not the right key for them.
+    /// Returning the part name here lets the caller log why attestation is
+    /// unavailable instead of reporting an unknown device.
+    pub fn non_cc_part_by_name(device_name: &str) -> Option<&'static str> {
+        let name = device_name.to_ascii_uppercase();
+        if name.contains("GB10") || name.contains("DGX SPARK") {
+            return Some("GB10 Grace Blackwell superchip");
+        }
+        None
     }
 }
 
@@ -1612,29 +2305,6 @@ struct SimulatedEvidence {
     cc_firmware_version: Option<String>,
     nonce: String,
     timestamp: i64,
-    measurements: SimulatedMeasurements,
-}
-
-/// Simulated measurements within evidence.
-#[derive(Debug, Serialize, Deserialize)]
-struct SimulatedMeasurements {
-    vbios: String,
-    driver: String,
-    cc_firmware: String,
-}
-
-/// Minimal GPU evidence collected via nvidia-smi (when NSCQ is not available).
-#[derive(Debug, Serialize, Deserialize)]
-struct MinimalGpuEvidence {
-    device_name: String,
-    pci_device_id: String,
-    driver_version: String,
-    compute_capability: String,
-    cc_enabled: bool,
-    cc_firmware_version: Option<String>,
-    serial_hash: String,
-    nonce: String,
-    timestamp: i64,
 }
 
 /// Parse JWT token claims without signature verification.
@@ -1646,21 +2316,80 @@ fn parse_jwt_claims(token: &str) -> Result<NrasTokenClaims> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err(TeeError::AttestationVerificationFailed(
-            "Invalid JWT token format from NRAS".to_string()
+            "Invalid JWT token format from NRAS".to_string(),
         ));
     }
 
-    let payload = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        parts[1],
-    ).map_err(|e| TeeError::AttestationVerificationFailed(format!(
-        "Failed to decode JWT payload: {}", e
-    )))?;
+    let payload =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, parts[1])
+            .map_err(|e| {
+                TeeError::AttestationVerificationFailed(format!(
+                    "Failed to decode JWT payload: {}",
+                    e
+                ))
+            })?;
 
-    serde_json::from_slice(&payload)
-        .map_err(|e| TeeError::AttestationVerificationFailed(format!(
-            "Failed to parse JWT claims: {}", e
-        )))
+    serde_json::from_slice(&payload).map_err(|e| {
+        TeeError::AttestationVerificationFailed(format!("Failed to parse JWT claims: {}", e))
+    })
+}
+
+/// Split an NRAS response into the overall token and the per-GPU tokens.
+///
+/// NRAS answers with an RFC 9711 detached Entity Attestation Token bundle: a
+/// two-element array whose first element is `["JWT", "<overall-token>"]` and
+/// whose second is an object mapping a device name ("GPU-0", ...) to that
+/// device's token.
+///
+/// Returns the raw overall token alongside the decoded claims, because a
+/// relying party downstream may want to forward the token itself rather than
+/// this crate's projection of it.
+fn parse_nras_bundle(body: &str) -> Result<(String, NrasBundle)> {
+    let malformed = |detail: &str| {
+        TeeError::AttestationVerificationFailed(format!(
+            "NRAS response is not a detached EAT bundle: {}",
+            detail
+        ))
+    };
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| malformed(&format!("not JSON ({})", e)))?;
+
+    let outer = parsed.as_array().ok_or_else(|| malformed("not an array"))?;
+    if outer.len() != 2 {
+        return Err(malformed("expected exactly two elements"));
+    }
+
+    let overall_token = outer[0]
+        .as_array()
+        .and_then(|pair| pair.get(1))
+        .and_then(|token| token.as_str())
+        .ok_or_else(|| malformed("first element is not a [type, token] pair"))?
+        .to_string();
+
+    let submods = outer[1]
+        .as_object()
+        .ok_or_else(|| malformed("second element is not an object of device tokens"))?;
+
+    let mut per_gpu = Vec::new();
+    for (name, token) in submods {
+        // A device entry is the device's own token. NRAS also emits digest
+        // entries of the form ["DIGEST", ["SHA256", "<hex>"]] which hash the
+        // device claims rather than carrying them, so anything that is not a
+        // string is not a token and is skipped.
+        let Some(token) = token.as_str() else {
+            continue;
+        };
+        per_gpu.push((name.clone(), parse_jwt_claims(token)?));
+    }
+
+    if per_gpu.is_empty() {
+        return Err(malformed("carries no per-device tokens"));
+    }
+    per_gpu.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let overall = parse_jwt_claims(&overall_token)?;
+    Ok((overall_token, NrasBundle { overall, per_gpu }))
 }
 
 /// Compare two version strings (semver-like: "550.90.07" >= "550.0").
@@ -1668,14 +2397,8 @@ fn parse_jwt_claims(token: &str) -> Result<NrasTokenClaims> {
 /// Splits on "." and compares each numeric component left-to-right.
 /// Missing components are treated as 0.
 fn version_gte(actual: &str, required: &str) -> bool {
-    let actual_parts: Vec<u64> = actual
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let required_parts: Vec<u64> = required
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let actual_parts: Vec<u64> = actual.split('.').filter_map(|s| s.parse().ok()).collect();
+    let required_parts: Vec<u64> = required.split('.').filter_map(|s| s.parse().ok()).collect();
 
     let max_len = actual_parts.len().max(required_parts.len());
     for i in 0..max_len {
@@ -1693,6 +2416,254 @@ fn version_gte(actual: &str, required: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // ---- SPDM MEASUREMENTS parsing -------------------------------------
+    //
+    // These build real wire bytes rather than mocking the parser, so the
+    // layout assumptions are the thing under test. The report is what a
+    // relying party's whole trust decision rests on, and a parser that
+    // mis-reads a length is how a malformed report becomes a panic or a
+    // silently-truncated measurement.
+
+    /// One DMTF measurement block: `index | spec | size(u16 LE) | body`,
+    /// body = `value_type | value_size(u16 LE) | value`.
+    fn dmtf_block(index: u8, value_type: u8, value: &[u8]) -> Vec<u8> {
+        let mut body = vec![value_type];
+        body.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        body.extend_from_slice(value);
+
+        let mut block = vec![index, SPDM_MEASUREMENT_SPEC_DMTF];
+        block.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        block.extend_from_slice(&body);
+        block
+    }
+
+    /// A whole MEASUREMENTS response around `record`.
+    fn spdm_response(
+        version: u8,
+        record: &[u8],
+        nonce: &[u8; 32],
+        opaque: &[u8],
+        sig: &[u8],
+    ) -> Vec<u8> {
+        let mut out = vec![version, SPDM_CODE_MEASUREMENTS, 0, 0, 0];
+        let len = record.len() as u32;
+        out.extend_from_slice(&len.to_le_bytes()[..3]); // 24-bit record length
+        out.extend_from_slice(record);
+        out.extend_from_slice(nonce);
+        out.extend_from_slice(&(opaque.len() as u16).to_le_bytes());
+        out.extend_from_slice(opaque);
+        out.extend_from_slice(sig);
+        out
+    }
+
+    #[test]
+    fn parses_a_well_formed_measurements_response() {
+        let record = [
+            dmtf_block(1, 0x01, &[0xAA; 48]),
+            dmtf_block(2, 0x02, &[0xBB; 48]),
+        ]
+        .concat();
+        let nonce = [0x5A; 32];
+        let blob = spdm_response(0x11, &record, &nonce, b"opaque", &[0xCC; 96]);
+
+        let parsed = parse_gpu_attestation_report(&blob).expect("well-formed report must parse");
+
+        assert_eq!(parsed.blocks.len(), 2);
+        assert_eq!(parsed.blocks[0].index, 1);
+        assert_eq!(parsed.blocks[0].value_type, 0x01);
+        assert_eq!(parsed.blocks[0].value, vec![0xAA; 48]);
+        assert_eq!(parsed.blocks[1].index, 2);
+        assert_eq!(parsed.nonce, nonce.to_vec());
+        assert_eq!(parsed.opaque_data, b"opaque".to_vec());
+        assert_eq!(parsed.signature, vec![0xCC; 96]);
+        // The hash must cover the record exactly, not the framing around it.
+        assert_eq!(
+            parsed.measurement_record_hash,
+            Sha384::digest(&record).to_vec()
+        );
+    }
+
+    #[test]
+    fn accepts_spdm_1_2_as_well_as_1_1() {
+        let record = dmtf_block(1, 0x01, &[0x11; 48]);
+        let blob = spdm_response(0x12, &record, &[0; 32], &[], &[0xEE; 96]);
+        assert!(parse_gpu_attestation_report(&blob).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_unsupported_spdm_version() {
+        let record = dmtf_block(1, 0x01, &[0x11; 48]);
+        let blob = spdm_response(0x10, &record, &[0; 32], &[], &[0xEE; 96]);
+        let err = parse_gpu_attestation_report(&blob).expect_err("0x10 is not a supported version");
+        assert!(
+            format!("{err}").contains("unsupported SPDM version"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_response_that_is_not_measurements() {
+        let record = dmtf_block(1, 0x01, &[0x11; 48]);
+        let mut blob = spdm_response(0x11, &record, &[0; 32], &[], &[0xEE; 96]);
+        blob[1] = 0x61; // some other SPDM response code
+        let err = parse_gpu_attestation_report(&blob).expect_err("wrong code must be refused");
+        assert!(
+            format!("{err}").contains("not a MEASUREMENTS response"),
+            "got {err}"
+        );
+    }
+
+    /// The driver may prefix the GET_MEASUREMENTS request it sent. That prefix
+    /// has to be skipped, or the parser reads the request as the response.
+    #[test]
+    fn skips_a_prefixed_get_measurements_request() {
+        let record = dmtf_block(3, 0x01, &[0x77; 48]);
+        let nonce = [0x33; 32];
+        let response = spdm_response(0x11, &record, &nonce, &[], &[0xDD; 96]);
+
+        let mut blob = vec![0u8; SPDM_MEASUREMENTS_REQUEST_LEN];
+        blob[1] = SPDM_CODE_GET_MEASUREMENTS;
+        blob.extend_from_slice(&response);
+
+        let parsed = parse_gpu_attestation_report(&blob).expect("prefixed report must parse");
+        assert_eq!(parsed.nonce, nonce.to_vec());
+        assert_eq!(parsed.blocks[0].index, 3);
+    }
+
+    // ---- truncation and length-field abuse ------------------------------
+
+    #[test]
+    fn rejects_a_header_shorter_than_the_spdm_minimum() {
+        let err = parse_gpu_attestation_report(&[0x11, 0x60, 0, 0]).expect_err("too short");
+        assert!(
+            format!("{err}").contains("shorter than an SPDM MEASUREMENTS header"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_report_truncated_before_the_nonce() {
+        let record = dmtf_block(1, 0x01, &[0x11; 48]);
+        let full = spdm_response(0x11, &record, &[0; 32], &[], &[0xEE; 96]);
+        // Cut inside the nonce.
+        let truncated = &full[..8 + record.len() + 10];
+        let err = parse_gpu_attestation_report(truncated).expect_err("must not read past the end");
+        assert!(
+            format!("{err}").contains("truncated before the nonce"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_report_with_no_signature() {
+        let record = dmtf_block(1, 0x01, &[0x11; 48]);
+        // Empty signature: opaque_end == len, so there is nothing left to sign with.
+        let blob = spdm_response(0x11, &record, &[0; 32], &[], &[]);
+        let err =
+            parse_gpu_attestation_report(&blob).expect_err("an unsigned report is not evidence");
+        assert!(
+            format!("{err}").contains("truncated before the signature"),
+            "got {err}"
+        );
+    }
+
+    /// A declared record length that runs past the buffer must be refused
+    /// rather than panicking on the slice.
+    #[test]
+    fn rejects_an_overlong_declared_record_length() {
+        let record = dmtf_block(1, 0x01, &[0x11; 48]);
+        let mut blob = spdm_response(0x11, &record, &[0; 32], &[], &[0xEE; 96]);
+        blob[5] = 0xFF;
+        blob[6] = 0xFF;
+        blob[7] = 0xFF;
+        assert!(parse_gpu_attestation_report(&blob).is_err());
+    }
+
+    /// Likewise an opaque-data length that overruns the buffer.
+    #[test]
+    fn rejects_an_overlong_declared_opaque_length() {
+        let record = dmtf_block(1, 0x01, &[0x11; 48]);
+        let mut blob = spdm_response(0x11, &record, &[0; 32], b"xy", &[0xEE; 96]);
+        let opaque_len_at = 8 + record.len() + 32;
+        blob[opaque_len_at] = 0xFF;
+        blob[opaque_len_at + 1] = 0xFF;
+        assert!(parse_gpu_attestation_report(&blob).is_err());
+    }
+
+    // ---- measurement-block parsing --------------------------------------
+
+    #[test]
+    fn rejects_a_non_dmtf_measurement_specification() {
+        // spec bit 0 clear => not DMTF.
+        let mut block = dmtf_block(1, 0x01, &[0x11; 48]);
+        block[1] = 0x02;
+        let blob = spdm_response(0x11, &block, &[0; 32], &[], &[0xEE; 96]);
+        let err = parse_gpu_attestation_report(&blob).expect_err("non-DMTF must be refused");
+        assert!(format!("{err}").contains("not DMTF"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_a_block_running_past_the_record() {
+        let mut block = dmtf_block(1, 0x01, &[0x11; 48]);
+        // Declare a body far larger than what follows.
+        block[2] = 0xFF;
+        block[3] = 0x00;
+        let blob = spdm_response(0x11, &block, &[0; 32], &[], &[0xEE; 96]);
+        let err = parse_gpu_attestation_report(&blob).expect_err("must not read past the record");
+        assert!(
+            format!("{err}").contains("runs past the record"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_record_ending_mid_block_header() {
+        // Three bytes: less than the four-byte block header.
+        let blob = spdm_response(
+            0x11,
+            &[1, SPDM_MEASUREMENT_SPEC_DMTF, 0],
+            &[0; 32],
+            &[],
+            &[0xEE; 96],
+        );
+        let err = parse_gpu_attestation_report(&blob).expect_err("partial header must be refused");
+        assert!(
+            format!("{err}").contains("ends mid-block header"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_value_larger_than_its_block() {
+        let mut block = dmtf_block(1, 0x01, &[0x11; 8]);
+        // Body is 3 + 8 bytes; claim a 0xFF-byte value inside it.
+        block[5] = 0xFF;
+        block[6] = 0x00;
+        let blob = spdm_response(0x11, &block, &[0; 32], &[], &[0xEE; 96]);
+        let err = parse_gpu_attestation_report(&blob).expect_err("value must fit its block");
+        assert!(
+            format!("{err}").contains("larger than the block"),
+            "got {err}"
+        );
+    }
+
+    /// A structurally valid response carrying no measurements is refused.
+    ///
+    /// It would parse cleanly and verify cleanly — the signature covers the
+    /// empty record perfectly well — while attesting nothing at all. Rejecting
+    /// it in the parser means a relying party cannot be handed a report that
+    /// looks valid and says nothing.
+    #[test]
+    fn rejects_a_measurement_record_with_no_blocks() {
+        let blob = spdm_response(0x11, &[], &[0x99; 32], &[], &[0xEE; 96]);
+        let err = parse_gpu_attestation_report(&blob)
+            .expect_err("a report with no measurements is not evidence");
+        assert!(
+            format!("{err}").contains("no measurement blocks"),
+            "got {err}"
+        );
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -1712,9 +2683,43 @@ mod tests {
         assert!(available); // Simulated GPU always available with CC enabled
     }
 
+    /// Config for tests that exercise GPU-report *mechanics* rather than the
+    /// composite-anchor invariant.
+    ///
+    /// `require_cpu_anchor` defaults to true, so a bare GPU provider refuses to
+    /// attest at all — which is the correct production behaviour and is asserted
+    /// separately by [`bare_gpu_provider_refuses_to_attest`]. Tests below that
+    /// only care about report shape opt out explicitly rather than silently
+    /// depending on the default.
+    fn gpu_only_config() -> NvidiaGpuConfig {
+        NvidiaGpuConfig {
+            require_cpu_anchor: false,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn bare_gpu_provider_refuses_to_attest() {
+        // NVIDIA GPU CC establishes no trust boundary on its own: the
+        // confidential VM comes from SEV-SNP or TDX and the GPU is admitted to
+        // it. A provider with no CPU anchor must therefore refuse rather than
+        // emit a report a relying party could mistake for a complete TEE claim.
+        let provider = NvidiaGpuProvider::new(NvidiaGpuConfig::default()).with_simulate();
+
+        let err = provider
+            .generate_attestation(b"test")
+            .await
+            .expect_err("bare GPU provider must not produce an attestation");
+
+        assert!(
+            matches!(err, TeeError::NotAvailable(_)),
+            "expected NotAvailable, got {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_generate_attestation_simulated() {
-        let config = NvidiaGpuConfig::default();
+        let config = gpu_only_config();
         let provider = NvidiaGpuProvider::new(config).with_simulate();
 
         let user_data = b"test attestation data for gpu";
@@ -1737,7 +2742,7 @@ mod tests {
         // no cryptographic authority. The verifier must reject them
         // outright — `result.valid` is false and the relying party
         // must not branch into the success path.
-        let config = NvidiaGpuConfig::default();
+        let config = gpu_only_config();
         let provider = NvidiaGpuProvider::new(config).with_simulate();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
@@ -1752,7 +2757,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_wrong_vendor_rejected() {
-        let config = NvidiaGpuConfig::default();
+        let config = gpu_only_config();
         let provider = NvidiaGpuProvider::new(config).with_simulate();
 
         let mut report = provider.generate_attestation(b"test").await.unwrap();
@@ -1787,7 +2792,10 @@ mod tests {
         assert_eq!(signature, signature2);
 
         // Different data should produce different signature
-        let signature3 = provider.enclave_sign(&key, b"different data").await.unwrap();
+        let signature3 = provider
+            .enclave_sign(&key, b"different data")
+            .await
+            .unwrap();
         assert_ne!(signature, signature3);
 
         // Verify the signature is cryptographically valid
@@ -1911,10 +2919,7 @@ mod tests {
             known_gpus::architecture_for_pci_id("1DB5"),
             Some(GpuArchitecture::Volta)
         );
-        assert_eq!(
-            known_gpus::architecture_for_pci_id("XXXX"),
-            None
-        );
+        assert_eq!(known_gpus::architecture_for_pci_id("XXXX"), None);
     }
 
     #[test]
@@ -1968,20 +2973,65 @@ mod tests {
         );
         let payload = base64::Engine::encode(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            r#"{"gpu_attestation_result":true,"gpu_arch":"HOPPER","gpu_model":"H100","iat":1700000000,"exp":1700086400,"nonce":"deadbeef"}"#,
+            r#"{"measres":"success","x-nvidia-overall-att-result":true,"x-nvidia-ver":"3.0","hwmodel":"NVIDIA H100 80GB HBM3","eat_nonce":"deadbeef","secboot":true,"dbgstat":"disabled","iat":1700000000,"exp":1700086400}"#,
         );
         let token = format!("{}.{}.fake_signature", header, payload);
 
         let claims = parse_jwt_claims(&token).unwrap();
-        assert!(claims.gpu_attestation_result);
-        assert_eq!(claims.gpu_arch, "HOPPER");
-        assert_eq!(claims.gpu_model, "H100");
-        assert_eq!(claims.nonce, "deadbeef");
+        assert!(claims.overall_result);
+        assert_eq!(claims.measres, "success");
+        assert_eq!(claims.claims_version, "3.0");
+        assert_eq!(claims.hwmodel, "NVIDIA H100 80GB HBM3");
+        assert_eq!(claims.eat_nonce, "deadbeef");
+        assert!(claims.secboot);
+        assert_eq!(claims.dbgstat, "disabled");
     }
 
     #[test]
     fn test_jwt_parse_invalid_format() {
         assert!(parse_jwt_claims("not.a.valid.jwt.token").is_err());
         assert!(parse_jwt_claims("single_segment").is_err());
+    }
+
+    #[test]
+    fn test_parse_nras_bundle() {
+        let jwt = |payload: &str| {
+            let header = base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                r#"{"alg":"ES384","typ":"JWT"}"#,
+            );
+            let body =
+                base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload);
+            format!("{}.{}.sig", header, body)
+        };
+
+        let overall = jwt(r#"{"x-nvidia-overall-att-result":true,"eat_nonce":"ab12"}"#);
+        let gpu0 = jwt(r#"{"measres":"success","hwmodel":"NVIDIA H100 80GB HBM3"}"#);
+        let gpu1 = jwt(r#"{"measres":"success","hwmodel":"NVIDIA H100 80GB HBM3"}"#);
+
+        // The digest entry is not a token and must be skipped rather than
+        // treated as a device.
+        let body = format!(
+            r#"[["JWT","{}"],{{"GPU-1":"{}","GPU-0":"{}","JWT":["DIGEST",["SHA256","00ff"]]}}]"#,
+            overall, gpu1, gpu0
+        );
+
+        let (token, bundle) = parse_nras_bundle(&body).unwrap();
+        assert_eq!(token, overall);
+        assert!(bundle.overall.overall_result);
+        assert_eq!(bundle.overall.eat_nonce, "ab12");
+        assert_eq!(bundle.per_gpu.len(), 2);
+        assert_eq!(bundle.per_gpu[0].0, "GPU-0");
+        assert_eq!(bundle.per_gpu[1].0, "GPU-1");
+        assert!(bundle.per_gpu.iter().all(|(_, c)| c.measres == "success"));
+    }
+
+    #[test]
+    fn test_parse_nras_bundle_rejects_malformed() {
+        assert!(parse_nras_bundle("not json").is_err());
+        assert!(parse_nras_bundle(r#"{"token":"abc"}"#).is_err());
+        assert!(parse_nras_bundle(r#"[["JWT","a.b.c"]]"#).is_err());
+        // A bundle whose submodule map holds no device tokens carries no verdict.
+        assert!(parse_nras_bundle(r#"[["JWT","a.b.c"],{}]"#).is_err());
     }
 }

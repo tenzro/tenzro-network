@@ -47,3 +47,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "zk_benchmarks"
 harness = false
+
+[lints]
+workspace = true

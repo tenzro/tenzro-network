@@ -13,8 +13,10 @@
 //!   used to bind a manifest to a `tee://...` `dataset_ref`.
 //! - [`validate_confidential_enrollment`] — gate run at trainer enroll time
 //!   that checks (a) tier requires a sealed manifest, (b) the trainer has an
-//!   envelope in it, (c) the trainer's TEE attestation matches the enclave
-//!   identity the sponsor sealed to.
+//!   envelope in it, (c) the trainer's TEE attestation verifies against a
+//!   pinned vendor root and attests to the enclave the sponsor sealed to.
+//! - [`EnclaveIdentityVerifier`] — the trait that check (c) runs behind,
+//!   implemented at the node layer so no vendor code lands in this crate.
 //! - [`SealedManifestStore`] — write-through cache for manifests, keyed by
 //!   `task_id` under the `manifest:` prefix in `CF_TRAINING_RUNS`.
 //!
@@ -30,7 +32,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, CF_TRAINING_RUNS};
+use tenzro_storage::{CF_TRAINING_RUNS, KvStore};
 use tenzro_types::primitives::Hash;
 use tenzro_types::training::{
     SealedDatasetManifest, SealedShardEnvelope, TrainingAttestation, TrainingTier,
@@ -62,8 +64,8 @@ pub fn compute_manifest_hash(envelopes: &[SealedShardEnvelope]) -> Hash {
         hasher.update(e.wrap_alg.as_bytes());
         hasher.update((e.enclave_pubkey.len() as u32).to_le_bytes());
         hasher.update(&e.enclave_pubkey);
-        hasher.update((e.enclave_measurements_hex.len() as u32).to_le_bytes());
-        hasher.update(e.enclave_measurements_hex.as_bytes());
+        hasher.update((e.enclave_measurement_hex.len() as u32).to_le_bytes());
+        hasher.update(e.enclave_measurement_hex.as_bytes());
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&hasher.finalize());
@@ -109,61 +111,86 @@ pub fn verify_manifest_binding(
     Ok(())
 }
 
+/// The enclave identity read out of a trainer's attestation report *after*
+/// the report's certificate chain has been checked against pinned vendor
+/// roots and the report has been rejected if it is simulated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedEnclaveIdentity {
+    /// Vendor tag carried by the verified report.
+    pub vendor: String,
+    /// Hex of the report's primary measurement.
+    pub measurement_hex: String,
+}
+
+/// Checks a trainer's attestation report and reports the enclave identity it
+/// attests to.
+///
+/// `expected_enclave_pubkey` is the key the sponsor wrapped the shard data key
+/// to. An implementation must confirm the report commits to that key in its
+/// user data — a report that attests to a different enclave key is not
+/// evidence about the enclave the sponsor sealed to.
+///
+/// `trainer_did` names the subject of the check so a rejection says which
+/// trainer was refused.
+///
+/// Implemented at the node layer, which owns the TEE verifier and the pinned
+/// vendor root certificates, so this crate carries no vendor code.
+pub trait EnclaveIdentityVerifier: Send + Sync {
+    fn verify(
+        &self,
+        trainer_did: &str,
+        attestation: &TrainingAttestation,
+        expected_enclave_pubkey: &[u8],
+    ) -> Result<VerifiedEnclaveIdentity>;
+}
+
 /// Validate that a Confidential-tier trainer is authorized by the sealed
 /// manifest before letting them enroll.
 ///
-/// The trainer's per-round [`TrainingAttestation`] carries the enclave
-/// program/firmware measurements and the enclave pubkey (encoded inside
-/// `report_hex` — vendor-specific layout). The sponsor's envelope binds the
-/// same fields. We require:
+/// The sponsor's envelope states which enclave the shard data key was wrapped
+/// to: an X25519 public key and the measurement of the enclave expected to
+/// hold the matching private key. The trainer's [`TrainingAttestation`] is the
+/// only evidence that the trainer is that enclave, so it is verified rather
+/// than recorded:
 ///
 /// 1. The manifest has an envelope addressed to this trainer DID.
-/// 2. The envelope's `enclave_pubkey` is byte-equal to what the trainer is
-///    presenting via a side-channel (the caller passes
-///    `trainer_enclave_pubkey` — typically extracted from the attestation
-///    report by the syncer's TEE verifier).
-/// 3. The envelope's `enclave_measurements_hex` is byte-equal to the
-///    measurements the trainer's attestation report carries
-///    (`trainer_measurements_hex`).
+/// 2. `verifier` checks the report against pinned vendor roots and confirms
+///    the report commits to the envelope's `enclave_pubkey`.
+/// 3. The measurement the verified report carries equals the envelope's
+///    `enclave_measurement_hex`.
 ///
-/// All three are exact-match checks: a mismatch means the trainer is not
-/// running the enclave the sponsor sealed to, and admission is rejected.
+/// Admission fails closed: with no verifier installed, a Confidential-tier
+/// trainer cannot enroll at all.
 pub fn validate_confidential_enrollment(
     task_id: &str,
     tier: TrainingTier,
     manifest: Option<&SealedDatasetManifest>,
     trainer_did: &str,
     trainer_attestation: Option<&TrainingAttestation>,
-    trainer_enclave_pubkey: &[u8],
-    trainer_measurements_hex: &str,
+    verifier: Option<&dyn EnclaveIdentityVerifier>,
 ) -> Result<()> {
     // Only enforce at Confidential tier. Open + Verified tiers don't need
     // a manifest.
     if tier != TrainingTier::Confidential {
         return Ok(());
     }
-    if trainer_attestation.is_none() {
-        return Err(TrainingError::AttestationRequired(tier));
-    }
+    let attestation = trainer_attestation.ok_or(TrainingError::AttestationRequired(tier))?;
     let manifest = manifest.ok_or_else(|| TrainingError::SealedManifestMissing {
         task_id: task_id.to_string(),
     })?;
-    let envelope = manifest
-        .envelope_for(trainer_did)
-        .ok_or_else(|| TrainingError::SealedEnvelopeMissing {
-            task_id: task_id.to_string(),
-            trainer_did: trainer_did.to_string(),
-        })?;
-    if envelope.enclave_pubkey != trainer_enclave_pubkey {
+    let envelope =
+        manifest
+            .envelope_for(trainer_did)
+            .ok_or_else(|| TrainingError::SealedEnvelopeMissing {
+                task_id: task_id.to_string(),
+                trainer_did: trainer_did.to_string(),
+            })?;
+    let verifier = verifier.ok_or(TrainingError::EnclaveVerifierUnavailable)?;
+    let identity = verifier.verify(trainer_did, attestation, &envelope.enclave_pubkey)?;
+    if identity.measurement_hex != envelope.enclave_measurement_hex {
         return Err(TrainingError::EnclaveBindingMismatch {
             trainer_did: trainer_did.to_string(),
-            field: "enclave_pubkey",
-        });
-    }
-    if envelope.enclave_measurements_hex != trainer_measurements_hex {
-        return Err(TrainingError::EnclaveBindingMismatch {
-            trainer_did: trainer_did.to_string(),
-            field: "enclave_measurements_hex",
+            field: "enclave_measurement_hex",
         });
     }
     Ok(())
@@ -398,7 +425,7 @@ mod tests {
             wrapped_data_key: vec![0xbb; 96],
             wrap_alg: "hpke-x25519-hkdf-sha256-aes-256-gcm".to_string(),
             enclave_pubkey: vec![0xcc; 32],
-            enclave_measurements_hex: "deadbeef".to_string(),
+            enclave_measurement_hex: "deadbeef".to_string(),
             created_at: Timestamp::now(),
         }
     }
@@ -466,6 +493,43 @@ mod tests {
         }
     }
 
+    /// Stands in for the node's TEE verifier. Reports the measurement it was
+    /// built with, and only for the enclave key it was told to expect — the
+    /// same contract the real implementation meets by re-packing the key and
+    /// comparing it against the report's user data.
+    struct StubVerifier {
+        accepts_pubkey: Vec<u8>,
+        measurement_hex: String,
+    }
+
+    impl EnclaveIdentityVerifier for StubVerifier {
+        fn verify(
+            &self,
+            trainer_did: &str,
+            _attestation: &TrainingAttestation,
+            expected_enclave_pubkey: &[u8],
+        ) -> Result<VerifiedEnclaveIdentity> {
+            if expected_enclave_pubkey != self.accepts_pubkey {
+                return Err(TrainingError::AttestationVerificationFailed {
+                    trainer_did: trainer_did.to_string(),
+                    reason: "report does not commit to the expected enclave key".to_string(),
+                });
+            }
+            Ok(VerifiedEnclaveIdentity {
+                vendor: "intel-tdx".to_string(),
+                measurement_hex: self.measurement_hex.clone(),
+            })
+        }
+    }
+
+    /// A verifier that agrees with `sample_envelope`.
+    fn stub_verifier() -> StubVerifier {
+        StubVerifier {
+            accepts_pubkey: vec![0xcc; 32],
+            measurement_hex: "deadbeef".to_string(),
+        }
+    }
+
     #[test]
     fn confidential_enrollment_open_tier_skips_check() {
         validate_confidential_enrollment(
@@ -474,8 +538,7 @@ mod tests {
             None,
             "did:tenzro:machine:any",
             None,
-            &[],
-            "",
+            None,
         )
         .unwrap();
     }
@@ -483,14 +546,14 @@ mod tests {
     #[test]
     fn confidential_enrollment_requires_attestation() {
         let m = sample_manifest("task-c1");
+        let v = stub_verifier();
         let err = validate_confidential_enrollment(
             "task-c1",
             TrainingTier::Confidential,
             Some(&m),
             "did:tenzro:machine:alice",
             None,
-            &[0xcc; 32],
-            "deadbeef",
+            Some(&v),
         )
         .unwrap_err();
         match err {
@@ -502,14 +565,14 @@ mod tests {
     #[test]
     fn confidential_enrollment_requires_manifest() {
         let att = sample_attestation();
+        let v = stub_verifier();
         let err = validate_confidential_enrollment(
             "task-c1",
             TrainingTier::Confidential,
             None,
             "did:tenzro:machine:alice",
             Some(&att),
-            &[0xcc; 32],
-            "deadbeef",
+            Some(&v),
         )
         .unwrap_err();
         match err {
@@ -522,14 +585,14 @@ mod tests {
     fn confidential_enrollment_rejects_unknown_trainer() {
         let m = sample_manifest("task-c1");
         let att = sample_attestation();
+        let v = stub_verifier();
         let err = validate_confidential_enrollment(
             "task-c1",
             TrainingTier::Confidential,
             Some(&m),
             "did:tenzro:machine:carol",
             Some(&att),
-            &[0xcc; 32],
-            "deadbeef",
+            Some(&v),
         )
         .unwrap_err();
         match err {
@@ -541,7 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn confidential_enrollment_rejects_pubkey_mismatch() {
+    fn confidential_enrollment_refuses_without_a_verifier() {
+        // No verifier installed means no way to check the report, and an
+        // unchecked report is not evidence. Admission fails closed.
         let m = sample_manifest("task-c1");
         let att = sample_attestation();
         let err = validate_confidential_enrollment(
@@ -550,53 +615,82 @@ mod tests {
             Some(&m),
             "did:tenzro:machine:alice",
             Some(&att),
-            &[0xdd; 32],
-            "deadbeef",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, TrainingError::EnclaveVerifierUnavailable));
+    }
+
+    #[test]
+    fn confidential_enrollment_rejects_report_bound_to_another_key() {
+        // The envelope's key is what gets handed to the verifier, so a report
+        // committing to some other enclave key is refused by the verifier
+        // rather than compared against a caller-supplied value.
+        let m = sample_manifest("task-c1");
+        let att = sample_attestation();
+        let v = StubVerifier {
+            accepts_pubkey: vec![0xdd; 32],
+            measurement_hex: "deadbeef".to_string(),
+        };
+        let err = validate_confidential_enrollment(
+            "task-c1",
+            TrainingTier::Confidential,
+            Some(&m),
+            "did:tenzro:machine:alice",
+            Some(&att),
+            Some(&v),
         )
         .unwrap_err();
         match err {
-            TrainingError::EnclaveBindingMismatch { trainer_did, field } => {
+            TrainingError::AttestationVerificationFailed { trainer_did, .. } => {
                 assert_eq!(trainer_did, "did:tenzro:machine:alice");
-                assert_eq!(field, "enclave_pubkey");
             }
-            _ => panic!("expected EnclaveBindingMismatch(enclave_pubkey), got {:?}", err),
+            _ => panic!("expected AttestationVerificationFailed, got {:?}", err),
         }
     }
 
     #[test]
     fn confidential_enrollment_rejects_measurement_mismatch() {
+        // A genuine report from an enclave the sponsor did not seal to.
         let m = sample_manifest("task-c1");
         let att = sample_attestation();
+        let v = StubVerifier {
+            accepts_pubkey: vec![0xcc; 32],
+            measurement_hex: "facade".to_string(),
+        };
         let err = validate_confidential_enrollment(
             "task-c1",
             TrainingTier::Confidential,
             Some(&m),
             "did:tenzro:machine:alice",
             Some(&att),
-            &[0xcc; 32],
-            "facade",
+            Some(&v),
         )
         .unwrap_err();
         match err {
-            TrainingError::EnclaveBindingMismatch { field, .. } => {
-                assert_eq!(field, "enclave_measurements_hex");
+            TrainingError::EnclaveBindingMismatch { trainer_did, field } => {
+                assert_eq!(trainer_did, "did:tenzro:machine:alice");
+                assert_eq!(field, "enclave_measurement_hex");
             }
-            _ => panic!("expected EnclaveBindingMismatch(measurements), got {:?}", err),
+            _ => panic!(
+                "expected EnclaveBindingMismatch(measurement), got {:?}",
+                err
+            ),
         }
     }
 
     #[test]
-    fn confidential_enrollment_accepts_matching_envelope() {
+    fn confidential_enrollment_accepts_verified_matching_enclave() {
         let m = sample_manifest("task-c1");
         let att = sample_attestation();
+        let v = stub_verifier();
         validate_confidential_enrollment(
             "task-c1",
             TrainingTier::Confidential,
             Some(&m),
             "did:tenzro:machine:alice",
             Some(&att),
-            &[0xcc; 32],
-            "deadbeef",
+            Some(&v),
         )
         .unwrap();
     }
@@ -610,7 +704,7 @@ mod tests {
             wrapped_data_key: vec![0xbb; 96],
             wrap_alg: "hpke-x25519-hkdf-sha256-aes-256-gcm".to_string(),
             enclave_pubkey: vec![0xcc; 32],
-            enclave_measurements_hex: "deadbeef".to_string(),
+            enclave_measurement_hex: "deadbeef".to_string(),
             created_at: Timestamp::now(),
         }
     }
@@ -676,7 +770,7 @@ mod tests {
             wrapped_data_key: vec![0xbb; 96],
             wrap_alg: "hpke-x25519-hkdf-sha256-aes-256-gcm".to_string(),
             enclave_pubkey: vec![0xcc; 32],
-            enclave_measurements_hex: "deadbeef".to_string(),
+            enclave_measurement_hex: "deadbeef".to_string(),
             created_at: Timestamp::now(),
         };
         let fetched = store.fetch(&env).await.unwrap();
@@ -694,7 +788,7 @@ mod tests {
             wrapped_data_key: vec![],
             wrap_alg: "hpke-x25519-hkdf-sha256-aes-256-gcm".to_string(),
             enclave_pubkey: vec![],
-            enclave_measurements_hex: String::new(),
+            enclave_measurement_hex: String::new(),
             created_at: Timestamp::now(),
         };
         let err = store.fetch(&env).await.unwrap_err();

@@ -69,9 +69,9 @@ impl NearTargetChain {
     /// Curve this chain expects.
     pub fn curve(&self) -> NearSigCurve {
         match self {
-            NearTargetChain::Bitcoin
-            | NearTargetChain::Ethereum
-            | NearTargetChain::Dogecoin => NearSigCurve::Secp256k1,
+            NearTargetChain::Bitcoin | NearTargetChain::Ethereum | NearTargetChain::Dogecoin => {
+                NearSigCurve::Secp256k1
+            }
             NearTargetChain::Solana
             | NearTargetChain::Ton
             | NearTargetChain::Stellar

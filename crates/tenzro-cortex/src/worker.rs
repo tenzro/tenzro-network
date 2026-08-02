@@ -17,7 +17,9 @@ use std::time::Instant;
 
 use tenzro_crypto::signatures::Signer;
 use tenzro_types::{
-    cortex::{AttestationRequirement, CortexPricing, CortexRequest, CortexResponse, ReasoningBudget},
+    cortex::{
+        AttestationRequirement, CortexPricing, CortexRequest, CortexResponse, ReasoningBudget,
+    },
     primitives::Address,
 };
 use tracing::{debug, warn};
@@ -128,7 +130,8 @@ impl CortexWorker {
         self.metrics.record_request_accepted(tier);
 
         if let Err(e) = self.validate_budget(&request.budget) {
-            self.metrics.record_rejection(RejectionReason::InvalidBudget);
+            self.metrics
+                .record_rejection(RejectionReason::InvalidBudget);
             return Err(e);
         }
 
@@ -324,9 +327,7 @@ impl CortexWorker {
                 budget.max_loops, family.max_loops
             )));
         }
-        if !family.supported_tiers.is_empty()
-            && !family.supported_tiers.contains(&budget.tier)
-        {
+        if !family.supported_tiers.is_empty() && !family.supported_tiers.contains(&budget.tier) {
             return Err(CortexError::InvalidBudget(format!(
                 "tier {:?} not supported by model",
                 budget.tier

@@ -99,13 +99,20 @@ impl DamlTemplateId {
 
     /// Get the fully-qualified name in `package_id:module_name:entity_name` format
     pub fn qualified_name(&self) -> String {
-        format!("{}:{}:{}", self.package_id, self.module_name, self.entity_name)
+        format!(
+            "{}:{}:{}",
+            self.package_id, self.module_name, self.entity_name
+        )
     }
 }
 
 impl std::fmt::Display for DamlTemplateId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}:{}", self.package_id, self.module_name, self.entity_name)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.package_id, self.module_name, self.entity_name
+        )
     }
 }
 

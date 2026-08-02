@@ -29,15 +29,9 @@ enum Node {
         value: Option<Vec<u8>>,
     },
     /// Extension node to compress paths
-    Extension {
-        path: Vec<u8>,
-        child: NodeHash,
-    },
+    Extension { path: Vec<u8>, child: NodeHash },
     /// Leaf node containing a value
-    Leaf {
-        path: Vec<u8>,
-        value: Vec<u8>,
-    },
+    Leaf { path: Vec<u8>, value: Vec<u8> },
 }
 
 impl MerklePatriciaTrie {
@@ -53,7 +47,8 @@ impl MerklePatriciaTrie {
 
     /// Inserts a key-value pair into the trie
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.pending_changes.insert(key.to_vec(), Some(value.to_vec()));
+        self.pending_changes
+            .insert(key.to_vec(), Some(value.to_vec()));
         self.committed = false;
         Ok(())
     }
@@ -171,14 +166,14 @@ impl MerklePatriciaTrie {
                 .ok_or_else(|| StorageError::InvalidKey("Node not found".to_string()))?;
 
             match node {
-                Node::Leaf { path, value: old_value } => {
+                Node::Leaf {
+                    path,
+                    value: old_value,
+                } => {
                     let remaining = &nibbles[depth..];
                     if path == remaining {
                         // Update existing leaf
-                        let new_node = Node::Leaf {
-                            path,
-                            value,
-                        };
+                        let new_node = Node::Leaf { path, value };
                         Ok(self.store_node(new_node))
                     } else {
                         // Split into branch
@@ -204,12 +199,8 @@ impl MerklePatriciaTrie {
                 Node::Extension { path, child } => {
                     let remaining = &nibbles[depth..];
                     if remaining.starts_with(&path) {
-                        let new_child = self.insert_into_node(
-                            Some(child),
-                            nibbles,
-                            depth + path.len(),
-                            value,
-                        )?;
+                        let new_child =
+                            self.insert_into_node(Some(child), nibbles, depth + path.len(), value)?;
                         let new_node = Node::Extension {
                             path,
                             child: new_child,
@@ -230,11 +221,16 @@ impl MerklePatriciaTrie {
                             };
                             Ok(self.store_node(ext_node))
                         } else {
-                            self.create_branch_from_extension_and_new(&path, child, remaining, value)
+                            self.create_branch_from_extension_and_new(
+                                &path, child, remaining, value,
+                            )
                         }
                     }
                 }
-                Node::Branch { mut children, value: node_value } => {
+                Node::Branch {
+                    mut children,
+                    value: node_value,
+                } => {
                     if depth >= nibbles.len() {
                         let new_node = Node::Branch {
                             children,
@@ -243,12 +239,8 @@ impl MerklePatriciaTrie {
                         Ok(self.store_node(new_node))
                     } else {
                         let nibble = nibbles[depth] as usize;
-                        let new_child = self.insert_into_node(
-                            children[nibble],
-                            nibbles,
-                            depth + 1,
-                            value,
-                        )?;
+                        let new_child =
+                            self.insert_into_node(children[nibble], nibbles, depth + 1, value)?;
                         children[nibble] = Some(new_child);
                         let new_node = Node::Branch {
                             children,
@@ -307,7 +299,10 @@ impl MerklePatriciaTrie {
                         Ok(Some(hash))
                     }
                 }
-                Node::Branch { mut children, value } => {
+                Node::Branch {
+                    mut children,
+                    value,
+                } => {
                     if depth >= nibbles.len() {
                         let new_node = Node::Branch {
                             children,
@@ -339,7 +334,9 @@ impl MerklePatriciaTrie {
         let mut children: [Option<NodeHash>; 16] = [None; 16];
 
         if path1.is_empty() && path2.is_empty() {
-            return Err(StorageError::InvalidKey("Cannot create branch with empty paths".to_string()));
+            return Err(StorageError::InvalidKey(
+                "Cannot create branch with empty paths".to_string(),
+            ));
         }
 
         if !path1.is_empty() {
@@ -362,7 +359,13 @@ impl MerklePatriciaTrie {
 
         let node = Node::Branch {
             children,
-            value: if path1.is_empty() { Some(value1) } else if path2.is_empty() { Some(value2) } else { None },
+            value: if path1.is_empty() {
+                Some(value1)
+            } else if path2.is_empty() {
+                Some(value2)
+            } else {
+                None
+            },
         };
         Ok(self.store_node(node))
     }
@@ -401,7 +404,11 @@ impl MerklePatriciaTrie {
 
         let node = Node::Branch {
             children,
-            value: if new_path.is_empty() { Some(new_value) } else { None },
+            value: if new_path.is_empty() {
+                Some(new_value)
+            } else {
+                None
+            },
         };
         Ok(self.store_node(node))
     }
@@ -567,8 +574,7 @@ impl MerklePatriciaTrie {
                     return Err(StorageError::InvalidMerkleProof);
                 }
                 let new_depth = depth + path.len();
-                let child_hash =
-                    Self::compute_proof_root(proof, nibbles, index + 1, new_depth)?;
+                let child_hash = Self::compute_proof_root(proof, nibbles, index + 1, new_depth)?;
                 let node = Node::Extension {
                     path: path.clone(),
                     child: child_hash,
@@ -588,12 +594,8 @@ impl MerklePatriciaTrie {
                     // claimed (this is the binding step that prevents
                     // a malicious prover from substituting children).
                     if index + 1 < proof.len() {
-                        let recomputed = Self::compute_proof_root(
-                            proof,
-                            nibbles,
-                            index + 1,
-                            depth + 1,
-                        )?;
+                        let recomputed =
+                            Self::compute_proof_root(proof, nibbles, index + 1, depth + 1)?;
                         match reconstructed[nibble] {
                             Some(claimed) if claimed != recomputed => {
                                 return Err(StorageError::InvalidMerkleProof);
@@ -850,9 +852,7 @@ mod tests {
         assert!(proof.proof.is_empty());
         assert!(MerklePatriciaTrie::verify_proof(&proof, Hash::zero(), None).unwrap());
         // An empty proof against a non-zero root must not verify.
-        assert!(
-            !MerklePatriciaTrie::verify_proof(&proof, Hash::new([1u8; 32]), None).unwrap()
-        );
+        assert!(!MerklePatriciaTrie::verify_proof(&proof, Hash::new([1u8; 32]), None).unwrap());
     }
 
     #[test]
@@ -887,8 +887,6 @@ mod tests {
             "proof should carry sibling hashes for branch nodes"
         );
 
-        assert!(
-            MerklePatriciaTrie::verify_proof(&proof, root, Some(b"v10")).unwrap()
-        );
+        assert!(MerklePatriciaTrie::verify_proof(&proof, root, Some(b"v10")).unwrap());
     }
 }

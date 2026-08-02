@@ -395,18 +395,17 @@ mod onnx_backend {
     }
 
     impl Segmenter for GenericSamSegmenter {
-        fn segment(
-            &self,
-            image_bytes: &[u8],
-            prompts: &[SegmentPrompt],
-        ) -> Result<SegmentResult> {
+        fn segment(&self, image_bytes: &[u8], prompts: &[SegmentPrompt]) -> Result<SegmentResult> {
             if image_bytes.is_empty() {
-                return Err(ModelError::InvalidModel("image bytes are empty".to_string()));
+                return Err(ModelError::InvalidModel(
+                    "image bytes are empty".to_string(),
+                ));
             }
 
             let start = Instant::now();
             let prep = self.preprocess(image_bytes)?;
-            let (coords, labels) = self.collect_prompt_tensors(prompts, prep.scale_x, prep.scale_y)?;
+            let (coords, labels) =
+                self.collect_prompt_tensors(prompts, prep.scale_x, prep.scale_y)?;
 
             // ── Encoder pass ────────────────────────────────────────
             let image_tensor = Tensor::from_array(prep.tensor)
@@ -420,11 +419,8 @@ mod onnx_backend {
                 // session — session.outputs is borrowed immutably, and the
                 // SessionOutputs returned by run() holds the &mut for the rest
                 // of this scope.
-                let output_names: Vec<String> = session
-                    .outputs
-                    .iter()
-                    .map(|o| o.name.clone())
-                    .collect();
+                let output_names: Vec<String> =
+                    session.outputs.iter().map(|o| o.name.clone()).collect();
                 let outputs = session
                     .run(ort::inputs![self.encoder_input_name.as_str() => image_tensor])
                     .map_err(|e| ModelError::InferenceError(format!("encoder run: {}", e)))?;
@@ -432,16 +428,10 @@ mod onnx_backend {
                 let mut collected = Vec::with_capacity(output_names.len());
                 for name in output_names {
                     let v = outputs.get(name.as_str()).ok_or_else(|| {
-                        ModelError::InferenceError(format!(
-                            "encoder missing output '{}'",
-                            name
-                        ))
+                        ModelError::InferenceError(format!("encoder missing output '{}'", name))
                     })?;
                     let (shape, data) = v.try_extract_tensor::<f32>().map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "encoder extract '{}': {}",
-                            name, e
-                        ))
+                        ModelError::InferenceError(format!("encoder extract '{}': {}", name, e))
                     })?;
                     collected.push((name, shape.iter().copied().collect(), data.to_vec()));
                 }
@@ -475,20 +465,15 @@ mod onnx_backend {
                     // and chongzhou/EdgeSAM exports):
                     //   image_embeddings, point_coords, point_labels,
                     //   mask_input, has_mask_input, orig_im_size
-                    let (_name, _shape, embed) = enc_outputs
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| {
+                    let (_name, _shape, embed) =
+                        enc_outputs.into_iter().next().ok_or_else(|| {
                             ModelError::InferenceError("SAM 1 encoder produced no outputs".into())
                         })?;
                     // image_embeddings is [1, 256, 64, 64]
-                    let embed_arr = ndarray::Array4::<f32>::from_shape_vec(
-                        (1, 256, 64, 64),
-                        embed,
-                    )
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("SAM 1 embed reshape: {}", e))
-                    })?;
+                    let embed_arr = ndarray::Array4::<f32>::from_shape_vec((1, 256, 64, 64), embed)
+                        .map_err(|e| {
+                            ModelError::InferenceError(format!("SAM 1 embed reshape: {}", e))
+                        })?;
                     let embed_tensor = Tensor::from_array(embed_arr).map_err(|e| {
                         ModelError::InferenceError(format!("SAM 1 embed tensor: {}", e))
                     })?;
@@ -545,35 +530,25 @@ mod onnx_backend {
                         ModelError::InferenceError("SAM 2 encoder missing 'image_embed'".into())
                     })?;
 
-                    let hr0_arr = ndarray::Array4::<f32>::from_shape_vec(
-                        (1, 32, 256, 256),
-                        high_res_0,
-                    )
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("high_res_0 reshape: {}", e))
-                    })?;
-                    let hr1_arr = ndarray::Array4::<f32>::from_shape_vec(
-                        (1, 64, 128, 128),
-                        high_res_1,
-                    )
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("high_res_1 reshape: {}", e))
-                    })?;
-                    let embed_arr = ndarray::Array4::<f32>::from_shape_vec(
-                        (1, 256, 64, 64),
-                        embed,
-                    )
-                    .map_err(|e| ModelError::InferenceError(format!("embed reshape: {}", e)))?;
+                    let hr0_arr =
+                        ndarray::Array4::<f32>::from_shape_vec((1, 32, 256, 256), high_res_0)
+                            .map_err(|e| {
+                                ModelError::InferenceError(format!("high_res_0 reshape: {}", e))
+                            })?;
+                    let hr1_arr =
+                        ndarray::Array4::<f32>::from_shape_vec((1, 64, 128, 128), high_res_1)
+                            .map_err(|e| {
+                                ModelError::InferenceError(format!("high_res_1 reshape: {}", e))
+                            })?;
+                    let embed_arr = ndarray::Array4::<f32>::from_shape_vec((1, 256, 64, 64), embed)
+                        .map_err(|e| ModelError::InferenceError(format!("embed reshape: {}", e)))?;
 
-                    let hr0_tensor = Tensor::from_array(hr0_arr).map_err(|e| {
-                        ModelError::InferenceError(format!("hr0 tensor: {}", e))
-                    })?;
-                    let hr1_tensor = Tensor::from_array(hr1_arr).map_err(|e| {
-                        ModelError::InferenceError(format!("hr1 tensor: {}", e))
-                    })?;
-                    let embed_tensor = Tensor::from_array(embed_arr).map_err(|e| {
-                        ModelError::InferenceError(format!("embed tensor: {}", e))
-                    })?;
+                    let hr0_tensor = Tensor::from_array(hr0_arr)
+                        .map_err(|e| ModelError::InferenceError(format!("hr0 tensor: {}", e)))?;
+                    let hr1_tensor = Tensor::from_array(hr1_arr)
+                        .map_err(|e| ModelError::InferenceError(format!("hr1 tensor: {}", e)))?;
+                    let embed_tensor = Tensor::from_array(embed_arr)
+                        .map_err(|e| ModelError::InferenceError(format!("embed tensor: {}", e)))?;
 
                     feed.push(("image_embed".into(), embed_tensor.into()));
                     feed.push(("high_res_feats_0".into(), hr0_tensor.into()));
@@ -604,9 +579,7 @@ mod onnx_backend {
                 // The IoU output is called `iou_predictions` in both
                 // dialects.
                 let iou_v = outputs.get("iou_predictions").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "decoder missing 'iou_predictions' output".into(),
-                    )
+                    ModelError::InferenceError("decoder missing 'iou_predictions' output".into())
                 })?;
                 let (_is, id) = iou_v
                     .try_extract_tensor::<f32>()
@@ -698,8 +671,7 @@ impl SegmentationRuntime {
         family: SamFamily,
         input_size: u32,
     ) -> Result<()> {
-        let model =
-            GenericSamSegmenter::from_onnx(encoder_path, decoder_path, family, input_size)?;
+        let model = GenericSamSegmenter::from_onnx(encoder_path, decoder_path, family, input_size)?;
         self.models
             .insert(model_id.into(), Arc::new(model) as Arc<dyn Segmenter>);
         Ok(())

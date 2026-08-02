@@ -15,10 +15,8 @@
 use std::borrow::Cow;
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_router, Json,
+    Json, handler::server::router::tool::ToolRouter, handler::server::wrapper::Parameters,
+    model::*, tool, tool_router,
 };
 use serde::Deserialize;
 
@@ -324,7 +322,9 @@ pub struct LzQuoteFeeParams {
     pub dst_eid: u32,
     #[schemars(description = "Hex-encoded message payload (with or without 0x prefix)")]
     pub message_hex: String,
-    #[schemars(description = "Hex-encoded LayerZero V3 options bytes (default: lzReceive with 200000 gas if omitted)")]
+    #[schemars(
+        description = "Hex-encoded LayerZero V3 options bytes (default: lzReceive with 200000 gas if omitted)"
+    )]
     pub options_hex: Option<String>,
     #[schemars(description = "Hex-encoded sender address (20 bytes, with or without 0x prefix)")]
     pub sender_hex: String,
@@ -340,13 +340,17 @@ pub struct LzSendMessageParams {
     pub receiver: String,
     #[schemars(description = "Hex-encoded message payload")]
     pub message_hex: String,
-    #[schemars(description = "Hex-encoded LayerZero V3 options bytes (default: lzReceive with 200000 gas if omitted)")]
+    #[schemars(
+        description = "Hex-encoded LayerZero V3 options bytes (default: lzReceive with 200000 gas if omitted)"
+    )]
     pub options_hex: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LzTrackMessageParams {
-    #[schemars(description = "Transaction hash to track LayerZero message for (with or without 0x prefix)")]
+    #[schemars(
+        description = "Transaction hash to track LayerZero message for (with or without 0x prefix)"
+    )]
     pub tx_hash: String,
 }
 
@@ -393,7 +397,9 @@ pub struct LzListDvnsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LzGetMessagesByAddressParams {
-    #[schemars(description = "Wallet address to get LayerZero messages for (hex, with or without 0x prefix)")]
+    #[schemars(
+        description = "Wallet address to get LayerZero messages for (hex, with or without 0x prefix)"
+    )]
     pub address: String,
     #[schemars(description = "Maximum number of messages to return (default: 10)")]
     pub limit: Option<u32>,
@@ -406,7 +412,9 @@ pub struct LzListChainsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LzGetChainRpcParams {
-    #[schemars(description = "Chain name to get RPC URL for (e.g. 'ethereum', 'arbitrum', 'base')")]
+    #[schemars(
+        description = "Chain name to get RPC URL for (e.g. 'ethereum', 'arbitrum', 'base')"
+    )]
     pub chain_name: String,
 }
 
@@ -418,11 +426,17 @@ pub struct LzTransferQuoteParams {
     pub src_chain: String,
     #[schemars(description = "Destination chain key (e.g. 'base', 'solana', 'ethereum')")]
     pub dst_chain: String,
-    #[schemars(description = "Source token address (use 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE for native ETH, or contract address for ERC-20)")]
+    #[schemars(
+        description = "Source token address (use 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE for native ETH, or contract address for ERC-20)"
+    )]
     pub src_token: String,
-    #[schemars(description = "Destination token address (use 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE for native ETH)")]
+    #[schemars(
+        description = "Destination token address (use 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE for native ETH)"
+    )]
     pub dst_token: String,
-    #[schemars(description = "Amount to transfer in base units (wei for ETH, smallest unit for tokens)")]
+    #[schemars(
+        description = "Amount to transfer in base units (wei for ETH, smallest unit for tokens)"
+    )]
     pub amount: String,
     #[schemars(description = "Sender wallet address on the source chain")]
     pub src_address: String,
@@ -457,13 +471,17 @@ pub struct LzTransferTokensParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LzStargateQuoteParams {
-    #[schemars(description = "Source chain name (e.g. 'optimism', 'ethereum', 'base', 'arbitrum')")]
+    #[schemars(
+        description = "Source chain name (e.g. 'optimism', 'ethereum', 'base', 'arbitrum')"
+    )]
     pub src_chain: String,
     #[schemars(description = "Destination chain name (e.g. 'base', 'ethereum', 'arbitrum')")]
     pub dst_chain: String,
     #[schemars(description = "Token symbol: 'ETH', 'USDC', or 'USDT'")]
     pub token: String,
-    #[schemars(description = "Amount to bridge in base units (wei for ETH, micro-units for USDC/USDT)")]
+    #[schemars(
+        description = "Amount to bridge in base units (wei for ETH, micro-units for USDC/USDT)"
+    )]
     pub amount: String,
     #[schemars(description = "Sender/recipient wallet address (hex, 20 bytes)")]
     pub wallet_address: String,
@@ -471,13 +489,17 @@ pub struct LzStargateQuoteParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LzStargateSendParams {
-    #[schemars(description = "Source chain name (e.g. 'optimism', 'ethereum', 'base', 'arbitrum')")]
+    #[schemars(
+        description = "Source chain name (e.g. 'optimism', 'ethereum', 'base', 'arbitrum')"
+    )]
     pub src_chain: String,
     #[schemars(description = "Destination chain name (e.g. 'base', 'ethereum', 'arbitrum')")]
     pub dst_chain: String,
     #[schemars(description = "Token symbol: 'ETH', 'USDC', or 'USDT'")]
     pub token: String,
-    #[schemars(description = "Amount to bridge in base units (wei for ETH, micro-units for USDC/USDT)")]
+    #[schemars(
+        description = "Amount to bridge in base units (wei for ETH, micro-units for USDC/USDT)"
+    )]
     pub amount: String,
     #[schemars(description = "Sender/recipient wallet address (hex, 20 bytes)")]
     pub wallet_address: String,
@@ -495,11 +517,17 @@ pub struct LzOftSendParams {
     pub dst_chain: String,
     #[schemars(description = "OFT contract address on the source chain (hex, 20 bytes)")]
     pub oft_address: String,
-    #[schemars(description = "Recipient address (hex, 20 bytes for EVM — will be left-padded to bytes32)")]
+    #[schemars(
+        description = "Recipient address (hex, 20 bytes for EVM — will be left-padded to bytes32)"
+    )]
     pub recipient: String,
-    #[schemars(description = "Amount to send in shared decimals (amountSD, uint64 — OFT V2 uses shared decimals, not local decimals)")]
+    #[schemars(
+        description = "Amount to send in shared decimals (amountSD, uint64 — OFT V2 uses shared decimals, not local decimals)"
+    )]
     pub amount: String,
-    #[schemars(description = "Minimum amount to receive in shared decimals (minAmountSD, uint64 — default: 90% of amount)")]
+    #[schemars(
+        description = "Minimum amount to receive in shared decimals (minAmountSD, uint64 — default: 90% of amount)"
+    )]
     pub min_amount: Option<String>,
     #[schemars(description = "Gas limit for lzReceive on destination (default: 200000)")]
     pub gas_limit: Option<u128>,
@@ -507,9 +535,13 @@ pub struct LzOftSendParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LzBroadcastSignedTxParams {
-    #[schemars(description = "Source chain name (e.g. 'ethereum', 'arbitrum', 'base', 'optimism', 'polygon', 'avalanche', 'bsc')")]
+    #[schemars(
+        description = "Source chain name (e.g. 'ethereum', 'arbitrum', 'base', 'optimism', 'polygon', 'avalanche', 'bsc')"
+    )]
     pub src_chain: String,
-    #[schemars(description = "Pre-signed Ethereum transaction in hex format (the 0x-prefixed RLP-encoded signed transaction). Construct calldata via lz_send_message / lz_oft_send / lz_stargate_send / lz_transfer_build, sign locally with msg.value = nativeFee, then submit here.")]
+    #[schemars(
+        description = "Pre-signed Ethereum transaction in hex format (the 0x-prefixed RLP-encoded signed transaction). Construct calldata via lz_send_message / lz_oft_send / lz_stargate_send / lz_transfer_build, sign locally with msg.value = nativeFee, then submit here."
+    )]
     pub signed_tx_hex: String,
 }
 
@@ -527,7 +559,9 @@ fn err_invalid_params(msg: impl Into<String>) -> ErrorData {
     }
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn json_result(
+    value: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
@@ -538,7 +572,9 @@ fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthro
 /// `lz_oft_send`, `lz_stargate_send`, `lz_transfer_build`) all instruct the
 /// caller to sign and broadcast — `lz_broadcast_signed_tx` is the canonical
 /// broadcast path.
-fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn text_result(
+    text: impl Into<String>,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput {
         result: serde_json::json!({ "message": text.into() }),
     }))
@@ -642,10 +678,7 @@ impl LayerZeroMcpServer {
     }
 
     /// Execute an HTTP GET against the Scan API.
-    async fn scan_api_get(
-        &self,
-        path: &str,
-    ) -> std::result::Result<serde_json::Value, ErrorData> {
+    async fn scan_api_get(&self, path: &str) -> std::result::Result<serde_json::Value, ErrorData> {
         let url = format!("{}{}", SCAN_API, path);
         let resp = self
             .http
@@ -776,7 +809,9 @@ impl LayerZeroMcpServer {
     //  Messaging Tools
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Estimate cross-chain messaging fee via LayerZero EndpointV2.quote() eth_call. Returns the native fee and LZ token fee required to send a message from the source chain to the destination endpoint. Uses the on-chain EndpointV2 contract at 0x1a44076050125825900e736c501f859c50fE728c. Selector: 0xdb9d28c6.")]
+    #[tool(
+        description = "Estimate cross-chain messaging fee via LayerZero EndpointV2.quote() eth_call. Returns the native fee and LZ token fee required to send a message from the source chain to the destination endpoint. Uses the on-chain EndpointV2 contract at 0x1a44076050125825900e736c501f859c50fE728c. Selector: 0xdb9d28c6."
+    )]
     async fn lz_quote_fee(
         &self,
         Parameters(params): Parameters<LzQuoteFeeParams>,
@@ -804,12 +839,8 @@ impl LayerZeroMcpServer {
         // Use sender padded to bytes32 as the receiver for quoting (receiver does not affect fee)
         let receiver = pad_left_32(&sender_bytes);
 
-        let params_encoded = Self::encode_messaging_params(
-            params.dst_eid,
-            &receiver,
-            &message,
-            &options,
-        );
+        let params_encoded =
+            Self::encode_messaging_params(params.dst_eid, &receiver, &message, &options);
 
         // quote(MessagingParams calldata _params, address _sender)
         //   returns (MessagingFee memory fee)
@@ -853,7 +884,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Build transaction calldata for EndpointV2.send() to dispatch a cross-chain message via LayerZero V2. Returns the hex-encoded calldata that should be submitted as a transaction to the EndpointV2 contract on the source chain. The caller must sign and broadcast the transaction with msg.value set to the nativeFee from lz_quote_fee. Selector: 0x5e280f11.")]
+    #[tool(
+        description = "Build transaction calldata for EndpointV2.send() to dispatch a cross-chain message via LayerZero V2. Returns the hex-encoded calldata that should be submitted as a transaction to the EndpointV2 contract on the source chain. The caller must sign and broadcast the transaction with msg.value set to the nativeFee from lz_quote_fee. Selector: 0x5e280f11."
+    )]
     async fn lz_send_message(
         &self,
         Parameters(params): Parameters<LzSendMessageParams>,
@@ -883,12 +916,8 @@ impl LayerZeroMcpServer {
             Self::build_default_options(200_000, 0)
         };
 
-        let params_encoded = Self::encode_messaging_params(
-            params.dst_eid,
-            &receiver,
-            &message,
-            &options,
-        );
+        let params_encoded =
+            Self::encode_messaging_params(params.dst_eid, &receiver, &message, &options);
 
         // send(MessagingParams calldata _params, address _refundAddress)
         //   returns (MessagingReceipt memory receipt)
@@ -920,7 +949,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Track a cross-chain LayerZero message by the source transaction hash. Queries the LayerZero Scan API for message status: INFLIGHT, CONFIRMING, DELIVERED, FAILED, or BLOCKED. Returns the full message details including source/destination chains, GUID, and current status.")]
+    #[tool(
+        description = "Track a cross-chain LayerZero message by the source transaction hash. Queries the LayerZero Scan API for message status: INFLIGHT, CONFIRMING, DELIVERED, FAILED, or BLOCKED. Returns the full message details including source/destination chains, GUID, and current status."
+    )]
     async fn lz_track_message(
         &self,
         Parameters(params): Parameters<LzTrackMessageParams>,
@@ -949,7 +980,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Get a LayerZero message by its GUID (Global Unique Identifier). The GUID is returned by EndpointV2.send() and can also be found in the Scan API message tracking response.")]
+    #[tool(
+        description = "Get a LayerZero message by its GUID (Global Unique Identifier). The GUID is returned by EndpointV2.send() and can also be found in the Scan API message tracking response."
+    )]
     async fn lz_get_message(
         &self,
         Parameters(params): Parameters<LzGetMessageParams>,
@@ -974,7 +1007,9 @@ impl LayerZeroMcpServer {
     //  OFT (Omnichain Fungible Token)
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Quote an OFT (Omnichain Fungible Token) transfer via the LayerZero Metadata API. Returns estimated fees, exchange rates, and transfer details for bridging tokens between chains using LayerZero's OFT standard.")]
+    #[tool(
+        description = "Quote an OFT (Omnichain Fungible Token) transfer via the LayerZero Metadata API. Returns estimated fees, exchange rates, and transfer details for bridging tokens between chains using LayerZero's OFT standard."
+    )]
     async fn lz_oft_quote(
         &self,
         Parameters(params): Parameters<LzOftQuoteParams>,
@@ -1009,7 +1044,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "List all available OFT (Omnichain Fungible Token) deployments registered in the LayerZero Metadata API. Returns token symbols, contract addresses, supported chains, and deployment details.")]
+    #[tool(
+        description = "List all available OFT (Omnichain Fungible Token) deployments registered in the LayerZero Metadata API. Returns token symbols, contract addresses, supported chains, and deployment details."
+    )]
     async fn lz_oft_list(
         &self,
         Parameters(_params): Parameters<LzOftListParams>,
@@ -1021,7 +1058,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Encode LayerZero TYPE_3 options bytes for use with EndpointV2.quote() and EndpointV2.send(). TYPE_3 (version tag 0x0003) is the current standard options format for LayerZero V2. Builds binary options with executor worker ID 0x01 and option type 1 (lzReceive) with configurable gas limit and native token drop amount. Returns the hex-encoded options bytes.")]
+    #[tool(
+        description = "Encode LayerZero TYPE_3 options bytes for use with EndpointV2.quote() and EndpointV2.send(). TYPE_3 (version tag 0x0003) is the current standard options format for LayerZero V2. Builds binary options with executor worker ID 0x01 and option type 1 (lzReceive) with configurable gas limit and native token drop amount. Returns the hex-encoded options bytes."
+    )]
     async fn lz_encode_options(
         &self,
         Parameters(params): Parameters<LzEncodeOptionsParams>,
@@ -1048,7 +1087,9 @@ impl LayerZeroMcpServer {
     //  Network Tools
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Get LayerZero V2 deployment addresses across all supported chains. Returns EndpointV2, SendLib, ReceiveLib, DVN, and Executor addresses from the LayerZero Metadata API.")]
+    #[tool(
+        description = "Get LayerZero V2 deployment addresses across all supported chains. Returns EndpointV2, SendLib, ReceiveLib, DVN, and Executor addresses from the LayerZero Metadata API."
+    )]
     async fn lz_get_deployments(
         &self,
         Parameters(_params): Parameters<LzGetDeploymentsParams>,
@@ -1061,7 +1102,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "List all Decentralized Verifier Networks (DVNs) registered in the LayerZero V2 protocol. DVNs verify cross-chain messages by attesting to source chain state on the destination chain. Returns DVN names, addresses, supported chains, and configuration details.")]
+    #[tool(
+        description = "List all Decentralized Verifier Networks (DVNs) registered in the LayerZero V2 protocol. DVNs verify cross-chain messages by attesting to source chain state on the destination chain. Returns DVN names, addresses, supported chains, and configuration details."
+    )]
     async fn lz_list_dvns(
         &self,
         Parameters(_params): Parameters<LzListDvnsParams>,
@@ -1073,7 +1116,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Get LayerZero messages for a specific wallet address. Queries the Scan API for all messages sent or received by the given address. Returns message details including status, source/destination chains, and timestamps.")]
+    #[tool(
+        description = "Get LayerZero messages for a specific wallet address. Queries the Scan API for all messages sent or received by the given address. Returns message details including status, source/destination chains, and timestamps."
+    )]
     async fn lz_get_messages_by_address(
         &self,
         Parameters(params): Parameters<LzGetMessagesByAddressParams>,
@@ -1103,7 +1148,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "List all 16 chains supported by this LayerZero MCP server with their Endpoint IDs (EIDs). Includes Ethereum, Arbitrum, Optimism, Polygon, BSC, Avalanche, Base, Solana, zkSync, Sei, Sonic, Berachain, Story, Monad, MegaETH, and Tron. EIDs are used in EndpointV2.quote() and EndpointV2.send() to identify destination chains.")]
+    #[tool(
+        description = "List all 16 chains supported by this LayerZero MCP server with their Endpoint IDs (EIDs). Includes Ethereum, Arbitrum, Optimism, Polygon, BSC, Avalanche, Base, Solana, zkSync, Sei, Sonic, Berachain, Story, Monad, MegaETH, and Tron. EIDs are used in EndpointV2.quote() and EndpointV2.send() to identify destination chains."
+    )]
     async fn lz_list_chains(
         &self,
         Parameters(_params): Parameters<LzListChainsParams>,
@@ -1126,7 +1173,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Get the public RPC URL for a supported chain by name. These RPC URLs are used by the server for eth_call queries against EndpointV2.")]
+    #[tool(
+        description = "Get the public RPC URL for a supported chain by name. These RPC URLs are used by the server for eth_call queries against EndpointV2."
+    )]
     async fn lz_get_chain_rpc(
         &self,
         Parameters(params): Parameters<LzGetChainRpcParams>,
@@ -1154,7 +1203,9 @@ impl LayerZeroMcpServer {
     //  Supports 130+ chains including Solana, unified quoting + build steps
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Get a cross-chain transfer quote from the LayerZero Value Transfer API. This is the newest LayerZero API (replaces deprecated Stargate REST API) supporting 130+ chains including Solana. Returns quotes with fees, estimated times, and a quote ID for building transaction steps. Use 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE as the token address for native ETH.")]
+    #[tool(
+        description = "Get a cross-chain transfer quote from the LayerZero Value Transfer API. This is the newest LayerZero API (replaces deprecated Stargate REST API) supporting 130+ chains including Solana. Returns quotes with fees, estimated times, and a quote ID for building transaction steps. Use 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE as the token address for native ETH."
+    )]
     async fn lz_transfer_quote(
         &self,
         Parameters(params): Parameters<LzTransferQuoteParams>,
@@ -1205,7 +1256,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Build signable transaction steps from a Value Transfer API quote. Takes a quoteId from lz_transfer_quote and returns pre-built transaction calldata (to, data, value) that the caller can sign and broadcast. Handles approval and bridge steps automatically.")]
+    #[tool(
+        description = "Build signable transaction steps from a Value Transfer API quote. Takes a quoteId from lz_transfer_quote and returns pre-built transaction calldata (to, data, value) that the caller can sign and broadcast. Handles approval and bridge steps automatically."
+    )]
     async fn lz_transfer_build(
         &self,
         Parameters(params): Parameters<LzTransferBuildParams>,
@@ -1215,13 +1268,10 @@ impl LayerZeroMcpServer {
         });
 
         let url = format!("{}/build-user-steps", TRANSFER_API);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| err_internal(format!("Value Transfer API build request failed: {}", e)))?;
+        let resp =
+            self.http.post(&url).json(&body).send().await.map_err(|e| {
+                err_internal(format!("Value Transfer API build request failed: {}", e))
+            })?;
 
         let status = resp.status();
         let body_text = resp
@@ -1246,18 +1296,17 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Check the status of a Value Transfer API transfer by its quote ID. Returns current transfer status, source/destination transaction hashes, and delivery progress.")]
+    #[tool(
+        description = "Check the status of a Value Transfer API transfer by its quote ID. Returns current transfer status, source/destination transaction hashes, and delivery progress."
+    )]
     async fn lz_transfer_status(
         &self,
         Parameters(params): Parameters<LzTransferStatusParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = format!("{}/status/{}", TRANSFER_API, params.quote_id);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| err_internal(format!("Value Transfer API status request failed: {}", e)))?;
+        let resp = self.http.get(&url).send().await.map_err(|e| {
+            err_internal(format!("Value Transfer API status request failed: {}", e))
+        })?;
 
         let status = resp.status();
         let body_text = resp
@@ -1281,18 +1330,17 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "List all chains supported by the LayerZero Value Transfer API. Returns 130+ chains including Solana, all EVM L1s and L2s, and their chain keys for use in lz_transfer_quote.")]
+    #[tool(
+        description = "List all chains supported by the LayerZero Value Transfer API. Returns 130+ chains including Solana, all EVM L1s and L2s, and their chain keys for use in lz_transfer_quote."
+    )]
     async fn lz_transfer_chains(
         &self,
         Parameters(_params): Parameters<LzTransferChainsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = format!("{}/chains", TRANSFER_API);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| err_internal(format!("Value Transfer API chains request failed: {}", e)))?;
+        let resp = self.http.get(&url).send().await.map_err(|e| {
+            err_internal(format!("Value Transfer API chains request failed: {}", e))
+        })?;
 
         let status = resp.status();
         let body_text = resp
@@ -1316,7 +1364,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "List tokens available for cross-chain transfer via the LayerZero Value Transfer API. Optionally filter by chain. Returns token addresses, symbols, decimals, and which chains they're available on.")]
+    #[tool(
+        description = "List tokens available for cross-chain transfer via the LayerZero Value Transfer API. Optionally filter by chain. Returns token addresses, symbols, decimals, and which chains they're available on."
+    )]
     async fn lz_transfer_tokens(
         &self,
         Parameters(params): Parameters<LzTransferTokensParams>,
@@ -1327,12 +1377,9 @@ impl LayerZeroMcpServer {
             format!("{}/tokens", TRANSFER_API)
         };
 
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| err_internal(format!("Value Transfer API tokens request failed: {}", e)))?;
+        let resp = self.http.get(&url).send().await.map_err(|e| {
+            err_internal(format!("Value Transfer API tokens request failed: {}", e))
+        })?;
 
         let status = resp.status();
         let body_text = resp
@@ -1362,7 +1409,9 @@ impl LayerZeroMcpServer {
     //  Direct on-chain quoteSend/sendToken for ETH, USDC, USDT
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Quote a Stargate V2 native bridge transfer fee. Calls quoteSend() on the StargatePoolNative contract (ETH, USDC, or USDT) to get the exact LayerZero messaging fee for bridging between supported EVM chains. Returns the fee in wei and the minimum amount received after slippage. Supported tokens: ETH (Ethereum/Optimism/Arbitrum/Base), USDC (6 chains), USDT (6 chains).")]
+    #[tool(
+        description = "Quote a Stargate V2 native bridge transfer fee. Calls quoteSend() on the StargatePoolNative contract (ETH, USDC, or USDT) to get the exact LayerZero messaging fee for bridging between supported EVM chains. Returns the fee in wei and the minimum amount received after slippage. Supported tokens: ETH (Ethereum/Optimism/Arbitrum/Base), USDC (6 chains), USDT (6 chains)."
+    )]
     async fn lz_stargate_quote(
         &self,
         Parameters(params): Parameters<LzStargateQuoteParams>,
@@ -1372,7 +1421,10 @@ impl LayerZeroMcpServer {
         })?;
 
         let dst_eid = chain_eid(&params.dst_chain).ok_or_else(|| {
-            err_invalid_params(format!("Unsupported destination chain '{}'", params.dst_chain))
+            err_invalid_params(format!(
+                "Unsupported destination chain '{}'",
+                params.dst_chain
+            ))
         })?;
 
         let pool = stargate_pool(&params.token, &params.src_chain).ok_or_else(|| {
@@ -1411,14 +1463,14 @@ impl LayerZeroMcpServer {
 
         // SendParam tuple:
         // 7 head words + 3 dynamic tails (all empty bytes)
-        calldata.extend_from_slice(&encode_u32(dst_eid));       // dstEid
-        calldata.extend_from_slice(&to_bytes32);                 // to
-        calldata.extend_from_slice(&encode_u256(amount));        // amountLD
-        calldata.extend_from_slice(&encode_u256(min_amount));    // minAmountLD
+        calldata.extend_from_slice(&encode_u32(dst_eid)); // dstEid
+        calldata.extend_from_slice(&to_bytes32); // to
+        calldata.extend_from_slice(&encode_u256(amount)); // amountLD
+        calldata.extend_from_slice(&encode_u256(min_amount)); // minAmountLD
         // Offsets for dynamic bytes (relative to tuple start = 7 * 32 = 224)
-        calldata.extend_from_slice(&encode_u256(7 * 32));       // offset extraOptions
-        calldata.extend_from_slice(&encode_u256(7 * 32 + 32));  // offset composeMsg
-        calldata.extend_from_slice(&encode_u256(7 * 32 + 64));  // offset oftCmd
+        calldata.extend_from_slice(&encode_u256(7 * 32)); // offset extraOptions
+        calldata.extend_from_slice(&encode_u256(7 * 32 + 32)); // offset composeMsg
+        calldata.extend_from_slice(&encode_u256(7 * 32 + 64)); // offset oftCmd
         // Empty bytes: extraOptions (len=0), composeMsg (len=0), oftCmd (len=0)
         calldata.extend_from_slice(&encode_u256(0)); // extraOptions length
         calldata.extend_from_slice(&encode_u256(0)); // composeMsg length
@@ -1470,7 +1522,9 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Build transaction calldata for a Stargate V2 sendToken() bridge transfer. Returns hex-encoded calldata, the target contract address, and the msg.value to include. The caller must sign and broadcast the transaction. For native ETH, msg.value = nativeFee + bridgeAmount. For ERC-20 tokens (USDC/USDT), approve the pool contract first, then msg.value = nativeFee only. Supported: ETH (4 chains), USDC (6 chains), USDT (6 chains).")]
+    #[tool(
+        description = "Build transaction calldata for a Stargate V2 sendToken() bridge transfer. Returns hex-encoded calldata, the target contract address, and the msg.value to include. The caller must sign and broadcast the transaction. For native ETH, msg.value = nativeFee + bridgeAmount. For ERC-20 tokens (USDC/USDT), approve the pool contract first, then msg.value = nativeFee only. Supported: ETH (4 chains), USDC (6 chains), USDT (6 chains)."
+    )]
     async fn lz_stargate_send(
         &self,
         Parameters(params): Parameters<LzStargateSendParams>,
@@ -1480,7 +1534,10 @@ impl LayerZeroMcpServer {
         })?;
 
         let dst_eid = chain_eid(&params.dst_chain).ok_or_else(|| {
-            err_invalid_params(format!("Unsupported destination chain '{}'", params.dst_chain))
+            err_invalid_params(format!(
+                "Unsupported destination chain '{}'",
+                params.dst_chain
+            ))
         })?;
 
         let pool = stargate_pool(&params.token, &params.src_chain).ok_or_else(|| {
@@ -1490,9 +1547,10 @@ impl LayerZeroMcpServer {
             ))
         })?;
 
-        let amount: u128 = params.amount.parse().map_err(|_| {
-            err_invalid_params("Amount must be a valid integer in base units")
-        })?;
+        let amount: u128 = params
+            .amount
+            .parse()
+            .map_err(|_| err_invalid_params("Amount must be a valid integer in base units"))?;
 
         let wallet_bytes = decode_hex(&params.wallet_address)?;
         if wallet_bytes.len() != 20 {
@@ -1555,9 +1613,9 @@ impl LayerZeroMcpServer {
         calldata.extend_from_slice(&to_bytes32);
         calldata.extend_from_slice(&encode_u256(amount));
         calldata.extend_from_slice(&encode_u256(min_amount));
-        calldata.extend_from_slice(&encode_u256(7 * 32));       // extraOptions offset
-        calldata.extend_from_slice(&encode_u256(7 * 32 + 32));  // composeMsg offset
-        calldata.extend_from_slice(&encode_u256(7 * 32 + 64));  // oftCmd offset
+        calldata.extend_from_slice(&encode_u256(7 * 32)); // extraOptions offset
+        calldata.extend_from_slice(&encode_u256(7 * 32 + 32)); // composeMsg offset
+        calldata.extend_from_slice(&encode_u256(7 * 32 + 64)); // oftCmd offset
         calldata.extend_from_slice(&encode_u256(0)); // extraOptions length
         calldata.extend_from_slice(&encode_u256(0)); // composeMsg length
         calldata.extend_from_slice(&encode_u256(0)); // oftCmd length
@@ -1630,7 +1688,11 @@ impl LayerZeroMcpServer {
             "Sign and submit as a transaction to {}. Set msg.value = {}{}.",
             pool,
             msg_value,
-            if is_native { " (includes bridge amount + LZ fee)" } else { " (LZ fee only — approve ERC-20 first)" }
+            if is_native {
+                " (includes bridge amount + LZ fee)"
+            } else {
+                " (LZ fee only — approve ERC-20 first)"
+            }
         ));
 
         json_result(result)
@@ -1640,7 +1702,9 @@ impl LayerZeroMcpServer {
     //  OFT Send Tool (build calldata for any OFT contract)
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Build transaction calldata for an OFT (Omnichain Fungible Token) send() call on any OFT contract. OFT V2 uses uint64 amountSD (shared decimals) instead of uint256 amountLD. Returns the hex-encoded calldata for OFT.send(SendParam, MessagingFee, refundAddress). The caller must first call lz_quote_fee or lz_oft_quote to get the messaging fee, then sign and broadcast this transaction with msg.value = nativeFee.")]
+    #[tool(
+        description = "Build transaction calldata for an OFT (Omnichain Fungible Token) send() call on any OFT contract. OFT V2 uses uint64 amountSD (shared decimals) instead of uint256 amountLD. Returns the hex-encoded calldata for OFT.send(SendParam, MessagingFee, refundAddress). The caller must first call lz_quote_fee or lz_oft_quote to get the messaging fee, then sign and broadcast this transaction with msg.value = nativeFee."
+    )]
     async fn lz_oft_send(
         &self,
         Parameters(params): Parameters<LzOftSendParams>,
@@ -1650,23 +1714,32 @@ impl LayerZeroMcpServer {
         })?;
 
         let dst_eid = chain_eid(&params.dst_chain).ok_or_else(|| {
-            err_invalid_params(format!("Unsupported destination chain '{}'", params.dst_chain))
+            err_invalid_params(format!(
+                "Unsupported destination chain '{}'",
+                params.dst_chain
+            ))
         })?;
 
         // OFT V2 uses uint64 amountSD (shared decimals), not uint256 amountLD
         let amount_sd: u64 = params.amount.parse().map_err(|_| {
-            err_invalid_params("Amount must be a valid uint64 integer in shared decimals (amountSD)")
+            err_invalid_params(
+                "Amount must be a valid uint64 integer in shared decimals (amountSD)",
+            )
         })?;
 
         let min_amount_sd: u64 = if let Some(ref min) = params.min_amount {
-            min.parse().map_err(|_| err_invalid_params("min_amount must be a valid uint64 integer (amountSD)"))?
+            min.parse().map_err(|_| {
+                err_invalid_params("min_amount must be a valid uint64 integer (amountSD)")
+            })?
         } else {
             amount_sd * 90 / 100
         };
 
         let recipient_bytes = decode_hex(&params.recipient)?;
         if recipient_bytes.len() != 20 {
-            return Err(err_invalid_params("Recipient must be 20 bytes (EVM address)"));
+            return Err(err_invalid_params(
+                "Recipient must be 20 bytes (EVM address)",
+            ));
         }
         let to_bytes32 = pad_left_32(&recipient_bytes);
 
@@ -1694,8 +1767,8 @@ impl LayerZeroMcpServer {
         quote_calldata.extend_from_slice(&encode_bool(false)); // payInLzToken
         quote_calldata.extend_from_slice(&encode_u32(dst_eid));
         quote_calldata.extend_from_slice(&to_bytes32);
-        quote_calldata.extend_from_slice(&encode_u64(amount_sd));       // amountSD (uint64)
-        quote_calldata.extend_from_slice(&encode_u64(min_amount_sd));   // minAmountSD (uint64)
+        quote_calldata.extend_from_slice(&encode_u64(amount_sd)); // amountSD (uint64)
+        quote_calldata.extend_from_slice(&encode_u64(min_amount_sd)); // minAmountSD (uint64)
         quote_calldata.extend_from_slice(&encode_u256(extra_options_offset as u128));
         quote_calldata.extend_from_slice(&encode_u256(compose_msg_offset as u128));
         quote_calldata.extend_from_slice(&encode_u256(oft_cmd_offset as u128));
@@ -1703,7 +1776,9 @@ impl LayerZeroMcpServer {
         quote_calldata.extend_from_slice(&empty_bytes_encoded); // composeMsg
         quote_calldata.extend_from_slice(&empty_bytes_encoded); // oftCmd
 
-        let quote_result = self.eth_call(&rpc_url, oft_address, &quote_calldata).await?;
+        let quote_result = self
+            .eth_call(&rpc_url, oft_address, &quote_calldata)
+            .await?;
         if quote_result.len() < 64 {
             return Err(err_internal("quoteSend returned invalid data"));
         }
@@ -1725,8 +1800,8 @@ impl LayerZeroMcpServer {
         // SendParam tuple with options (OFT V2: uint64 amountSD)
         calldata.extend_from_slice(&encode_u32(dst_eid));
         calldata.extend_from_slice(&to_bytes32);
-        calldata.extend_from_slice(&encode_u64(amount_sd));         // amountSD (uint64)
-        calldata.extend_from_slice(&encode_u64(min_amount_sd));     // minAmountSD (uint64)
+        calldata.extend_from_slice(&encode_u64(amount_sd)); // amountSD (uint64)
+        calldata.extend_from_slice(&encode_u64(min_amount_sd)); // minAmountSD (uint64)
         calldata.extend_from_slice(&encode_u256(extra_options_offset as u128));
         calldata.extend_from_slice(&encode_u256(compose_msg_offset as u128));
         calldata.extend_from_slice(&encode_u256(oft_cmd_offset as u128));
@@ -1753,20 +1828,22 @@ impl LayerZeroMcpServer {
         }))
     }
 
-    #[tool(description = "Broadcast a pre-signed Ethereum transaction via eth_sendRawTransaction on the source chain RPC. Use this as the canonical broadcast path for calldata produced by lz_send_message (EndpointV2.send), lz_oft_send (OFT.send), lz_stargate_send (StargatePoolNative.sendToken), and lz_transfer_build (Value Transfer API steps). Returns the transaction hash on success. The caller must construct calldata, sign locally with msg.value = nativeFee from the corresponding quote tool, then submit the RLP-encoded signed tx hex here.")]
+    #[tool(
+        description = "Broadcast a pre-signed Ethereum transaction via eth_sendRawTransaction on the source chain RPC. Use this as the canonical broadcast path for calldata produced by lz_send_message (EndpointV2.send), lz_oft_send (OFT.send), lz_stargate_send (StargatePoolNative.sendToken), and lz_transfer_build (Value Transfer API steps). Returns the transaction hash on success. The caller must construct calldata, sign locally with msg.value = nativeFee from the corresponding quote tool, then submit the RLP-encoded signed tx hex here."
+    )]
     async fn lz_broadcast_signed_tx(
         &self,
         Parameters(params): Parameters<LzBroadcastSignedTxParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
-            err_invalid_params(format!("Unknown chain: {}", params.src_chain))
-        })?;
+        let rpc_url = chain_rpc(&params.src_chain)
+            .ok_or_else(|| err_invalid_params(format!("Unknown chain: {}", params.src_chain)))?;
 
-        let raw = if params.signed_tx_hex.starts_with("0x") || params.signed_tx_hex.starts_with("0X") {
-            params.signed_tx_hex.clone()
-        } else {
-            format!("0x{}", params.signed_tx_hex)
-        };
+        let raw =
+            if params.signed_tx_hex.starts_with("0x") || params.signed_tx_hex.starts_with("0X") {
+                params.signed_tx_hex.clone()
+            } else {
+                format!("0x{}", params.signed_tx_hex)
+            };
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1800,7 +1877,10 @@ impl LayerZeroMcpServer {
             .map_err(|e| err_internal(format!("Failed to parse RPC response: {}", e)))?;
 
         if let Some(error) = json.get("error") {
-            return Err(err_internal(format!("eth_sendRawTransaction error: {}", error)));
+            return Err(err_internal(format!(
+                "eth_sendRawTransaction error: {}",
+                error
+            )));
         }
 
         let tx_hash = json
@@ -1884,7 +1964,7 @@ pub async fn start_layerzero_mcp_server_with_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let config = StreamableHttpServerConfig::default()
@@ -1907,11 +1987,18 @@ pub async fn start_layerzero_mcp_server_with_shutdown(
     let app = axum::Router::new()
         .nest_service("/mcp", service)
         .layer(tower::limit::ConcurrencyLimitLayer::new(100))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            2 * 1024 * 1024,
+        ));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await
-        .map_err(|e| format!("Failed to bind LayerZero MCP server to {}: {}", listen_addr, e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to bind LayerZero MCP server to {}: {}",
+                listen_addr, e
+            )
+        })?;
 
     tracing::info!(
         "LayerZero MCP server listening on {} (Streamable HTTP, stateless)",

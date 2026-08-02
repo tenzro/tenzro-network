@@ -399,12 +399,7 @@ impl ModelLibrary {
     }
 
     /// Checks if provider meets model compatibility requirements
-    pub fn check_compatibility(
-        &self,
-        model_id: &str,
-        vram_gb: u32,
-        ram_gb: u32,
-    ) -> Result<bool> {
+    pub fn check_compatibility(&self, model_id: &str, vram_gb: u32, ram_gb: u32) -> Result<bool> {
         if let Some(requirements) = self.get_requirements(model_id) {
             Ok(requirements.is_compatible(vram_gb, ram_gb))
         } else {

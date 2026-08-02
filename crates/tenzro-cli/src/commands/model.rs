@@ -2,9 +2,9 @@
 //!
 //! Uses tenzro-model crate directly for local model catalog, download, serve, and delete.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output::{self};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Model management commands
 #[derive(Debug, Subcommand)]
@@ -103,14 +103,11 @@ pub struct ModelListCmd {
 
 impl ModelListCmd {
     pub async fn execute(&self) -> Result<()> {
-        use tenzro_model::{get_model_catalog, HfDownloader};
+        use tenzro_model::{HfDownloader, get_model_catalog};
 
         output::print_header("Available Models");
 
-        let models_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".tenzro")
-            .join("models");
+        let models_dir = tenzro_types::paths::models_dir();
         let downloader = HfDownloader::new(models_dir);
 
         let catalog = get_model_catalog();
@@ -120,14 +117,22 @@ impl ModelListCmd {
         let served_models = config.served_models;
 
         if self.format == "json" {
-            let json_models: Vec<serde_json::Value> = catalog.iter()
+            let json_models: Vec<serde_json::Value> = catalog
+                .iter()
                 .filter(|m| {
                     if let Some(ref family) = self.family
-                        && m.family != *family { return false; }
+                        && m.family != *family
+                    {
+                        return false;
+                    }
                     let is_downloaded = downloader.is_downloaded(&m.id);
                     let is_serving = served_models.contains(&m.id);
-                    if self.downloaded && !is_downloaded { return false; }
-                    if self.serving && !is_serving { return false; }
+                    if self.downloaded && !is_downloaded {
+                        return false;
+                    }
+                    if self.serving && !is_serving {
+                        return false;
+                    }
                     true
                 })
                 .map(|m| {
@@ -166,23 +171,42 @@ impl ModelListCmd {
             return Ok(());
         }
 
-        let headers = vec!["Model ID", "Name", "Params", "Quant", "Size", "Availability", "Cost"];
+        let headers = vec![
+            "Model ID",
+            "Name",
+            "Params",
+            "Quant",
+            "Size",
+            "Availability",
+            "Cost",
+        ];
         let mut rows = Vec::new();
 
         for m in &catalog {
             if let Some(ref family) = self.family
-                && m.family != *family { continue; }
+                && m.family != *family
+            {
+                continue;
+            }
 
             let is_downloaded = downloader.is_downloaded(&m.id);
             let is_serving = served_models.contains(&m.id);
 
-            if self.downloaded && !is_downloaded { continue; }
-            if self.serving && !is_serving { continue; }
+            if self.downloaded && !is_downloaded {
+                continue;
+            }
+            if self.serving && !is_serving {
+                continue;
+            }
 
             let availability = if is_serving {
                 format!("{}local{}", output::colors::GREEN, output::colors::RESET)
             } else if is_downloaded {
-                format!("{}downloaded{}", output::colors::CYAN, output::colors::RESET)
+                format!(
+                    "{}downloaded{}",
+                    output::colors::CYAN,
+                    output::colors::RESET
+                )
             } else {
                 "downloadable".to_string()
             };
@@ -226,7 +250,7 @@ pub struct ModelInfoCmd {
 
 impl ModelInfoCmd {
     pub async fn execute(&self) -> Result<()> {
-        use tenzro_model::{get_model_by_id, HfDownloader};
+        use tenzro_model::{HfDownloader, get_model_by_id};
 
         let entry = get_model_by_id(&self.model_id);
 
@@ -234,10 +258,7 @@ impl ModelInfoCmd {
             Some(m) => {
                 output::print_header(&format!("Model Information: {}", self.model_id));
 
-                let models_dir = dirs::home_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join(".tenzro")
-                    .join("models");
+                let models_dir = tenzro_types::paths::models_dir();
                 let downloader = HfDownloader::new(models_dir);
                 let is_downloaded = downloader.is_downloaded(&m.id);
 
@@ -321,13 +342,27 @@ impl ModelInfoCmd {
                 if s.min_p > 0.0 {
                     output::print_field("Serving — Min-P", &s.min_p.to_string());
                 }
+                if s.presence_penalty > 0.0 {
+                    output::print_field(
+                        "Serving — Presence Penalty",
+                        &s.presence_penalty.to_string(),
+                    );
+                }
                 output::print_field(
                     "Serving — Chat Template (jinja)",
-                    if s.jinja_required { "required" } else { "optional" },
+                    if s.jinja_required {
+                        "required"
+                    } else {
+                        "optional"
+                    },
                 );
                 output::print_field(
                     "Serving — Reasoning",
-                    if s.reasoning_default { "on by default" } else { "off by default" },
+                    if s.reasoning_default {
+                        "on by default"
+                    } else {
+                        "off by default"
+                    },
                 );
 
                 println!();
@@ -347,7 +382,10 @@ impl ModelInfoCmd {
                     if let Some(size) = downloader.downloaded_size(&m.id) {
                         output::print_field("Local Size", &format_bytes(size));
                     }
-                    output::print_field("Local Path", &downloader.model_path(&m.id).display().to_string());
+                    output::print_field(
+                        "Local Path",
+                        &downloader.model_path(&m.id).display().to_string(),
+                    );
                 }
             }
             None => {
@@ -420,8 +458,14 @@ impl ModelDownloadCmd {
 
         spinner.finish_and_clear();
 
-        let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-        if status.to_lowercase().contains("complet") || status.to_lowercase().contains("ok") || status.to_lowercase().contains("success") {
+        let status = result
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if status.to_lowercase().contains("complet")
+            || status.to_lowercase().contains("ok")
+            || status.to_lowercase().contains("success")
+        {
             output::print_success(&format!("Model '{}' downloaded on node", self.model_id));
         } else {
             output::print_field("Status", status);
@@ -434,51 +478,57 @@ impl ModelDownloadCmd {
     }
 
     async fn execute_local(&self) -> Result<()> {
-        use tenzro_model::{get_model_by_id, HfDownloader};
+        use tenzro_model::{HfDownloader, get_model_by_id};
 
         let entry = match get_model_by_id(&self.model_id) {
             Some(e) => e,
-            None => return Err(anyhow::anyhow!(
-                "Model '{}' not found in catalog. Use 'tenzro model list' to see available models.",
-                self.model_id
-            )),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found in catalog. Use 'tenzro model list' to see available models.",
+                    self.model_id
+                ));
+            }
         };
 
-        let models_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".tenzro")
-            .join("models");
+        let models_dir = tenzro_types::paths::models_dir();
         let downloader = HfDownloader::new(models_dir);
 
         if downloader.is_downloaded(&self.model_id) {
             output::print_success(&format!("Model '{}' is already downloaded", self.model_id));
-            output::print_field("Path", &downloader.model_path(&self.model_id).display().to_string());
+            output::print_field(
+                "Path",
+                &downloader.model_path(&self.model_id).display().to_string(),
+            );
             return Ok(());
         }
 
         output::print_header(&format!("Downloading Model: {}", entry.name));
         println!();
         output::print_field("Model", &entry.name);
-        output::print_field("Source", &format!("{}/{}", entry.hf_repo, entry.hf_filename));
+        output::print_field(
+            "Source",
+            &format!("{}/{}", entry.hf_repo, entry.hf_filename),
+        );
         output::print_field("Size", &format_bytes(entry.size_bytes));
         println!();
 
         let pb_label = match self.policy() {
             tenzro_model::SourcePolicy::Network => "Downloading from verified network providers...",
             tenzro_model::SourcePolicy::HuggingFace => "Downloading from HuggingFace...",
-            tenzro_model::SourcePolicy::Auto => "Downloading (network-first, HuggingFace fallback)...",
+            tenzro_model::SourcePolicy::Auto => {
+                "Downloading (network-first, HuggingFace fallback)..."
+            }
         };
         let pb = output::create_progress_bar(entry.size_bytes, pb_label);
 
-        let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(
-            tenzro_model::DownloadProgress {
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::watch::channel(tenzro_model::DownloadProgress {
                 model_id: self.model_id.clone(),
                 status: tenzro_model::DownloadState::Pending,
                 progress_percent: 0.0,
                 downloaded_bytes: 0,
                 total_bytes: entry.size_bytes,
-            }
-        );
+            });
 
         // Monitor progress in background
         let pb_clone = pb.clone();
@@ -490,7 +540,10 @@ impl ModelDownloadCmd {
         });
 
         // Perform download
-        match downloader.download_model(&entry, None, self.policy(), progress_tx).await {
+        match downloader
+            .download_model(&entry, None, self.policy(), progress_tx)
+            .await
+        {
             Ok(path) => {
                 pb.finish_with_message("Download complete!");
                 output::print_success(&format!("Model downloaded to: {}", path.display()));
@@ -601,16 +654,27 @@ impl ModelServeCmd {
                 req["api_key"] = serde_json::json!(key);
             }
         }
-        let result: serde_json::Value = rpc.call("tenzro_serveModel", req)
-            .await.map_err(|e| anyhow::anyhow!("Serve request failed: {}", e))?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_serveModel", req)
+            .await
+            .map_err(|e| anyhow::anyhow!("Serve request failed: {}", e))?;
 
         spinner.finish_and_clear();
 
         if let Some(mc) = result.get("max_concurrent").and_then(|v| v.as_u64()) {
-            output::print_success(&format!("Model '{}' is now serving on node (max_concurrent: {})", self.model_id, mc));
+            output::print_success(&format!(
+                "Model '{}' is now serving on node (max_concurrent: {})",
+                self.model_id, mc
+            ));
         } else {
-            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
-            output::print_success(&format!("Model '{}' serve request sent — status: {}", self.model_id, status));
+            let status = result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ok");
+            output::print_success(&format!(
+                "Model '{}' serve request sent — status: {}",
+                self.model_id, status
+            ));
         }
         if let Some(ep) = result.get("api_endpoint").and_then(|v| v.as_str()) {
             output::print_field("API Endpoint", ep);
@@ -622,31 +686,35 @@ impl ModelServeCmd {
             output::print_field("Engine URL", base);
         }
         println!();
-        output::print_info(&format!("Use 'tenzro chat {} --rpc {}' to interact.", self.model_id, rpc_url));
+        output::print_info(&format!(
+            "Use 'tenzro chat {} --rpc {}' to interact.",
+            self.model_id, rpc_url
+        ));
 
         Ok(())
     }
 
     async fn execute_local(&self) -> Result<()> {
-        use tenzro_model::{get_model_by_id, HfDownloader, ModelRuntime};
+        use tenzro_model::{HfDownloader, ModelRuntime, get_model_by_id};
 
         let entry = match get_model_by_id(&self.model_id) {
             Some(e) => e,
-            None => return Err(anyhow::anyhow!(
-                "Model '{}' not found in catalog", self.model_id
-            )),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found in catalog",
+                    self.model_id
+                ));
+            }
         };
 
-        let models_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".tenzro")
-            .join("models");
+        let models_dir = tenzro_types::paths::models_dir();
         let downloader = HfDownloader::new(models_dir);
 
         if !downloader.is_downloaded(&self.model_id) {
             return Err(anyhow::anyhow!(
                 "Model '{}' is not downloaded. Run 'tenzro model download {}' first.",
-                self.model_id, self.model_id
+                self.model_id,
+                self.model_id
             ));
         }
 
@@ -657,7 +725,10 @@ impl ModelServeCmd {
         let runtime = ModelRuntime::new();
         let gguf_path = downloader.model_path(&self.model_id);
 
-        match runtime.load_model_with_context(&self.model_id, &gguf_path, Some(entry.context_length)).await {
+        match runtime
+            .load_model_with_context(&self.model_id, &gguf_path, Some(entry.context_length))
+            .await
+        {
             Ok(()) => {
                 spinner.finish_and_clear();
                 output::print_success(&format!("Model '{}' loaded successfully!", entry.name));
@@ -702,13 +773,23 @@ impl ModelStopCmd {
             use crate::rpc::RpcClient;
             let rpc = RpcClient::new(rpc_url);
             let spinner = output::create_spinner("Stopping model on node...");
-            let result: Result<serde_json::Value> = rpc.call("tenzro_stopModel", serde_json::json!([{
-                "model_id": self.model_id
-            }])).await;
+            let result: Result<serde_json::Value> = rpc
+                .call(
+                    "tenzro_stopModel",
+                    serde_json::json!([{
+                        "model_id": self.model_id
+                    }]),
+                )
+                .await;
             spinner.finish_and_clear();
             match result {
-                Ok(_) => output::print_success(&format!("Model '{}' stopped on node", self.model_id)),
-                Err(e) => output::print_warning(&format!("Node stop failed: {} (local config updated)", e)),
+                Ok(_) => {
+                    output::print_success(&format!("Model '{}' stopped on node", self.model_id))
+                }
+                Err(e) => output::print_warning(&format!(
+                    "Node stop failed: {} (local config updated)",
+                    e
+                )),
             }
         }
 
@@ -738,10 +819,7 @@ impl ModelDeleteCmd {
     pub async fn execute(&self) -> Result<()> {
         use tenzro_model::HfDownloader;
 
-        let models_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".tenzro")
-            .join("models");
+        let models_dir = tenzro_types::paths::models_dir();
         let downloader = HfDownloader::new(models_dir);
 
         if !downloader.is_downloaded(&self.model_id) {
@@ -752,7 +830,10 @@ impl ModelDeleteCmd {
         if !self.yes {
             use dialoguer::Confirm;
             let confirm = Confirm::new()
-                .with_prompt(format!("Delete model '{}' and all cached files?", self.model_id))
+                .with_prompt(format!(
+                    "Delete model '{}' and all cached files?",
+                    self.model_id
+                ))
                 .default(false)
                 .interact()?;
 
@@ -824,26 +905,39 @@ impl ModelEndpointsCmd {
                     return Ok(());
                 }
 
-                let headers = vec!["Served by", "Model", "Instance ID", "API Endpoint", "Status", "Load"];
+                let headers = vec![
+                    "Served by",
+                    "Model",
+                    "Instance ID",
+                    "API Endpoint",
+                    "Status",
+                    "Load",
+                ];
                 let mut rows = Vec::new();
 
                 for endpoint in &endpoints {
-                    let location = endpoint.get("location")
+                    let location = endpoint
+                        .get("location")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    let iroh_endpoint_id = endpoint.get("iroh_endpoint_id")
+                    let iroh_endpoint_id = endpoint
+                        .get("iroh_endpoint_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let model_name = endpoint.get("model_name")
+                    let model_name = endpoint
+                        .get("model_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    let instance_id = endpoint.get("instance_id")
+                    let instance_id = endpoint
+                        .get("instance_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    let api_endpoint = endpoint.get("api_endpoint")
+                    let api_endpoint = endpoint
+                        .get("api_endpoint")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let status = endpoint.get("status")
+                    let status = endpoint
+                        .get("status")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
 
@@ -858,7 +952,12 @@ impl ModelEndpointsCmd {
                         } else {
                             iroh_endpoint_id
                         };
-                        format!("{}network · {}…{}", output::colors::BLUE, short, output::colors::RESET)
+                        format!(
+                            "{}network · {}…{}",
+                            output::colors::BLUE,
+                            short,
+                            output::colors::RESET
+                        )
                     } else if location == "local" {
                         format!("{}local{}", output::colors::CYAN, output::colors::RESET)
                     } else {
@@ -900,7 +999,10 @@ impl ModelEndpointsCmd {
             Err(e) => {
                 output::print_warning(&format!("Failed to fetch endpoints: {}", e));
                 println!();
-                output::print_info(&format!("Make sure a Tenzro node is running at {}", self.rpc));
+                output::print_info(&format!(
+                    "Make sure a Tenzro node is running at {}",
+                    self.rpc
+                ));
             }
         }
 
@@ -950,31 +1052,40 @@ impl ModelEndpointCmd {
                     return Ok(());
                 }
 
-                let instance_id = endpoint.get("instance_id")
+                let instance_id = endpoint
+                    .get("instance_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&self.id);
-                let model_name = endpoint.get("model_name")
+                let model_name = endpoint
+                    .get("model_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let model_id = endpoint.get("model_id")
+                let model_id = endpoint
+                    .get("model_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let location = endpoint.get("location")
+                let location = endpoint
+                    .get("location")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let provider_name = endpoint.get("provider_name")
+                let provider_name = endpoint
+                    .get("provider_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let status = endpoint.get("status")
+                let status = endpoint
+                    .get("status")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let api_endpoint = endpoint.get("api_endpoint")
+                let api_endpoint = endpoint
+                    .get("api_endpoint")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let mcp_endpoint = endpoint.get("mcp_endpoint")
+                let mcp_endpoint = endpoint
+                    .get("mcp_endpoint")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let iroh_endpoint_id = endpoint.get("iroh_endpoint_id")
+                let iroh_endpoint_id = endpoint
+                    .get("iroh_endpoint_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
@@ -1000,9 +1111,10 @@ impl ModelEndpointCmd {
                 output::print_field("Status", status);
 
                 if let Some(parameters) = endpoint.get("parameters")
-                    && let Some(params_str) = parameters.as_str() {
-                        output::print_field("Parameters", params_str);
-                    }
+                    && let Some(params_str) = parameters.as_str()
+                {
+                    output::print_field("Parameters", params_str);
+                }
 
                 output::print_field("API Endpoint", api_endpoint);
 
@@ -1012,18 +1124,22 @@ impl ModelEndpointCmd {
 
                 // Pricing information
                 if let Some(pricing) = endpoint.get("pricing").and_then(|v| v.as_object()) {
-                    let input_price = pricing.get("input_per_token")
+                    let input_price = pricing
+                        .get("input_per_token")
                         .and_then(|v| v.as_str())
                         .unwrap_or("0");
-                    let output_price = pricing.get("output_per_token")
+                    let output_price = pricing
+                        .get("output_per_token")
                         .and_then(|v| v.as_str())
                         .unwrap_or("0");
 
                     let pricing_str = if location == "local" {
                         "Free (local)".to_string()
                     } else {
-                        format!("{} TNZO per input token, {} TNZO per output token",
-                            input_price, output_price)
+                        format!(
+                            "{} TNZO per input token, {} TNZO per output token",
+                            input_price, output_price
+                        )
                     };
                     output::print_field("Pricing", &pricing_str);
                 }
@@ -1043,7 +1159,10 @@ impl ModelEndpointCmd {
             Err(e) => {
                 output::print_warning(&format!("Failed to fetch endpoint details: {}", e));
                 println!();
-                output::print_info(&format!("Make sure a Tenzro node is running at {}", self.rpc));
+                output::print_info(&format!(
+                    "Make sure a Tenzro node is running at {}",
+                    self.rpc
+                ));
                 output::print_info(&format!("and that endpoint '{}' exists", self.id));
             }
         }
@@ -1078,26 +1197,45 @@ impl ModelDiscoverCmd {
         let spinner = output::create_spinner("Discovering...");
         let rpc = RpcClient::new(&self.rpc);
         let mut params = serde_json::json!({ "limit": self.limit });
-        if let Some(ref c) = self.category { params["category"] = serde_json::json!(c); }
-        if let Some(ref n) = self.name { params["name"] = serde_json::json!(n); }
+        if let Some(ref c) = self.category {
+            params["category"] = serde_json::json!(c);
+        }
+        if let Some(ref n) = self.name {
+            params["name"] = serde_json::json!(n);
+        }
         let result: serde_json::Value = rpc.call("tenzro_discoverModels", params).await?;
         spinner.finish_and_clear();
         if let Some(models) = result.as_array() {
-            if models.is_empty() { output::print_info("No models discovered."); }
-            else {
+            if models.is_empty() {
+                output::print_info("No models discovered.");
+            } else {
                 let headers = vec!["Model ID", "Name", "Category", "Provider"];
                 let mut rows = Vec::new();
                 for m in models {
                     rows.push(vec![
-                        m.get("model_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        m.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        m.get("provider").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        m.get("model_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        m.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        m.get("category")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        m.get("provider")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
             }
-        } else { output::print_json(&result)?; }
+        } else {
+            output::print_json(&result)?;
+        }
         Ok(())
     }
 }
@@ -1117,17 +1255,34 @@ impl ModelProgressCmd {
         use crate::rpc::RpcClient;
         output::print_header("Download Progress");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_getDownloadProgress", serde_json::json!({
-            "model_id": self.model_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getDownloadProgress",
+                serde_json::json!({
+                    "model_id": self.model_id,
+                }),
+            )
+            .await?;
         output::print_field("Model", &self.model_id);
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown"));
+        output::print_field(
+            "Status",
+            result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
         if let Some(pct) = result.get("progress_percent").and_then(|v| v.as_f64()) {
             output::print_field("Progress", &format!("{:.1}%", pct));
         }
         if let Some(downloaded) = result.get("downloaded_bytes").and_then(|v| v.as_u64()) {
-            let total = result.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-            output::print_field("Downloaded", &format!("{} / {}", format_bytes(downloaded), format_bytes(total)));
+            let total = result
+                .get("total_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            output::print_field(
+                "Downloaded",
+                &format!("{} / {}", format_bytes(downloaded), format_bytes(total)),
+            );
         }
         Ok(())
     }
@@ -1156,14 +1311,21 @@ impl ModelRegisterEndpointCmd {
         output::print_header("Register Model Endpoint");
         let spinner = output::create_spinner("Registering...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_registerModelEndpoint", serde_json::json!({
-            "model_id": self.model_id,
-            "api_endpoint": self.api_endpoint,
-            "provider": self.provider,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_registerModelEndpoint",
+                serde_json::json!({
+                    "model_id": self.model_id,
+                    "api_endpoint": self.api_endpoint,
+                    "provider": self.provider,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Endpoint registered!");
-        if let Some(v) = result.get("instance_id").and_then(|v| v.as_str()) { output::print_field("Instance ID", v); }
+        if let Some(v) = result.get("instance_id").and_then(|v| v.as_str()) {
+            output::print_field("Instance ID", v);
+        }
         output::print_field("Model", &self.model_id);
         output::print_field("Endpoint", &self.api_endpoint);
         Ok(())
@@ -1186,9 +1348,14 @@ impl ModelUnregisterEndpointCmd {
         output::print_header("Unregister Model Endpoint");
         let spinner = output::create_spinner("Unregistering...");
         let rpc = RpcClient::new(&self.rpc);
-        let _result: serde_json::Value = rpc.call("tenzro_unregisterModelEndpoint", serde_json::json!({
-            "instance_id": self.instance_id,
-        })).await?;
+        let _result: serde_json::Value = rpc
+            .call(
+                "tenzro_unregisterModelEndpoint",
+                serde_json::json!({
+                    "instance_id": self.instance_id,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success(&format!("Endpoint {} unregistered", self.instance_id));
         Ok(())
@@ -1248,8 +1415,8 @@ impl ModelPruneCmd {
 ///
 /// Splits the file into AES-256-GCM shards published to the blob layer,
 /// wraps the content key to each recipient's X25519 public key
-/// (`x25519-envelope-aes-256-gcm`), and stores the signed manifest on the
-/// node. Operator-only (requires the node admin token).
+/// (`x25519-hkdf-sha256-envelope-aes-256-gcm`), and stores the signed
+/// manifest on the node. Operator-only (requires the node admin token).
 #[derive(Debug, Parser)]
 pub struct ModelSealCmd {
     /// Model ID to seal under
@@ -1263,7 +1430,9 @@ pub struct ModelSealCmd {
     #[arg(long)]
     owner_did: String,
 
-    /// Recipient in `did:...=<64-hex x25519 pubkey>` form (repeatable)
+    /// Recipient in `did:...=<64-hex x25519 pubkey>[=<enclave measurement hex>]`
+    /// form (repeatable). A third component pins the recipient to an enclave
+    /// measurement — that node must produce a matching attestation to install.
     #[arg(long = "recipient", required = true)]
     recipients: Vec<String>,
 
@@ -1296,16 +1465,27 @@ impl ModelSealCmd {
 
         let mut recipients = Vec::with_capacity(self.recipients.len());
         for r in &self.recipients {
-            let (did, pubkey) = r.split_once('=').ok_or_else(|| {
-                anyhow::anyhow!(
-                    "recipient '{}' must be 'did:...=<64-hex x25519 pubkey>'",
-                    r
-                )
-            })?;
-            recipients.push(serde_json::json!({
+            let mut parts = r.splitn(3, '=');
+            let did = parts.next().filter(|s| !s.is_empty());
+            let pubkey = parts.next().filter(|s| !s.is_empty());
+            let (did, pubkey) = match (did, pubkey) {
+                (Some(d), Some(p)) => (d, p),
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "recipient '{}' must be \
+                         'did:...=<64-hex x25519 pubkey>[=<enclave measurement hex>]'",
+                        r
+                    ));
+                }
+            };
+            let mut entry = serde_json::json!({
                 "did": did,
                 "x25519_pubkey": pubkey,
-            }));
+            });
+            if let Some(measurement) = parts.next().filter(|s| !s.is_empty()) {
+                entry["enclave_measurement_hex"] = serde_json::json!(measurement);
+            }
+            recipients.push(entry);
         }
 
         let mut params = serde_json::json!({
@@ -1338,23 +1518,40 @@ impl ModelSealCmd {
         output::print_success(&format!("Model '{}' sealed", self.model_id));
         output::print_field(
             "Manifest hash",
-            result.get("manifest_hash").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("manifest_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         output::print_field(
             "Model hash",
-            result.get("model_hash").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("model_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         output::print_field(
             "Shards",
-            &result.get("shard_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+            &result
+                .get("shard_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
         );
         output::print_field(
             "Recipients",
-            &result.get("recipient_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+            &result
+                .get("recipient_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
         );
         output::print_field(
             "Wrap alg",
-            result.get("wrap_alg").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("wrap_alg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         Ok(())
     }
@@ -1429,15 +1626,25 @@ impl ModelInstallSealedCmd {
 
         output::print_success(&format!(
             "Sealed model '{}' installed",
-            result.get("model_id").and_then(|v| v.as_str()).unwrap_or("-")
+            result
+                .get("model_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-")
         ));
         output::print_field(
             "Path",
-            result.get("installed_path").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("installed_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         output::print_field(
             "Bytes",
-            &result.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+            &result
+                .get("total_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
         );
         Ok(())
     }
@@ -1462,8 +1669,9 @@ impl ModelSealedListCmd {
         output::print_header("Sealed Models");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value =
-            rpc.call("tenzro_listSealedModels", serde_json::Value::Null).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_listSealedModels", serde_json::Value::Null)
+            .await?;
 
         if self.format == "json" {
             output::print_json(&result)?;
@@ -1480,21 +1688,40 @@ impl ModelSealedListCmd {
             return Ok(());
         }
 
-        let headers = vec!["Model ID", "Artifact", "Size", "Shards", "Recipients", "Owner DID"];
+        let headers = vec![
+            "Model ID",
+            "Artifact",
+            "Size",
+            "Shards",
+            "Recipients",
+            "Owner DID",
+        ];
         let rows: Vec<Vec<String>> = models
             .iter()
             .map(|m| {
                 vec![
-                    m.get("model_id").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
-                    m.get("artifact_name").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                    m.get("model_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
+                    m.get("artifact_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
                     format_bytes(m.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0)),
-                    m.get("shard_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                    m.get("shard_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        .to_string(),
                     m.get("recipients")
                         .and_then(|v| v.as_array())
                         .map(|a| a.len())
                         .unwrap_or(0)
                         .to_string(),
-                    m.get("owner_did").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                    m.get("owner_did")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
                 ]
             })
             .collect();
@@ -1563,8 +1790,9 @@ impl ModelRecipientKeyCmd {
         use crate::rpc::RpcClient;
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value =
-            rpc.call("tenzro_modelRecipientKey", serde_json::Value::Null).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_modelRecipientKey", serde_json::Value::Null)
+            .await?;
 
         if self.format == "json" {
             output::print_json(&result)?;
@@ -1573,11 +1801,17 @@ impl ModelRecipientKeyCmd {
 
         output::print_field(
             "X25519 pubkey",
-            result.get("x25519_pubkey").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("x25519_pubkey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         output::print_field(
             "Wrap alg",
-            result.get("wrap_alg").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("wrap_alg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         Ok(())
     }
@@ -1629,13 +1863,23 @@ impl ModelGetHashCmd {
         );
         output::print_field(
             "Manifest hash",
-            result.get("manifest_hash").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("manifest_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         output::print_field(
             "Recorder DID",
-            result.get("recorder_did").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("recorder_did")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
-        if result.get("governance_overridden").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if result
+            .get("governance_overridden")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             output::print_field("Governance overridden", "true");
         }
         Ok(())
@@ -1661,8 +1905,9 @@ impl ModelListHashesCmd {
         output::print_header("Model Hashes");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value =
-            rpc.call("tenzro_listModelHashes", serde_json::Value::Null).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_listModelHashes", serde_json::Value::Null)
+            .await?;
 
         if self.format == "json" {
             output::print_json(&result)?;
@@ -1684,9 +1929,18 @@ impl ModelListHashesCmd {
             .iter()
             .map(|h| {
                 vec![
-                    h.get("model_id").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
-                    h.get("blake3").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
-                    h.get("sha256").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                    h.get("model_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
+                    h.get("blake3")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
+                    h.get("sha256")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
                 ]
             })
             .collect();
@@ -1748,4 +2002,3 @@ fn format_bytes(bytes: u64) -> String {
         format!("{} KB", bytes / 1_000)
     }
 }
-

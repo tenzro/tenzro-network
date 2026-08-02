@@ -24,9 +24,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use dashmap::DashMap;
 
-use tenzro_storage::kv::{
-    KvStore, CF_MEDIA_GEN_RECEIPTS, CF_MEDIA_GEN_RUNS, CF_MEDIA_GEN_WORKERS,
-};
+use tenzro_storage::kv::{CF_MEDIA_GEN_RECEIPTS, CF_MEDIA_GEN_RUNS, CF_MEDIA_GEN_WORKERS, KvStore};
 use tenzro_types::media_gen::{
     MediaGenAssignment, MediaGenExpertRole, MediaGenHandoff, MediaGenJob, MediaGenReceipt,
     MediaGenStatus, MediaGenTaskSpec, MediaGenWorkerCapability,
@@ -37,7 +35,7 @@ use crate::commitments::expected_job_id;
 use crate::error::{MediaGenError, Result};
 use crate::gossip::MediaGenClaim;
 use crate::output_store::MediaGenOutputStore;
-use crate::pricing::{enforce_ceiling, MediaGenPricing};
+use crate::pricing::{MediaGenPricing, enforce_ceiling};
 
 /// Counts restored by [`MediaGenRuntime::hydrate`]: non-terminal jobs, then
 /// enrolled workers.
@@ -399,11 +397,7 @@ impl MediaGenRuntime {
                     reason: "the spec in the receipt differs from the posted spec".to_string(),
                 });
             }
-            enforce_ceiling(
-                &receipt.job_id,
-                receipt.price_paid,
-                job.task_spec.max_price,
-            )?;
+            enforce_ceiling(&receipt.job_id, receipt.price_paid, job.task_spec.max_price)?;
 
             apply_shares(job)?;
             job.status = MediaGenStatus::Completed;
@@ -651,10 +645,10 @@ impl MediaGenRuntime {
     /// Receipt for a completed job, read from storage so it survives the
     /// terminal-job eviction that [`Self::hydrate`] applies to the queue.
     pub fn get_receipt(&self, job_id: &str) -> Result<Option<MediaGenReceipt>> {
-        if let Some(job) = self.get_job(job_id) {
-            if let Some(receipt) = job.receipt {
-                return Ok(Some(receipt));
-            }
+        if let Some(job) = self.get_job(job_id)
+            && let Some(receipt) = job.receipt
+        {
+            return Ok(Some(receipt));
         }
         let Some(storage) = &self.storage else {
             return Ok(None);
@@ -1119,7 +1113,8 @@ mod tests {
     fn receipt_from_another_worker_is_rejected() {
         let rt = runtime();
         let job = rt.post_job(spec(MediaGenKind::Text2Image)).unwrap();
-        rt.claim_job(&job.job_id, &worker().worker_did, None).unwrap();
+        rt.claim_job(&job.job_id, &worker().worker_did, None)
+            .unwrap();
 
         let mut r = receipt_for(&job);
         r.worker_did = "did:tenzro:machine:other".to_string();
@@ -1133,7 +1128,8 @@ mod tests {
     fn receipt_carrying_a_different_spec_is_rejected() {
         let rt = runtime();
         let job = rt.post_job(spec(MediaGenKind::Text2Image)).unwrap();
-        rt.claim_job(&job.job_id, &worker().worker_did, None).unwrap();
+        rt.claim_job(&job.job_id, &worker().worker_did, None)
+            .unwrap();
 
         let mut r = receipt_for(&job);
         r.task_spec.params.steps = 4;
@@ -1147,7 +1143,8 @@ mod tests {
     fn receipt_over_the_ceiling_is_rejected() {
         let rt = runtime();
         let job = rt.post_job(spec(MediaGenKind::Text2Image)).unwrap();
-        rt.claim_job(&job.job_id, &worker().worker_did, None).unwrap();
+        rt.claim_job(&job.job_id, &worker().worker_did, None)
+            .unwrap();
 
         let mut r = receipt_for(&job);
         r.price_paid = CEILING + 1;
@@ -1167,7 +1164,8 @@ mod tests {
             MediaGenError::NotJobHolder { .. }
         ));
 
-        rt.claim_job(&job.job_id, &worker().worker_did, None).unwrap();
+        rt.claim_job(&job.job_id, &worker().worker_did, None)
+            .unwrap();
         assert!(matches!(
             rt.cancel_job(&job.job_id, &job.task_spec.requester_did)
                 .unwrap_err(),
@@ -1215,7 +1213,8 @@ mod tests {
         let rt = runtime();
         let job = rt.post_job(spec(MediaGenKind::Text2Image)).unwrap();
         assert_eq!(rt.list_jobs_by_status(MediaGenStatus::Pending).len(), 1);
-        rt.claim_job(&job.job_id, &worker().worker_did, None).unwrap();
+        rt.claim_job(&job.job_id, &worker().worker_did, None)
+            .unwrap();
         assert!(rt.list_jobs_by_status(MediaGenStatus::Pending).is_empty());
         assert_eq!(rt.list_jobs().len(), 1);
     }
@@ -1246,8 +1245,12 @@ mod tests {
     /// Drive a split job to Running with both halves claimed.
     fn running_split(rt: &MediaGenRuntime) -> MediaGenJob {
         let job = rt.post_split_job(split_spec()).unwrap();
-        rt.claim_job(&job.job_id, &high_did(), Some(MediaGenExpertRole::HighNoise))
-            .unwrap();
+        rt.claim_job(
+            &job.job_id,
+            &high_did(),
+            Some(MediaGenExpertRole::HighNoise),
+        )
+        .unwrap();
         rt.claim_job(&job.job_id, &low_did(), Some(MediaGenExpertRole::LowNoise))
             .unwrap();
         rt.mark_running(&job.job_id, &high_did()).unwrap()
@@ -1260,14 +1263,15 @@ mod tests {
         assert!(job.is_split());
         assert_eq!(
             job.unclaimed_roles(),
-            vec![
-                MediaGenExpertRole::HighNoise,
-                MediaGenExpertRole::LowNoise
-            ]
+            vec![MediaGenExpertRole::HighNoise, MediaGenExpertRole::LowNoise]
         );
 
         let half = rt
-            .claim_job(&job.job_id, &high_did(), Some(MediaGenExpertRole::HighNoise))
+            .claim_job(
+                &job.job_id,
+                &high_did(),
+                Some(MediaGenExpertRole::HighNoise),
+            )
             .unwrap();
         assert_eq!(half.status, MediaGenStatus::Pending);
         assert_eq!(half.unclaimed_roles(), vec![MediaGenExpertRole::LowNoise]);
@@ -1308,8 +1312,12 @@ mod tests {
     fn a_claimed_half_is_not_reclaimable() {
         let rt = split_runtime();
         let job = rt.post_split_job(split_spec()).unwrap();
-        rt.claim_job(&job.job_id, &high_did(), Some(MediaGenExpertRole::HighNoise))
-            .unwrap();
+        rt.claim_job(
+            &job.job_id,
+            &high_did(),
+            Some(MediaGenExpertRole::HighNoise),
+        )
+        .unwrap();
         assert!(matches!(
             rt.claim_job(&job.job_id, &low_did(), Some(MediaGenExpertRole::HighNoise))
                 .unwrap_err(),
@@ -1389,8 +1397,12 @@ mod tests {
     fn handoff_needs_a_running_job() {
         let rt = split_runtime();
         let job = rt.post_split_job(split_spec()).unwrap();
-        rt.claim_job(&job.job_id, &high_did(), Some(MediaGenExpertRole::HighNoise))
-            .unwrap();
+        rt.claim_job(
+            &job.job_id,
+            &high_did(),
+            Some(MediaGenExpertRole::HighNoise),
+        )
+        .unwrap();
         assert!(matches!(
             rt.record_handoff(handoff_for(&job, 26)).unwrap_err(),
             MediaGenError::IllegalTransition { .. }
@@ -1476,7 +1488,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_output_verifies_the_receipt_commitment() {
-        use crate::output_store::{compute_output_hash, InMemoryOutputStore, MediaGenOutputStore};
+        use crate::output_store::{InMemoryOutputStore, MediaGenOutputStore, compute_output_hash};
 
         let store = Arc::new(InMemoryOutputStore::new());
         let bytes = Bytes::from_static(b"generated-png-bytes");

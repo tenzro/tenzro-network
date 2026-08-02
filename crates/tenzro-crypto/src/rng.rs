@@ -29,8 +29,8 @@
 //! `getrandom` was compiled without OS support and silently fell back to a
 //! deterministic stub).
 
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 
 /// Returns the canonical CSPRNG used throughout Tenzro Network.
 ///
@@ -102,7 +102,10 @@ mod tests {
         let mut buf = [0u8; 64];
         fill_random_bytes(&mut buf);
         // Probability of all-zeros from a real CSPRNG is 2^-512.
-        assert!(buf.iter().any(|&b| b != 0), "buffer should not be all zeros");
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "buffer should not be all zeros"
+        );
     }
 
     #[test]

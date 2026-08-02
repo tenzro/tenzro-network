@@ -54,20 +54,41 @@ impl DatabaseCommand {
     }
 }
 
+/// Build a client for the managed-database surface.
+///
+/// The whole namespace is `database`-scoped, and the key's subject becomes the
+/// caller DID every access policy is adjudicated against — so a command run
+/// with the wrong key does not fail closed with a clear error, it succeeds as
+/// somebody else. Surfacing the flag per subcommand makes that choice visible
+/// rather than leaving it to whatever `TENZRO_API_KEY` happens to hold.
+fn db_client(rpc_url: &str, api_key: Option<&str>) -> rpc::RpcClient {
+    let client = rpc::RpcClient::new(rpc_url);
+    match api_key {
+        Some(k) => client.with_api_key(k.to_string()),
+        None => client,
+    }
+}
+
 #[derive(Debug, Parser)]
 pub struct EnginesCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl EnginesCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header("Database Engines");
         let spinner = output::create_spinner("Reading engine catalog...");
-        let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_listDatabaseEngines", serde_json::json!({})).await;
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_listDatabaseEngines", serde_json::json!({}))
+            .await;
         spinner.finish_and_clear();
 
         let value = match result {
@@ -92,7 +113,10 @@ impl EnginesCmd {
                     .get("data_models")
                     .and_then(|v| v.as_array())
                     .map(|a| {
-                        a.iter().filter_map(|m| m.as_str()).collect::<Vec<_>>().join(", ")
+                        a.iter()
+                            .filter_map(|m| m.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     })
                     .unwrap_or_default();
                 println!();
@@ -147,6 +171,11 @@ pub struct CreateCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl CreateCmd {
@@ -183,9 +212,8 @@ impl CreateCmd {
         }
 
         let spinner = output::create_spinner("Computing placement...");
-        let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_createDatabase", params).await;
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
+        let result: Result<serde_json::Value> = rpc.call("tenzro_createDatabase", params).await;
         spinner.finish_and_clear();
 
         match result {
@@ -207,14 +235,22 @@ pub struct GetCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl GetCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header(&format!("Database: {}", self.database_id));
-        let rpc = rpc::RpcClient::new(&self.rpc);
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
         let result: Result<serde_json::Value> = rpc
-            .call("tenzro_getDatabase", serde_json::json!({ "database_id": self.database_id }))
+            .call(
+                "tenzro_getDatabase",
+                serde_json::json!({ "database_id": self.database_id }),
+            )
             .await;
         match result {
             Ok(value) => {
@@ -232,14 +268,20 @@ pub struct ListCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl ListCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header("Databases");
-        let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_listDatabases", serde_json::json!({})).await;
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_listDatabases", serde_json::json!({}))
+            .await;
         match result {
             Ok(value) => {
                 println!();
@@ -266,12 +308,17 @@ pub struct PartitionsCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl PartitionsCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header(&format!("Partitions: {}", self.database_id));
-        let rpc = rpc::RpcClient::new(&self.rpc);
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
         let result: Result<serde_json::Value> = rpc
             .call(
                 "tenzro_listDatabasePartitions",
@@ -320,6 +367,11 @@ pub struct RescaleCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl RescaleCmd {
@@ -348,9 +400,8 @@ impl RescaleCmd {
         }
 
         let spinner = output::create_spinner("Recomputing placement...");
-        let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_rescaleDatabase", params).await;
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
+        let result: Result<serde_json::Value> = rpc.call("tenzro_rescaleDatabase", params).await;
         spinner.finish_and_clear();
 
         match result {
@@ -381,6 +432,11 @@ pub struct DropCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl DropCmd {
@@ -398,7 +454,7 @@ impl DropCmd {
             params["envelope"] = serde_json::json!(env);
         }
 
-        let rpc = rpc::RpcClient::new(&self.rpc);
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
         let result: Result<serde_json::Value> = rpc.call("tenzro_dropDatabase", params).await;
         match result {
             Ok(value) => {
@@ -427,6 +483,11 @@ pub struct AuthorizeCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl AuthorizeCmd {
@@ -444,14 +505,16 @@ impl AuthorizeCmd {
             params["envelope"] = serde_json::json!(env);
         }
 
-        let rpc = rpc::RpcClient::new(&self.rpc);
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
         let result: Result<serde_json::Value> =
             rpc.call("tenzro_authorizeDatabaseRead", params).await;
         match result {
             Ok(value) => {
                 println!();
-                let authorized =
-                    value.get("authorized").and_then(|v| v.as_bool()).unwrap_or(false);
+                let authorized = value
+                    .get("authorized")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 output::print_field("Authorized", &authorized.to_string());
                 if let Some(reason) = value.get("reason").and_then(|v| v.as_str()) {
                     output::print_field("Reason", reason);
@@ -488,6 +551,11 @@ pub struct ConnectCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl ConnectCmd {
@@ -513,7 +581,7 @@ impl ConnectCmd {
         }
 
         let spinner = output::create_spinner("Issuing connection credential...");
-        let rpc = rpc::RpcClient::new(&self.rpc);
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
         let result: Result<serde_json::Value> =
             rpc.call("tenzro_issueDatabaseConnection", params).await;
         spinner.finish_and_clear();
@@ -523,15 +591,24 @@ impl ConnectCmd {
                 println!();
                 output::print_field(
                     "Database",
-                    value.get("database_id").and_then(|v| v.as_str()).unwrap_or("?"),
+                    value
+                        .get("database_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?"),
                 );
                 output::print_field(
                     "Engine",
-                    value.get("engine_id").and_then(|v| v.as_str()).unwrap_or("?"),
+                    value
+                        .get("engine_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?"),
                 );
                 output::print_field(
                     "Bearer DID",
-                    value.get("bearer_did").and_then(|v| v.as_str()).unwrap_or("?"),
+                    value
+                        .get("bearer_did")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?"),
                 );
                 output::print_field(
                     "Mode",
@@ -542,7 +619,10 @@ impl ConnectCmd {
                 }
                 output::print_field(
                     "Query Method",
-                    value.get("query_method").and_then(|v| v.as_str()).unwrap_or("?"),
+                    value
+                        .get("query_method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?"),
                 );
                 if let Some(token) = value.get("capability").and_then(|v| v.as_str()) {
                     println!();
@@ -587,6 +667,11 @@ pub struct QueryCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl QueryCmd {
@@ -615,15 +700,17 @@ impl QueryCmd {
         }
 
         let spinner = output::create_spinner("Running query...");
-        let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_databaseQuery", params).await;
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
+        let result: Result<serde_json::Value> = rpc.call("tenzro_databaseQuery", params).await;
         spinner.finish_and_clear();
 
         match result {
             Ok(value) => {
                 println!();
-                let served = value.get("served_here").and_then(|v| v.as_bool()).unwrap_or(false);
+                let served = value
+                    .get("served_here")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 output::print_field("Served Here", &served.to_string());
                 if served {
                     if let Some(res) = value.get("result") {
@@ -664,6 +751,11 @@ pub struct UsageCmd {
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+
+    /// Database-scoped API key. Its subject is the caller DID every access
+    /// policy is adjudicated against. Falls back to `TENZRO_API_KEY`.
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 impl UsageCmd {
@@ -681,21 +773,30 @@ impl UsageCmd {
             params["envelope"] = serde_json::json!(env);
         }
 
-        let rpc = rpc::RpcClient::new(&self.rpc);
+        let rpc = db_client(&self.rpc, self.api_key.as_deref());
         let result: Result<serde_json::Value> = rpc.call("tenzro_databaseUsage", params).await;
         match result {
             Ok(value) => {
                 println!();
                 if let Some(pricing) = value.get("pricing") {
-                    let asset = pricing.get("asset_id").and_then(|v| v.as_str()).unwrap_or("?");
-                    let price =
-                        pricing.get("price_per_query").and_then(|v| v.as_str()).unwrap_or("0");
+                    let asset = pricing
+                        .get("asset_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    let price = pricing
+                        .get("price_per_query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0");
                     output::print_field("Price / Query", &format!("{} {}", price, asset));
                 }
                 match value.get("usage").filter(|u| !u.is_null()) {
                     Some(usage) => {
                         let g = |k: &str| {
-                            usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0).to_string()
+                            usage
+                                .get(k)
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                .to_string()
                         };
                         output::print_field("Queries", &g("query_count"));
                         output::print_field("Writes", &g("write_count"));
@@ -703,7 +804,10 @@ impl UsageCmd {
                         output::print_field("Bytes Out", &g("bytes_out"));
                         output::print_field(
                             "Billed Total",
-                            usage.get("billed_total").and_then(|v| v.as_str()).unwrap_or("0"),
+                            usage
+                                .get("billed_total")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("0"),
                         );
                         output::print_field("Last Query (ms)", &g("last_query_ms"));
                     }
@@ -725,7 +829,10 @@ fn read_json_file(path: &str, label: &str) -> Result<serde_json::Value> {
 
 fn print_database(db: Option<&serde_json::Value>) {
     let Some(db) = db else { return };
-    let id = db.get("database_id").and_then(|v| v.as_str()).unwrap_or("?");
+    let id = db
+        .get("database_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
     let engine = db.get("engine_id").and_then(|v| v.as_str()).unwrap_or("?");
     let placement = db.get("placement").and_then(|v| v.as_str()).unwrap_or("?");
     let partitions = db.get("partitions").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -750,12 +857,21 @@ fn print_database(db: Option<&serde_json::Value>) {
     );
     if let Some(policy) = db.get("access_policy") {
         let kind = policy.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-        let owner = policy.get("owner_did").and_then(|v| v.as_str()).unwrap_or("?");
+        let owner = policy
+            .get("owner_did")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         output::print_field("  Access", &format!("{} · owner {}", kind, owner));
     }
     if let Some(pricing) = db.get("pricing") {
-        let asset = pricing.get("asset_id").and_then(|v| v.as_str()).unwrap_or("?");
-        let price = pricing.get("price_per_query").and_then(|v| v.as_str()).unwrap_or("0");
+        let asset = pricing
+            .get("asset_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let price = pricing
+            .get("price_per_query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0");
         let label = if price == "0" {
             "free".to_string()
         } else {
@@ -772,20 +888,28 @@ fn print_database(db: Option<&serde_json::Value>) {
 }
 
 fn print_partitions(partitions: Option<&serde_json::Value>) {
-    let Some(arr) = partitions.and_then(|v| v.as_array()) else { return };
+    let Some(arr) = partitions.and_then(|v| v.as_array()) else {
+        return;
+    };
     if arr.is_empty() {
         return;
     }
     println!();
     for p in arr {
-        let idx = p.get("partition_index").and_then(|v| v.as_u64()).unwrap_or(0);
+        let idx = p
+            .get("partition_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let role = p.get("role").and_then(|v| v.as_str()).unwrap_or("?");
         let holders = p
             .get("local_holders")
             .and_then(|v| v.as_array())
             .map(|a| a.len())
             .unwrap_or(0)
-            + p.get("network_holders").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            + p.get("network_holders")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
         output::print_field(
             &format!("Partition {}", idx),
             &format!("{} · {} holders", role, holders),

@@ -7,12 +7,14 @@ use crate::{
     config::VmConfig,
     error::{Result, VmError},
     traits::{VmExecutor, VmState, VmType},
-    types::{CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction},
+    types::{
+        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction,
+    },
 };
 
 use super::{
     canton_client::{CantonClient, CantonClientConfig},
-    types::{DamlSubmission, ActiveContractsQuery},
+    types::{ActiveContractsQuery, DamlSubmission},
 };
 use tenzro_types::canton::DamlCommand;
 
@@ -45,11 +47,7 @@ impl DamlExecutor {
     /// The connection to Canton is NOT established immediately — it is deferred
     /// until the first DAML operation. This allows the Tenzro node to start even
     /// if Canton is not yet available. EVM and SVM operations are unaffected.
-    pub fn new(
-        config: VmConfig,
-        canton_host: impl Into<String>,
-        canton_port: u16,
-    ) -> Result<Self> {
+    pub fn new(config: VmConfig, canton_host: impl Into<String>, canton_port: u16) -> Result<Self> {
         tracing::info!("Initializing Daml executor (Canton 3.x Ledger API)");
 
         let client_config = CantonClientConfig::new(canton_host, canton_port);
@@ -93,7 +91,7 @@ impl DamlExecutor {
     fn decode_commands(&self, data: &[u8]) -> Result<Vec<DamlCommand>> {
         if data.is_empty() {
             return Err(VmError::CantonError(
-                "Empty transaction data: cannot decode Daml commands".to_string()
+                "Empty transaction data: cannot decode Daml commands".to_string(),
             ));
         }
 
@@ -108,7 +106,7 @@ impl DamlExecutor {
         if let Ok(cmds) = serde_json::from_slice::<Vec<DamlCommand>>(data) {
             if cmds.is_empty() {
                 return Err(VmError::CantonError(
-                    "Empty command list: at least one command required".to_string()
+                    "Empty command list: at least one command required".to_string(),
                 ));
             }
             // Validate all commands
@@ -118,12 +116,10 @@ impl DamlExecutor {
             return Ok(cmds);
         }
 
-        Err(VmError::CantonError(
-            format!(
-                "Invalid Daml command format: expected JSON-encoded DamlCommand or Vec<DamlCommand>, got {} bytes",
-                data.len()
-            )
-        ))
+        Err(VmError::CantonError(format!(
+            "Invalid Daml command format: expected JSON-encoded DamlCommand or Vec<DamlCommand>, got {} bytes",
+            data.len()
+        )))
     }
 
     /// Validate a Daml command structure
@@ -132,53 +128,65 @@ impl DamlExecutor {
             DamlCommand::Create { template_id, .. } => {
                 if template_id.package_id.is_empty() {
                     return Err(VmError::CantonError(
-                        "Create command: package_id cannot be empty".to_string()
+                        "Create command: package_id cannot be empty".to_string(),
                     ));
                 }
                 if template_id.module_name.is_empty() {
                     return Err(VmError::CantonError(
-                        "Create command: module_name cannot be empty".to_string()
+                        "Create command: module_name cannot be empty".to_string(),
                     ));
                 }
                 if template_id.entity_name.is_empty() {
                     return Err(VmError::CantonError(
-                        "Create command: entity_name cannot be empty".to_string()
+                        "Create command: entity_name cannot be empty".to_string(),
                     ));
                 }
             }
-            DamlCommand::Exercise { contract_id, choice, .. } => {
+            DamlCommand::Exercise {
+                contract_id,
+                choice,
+                ..
+            } => {
                 if contract_id.0.is_empty() {
                     return Err(VmError::CantonError(
-                        "Exercise command: contract_id cannot be empty".to_string()
+                        "Exercise command: contract_id cannot be empty".to_string(),
                     ));
                 }
                 if choice.is_empty() {
                     return Err(VmError::CantonError(
-                        "Exercise command: choice cannot be empty".to_string()
+                        "Exercise command: choice cannot be empty".to_string(),
                     ));
                 }
             }
-            DamlCommand::CreateAndExercise { template_id, choice, .. } => {
+            DamlCommand::CreateAndExercise {
+                template_id,
+                choice,
+                ..
+            } => {
                 if template_id.package_id.is_empty() {
                     return Err(VmError::CantonError(
-                        "CreateAndExercise command: package_id cannot be empty".to_string()
+                        "CreateAndExercise command: package_id cannot be empty".to_string(),
                     ));
                 }
                 if choice.is_empty() {
                     return Err(VmError::CantonError(
-                        "CreateAndExercise command: choice cannot be empty".to_string()
+                        "CreateAndExercise command: choice cannot be empty".to_string(),
                     ));
                 }
             }
-            DamlCommand::ExerciseByKey { template_id, choice, .. } => {
+            DamlCommand::ExerciseByKey {
+                template_id,
+                choice,
+                ..
+            } => {
                 if template_id.package_id.is_empty() {
                     return Err(VmError::CantonError(
-                        "ExerciseByKey command: package_id cannot be empty".to_string()
+                        "ExerciseByKey command: package_id cannot be empty".to_string(),
                     ));
                 }
                 if choice.is_empty() {
                     return Err(VmError::CantonError(
-                        "ExerciseByKey command: choice cannot be empty".to_string()
+                        "ExerciseByKey command: choice cannot be empty".to_string(),
                     ));
                 }
             }
@@ -220,17 +228,14 @@ impl VmExecutor for DamlExecutor {
         tx: &VmTransaction,
         state: &mut dyn VmState,
     ) -> Result<ExecutionResult> {
-        tracing::debug!(
-            "Daml: Executing transaction from {}",
-            hex::encode(&tx.from)
-        );
+        tracing::debug!("Daml: Executing transaction from {}", hex::encode(&tx.from));
 
         // Decode Daml commands from transaction data
         let commands = self.decode_commands(&tx.data)?;
 
         if commands.is_empty() {
             return Err(VmError::CantonError(
-                "No Daml commands found in transaction".to_string()
+                "No Daml commands found in transaction".to_string(),
             ));
         }
 
@@ -247,7 +252,8 @@ impl VmExecutor for DamlExecutor {
         );
 
         // Submit to Canton
-        let result = self.client
+        let result = self
+            .client
             .submit_command(&submission)
             .await
             .map_err(|e| VmError::CantonError(format!("Canton submission failed: {}", e)))?;
@@ -262,12 +268,14 @@ impl VmExecutor for DamlExecutor {
 
         // Add nonce state change to the result
         if execution_result.success {
-            execution_result.state_changes.push(crate::types::StateChange::new(
-                tx.from.clone(),
-                b"nonce".to_vec(),
-                Some(nonce.to_le_bytes().to_vec()),
-                Some((nonce + 1).to_le_bytes().to_vec()),
-            ));
+            execution_result
+                .state_changes
+                .push(crate::types::StateChange::new(
+                    tx.from.clone(),
+                    b"nonce".to_vec(),
+                    Some(nonce.to_le_bytes().to_vec()),
+                    Some((nonce + 1).to_le_bytes().to_vec()),
+                ));
         }
 
         tracing::debug!(
@@ -278,15 +286,8 @@ impl VmExecutor for DamlExecutor {
         Ok(execution_result)
     }
 
-    async fn call(
-        &self,
-        call: &ContractCall,
-        _state: &dyn VmState,
-    ) -> Result<CallResult> {
-        tracing::debug!(
-            "Daml: Read-only call to {}",
-            hex::encode(&call.contract)
-        );
+    async fn call(&self, call: &ContractCall, _state: &dyn VmState) -> Result<CallResult> {
+        tracing::debug!("Daml: Read-only call to {}", hex::encode(&call.contract));
 
         // For Daml, a "call" is typically a query for active contracts
         // The contract address is used as a party identifier
@@ -299,11 +300,12 @@ impl VmExecutor for DamlExecutor {
             None
         };
 
-        let query = ActiveContractsQuery::new(party)
-            .with_template_id(template_id.unwrap_or_default());
+        let query =
+            ActiveContractsQuery::new(party).with_template_id(template_id.unwrap_or_default());
 
         // Query active contracts
-        let contracts = self.client
+        let contracts = self
+            .client
             .get_active_contracts(&query)
             .await
             .map_err(|e| VmError::CantonError(format!("Canton query failed: {}", e)))?;
@@ -329,7 +331,8 @@ impl VmExecutor for DamlExecutor {
         self.config.validate_contract_size(deployment.code.len())?;
 
         // Upload DAR to Canton
-        let package_id = self.client
+        let package_id = self
+            .client
             .upload_dar(&deployment.code)
             .await
             .map_err(|e| VmError::CantonError(format!("DAR upload failed: {}", e)))?;
@@ -352,11 +355,7 @@ impl VmExecutor for DamlExecutor {
         Ok(DeployResult::success(contract_address, gas_used))
     }
 
-    async fn estimate_gas(
-        &self,
-        tx: &VmTransaction,
-        _state: &dyn VmState,
-    ) -> Result<u64> {
+    async fn estimate_gas(&self, tx: &VmTransaction, _state: &dyn VmState) -> Result<u64> {
         // Daml doesn't use gas, but we provide fixed estimates for compatibility
 
         if tx.to.is_none() {
@@ -433,8 +432,11 @@ mod tests {
         let result = executor.deploy_contract(&deployment, &mut state).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Canton") || err.contains("connect"),
-            "Expected Canton connection error, got: {}", err);
+        assert!(
+            err.contains("Canton") || err.contains("connect"),
+            "Expected Canton connection error, got: {}",
+            err
+        );
     }
 
     #[test]

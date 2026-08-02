@@ -4,7 +4,7 @@
 //! by both hash and height.
 
 use crate::error::{Result, StorageError};
-use crate::kv::{KvStore, WriteOp, CF_BLOCKS, CF_METADATA};
+use crate::kv::{CF_BLOCKS, CF_METADATA, KvStore, WriteOp};
 use crate::traits::BlockStore;
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -84,16 +84,14 @@ impl<K: KvStore> BlockStoreImpl<K> {
     /// records in `CF_TRANSACTIONS` (see `tenzro_node::event_loop`
     /// block-finalization indexing).
     fn encode_block(block: &Block) -> Result<Vec<u8>> {
-        serde_json::to_vec(block).map_err(|e| {
-            StorageError::SerializationError(format!("encode_block: {}", e))
-        })
+        serde_json::to_vec(block)
+            .map_err(|e| StorageError::SerializationError(format!("encode_block: {}", e)))
     }
 
     /// Decode a JSON-encoded block from storage.
     fn decode_block(data: &[u8]) -> Result<Block> {
-        serde_json::from_slice::<Block>(data).map_err(|e| {
-            StorageError::SerializationError(format!("decode_block: {}", e))
-        })
+        serde_json::from_slice::<Block>(data)
+            .map_err(|e| StorageError::SerializationError(format!("decode_block: {}", e)))
     }
 }
 
@@ -262,8 +260,8 @@ impl<K: KvStore + 'static> BlockStore for BlockStoreImpl<K> {
 mod tests {
     use super::*;
     use crate::kv::MemoryStore;
-    use tenzro_types::{BlockHeader, ConsensusProof, Address};
     use tenzro_types::block::ConsensusAlgorithm;
+    use tenzro_types::{Address, BlockHeader, ConsensusProof};
 
     fn create_test_block(height: u64) -> Block {
         let header = BlockHeader::new(
@@ -320,8 +318,8 @@ mod tests {
     #[tokio::test]
     async fn test_block_with_typed_transactions_roundtrip() {
         use tenzro_crypto::pq::MlDsaSigningKey;
-        use tenzro_types::primitives::{ChainId, Nonce, Timestamp, Signature};
-        use tenzro_types::transaction::{Transaction, TransactionType, SignedTransaction};
+        use tenzro_types::primitives::{ChainId, Nonce, Signature, Timestamp};
+        use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
 
         let kv_store = Arc::new(MemoryStore::new());
         let mut block_store = BlockStoreImpl::new(kv_store).unwrap();
@@ -332,7 +330,9 @@ mod tests {
             from: Address::zero(),
             to: Address::zero(),
             nonce: Nonce::from(0u64),
-            tx_type: TransactionType::Transfer { amount: 5_000_000_000_000_000_000u128 },
+            tx_type: TransactionType::Transfer {
+                amount: 5_000_000_000_000_000_000u128,
+            },
             gas_limit: 21_000,
             gas_price: 1_000_000_000,
             timestamp: Timestamp::new(1_700_000_000_000),
@@ -340,7 +340,8 @@ mod tests {
             pq_public_key: pq_key.verifying_key_bytes().to_vec(),
         };
         let pq_sig = pq_key.sign(tx.hash().as_bytes()).to_vec();
-        let signed = SignedTransaction::new(tx, Signature::new(vec![0u8; 64], vec![0u8; 32]), pq_sig);
+        let signed =
+            SignedTransaction::new(tx, Signature::new(vec![0u8; 64], vec![0u8; 32]), pq_sig);
 
         let header = BlockHeader::new(
             BlockHeight::new(7),
@@ -353,7 +354,10 @@ mod tests {
         let block = Block::new(header, vec![signed]);
 
         block_store.put_block(&block).await.unwrap();
-        let got = block_store.get_block_by_height(BlockHeight::new(7)).await.unwrap();
+        let got = block_store
+            .get_block_by_height(BlockHeight::new(7))
+            .await
+            .unwrap();
         assert_eq!(got.as_ref().map(|b| b.transactions.len()), Some(1));
         assert_eq!(got.unwrap().transactions[0].transaction.gas_limit, 21_000);
     }

@@ -186,11 +186,10 @@ impl Default for TenzroIrohConfig {
     /// keypair so the iroh `EndpointId` is byte-identical to the node DID.
     fn default() -> Self {
         Self {
-            data_dir: PathBuf::from("./data/iroh"),
+            data_dir: tenzro_types::paths::default_data_dir().join("iroh"),
             publish_to_n0_default_discovery: false,
             pkarr_relay_url: Some(
-                Url::parse("https://pkarr.tenzro.xyz")
-                    .expect("pkarr.tenzro.xyz is a valid URL"),
+                Url::parse("https://pkarr.tenzro.xyz").expect("pkarr.tenzro.xyz is a valid URL"),
             ),
             secret_key_seed: None,
             enable_docs: true,
@@ -247,7 +246,13 @@ mod tests {
         assert!(!cfg.publish_to_n0_default_discovery);
         assert!(cfg.enable_docs);
         assert!(cfg.secret_key_seed.is_none());
-        assert_eq!(cfg.data_dir, PathBuf::from("./data/iroh"));
+        // Under the Tenzro root's default instance rather than a
+        // cwd-relative path: two nodes started from different directories
+        // used to get different blob stores and re-fetch everything.
+        assert_eq!(
+            cfg.data_dir,
+            tenzro_types::paths::default_data_dir().join("iroh")
+        );
         assert_eq!(
             cfg.bind_addr,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_IROH_BIND_PORT)
@@ -257,8 +262,7 @@ mod tests {
     #[test]
     fn with_bind_addr_overrides_default() {
         let custom = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 12345);
-        let cfg = TenzroIrohConfig::with_data_dir(PathBuf::from("/tmp"))
-            .with_bind_addr(custom);
+        let cfg = TenzroIrohConfig::with_data_dir(PathBuf::from("/tmp")).with_bind_addr(custom);
         assert_eq!(cfg.bind_addr, custom);
     }
 }

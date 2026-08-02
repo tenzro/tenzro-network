@@ -74,13 +74,21 @@ pub struct CpuCompute {
     tier: CpuSimd,
 }
 
-/// Detected x86 SIMD tier for the Q8_0 integer-dot fast path.
+/// Detected CPU SIMD tier for the Q8_0 integer-dot fast path.
+///
+/// Each accelerated variant is gated to the architecture that can construct it,
+/// so there is no unreachable variant on any target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CpuSimd {
     /// No SIMD acceleration used — dequantize-then-GEMM / scalar dot.
     Scalar,
     /// AVX-512 Foundation + VNNI (`vpdpbusd`) available.
+    #[cfg(target_arch = "x86_64")]
     Avx512Vnni,
+    /// NEON advanced SIMD. Architecturally guaranteed on every ARMv8-A part,
+    /// so on aarch64 this tier is always selected rather than probed.
+    #[cfg(target_arch = "aarch64")]
+    Neon,
 }
 
 impl CpuCompute {
@@ -130,6 +138,27 @@ impl CpuCompute {
             return y;
         }
 
+        #[cfg(target_arch = "aarch64")]
+        if self.tier == CpuSimd::Neon
+            && q.kind() == QuantKind::Q8_0
+            && cols.is_multiple_of(crate::moe_quant::QK8_0)
+        {
+            // Same shape as the AVX-512 path above: quantize each activation
+            // row to Q8_0 once, then integer-dot it against every weight row.
+            let mut act_blocks: Vec<Vec<u8>> = Vec::with_capacity(n);
+            for i in 0..n {
+                let row: Vec<f32> = x.row(i).to_vec();
+                act_blocks.push(crate::moe_quant::quantize_row_q8_0(&row));
+            }
+            for j in 0..out {
+                let wblocks = q.row_block_bytes(j);
+                for (i, ablocks) in act_blocks.iter().enumerate() {
+                    y[[i, j]] = dot_q8_0_neon(ablocks, wblocks);
+                }
+            }
+            return y;
+        }
+
         // Scalar / ndarray reference path (always reachable).
         let mut wrow = vec![0.0f32; cols];
         for j in 0..out {
@@ -154,7 +183,10 @@ impl ExpertCompute for CpuCompute {
     fn tag(&self) -> &'static str {
         match self.tier {
             CpuSimd::Scalar => "cpu",
+            #[cfg(target_arch = "x86_64")]
             CpuSimd::Avx512Vnni => "cpu-avx512-vnni",
+            #[cfg(target_arch = "aarch64")]
+            CpuSimd::Neon => "cpu-neon",
         }
     }
 }
@@ -170,6 +202,13 @@ fn detect_cpu_simd() -> CpuSimd {
             return CpuSimd::Avx512Vnni;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON is mandatory in ARMv8-A, so unlike the x86 tier there is nothing
+        // to probe — every aarch64 target reaching this code has it.
+        return CpuSimd::Neon;
+    }
+    #[allow(unreachable_code)]
     CpuSimd::Scalar
 }
 
@@ -186,8 +225,8 @@ fn detect_cpu_simd() -> CpuSimd {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
 unsafe fn dot_q8_0_avx512_vnni(a: &[u8], b: &[u8]) -> f32 {
-    use std::arch::x86_64::*;
     use half::f16;
+    use std::arch::x86_64::*;
 
     const BB: usize = crate::moe_quant::Q8_0_BLOCK_BYTES; // 34
     debug_assert_eq!(a.len(), b.len());
@@ -243,6 +282,77 @@ unsafe fn hsum_i32x8(v: std::arch::x86_64::__m256i) -> i32 {
     let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
     let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b00_00_00_01));
     _mm_cvtsi128_si32(s)
+}
+
+/// Dot product of two Q8_0-block rows via the Armv8.2 NEON dot-product
+/// extension (`SDOT`).
+///
+/// Both `a` and `b` are concatenated Q8_0 blocks (`[f16 scale | 32×i8]`,
+/// 34 bytes each) of equal length. Per block: two `vdotq_s32` accumulations
+/// cover the 32 quants as 2×16 lanes, horizontally sum to i32, then scale by
+/// `d_a · d_b`.
+///
+/// Unlike the AVX-512 path, no bias correction is needed: the NEON widening
+/// multiply is *signed*, so the Q8_0 i8 quants feed it directly, whereas
+/// `vpdpbusd` requires one operand to be unsigned and a `128·Σb` correction
+/// afterwards.
+///
+/// Implementation note: this uses `vmull_s8` + `vpaddlq_s16` rather than the
+/// Armv8.2 `SDOT` instruction. `vdotq_s32` is still unstable in Rust
+/// (`stdarch_neon_dotprod`) as of 1.97 and the workspace pins stable, so the
+/// widening-multiply form is the portable equivalent — it is exactly the
+/// fallback the vendored llama.cpp uses when `__ARM_FEATURE_DOTPROD` is absent
+/// (`ggml/src/ggml-cpu/ggml-cpu-impl.h`, `ggml_vdotq_s32`). It also has the
+/// advantage of needing no runtime feature probe: NEON is mandatory in ARMv8-A,
+/// so every aarch64 part takes this path. When `vdotq_s32` stabilizes, swapping
+/// the inner two lines for a pair of `SDOT` accumulations is the only change
+/// required.
+///
+/// Per-lane grouping differs from `SDOT`, but the horizontal sum is identical,
+/// which is all this function returns.
+///
+/// # Safety
+/// Caller must ensure `a` and `b` are the same number of whole Q8_0 blocks.
+#[cfg(target_arch = "aarch64")]
+fn dot_q8_0_neon(a: &[u8], b: &[u8]) -> f32 {
+    use half::f16;
+    use std::arch::aarch64::*;
+
+    const BB: usize = crate::moe_quant::Q8_0_BLOCK_BYTES; // 34
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(a.len() % BB, 0);
+
+    let mut acc = 0.0f32;
+    let nblocks = a.len() / BB;
+    for blk in 0..nblocks {
+        let ab = &a[blk * BB..(blk + 1) * BB];
+        let bb = &b[blk * BB..(blk + 1) * BB];
+        let da = f16::from_le_bytes([ab[0], ab[1]]).to_f32();
+        let db = f16::from_le_bytes([bb[0], bb[1]]).to_f32();
+
+        // Safety: NEON is architecturally guaranteed on aarch64, and both
+        // slices are indexed within the 34-byte block bounds asserted above.
+        let raw = unsafe {
+            // 32 i8 quants per block, loaded as 2×int8x16_t.
+            let qa0 = vld1q_s8(ab.as_ptr().add(2) as *const i8);
+            let qa1 = vld1q_s8(ab.as_ptr().add(2 + 16) as *const i8);
+            let qb0 = vld1q_s8(bb.as_ptr().add(2) as *const i8);
+            let qb1 = vld1q_s8(bb.as_ptr().add(2 + 16) as *const i8);
+
+            // Widening signed multiply into i16x8, then pairwise-accumulate
+            // into i32x4. Four halves cover all 32 lanes.
+            let p0 = vmull_s8(vget_low_s8(qa0), vget_low_s8(qb0));
+            let p1 = vmull_s8(vget_high_s8(qa0), vget_high_s8(qb0));
+            let p2 = vmull_s8(vget_low_s8(qa1), vget_low_s8(qb1));
+            let p3 = vmull_s8(vget_high_s8(qa1), vget_high_s8(qb1));
+
+            let s01 = vaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1));
+            let s23 = vaddq_s32(vpaddlq_s16(p2), vpaddlq_s16(p3));
+            vaddvq_s32(vaddq_s32(s01, s23))
+        };
+        acc += (raw as f32) * da * db;
+    }
+    acc
 }
 
 /// Which compute backend the runtime resolved for this node.
@@ -367,14 +477,11 @@ mod tests {
         let n = 4usize;
         let wdense =
             Array2::from_shape_fn((out, cols), |(i, j)| ((i * cols + j) as f32).sin() * 0.5);
-        let q = QuantMatrix::quantize(
-            QuantKind::Q8_0,
-            out,
-            cols,
-            wdense.as_slice().unwrap(),
-        )
-        .unwrap();
-        let x = Array2::from_shape_fn((n, cols), |(i, j)| ((i + 1) as f32 * (j as f32)).cos() * 0.3);
+        let q =
+            QuantMatrix::quantize(QuantKind::Q8_0, out, cols, wdense.as_slice().unwrap()).unwrap();
+        let x = Array2::from_shape_fn((n, cols), |(i, j)| {
+            ((i + 1) as f32 * (j as f32)).cos() * 0.3
+        });
 
         let got = cpu.matmul_xt(x.view(), &Weight::Quant(&q));
 

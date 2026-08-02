@@ -54,8 +54,8 @@
 //!     2x headroom before the consensus retry policy fires.
 
 use libp2p::{
-    request_response::{self, ProtocolSupport},
     StreamProtocol,
+    request_response::{self, ProtocolSupport},
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -147,12 +147,8 @@ pub type ConsensusDirectBehaviour =
 /// policy enforces tighter per-message deadlines where appropriate.
 pub fn new_behaviour() -> ConsensusDirectBehaviour {
     let protocol = StreamProtocol::new(CONSENSUS_DIRECT_PROTOCOL);
-    let cfg = request_response::Config::default()
-        .with_request_timeout(REQUEST_TIMEOUT);
-    request_response::cbor::Behaviour::new(
-        std::iter::once((protocol, ProtocolSupport::Full)),
-        cfg,
-    )
+    let cfg = request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT);
+    request_response::cbor::Behaviour::new(std::iter::once((protocol, ProtocolSupport::Full)), cfg)
 }
 
 #[cfg(test)]
@@ -178,8 +174,7 @@ mod tests {
         ];
         for resp in cases {
             let bytes = bincode::serialize(&resp).expect("encode");
-            let decoded: ConsensusDirectResponse =
-                bincode::deserialize(&bytes).expect("decode");
+            let decoded: ConsensusDirectResponse = bincode::deserialize(&bytes).expect("decode");
             // PartialEq on the response is satisfied via enum discriminant
             // round-trip; we don't derive PartialEq on the outer to avoid
             // pulling it through ConsensusMessage. Compare via Debug fmt
@@ -203,8 +198,7 @@ mod tests {
             public_key: vec![0xcd; 32],
         });
         let bytes = bincode::serialize(&req).expect("encode");
-        let decoded: ConsensusDirectRequest =
-            bincode::deserialize(&bytes).expect("decode");
+        let decoded: ConsensusDirectRequest = bincode::deserialize(&bytes).expect("decode");
         assert_eq!(format!("{:?}", req), format!("{:?}", decoded));
     }
 
@@ -224,8 +218,7 @@ mod tests {
             bls_signature: vec![0u8; 96],
         });
         let bytes = bincode::serialize(&req).expect("encode");
-        let decoded: ConsensusDirectRequest =
-            bincode::deserialize(&bytes).expect("decode");
+        let decoded: ConsensusDirectRequest = bincode::deserialize(&bytes).expect("decode");
         assert_eq!(format!("{:?}", req), format!("{:?}", decoded));
     }
 

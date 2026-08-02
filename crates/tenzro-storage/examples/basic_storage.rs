@@ -10,11 +10,10 @@ use tenzro_storage::{
     merkle::MerklePatriciaTrie,
     traits::{AccountStore, BlockStore},
 };
-use tenzro_types::{
-    Account, Address, Block, BlockHeader, BlockHeight, ConsensusProof, Hash,
-    Nonce,
-};
 use tenzro_types::block::ConsensusAlgorithm;
+use tenzro_types::{
+    Account, Address, Block, BlockHeader, BlockHeight, ConsensusProof, Hash, Nonce,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -118,8 +117,7 @@ fn demo_merkle_trie() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate and verify a proof
     let proof = trie.generate_proof(b"account1")?;
-    let is_valid =
-        MerklePatriciaTrie::verify_proof(&proof, state_root, Some(b"balance:1000"))?;
+    let is_valid = MerklePatriciaTrie::verify_proof(&proof, state_root, Some(b"balance:1000"))?;
     println!("Proof verification: {}", is_valid);
 
     // Delete a key

@@ -229,16 +229,14 @@ impl CdpFacilitatorClient {
             req_builder = req_builder.bearer_auth(key);
         }
 
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("CDP facilitator verify failed: {}", e)))?;
+        let response = req_builder.send().await.map_err(|e| {
+            PaymentError::NetworkError(format!("CDP facilitator verify failed: {}", e))
+        })?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("Failed to read CDP response: {}", e)))?;
+        let body = response.text().await.map_err(|e| {
+            PaymentError::NetworkError(format!("Failed to read CDP response: {}", e))
+        })?;
 
         if !status.is_success() {
             return Err(PaymentError::VerificationFailed(format!(
@@ -287,16 +285,14 @@ impl CdpFacilitatorClient {
             req_builder = req_builder.bearer_auth(key);
         }
 
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("CDP facilitator settle failed: {}", e)))?;
+        let response = req_builder.send().await.map_err(|e| {
+            PaymentError::NetworkError(format!("CDP facilitator settle failed: {}", e))
+        })?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("Failed to read CDP response: {}", e)))?;
+        let body = response.text().await.map_err(|e| {
+            PaymentError::NetworkError(format!("Failed to read CDP response: {}", e))
+        })?;
 
         if !status.is_success() {
             return Err(PaymentError::SettlementError(format!(
@@ -311,10 +307,7 @@ impl CdpFacilitatorClient {
         })?;
 
         if settle_response.success {
-            info!(
-                "x402 settlement successful: tx={}",
-                settle_response.tx_hash
-            );
+            info!("x402 settlement successful: tx={}", settle_response.tx_hash);
         } else {
             warn!(
                 "x402 settlement failed: {}",
@@ -633,8 +626,7 @@ mod tests {
             value: "1000000".to_string(),
             valid_after: 0,
             valid_before: u64::MAX,
-            nonce: "0x0000000000000000000000000000000000000000000000000000000000000001"
-                .to_string(),
+            nonce: "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
         };
 
         let r = [1u8; 32];

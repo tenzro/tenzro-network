@@ -92,9 +92,7 @@ pub enum NodeError {
     /// `tenzro-node init` refused to overwrite existing validator
     /// key files. Pass `--force` to rotate; doing so abandons the
     /// previous validator identity and any bonded stake.
-    #[error(
-        "validator key file(s) already exist: {0} — refusing to overwrite without --force"
-    )]
+    #[error("validator key file(s) already exist: {0} — refusing to overwrite without --force")]
     KeysAlreadyExist(String),
 
     /// IO error

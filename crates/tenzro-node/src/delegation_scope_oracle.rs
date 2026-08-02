@@ -62,10 +62,7 @@ pub struct IdentityScopeOracle {
 }
 
 impl IdentityScopeOracle {
-    pub fn new(
-        identity_registry: Arc<IdentityRegistry>,
-        agent_runtime: Arc<AgentRuntime>,
-    ) -> Self {
+    pub fn new(identity_registry: Arc<IdentityRegistry>, agent_runtime: Arc<AgentRuntime>) -> Self {
         Self {
             identity_registry,
             agent_runtime,
@@ -134,7 +131,9 @@ impl ScopeOracle for IdentityScopeOracle {
                 // Per-tx ceiling: the tighter of (delegation, runtime).
                 let max_per_tx = match (
                     delegation_scope.max_transaction_value,
-                    runtime_policy.as_ref().map(|p| p.max_per_transaction as u128),
+                    runtime_policy
+                        .as_ref()
+                        .map(|p| p.max_per_transaction as u128),
                 ) {
                     (Some(d), Some(r)) => Some(d.min(r)),
                     (Some(d), None) => Some(d),

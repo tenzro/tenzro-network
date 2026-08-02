@@ -73,8 +73,9 @@ impl PlanCmd {
 
         let spinner = output::create_spinner("Computing placement...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_clusterPlan", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_clusterPlan", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -83,7 +84,10 @@ impl PlanCmd {
                 if let Some(fit) = value.get("fit").and_then(|v| v.as_str()) {
                     output::print_field("Fit Decision", fit);
                 }
-                let forms = value.get("forms_cluster").and_then(|v| v.as_bool()).unwrap_or(false);
+                let forms = value
+                    .get("forms_cluster")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 output::print_field("Forms Cluster", &forms.to_string());
                 if let Some(bytes) = value
                     .get("activation_bytes_per_token")
@@ -96,7 +100,10 @@ impl PlanCmd {
                     output::print_field("Stages", &stages.len().to_string());
                     for (i, stage) in stages.iter().enumerate() {
                         let address = stage.get("address").and_then(|v| v.as_str()).unwrap_or("?");
-                        let start = stage.get("start_layer").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let start = stage
+                            .get("start_layer")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         let end = stage.get("end_layer").and_then(|v| v.as_u64()).unwrap_or(0);
                         output::print_field(
                             &format!("Stage {}", i),
@@ -141,8 +148,7 @@ impl PreviewCmd {
 
         let spinner = output::create_spinner("Reading model shape and discovering members...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_clusterPreview", params).await;
+        let result: Result<serde_json::Value> = rpc.call("tenzro_clusterPreview", params).await;
         spinner.finish_and_clear();
 
         let value = match result {
@@ -156,13 +162,22 @@ impl PreviewCmd {
         println!();
         if let Some(shape) = value.get("model_shape") {
             let layers = shape.get("layers").and_then(|v| v.as_u64()).unwrap_or(0);
-            let vram = shape.get("total_vram_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            output::print_field("Model Shape", &format!("{} layers, {:.1} GB weights", layers, vram));
+            let vram = shape
+                .get("total_vram_gb")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            output::print_field(
+                "Model Shape",
+                &format!("{} layers, {:.1} GB weights", layers, vram),
+            );
         }
         if let Some(fit) = value.get("fit").and_then(|v| v.as_str()) {
             output::print_field("Fit Decision", fit);
         }
-        let forms = value.get("forms_cluster").and_then(|v| v.as_bool()).unwrap_or(false);
+        let forms = value
+            .get("forms_cluster")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         output::print_field("Forms Cluster", &forms.to_string());
 
         if let Some(members) = value.get("members").and_then(|v| v.as_array()) {
@@ -172,7 +187,10 @@ impl PreviewCmd {
                 let address = m.get("address").and_then(|v| v.as_str()).unwrap_or("?");
                 let vram = m.get("vram_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let backend = m.get("backend").and_then(|v| v.as_str()).unwrap_or("?");
-                let reach = m.get("reachability").and_then(|v| v.as_str()).unwrap_or("?");
+                let reach = m
+                    .get("reachability")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let head = if m.get("is_head").and_then(|v| v.as_bool()).unwrap_or(false) {
                     " [head]"
                 } else {
@@ -209,7 +227,10 @@ impl PreviewCmd {
                 output::print_field("Proposed Split", &format!("{} stages", stages.len()));
                 for (i, stage) in stages.iter().enumerate() {
                     let address = stage.get("address").and_then(|v| v.as_str()).unwrap_or("?");
-                    let start = stage.get("start_layer").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let start = stage
+                        .get("start_layer")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     let end = stage.get("end_layer").and_then(|v| v.as_u64()).unwrap_or(0);
                     output::print_field(
                         &format!("Stage {}", i),
@@ -236,8 +257,9 @@ impl MembersCmd {
 
         let spinner = output::create_spinner("Discovering members on the local network...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_clusterMembers", serde_json::json!({})).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_clusterMembers", serde_json::json!({}))
+            .await;
         spinner.finish_and_clear();
 
         let value = match result {
@@ -265,7 +287,10 @@ impl MembersCmd {
                 let address = m.get("address").and_then(|v| v.as_str()).unwrap_or("?");
                 let vram = m.get("vram_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let backend = m.get("backend").and_then(|v| v.as_str()).unwrap_or("?");
-                let reach = m.get("reachability").and_then(|v| v.as_str()).unwrap_or("?");
+                let reach = m
+                    .get("reachability")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let head = if m.get("is_head").and_then(|v| v.as_bool()).unwrap_or(false) {
                     " [head]"
                 } else {

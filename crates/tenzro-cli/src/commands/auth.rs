@@ -13,7 +13,7 @@
 use crate::config;
 use crate::output;
 use crate::rpc::RpcClient;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 /// OAuth 2.1 + DPoP auth management

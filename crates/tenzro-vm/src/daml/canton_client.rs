@@ -19,19 +19,19 @@
 //! to operate without Canton for EVM/SVM workloads while clearly reporting that
 //! DAML operations require a running Canton participant.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use prost::Message;
 use tokio::sync::RwLock;
 use tonic::transport::{Channel, Endpoint};
 
+use super::types::{ActiveContractsQuery, DamlExecutionResult, DamlSubmission};
 use crate::error::{Result, VmError};
-use super::types::{DamlSubmission, DamlExecutionResult, ActiveContractsQuery};
 use tenzro_types::canton::{
-    DamlCommand, DamlContractId, DamlEvent, DamlPackageInfo, DamlParty,
-    DamlTransaction, DamlValue, CantonSynchronizerId,
+    CantonSynchronizerId, DamlCommand, DamlContractId, DamlEvent, DamlPackageInfo, DamlParty,
+    DamlTransaction, DamlValue,
 };
 
 // ───────────────────────────────────────────────────────────────────
@@ -356,8 +356,7 @@ pub mod proto {
     }
 
     #[derive(Clone, PartialEq, Message)]
-    pub struct ListPackagesRequest {
-    }
+    pub struct ListPackagesRequest {}
 
     #[derive(Clone, PartialEq, Message)]
     pub struct ListPackagesResponse {
@@ -445,19 +444,19 @@ impl CantonClientConfig {
     pub fn validate(&self) -> Result<()> {
         if self.host.is_empty() {
             return Err(VmError::CantonError(
-                "Canton host cannot be empty".to_string()
+                "Canton host cannot be empty".to_string(),
             ));
         }
 
         if self.ledger_api_port == 0 {
             return Err(VmError::CantonError(
-                "Invalid Ledger API port: must be > 0".to_string()
+                "Invalid Ledger API port: must be > 0".to_string(),
             ));
         }
 
         if self.admin_api_port == 0 {
             return Err(VmError::CantonError(
-                "Invalid Admin API port: must be > 0".to_string()
+                "Invalid Admin API port: must be > 0".to_string(),
             ));
         }
 
@@ -545,7 +544,9 @@ impl CantonClient {
     /// connection was lost.
     pub async fn connect(&self) -> Result<()> {
         // Try to connect to Ledger API
-        let ledger_channel = self.create_channel(&self.config.ledger_api_endpoint()).await?;
+        let ledger_channel = self
+            .create_channel(&self.config.ledger_api_endpoint())
+            .await?;
 
         {
             let mut conn = self.ledger_connection.write().await;
@@ -557,7 +558,10 @@ impl CantonClient {
             Ok(admin_channel) => {
                 let mut conn = self.admin_connection.write().await;
                 conn.channel = Some(admin_channel);
-                tracing::info!("Canton Admin API connected: {}", self.config.admin_api_endpoint());
+                tracing::info!(
+                    "Canton Admin API connected: {}",
+                    self.config.admin_api_endpoint()
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -569,7 +573,10 @@ impl CantonClient {
         }
 
         self.connected.store(true, Ordering::SeqCst);
-        tracing::info!("Canton Ledger API connected: {}", self.config.ledger_api_endpoint());
+        tracing::info!(
+            "Canton Ledger API connected: {}",
+            self.config.ledger_api_endpoint()
+        );
 
         Ok(())
     }
@@ -577,7 +584,9 @@ impl CantonClient {
     /// Create a tonic gRPC channel to the given endpoint
     async fn create_channel(&self, endpoint_url: &str) -> Result<Channel> {
         let endpoint = Endpoint::from_shared(endpoint_url.to_string())
-            .map_err(|e| VmError::CantonError(format!("Invalid endpoint '{}': {}", endpoint_url, e)))?
+            .map_err(|e| {
+                VmError::CantonError(format!("Invalid endpoint '{}': {}", endpoint_url, e))
+            })?
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.request_timeout)
             .http2_keep_alive_interval(Duration::from_secs(30))
@@ -609,7 +618,8 @@ impl CantonClient {
         conn.channel.clone().ok_or_else(|| {
             VmError::CantonError(
                 "Canton participant not available. DAML operations require a running Canton \
-                 participant node with Ledger API enabled.".to_string()
+                 participant node with Ledger API enabled."
+                    .to_string(),
             )
         })
     }
@@ -624,7 +634,9 @@ impl CantonClient {
         }
 
         // Try connecting Admin API
-        let admin_channel = self.create_channel(&self.config.admin_api_endpoint()).await?;
+        let admin_channel = self
+            .create_channel(&self.config.admin_api_endpoint())
+            .await?;
         {
             let mut conn = self.admin_connection.write().await;
             conn.channel = Some(admin_channel.clone());
@@ -651,7 +663,8 @@ impl CantonClient {
 
         // Encode the request
         let mut buf = Vec::new();
-        request.encode(&mut buf)
+        request
+            .encode(&mut buf)
             .map_err(|e| VmError::CantonError(format!("Failed to encode gRPC request: {}", e)))?;
 
         // Build gRPC frame: 1 byte compression flag (0) + 4 bytes big-endian length + data
@@ -661,7 +674,8 @@ impl CantonClient {
         frame.extend_from_slice(&buf);
 
         // Create the HTTP/2 request
-        let uri = path.parse::<http::Uri>()
+        let uri = path
+            .parse::<http::Uri>()
             .map_err(|e| VmError::CantonError(format!("Invalid gRPC path '{}': {}", path, e)))?;
 
         let request = http::Request::builder()
@@ -671,97 +685,117 @@ impl CantonClient {
             .header("te", "trailers")
             .body(tonic::body::BoxBody::new(
                 http_body_util::Full::new(bytes::Bytes::from(frame))
-                    .map_err(|never| match never {})
+                    .map_err(|never| match never {}),
             ))
             .map_err(|e| VmError::CantonError(format!("Failed to build gRPC request: {}", e)))?;
 
         // Send via the channel
         let mut svc = channel.clone();
-        let response = tower::Service::call(&mut svc, request).await
-            .map_err(|e| {
-                self.connected.store(false, Ordering::SeqCst);
-                VmError::CantonError(format!(
-                    "Canton gRPC call to {} failed: {}. \
+        let response = tower::Service::call(&mut svc, request).await.map_err(|e| {
+            self.connected.store(false, Ordering::SeqCst);
+            VmError::CantonError(format!(
+                "Canton gRPC call to {} failed: {}. \
                      The Canton participant may be down or unreachable.",
-                    path, e
-                ))
-            })?;
+                path, e
+            ))
+        })?;
 
         // Check gRPC status from trailers
         let status_code = response.status();
         if !status_code.is_success() {
             return Err(VmError::CantonError(format!(
-                "Canton gRPC call to {} returned HTTP {}", path, status_code
+                "Canton gRPC call to {} returned HTTP {}",
+                path, status_code
             )));
         }
 
         // Read response body
         use http_body_util::BodyExt;
-        let body_bytes = response.into_body()
-            .collect().await
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
             .map_err(|e| VmError::CantonError(format!("Failed to read gRPC response body: {}", e)))?
             .to_bytes();
 
         // Parse gRPC frame: skip 5-byte header (1 compression + 4 length)
         if body_bytes.len() < 5 {
             return Err(VmError::CantonError(format!(
-                "Invalid gRPC response from {}: too short ({} bytes)", path, body_bytes.len()
+                "Invalid gRPC response from {}: too short ({} bytes)",
+                path,
+                body_bytes.len()
             )));
         }
 
         let message_bytes = &body_bytes[5..];
-        Resp::decode(message_bytes)
-            .map_err(|e| VmError::CantonError(format!(
-                "Failed to decode gRPC response from {}: {}", path, e
-            )))
+        Resp::decode(message_bytes).map_err(|e| {
+            VmError::CantonError(format!(
+                "Failed to decode gRPC response from {}: {}",
+                path, e
+            ))
+        })
     }
 
     /// Convert a DamlCommand to a proto Command
     fn daml_command_to_proto(cmd: &DamlCommand) -> proto::Command {
         match cmd {
-            DamlCommand::Create { template_id, create_arguments } => {
-                proto::Command {
-                    command: Some(proto::command::Command::Create(proto::CreateCommand {
+            DamlCommand::Create {
+                template_id,
+                create_arguments,
+            } => proto::Command {
+                command: Some(proto::command::Command::Create(proto::CreateCommand {
+                    template_id: Some(proto::Identifier {
+                        package_id: template_id.package_id.clone(),
+                        module_name: template_id.module_name.clone(),
+                        entity_name: template_id.entity_name.clone(),
+                    }),
+                    create_arguments: Some(Self::daml_value_to_record(create_arguments)),
+                })),
+            },
+            DamlCommand::Exercise {
+                contract_id,
+                template_id,
+                choice,
+                choice_argument,
+            } => proto::Command {
+                command: Some(proto::command::Command::Exercise(proto::ExerciseCommand {
+                    template_id: Some(proto::Identifier {
+                        package_id: template_id.package_id.clone(),
+                        module_name: template_id.module_name.clone(),
+                        entity_name: template_id.entity_name.clone(),
+                    }),
+                    contract_id: contract_id.as_str().to_string(),
+                    choice: choice.clone(),
+                    choice_argument: Some(Self::daml_value_to_proto(choice_argument)),
+                })),
+            },
+            DamlCommand::CreateAndExercise {
+                template_id,
+                create_arguments,
+                choice,
+                choice_argument,
+            } => proto::Command {
+                command: Some(proto::command::Command::CreateAndExercise(
+                    proto::CreateAndExerciseCommand {
                         template_id: Some(proto::Identifier {
                             package_id: template_id.package_id.clone(),
                             module_name: template_id.module_name.clone(),
                             entity_name: template_id.entity_name.clone(),
                         }),
                         create_arguments: Some(Self::daml_value_to_record(create_arguments)),
-                    })),
-                }
-            }
-            DamlCommand::Exercise { contract_id, template_id, choice, choice_argument } => {
-                proto::Command {
-                    command: Some(proto::command::Command::Exercise(proto::ExerciseCommand {
-                        template_id: Some(proto::Identifier {
-                            package_id: template_id.package_id.clone(),
-                            module_name: template_id.module_name.clone(),
-                            entity_name: template_id.entity_name.clone(),
-                        }),
-                        contract_id: contract_id.as_str().to_string(),
                         choice: choice.clone(),
                         choice_argument: Some(Self::daml_value_to_proto(choice_argument)),
-                    })),
-                }
-            }
-            DamlCommand::CreateAndExercise { template_id, create_arguments, choice, choice_argument } => {
-                proto::Command {
-                    command: Some(proto::command::Command::CreateAndExercise(proto::CreateAndExerciseCommand {
-                        template_id: Some(proto::Identifier {
-                            package_id: template_id.package_id.clone(),
-                            module_name: template_id.module_name.clone(),
-                            entity_name: template_id.entity_name.clone(),
-                        }),
-                        create_arguments: Some(Self::daml_value_to_record(create_arguments)),
-                        choice: choice.clone(),
-                        choice_argument: Some(Self::daml_value_to_proto(choice_argument)),
-                    })),
-                }
-            }
-            DamlCommand::ExerciseByKey { template_id, contract_key, choice, choice_argument } => {
-                proto::Command {
-                    command: Some(proto::command::Command::ExerciseByKey(proto::ExerciseByKeyCommand {
+                    },
+                )),
+            },
+            DamlCommand::ExerciseByKey {
+                template_id,
+                contract_key,
+                choice,
+                choice_argument,
+            } => proto::Command {
+                command: Some(proto::command::Command::ExerciseByKey(
+                    proto::ExerciseByKeyCommand {
                         template_id: Some(proto::Identifier {
                             package_id: template_id.package_id.clone(),
                             module_name: template_id.module_name.clone(),
@@ -770,9 +804,9 @@ impl CantonClient {
                         contract_key: Some(Self::daml_value_to_proto(contract_key)),
                         choice: choice.clone(),
                         choice_argument: Some(Self::daml_value_to_proto(choice_argument)),
-                    })),
-                }
-            }
+                    },
+                )),
+            },
         }
     }
 
@@ -816,7 +850,9 @@ impl CantonClient {
             },
             DamlValue::Optional(inner) => proto::Value {
                 sum: Some(proto::value::Sum::Optional(Box::new(proto::Optional {
-                    value: inner.as_ref().map(|v| Box::new(Self::daml_value_to_proto(v))),
+                    value: inner
+                        .as_ref()
+                        .map(|v| Box::new(Self::daml_value_to_proto(v))),
                 }))),
             },
             DamlValue::Unit => proto::Value { sum: None },
@@ -827,18 +863,16 @@ impl CantonClient {
     /// Convert a DamlValue to a proto Record (for create arguments)
     fn daml_value_to_record(value: &DamlValue) -> proto::Record {
         match value {
-            DamlValue::Record { fields, .. } => {
-                proto::Record {
-                    record_id: None,
-                    fields: fields
-                        .iter()
-                        .map(|(label, v)| proto::RecordField {
-                            label: label.clone(),
-                            value: Some(Self::daml_value_to_proto(v)),
-                        })
-                        .collect(),
-                }
-            }
+            DamlValue::Record { fields, .. } => proto::Record {
+                record_id: None,
+                fields: fields
+                    .iter()
+                    .map(|(label, v)| proto::RecordField {
+                        label: label.clone(),
+                        value: Some(Self::daml_value_to_proto(v)),
+                    })
+                    .collect(),
+            },
             _ => proto::Record {
                 record_id: None,
                 fields: Vec::new(),
@@ -847,46 +881,55 @@ impl CantonClient {
     }
 
     /// Convert a proto Identifier to tenzro_types DamlTemplateId
-    fn proto_identifier_to_template_id(id: &proto::Identifier) -> tenzro_types::canton::DamlTemplateId {
-        tenzro_types::canton::DamlTemplateId::new(
-            &id.package_id,
-            &id.module_name,
-            &id.entity_name,
-        )
+    fn proto_identifier_to_template_id(
+        id: &proto::Identifier,
+    ) -> tenzro_types::canton::DamlTemplateId {
+        tenzro_types::canton::DamlTemplateId::new(&id.package_id, &id.module_name, &id.entity_name)
     }
 
     /// Convert proto events to DamlEvents
     fn proto_events_to_daml(events: &[proto::Event]) -> Vec<DamlEvent> {
-        events.iter().filter_map(|event| {
-            match &event.event {
-                Some(proto::event::Event::Created(created)) => {
-                    let template_id = created.template_id.as_ref()
-                        .map(Self::proto_identifier_to_template_id)
-                        .unwrap_or_else(|| tenzro_types::canton::DamlTemplateId::new("", "", ""));
+        events
+            .iter()
+            .filter_map(|event| {
+                match &event.event {
+                    Some(proto::event::Event::Created(created)) => {
+                        let template_id = created
+                            .template_id
+                            .as_ref()
+                            .map(Self::proto_identifier_to_template_id)
+                            .unwrap_or_else(|| {
+                                tenzro_types::canton::DamlTemplateId::new("", "", "")
+                            });
 
-                    Some(DamlEvent::Created {
-                        event_id: created.event_id.clone(),
-                        contract_id: DamlContractId::new(&created.contract_id),
-                        template_id,
-                        create_arguments: DamlValue::Unit, // simplified
-                        signatories: created.signatories.iter().map(DamlParty::new).collect(),
-                        observers: created.observers.iter().map(DamlParty::new).collect(),
-                    })
-                }
-                Some(proto::event::Event::Archived(archived)) => {
-                    let template_id = archived.template_id.as_ref()
-                        .map(Self::proto_identifier_to_template_id)
-                        .unwrap_or_else(|| tenzro_types::canton::DamlTemplateId::new("", "", ""));
+                        Some(DamlEvent::Created {
+                            event_id: created.event_id.clone(),
+                            contract_id: DamlContractId::new(&created.contract_id),
+                            template_id,
+                            create_arguments: DamlValue::Unit, // simplified
+                            signatories: created.signatories.iter().map(DamlParty::new).collect(),
+                            observers: created.observers.iter().map(DamlParty::new).collect(),
+                        })
+                    }
+                    Some(proto::event::Event::Archived(archived)) => {
+                        let template_id = archived
+                            .template_id
+                            .as_ref()
+                            .map(Self::proto_identifier_to_template_id)
+                            .unwrap_or_else(|| {
+                                tenzro_types::canton::DamlTemplateId::new("", "", "")
+                            });
 
-                    Some(DamlEvent::Archived {
-                        event_id: archived.event_id.clone(),
-                        contract_id: DamlContractId::new(&archived.contract_id),
-                        template_id,
-                    })
+                        Some(DamlEvent::Archived {
+                            event_id: archived.event_id.clone(),
+                            contract_id: DamlContractId::new(&archived.contract_id),
+                            template_id,
+                        })
+                    }
+                    None => None,
                 }
-                None => None,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Submit commands via CommandService.SubmitAndWait
@@ -903,7 +946,8 @@ impl CantonClient {
         let channel = self.get_ledger_channel().await?;
 
         // Build proto Commands
-        let proto_commands: Vec<proto::Command> = submission.commands
+        let proto_commands: Vec<proto::Command> = submission
+            .commands
             .iter()
             .map(Self::daml_command_to_proto)
             .collect();
@@ -920,11 +964,13 @@ impl CantonClient {
         };
 
         // Make the gRPC call
-        let response: proto::SubmitAndWaitResponse = self.grpc_unary(
-            &channel,
-            "/com.daml.ledger.api.v2.CommandService/SubmitAndWait",
-            request,
-        ).await?;
+        let response: proto::SubmitAndWaitResponse = self
+            .grpc_unary(
+                &channel,
+                "/com.daml.ledger.api.v2.CommandService/SubmitAndWait",
+                request,
+            )
+            .await?;
 
         // Convert response to DamlExecutionResult
         if let Some(tx) = response.transaction {
@@ -933,7 +979,11 @@ impl CantonClient {
             let transaction = DamlTransaction {
                 transaction_id: tx.transaction_id,
                 command_id: tx.command_id,
-                workflow_id: if tx.workflow_id.is_empty() { None } else { Some(tx.workflow_id) },
+                workflow_id: if tx.workflow_id.is_empty() {
+                    None
+                } else {
+                    Some(tx.workflow_id)
+                },
                 events: events.clone(),
                 effective_at: tx.effective_at,
                 offset: tx.offset,
@@ -946,12 +996,17 @@ impl CantonClient {
 
             Ok(DamlExecutionResult::success(transaction, events))
         } else {
-            Ok(DamlExecutionResult::failed("Canton returned empty transaction"))
+            Ok(DamlExecutionResult::failed(
+                "Canton returned empty transaction",
+            ))
         }
     }
 
     /// Query active contracts via StateService.GetActiveContracts
-    pub async fn get_active_contracts(&self, query: &ActiveContractsQuery) -> Result<Vec<DamlContractId>> {
+    pub async fn get_active_contracts(
+        &self,
+        query: &ActiveContractsQuery,
+    ) -> Result<Vec<DamlContractId>> {
         tracing::debug!(
             "Canton StateService.GetActiveContracts: party={}",
             query.party
@@ -999,11 +1054,13 @@ impl CantonClient {
         // For simplicity, we use a unary call pattern here. In production,
         // this should use tonic's streaming client for large contract sets.
         // The server will send back one response per active contract.
-        let response: proto::GetActiveContractsResponse = self.grpc_unary(
-            &channel,
-            "/com.daml.ledger.api.v2.StateService/GetActiveContracts",
-            request,
-        ).await?;
+        let response: proto::GetActiveContractsResponse = self
+            .grpc_unary(
+                &channel,
+                "/com.daml.ledger.api.v2.StateService/GetActiveContracts",
+                request,
+            )
+            .await?;
 
         let mut contracts = Vec::new();
         if let Some(entry) = response.contract_entry
@@ -1031,11 +1088,13 @@ impl CantonClient {
             submission_id: submission_id.clone(),
         };
 
-        let _response: proto::UploadDarFileResponse = self.grpc_unary(
-            &channel,
-            "/com.daml.ledger.api.v2.admin.PackageManagementService/UploadDarFile",
-            request,
-        ).await?;
+        let _response: proto::UploadDarFileResponse = self
+            .grpc_unary(
+                &channel,
+                "/com.daml.ledger.api.v2.admin.PackageManagementService/UploadDarFile",
+                request,
+            )
+            .await?;
 
         // Canton doesn't return the package ID directly from UploadDarFile.
         // We compute it from a hash of the DAR content for tracking.
@@ -1045,7 +1104,10 @@ impl CantonClient {
         let hash = hasher.finalize();
         let package_id = hex::encode(&hash[..16]);
 
-        tracing::info!("Canton: DAR uploaded successfully, package_id={}", package_id);
+        tracing::info!(
+            "Canton: DAR uploaded successfully, package_id={}",
+            package_id
+        );
 
         Ok(package_id)
     }
@@ -1058,13 +1120,16 @@ impl CantonClient {
 
         let request = proto::ListPackagesRequest {};
 
-        let response: proto::ListPackagesResponse = self.grpc_unary(
-            &channel,
-            "/com.daml.ledger.api.v2.admin.PackageManagementService/ListPackages",
-            request,
-        ).await?;
+        let response: proto::ListPackagesResponse = self
+            .grpc_unary(
+                &channel,
+                "/com.daml.ledger.api.v2.admin.PackageManagementService/ListPackages",
+                request,
+            )
+            .await?;
 
-        let packages: Vec<DamlPackageInfo> = response.package_ids
+        let packages: Vec<DamlPackageInfo> = response
+            .package_ids
             .iter()
             .map(|id| DamlPackageInfo {
                 package_id: id.clone(),
@@ -1090,11 +1155,13 @@ impl CantonClient {
         };
 
         // Note: GetUpdates is a server-streaming RPC. Using unary for simplicity.
-        let response: proto::GetUpdatesResponse = self.grpc_unary(
-            &channel,
-            "/com.daml.ledger.api.v2.UpdateService/GetUpdates",
-            request,
-        ).await?;
+        let response: proto::GetUpdatesResponse = self
+            .grpc_unary(
+                &channel,
+                "/com.daml.ledger.api.v2.UpdateService/GetUpdates",
+                request,
+            )
+            .await?;
 
         let mut transactions = Vec::new();
         if let Some(tx) = response.transaction {
@@ -1102,7 +1169,11 @@ impl CantonClient {
             transactions.push(DamlTransaction {
                 transaction_id: tx.transaction_id,
                 command_id: tx.command_id,
-                workflow_id: if tx.workflow_id.is_empty() { None } else { Some(tx.workflow_id) },
+                workflow_id: if tx.workflow_id.is_empty() {
+                    None
+                } else {
+                    Some(tx.workflow_id)
+                },
                 events,
                 effective_at: tx.effective_at,
                 offset: tx.offset,
@@ -1179,8 +1250,14 @@ mod tests {
         let config = CantonClientConfig::new("canton.example.com", 5001)
             .with_tls(true)
             .with_admin_port(5003);
-        assert_eq!(config.ledger_api_endpoint(), "https://canton.example.com:5001");
-        assert_eq!(config.admin_api_endpoint(), "https://canton.example.com:5003");
+        assert_eq!(
+            config.ledger_api_endpoint(),
+            "https://canton.example.com:5001"
+        );
+        assert_eq!(
+            config.admin_api_endpoint(),
+            "https://canton.example.com:5003"
+        );
     }
 
     #[test]
@@ -1309,32 +1386,37 @@ mod tests {
 
     #[test]
     fn test_daml_command_to_proto_create() {
-        let template_id = tenzro_types::canton::DamlTemplateId::new(
-            "pkg1", "Module1", "Template1",
-        );
+        let template_id = tenzro_types::canton::DamlTemplateId::new("pkg1", "Module1", "Template1");
         let cmd = DamlCommand::Create {
             template_id,
             create_arguments: DamlValue::Record {
                 record_id: None,
-                fields: vec![("owner".to_string(), DamlValue::Party(DamlParty::new("Alice")))],
+                fields: vec![(
+                    "owner".to_string(),
+                    DamlValue::Party(DamlParty::new("Alice")),
+                )],
             },
         };
         let proto_cmd = CantonClient::daml_command_to_proto(&cmd);
-        assert!(matches!(proto_cmd.command, Some(proto::command::Command::Create(_))));
+        assert!(matches!(
+            proto_cmd.command,
+            Some(proto::command::Command::Create(_))
+        ));
     }
 
     #[test]
     fn test_daml_command_to_proto_exercise() {
-        let template_id = tenzro_types::canton::DamlTemplateId::new(
-            "pkg1", "Module1", "Template1",
-        );
+        let template_id = tenzro_types::canton::DamlTemplateId::new("pkg1", "Module1", "Template1");
         let cmd = DamlCommand::Exercise {
             contract_id: DamlContractId::new("contract-1"),
             template_id,
             choice: "Transfer".to_string(),
             choice_argument: DamlValue::Record {
                 record_id: None,
-                fields: vec![("newOwner".to_string(), DamlValue::Party(DamlParty::new("Bob")))],
+                fields: vec![(
+                    "newOwner".to_string(),
+                    DamlValue::Party(DamlParty::new("Bob")),
+                )],
             },
         };
         let proto_cmd = CantonClient::daml_command_to_proto(&cmd);
@@ -1380,7 +1462,11 @@ mod tests {
         assert_eq!(daml_events.len(), 2);
 
         match &daml_events[0] {
-            DamlEvent::Created { event_id, contract_id, .. } => {
+            DamlEvent::Created {
+                event_id,
+                contract_id,
+                ..
+            } => {
                 assert_eq!(event_id, "ev1");
                 assert_eq!(contract_id.as_str(), "cid1");
             }
@@ -1388,7 +1474,11 @@ mod tests {
         }
 
         match &daml_events[1] {
-            DamlEvent::Archived { event_id, contract_id, .. } => {
+            DamlEvent::Archived {
+                event_id,
+                contract_id,
+                ..
+            } => {
                 assert_eq!(event_id, "ev2");
                 assert_eq!(contract_id.as_str(), "cid2");
             }

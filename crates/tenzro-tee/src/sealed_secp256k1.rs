@@ -19,12 +19,12 @@
 //! ```text
 //!   AMD SEV-SNP path:
 //!     SNP_GET_DERIVED_KEY(MEASUREMENT|IMAGE_ID|GUEST_SVN) → 64-byte IKM
-//!         ↓ HKDF-SHA256(salt=label, info="tenzro/sealed-secp256k1/v1")
+//!         ↓ HKDF-SHA256(salt=label, info="tenzro/sealed-secp256k1")
 //!     32-byte secp256k1 scalar → k256::SecretKey
 //!
 //!   Intel TDX path:
 //!     TDX quote → MRTD (48 bytes SHA-384) as IKM
-//!         ↓ HKDF-SHA256(salt=label, info="tenzro/sealed-secp256k1/v1")
+//!         ↓ HKDF-SHA256(salt=label, info="tenzro/sealed-secp256k1")
 //!     32-byte secp256k1 scalar → k256::SecretKey
 //! ```
 //!
@@ -46,15 +46,16 @@
 //!   rather than silently retrying with a different label.
 
 use hkdf::Hkdf;
-use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
 use k256::SecretKey;
+use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::error::{Result, TeeError};
 
-/// HKDF info string. Bumped if the derivation chain ever changes.
-const HKDF_INFO: &[u8] = b"tenzro/sealed-secp256k1/v1";
+/// HKDF info string. Callers separate purposes via the `label` salt, not
+/// through this.
+const HKDF_INFO: &[u8] = b"tenzro/sealed-secp256k1";
 
 /// A secp256k1 signing key whose private scalar is derived from TEE-rooted
 /// material and never touches the filesystem or network.
@@ -69,74 +70,23 @@ pub struct SealedSecp256k1Key {
 }
 
 impl SealedSecp256k1Key {
-    /// Derives a key on AMD SEV-SNP via `SNP_GET_DERIVED_KEY`.
+    /// Derives a key from the platform's stable hardware root.
     ///
-    /// The PSP-derived 64-byte key is bound to the VM's `MEASUREMENT`,
-    /// `IMAGE_ID`, and `GUEST_SVN` so the key is reproducible only inside
-    /// this exact VM image.
+    /// The root is [`crate::platform_root::platform_root_ikm`]: the
+    /// SEV-SNP PSP-derived key bound to `MEASUREMENT | IMAGE_ID |
+    /// GUEST_SVN` where available, otherwise the TDX MRTD. Both reproduce
+    /// for a given measured image, so the same node recovers the same
+    /// signer — and therefore the same sender address — after a restart.
     ///
-    /// `label` is the HKDF salt — use distinct labels for different
-    /// purposes (e.g. `b"tenzro/bridge/evm-signer"` vs `b"tenzro/mpc"`).
-    #[cfg(feature = "amd-sev-snp")]
-    pub fn derive_from_snp(label: &[u8]) -> Result<Self> {
-        use crate::amd_sev_snp::{guest_field_select, AmdSevSnpProvider};
-
-        let provider = AmdSevSnpProvider::new();
-        let ikm = provider.derived_key(
-            0, // root_key_select = 0 → VCEK (versioned chip endorsement key)
-            guest_field_select::MEASUREMENT
-                | guest_field_select::IMAGE_ID
-                | guest_field_select::GUEST_SVN,
-            0, // vmpl = 0
-            0, // guest_svn = 0 (current)
-            0, // tcb_version = 0 (current)
-        )?;
-        let ikm = Zeroizing::new(ikm);
-        Self::from_ikm(label, ikm.as_slice())
-    }
-
-    /// Derives a key on Intel TDX from MRTD (initial TD measurement).
+    /// `label` is the HKDF salt and the only thing separating one purpose
+    /// from another (e.g. `b"tenzro/bridge/evm-signer"` vs
+    /// `b"tenzro/mpc/keyshare"`). Reuse a label and you reuse a key.
     ///
-    /// Unlike SNP, TDX has no hardware KDF — we use MRTD itself as IKM
-    /// and run it through HKDF-SHA256 with the per-purpose label as salt.
-    /// Two TDs with the same image have the same MRTD; tampering with the
-    /// boot media changes MRTD; another tenant's TD has a different MRTD.
-    ///
-    /// Note: a TD operator with debug access to their own running TD can
-    /// read MRTD via the same ioctl — the security boundary here is "no
-    /// other tenant or compromised host OS can recover this key", not
-    /// "even the TD owner cannot recover this key".
-    #[cfg(feature = "intel-tdx")]
-    pub async fn derive_from_tdx(label: &[u8]) -> Result<Self> {
-        let provider = crate::intel_tdx::IntelTdxProvider::new();
-        let mr_td = provider.platform_measurement().await?;
-        let ikm = Zeroizing::new(mr_td);
-        Self::from_ikm(label, ikm.as_slice())
-    }
-
-    /// Auto-detects the available TEE and derives accordingly. Returns
-    /// `TeeError::NotAvailable` if neither SNP nor TDX is reachable.
-    ///
-    /// Order of preference: SEV-SNP (true hardware KDF), then TDX
-    /// (measurement-bound HKDF).
+    /// Returns `TeeError::NotAvailable` when neither SNP nor TDX is
+    /// reachable — nothing is fabricated off hardware.
     pub async fn derive_auto(label: &[u8]) -> Result<Self> {
-        #[cfg(feature = "amd-sev-snp")]
-        {
-            if std::path::Path::new("/dev/sev-guest").exists() {
-                return Self::derive_from_snp(label);
-            }
-        }
-        #[cfg(feature = "intel-tdx")]
-        {
-            if std::path::Path::new("/dev/tdx_guest").exists()
-                || std::path::Path::new("/sys/kernel/config/tsm/report").exists()
-            {
-                return Self::derive_from_tdx(label).await;
-            }
-        }
-        Err(TeeError::not_available(
-            "No TEE available for sealed secp256k1 key derivation",
-        ))
+        let ikm = crate::platform_root::platform_root_ikm().await?;
+        Self::from_ikm(label, ikm.as_slice())
     }
 
     /// Internal: wraps an IKM (either SNP's 64-byte derived key or TDX's
@@ -215,7 +165,7 @@ mod tests {
         // Two derivations with the same label and IKM must produce the
         // same key. This is what guarantees "redeploy → same address".
         let ikm = [0x42u8; 64];
-        let label = b"tenzro/test/v1";
+        let label = b"tenzro/test";
         let k1 = SealedSecp256k1Key::from_ikm(label, &ikm).unwrap();
         let k2 = SealedSecp256k1Key::from_ikm(label, &ikm).unwrap();
         assert_eq!(k1.address(), k2.address());
@@ -232,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_ikm_provides_isolation() {
-        let label = b"tenzro/test/v1";
+        let label = b"tenzro/test";
         let k1 = SealedSecp256k1Key::from_ikm(label, &[0x11u8; 64]).unwrap();
         let k2 = SealedSecp256k1Key::from_ikm(label, &[0x22u8; 64]).unwrap();
         assert_ne!(k1.address(), k2.address());

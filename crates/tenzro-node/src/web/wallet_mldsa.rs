@@ -54,16 +54,16 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use tenzro_crypto::pq::{MlDsaSigningKey, ML_DSA_65_SEED_LEN, ML_DSA_65_SIG_LEN};
+use tenzro_crypto::pq::{ML_DSA_65_SEED_LEN, ML_DSA_65_SIG_LEN, MlDsaSigningKey};
 
 use super::error::WalletApiError;
 use super::handlers::WebState;

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tenzro-tts"
+version = "0.1.0"
+description = "Tenzro TTS reference worker (Python). Wraps the Qwen3-TTS family via transformers and serves speech synthesis to the Rust node over JSON-RPC. Takes raw text — no grapheme-to-phoneme step, and therefore no dependency on espeak-ng, whose GPL licence rules it out of an Apache-2.0 codebase."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tenzro" }]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3 :: Only",
+]
+# The base install carries the wire types, the audio encoders, and the
+# JSON-RPC client — enough to drive a worker or decode its output from a
+# machine with no model stack. Synthesis needs the `synth` extra.
+dependencies = ["requests>=2.31"]
+
+[project.optional-dependencies]
+# What a worker needs to actually speak. `soundfile` writes WAV/FLAC/OGG;
+# mp3/aac/opus go through ffmpeg, which the node's Dockerfile already carries
+# for the video path.
+synth = [
+  "torch>=2.4",
+  "transformers>=4.45",
+  "accelerate>=1.0",
+  "safetensors>=0.4.3",
+  "soundfile>=0.12",
+  "numpy>=1.24",
+]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+tenzro-tts = "tenzro_tts.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tenzro_tts*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

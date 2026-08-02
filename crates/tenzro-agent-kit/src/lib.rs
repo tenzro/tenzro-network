@@ -85,7 +85,7 @@ mod spec;
 pub mod wasm;
 
 pub use auth::{AgentAuthRequest, AgentCredentials, AuthIssuer, DpopSigner};
-pub use bootstrap::{bootstrap_reference_templates, BootstrapReport};
+pub use bootstrap::{BootstrapReport, bootstrap_reference_templates};
 pub use error::AgentKitError;
 pub use executor::{ExecutionContext, RunOptions, RunReport, StepResult};
 pub use registry::RegistryClient;
@@ -96,8 +96,8 @@ pub use spawner::{AgentSpawner, SpawnArgs, SpawnedAgent};
 // a separate dependency just to construct templates.
 pub use tenzro_types::agent_template::{
     AgentCapability, AgentPricingModel, AgentRuntimeRequirements, AgentTemplate,
-    AgentTemplateFilter, AgentTemplateStatus, AgentTemplateType, DelegationSpec,
-    ExecutionBackend, ExecutionSpec, ExecutionStep, HardCaps, SvmAccountMeta,
+    AgentTemplateFilter, AgentTemplateStatus, AgentTemplateType, DelegationSpec, ExecutionBackend,
+    ExecutionSpec, ExecutionStep, HardCaps, SvmAccountMeta,
 };
 
 use std::sync::Arc;
@@ -241,10 +241,8 @@ impl AgentKit {
         spawned: &SpawnedAgent,
         run_opts: RunOptions,
     ) -> Result<RunReport, AgentKitError> {
-        let mut executor = executor::Executor::new(
-            self.registry.clone(),
-            self.identity_registry.clone(),
-        );
+        let mut executor =
+            executor::Executor::new(self.registry.clone(), self.identity_registry.clone());
         executor.run(spawned, run_opts).await
     }
 

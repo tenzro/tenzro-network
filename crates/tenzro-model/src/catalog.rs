@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 /// carried on `ModelInfo` and enforced in `ModelRegistry::register_model()`.
 pub use tenzro_types::LicenseTier;
 
-
 /// A model entry in the curated catalog with HuggingFace metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HfModelEntry {
@@ -222,6 +221,10 @@ pub struct ServingProfile {
     pub top_k: u32,
     /// Min-p sampling floor. `0.0` disables it. GLM/Kimi/DeepSeek use 0.01.
     pub min_p: f32,
+    /// Presence penalty. `0.0` disables it, which is right for almost every
+    /// family. Qwen3-VL is the exception: its instruct card publishes 1.5,
+    /// because the vision path otherwise loops on repeated image captions.
+    pub presence_penalty: f32,
     /// Whether `--jinja` must be passed (apply the GGUF's embedded chat
     /// template). Required for tool calling and for templates that otherwise
     /// emit empty/garbage output. Effectively always `true` for chat models;
@@ -244,6 +247,7 @@ impl Default for ServingProfile {
             top_p: 0.8,
             top_k: 20,
             min_p: 0.0,
+            presence_penalty: 0.0,
             jinja_required: true,
             reasoning_default: false,
         }
@@ -266,6 +270,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 0,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             };
@@ -277,6 +282,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 64,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -291,6 +297,49 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 20,
                 min_p: 0.0,
+                presence_penalty: 0.0,
+                jinja_required: true,
+                reasoning_default: true,
+            },
+            // Qwen3-VL instruct: temp 0.7 / top_p 0.8 / top_k 20, and the one
+            // family with a non-zero presence penalty — 1.5, per Unsloth's
+            // published row. The thinking variants use 1.0 / 0.95 / 20 with
+            // no penalty; the catalog carries the instruct model.
+            // See https://unsloth.ai/docs/models/tutorials/qwen3-how-to-run-and-fine-tune/qwen3-vl-how-to-run-and-fine-tune
+            "qwen3-vl" => Self {
+                temperature: 0.7,
+                top_p: 0.8,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 1.5,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Qwen3-Next: temp 1.0 / top_p 0.95 / top_k 40 / min_p 0.01, and
+            // repeat penalty off. Non-thinking — the line emits no `<think>`
+            // block at all, so there is no mode to default on.
+            // See https://unsloth.ai/docs/models/qwen3-coder-next
+            "qwen3-next" => Self {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 40,
+                min_p: 0.01,
+                presence_penalty: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Qwen-AgentWorld: temp 0.6 / top_p 0.95 / top_k 20 — the Qwen
+            // team's own world-model-inference row, lower than the Qwen 3.5
+            // family it shares an architecture with. Thinking is on: the
+            // model reasons about environment state transitions before
+            // predicting the next observation.
+            // See https://huggingface.co/Qwen/Qwen-AgentWorld-35B-A3B
+            "qwen-agentworld" => Self {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: true,
             },
@@ -307,6 +356,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 20,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: true,
             },
@@ -320,6 +370,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 20,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: true,
             },
@@ -329,6 +380,7 @@ impl ServingProfile {
                 top_p: 1.0,
                 top_k: 0,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -338,6 +390,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 0,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -347,6 +400,7 @@ impl ServingProfile {
                 top_p: 1.0,
                 top_k: 0,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -356,6 +410,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 0,
                 min_p: 0.01,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -365,6 +420,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 0,
                 min_p: 0.01,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -376,6 +432,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 0,
                 min_p: 0.01,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: true,
             },
@@ -385,6 +442,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 0,
                 min_p: 0.01,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -394,6 +452,7 @@ impl ServingProfile {
                 top_p: 0.95,
                 top_k: 0,
                 min_p: 0.01,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -403,6 +462,7 @@ impl ServingProfile {
                 top_p: 1.0,
                 top_k: 0,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -412,6 +472,7 @@ impl ServingProfile {
                 top_p: 1.0,
                 top_k: 0,
                 min_p: 0.0,
+                presence_penalty: 0.0,
                 jinja_required: true,
                 reasoning_default: false,
             },
@@ -522,6 +583,18 @@ impl ReasoningPolicy {
                 supports_thinking: true,
                 default_mode: ReasoningMode::Auto,
                 thinking_safe_min_b: 4.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // Qwen-AgentWorld: thinking on by default — the card states the
+            // model reasons about environment state transitions inside
+            // `<think>` before emitting the predicted observation, so it is
+            // not an optional mode. Safe-min 0.0 rather than the Qwen 3.5
+            // family's 4.0: that carve-out guards small models that loop,
+            // and this one is published as thinking-first at 3B active.
+            "qwen-agentworld" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
                 thinking_min_budget_tokens: 16_384,
             },
             // Ornith 1.0: agentic-coding family whose RL objective is the
@@ -688,14 +761,18 @@ pub fn parse_params_active_b(parameters: &str) -> f32 {
     // Look for "<N>B-A<M>B" (e.g. "30B-A3B") — take the A part.
     if let Some(a_idx) = parameters.find("-A") {
         let after = &parameters[a_idx + 2..];
-        let num_end = after.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(after.len());
+        let num_end = after
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(after.len());
         if let Ok(v) = after[..num_end].parse::<f32>() {
             return v;
         }
     }
     // Plain "<N>B" — dense.
     let trimmed = parameters.trim().trim_end_matches(['B', 'b']);
-    let num_end = trimmed.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(trimmed.len());
+    let num_end = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(trimmed.len());
     trimmed[..num_end].parse::<f32>().unwrap_or(0.0)
 }
 
@@ -716,6 +793,15 @@ pub enum ModelArchitecture {
     Qwen35Moe,
     Qwen36,
     Qwen36Moe,
+    /// Qwen3-VL: the Qwen 3 decoder plus a vision tower, served through
+    /// llama.cpp's mmproj path rather than one of the ONNX vision
+    /// runtimes.
+    Qwen3Vl,
+    /// Qwen3-Next: the hybrid gated-delta-net attention line. No `Moe`
+    /// suffix because — unlike Qwen3 / Qwen3.5 / Qwen3.6, which each ship
+    /// a dense and an MoE sibling — every released Qwen3-Next checkpoint
+    /// is MoE, so there is no dense variant to distinguish it from.
+    Qwen3Next,
     Gemma3,
     Gemma4,
     Gemma4Moe,
@@ -750,6 +836,8 @@ impl std::fmt::Display for ModelArchitecture {
             Self::Qwen35Moe => write!(f, "qwen35moe"),
             Self::Qwen36 => write!(f, "qwen36"),
             Self::Qwen36Moe => write!(f, "qwen36moe"),
+            Self::Qwen3Vl => write!(f, "qwen3vl"),
+            Self::Qwen3Next => write!(f, "qwen3next"),
             Self::Gemma3 => write!(f, "gemma3"),
             Self::Gemma4 => write!(f, "gemma4"),
             Self::Gemma4Moe => write!(f, "gemma4moe"),
@@ -892,7 +980,8 @@ pub fn get_vision_catalog() -> Vec<OnnxVisionEntry> {
             min_ram_gb: 4,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Google SigLIP2 large — high-fidelity multilingual image-text encoder".into(),
+            description: "Google SigLIP2 large — high-fidelity multilingual image-text encoder"
+                .into(),
         },
         OnnxVisionEntry {
             id: "siglip2-so400m-384".into(),
@@ -907,7 +996,8 @@ pub fn get_vision_catalog() -> Vec<OnnxVisionEntry> {
             min_ram_gb: 6,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Google SigLIP2 SO400M-384 — flagship encoder, top zero-shot accuracy".into(),
+            description: "Google SigLIP2 SO400M-384 — flagship encoder, top zero-shot accuracy"
+                .into(),
         },
         // ── DINOv3 family (DINOv3 License — commercial-OK custom) ─
         // Released Sep 2025; ONNX exports at onnx-community mirrors.
@@ -927,7 +1017,8 @@ pub fn get_vision_catalog() -> Vec<OnnxVisionEntry> {
             min_ram_gb: 1,
             license: "DINOv3 License".into(),
             license_tier: LicenseTier::CommercialCustom,
-            description: "Meta DINOv3 ViT-S/16 — next-gen self-supervised features, edge-tier".into(),
+            description: "Meta DINOv3 ViT-S/16 — next-gen self-supervised features, edge-tier"
+                .into(),
         },
         OnnxVisionEntry {
             id: "dinov3-vitb16".into(),
@@ -942,7 +1033,8 @@ pub fn get_vision_catalog() -> Vec<OnnxVisionEntry> {
             min_ram_gb: 2,
             license: "DINOv3 License".into(),
             license_tier: LicenseTier::CommercialCustom,
-            description: "Meta DINOv3 ViT-B/16 — flagship self-supervised features, base-tier".into(),
+            description: "Meta DINOv3 ViT-B/16 — flagship self-supervised features, base-tier"
+                .into(),
         },
         OnnxVisionEntry {
             id: "dinov3-vitl16".into(),
@@ -1059,6 +1151,41 @@ pub fn get_forecast_catalog() -> Vec<OnnxForecastEntry> {
             license_tier: LicenseTier::Permissive,
             description:
                 "Google TimesFM 2.5 — foundation timeseries forecaster, patch-tokenized decoder"
+                    .into(),
+        },
+        // ── Chronos-2 Small (Apache 2.0, Amazon) ────────────────────
+        // A five-input encoder, not a single-tensor forecaster: it takes
+        // `context`, `group_ids`, `attention_mask` (float, not int64), and a
+        // pair of covariate tensors, and returns `quantile_preds` shaped
+        // [batch, 13, 672] — quantiles *before* time. `GenericForecast`
+        // would read a quantile index as a timestep, so this entry is served
+        // by the `chronos2` adapter, selected on `family`.
+        //
+        // The covariate tensors cannot be omitted or sent empty even with no
+        // covariates: the graph reshapes them to [batch, 42, 16], so a
+        // zero-length tensor fails inside the model. The adapter sends them
+        // full-width with an all-zero mask.
+        //
+        // Horizon is fixed at 672 (42 patches × 16) by the export; shorter
+        // requests are truncations of that single pass.
+        OnnxForecastEntry {
+            id: "chronos-2-small".into(),
+            name: "Chronos-2 Small".into(),
+            family: "chronos2".into(),
+            hf_repo: "OpenSTEF/chronos-2-small-onnx".into(),
+            hf_filename: "chronos-2-small.onnx".into(),
+            context_length: 5760,
+            max_horizon: 672,
+            n_quantiles: 13,
+            output_name: Some("quantile_preds".into()),
+            batch_size: 1,
+            parameters: "120M".into(),
+            size_bytes: 112_083_145,
+            min_ram_gb: 2,
+            license: "Apache 2.0".into(),
+            license_tier: LicenseTier::Permissive,
+            description:
+                "Amazon Chronos-2 — multivariate-capable foundation forecaster, 13-quantile head"
                     .into(),
         },
         // ── TiRex 35M (NXAI Community License, NXAI) ────────────────
@@ -1232,7 +1359,8 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             min_ram_gb: 3,
             license: "Gemma Terms of Use".into(),
             license_tier: LicenseTier::CommercialCustom,
-            description: "Google EmbeddingGemma 300M — Matryoshka edge embeddings, fp32-only".into(),
+            description: "Google EmbeddingGemma 300M — Matryoshka edge embeddings, fp32-only"
+                .into(),
         },
         // ── BGE-M3 (MIT, BAAI) ─────────────────────────────────────
         // Multilingual + multi-functional (dense, sparse, ColBERT) — dense only here.
@@ -1274,7 +1402,9 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             min_ram_gb: 2,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "ModernBERT-embed base — 8192-context mean-pooled retrieval encoder, Matryoshka 256".into(),
+            description:
+                "ModernBERT-embed base — 8192-context mean-pooled retrieval encoder, Matryoshka 256"
+                    .into(),
         },
         OnnxTextEmbeddingEntry {
             id: "modernbert-embed-large".into(),
@@ -1292,14 +1422,17 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             min_ram_gb: 3,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "ModernBERT-embed large — 8192-context mean-pooled retrieval encoder".into(),
+            description: "ModernBERT-embed large — 8192-context mean-pooled retrieval encoder"
+                .into(),
         },
     ]
 }
 
 /// Look up an ONNX text-embedding model by its internal ID.
 pub fn get_text_embedding_model_by_id(id: &str) -> Option<OnnxTextEmbeddingEntry> {
-    get_text_embedding_catalog().into_iter().find(|m| m.id == id)
+    get_text_embedding_catalog()
+        .into_iter()
+        .find(|m| m.id == id)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1356,8 +1489,8 @@ pub fn get_segmentation_catalog() -> Vec<OnnxSegmentationEntry> {
             name: "SAM 2 base".into(),
             family: "sam2".into(),
             hf_repo: "vietanhdev/segment-anything-2-onnx-models".into(),
-            encoder_filename: "sam2_hiera_base_plus_encoder.onnx".into(),
-            decoder_filename: "sam2_hiera_base_plus_decoder.onnx".into(),
+            encoder_filename: "sam2_hiera_base_plus.encoder.onnx".into(),
+            decoder_filename: "sam2_hiera_base_plus.decoder.onnx".into(),
             input_size: 1024,
             size_bytes: 320_000_000,
             min_ram_gb: 2,
@@ -1370,8 +1503,8 @@ pub fn get_segmentation_catalog() -> Vec<OnnxSegmentationEntry> {
             name: "SAM 2 large".into(),
             family: "sam2".into(),
             hf_repo: "vietanhdev/segment-anything-2-onnx-models".into(),
-            encoder_filename: "sam2_hiera_large_encoder.onnx".into(),
-            decoder_filename: "sam2_hiera_large_decoder.onnx".into(),
+            encoder_filename: "sam2_hiera_large.encoder.onnx".into(),
+            decoder_filename: "sam2_hiera_large.decoder.onnx".into(),
             input_size: 1024,
             size_bytes: 900_000_000,
             min_ram_gb: 4,
@@ -1399,9 +1532,11 @@ pub fn get_segmentation_catalog() -> Vec<OnnxSegmentationEntry> {
             id: "mobilesam".into(),
             name: "MobileSAM".into(),
             family: "mobilesam".into(),
-            hf_repo: "vietanhdev/segment-anything-onnx-models".into(),
-            encoder_filename: "mobile_sam_encoder.onnx".into(),
-            decoder_filename: "mobile_sam.decoder.onnx".into(),
+            hf_repo: "Acly/MobileSAM".into(),
+            encoder_filename: "mobile_sam_image_encoder.onnx".into(),
+            // `_single` rather than `_multi`: this runtime's decoder ABI
+            // returns one mask per prompt.
+            decoder_filename: "sam_mask_decoder_single.onnx".into(),
             input_size: 1024,
             size_bytes: 40_000_000,
             min_ram_gb: 1,
@@ -1500,7 +1635,9 @@ pub fn get_text_segmentation_catalog() -> Vec<OnnxTextSegmentationEntry> {
 
 /// Look up an ONNX text-promptable segmentation model by its internal ID.
 pub fn get_text_segmentation_model_by_id(id: &str) -> Option<OnnxTextSegmentationEntry> {
-    get_text_segmentation_catalog().into_iter().find(|m| m.id == id)
+    get_text_segmentation_catalog()
+        .into_iter()
+        .find(|m| m.id == id)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1636,12 +1773,17 @@ pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
             description: "RF-DETR 2x-large — flagship >60 AP on COCO (ICLR 2026)".into(),
         },
         // ── D-FINE (Apache 2.0) — secondary baseline ──────────────
+        // Weights come from the per-variant `onnx-community/dfine_*_coco-ONNX`
+        // exports, not from `Peterande/D-FINE`: the upstream author's repo
+        // publishes PyTorch `.pth` checkpoints only, and this runtime is ORT.
+        // Every file in those repos is named `onnx/model.onnx`, so the repo
+        // id is what selects the variant.
         OnnxDetectionEntry {
             id: "d-fine-s".into(),
             name: "D-FINE small".into(),
             family: "d-fine".into(),
-            hf_repo: "Peterande/D-FINE".into(),
-            hf_filename: "dfine_s_coco.onnx".into(),
+            hf_repo: "onnx-community/dfine_s_coco-ONNX".into(),
+            hf_filename: "onnx/model.onnx".into(),
             input_size: 640,
             num_classes: 80,
             size_bytes: 40_000_000,
@@ -1654,8 +1796,8 @@ pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
             id: "d-fine-m".into(),
             name: "D-FINE medium".into(),
             family: "d-fine".into(),
-            hf_repo: "Peterande/D-FINE".into(),
-            hf_filename: "dfine_m_coco.onnx".into(),
+            hf_repo: "onnx-community/dfine_m_coco-ONNX".into(),
+            hf_filename: "onnx/model.onnx".into(),
             input_size: 640,
             num_classes: 80,
             size_bytes: 80_000_000,
@@ -1668,8 +1810,8 @@ pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
             id: "d-fine-l".into(),
             name: "D-FINE large".into(),
             family: "d-fine".into(),
-            hf_repo: "Peterande/D-FINE".into(),
-            hf_filename: "dfine_l_coco.onnx".into(),
+            hf_repo: "onnx-community/dfine_l_coco-ONNX".into(),
+            hf_filename: "onnx/model.onnx".into(),
             input_size: 640,
             num_classes: 80,
             size_bytes: 130_000_000,
@@ -1732,6 +1874,148 @@ pub struct OnnxAudioEntry {
 }
 
 /// Get the curated ONNX audio-ASR catalog.
+/// A speech-synthesis model this node can serve.
+///
+/// Named for what it is rather than mirroring the ONNX entry types: the
+/// Qwen3-TTS family ships `safetensors` with a `config.json` and loads
+/// through `transformers`, not ORT. A field called `onnx_filename` holding
+/// something that is not ONNX is exactly the drift this avoids.
+///
+/// Synthesis itself runs in the Python worker at `integrations/tts/`, the same
+/// split as Tenzro Train and Media Gen. The node owns admission, billing and
+/// the API surface; the worker owns the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TtsModelEntry {
+    /// Internal model ID.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Model family.
+    pub family: String,
+    /// HuggingFace repository.
+    pub hf_repo: String,
+    /// Approximate on-disk size in bytes.
+    pub size_bytes: u64,
+    /// Minimum RAM in GB to load.
+    pub min_ram_gb: u32,
+    /// Output sample rate in Hz.
+    pub sample_rate: u32,
+    /// Languages, as the model card names them.
+    pub languages: Vec<String>,
+    /// Licence exactly as the repo declares it.
+    pub license: String,
+    /// Licence tier, enforced in `ModelRegistry::register_model`.
+    #[serde(default)]
+    pub license_tier: LicenseTier,
+    /// Whether this checkpoint can clone a voice from reference audio.
+    ///
+    /// Recorded per checkpoint so an operator can see which models carry the
+    /// capability before enabling it, rather than discovering it from a
+    /// request. Cloning stays behind a separate operator opt-in regardless —
+    /// choosing a model family that supports it is not the same act as
+    /// offering it to callers.
+    pub supports_voice_cloning: bool,
+    /// Preset voice ids the checkpoint ships.
+    pub preset_voices: Vec<String>,
+    /// Short description.
+    pub description: String,
+}
+
+/// Get the curated speech-synthesis catalog.
+///
+/// Qwen3-TTS only, deliberately. It is Apache-2.0, ungated, and — the property
+/// that made this modality buildable at all — it takes **raw text** with no
+/// grapheme-to-phoneme step. The obvious alternative, Kokoro, needs a
+/// phonemizer, and the standard engine for that (espeak-ng) is GPL, which
+/// cannot be linked from an Apache-2.0 codebase. The permissive G2P
+/// alternatives are Python-only and would have made the phonemizer the hardest
+/// part of the modality rather than an implementation detail.
+///
+/// Sizes are the summed blob sizes reported by the hub, not estimates.
+pub fn get_tts_catalog() -> Vec<TtsModelEntry> {
+    let langs: Vec<String> = [
+        "Chinese",
+        "English",
+        "Japanese",
+        "Korean",
+        "German",
+        "French",
+        "Russian",
+        "Portuguese",
+        "Spanish",
+        "Italian",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    vec![
+        // ── Qwen3-TTS 1.7B CustomVoice (Apache-2.0, Alibaba Qwen) ──
+        // The default. Preset voices only, so it carries none of the consent
+        // questions the cloning checkpoint does.
+        TtsModelEntry {
+            id: "qwen3-tts-1.7b".to_string(),
+            name: "Qwen3-TTS 12Hz 1.7B CustomVoice".to_string(),
+            family: "qwen3-tts".to_string(),
+            hf_repo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice".to_string(),
+            size_bytes: 4_520_218_951,
+            min_ram_gb: 7,
+            sample_rate: 24_000,
+            languages: langs.clone(),
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            supports_voice_cloning: false,
+            preset_voices: vec!["Vivian".to_string()],
+            description: "Ten-language speech synthesis from raw text; no phonemizer required"
+                .to_string(),
+        },
+        // ── Qwen3-TTS 0.6B CustomVoice (Apache-2.0) ──
+        // Same shape at a little over half the size. What to reach for when
+        // speech shares a machine with a language model rather than owning it.
+        TtsModelEntry {
+            id: "qwen3-tts-0.6b".to_string(),
+            name: "Qwen3-TTS 12Hz 0.6B CustomVoice".to_string(),
+            family: "qwen3-tts".to_string(),
+            hf_repo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice".to_string(),
+            size_bytes: 2_498_388_392,
+            min_ram_gb: 4,
+            sample_rate: 24_000,
+            languages: langs.clone(),
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            supports_voice_cloning: false,
+            preset_voices: vec!["Vivian".to_string()],
+            description: "Smaller Qwen3-TTS for nodes where speech shares the machine".to_string(),
+        },
+        // ── Qwen3-TTS 1.7B Base (Apache-2.0) ──
+        // The cloning checkpoint: ~3s of reference audio plus its transcript.
+        // Listed so an operator who wants it can have it, flagged so nobody
+        // enables it without meaning to.
+        TtsModelEntry {
+            id: "qwen3-tts-1.7b-clone".to_string(),
+            name: "Qwen3-TTS 12Hz 1.7B Base".to_string(),
+            family: "qwen3-tts".to_string(),
+            hf_repo: "Qwen/Qwen3-TTS-12Hz-1.7B-Base".to_string(),
+            size_bytes: 4_544_229_700,
+            min_ram_gb: 7,
+            sample_rate: 24_000,
+            languages: langs,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            supports_voice_cloning: true,
+            preset_voices: Vec::new(),
+            description: "Voice cloning from ~3s of reference audio and its transcript; \
+                          requires an explicit operator opt-in"
+                .to_string(),
+        },
+    ]
+}
+
+/// Look up a speech model by its internal ID.
+pub fn get_tts_model_by_id(model_id: &str) -> Option<TtsModelEntry> {
+    get_tts_catalog().into_iter().find(|e| e.id == model_id)
+}
+
 pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
     vec![
         // ── Moonshine (MIT, Useful Sensors) ────────────────────────
@@ -1965,84 +2249,37 @@ pub struct OnnxVideoEntry {
 
 /// Get the curated ONNX video catalog.
 ///
-/// Returns the V-JEPA 2 family (Meta AI, 2025). All three sizes share
-/// the same architecture (ViT encoder over 64-frame tubelets, patch
-/// size 16, tubelet size 2) — they differ only in width, depth, and
-/// input resolution. License: ViT-L/H are MIT, ViT-g is Apache-2.0,
-/// all `LicenseTier::Permissive`.
+/// **Empty, and deliberately so.** No permissive, ONNX-shippable,
+/// encoder-only video model exists to put in it.
 ///
-/// Loading currently rejects at `tenzro_loadVideoModel` with
-/// `-32004`: the upstream `facebook/vjepa2-*` repos carry `safetensors`
-/// only, no native ONNX export. Catalog entries exist so license-tier
-/// gating, discovery RPCs, CLI listing, and MCP enumeration return
-/// the V-JEPA 2 options correctly; the loader will accept them once
-/// the ONNX export step is available.
+/// The V-JEPA 2 family (Meta, MIT/Apache-2.0) is the obvious candidate and
+/// was listed here for a while, but the upstream `facebook/vjepa2-*` repos
+/// ship `safetensors` only — verified against the HF API, no `.onnx` sibling
+/// on any of the three sizes. The community exports that do exist are not
+/// substitutes: `onnx-community/vjepa2-vitl-fpc32-256-diving48-ONNX` is
+/// fine-tuned for Diving48 video *classification*, and the `abdelstark`
+/// exports are `fpc2` / `img16` — two frames per clip, not the 64-frame
+/// configuration the encoder is trained for.
+///
+/// Listing them anyway would have been worse than an empty catalog: nothing
+/// in the node can load a V-JEPA 2 checkpoint, so `tenzro_listVideoCatalog`
+/// would advertise three models that every caller discovers are unreachable
+/// only after trying.
+///
+/// Video embedding is served instead by
+/// [`VisionFallbackVideoEncoder`](crate::video_runtime::VisionFallbackVideoEncoder),
+/// which extracts evenly-spaced frames with `ffmpeg`, embeds each through a
+/// registered image encoder, and mean-pools — the CLIP4Clip pattern.
+/// `tenzro_loadVideoModel` wires it by naming an already-loaded vision model,
+/// which is why that handler takes a `vision_model_id` rather than trying to
+/// load anything from this catalog.
+///
+/// Populate this when an encoder-only video model ships a real ONNX export
+/// under a permissive licence.
 pub fn get_video_catalog() -> Vec<OnnxVideoEntry> {
-    vec![
-        // V-JEPA 2 ViT-L — 300M params, 256² spatial, embed dim 1024.
-        // Smallest of the three; the default reference for video
-        // embedding in the V-JEPA 2 family.
-        OnnxVideoEntry {
-            id: "vjepa2-vitl-256".to_string(),
-            name: "V-JEPA 2 ViT-L".to_string(),
-            family: "vjepa2".to_string(),
-            hf_repo: "facebook/vjepa2-vitl-fpc64-256".to_string(),
-            // Pending ONNX export. Filename matches what the export
-            // tool will emit (encoder-only, single-file).
-            hf_filename: "model.onnx".to_string(),
-            frame_size: 256,
-            num_frames: 64,
-            // V-JEPA 2 native sampling is uniform over the clip; 8 fps
-            // is the canonical CLIP4Clip-style preprocessing rate
-            // applied by the V-JEPA 2 reference loader.
-            fps: 8,
-            embedding_dim: 1024,
-            size_bytes: 1_400_000_000,
-            min_ram_gb: 4,
-            license: "MIT".to_string(),
-            license_tier: LicenseTier::Permissive,
-            description: "V-JEPA 2 ViT-L joint-embedding video encoder (Meta AI, 256² spatial, 64-frame tubelets, 1024-d embeddings)".to_string(),
-        },
-        // V-JEPA 2 ViT-H — 700M params, 256² spatial, embed dim 1280.
-        OnnxVideoEntry {
-            id: "vjepa2-vith-256".to_string(),
-            name: "V-JEPA 2 ViT-H".to_string(),
-            family: "vjepa2".to_string(),
-            hf_repo: "facebook/vjepa2-vith-fpc64-256".to_string(),
-            hf_filename: "model.onnx".to_string(),
-            frame_size: 256,
-            num_frames: 64,
-            fps: 8,
-            embedding_dim: 1280,
-            size_bytes: 2_700_000_000,
-            min_ram_gb: 8,
-            license: "MIT".to_string(),
-            license_tier: LicenseTier::Permissive,
-            description: "V-JEPA 2 ViT-H joint-embedding video encoder (Meta AI, 256² spatial, 64-frame tubelets, 1280-d embeddings)".to_string(),
-        },
-        // V-JEPA 2 ViT-g — 1B+ params, 384² spatial, embed dim 1408.
-        // Largest in the family; Apache-2.0 rather than MIT (still
-        // `LicenseTier::Permissive`).
-        OnnxVideoEntry {
-            id: "vjepa2-vitg-384".to_string(),
-            name: "V-JEPA 2 ViT-g".to_string(),
-            family: "vjepa2".to_string(),
-            hf_repo: "facebook/vjepa2-vitg-fpc64-384".to_string(),
-            hf_filename: "model.onnx".to_string(),
-            frame_size: 384,
-            num_frames: 64,
-            fps: 8,
-            embedding_dim: 1408,
-            size_bytes: 4_300_000_000,
-            min_ram_gb: 12,
-            license: "Apache-2.0".to_string(),
-            license_tier: LicenseTier::Permissive,
-            description: "V-JEPA 2 ViT-g joint-embedding video encoder (Meta AI, 384² spatial, 64-frame tubelets, 1408-d embeddings)".to_string(),
-        },
-    ]
+    Vec::new()
 }
 
-/// Look up an ONNX video model by its internal ID.
 pub fn get_video_model_by_id(id: &str) -> Option<OnnxVideoEntry> {
     get_video_catalog().into_iter().find(|m| m.id == id)
 }
@@ -2139,6 +2376,16 @@ pub struct MediaGenModelEntry {
     pub expert_pair: Option<MediaGenExpertPair>,
     /// Short description.
     pub description: String,
+    /// Whether the Hub requires per-account approval before this can be
+    /// fetched.
+    ///
+    /// Recorded because it decides whether an operator can serve the model at
+    /// all, and they should learn that from the catalog rather than from a 403
+    /// halfway through a 50 GB download. A gated entry needs `HF_TOKEN` (or
+    /// `huggingface-cli login`) from an account that has accepted the model's
+    /// terms.
+    #[serde(default)]
+    pub gated: bool,
 }
 
 /// Get the curated generative-media catalog.
@@ -2165,9 +2412,26 @@ pub struct MediaGenModelEntry {
 /// Entries are [`LicenseTier::Permissive`] except `qwen-image-flash`, which
 /// carries the NVIDIA Open Model License and so is [`LicenseTier::CommercialCustom`]
 /// — a worker must enroll with `--accept-license nvidia-open-model` to hold it.
-/// The frontier also holds several gated custom-license and non-commercial
-/// pipelines (Krea 2, FLUX.2 dev and klein-9B); they are absent because they
-/// are gated, not because of their tier.
+/// Two different reasons keep other frontier checkpoints out, and they are
+/// worth separating because only one of them is about licensing:
+///
+/// - **Gated on the Hub** — Krea 2, `FLUX.2-dev`, `FLUX.2-klein-9B` and the
+///   `klein-base-9B` / `klein-9b-kv` line all report `gated: auto`. A worker
+///   cannot fetch them without per-account approval, so listing them would
+///   advertise something most operators cannot actually serve.
+/// - **Not a loadable pipeline** — the `fp8` and `nvfp4` FLUX.2 repos
+///   (`klein-4b-fp8`, `klein-4b-nvfp4`, `dev-NVFP4`, `klein-9b-kv-fp8`) are
+///   ungated, and two of them are Apache-2.0, but each ships only a quantized
+///   transformer with no `model_index.json`. `from_pretrained` cannot build a
+///   pipeline from them; they are a component to swap into a base pipeline,
+///   which is a loading path `MediaGenModelEntry` does not yet express. Their
+///   appeal is real — `klein-4b-nvfp4` is 2.5 GB against the base model's
+///   23.7 GB — so this is a gap to close, not a decision to exclude them.
+///
+/// Checked against the Hub API rather than inferred: `gated` and `license` were
+/// read per repo, and the earlier note in this position claimed the whole
+/// non-Apache FLUX.2 line was gated, which was wrong for `dev-NVFP4` and
+/// `klein-9b-kv-fp8`.
 pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
     use tenzro_types::MediaGenKind::{Image2Image, Image2Video, Text2Image, Text2Video};
 
@@ -2185,7 +2449,11 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             id: "qwen-image".to_string(),
             name: "Qwen-Image".to_string(),
             family: "qwen-image".to_string(),
-            hf_repo: "Qwen/Qwen-Image".to_string(),
+            // The 2512 release supersedes the original Qwen/Qwen-Image.
+            // Same architecture and near-identical size, newer weights — a
+            // version bump, so the repo moves and the id stays stable rather
+            // than the catalog carrying both.
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             pipeline_class: "QwenImagePipeline".to_string(),
             kinds: vec![Text2Image],
             default_width: 1328,
@@ -2196,12 +2464,14 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             default_num_frames: None,
             default_fps: None,
             parameters: "20.4B".to_string(),
-            size_bytes: 57_704_594_653,
+            size_bytes: 57_704_595_735,
             min_vram_gb: 48,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
-            description: "Qwen-Image text-to-image MMDiT with strong text rendering".to_string(),
+            gated: false,
+            description: "Qwen-Image 2512 text-to-image MMDiT with strong text rendering"
+                .to_string(),
         },
         // ── Qwen-Image-Flash (NVIDIA Open Model License, NVIDIA) ──
         // A distillation of Qwen/Qwen-Image down to a four-step trajectory,
@@ -2236,6 +2506,7 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             license: "NVIDIA Open Model License".to_string(),
             license_tier: LicenseTier::CommercialCustom,
             expert_pair: None,
+            gated: false,
             description: "Qwen-Image distilled to four steps, guidance disabled".to_string(),
         },
         // ── Qwen-Image-Edit (Apache-2.0, Alibaba Qwen) ──
@@ -2261,6 +2532,7 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
+            gated: false,
             description: "Qwen-Image-Edit instruction-driven image editing, multi-reference"
                 .to_string(),
         },
@@ -2286,6 +2558,7 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
+            gated: false,
             description: "Z-Image Turbo few-step text-to-image, 9 steps without guidance"
                 .to_string(),
         },
@@ -2313,8 +2586,153 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
+            gated: false,
             description: "FLUX.2 klein 4B text-to-image and editing, runs on consumer GPUs"
                 .to_string(),
+        },
+        // ── FLUX.2 klein base 4B (Apache-2.0, Black Forest Labs) ──
+        // The un-distilled sibling of klein-4B: same architecture and licence,
+        // but trained without the few-step distillation, so it wants a normal
+        // step count and real guidance. Kept alongside rather than instead —
+        // the distilled one is four steps and much cheaper, this one is what
+        // you reach for when the distilled output is not good enough.
+        //
+        // Verified ungated with `license: apache-2.0` on the Hub, and it ships
+        // a `model_index.json`, so `from_pretrained` loads it whole.
+        MediaGenModelEntry {
+            id: "flux2-klein-base-4b".to_string(),
+            name: "FLUX.2 klein base 4B".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-klein-base-4B".to_string(),
+            pipeline_class: "Flux2KleinPipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            // Undistilled: the four-step schedule of the distilled sibling
+            // does not apply, and guidance is doing real work again.
+            default_steps: 28,
+            default_guidance_scale: 4.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "3.9B".to_string(),
+            size_bytes: 23_740_007_506,
+            min_vram_gb: 12,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            gated: false,
+            description: "FLUX.2 klein base 4B — undistilled text-to-image and editing".to_string(),
+        },
+        // ── FLUX.2 dev (custom BFL licence, gated, Black Forest Labs) ──
+        // The full 32B flagship. Gated on the Hub, so an operator needs a
+        // token from an account that has accepted its terms — the downloader
+        // sends one when configured.
+        //
+        // 177 GB of weights: it does not fit a single 121 GB box even at
+        // bf16, so this entry is for machines that have the memory or that
+        // shard it. The serve planner refuses rather than thrashes.
+        MediaGenModelEntry {
+            id: "flux2-dev".to_string(),
+            name: "FLUX.2 dev".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-dev".to_string(),
+            pipeline_class: "Flux2Pipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 4096,
+            default_steps: 28,
+            default_guidance_scale: 4.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "32B".to_string(),
+            size_bytes: 177_640_374_395,
+            min_vram_gb: 80,
+            license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: true,
+            description: "FLUX.2 dev — 32B flagship text-to-image and editing".to_string(),
+        },
+        // ── FLUX.2 klein 9B (custom BFL licence, gated) ──
+        // The distilled 9B: the size most single-accelerator operators will
+        // actually run, and it fits a 121 GB box with room for the rest of
+        // the node.
+        MediaGenModelEntry {
+            id: "flux2-klein-9b".to_string(),
+            name: "FLUX.2 klein 9B".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            pipeline_class: "Flux2KleinPipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            default_steps: 4,
+            default_guidance_scale: 1.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "9B".to_string(),
+            size_bytes: 52_888_736_795,
+            min_vram_gb: 24,
+            license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: true,
+            description: "FLUX.2 klein 9B — distilled few-step generation and editing".to_string(),
+        },
+        // ── FLUX.2 klein base 9B (custom BFL licence, gated) ──
+        // Undistilled 9B: normal step count and real guidance, for when the
+        // four-step output is not good enough.
+        MediaGenModelEntry {
+            id: "flux2-klein-base-9b".to_string(),
+            name: "FLUX.2 klein base 9B".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-klein-base-9B".to_string(),
+            pipeline_class: "Flux2KleinPipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            default_steps: 28,
+            default_guidance_scale: 4.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "9B".to_string(),
+            size_bytes: 52_888_736_752,
+            min_vram_gb: 24,
+            license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: true,
+            description: "FLUX.2 klein base 9B — undistilled generation and editing".to_string(),
+        },
+        // ── FLUX.2 klein 9B KV (custom BFL licence, gated) ──
+        // The KV variant of klein-9B. Same weights budget; the difference is
+        // in how attention state is carried, which is what its card is about.
+        MediaGenModelEntry {
+            id: "flux2-klein-9b-kv".to_string(),
+            name: "FLUX.2 klein 9B KV".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-klein-9b-kv".to_string(),
+            pipeline_class: "Flux2KleinPipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            default_steps: 4,
+            default_guidance_scale: 1.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "9B".to_string(),
+            size_bytes: 52_886_252_700,
+            min_vram_gb: 24,
+            license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: true,
+            description: "FLUX.2 klein 9B KV — few-step generation and editing".to_string(),
         },
         // ── Wan 2.2 T2V A14B (Apache-2.0, Alibaba Wan) ──
         // Two-expert MoE over the denoising schedule: 27B total, ~14B active
@@ -2345,6 +2763,7 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
                 boundary_ratio: 0.875,
                 min_vram_gb_per_expert: 48,
             }),
+            gated: false,
             description: "Wan 2.2 text-to-video mixture-of-experts, 480P and 720P".to_string(),
         },
         // ── Wan 2.2 I2V A14B (Apache-2.0, Alibaba Wan) ──
@@ -2374,7 +2793,42 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
                 boundary_ratio: 0.875,
                 min_vram_gb_per_expert: 48,
             }),
+            gated: false,
             description: "Wan 2.2 image-to-video mixture-of-experts, 480P and 720P".to_string(),
+        },
+        // ── Wan 2.1 FLF2V 14B 720P (Apache-2.0, Alibaba Wan) ──
+        // First-last-frame interpolation: given two stills it generates the
+        // motion between them, which is the stills-to-video bridge rather
+        // than a plain animation of one frame.
+        //
+        // Declared `Image2Video` because that is the closest kind the
+        // protocol carries, but the shape is not quite the same — this takes
+        // TWO conditioning images where ordinary I2V takes one. A caller
+        // passing a single image gets an interpolation to nowhere, so the
+        // worker has to validate the pair rather than assume it.
+        MediaGenModelEntry {
+            id: "wan2.1-flf2v-14b".to_string(),
+            name: "Wan 2.1 FLF2V 14B 720P".to_string(),
+            family: "wan2.1".to_string(),
+            hf_repo: "Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers".to_string(),
+            pipeline_class: "WanImageToVideoPipeline".to_string(),
+            kinds: vec![Image2Video],
+            default_width: 1280,
+            default_height: 720,
+            max_resolution: 1280,
+            default_steps: 40,
+            default_guidance_scale: 5.0,
+            default_num_frames: Some(81),
+            default_fps: Some(16),
+            parameters: "14B".to_string(),
+            size_bytes: 90_110_903_694,
+            min_vram_gb: 60,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            gated: false,
+            description: "Wan 2.1 first-last-frame interpolation; bridges two stills into motion"
+                .to_string(),
         },
         // ── Wan 2.2 TI2V 5B (Apache-2.0, Alibaba Wan) ──
         // The affordable video option: a 16×16×4 VAE lets 5B cover both video
@@ -2400,6 +2854,7 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
+            gated: false,
             description: "Wan 2.2 hybrid text/image-to-video at 720P 24fps on a single 24 GB GPU"
                 .to_string(),
         },
@@ -2426,9 +2881,7 @@ pub fn media_gen_model_splits(model_id: &str) -> bool {
 }
 
 /// Generative-media pipelines serving a given job kind.
-pub fn get_media_gen_models_for_kind(
-    kind: tenzro_types::MediaGenKind,
-) -> Vec<MediaGenModelEntry> {
+pub fn get_media_gen_models_for_kind(kind: tenzro_types::MediaGenKind) -> Vec<MediaGenModelEntry> {
     get_media_gen_catalog()
         .into_iter()
         .filter(|m| m.kinds.contains(&kind))
@@ -2438,32 +2891,38 @@ pub fn get_media_gen_models_for_kind(
 /// Get the full curated model catalog.
 pub fn get_model_catalog() -> Vec<HfModelEntry> {
     let mut catalog = vec![
-    // ── Qwen 3 (Apache 2.0, via unsloth GGUF — official Qwen repos lack Q4_K_M) ──
-    HfModelEntry {
-        id: "qwen3-0.6b".into(),
-        name: "Qwen 3 0.6B".into(),
-        family: "qwen3".into(),
-        hf_repo: "unsloth/Qwen3-0.6B-GGUF".into(),
-        hf_filename: "Qwen3-0.6B-Q4_K_M.gguf".into(),
-        parameters: "0.6B".into(),
-        architecture: ModelArchitecture::Qwen3,
-        context_length: 32768,
-        quantization: "Q4_K_M".into(),
-        size_bytes: 396_705_472,
-        min_ram_gb: 2,
-        license: "Apache 2.0".into(),
-        description: "Compact model optimized for edge deployment".into(),
-        drafter_id: None,
-        mtp_kind: MtpKind::None,
-        mtp_default_draft_n: None,
-        moe: None,
-        promotable: true,
-        serving: ServingProfile::default(),
-        mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
-        template_fix: TemplateFix::None,
-        download_filename: String::new(),
-    }];
+        // ── Qwen 3 (Apache 2.0, via unsloth GGUF — official Qwen repos lack Q4_K_M) ──
+        HfModelEntry {
+            id: "qwen3-0.6b".into(),
+            name: "Qwen 3 0.6B".into(),
+            family: "qwen3".into(),
+            hf_repo: "unsloth/Qwen3-0.6B-GGUF".into(),
+            hf_filename: "Qwen3-0.6B-Q4_K_M.gguf".into(),
+            parameters: "0.6B".into(),
+            architecture: ModelArchitecture::Qwen3,
+            context_length: 32768,
+            quantization: "Q4_K_M".into(),
+            size_bytes: 396_705_472,
+            min_ram_gb: 2,
+            license: "Apache 2.0".into(),
+            description: "Compact model optimized for edge deployment".into(),
+            drafter_id: None,
+            mtp_kind: MtpKind::None,
+            mtp_default_draft_n: None,
+            moe: None,
+            promotable: true,
+            serving: ServingProfile::default(),
+            mmproj: None,
+            reasoning: ReasoningPolicy {
+                supports_thinking: false,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 0,
+            },
+            template_fix: TemplateFix::None,
+            download_filename: String::new(),
+        },
+    ];
     catalog.push(HfModelEntry {
         id: "qwen3-1.7b".into(),
         name: "Qwen 3 1.7B".into(),
@@ -2485,7 +2944,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2510,7 +2974,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2535,7 +3004,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2560,7 +3034,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2585,7 +3064,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2615,7 +3099,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2642,7 +3131,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2667,7 +3161,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2692,7 +3191,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2717,7 +3221,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2742,7 +3251,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2759,7 +3273,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 22_016_023_168,
         min_ram_gb: 14,
         license: "Apache 2.0".into(),
-        description: "Mixture-of-Experts with only 3B active params — fast inference at 35B quality".into(),
+        description:
+            "Mixture-of-Experts with only 3B active params — fast inference at 35B quality".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
@@ -2772,7 +3287,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2859,7 +3379,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2884,7 +3409,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2909,7 +3439,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2934,7 +3469,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -2959,7 +3499,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3434,7 +3979,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3459,7 +4009,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3484,7 +4039,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3511,7 +4071,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3536,7 +4101,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3561,7 +4131,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3588,7 +4163,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3613,7 +4193,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3638,7 +4223,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3663,7 +4253,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3690,7 +4285,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3715,7 +4315,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3747,7 +4352,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3774,7 +4384,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3804,7 +4419,75 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // ── Nemotron 3 Ultra + Nano Omni (verified 2026-07-31) ───────────
+    // Ultra is a hybrid Transformer-Mamba MoE with Latent MoE and a
+    // built-in Multi-Token-Prediction head, so it drafts against itself
+    // rather than needing a paired drafter GGUF.
+    catalog.push(HfModelEntry {
+        id: "nemotron-3-ultra-550b-a55b".into(),
+        name: "Nemotron 3 Ultra 550B-A55B (MoE)".into(),
+        family: "nemotron".into(),
+        hf_repo: "unsloth/NVIDIA-Nemotron-3-Ultra-550B-A55B-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/NVIDIA-Nemotron-3-Ultra-550B-A55B-UD-Q4_K_XL-00001-of-00009.gguf".into(),
+        parameters: "550B (MoE, 55B active)".into(),
+        architecture: ModelArchitecture::Llama,
+        context_length: 1048576,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 330_000_000_000,
+        min_ram_gb: 360,
+        license: "NVIDIA Open Model, Weights & Data".into(),
+        description: "NVIDIA Nemotron 3 Ultra — 550B total / 55B active hybrid Transformer-Mamba MoE with Latent MoE and a built-in Multi-Token-Prediction head; up to 1M context.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
         reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+    // Omni takes audio, video, text, images and documents in and emits
+    // text. The vision path needs the separate `mmproj` sibling, which is
+    // why it is declared here rather than left for the loader to guess.
+    catalog.push(HfModelEntry {
+        id: "nemotron-3-nano-omni-30b-a3b".into(),
+        name: "Nemotron 3 Nano Omni 30B-A3B (MoE, multimodal)".into(),
+        family: "nemotron".into(),
+        hf_repo: "unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF".into(),
+        hf_filename: "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf".into(),
+        parameters: "30B (MoE, 3B active)".into(),
+        architecture: ModelArchitecture::Llama,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 18_500_000_000,
+        min_ram_gb: 25,
+        license: "NVIDIA Open".into(),
+        description: "NVIDIA Nemotron 3 Nano Omni — 30B total / 3B active hybrid reasoning MoE, 256K context. Accepts audio, video, text, images and documents; output is text. Needs a llama.cpp-compatible backend: the vision path uses a separate mmproj file that Ollama does not load.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 6,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec { filename: "mmproj-F16.gguf".into() }),
+        reasoning: ReasoningPolicy { supports_thinking: true, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3831,7 +4514,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -3863,7 +4551,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4070,7 +4763,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         id: "inkling".into(),
         name: "Inkling (MoE, multimodal)".into(),
         family: "inkling".into(),
-        hf_repo: "unsloth/inkling-GGUF".into(),
+        hf_repo: "unsloth/Inkling-GGUF".into(),
         hf_filename: "UD-Q4_K_XL/inkling-UD-Q4_K_XL-00001-of-00014.gguf".into(),
         parameters: "975B (MoE, 41B active)".into(),
         architecture: ModelArchitecture::Inkling,
@@ -4097,40 +4790,76 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         download_filename: String::new(),
     });
 
-    // ── MiniMax M1 (superseded — Unsloth jumped to M2.x/M3) ──────────
+    // Inkling Small: same architecture and modalities, a fifth the size, so
+    // it fits hardware the 975B never will.
     catalog.push(HfModelEntry {
-        id: "minimax-m1-40b".into(),
-        name: "MiniMax M1 40B".into(),
-        family: "minimax".into(),
-        hf_repo: "unsloth/MiniMax-M1-40B-GGUF".into(),
-        hf_filename: "MiniMax-M1-40B-Q4_K_M.gguf".into(),
-        parameters: "40B".into(),
-        architecture: ModelArchitecture::MiniMax,
+        id: "inkling-small".into(),
+        name: "Inkling Small (MoE, multimodal)".into(),
+        family: "inkling".into(),
+        hf_repo: "unsloth/Inkling-Small-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/Inkling-Small-UD-Q4_K_XL-00001-of-00005.gguf".into(),
+        parameters: "276B (MoE, 12B active)".into(),
+        architecture: ModelArchitecture::Inkling,
         context_length: 1048576,
-        quantization: "Q4_K_M".into(),
-        size_bytes: 24_198_768_640,
-        min_ram_gb: 28,
-        license: "MiniMax Open".into(),
-        description: "MiniMax M1 40B with Lightning Attention, 1M context".into(),
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 170_000_000_000,
+        min_ram_gb: 180,
+        license: "Apache 2.0".into(),
+        description: "Thinking Machines Inkling Small — 276B-total multimodal MoE, 12B active, 1M context. Accepts text, images and 16kHz WAV audio; output is text. Apache-2.0.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 32,
-            experts_per_token: 2,
-            shared_experts: 0,
-            params_per_expert_x10: Some(13),
+            num_experts: 256,
+            experts_per_token: 6,
+            shared_experts: 2,
+            params_per_expert_x10: Some(10),
         }),
-        // Gated out: `unsloth/MiniMax-M1-40B-GGUF` returns HTTP 401
-        // (gated repo, auth required) and is superseded by the M2.x/M3
-        // line. Promoted MiniMax frontier is `minimax-m2.7` below.
-        promotable: false,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec { filename: "mmproj-BF16.gguf".into() }),
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // ── Qwen 3.6 27B Fable-Fusion (community fine-tune, verified 2026-07-31)
+    // A DavidAU merge of Qwen3.6-27B. Listed because its MTP GGUFs carry the
+    // multi-token-prediction tensors in-file at Q8_0, so it drafts against
+    // itself with no paired drafter — the same shape as the Unsloth MTP
+    // variants but on a fine-tune an operator may prefer for long-form work.
+    //
+    // Uncensored: the tune deliberately removes the base model's refusal
+    // behaviour. Stated plainly here rather than left in the repo name so an
+    // operator choosing what their node serves is making an informed choice.
+    catalog.push(HfModelEntry {
+        id: "qwen3.6-27b-fable-fusion-mtp".into(),
+        name: "Qwen 3.6 27B Fable-Fusion (MTP, uncensored)".into(),
+        family: "qwen3.6".into(),
+        hf_repo: "DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF".into(),
+        hf_filename: "Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_M.gguf".into(),
+        parameters: "27B".into(),
+        architecture: ModelArchitecture::Qwen36,
+        // 256K native; the card documents YaRN extension to ~1.01M, which is
+        // an operator decision rather than a default.
+        context_length: 262144,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 16_800_000_000,
+        min_ram_gb: 24,
+        license: "Apache 2.0".into(),
+        description: "Qwen 3.6 27B Fable-Fusion — community fine-tune of Qwen3.6-27B tuned for long-form fiction and creative writing, with multi-token-prediction tensors carried in-file at Q8_0 so it drafts against itself. 256K native context, YaRN-extensible. Uncensored: the base model's refusal behaviour is deliberately removed.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+        moe: None,
+        promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
         reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
+
     // ── MiniMax M2.7 (current frontier MiniMax, via unsloth GGUF) ────
     catalog.push(HfModelEntry {
         id: "minimax-m2.7".into(),
@@ -4223,7 +4952,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4257,7 +4991,128 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+    // ── Qwen3-VL 8B Instruct (Apache-2.0, Alibaba Qwen) ───────────────
+    // Vision-language: the same llama.cpp path as the text models plus an
+    // mmproj tower, so images arrive on the chat surface rather than needing
+    // one of the ONNX vision runtimes. 5M downloads makes it the most-used
+    // model in this group by an order of magnitude.
+    catalog.push(HfModelEntry {
+        id: "qwen3-vl-8b".into(),
+        name: "Qwen3-VL 8B Instruct".into(),
+        family: "qwen3-vl".into(),
+        hf_repo: "unsloth/Qwen3-VL-8B-Instruct-GGUF".into(),
+        hf_filename: "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf".into(),
+        parameters: "8B".into(),
+        architecture: ModelArchitecture::Qwen3Vl,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 5_148_699_488,
+        min_ram_gb: 8,
+        license: "Apache 2.0".into(),
+        description: "Qwen3-VL 8B — vision-language instruct, images on the chat surface".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec {
+            filename: "mmproj-F16.gguf".into(),
+        }),
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+    // ── Qwen3-Coder-Next (Apache-2.0, Alibaba Qwen) ───────────────────
+    // The coding model of the Next line. 49.6 GB at UD-Q4_K_XL — it fits a
+    // 121 GB box comfortably, and does not fit a 48 GB one, which is the
+    // decision the serve planner exists to make before the download starts.
+    catalog.push(HfModelEntry {
+        id: "qwen3-coder-next".into(),
+        name: "Qwen3-Coder-Next".into(),
+        family: "qwen3-next".into(),
+        hf_repo: "unsloth/Qwen3-Coder-Next-GGUF".into(),
+        hf_filename: "Qwen3-Coder-Next-UD-Q4_K_XL.gguf".into(),
+        parameters: "80B (MoE, 3B active)".into(),
+        architecture: ModelArchitecture::Qwen3Next,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 49_608_478_720,
+        min_ram_gb: 56,
+        license: "Apache 2.0".into(),
+        description: "Qwen3-Coder-Next — agentic coding, long-context repository work".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        // 512 routed experts, top-10, one shared. 3 x 2048 x 512 per
+        // expert per layer over 48 layers is 0.15B, so 2 at the x10 scale.
+        moe: Some(MoeShape {
+            num_experts: 512,
+            experts_per_token: 10,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+    // ── Qwen-AgentWorld 35B-A3B (Apache-2.0, Alibaba Qwen) ────────────
+    // Agentic MoE: 35B total with ~3B active, so it serves at roughly the
+    // cost of a 3B while holding a 35B's knowledge. 22.3 GB quantized.
+    catalog.push(HfModelEntry {
+        id: "qwen-agentworld-35b-a3b".into(),
+        name: "Qwen-AgentWorld 35B-A3B (MoE)".into(),
+        family: "qwen-agentworld".into(),
+        hf_repo: "unsloth/Qwen-AgentWorld-35B-A3B-GGUF".into(),
+        hf_filename: "Qwen-AgentWorld-35B-A3B-UD-Q4_K_XL.gguf".into(),
+        parameters: "35B (MoE, 3B active)".into(),
+        architecture: ModelArchitecture::Qwen35Moe,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 22_324_804_864,
+        min_ram_gb: 26,
+        license: "Apache 2.0".into(),
+        description: "Qwen-AgentWorld 35B-A3B — agentic MoE, 3B active per token".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 256,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4341,7 +5196,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 397_000_000,
         min_ram_gb: 1,
         license: "Apache 2.0".into(),
-        description: "Speculative drafter for Mistral Small 3.1/3.2 — vocab-matched, 6-language fine-tune.".into(),
+        description:
+            "Speculative drafter for Mistral Small 3.1/3.2 — vocab-matched, 6-language fine-tune."
+                .into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
@@ -4349,7 +5206,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4374,7 +5236,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4399,7 +5266,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4426,7 +5298,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4456,7 +5333,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4483,7 +5365,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4508,7 +5395,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4533,7 +5425,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4558,7 +5455,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
-        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -4691,22 +5593,23 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
     // V4 supersedes V3 from 2026-07-24. Two variants: Pro (1.6T / 49B
     // active) and Flash (284B / 13B active). Both 1M context.
     // Note: Instruct variants are QAT-trained at FP4 for experts — GGUF
-    // conversion is non-trivial; this entry pins the community
-    // `antirez/deepseek-v4-gguf` build pending an official Unsloth GGUF.
+    // conversion is non-trivial. Flash now pins the official
+    // `unsloth/DeepSeek-V4-Flash-0731-GGUF` (verified 2026-07-31); Pro still
+    // has no official sharded GGUF and stays on the community build.
     catalog.push(HfModelEntry {
         id: "deepseek-v4-flash".into(),
         name: "DeepSeek V4 Flash (MoE)".into(),
         family: "deepseek".into(),
-        hf_repo: "antirez/deepseek-v4-gguf".into(),
-        hf_filename: "DeepSeek-V4-Flash-Q4KExperts-F16HC-F16Compressor-F16Indexer-Q8Attn-Q8Shared-Q8Out-chat-v2-imatrix.gguf".into(),
+        hf_repo: "unsloth/DeepSeek-V4-Flash-0731-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00001-of-00005.gguf".into(),
         parameters: "284B (MoE, 13B active)".into(),
         architecture: ModelArchitecture::DeepSeekV3,
         context_length: 1048576,
-        quantization: "Q4K-imatrix".into(),
+        quantization: "UD-Q4_K_XL".into(),
         size_bytes: 155_000_000_000,
         min_ram_gb: 128,
         license: "MIT".into(),
-        description: "DeepSeek V4 Flash — 284B total / 13B active MoE; 1M context. Hybrid Compressed Sparse Attention (CSA) + Heavily Compressed Attention (HCA). Cost-effective frontier variant. Pre-trained on 32T tokens. MTP head built into the model file.".into(),
+        description: "DeepSeek V4 Flash 0731 — 284B total / 13B active MoE; 1M context. Hybrid Compressed Sparse Attention (CSA) + Heavily Compressed Attention (HCA). Quantization-aware-trained: routed experts (96% of the model) natively MXFP4, the rest FP8/BF16. Outperforms V4-Pro Preview. MTP head built into the model file.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(4),
@@ -4728,13 +5631,13 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "DeepSeek V4 Pro (MoE)".into(),
         family: "deepseek".into(),
         hf_repo: "antirez/deepseek-v4-gguf".into(),
-        hf_filename: "DeepSeek-V4-Pro-Q4_K_M.gguf".into(),
+        hf_filename: "DeepSeek-V4-Pro-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-Instruct.gguf".into(),
         parameters: "1.6T (MoE, 49B active)".into(),
         architecture: ModelArchitecture::DeepSeekV3,
         context_length: 1048576,
-        quantization: "Q4_K_M".into(),
-        size_bytes: 875_000_000_000,
-        min_ram_gb: 600,
+        quantization: "IQ2XXS".into(),
+        size_bytes: 440_000_000_000,
+        min_ram_gb: 470,
         license: "MIT".into(),
         description: "DeepSeek V4 Pro — 1.6T total / 49B active MoE; 1M context. CSA+HCA hybrid attention reduces single-token inference to 27% of V3.2 FLOPs and 10% of KV cache at 1M. Frontier intelligence variant. MTP head built into the model file.".into(),
         drafter_id: None,
@@ -4746,12 +5649,13 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(40),
         }),
-        // Gated out: the only DeepSeek-V4-Pro GGUF (antirez) is a
-        // non-standard manual 2-file layer split
-        // (`...Layers00-30.gguf` + `...Layers-31-output.gguf`), NOT
-        // gguf-split numbering, so llama.cpp won't auto-continue it.
-        // Flip to true once unsloth/DeepSeek-V4-Pro-GGUF ships a proper
-        // sharded quant.
+        // The community repo's Q4K build is a non-standard manual 2-file
+        // layer split (`...Layers00-30.gguf` + `...Layers-31-output.gguf`),
+        // NOT gguf-split numbering, so llama.cpp will not auto-continue it.
+        // This entry pins the single-file IQ2XXS instead, which loads
+        // normally. Still gated out: at 2 bits over a 1.6T MoE the quality
+        // is not something to serve to the network by default, and there is
+        // no official Unsloth Pro GGUF yet to promote to.
         promotable: false,
         serving: ServingProfile::default(),
         mmproj: None,
@@ -4831,17 +5735,116 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
     // rest auto-load). No separate drafter target needed at runtime
     // (`--spec-type draft-mtp`).
     for &(id, name_size, hf_size, gguf_size, params, ctx, sz, ram, is_moe, shards, moe_shape) in &[
-        ("qwen3.5-0.8b-mtp", "0.8B", "0.8B", "0.8B", "0.8B", 131072_u32, 540_000_000_u64, 2_u32, false, 0_u32, None::<(u32, u8, u32, Option<u32>)>),
-        ("qwen3.5-2b-mtp", "2B", "2B", "2B", "2B", 131072, 1_300_000_000, 4, false, 0, None),
-        ("qwen3.5-4b-mtp", "4B", "4B", "4B", "4B", 131072, 2_500_000_000, 6, false, 0, None),
-        ("qwen3.5-9b-mtp", "9B", "9B", "9B", "9B", 131072, 5_500_000_000, 12, false, 0, None),
-        ("qwen3.5-27b-mtp", "27B", "27B", "27B", "27B", 131072, 17_000_000_000, 24, false, 0, None),
-        ("qwen3.5-35b-a3b-mtp", "35B-A3B (MoE)", "35B-A3B", "35B-A3B", "35B (MoE, 3B active)", 131072, 22_500_000_000, 28, true, 0, Some((128, 8, 0, Some(2)))),
-        ("qwen3.5-122b-a10b-mtp", "122B-A10B (MoE)", "122B-A10B", "122B-A10B", "122B (MoE, 10B active)", 131072, 75_000_000_000, 96, true, 3, Some((128, 8, 0, Some(8)))),
-        ("qwen3.5-397b-a17b-mtp", "397B-A17B (MoE)", "397B-A17B", "397B-A17B", "397B (MoE, 17B active)", 131072, 240_000_000_000, 256, true, 7, Some((128, 8, 0, Some(13)))),
+        (
+            "qwen3.5-0.8b-mtp",
+            "0.8B",
+            "0.8B",
+            "0.8B",
+            "0.8B",
+            131072_u32,
+            540_000_000_u64,
+            2_u32,
+            false,
+            0_u32,
+            None::<(u32, u8, u32, Option<u32>)>,
+        ),
+        (
+            "qwen3.5-2b-mtp",
+            "2B",
+            "2B",
+            "2B",
+            "2B",
+            131072,
+            1_300_000_000,
+            4,
+            false,
+            0,
+            None,
+        ),
+        (
+            "qwen3.5-4b-mtp",
+            "4B",
+            "4B",
+            "4B",
+            "4B",
+            131072,
+            2_500_000_000,
+            6,
+            false,
+            0,
+            None,
+        ),
+        (
+            "qwen3.5-9b-mtp",
+            "9B",
+            "9B",
+            "9B",
+            "9B",
+            131072,
+            5_500_000_000,
+            12,
+            false,
+            0,
+            None,
+        ),
+        (
+            "qwen3.5-27b-mtp",
+            "27B",
+            "27B",
+            "27B",
+            "27B",
+            131072,
+            17_000_000_000,
+            24,
+            false,
+            0,
+            None,
+        ),
+        (
+            "qwen3.5-35b-a3b-mtp",
+            "35B-A3B (MoE)",
+            "35B-A3B",
+            "35B-A3B",
+            "35B (MoE, 3B active)",
+            131072,
+            22_500_000_000,
+            28,
+            true,
+            0,
+            Some((128, 8, 0, Some(2))),
+        ),
+        (
+            "qwen3.5-122b-a10b-mtp",
+            "122B-A10B (MoE)",
+            "122B-A10B",
+            "122B-A10B",
+            "122B (MoE, 10B active)",
+            131072,
+            75_000_000_000,
+            96,
+            true,
+            3,
+            Some((128, 8, 0, Some(8))),
+        ),
+        (
+            "qwen3.5-397b-a17b-mtp",
+            "397B-A17B (MoE)",
+            "397B-A17B",
+            "397B-A17B",
+            "397B (MoE, 17B active)",
+            131072,
+            240_000_000_000,
+            256,
+            true,
+            7,
+            Some((128, 8, 0, Some(13))),
+        ),
     ] {
         let hf_filename = if shards > 0 {
-            format!("UD-Q4_K_XL/Qwen3.5-{}-UD-Q4_K_XL-00001-of-{:05}.gguf", gguf_size, shards)
+            format!(
+                "UD-Q4_K_XL/Qwen3.5-{}-UD-Q4_K_XL-00001-of-{:05}.gguf",
+                gguf_size, shards
+            )
         } else {
             format!("Qwen3.5-{}-UD-Q4_K_XL.gguf", gguf_size)
         };
@@ -4931,9 +5934,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         // Vision: every Gemma 4 GGUF ships a mmproj-F16.gguf alongside
         // the language model. Speculative draft entries (-mtp-draft)
         // are text-only and must NOT carry a projector.
-        if entry.architecture == ModelArchitecture::Gemma4
-            && !entry.id.ends_with("-mtp-draft")
-        {
+        if entry.architecture == ModelArchitecture::Gemma4 && !entry.id.ends_with("-mtp-draft") {
             entry.mmproj = Some(MmprojSpec {
                 filename: "mmproj-F16.gguf".into(),
             });
@@ -4966,10 +5967,7 @@ impl HfModelEntry {
     /// bound to `provider`. Populates the MoE metadata block from the
     /// catalog's `moe` shape, the architecture string from the enum
     /// variant, and a description/parameters annotation.
-    pub fn to_model_info(
-        &self,
-        provider: tenzro_types::Address,
-    ) -> tenzro_types::ModelInfo {
+    pub fn to_model_info(&self, provider: tenzro_types::Address) -> tenzro_types::ModelInfo {
         let mut info = tenzro_types::ModelInfo::new(
             self.id.clone(),
             self.name.clone(),
@@ -5013,7 +6011,12 @@ fn license_tier_for(license: &str, family: &str) -> (LicenseTier, Option<String>
 /// permissive/attribution licenses (no id is required to admit those).
 pub fn custom_license_id(license: &str) -> Option<String> {
     let l = license.to_ascii_lowercase();
-    if l.contains("dinov3") {
+    if l.contains("flux") || l.contains("bfl") {
+        // The FLUX.2 non-commercial / BFL custom terms. Gated on the Hub *and*
+        // custom-licensed, which are two separate gates: the token gets the
+        // bytes, this gets the operator's acknowledgement of the terms.
+        Some("bfl-flux2".to_string())
+    } else if l.contains("dinov3") {
         Some("dinov3".to_string())
     } else if l.contains("gemma") {
         Some("gemma".to_string())
@@ -5070,7 +6073,10 @@ mod tests {
     fn test_catalog_not_empty() {
         let catalog = get_model_catalog();
         assert!(!catalog.is_empty());
-        assert!(catalog.len() >= 20, "Expected at least 20 models in catalog");
+        assert!(
+            catalog.len() >= 20,
+            "Expected at least 20 models in catalog"
+        );
     }
 
     #[test]
@@ -5105,7 +6111,11 @@ mod tests {
                 assert!(entry.size_bytes > 0, "Size is 0 for {}", entry.id);
                 assert!(entry.min_ram_gb > 0, "Min RAM is 0 for {}", entry.id);
             }
-            assert!(entry.context_length > 0, "Context length is 0 for {}", entry.id);
+            assert!(
+                entry.context_length > 0,
+                "Context length is 0 for {}",
+                entry.id
+            );
             // Serving profile must be stamped (the build pass overwrites the
             // literal placeholder). Sampler values must be plausible.
             assert!(
@@ -5139,7 +6149,11 @@ mod tests {
         }
         // Every entry must have jinja required (all are chat models).
         for entry in get_model_catalog() {
-            assert!(entry.serving.jinja_required, "{} should require jinja", entry.id);
+            assert!(
+                entry.serving.jinja_required,
+                "{} should require jinja",
+                entry.id
+            );
         }
     }
 
@@ -5234,8 +6248,8 @@ mod tests {
             ("gemma4-31b", "gemma4-31b-mtp-draft"),
         ];
         for (target, expected_drafter) in pairs {
-            let entry = get_model_by_id(target)
-                .unwrap_or_else(|| panic!("missing target `{}`", target));
+            let entry =
+                get_model_by_id(target).unwrap_or_else(|| panic!("missing target `{}`", target));
             assert_eq!(
                 entry.drafter_id.as_deref(),
                 Some(expected_drafter),
@@ -5414,10 +6428,7 @@ mod tests {
         assert_eq!(tirex.n_quantiles / 2, 4);
         assert_eq!(tirex.batch_size, 1);
         assert!(tirex.output_name.is_none());
-        assert!(matches!(
-            tirex.license_tier,
-            LicenseTier::CommercialCustom
-        ));
+        assert!(matches!(tirex.license_tier, LicenseTier::CommercialCustom));
     }
 
     #[test]
@@ -5466,8 +6477,8 @@ mod tests {
     #[test]
     fn test_vision_dinov3_entries_present() {
         for id in &["dinov3-vits16", "dinov3-vitb16", "dinov3-vitl16"] {
-            let e = get_vision_model_by_id(id)
-                .unwrap_or_else(|| panic!("missing dinov3 entry {}", id));
+            let e =
+                get_vision_model_by_id(id).unwrap_or_else(|| panic!("missing dinov3 entry {}", id));
             assert_eq!(e.family, "dinov3");
             assert_eq!(e.license_tier, LicenseTier::CommercialCustom);
         }
@@ -5488,7 +6499,10 @@ mod tests {
     #[test]
     fn test_text_embedding_catalog_not_empty() {
         let catalog = get_text_embedding_catalog();
-        assert!(catalog.len() >= 5, "expected at least 5 text-embedding models");
+        assert!(
+            catalog.len() >= 5,
+            "expected at least 5 text-embedding models"
+        );
     }
 
     #[test]
@@ -5571,8 +6585,7 @@ mod tests {
     #[test]
     fn test_segmentation_sam2_permissive() {
         for id in &["sam2-base", "sam2-large"] {
-            let e = get_segmentation_model_by_id(id)
-                .unwrap_or_else(|| panic!("missing {}", id));
+            let e = get_segmentation_model_by_id(id).unwrap_or_else(|| panic!("missing {}", id));
             assert_eq!(e.license_tier, LicenseTier::Permissive);
         }
     }
@@ -5656,52 +6669,170 @@ mod tests {
         }
     }
 
-    // ── Video catalog (V-JEPA 2 family) ────────────────────────────
+    // ── Video catalog ──────────────────────────────────────────────
 
     #[test]
-    fn test_video_catalog_vjepa2_family() {
-        let catalog = get_video_catalog();
-        let ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["vjepa2-vitl-256", "vjepa2-vith-256", "vjepa2-vitg-384"],
-            "expected V-JEPA 2 ViT-L / ViT-H / ViT-g entries in order"
+    fn the_video_catalog_is_empty_until_a_real_onnx_export_exists() {
+        // Guards against re-adding entries the node cannot load. V-JEPA 2 sat
+        // here for a while, but `facebook/vjepa2-*` ships safetensors only and
+        // `handle_load_video_model` never consults this catalog — it wires the
+        // frame-wise vision fallback from a `vision_model_id` instead. An entry
+        // here is therefore unreachable by construction, and advertising an
+        // unreachable model is worse than advertising none: callers only find
+        // out after trying.
+        //
+        // When a permissive encoder-only video model ships a genuine ONNX
+        // export, add it here AND give it a loader path in the same change.
+        assert!(
+            get_video_catalog().is_empty(),
+            "video entries need a loader path before they are listed"
         );
+        assert!(get_video_model_by_id("vjepa2-vitl-256").is_none());
+    }
+
+    // ── Speech synthesis catalog ─────────────────────────────────────
+
+    #[test]
+    fn every_tts_entry_is_permissive_and_complete() {
+        let catalog = get_tts_catalog();
+        assert!(!catalog.is_empty());
         for e in &catalog {
-            assert_eq!(e.family, "vjepa2");
-            assert_eq!(e.num_frames, 64, "V-JEPA 2 native frames_per_clip");
-            // All three sizes are LicenseTier::Permissive: ViT-L/H are
-            // MIT, ViT-g is Apache-2.0.
-            assert!(
-                matches!(e.license_tier, LicenseTier::Permissive),
-                "{} must be Permissive (license={})",
-                e.id,
-                e.license
+            assert_eq!(e.license, "Apache-2.0", "{} is {}", e.id, e.license);
+            assert!(matches!(e.license_tier, LicenseTier::Permissive));
+            assert!(e.hf_repo.starts_with("Qwen/"), "{}", e.hf_repo);
+            assert!(e.size_bytes > 0 && e.min_ram_gb > 0 && e.sample_rate > 0);
+            assert!(e.languages.iter().any(|l| l == "English"));
+            assert_eq!(
+                get_tts_model_by_id(&e.id).as_ref().map(|x| &x.id),
+                Some(&e.id),
+                "{} must round-trip through lookup",
+                e.id
             );
-            // Lookup round-trips through get_video_model_by_id.
-            let looked_up = get_video_model_by_id(&e.id)
-                .unwrap_or_else(|| panic!("{} missing from catalog lookup", e.id));
-            assert_eq!(looked_up.embedding_dim, e.embedding_dim);
         }
-        assert!(get_video_model_by_id("not-a-real-id").is_none());
     }
 
     #[test]
-    fn test_video_catalog_dims_match_vjepa2_configs() {
-        // Sanity-check that embed dims and crop sizes match the
-        // upstream `config.json` for each V-JEPA 2 release. Drift here
-        // means the catalog is lying about model shape to downstream
-        // CLI/RPC consumers.
-        let by = |id: &str| get_video_model_by_id(id).unwrap_or_else(|| panic!("{}", id));
-        let l = by("vjepa2-vitl-256");
-        assert_eq!((l.frame_size, l.embedding_dim), (256, 1024));
-        let h = by("vjepa2-vith-256");
-        assert_eq!((h.frame_size, h.embedding_dim), (256, 1280));
-        let g = by("vjepa2-vitg-384");
-        assert_eq!((g.frame_size, g.embedding_dim), (384, 1408));
+    fn voice_cloning_capability_is_recorded_per_checkpoint() {
+        // An operator has to be able to see which checkpoints carry cloning
+        // before turning it on, rather than finding out from a request.
+        let by_id: std::collections::HashMap<String, TtsModelEntry> = get_tts_catalog()
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        assert!(!by_id["qwen3-tts-1.7b"].supports_voice_cloning);
+        assert!(!by_id["qwen3-tts-0.6b"].supports_voice_cloning);
+        assert!(by_id["qwen3-tts-1.7b-clone"].supports_voice_cloning);
+    }
+
+    #[test]
+    fn a_preset_voice_model_ships_a_voice_to_speak_with() {
+        for e in get_tts_catalog() {
+            if !e.supports_voice_cloning {
+                assert!(!e.preset_voices.is_empty(), "{} has no voice", e.id);
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_tts_model_resolves_to_none() {
+        assert!(get_tts_model_by_id("kokoro-82m").is_none());
     }
 
     // ── Generative-media catalog ─────────────────────────────────────
+
+    /// Every media-gen entry must still satisfy the catalog's own admission
+    /// rules on the real hub.
+    ///
+    /// The rules are documented on [`get_media_gen_catalog`]: ungated, and
+    /// loadable by `diffusers` (a `model_index.json` naming a real pipeline).
+    /// Both are properties of the upstream repo, not of this file, so they
+    /// can stop being true without anything here changing — a repo gets
+    /// gated, renamed, or re-uploaded at a different size, and the first
+    /// anyone knows is a worker failing mid-job.
+    ///
+    /// `size_bytes` is checked to within 10%: it feeds the memory budget and
+    /// the on-demand tier ceiling, so a stale figure means the node admits a
+    /// pipeline against the wrong footprint.
+    ///
+    /// Ignored by default — it hits the network, and CI stays hermetic.
+    #[tokio::test]
+    #[ignore = "hits the HuggingFace API; run with --run-ignored"]
+    async fn media_gen_entries_still_satisfy_their_admission_rules() {
+        #[derive(serde::Deserialize)]
+        struct Sibling {
+            rfilename: String,
+            #[serde(default)]
+            size: Option<u64>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RepoInfo {
+            #[serde(default)]
+            gated: serde_json::Value,
+            #[serde(default)]
+            siblings: Vec<Sibling>,
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("client");
+
+        let mut problems = Vec::new();
+        for entry in get_media_gen_catalog() {
+            let url = format!(
+                "https://huggingface.co/api/models/{}?blobs=true",
+                entry.hf_repo
+            );
+            let response = client.get(&url).send().await.expect("HF reachable");
+            if !response.status().is_success() {
+                problems.push(format!(
+                    "{}: HF returned {} for {}",
+                    entry.id,
+                    response.status(),
+                    entry.hf_repo
+                ));
+                continue;
+            }
+            let info: RepoInfo = response.json().await.expect("HF response parses");
+
+            // `gated` is `false` when open, or a string like "auto"/"manual".
+            if info.gated != serde_json::Value::Bool(false) {
+                problems.push(format!("{}: gated ({})", entry.id, info.gated));
+            }
+            if !info
+                .siblings
+                .iter()
+                .any(|s| s.rfilename == "model_index.json")
+            {
+                problems.push(format!(
+                    "{}: no model_index.json — not loadable by diffusers::from_pretrained",
+                    entry.id
+                ));
+            }
+
+            let actual: u64 = info.siblings.iter().filter_map(|s| s.size).sum();
+            if actual > 0 && entry.size_bytes > 0 {
+                let drift = (actual as f64 - entry.size_bytes as f64).abs()
+                    / entry.size_bytes as f64
+                    * 100.0;
+                if drift > 10.0 {
+                    problems.push(format!(
+                        "{}: size drifted {drift:.0}% (catalog {:.1} GB, actual {:.1} GB) — the \
+                         memory budget would admit it against the wrong footprint",
+                        entry.id,
+                        entry.size_bytes as f64 / 1e9,
+                        actual as f64 / 1e9
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "catalog drift:\n  {}",
+            problems.join("\n  ")
+        );
+    }
 
     #[test]
     fn test_media_gen_catalog_membership() {
@@ -5711,10 +6842,16 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "flux2-dev",
                 "flux2-klein-4b",
+                "flux2-klein-9b",
+                "flux2-klein-9b-kv",
+                "flux2-klein-base-4b",
+                "flux2-klein-base-9b",
                 "qwen-image",
                 "qwen-image-edit",
                 "qwen-image-flash",
+                "wan2.1-flf2v-14b",
                 "wan2.2-i2v-a14b",
                 "wan2.2-t2v-a14b",
                 "wan2.2-ti2v-5b",
@@ -5803,7 +6940,10 @@ mod tests {
     fn test_media_gen_kind_filter() {
         use tenzro_types::MediaGenKind;
         let t2v = get_media_gen_models_for_kind(MediaGenKind::Text2Video);
-        assert!(t2v.iter().all(|e| e.kinds.contains(&MediaGenKind::Text2Video)));
+        assert!(
+            t2v.iter()
+                .all(|e| e.kinds.contains(&MediaGenKind::Text2Video))
+        );
         assert!(t2v.iter().any(|e| e.id == "wan2.2-t2v-a14b"));
         // TI2V-5B is the one entry serving both video kinds.
         assert!(t2v.iter().any(|e| e.id == "wan2.2-ti2v-5b"));
@@ -5863,8 +7003,7 @@ mod tests {
             }
             // No accidental leading slash / windows separators.
             assert!(
-                !entry.hf_filename.starts_with('/')
-                    && !entry.hf_filename.contains('\\'),
+                !entry.hf_filename.starts_with('/') && !entry.hf_filename.contains('\\'),
                 "{}: malformed hf_filename `{}`",
                 entry.id,
                 entry.hf_filename
@@ -5876,7 +7015,10 @@ mod tests {
     fn test_parse_params_active_b_prefers_active_over_total() {
         // MoE forms must yield the active path width, not the total.
         assert_eq!(parse_params_active_b("1T (MoE, 32B active)"), 32.0);
-        assert_eq!(parse_params_active_b("2.8T total / 104B active (MoE)"), 104.0);
+        assert_eq!(
+            parse_params_active_b("2.8T total / 104B active (MoE)"),
+            104.0
+        );
         assert_eq!(parse_params_active_b("35B (MoE, 3B active)"), 3.0);
         assert_eq!(parse_params_active_b("397B (MoE, 17B active)"), 17.0);
         assert_eq!(parse_params_active_b("975B (MoE, 41B active)"), 41.0);
@@ -5905,8 +7047,8 @@ mod tests {
             // active path; attention and embeddings add to it. A parsed
             // figure below that bound means we read the total by mistake
             // or the shape is wrong.
-            let expert_active_b =
-                (per_expert_x10 as f32 / 10.0) * (moe.experts_per_token as f32 + moe.shared_experts as f32);
+            let expert_active_b = (per_expert_x10 as f32 / 10.0)
+                * (moe.experts_per_token as f32 + moe.shared_experts as f32);
             assert!(
                 parsed >= expert_active_b * 0.9,
                 "{}: parsed active {}B is below the expert-only floor {}B \
@@ -5930,10 +7072,7 @@ mod tests {
             .collect();
         let mut gated_sorted = gated.clone();
         gated_sorted.sort();
-        let expected = vec![
-            "deepseek-v4-pro".to_string(),
-            "minimax-m1-40b".to_string(),
-        ];
+        let expected = vec!["deepseek-v4-pro".to_string()];
         assert_eq!(
             gated_sorted, expected,
             "Gated-out set changed unexpectedly. Current gated: {:?}. \
@@ -6035,6 +7174,108 @@ mod tests {
             "{} promotable catalog entries failed HF verification:\n{}",
             failures.len(),
             failures.join("\n")
+        );
+    }
+
+    /// The GGUF verifier above covered only `get_model_catalog`, which is why
+    /// three D-FINE detection entries sat pointing at `.onnx` files that never
+    /// existed in `Peterande/D-FINE` (that repo publishes PyTorch `.pth`
+    /// only). The ONNX catalogs need the same check or the same drift recurs.
+    ///
+    /// Network-gated for the same reason as its GGUF sibling.
+    #[tokio::test]
+    #[ignore = "network: hits huggingface.co — run with --ignored in CI"]
+    async fn verify_onnx_catalog_entries_resolve_on_hf() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("tenzro-model-catalog-verify")
+            .build()
+            .expect("build http client");
+
+        // (catalog label, id, repo, filename) flattened across every ONNX
+        // catalog, so adding a modality without adding it here is visible as
+        // a missing label rather than as silent non-coverage.
+        let mut entries: Vec<(&str, String, String, String)> = Vec::new();
+        for e in get_detection_catalog() {
+            entries.push(("detection", e.id, e.hf_repo, e.hf_filename));
+        }
+        for e in get_segmentation_catalog() {
+            // Both halves: a missing decoder breaks segmentation exactly as
+            // thoroughly as a missing encoder.
+            entries.push((
+                "segmentation-encoder",
+                e.id.clone(),
+                e.hf_repo.clone(),
+                e.encoder_filename,
+            ));
+            entries.push(("segmentation-decoder", e.id, e.hf_repo, e.decoder_filename));
+        }
+        for e in get_vision_catalog() {
+            entries.push(("vision", e.id, e.hf_repo, e.hf_filename));
+        }
+        for e in get_text_embedding_catalog() {
+            entries.push(("text-embedding", e.id, e.hf_repo, e.hf_filename));
+        }
+        for e in get_forecast_catalog() {
+            entries.push(("forecast", e.id, e.hf_repo, e.hf_filename));
+        }
+
+        let mut repo_files: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut failures: Vec<String> = Vec::new();
+
+        for (kind, id, repo, filename) in entries {
+            if filename.is_empty() {
+                continue;
+            }
+            let files = if let Some(f) = repo_files.get(&repo) {
+                f.clone()
+            } else {
+                let url = format!("https://huggingface.co/api/models/{repo}");
+                let files = match client.get(&url).send().await {
+                    Ok(r) if r.status().is_success() => {
+                        let v: serde_json::Value =
+                            r.json().await.unwrap_or(serde_json::Value::Null);
+                        v.get("siblings")
+                            .and_then(|s| s.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| {
+                                        s.get("rfilename")
+                                            .and_then(|n| n.as_str())
+                                            .map(String::from)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    }
+                    Ok(r) => {
+                        failures.push(format!(
+                            "{kind}/{id}: repo `{repo}` returned HTTP {}",
+                            r.status()
+                        ));
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        failures.push(format!("{kind}/{id}: repo `{repo}` request error: {e}"));
+                        Vec::new()
+                    }
+                };
+                repo_files.insert(repo.clone(), files.clone());
+                files
+            };
+
+            if !files.is_empty() && !files.iter().any(|f| f == &filename) {
+                failures.push(format!(
+                    "{kind}/{id}: file `{filename}` not found in repo `{repo}`"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "ONNX catalog entries that do not resolve on HuggingFace:\n  {}",
+            failures.join("\n  ")
         );
     }
 }

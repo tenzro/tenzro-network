@@ -50,7 +50,11 @@ pub struct LayerZeroAdapter {
     /// Per-source-EID DVN attestation set. Inbound delivery requires
     /// threshold-many DVN signatures over the LayerZero V2 ULN payload
     /// hash. Absent set → `receive_message` refuses (no fail-open).
-    dvn_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u32, crate::secp256k1_multisig::ValidatorSet>>>,
+    dvn_sets: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<u32, crate::secp256k1_multisig::ValidatorSet>,
+        >,
+    >,
     /// Replay cache for inbound packets keyed `{src_eid}:{guid_hex}`.
     seen_guids: Arc<DashMap<String, ()>>,
     /// Optional write-through persistence for the replay cache.
@@ -80,10 +84,7 @@ impl LayerZeroAdapter {
 
     /// Attach RocksDB persistence: hydrates the inbound-packet replay
     /// cache from `CF_SETTLEMENTS / bridge_seen:layerzero:*`.
-    pub fn with_storage(
-        mut self,
-        storage: Arc<dyn tenzro_storage::KvStore>,
-    ) -> Self {
+    pub fn with_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
         for key in crate::message_format::load_seen_keys(&storage, "layerzero") {
             self.seen_guids.insert(key, ());
         }
@@ -94,12 +95,7 @@ impl LayerZeroAdapter {
     /// Install the DVN attestation set for a source EID. Inbound
     /// `receive_message` calls from `src_eid` will require
     /// `threshold`-many DVN signatures over the ULN payload hash.
-    pub fn install_dvn_set(
-        &self,
-        src_eid: u32,
-        dvn_addresses: Vec<[u8; 20]>,
-        threshold: u8,
-    ) {
+    pub fn install_dvn_set(&self, src_eid: u32, dvn_addresses: Vec<[u8; 20]>, threshold: u8) {
         let set = crate::secp256k1_multisig::ValidatorSet::new(
             dvn_addresses,
             threshold,
@@ -178,7 +174,7 @@ impl LayerZeroAdapter {
         let dummy_payload = vec![0u8; payload_size];
         let messaging_params = self.encode_messaging_params(
             dest_eid,
-            vec![0u8; 32], // dummy receiver
+            vec![0u8; 32],  // dummy receiver
             &dummy_payload, // dummy payload of correct size
             self.encode_options(),
             false, // payInLzToken
@@ -205,11 +201,7 @@ impl LayerZeroAdapter {
             )));
         }
 
-        let native_fee = u128::from_be_bytes(
-            response[16..32]
-                .try_into()
-                .unwrap_or([0u8; 16])
-        );
+        let native_fee = u128::from_be_bytes(response[16..32].try_into().unwrap_or([0u8; 16]));
 
         debug!(
             "LayerZero: Quoted fee for {} to {} = {} wei",
@@ -304,10 +296,7 @@ impl LayerZeroAdapter {
             .map_err(|e| BridgeError::AdapterError(format!("Invalid JSON: {}", e)))?;
 
         if let Some(error) = json.get("error") {
-            return Err(BridgeError::AdapterError(format!(
-                "RPC error: {}",
-                error
-            )));
+            return Err(BridgeError::AdapterError(format!("RPC error: {}", error)));
         }
 
         let result = json
@@ -317,8 +306,7 @@ impl LayerZeroAdapter {
 
         // Remove 0x prefix and decode
         let hex_str = result.strip_prefix("0x").unwrap_or(result);
-        hex::decode(hex_str)
-            .map_err(|e| BridgeError::AdapterError(format!("Invalid hex: {}", e)))
+        hex::decode(hex_str).map_err(|e| BridgeError::AdapterError(format!("Invalid hex: {}", e)))
     }
 
     /// Encodes MessagingParams for ABI encoding
@@ -554,16 +542,13 @@ impl BridgeAdapter for LayerZeroAdapter {
         //   headerHash  = keccak256(packet_header_81)
         //   payloadHash = keccak256(guid || message_bytes)
         let src_eid = self.get_chain_eid(source_chain)?;
-        let set = self
-            .dvn_sets
-            .read()
-            .get(&src_eid)
-            .cloned()
-            .ok_or_else(|| BridgeError::AdapterError(format!(
+        let set = self.dvn_sets.read().get(&src_eid).cloned().ok_or_else(|| {
+            BridgeError::AdapterError(format!(
                 "LayerZero adapter has no DVN set installed for source EID \
                  {src_eid} — inbound traffic refused. Call install_dvn_set \
                  at startup."
-            )))?;
+            ))
+        })?;
         if payload.len() < 113 + 1 {
             return Err(BridgeError::InvalidParameter(
                 "LayerZero ULN: payload too short for packet header + guid".into(),
@@ -603,15 +588,16 @@ impl BridgeAdapter for LayerZeroAdapter {
         // the packet header (81) + guid (32). Guid replay protection
         // above covers per-message dedup, so no per-sender nonce
         // tracker is layered here.
-        let verified =
-            crate::message_format::verify_inner_message(&body[113..], None)?;
+        let verified = crate::message_format::verify_inner_message(&body[113..], None)?;
         if let Some(ref storage) = self.seen_storage {
             crate::message_format::persist_seen_key(storage, "layerzero", &guid_key);
         }
         self.seen_guids.insert(guid_key, ());
         info!(
             "LayerZero ULN: DVN quorum verified ({} sigs, threshold {}, src_eid {})",
-            signatures.len(), set.threshold, src_eid
+            signatures.len(),
+            set.threshold,
+            src_eid
         );
         Ok(verified)
     }
@@ -647,11 +633,13 @@ impl BridgeAdapter for LayerZeroAdapter {
                 Ok(f) => f,
                 Err(e) => {
                     warn!("LayerZero: Fee quote failed ({}), using estimate", e);
-                    self.estimate_fee(&request.dest_chain, oft_payload.len()).await?
+                    self.estimate_fee(&request.dest_chain, oft_payload.len())
+                        .await?
                 }
             }
         } else {
-            self.estimate_fee(&request.dest_chain, oft_payload.len()).await?
+            self.estimate_fee(&request.dest_chain, oft_payload.len())
+                .await?
         };
 
         // Get nonce
@@ -689,8 +677,8 @@ impl BridgeAdapter for LayerZeroAdapter {
                 tx_hash_str
             );
             // Parse hex hash into Hash type
-            let hash_bytes = hex::decode(tx_hash_str.trim_start_matches("0x"))
-                .unwrap_or_else(|_| vec![0u8; 32]);
+            let hash_bytes =
+                hex::decode(tx_hash_str.trim_start_matches("0x")).unwrap_or_else(|_| vec![0u8; 32]);
             let mut hash_array = [0u8; 32];
             let len = hash_bytes.len().min(32);
             hash_array[32 - len..].copy_from_slice(&hash_bytes[..len]);
@@ -713,7 +701,8 @@ impl BridgeAdapter for LayerZeroAdapter {
             Timestamp::now().as_millis() + (dest_chain_info.finality_time_secs as i64 * 1000);
 
         // Track transfer
-        self.transfers.insert(transfer_id.clone(), TransferStatus::Pending);
+        self.transfers
+            .insert(transfer_id.clone(), TransferStatus::Pending);
 
         info!(
             "LayerZero OFT: Transfer {} initiated, tx_hash={}, fee={} wei",
@@ -1065,13 +1054,7 @@ mod tests {
         let message = vec![0x34; 10];
         let options = vec![0x56; 5];
 
-        let encoded = adapter.encode_messaging_params(
-            30110,
-            receiver,
-            &message,
-            options,
-            false,
-        );
+        let encoded = adapter.encode_messaging_params(30110, receiver, &message, options, false);
 
         // Should contain struct offset + 5 fields + variable data
         assert!(encoded.len() > 32 * 6);

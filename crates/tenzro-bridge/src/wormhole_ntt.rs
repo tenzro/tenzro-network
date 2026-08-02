@@ -187,24 +187,27 @@ mod tests {
         assert!(!att.has_quorum());
 
         // 1 attestation: not enough.
-        att.transceiver_attestations.push(NttTransceiverAttestation {
-            transceiver_address: [0x11; 32],
-            signature: vec![0u8; 65],
-        });
+        att.transceiver_attestations
+            .push(NttTransceiverAttestation {
+                transceiver_address: [0x11; 32],
+                signature: vec![0u8; 65],
+            });
         assert!(!att.has_quorum());
 
         // Same transceiver again — must not count.
-        att.transceiver_attestations.push(NttTransceiverAttestation {
-            transceiver_address: [0x11; 32],
-            signature: vec![0u8; 65],
-        });
+        att.transceiver_attestations
+            .push(NttTransceiverAttestation {
+                transceiver_address: [0x11; 32],
+                signature: vec![0u8; 65],
+            });
         assert!(!att.has_quorum());
 
         // Distinct second transceiver — quorum.
-        att.transceiver_attestations.push(NttTransceiverAttestation {
-            transceiver_address: [0x22; 32],
-            signature: vec![0u8; 65],
-        });
+        att.transceiver_attestations
+            .push(NttTransceiverAttestation {
+                transceiver_address: [0x22; 32],
+                signature: vec![0u8; 65],
+            });
         assert!(att.has_quorum());
     }
 }

@@ -6,8 +6,8 @@
 //! notification instead of being disconnected (unlike Geth's 10k buffer cliff).
 
 use crate::types::{EventEnvelope, EventFilter, SubscriptionId, TenzroEvent, VmType};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
@@ -218,9 +218,7 @@ impl EventBus {
         self.stats
             .active_subscribers
             .fetch_add(1, Ordering::Relaxed);
-        let id = SubscriptionId(
-            self.next_subscription_id.fetch_add(1, Ordering::Relaxed),
-        );
+        let id = SubscriptionId(self.next_subscription_id.fetch_add(1, Ordering::Relaxed));
         EventSubscriber {
             id,
             receiver,

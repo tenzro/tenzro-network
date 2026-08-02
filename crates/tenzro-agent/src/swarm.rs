@@ -13,9 +13,9 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
-use tenzro_storage::kv::{KvStore, CF_AGENTS};
+use tenzro_storage::kv::{CF_AGENTS, KvStore};
 use tenzro_types::agent::{SwarmConfig, SwarmMember, SwarmMemberStatus};
+use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -65,36 +65,29 @@ impl SwarmManager {
     /// Hydration failures on individual swarm records are logged and
     /// skipped so that one corrupt entry does not block the whole registry
     /// from coming back up.
-    pub fn with_storage(
-        runtime: Arc<AgentRuntime>,
-        storage: Arc<dyn KvStore>,
-    ) -> Result<Self> {
+    pub fn with_storage(runtime: Arc<AgentRuntime>, storage: Arc<dyn KvStore>) -> Result<Self> {
         let swarms: Arc<DashMap<String, SwarmState>> = Arc::new(DashMap::new());
 
         let keys = storage
             .get_keys_with_prefix(CF_AGENTS, SWARM_KEY_PREFIX)
-            .map_err(|e| AgentError::StorageError(format!(
-                "Failed to scan swarm keys: {}", e
-            )))?;
+            .map_err(|e| AgentError::StorageError(format!("Failed to scan swarm keys: {}", e)))?;
 
         for key in keys {
             match storage.get(CF_AGENTS, &key) {
-                Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<SwarmState>(&bytes) {
-                        Ok(state) => {
-                            if let Some(id_bytes) = key.strip_prefix(SWARM_KEY_PREFIX)
-                                && let Ok(swarm_id) = std::str::from_utf8(id_bytes)
-                            {
-                                swarms.insert(swarm_id.to_string(), state);
-                            }
+                Ok(Some(bytes)) => match serde_json::from_slice::<SwarmState>(&bytes) {
+                    Ok(state) => {
+                        if let Some(id_bytes) = key.strip_prefix(SWARM_KEY_PREFIX)
+                            && let Ok(swarm_id) = std::str::from_utf8(id_bytes)
+                        {
+                            swarms.insert(swarm_id.to_string(), state);
                         }
-                        Err(e) => warn!(
-                            "Corrupt swarm record at key {:?}: {}",
-                            String::from_utf8_lossy(&key),
-                            e
-                        ),
                     }
-                }
+                    Err(e) => warn!(
+                        "Corrupt swarm record at key {:?}: {}",
+                        String::from_utf8_lossy(&key),
+                        e
+                    ),
+                },
                 Ok(None) => {}
                 Err(e) => warn!(
                     "Failed to read swarm key {:?}: {}",
@@ -133,9 +126,7 @@ impl SwarmManager {
             let key = Self::swarm_key(swarm_id);
             storage
                 .put(CF_AGENTS, &key, &bytes)
-                .map_err(|e| AgentError::StorageError(format!(
-                    "Failed to persist swarm: {}", e
-                )))?;
+                .map_err(|e| AgentError::StorageError(format!("Failed to persist swarm: {}", e)))?;
         }
         Ok(())
     }
@@ -147,9 +138,7 @@ impl SwarmManager {
             let key = Self::swarm_key(swarm_id);
             storage
                 .delete(CF_AGENTS, &key)
-                .map_err(|e| AgentError::StorageError(format!(
-                    "Failed to remove swarm: {}", e
-                )))?;
+                .map_err(|e| AgentError::StorageError(format!("Failed to remove swarm: {}", e)))?;
         }
         Ok(())
     }
@@ -210,18 +199,13 @@ impl SwarmManager {
     /// Returns a `Vec` with one status string per member.  Individual member
     /// failures are captured as strings rather than propagating — the caller
     /// can inspect them to decide whether to retry.
-    pub async fn broadcast_task(
-        &self,
-        swarm_id: &str,
-        task: &str,
-    ) -> Result<Vec<String>> {
+    pub async fn broadcast_task(&self, swarm_id: &str, task: &str) -> Result<Vec<String>> {
         // Extract config values and member IDs in one scope to avoid holding DashMap guard
         // across the async boundary.
         let (member_ids, task_timeout_secs, parallel, snapshot) = {
-            let mut state = self
-                .swarms
-                .get_mut(swarm_id)
-                .ok_or_else(|| AgentError::ProtocolError(format!("swarm not found: {}", swarm_id)))?;
+            let mut state = self.swarms.get_mut(swarm_id).ok_or_else(|| {
+                AgentError::ProtocolError(format!("swarm not found: {}", swarm_id))
+            })?;
             state.status = "working".to_string();
             let ids: Vec<String> = state.members.iter().map(|m| m.agent_id.clone()).collect();
             let secs = state.config.task_timeout_secs;
@@ -284,9 +268,9 @@ impl SwarmManager {
                 .map(|agent_id| {
                     let rt = runtime.clone();
                     let t = task_owned.clone();
-                    tokio::spawn(async move {
-                        dispatch_one(rt, agent_id, t, task_timeout_secs).await
-                    })
+                    tokio::spawn(
+                        async move { dispatch_one(rt, agent_id, t, task_timeout_secs).await },
+                    )
                 })
                 .collect();
 
@@ -452,12 +436,9 @@ impl SwarmManager {
             }
 
             // Swarm is dead iff every member is Terminated.
-            let all_terminated = member_ids.iter().all(|id| {
-                matches!(
-                    self.runtime.get_agent_state(id),
-                    Ok(AgentState::Terminated)
-                )
-            });
+            let all_terminated = member_ids
+                .iter()
+                .all(|id| matches!(self.runtime.get_agent_state(id), Ok(AgentState::Terminated)));
 
             if !all_terminated {
                 continue;

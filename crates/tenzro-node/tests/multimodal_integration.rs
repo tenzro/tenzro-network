@@ -21,9 +21,8 @@
 use std::sync::Arc;
 
 use tenzro_model::{
-    get_audio_catalog, get_detection_catalog, get_forecast_catalog,
-    get_segmentation_catalog, get_text_embedding_catalog, get_video_catalog,
-    get_vision_catalog, ModelRegistry,
+    ModelRegistry, get_audio_catalog, get_detection_catalog, get_forecast_catalog,
+    get_segmentation_catalog, get_text_embedding_catalog, get_video_catalog, get_vision_catalog,
 };
 use tenzro_storage::{KvStore, MemoryStore};
 use tenzro_types::model::{
@@ -121,7 +120,10 @@ fn vision_catalog_is_non_empty_and_well_formed() {
     );
     for entry in &catalog {
         assert!(entry.input_size > 0, "vision entry has zero input_size");
-        assert!(entry.embedding_dim > 0, "vision entry has zero embedding_dim");
+        assert!(
+            entry.embedding_dim > 0,
+            "vision entry has zero embedding_dim"
+        );
     }
 }
 
@@ -134,7 +136,10 @@ fn text_embedding_catalog_is_non_empty_and_well_formed() {
     );
     for entry in &catalog {
         assert!(!entry.id.is_empty(), "text-embed entry has empty id");
-        assert!(entry.embedding_dim > 0, "text-embed embedding_dim must be > 0");
+        assert!(
+            entry.embedding_dim > 0,
+            "text-embed embedding_dim must be > 0"
+        );
     }
 }
 
@@ -176,18 +181,21 @@ fn audio_catalog_is_non_empty_and_well_formed() {
 }
 
 #[test]
-fn video_catalog_advertises_vjepa2_family() {
-    // The video catalog advertises V-JEPA 2 ViT-L (MIT), ViT-H (MIT),
-    // and ViT-g (Apache-2.0) — all LicenseTier::Permissive. Loading
-    // currently rejects at `tenzro_loadVideoModel` (-32004) because
-    // facebook/vjepa2-* carries safetensors only; the catalog exists so
-    // discovery, CLI listing, and MCP enumeration return the right
-    // options once the ONNX export step is available.
-    let catalog = get_video_catalog();
-    let ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        vec!["vjepa2-vitl-256", "vjepa2-vith-256", "vjepa2-vitg-384"],
+fn video_catalog_lists_nothing_the_node_cannot_load() {
+    // The catalog previously advertised the V-JEPA 2 family. It was removed:
+    // `facebook/vjepa2-*` ships safetensors only (verified against the HF API
+    // — no `.onnx` sibling on any size), and the community exports are not
+    // substitutes, being either Diving48 classification fine-tunes or `fpc2` /
+    // `img16` variants rather than the 64-frame encoder.
+    //
+    // Decisively, `handle_load_video_model` never consults this catalog at
+    // all: it registers the frame-wise vision fallback from a
+    // `vision_model_id`. So an entry here had no loader path in any code path,
+    // and discovery that ends in "you cannot actually load this" is worse for
+    // a caller than discovery that returns nothing.
+    assert!(
+        get_video_catalog().is_empty(),
+        "a video entry needs a loader path before it is advertised"
     );
 }
 
@@ -223,12 +231,12 @@ fn register_and_lookup_per_modality() {
     }
 
     // Deactivate one and confirm status flips.
-    let deactivated = registry
-        .deactivate_model("ts-1")
-        .expect("deactivate_model");
+    let deactivated = registry.deactivate_model("ts-1").expect("deactivate_model");
     let _ = deactivated; // event payload not asserted here
 
-    let got = registry.get_model("ts-1").expect("get_model after deactivate");
+    let got = registry
+        .get_model("ts-1")
+        .expect("get_model after deactivate");
     assert_eq!(
         got.status,
         tenzro_types::model::ModelStatus::Inactive,
@@ -369,7 +377,9 @@ fn duplicate_register_is_rejected() {
     let registry = ModelRegistry::new();
     let m = make_model("dup-1", ModelModality::Image, 1);
     registry.register_model(m.clone()).expect("first register");
-    let err = registry.register_model(m).expect_err("dup register must fail");
+    let err = registry
+        .register_model(m)
+        .expect_err("dup register must fail");
     let msg = format!("{err}");
     assert!(
         msg.contains("dup-1") || msg.to_lowercase().contains("already"),

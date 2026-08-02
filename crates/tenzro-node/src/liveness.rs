@@ -37,7 +37,7 @@ use tracing::{debug, info, warn};
 
 use tenzro_agent::AgentLifecycle;
 use tenzro_storage::kv::{
-    KvStore, CF_AGENT_TEMPLATES, CF_CHANNELS, CF_MODEL_SERVICES, CF_SKILLS, CF_TASKS, CF_TOOLS,
+    CF_AGENT_TEMPLATES, CF_CHANNELS, CF_MODEL_SERVICES, CF_SKILLS, CF_TASKS, CF_TOOLS, KvStore,
 };
 
 /// Default cadence at which the sweeper wakes up.
@@ -283,16 +283,12 @@ fn sweep_skills(
             continue;
         }
         let age = now.saturating_sub(skill.last_seen_at);
-        if matches!(skill.status, SkillStatus::Inactive)
-            && age >= cfg.skill_purge_after_secs
-        {
+        if matches!(skill.status, SkillStatus::Inactive) && age >= cfg.skill_purge_after_secs {
             let _ = storage.delete(CF_SKILLS, &key);
             stats.skills_purged += 1;
             continue;
         }
-        if matches!(skill.status, SkillStatus::Active)
-            && age >= cfg.skill_stale_after_secs
-        {
+        if matches!(skill.status, SkillStatus::Active) && age >= cfg.skill_stale_after_secs {
             skill.status = SkillStatus::Inactive;
             if let Ok(updated) = serde_json::to_vec(&skill) {
                 let _ = storage.put(CF_SKILLS, &key, &updated);
@@ -331,16 +327,12 @@ fn sweep_tools(
             continue;
         }
         let age = now.saturating_sub(tool.last_seen_at);
-        if matches!(tool.status, ToolStatus::Inactive)
-            && age >= cfg.tool_purge_after_secs
-        {
+        if matches!(tool.status, ToolStatus::Inactive) && age >= cfg.tool_purge_after_secs {
             let _ = storage.delete(CF_TOOLS, &key);
             stats.tools_purged += 1;
             continue;
         }
-        if matches!(tool.status, ToolStatus::Active)
-            && age >= cfg.tool_stale_after_secs
-        {
+        if matches!(tool.status, ToolStatus::Active) && age >= cfg.tool_stale_after_secs {
             tool.status = ToolStatus::Inactive;
             if let Ok(updated) = serde_json::to_vec(&tool) {
                 let _ = storage.put(CF_TOOLS, &key, &updated);
@@ -640,7 +632,10 @@ mod tests {
         assert_eq!(stats.skills_marked_inactive, 1);
         assert_eq!(stats.skills_purged, 0);
 
-        let stored = store.get(CF_SKILLS, skill.skill_id.as_bytes()).unwrap().unwrap();
+        let stored = store
+            .get(CF_SKILLS, skill.skill_id.as_bytes())
+            .unwrap()
+            .unwrap();
         let after: SkillDefinition = serde_json::from_slice(&stored).unwrap();
         assert_eq!(after.status, SkillStatus::Inactive);
 
@@ -656,7 +651,12 @@ mod tests {
             .unwrap();
         let stats2 = run_sweep(&store, &cfg, None).unwrap();
         assert_eq!(stats2.skills_purged, 1);
-        assert!(store.get(CF_SKILLS, after.skill_id.as_bytes()).unwrap().is_none());
+        assert!(
+            store
+                .get(CF_SKILLS, after.skill_id.as_bytes())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -696,7 +696,11 @@ mod tests {
         );
         skill.last_seen_at = now_secs().saturating_sub(500); // way past purge
         store
-            .put(CF_SKILLS, skill.skill_id.as_bytes(), &serde_json::to_vec(&skill).unwrap())
+            .put(
+                CF_SKILLS,
+                skill.skill_id.as_bytes(),
+                &serde_json::to_vec(&skill).unwrap(),
+            )
             .unwrap();
 
         let mut tool = ToolDefinition::new(
@@ -710,7 +714,11 @@ mod tests {
         tool.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
         tool.last_seen_at = now_secs().saturating_sub(500);
         store
-            .put(CF_TOOLS, tool.tool_id.as_bytes(), &serde_json::to_vec(&tool).unwrap())
+            .put(
+                CF_TOOLS,
+                tool.tool_id.as_bytes(),
+                &serde_json::to_vec(&tool).unwrap(),
+            )
             .unwrap();
 
         let stats = run_sweep(&store, &cfg, None).unwrap();
@@ -720,12 +728,18 @@ mod tests {
         assert_eq!(stats.tools_purged, 0);
 
         let after: SkillDefinition = serde_json::from_slice(
-            &store.get(CF_SKILLS, skill.skill_id.as_bytes()).unwrap().unwrap(),
+            &store
+                .get(CF_SKILLS, skill.skill_id.as_bytes())
+                .unwrap()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(after.status, SkillStatus::Active);
         let after_tool: ToolDefinition = serde_json::from_slice(
-            &store.get(CF_TOOLS, tool.tool_id.as_bytes()).unwrap().unwrap(),
+            &store
+                .get(CF_TOOLS, tool.tool_id.as_bytes())
+                .unwrap()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(after_tool.status, ToolStatus::Active);
@@ -755,7 +769,10 @@ mod tests {
         let stats = run_sweep(&store, &cfg, None).unwrap();
         assert_eq!(stats.tools_marked_inactive, 1);
 
-        let stored = store.get(CF_TOOLS, tool.tool_id.as_bytes()).unwrap().unwrap();
+        let stored = store
+            .get(CF_TOOLS, tool.tool_id.as_bytes())
+            .unwrap()
+            .unwrap();
         let after: ToolDefinition = serde_json::from_slice(&stored).unwrap();
         assert_eq!(after.status, ToolStatus::Inactive);
     }
@@ -789,10 +806,8 @@ mod tests {
 
         let stats = run_sweep(&store, &cfg, None).unwrap();
         assert_eq!(stats.tasks_marked_expired, 1);
-        let after: TaskInfo = serde_json::from_slice(
-            &store.get(CF_TASKS, key.as_bytes()).unwrap().unwrap(),
-        )
-        .unwrap();
+        let after: TaskInfo =
+            serde_json::from_slice(&store.get(CF_TASKS, key.as_bytes()).unwrap().unwrap()).unwrap();
         assert_eq!(after.status, TaskStatus::Expired);
         let _ = Timestamp::default();
     }

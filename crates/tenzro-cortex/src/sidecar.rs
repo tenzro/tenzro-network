@@ -122,10 +122,7 @@ impl SidecarModel {
     /// health checks should never block a startup sequence for minutes.
     pub async fn ping_health(&self) -> Result<()> {
         let url = format!("{}/healthz", self.cfg.base_url.trim_end_matches('/'));
-        let mut req = self
-            .http
-            .get(&url)
-            .timeout(Duration::from_secs(5));
+        let mut req = self.http.get(&url).timeout(Duration::from_secs(5));
         if let Some(token) = &self.cfg.bearer_token {
             req = req.bearer_auth(token);
         }
@@ -193,7 +190,10 @@ impl RecurrentDepthModel for SidecarModel {
             )));
         }
 
-        let url = format!("{}/v1/cortex/infer", self.cfg.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/cortex/infer",
+            self.cfg.base_url.trim_end_matches('/')
+        );
         let wire = InferRequestWire {
             model_id: &self.model_id,
             input_hex: hex::encode(&request.input),
@@ -291,7 +291,7 @@ impl RecurrentDepthModel for SidecarModel {
 
 fn parse_hash_hex(s: &str, field: &str) -> Result<Hash> {
     let trimmed = s.trim_start_matches("0x");
-    let bytes = hex::decode(trimmed)
-        .map_err(|e| CortexError::Other(format!("invalid {field}: {e}")))?;
+    let bytes =
+        hex::decode(trimmed).map_err(|e| CortexError::Other(format!("invalid {field}: {e}")))?;
     Hash::from_bytes(&bytes).ok_or_else(|| CortexError::Other(format!("{field} not 32 bytes")))
 }

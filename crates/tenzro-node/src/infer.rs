@@ -20,12 +20,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use tenzro_iroh::{IrohError, IrohResult, JsonRpcDispatcher};
 
 use crate::node::TenzroNode;
-use crate::rpc::{dispatch_embedded, EmbeddedAuth};
+use crate::rpc::{EmbeddedAuth, dispatch_embedded};
 
 /// `JsonRpcDispatcher` for the `tenzro/infer` iroh ALPN.
 ///
@@ -40,7 +40,8 @@ pub struct IrohInferDispatcher {
 
 impl std::fmt::Debug for IrohInferDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IrohInferDispatcher").finish_non_exhaustive()
+        f.debug_struct("IrohInferDispatcher")
+            .finish_non_exhaustive()
     }
 }
 

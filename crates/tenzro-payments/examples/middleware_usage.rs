@@ -3,11 +3,11 @@
 //! This example demonstrates how to set up payment-gated API endpoints
 //! using the Axum middleware layer.
 
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use std::sync::Arc;
 use tenzro_payments::{
     gateway::TenzroPaymentGateway,
-    middleware::{payment_gate_handler, PaymentGateConfig, PaymentGateMiddleware},
+    middleware::{PaymentGateConfig, PaymentGateMiddleware, payment_gate_handler},
 };
 
 #[tokio::main]
@@ -42,11 +42,8 @@ async fn main() {
     };
 
     // Create the middleware
-    let payment_middleware = PaymentGateMiddleware::new(
-        gateway.clone(),
-        config,
-        gateway.challenge_store(),
-    );
+    let payment_middleware =
+        PaymentGateMiddleware::new(gateway.clone(), config, gateway.challenge_store());
 
     // Build the router with payment-gated endpoints
     let app = Router::new()

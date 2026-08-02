@@ -36,6 +36,31 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion -- --nocapture
 
+  # Long-running tests, kept out of the default suite so a local `cargo test`
+  # stays fast, but run here on every push. They were ignored and unrun for
+  # long enough that all five cluster simulations had silently stopped
+  # finalising any blocks at all — an ignored test nothing executes is not
+  # coverage, it is a comment.
+  #
+  # Two classes: the consensus cluster simulations (2-3 min), and the model
+  # catalog verifiers that resolve every HuggingFace repo + filename (network).
+  slow-tests:
+    name: Slow and network tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+      - name: Consensus cluster simulations
+        run: cargo test -p tenzro-consensus --test tail_fork_regression -- --ignored --nocapture
+      - name: Model catalog resolves on HuggingFace
+        run: cargo test -p tenzro-model --lib catalog -- --ignored --nocapture
+
   benches:
     name: Bench compile-check
     runs-on: ubuntu-latest

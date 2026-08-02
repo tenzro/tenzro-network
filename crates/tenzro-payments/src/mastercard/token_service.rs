@@ -61,7 +61,9 @@ impl AgenticTokenService {
                 "did={}&type={}&amount_limit={}&expires={}",
                 agent_did,
                 token_type,
-                amount_limit.map(|a| a.to_string()).unwrap_or_else(|| "unlimited".to_string()),
+                amount_limit
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "unlimited".to_string()),
                 expires_at.timestamp()
             );
             s
@@ -140,11 +142,9 @@ impl AgenticTokenService {
     pub fn revoke_token(&self, token_id: &str) -> Result<()> {
         info!("Revoking token: {}", token_id);
 
-        self.tokens
-            .remove(token_id)
-            .ok_or_else(|| {
-                PaymentError::MastercardError(format!("Token not found: {}", token_id))
-            })?;
+        self.tokens.remove(token_id).ok_or_else(|| {
+            PaymentError::MastercardError(format!("Token not found: {}", token_id))
+        })?;
 
         Ok(())
     }

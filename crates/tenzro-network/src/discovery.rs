@@ -1,8 +1,8 @@
 //! Peer discovery via Kademlia DHT for Tenzro Network
 
 use libp2p::{
-    kad::{store::MemoryStore, Behaviour as Kademlia, Config as KademliaConfig, Mode},
     Multiaddr, PeerId,
+    kad::{Behaviour as Kademlia, Config as KademliaConfig, Mode, store::MemoryStore},
 };
 use std::time::{Duration, Instant};
 use tenzro_types::network::NetworkRole;
@@ -78,7 +78,10 @@ pub fn connect_to_bootstrap_nodes(
         if let Err(e) = kademlia.bootstrap() {
             tracing::warn!("Failed to start DHT bootstrap: {:?}", e);
         } else {
-            tracing::info!("Started DHT bootstrap with {} boot nodes", config.boot_nodes.len());
+            tracing::info!(
+                "Started DHT bootstrap with {} boot nodes",
+                config.boot_nodes.len()
+            );
         }
     }
 
@@ -339,10 +342,7 @@ mod tests {
             ProviderType::from_role(NetworkRole::ModelProvider),
             Some(ProviderType::Inference)
         );
-        assert_eq!(
-            ProviderType::from_role(NetworkRole::FullNode),
-            None
-        );
+        assert_eq!(ProviderType::from_role(NetworkRole::FullNode), None);
     }
 
     #[test]

@@ -75,6 +75,7 @@ pub mod jsonrpc;
 pub mod media_gen_output_store;
 pub mod resolver;
 pub mod sealed_shard_store;
+pub mod shell;
 pub mod tdip;
 
 pub use config::TenzroIrohConfig;
@@ -82,14 +83,15 @@ pub use da_backend::IrohBlobsDaBackend;
 pub use error::{IrohError, IrohResult};
 pub use gradient_store::IrohGradientStore;
 pub use jsonrpc::{
-    call as jsonrpc_call, open_http_stream, DeferredHttpHandler, DeferredJsonRpcDispatcher,
-    DeferredMcpHandler, HttpForwardHandler, HttpForwardProtocol, JsonRpcDispatcher,
-    JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_HTTP, ALPN_INFER, ALPN_MCP,
-    ALPN_MOE,
+    ALPN_A2A, ALPN_HTTP, ALPN_INFER, ALPN_MCP, ALPN_MOE, DeferredHttpHandler,
+    DeferredJsonRpcDispatcher, DeferredMcpHandler, HttpForwardHandler, HttpForwardProtocol,
+    JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler, call as jsonrpc_call,
+    open_http_stream,
 };
 pub use media_gen_output_store::IrohMediaGenOutputStore;
 pub use resolver::{IrohBackedResolver, IrohResolver};
 pub use sealed_shard_store::IrohSealedShardStore;
+pub use shell::{ALPN_SHELL, DeferredShellHandler, SessionPeer, ShellHandler, ShellProtocol};
 pub use tdip::derive_iroh_secret_key_from_ed25519;
 
 // Re-export the parsed URI type so downstream crates only need to import

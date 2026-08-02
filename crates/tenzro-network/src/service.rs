@@ -18,21 +18,20 @@ use crate::{
     },
     error::{NetworkError, Result},
     gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message},
-    message::{ConsensusMessage, NetworkMessage, MessagePayload},
+    message::{ConsensusMessage, MessagePayload, NetworkMessage},
     metrics::NetworkMetrics,
-    peer_manager::{PeerManager, ManagedPeer},
+    peer_manager::{ManagedPeer, PeerManager},
 };
 use async_trait::async_trait;
 use futures::StreamExt;
 use libp2p::{
-    autonat, dcutr,
+    Multiaddr, PeerId, Swarm, autonat, dcutr,
     gossipsub::{self, IdentTopic, TopicHash},
     identify,
     kad::{self, QueryResult},
     mdns, ping, relay,
     request_response::{self, InboundRequestId, OutboundRequestId, ResponseChannel},
-    swarm::{dial_opts::DialOpts, SwarmEvent},
-    Multiaddr, PeerId, Swarm,
+    swarm::{SwarmEvent, dial_opts::DialOpts},
 };
 use parking_lot::Mutex;
 use prometheus_client::registry::Registry;
@@ -41,9 +40,9 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{interval, MissedTickBehavior};
 use tenzro_types::network::PeerStatus;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{MissedTickBehavior, interval};
 
 /// Builds `DialOpts` for an outbound dial that forces a freshly-allocated
 /// source port (`PortUse::New`) instead of libp2p's default best-effort reuse
@@ -114,7 +113,9 @@ fn maybe_promote_kad_to_server(state: &mut EventLoopState) {
 /// sign a PeerId↔validator-identity binding) load the same key.
 pub fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identity::Keypair> {
     let Some(dir) = data_dir else {
-        tracing::warn!("No data_dir configured — generating ephemeral keypair (peer ID will change on restart)");
+        tracing::warn!(
+            "No data_dir configured — generating ephemeral keypair (peer ID will change on restart)"
+        );
         return Ok(libp2p::identity::Keypair::generate_ed25519());
     };
 
@@ -123,19 +124,25 @@ pub fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::id
     // Try to load existing key
     if key_path.exists() {
         match std::fs::read(&key_path) {
-            Ok(bytes) => {
-                match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
-                    Ok(keypair) => {
-                        tracing::info!("Loaded persistent keypair from {}", key_path.display());
-                        return Ok(keypair);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to decode keypair from {}: {} — generating new one", key_path.display(), e);
-                    }
+            Ok(bytes) => match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
+                Ok(keypair) => {
+                    tracing::info!("Loaded persistent keypair from {}", key_path.display());
+                    return Ok(keypair);
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to decode keypair from {}: {} — generating new one",
+                        key_path.display(),
+                        e
+                    );
+                }
+            },
             Err(e) => {
-                tracing::warn!("Failed to read keypair file {}: {} — generating new one", key_path.display(), e);
+                tracing::warn!(
+                    "Failed to read keypair file {}: {} — generating new one",
+                    key_path.display(),
+                    e
+                );
             }
         }
     }
@@ -147,7 +154,11 @@ pub fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::id
     if let Some(parent) = key_path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        tracing::warn!("Failed to create directory {}: {} — keypair will be ephemeral", parent.display(), e);
+        tracing::warn!(
+            "Failed to create directory {}: {} — keypair will be ephemeral",
+            parent.display(),
+            e
+        );
         return Ok(keypair);
     }
 
@@ -160,18 +171,28 @@ pub fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::id
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        if let Err(e) = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)) {
+                        if let Err(e) = std::fs::set_permissions(
+                            &key_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        ) {
                             tracing::warn!("Failed to set keypair file permissions: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to write keypair to {}: {} — keypair will be ephemeral", key_path.display(), e);
+                    tracing::warn!(
+                        "Failed to write keypair to {}: {} — keypair will be ephemeral",
+                        key_path.display(),
+                        e
+                    );
                 }
             }
         }
         Err(e) => {
-            tracing::warn!("Failed to encode keypair: {} — keypair will be ephemeral", e);
+            tracing::warn!(
+                "Failed to encode keypair: {} — keypair will be ephemeral",
+                e
+            );
         }
     }
 
@@ -230,7 +251,8 @@ fn is_globally_routable(addr: &Multiaddr) -> bool {
                     || ip.is_unspecified()
                     || ip.is_multicast()
                     || (seg0 & 0xffc0) == 0xfe80  // fe80::/10 link-local
-                    || (seg0 & 0xfe00) == 0xfc00  // fc00::/7 unique-local
+                    || (seg0 & 0xfe00) == 0xfc00
+                // fc00::/7 unique-local
                 {
                     return false;
                 }
@@ -239,7 +261,7 @@ fn is_globally_routable(addr: &Multiaddr) -> bool {
             _ => {}
         }
     }
-    false  // No IP component found — not routable
+    false // No IP component found — not routable
 }
 
 /// Extracts the IPv4/IPv6 address from a libp2p `Multiaddr`, if any.
@@ -477,11 +499,17 @@ pub trait NetworkService: Send + Sync {
     async fn dial(&self, addr: Multiaddr) -> Result<()>;
 
     /// Sets the validator registry for peer authorization on validator-only topics
-    async fn set_validator_registry(&self, registry: std::sync::Arc<dyn crate::peer_manager::ValidatorRegistry>) -> Result<()>;
+    async fn set_validator_registry(
+        &self,
+        registry: std::sync::Arc<dyn crate::peer_manager::ValidatorRegistry>,
+    ) -> Result<()>;
 
     /// Sets the durable ban store; persisted bans are hydrated and re-enforced
     /// at the libp2p transport layer immediately.
-    async fn set_ban_store(&self, store: std::sync::Arc<dyn crate::peer_manager::BanStore>) -> Result<()>;
+    async fn set_ban_store(
+        &self,
+        store: std::sync::Arc<dyn crate::peer_manager::BanStore>,
+    ) -> Result<()>;
 
     /// Returns the set of multiaddrs the swarm is currently listening on.
     ///
@@ -527,9 +555,8 @@ pub trait NetworkService: Send + Sync {
     /// continuously; if the channel is full or dropped, the event loop
     /// responds to the sending peer with `ConsensusDirectError::NoSubscriber`,
     /// surfacing the back-pressure to the consensus engine on the other side.
-    async fn subscribe_consensus_direct(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<ConsensusMessage>>;
+    async fn subscribe_consensus_direct(&self)
+    -> Result<mpsc::UnboundedReceiver<ConsensusMessage>>;
 
     /// Installs the DID-to-PeerId resolver used by the MPC relay overlay.
     ///
@@ -838,9 +865,8 @@ enum NetworkCommand {
     /// Subscribes to inbound MPC relay round messages. One subscriber per
     /// node — calling twice replaces the previous channel.
     SubscribeMpcRelay {
-        response: oneshot::Sender<
-            Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>,
-        >,
+        response:
+            oneshot::Sender<Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>>,
     },
     /// Sends one cluster-tunnel frame to `peer`. Returns the
     /// `OutboundRequestId`; the member's `Ack`/`Error` or a transport
@@ -1014,7 +1040,8 @@ impl TenzroNetworkService {
     /// Signals the event loop to shut down gracefully.
     /// Waits for the loop to drain in-flight commands before returning.
     pub async fn shutdown(&self) -> Result<()> {
-        self.send_command(|response| NetworkCommand::Shutdown { response }).await
+        self.send_command(|response| NetworkCommand::Shutdown { response })
+            .await
     }
 
     /// Returns the current number of gossipsub mesh peers for `topic`.
@@ -1320,9 +1347,7 @@ impl TenzroNetworkService {
     /// events. In practice, the consumer's own `tokio::select!` arm pulls
     /// from this receiver alongside its other duties, which is the
     /// canonical libp2p subscriber pattern.
-    pub async fn subscribe_peer_events(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<PeerEvent>> {
+    pub async fn subscribe_peer_events(&self) -> Result<mpsc::UnboundedReceiver<PeerEvent>> {
         self.send_command(|response| NetworkCommand::SubscribePeerEvents { response })
             .await
     }
@@ -1452,12 +1477,18 @@ impl NetworkService for TenzroNetworkService {
             .await
     }
 
-    async fn set_validator_registry(&self, registry: std::sync::Arc<dyn crate::peer_manager::ValidatorRegistry>) -> Result<()> {
+    async fn set_validator_registry(
+        &self,
+        registry: std::sync::Arc<dyn crate::peer_manager::ValidatorRegistry>,
+    ) -> Result<()> {
         self.send_command(|response| NetworkCommand::SetValidatorRegistry { registry, response })
             .await
     }
 
-    async fn set_ban_store(&self, store: std::sync::Arc<dyn crate::peer_manager::BanStore>) -> Result<()> {
+    async fn set_ban_store(
+        &self,
+        store: std::sync::Arc<dyn crate::peer_manager::BanStore>,
+    ) -> Result<()> {
         self.send_command(|response| NetworkCommand::SetBanStore { store, response })
             .await
     }
@@ -1499,11 +1530,8 @@ impl NetworkService for TenzroNetworkService {
         &self,
         message: crate::mpc_relay::MpcRelayRequest,
     ) -> Result<()> {
-        self.send_command(move |response| NetworkCommand::SendMpcRelayMessage {
-            message,
-            response,
-        })
-        .await
+        self.send_command(move |response| NetworkCommand::SendMpcRelayMessage { message, response })
+            .await
     }
 
     async fn subscribe_mpc_relay(
@@ -1708,8 +1736,10 @@ struct EventLoopState {
     /// `InboundRequestId`. Parked here until the member's serving runtime
     /// answers via `SendClusterTunnelResponse`. Same rationale as
     /// `pending_inbound_block_sync`.
-    pending_inbound_cluster_tunnel:
-        HashMap<InboundRequestId, ResponseChannel<crate::cluster_tunnel_proto::ClusterTunnelResponse>>,
+    pending_inbound_cluster_tunnel: HashMap<
+        InboundRequestId,
+        ResponseChannel<crate::cluster_tunnel_proto::ClusterTunnelResponse>,
+    >,
     /// Subscriber channel for inbound cluster-tunnel frames. `None` until a
     /// member's serving runtime attaches via `SubscribeClusterTunnelRequests`.
     /// Inbound frames arriving while this is `None` are answered with
@@ -1758,8 +1788,7 @@ struct EventLoopState {
     /// Pending inbound database replicated-write response channels keyed by
     /// `InboundRequestId`. Parked until the holder's replication handler
     /// answers via `SendDbReplicateResponse`.
-    pending_inbound_db_replicate:
-        HashMap<InboundRequestId, ResponseChannel<DbReplicateResponse>>,
+    pending_inbound_db_replicate: HashMap<InboundRequestId, ResponseChannel<DbReplicateResponse>>,
     /// Subscriber channel for inbound database replicated-write requests. `None`
     /// until a holder's replication handler attaches via
     /// `SubscribeDbReplicateRequests`. Requests arriving while this is `None`
@@ -1935,9 +1964,7 @@ async fn run_event_loop(
                 enable_mdns,
                 Some(relay_client),
             )
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
         })
         .map_err(|e| NetworkError::Transport(format!("Behaviour construction failed: {}", e)))?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(idle_timeout))
@@ -1983,9 +2010,8 @@ async fn run_event_loop(
 
     // Create peer manager. No longer needs `mut` — `add_protected_peer`
     // takes `&self` now that `protected_peers` is a lock-free `DashSet`.
-    let peer_manager = PeerManager::new(
-        (config.max_inbound_peers + config.max_outbound_peers) as usize,
-    );
+    let peer_manager =
+        PeerManager::new((config.max_inbound_peers + config.max_outbound_peers) as usize);
 
     // Register boot node peers as protected (never auto-ban). We do NOT add
     // them as gossipsub `explicit_peers` — that classification causes mutual
@@ -2383,11 +2409,12 @@ fn handle_block_sync_event(
     match event {
         RrEvent::Message {
             peer,
-            message: Message::Request {
-                request_id,
-                request,
-                channel,
-            },
+            message:
+                Message::Request {
+                    request_id,
+                    request,
+                    channel,
+                },
             ..
         } => {
             // Park the response channel and notify the subscriber. If no
@@ -2416,11 +2443,10 @@ fn handle_block_sync_event(
                          (subscriber not yet attached) — replying with Storage error"
                     );
                 }
-                let err_resp = BlockSyncResponse::Error(
-                    crate::block_sync_proto::BlockSyncError::Storage(
+                let err_resp =
+                    BlockSyncResponse::Error(crate::block_sync_proto::BlockSyncError::Storage(
                         "no block-sync subscriber attached".to_string(),
-                    ),
-                );
+                    ));
                 let _ = state
                     .swarm
                     .behaviour_mut()
@@ -2429,9 +2455,7 @@ fn handle_block_sync_event(
                 return;
             };
 
-            state
-                .pending_inbound_block_sync
-                .insert(request_id, channel);
+            state.pending_inbound_block_sync.insert(request_id, channel);
 
             let inbound = InboundBlockSync {
                 peer,
@@ -2446,11 +2470,10 @@ fn handle_block_sync_event(
                 state.block_sync_request_subscriber = None;
                 // Reply with a Storage error so the peer doesn't time out.
                 if let Some(channel) = state.pending_inbound_block_sync.remove(&request_id) {
-                    let err_resp = BlockSyncResponse::Error(
-                        crate::block_sync_proto::BlockSyncError::Storage(
+                    let err_resp =
+                        BlockSyncResponse::Error(crate::block_sync_proto::BlockSyncError::Storage(
                             "subscriber dropped".to_string(),
-                        ),
-                    );
+                        ));
                     let _ = state
                         .swarm
                         .behaviour_mut()
@@ -2461,10 +2484,11 @@ fn handle_block_sync_event(
         }
         RrEvent::Message {
             peer,
-            message: Message::Response {
-                request_id,
-                response,
-            },
+            message:
+                Message::Response {
+                    request_id,
+                    response,
+                },
             ..
         } => {
             if let Some(tx) = state.block_sync_result_subscriber.as_ref() {
@@ -2515,7 +2539,9 @@ fn handle_block_sync_event(
             tracing::debug!(%peer, %request_id, %error, "Inbound block-sync failure");
             state.pending_inbound_block_sync.remove(&request_id);
         }
-        RrEvent::ResponseSent { peer, request_id, .. } => {
+        RrEvent::ResponseSent {
+            peer, request_id, ..
+        } => {
             tracing::trace!(%peer, %request_id, "Block-sync response flushed to wire");
         }
     }
@@ -2550,11 +2576,12 @@ fn handle_consensus_direct_event(
     match event {
         RrEvent::Message {
             peer,
-            message: Message::Request {
-                request_id: _,
-                request,
-                channel,
-            },
+            message:
+                Message::Request {
+                    request_id: _,
+                    request,
+                    channel,
+                },
             ..
         } => {
             // Per-peer inbound concurrency cap. Reject overflow synchronously
@@ -2571,16 +2598,12 @@ fn handle_consensus_direct_event(
                     limit = MAX_INBOUND_STREAMS_PER_PEER,
                     "consensus-direct: rejecting overflow inbound stream"
                 );
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .consensus_direct
-                    .send_response(
-                        channel,
-                        ConsensusDirectResponse::Error(ConsensusDirectError::ServerBusy {
-                            limit: MAX_INBOUND_STREAMS_PER_PEER,
-                        }),
-                    );
+                let _ = state.swarm.behaviour_mut().consensus_direct.send_response(
+                    channel,
+                    ConsensusDirectResponse::Error(ConsensusDirectError::ServerBusy {
+                        limit: MAX_INBOUND_STREAMS_PER_PEER,
+                    }),
+                );
                 return;
             }
 
@@ -2607,14 +2630,10 @@ fn handle_consensus_direct_event(
                          (subscriber not yet attached) — replying NoSubscriber"
                     );
                 }
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .consensus_direct
-                    .send_response(
-                        channel,
-                        ConsensusDirectResponse::Error(ConsensusDirectError::NoSubscriber),
-                    );
+                let _ = state.swarm.behaviour_mut().consensus_direct.send_response(
+                    channel,
+                    ConsensusDirectResponse::Error(ConsensusDirectError::NoSubscriber),
+                );
                 return;
             };
 
@@ -2630,14 +2649,10 @@ fn handle_consensus_direct_event(
                     "consensus-direct: subscriber dropped — replying NoSubscriber"
                 );
                 state.consensus_direct_subscriber = None;
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .consensus_direct
-                    .send_response(
-                        channel,
-                        ConsensusDirectResponse::Error(ConsensusDirectError::NoSubscriber),
-                    );
+                let _ = state.swarm.behaviour_mut().consensus_direct.send_response(
+                    channel,
+                    ConsensusDirectResponse::Error(ConsensusDirectError::NoSubscriber),
+                );
                 return;
             }
 
@@ -2651,10 +2666,11 @@ fn handle_consensus_direct_event(
         }
         RrEvent::Message {
             peer,
-            message: Message::Response {
-                request_id,
-                response,
-            },
+            message:
+                Message::Response {
+                    request_id,
+                    response,
+                },
             ..
         } => {
             // Outbound responses are Ack/Error. We log Error variants because
@@ -2709,7 +2725,9 @@ fn handle_consensus_direct_event(
                 *count -= 1;
             }
         }
-        RrEvent::ResponseSent { peer, request_id, .. } => {
+        RrEvent::ResponseSent {
+            peer, request_id, ..
+        } => {
             tracing::trace!(
                 %peer,
                 %request_id,
@@ -2743,42 +2761,36 @@ fn handle_mpc_relay_event(
         crate::mpc_relay::MpcRelayResponse,
     >,
 ) {
-    use crate::mpc_relay::{MpcRelayError, MpcRelayResponse, MAX_INBOUND_STREAMS_PER_PEER};
+    use crate::mpc_relay::{MAX_INBOUND_STREAMS_PER_PEER, MpcRelayError, MpcRelayResponse};
     use request_response::{Event as RrEvent, Message};
     match event {
         RrEvent::Message {
             peer,
-            message: Message::Request {
-                request_id: _,
-                request,
-                channel,
-            },
+            message:
+                Message::Request {
+                    request_id: _,
+                    request,
+                    channel,
+                },
             ..
         } => {
             // Per-peer inbound concurrency cap. Reject overflow synchronously
             // with ServerBusy — queueing would cause the requester's
             // per-round timeout to fire while the request sits in our
             // backlog (same rationale as consensus-direct).
-            let inflight = state
-                .mpc_relay_inbound_inflight
-                .entry(peer)
-                .or_insert(0);
+            let inflight = state.mpc_relay_inbound_inflight.entry(peer).or_insert(0);
             if *inflight >= MAX_INBOUND_STREAMS_PER_PEER {
                 tracing::warn!(
                     %peer,
                     limit = MAX_INBOUND_STREAMS_PER_PEER,
                     "mpc-relay: rejecting overflow inbound stream"
                 );
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .mpc_relay
-                    .send_response(
-                        channel,
-                        MpcRelayResponse::Error(MpcRelayError::ServerBusy {
-                            limit: MAX_INBOUND_STREAMS_PER_PEER,
-                        }),
-                    );
+                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
+                    channel,
+                    MpcRelayResponse::Error(MpcRelayError::ServerBusy {
+                        limit: MAX_INBOUND_STREAMS_PER_PEER,
+                    }),
+                );
                 return;
             }
 
@@ -2818,14 +2830,10 @@ fn handle_mpc_relay_event(
                 },
             };
             if !audit_ok {
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .mpc_relay
-                    .send_response(
-                        channel,
-                        MpcRelayResponse::Error(MpcRelayError::UnknownSender),
-                    );
+                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
+                    channel,
+                    MpcRelayResponse::Error(MpcRelayError::UnknownSender),
+                );
                 return;
             }
 
@@ -2846,14 +2854,10 @@ fn handle_mpc_relay_event(
                          (subscriber not yet attached) — replying NoSubscriber"
                     );
                 }
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .mpc_relay
-                    .send_response(
-                        channel,
-                        MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
-                    );
+                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
+                    channel,
+                    MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
+                );
                 return;
             };
 
@@ -2867,14 +2871,10 @@ fn handle_mpc_relay_event(
                     "mpc-relay: subscriber dropped — replying NoSubscriber"
                 );
                 state.mpc_relay_subscriber = None;
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .mpc_relay
-                    .send_response(
-                        channel,
-                        MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
-                    );
+                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
+                    channel,
+                    MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
+                );
                 return;
             }
 
@@ -2888,10 +2888,11 @@ fn handle_mpc_relay_event(
         }
         RrEvent::Message {
             peer,
-            message: Message::Response {
-                request_id,
-                response,
-            },
+            message:
+                Message::Response {
+                    request_id,
+                    response,
+                },
             ..
         } => match response {
             MpcRelayResponse::Ack => {
@@ -2937,7 +2938,9 @@ fn handle_mpc_relay_event(
                 *count -= 1;
             }
         }
-        RrEvent::ResponseSent { peer, request_id, .. } => {
+        RrEvent::ResponseSent {
+            peer, request_id, ..
+        } => {
             tracing::trace!(
                 %peer,
                 %request_id,
@@ -2980,11 +2983,12 @@ fn handle_cluster_tunnel_event(
     match event {
         RrEvent::Message {
             peer,
-            message: Message::Request {
-                request_id,
-                request,
-                channel,
-            },
+            message:
+                Message::Request {
+                    request_id,
+                    request,
+                    channel,
+                },
             ..
         } => {
             // Per-peer inbound concurrency cap. Reject overflow synchronously
@@ -3000,16 +3004,12 @@ fn handle_cluster_tunnel_event(
                     limit = MAX_INBOUND_STREAMS_PER_PEER,
                     "cluster-tunnel: rejecting overflow inbound stream"
                 );
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .cluster_tunnel
-                    .send_response(
-                        channel,
-                        ClusterTunnelResponse::Error(ClusterTunnelError::ServerBusy {
-                            limit: MAX_INBOUND_STREAMS_PER_PEER,
-                        }),
-                    );
+                let _ = state.swarm.behaviour_mut().cluster_tunnel.send_response(
+                    channel,
+                    ClusterTunnelResponse::Error(ClusterTunnelError::ServerBusy {
+                        limit: MAX_INBOUND_STREAMS_PER_PEER,
+                    }),
+                );
                 return;
             }
 
@@ -3029,14 +3029,10 @@ fn handle_cluster_tunnel_event(
                          — replying NoMember"
                     );
                 }
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .cluster_tunnel
-                    .send_response(
-                        channel,
-                        ClusterTunnelResponse::Error(ClusterTunnelError::NoMember),
-                    );
+                let _ = state.swarm.behaviour_mut().cluster_tunnel.send_response(
+                    channel,
+                    ClusterTunnelResponse::Error(ClusterTunnelError::NoMember),
+                );
                 return;
             };
 
@@ -3056,14 +3052,10 @@ fn handle_cluster_tunnel_event(
                 );
                 state.cluster_tunnel_request_subscriber = None;
                 if let Some(channel) = state.pending_inbound_cluster_tunnel.remove(&request_id) {
-                    let _ = state
-                        .swarm
-                        .behaviour_mut()
-                        .cluster_tunnel
-                        .send_response(
-                            channel,
-                            ClusterTunnelResponse::Error(ClusterTunnelError::NoMember),
-                        );
+                    let _ = state.swarm.behaviour_mut().cluster_tunnel.send_response(
+                        channel,
+                        ClusterTunnelResponse::Error(ClusterTunnelError::NoMember),
+                    );
                 }
                 return;
             }
@@ -3072,10 +3064,11 @@ fn handle_cluster_tunnel_event(
         }
         RrEvent::Message {
             peer,
-            message: Message::Response {
-                request_id,
-                response,
-            },
+            message:
+                Message::Response {
+                    request_id,
+                    response,
+                },
             ..
         } => {
             if let Some(tx) = state.cluster_tunnel_result_subscriber.as_ref() {
@@ -3128,7 +3121,9 @@ fn handle_cluster_tunnel_event(
                 *count -= 1;
             }
         }
-        RrEvent::ResponseSent { peer, request_id, .. } => {
+        RrEvent::ResponseSent {
+            peer, request_id, ..
+        } => {
             tracing::trace!(%peer, %request_id, "cluster-tunnel response flushed to wire");
             if let Some(count) = state.cluster_tunnel_inbound_inflight.get_mut(&peer)
                 && *count > 0
@@ -3158,36 +3153,30 @@ fn handle_da_committee_event(
     match event {
         RrEvent::Message {
             peer,
-            message: Message::Request {
-                request_id,
-                request,
-                channel,
-            },
+            message:
+                Message::Request {
+                    request_id,
+                    request,
+                    channel,
+                },
             ..
         } => {
             // Per-peer inbound concurrency cap. Reject overflow synchronously —
             // queueing would let the requester's response timeout fire while
             // the request still sits in our backlog.
-            let inflight = state
-                .da_committee_inbound_inflight
-                .entry(peer)
-                .or_insert(0);
+            let inflight = state.da_committee_inbound_inflight.entry(peer).or_insert(0);
             if *inflight >= DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER {
                 tracing::warn!(
                     %peer,
                     limit = DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
                     "committee-DA: rejecting overflow inbound stream"
                 );
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .da_committee
-                    .send_response(
-                        channel,
-                        DaCommitteeResponse::Error(DaCommitteeError::ServerBusy {
-                            limit: DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
-                        }),
-                    );
+                let _ = state.swarm.behaviour_mut().da_committee.send_response(
+                    channel,
+                    DaCommitteeResponse::Error(DaCommitteeError::ServerBusy {
+                        limit: DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
+                    }),
+                );
                 return;
             }
 
@@ -3207,14 +3196,10 @@ fn handle_da_committee_event(
                          — replying NoHandler"
                     );
                 }
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .da_committee
-                    .send_response(
-                        channel,
-                        DaCommitteeResponse::Error(DaCommitteeError::NoHandler),
-                    );
+                let _ = state.swarm.behaviour_mut().da_committee.send_response(
+                    channel,
+                    DaCommitteeResponse::Error(DaCommitteeError::NoHandler),
+                );
                 return;
             };
 
@@ -3234,14 +3219,10 @@ fn handle_da_committee_event(
                 );
                 state.da_committee_request_subscriber = None;
                 if let Some(channel) = state.pending_inbound_da_committee.remove(&request_id) {
-                    let _ = state
-                        .swarm
-                        .behaviour_mut()
-                        .da_committee
-                        .send_response(
-                            channel,
-                            DaCommitteeResponse::Error(DaCommitteeError::NoHandler),
-                        );
+                    let _ = state.swarm.behaviour_mut().da_committee.send_response(
+                        channel,
+                        DaCommitteeResponse::Error(DaCommitteeError::NoHandler),
+                    );
                 }
                 return;
             }
@@ -3250,25 +3231,24 @@ fn handle_da_committee_event(
         }
         RrEvent::Message {
             peer,
-            message: Message::Response {
-                request_id,
-                response,
-            },
+            message:
+                Message::Response {
+                    request_id,
+                    response,
+                },
             ..
-        } => {
-            match state.pending_da_committee_requests.remove(&request_id) {
-                Some(reply) => {
-                    let _ = reply.send(Ok(response));
-                }
-                None => {
-                    tracing::warn!(
-                        %peer,
-                        %request_id,
-                        "committee-DA: response for unknown outbound request"
-                    );
-                }
+        } => match state.pending_da_committee_requests.remove(&request_id) {
+            Some(reply) => {
+                let _ = reply.send(Ok(response));
             }
-        }
+            None => {
+                tracing::warn!(
+                    %peer,
+                    %request_id,
+                    "committee-DA: response for unknown outbound request"
+                );
+            }
+        },
         RrEvent::OutboundFailure {
             peer,
             request_id,
@@ -3297,7 +3277,9 @@ fn handle_da_committee_event(
                 *count -= 1;
             }
         }
-        RrEvent::ResponseSent { peer, request_id, .. } => {
+        RrEvent::ResponseSent {
+            peer, request_id, ..
+        } => {
             tracing::trace!(%peer, %request_id, "committee-DA response flushed to wire");
             if let Some(count) = state.da_committee_inbound_inflight.get_mut(&peer)
                 && *count > 0
@@ -3327,33 +3309,27 @@ fn handle_db_replicate_event(
     match event {
         RrEvent::Message {
             peer,
-            message: Message::Request {
-                request_id,
-                request,
-                channel,
-            },
+            message:
+                Message::Request {
+                    request_id,
+                    request,
+                    channel,
+                },
             ..
         } => {
-            let inflight = state
-                .db_replicate_inbound_inflight
-                .entry(peer)
-                .or_insert(0);
+            let inflight = state.db_replicate_inbound_inflight.entry(peer).or_insert(0);
             if *inflight >= DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER {
                 tracing::warn!(
                     %peer,
                     limit = DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
                     "db-replicate: rejecting overflow inbound stream"
                 );
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .db_replicate
-                    .send_response(
-                        channel,
-                        DbReplicateResponse::Error(DbReplicateError::ServerBusy {
-                            limit: DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
-                        }),
-                    );
+                let _ = state.swarm.behaviour_mut().db_replicate.send_response(
+                    channel,
+                    DbReplicateResponse::Error(DbReplicateError::ServerBusy {
+                        limit: DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
+                    }),
+                );
                 return;
             }
 
@@ -3370,14 +3346,10 @@ fn handle_db_replicate_event(
                          — replying NoHandler"
                     );
                 }
-                let _ = state
-                    .swarm
-                    .behaviour_mut()
-                    .db_replicate
-                    .send_response(
-                        channel,
-                        DbReplicateResponse::Error(DbReplicateError::NoHandler),
-                    );
+                let _ = state.swarm.behaviour_mut().db_replicate.send_response(
+                    channel,
+                    DbReplicateResponse::Error(DbReplicateError::NoHandler),
+                );
                 return;
             };
 
@@ -3397,14 +3369,10 @@ fn handle_db_replicate_event(
                 );
                 state.db_replicate_request_subscriber = None;
                 if let Some(channel) = state.pending_inbound_db_replicate.remove(&request_id) {
-                    let _ = state
-                        .swarm
-                        .behaviour_mut()
-                        .db_replicate
-                        .send_response(
-                            channel,
-                            DbReplicateResponse::Error(DbReplicateError::NoHandler),
-                        );
+                    let _ = state.swarm.behaviour_mut().db_replicate.send_response(
+                        channel,
+                        DbReplicateResponse::Error(DbReplicateError::NoHandler),
+                    );
                 }
                 return;
             }
@@ -3413,25 +3381,24 @@ fn handle_db_replicate_event(
         }
         RrEvent::Message {
             peer,
-            message: Message::Response {
-                request_id,
-                response,
-            },
+            message:
+                Message::Response {
+                    request_id,
+                    response,
+                },
             ..
-        } => {
-            match state.pending_db_replicate_requests.remove(&request_id) {
-                Some(reply) => {
-                    let _ = reply.send(Ok(response));
-                }
-                None => {
-                    tracing::warn!(
-                        %peer,
-                        %request_id,
-                        "db-replicate: response for unknown outbound request"
-                    );
-                }
+        } => match state.pending_db_replicate_requests.remove(&request_id) {
+            Some(reply) => {
+                let _ = reply.send(Ok(response));
             }
-        }
+            None => {
+                tracing::warn!(
+                    %peer,
+                    %request_id,
+                    "db-replicate: response for unknown outbound request"
+                );
+            }
+        },
         RrEvent::OutboundFailure {
             peer,
             request_id,
@@ -3460,7 +3427,9 @@ fn handle_db_replicate_event(
                 *count -= 1;
             }
         }
-        RrEvent::ResponseSent { peer, request_id, .. } => {
+        RrEvent::ResponseSent {
+            peer, request_id, ..
+        } => {
             tracing::trace!(%peer, %request_id, "db-replicate response flushed to wire");
             if let Some(count) = state.db_replicate_inbound_inflight.get_mut(&peer)
                 && *count > 0
@@ -3472,10 +3441,7 @@ fn handle_db_replicate_event(
 }
 
 /// Handles swarm events
-async fn handle_swarm_event(
-    state: &mut EventLoopState,
-    event: SwarmEvent<TenzroBehaviourEvent>,
-) {
+async fn handle_swarm_event(state: &mut EventLoopState, event: SwarmEvent<TenzroBehaviourEvent>) {
     match event {
         SwarmEvent::Behaviour(behaviour_event) => match behaviour_event {
             TenzroBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -3505,7 +3471,10 @@ async fn handle_swarm_event(
 
                 // Application-level deduplication (defense-in-depth over gossipsub message IDs)
                 if state.deduplicator.is_duplicate(&message.data) {
-                    tracing::trace!("Dropping duplicate message from peer {}", propagation_source);
+                    tracing::trace!(
+                        "Dropping duplicate message from peer {}",
+                        propagation_source
+                    );
                     state.metrics.gossip_rejected_duplicate.inc();
                     return;
                 }
@@ -3515,7 +3484,10 @@ async fn handle_swarm_event(
                 // Validators may not be in the local registry during early startup or
                 // after a genesis wipe, causing false-positive bans.
                 let topic_str = message.topic.to_string();
-                if !state.peer_manager.authorize_peer_for_topic(&propagation_source, &topic_str) {
+                if !state
+                    .peer_manager
+                    .authorize_peer_for_topic(&propagation_source, &topic_str)
+                {
                     state.metrics.gossip_rejected_validator_only.inc();
                     return;
                 }
@@ -3524,8 +3496,13 @@ async fn handle_swarm_event(
                 match validate_gossip_message(&message.topic, &message.data) {
                     MessageValidation::Accept => {}
                     MessageValidation::Reject => {
-                        tracing::warn!("Message validation rejected from peer {}", propagation_source);
-                        state.peer_manager.decrease_reputation(&propagation_source, 5);
+                        tracing::warn!(
+                            "Message validation rejected from peer {}",
+                            propagation_source
+                        );
+                        state
+                            .peer_manager
+                            .decrease_reputation(&propagation_source, 5);
                         state.metrics.gossip_rejected_invalid.inc();
                         return;
                     }
@@ -3564,7 +3541,11 @@ async fn handle_swarm_event(
             TenzroBehaviourEvent::Gossipsub(gossipsub::Event::Unsubscribed { peer_id, topic }) => {
                 tracing::debug!("Peer {} unsubscribed from topic {:?}", peer_id, topic);
             }
-            TenzroBehaviourEvent::Identify(identify::Event::Received { peer_id, info, connection_id: _ }) => {
+            TenzroBehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                info,
+                connection_id: _,
+            }) => {
                 tracing::info!(
                     "Identified peer {}: protocol={}, agent={}",
                     peer_id,
@@ -3624,9 +3605,8 @@ async fn handle_swarm_event(
                 {
                     use crate::reachability::ReachabilityTier;
                     let our_tier = state.reachability.tier();
-                    let peer_speaks_hop = info
-                        .protocols
-                        .contains(&libp2p::relay::HOP_PROTOCOL_NAME);
+                    let peer_speaks_hop =
+                        info.protocols.contains(&libp2p::relay::HOP_PROTOCOL_NAME);
                     // Bootstrap peers are the validator-class relay-serving
                     // nodes by convention. If the peer connected via one of
                     // our configured boot addresses, treat it as a relay
@@ -3637,13 +3617,10 @@ async fn handle_swarm_event(
                     // for the case where identify's protocol-list
                     // serialization drops HOP (observed empty in the
                     // 2026-07-15 verification run against a healthy fleet).
-                    let peer_is_bootstrap = state
-                        .bootstrap_peers
-                        .iter()
-                        .any(|(pid, _)| *pid == peer_id);
+                    let peer_is_bootstrap =
+                        state.bootstrap_peers.iter().any(|(pid, _)| *pid == peer_id);
                     let peer_looks_relayable = peer_speaks_hop || peer_is_bootstrap;
-                    let already_attempted =
-                        state.attempted_relay_reservations.contains(&peer_id);
+                    let already_attempted = state.attempted_relay_reservations.contains(&peer_id);
                     tracing::debug!(
                         %peer_id,
                         our_tier = %our_tier.as_str(),
@@ -3708,12 +3685,12 @@ async fn handle_swarm_event(
                             // Ensure the /p2p/<peer_id> component is present —
                             // relay-client needs it to know which peer to
                             // reserve on.
-                            let has_p2p = circuit_addr.iter().any(|p| {
-                                matches!(p, libp2p::multiaddr::Protocol::P2p(_))
-                            });
+                            let has_p2p = circuit_addr
+                                .iter()
+                                .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
                             if !has_p2p {
-                                circuit_addr = circuit_addr
-                                    .with(libp2p::multiaddr::Protocol::P2p(peer_id));
+                                circuit_addr =
+                                    circuit_addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
                             }
                             circuit_addr =
                                 circuit_addr.with(libp2p::multiaddr::Protocol::P2pCircuit);
@@ -3728,9 +3705,7 @@ async fn handle_swarm_event(
                                         "Requesting Circuit-Relay v2 reservation \
                                          (NAT-traversal fallback)"
                                     );
-                                    state
-                                        .attempted_relay_reservations
-                                        .insert(peer_id);
+                                    state.attempted_relay_reservations.insert(peer_id);
                                 }
                                 Err(e) => {
                                     tracing::debug!(
@@ -3904,23 +3879,31 @@ async fn handle_swarm_event(
                     }
                 }
             }
-            TenzroBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed { result, .. }) => {
-                match result {
-                    QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, .. })) => {
-                        tracing::debug!("Found {} provider(s)", providers.len());
-                        for peer in providers {
-                            tracing::debug!("Found provider: {}", peer);
-                        }
+            TenzroBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                result, ..
+            }) => match result {
+                QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+                    providers,
+                    ..
+                })) => {
+                    tracing::debug!("Found {} provider(s)", providers.len());
+                    for peer in providers {
+                        tracing::debug!("Found provider: {}", peer);
                     }
-                    QueryResult::GetProviders(Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { closest_peers })) => {
-                        tracing::debug!("GetProviders query finished with {} closest peers", closest_peers.len());
-                    }
-                    QueryResult::Bootstrap(Ok(_)) => {
-                        tracing::info!("DHT bootstrap completed");
-                    }
-                    _ => {}
                 }
-            }
+                QueryResult::GetProviders(Ok(
+                    kad::GetProvidersOk::FinishedWithNoAdditionalRecord { closest_peers },
+                )) => {
+                    tracing::debug!(
+                        "GetProviders query finished with {} closest peers",
+                        closest_peers.len()
+                    );
+                }
+                QueryResult::Bootstrap(Ok(_)) => {
+                    tracing::info!("DHT bootstrap completed");
+                }
+                _ => {}
+            },
             TenzroBehaviourEvent::Ping(ping::Event { peer, result, .. }) => {
                 match result {
                     Ok(duration) => {
@@ -4023,10 +4006,7 @@ async fn handle_swarm_event(
                         "Outbound circuit established via relay"
                     );
                 }
-                relay::client::Event::InboundCircuitEstablished {
-                    src_peer_id,
-                    limit,
-                } => {
+                relay::client::Event::InboundCircuitEstablished { src_peer_id, limit } => {
                     tracing::info!(
                         %src_peer_id,
                         ?limit,
@@ -4169,7 +4149,10 @@ async fn handle_swarm_event(
             // path migrations, mobile-network switches, and NAT rebinding
             // events without reaching into quinn-proto internals.
             let remote_addr = endpoint.get_remote_address().clone();
-            if state.peer_manager.update_endpoint(&peer_id, remote_addr.clone()) {
+            if state
+                .peer_manager
+                .update_endpoint(&peer_id, remote_addr.clone())
+            {
                 state.metrics.peer_address_migrations_total.inc();
                 tracing::info!(
                     %peer_id,
@@ -4260,10 +4243,7 @@ async fn handle_swarm_event(
                 // operator-configured ground truth. Peers reached only via an
                 // inbound listener have no dial address we can re-use, so only
                 // record dialer endpoints.
-                let is_bootstrap = state
-                    .bootstrap_peers
-                    .iter()
-                    .any(|(pid, _)| *pid == peer_id);
+                let is_bootstrap = state.bootstrap_peers.iter().any(|(pid, _)| *pid == peer_id);
                 if !is_bootstrap
                     && let libp2p::core::ConnectedPoint::Dialer { address, .. } = &endpoint
                 {
@@ -4300,8 +4280,16 @@ async fn handle_swarm_event(
             tracing::info!("Listen address expired: {}", address);
             state.listen_addresses.retain(|a| a != &address);
         }
-        SwarmEvent::IncomingConnection { connection_id, send_back_addr, local_addr } => {
-            tracing::debug!("Incoming connection from {} to {}", send_back_addr, local_addr);
+        SwarmEvent::IncomingConnection {
+            connection_id,
+            send_back_addr,
+            local_addr,
+        } => {
+            tracing::debug!(
+                "Incoming connection from {} to {}",
+                send_back_addr,
+                local_addr
+            );
 
             // Apply per-IP + global dial rate limiting to mitigate connection-flood DoS.
             // `check_dial_rate_limit` consults both a keyed IP limiter (10/min burst 5)
@@ -4315,8 +4303,16 @@ async fn handle_swarm_event(
                 state.swarm.close_connection(connection_id);
             }
         }
-        SwarmEvent::IncomingConnectionError { send_back_addr, error, .. } => {
-            tracing::warn!("Incoming connection error from {}: {}", send_back_addr, error);
+        SwarmEvent::IncomingConnectionError {
+            send_back_addr,
+            error,
+            ..
+        } => {
+            tracing::warn!(
+                "Incoming connection error from {}: {}",
+                send_back_addr,
+                error
+            );
         }
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             if let Some(peer_id) = peer_id {
@@ -4376,9 +4372,7 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         } => {
             let result = (|| {
                 let topic_obj = IdentTopic::new(topic);
-                let bytes = message.to_bytes().map_err(|e| {
-                    NetworkError::Serialization(e)
-                })?;
+                let bytes = message.to_bytes().map_err(NetworkError::Serialization)?;
 
                 state
                     .swarm
@@ -4407,11 +4401,7 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
                     .map_err(|e| NetworkError::SubscriptionError(e.to_string()))?;
 
                 let (tx, rx) = mpsc::unbounded_channel();
-                state
-                    .subscribers
-                    .entry(topic_hash)
-                    .or_default()
-                    .push(tx);
+                state.subscribers.entry(topic_hash).or_default().push(tx);
 
                 Ok(rx)
             })();
@@ -4472,11 +4462,7 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         }
         NetworkCommand::MeshPeerCount { topic, response } => {
             let topic_hash = IdentTopic::new(topic).hash();
-            let count = state
-                .swarm
-                .behaviour()
-                .mesh_peers(&topic_hash)
-                .len();
+            let count = state.swarm.behaviour().mesh_peers(&topic_hash).len();
             let _ = response.send(Ok(count));
         }
         NetworkCommand::ListenAddresses { response } => {
@@ -4504,7 +4490,11 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             };
             let _ = response.send(Ok(admitted));
         }
-        NetworkCommand::SendBlockSyncRequest { peer, request, response } => {
+        NetworkCommand::SendBlockSyncRequest {
+            peer,
+            request,
+            response,
+        } => {
             let request_id = state
                 .swarm
                 .behaviour_mut()
@@ -4635,7 +4625,11 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             state.mpc_relay_subscriber_ever_attached = true;
             let _ = response.send(Ok(rx));
         }
-        NetworkCommand::SendClusterTunnelFrame { peer, request, response } => {
+        NetworkCommand::SendClusterTunnelFrame {
+            peer,
+            request,
+            response,
+        } => {
             let request_id = state
                 .swarm
                 .behaviour_mut()
@@ -4673,7 +4667,11 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             state.cluster_tunnel_result_subscriber = Some(tx);
             let _ = response.send(Ok(rx));
         }
-        NetworkCommand::DaCommitteeRequest { peer, request, response } => {
+        NetworkCommand::DaCommitteeRequest {
+            peer,
+            request,
+            response,
+        } => {
             // Dispatch and park the caller's reply channel keyed by the
             // outbound request id. The event handler fulfils it when the peer
             // replies (or the request fails). No `response.send()` here — the
@@ -4712,7 +4710,11 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             state.da_committee_request_subscriber_ever_attached = true;
             let _ = response.send(Ok(rx));
         }
-        NetworkCommand::DbReplicateRequest { peer, request, response } => {
+        NetworkCommand::DbReplicateRequest {
+            peer,
+            request,
+            response,
+        } => {
             // Dispatch and park the caller's reply channel keyed by the
             // outbound request id. The event handler fulfils it when the peer
             // replies (or the request fails). No `response.send()` here — the
@@ -4781,7 +4783,8 @@ mod tests {
 
     #[test]
     fn extract_port_handles_p2p_suffix() {
-        let m = ma("/ip4/10.0.0.5/tcp/9000/p2p/12D3KooWGgjoKhKXBvN6jFWqn5sJE6KD38bXtNaoE6itbRUjGBxK");
+        let m =
+            ma("/ip4/10.0.0.5/tcp/9000/p2p/12D3KooWGgjoKhKXBvN6jFWqn5sJE6KD38bXtNaoE6itbRUjGBxK");
         assert_eq!(extract_port(&m), Some(9000));
     }
 
@@ -4833,4 +4836,3 @@ mod tests {
         assert!(!is_observed_port_one_of_ours(&observed, &listen));
     }
 }
-

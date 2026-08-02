@@ -141,8 +141,13 @@ impl ComputeRentalRuntime {
         total_epochs: u64,
     ) -> tenzro_settlement::error::Result<RentalAgreement> {
         let price_per_epoch = self.effective_rate();
-        self.manager
-            .book_rental(renter, self.provider, asset_id, price_per_epoch, total_epochs)
+        self.manager.book_rental(
+            renter,
+            self.provider,
+            asset_id,
+            price_per_epoch,
+            total_epochs,
+        )
     }
 
     /// Settles one epoch of an active rental, gated on the provider's
@@ -175,11 +180,16 @@ impl ComputeRentalRuntime {
                 Ok(EpochOutcome::Settled { .. }) => settled += 1,
                 Ok(EpochOutcome::Missed { .. }) => missed += 1,
                 Ok(EpochOutcome::Closed { .. }) => closed += 1,
-                Err(e) => warn!(rental = %rental.rental_id, error = %e, "Rental epoch settle failed"),
+                Err(e) => {
+                    warn!(rental = %rental.rental_id, error = %e, "Rental epoch settle failed")
+                }
             }
         }
         if settled + missed + closed > 0 {
-            info!(settled, missed, closed, "Compute rental billing epoch complete");
+            info!(
+                settled,
+                missed, closed, "Compute rental billing epoch complete"
+            );
         }
         (settled, missed, closed)
     }
@@ -208,7 +218,8 @@ impl ComputeRentalRuntime {
     /// [`step_pricing`]: ComputeRentalRuntime::step_pricing
     pub fn enable_dynamic_pricing(&self, capacity: u128, min_rate: u128, max_rate: u128) {
         let start = self.effective_rate();
-        let dynamic = DynamicPricing::new(ResourceKind::Compute, capacity, start, min_rate, max_rate);
+        let dynamic =
+            DynamicPricing::new(ResourceKind::Compute, capacity, start, min_rate, max_rate);
         *self.pricing.write() = PricingPolicy::Dynamic(dynamic);
         info!(
             capacity,

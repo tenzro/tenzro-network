@@ -370,7 +370,10 @@ mod tests {
     fn receipt_commitment_ignores_the_signature() {
         let mut resigned = receipt();
         resigned.worker_signature = Signature::new(vec![7u8; 64], vec![3u8; 32]);
-        assert_eq!(receipt_commitment(&resigned), receipt_commitment(&receipt()));
+        assert_eq!(
+            receipt_commitment(&resigned),
+            receipt_commitment(&receipt())
+        );
     }
 
     #[test]
@@ -404,7 +407,10 @@ mod tests {
     fn handoff_commitment_ignores_the_signature() {
         let mut resigned = handoff();
         resigned.worker_signature = Signature::new(vec![7u8; 64], vec![3u8; 32]);
-        assert_eq!(handoff_commitment(&resigned), handoff_commitment(&handoff()));
+        assert_eq!(
+            handoff_commitment(&resigned),
+            handoff_commitment(&handoff())
+        );
     }
 
     #[test]

@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tenzro_wasm::{
-    ComponentManifest, ExecutionReceipt, SharedHost, SkillRuntime, WasmEngine, WasmError, WasmResult,
+    ComponentManifest, ExecutionReceipt, SharedHost, SkillRuntime, WasmEngine, WasmError,
+    WasmResult,
 };
 
 /// Default per-invocation deadline if a skill manifest does not specify one.

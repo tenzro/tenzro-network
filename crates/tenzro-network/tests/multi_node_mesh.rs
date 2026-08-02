@@ -22,8 +22,8 @@ use std::time::Duration;
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_network::{
-    binding_payload, encode_agent_binding, load_or_generate_keypair, MessagePayload,
-    NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService, ValidatorRegistry,
+    MessagePayload, NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService,
+    ValidatorRegistry, binding_payload, encode_agent_binding, load_or_generate_keypair,
 };
 use tokio::time::timeout;
 
@@ -146,10 +146,7 @@ async fn two_node_consensus_mesh_forms_and_broadcasts() {
 
     // Node B dials node A on its first bound TCP address.
     let dial_target = addrs_a[0].clone();
-    node_b
-        .dial(dial_target.clone())
-        .await
-        .expect("B dialed A");
+    node_b.dial(dial_target.clone()).await.expect("B dialed A");
 
     // Wait for the gossipsub mesh on the consensus topic to form on BOTH
     // sides. With only 2 nodes, mesh size of 1 is the maximum possible.
@@ -232,10 +229,22 @@ async fn four_node_consensus_mesh_full_propagation() {
     // Wait for at least 1 mesh peer on every node. With 4 nodes in a star,
     // node 0 sees up to 3 peers; nodes 1/2/3 see at least 1 (node 0) and
     // potentially more after gossipsub's PX kicks in.
-    let m0 = n0.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    let m1 = n1.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    let m2 = n2.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    let m3 = n3.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
+    let m0 = n0
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    let m1 = n1
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    let m2 = n2
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    let m3 = n3
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
 
     assert!(m0 >= 1, "n0 mesh empty (got {})", m0);
     assert!(m1 >= 1, "n1 mesh empty (got {})", m1);
@@ -250,11 +259,7 @@ async fn four_node_consensus_mesh_full_propagation() {
         .await
         .expect("n0 broadcast");
 
-    for (label, rx) in [
-        ("n1", &mut rx1),
-        ("n2", &mut rx2),
-        ("n3", &mut rx3),
-    ] {
+    for (label, rx) in [("n1", &mut rx1), ("n2", &mut rx2), ("n3", &mut rx3)] {
         let msg = timeout(RECV_TIMEOUT, rx.recv())
             .await
             .unwrap_or_else(|_| panic!("{} did not receive within {:?}", label, RECV_TIMEOUT))
@@ -325,14 +330,31 @@ async fn four_node_with_validator_registry_propagates() {
     n2.dial(target.clone()).await.unwrap();
     n3.dial(target.clone()).await.unwrap();
 
-    let m0 = n0.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    let m1 = n1.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    let m2 = n2.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    let m3 = n3.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
+    let m0 = n0
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    let m1 = n1
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    let m2 = n2
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    let m3 = n3
+        .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
 
-    assert!(m0 >= 1 && m1 >= 1 && m2 >= 1 && m3 >= 1,
+    assert!(
+        m0 >= 1 && m1 >= 1 && m2 >= 1 && m3 >= 1,
         "mesh formation failed with registry installed: m0={}, m1={}, m2={}, m3={}",
-        m0, m1, m2, m3);
+        m0,
+        m1,
+        m2,
+        m3
+    );
 
     let outbound = NetworkMessage::new(MessagePayload::Ping);
     let id = outbound.message_id.clone();
@@ -379,10 +401,7 @@ async fn validator_registry_blocks_unknown_publisher() {
     let mut set = HashSet::new();
     set.insert(receiver_pid);
     let registry = Arc::new(StaticValidatorRegistry(set));
-    receiver
-        .set_validator_registry(registry)
-        .await
-        .unwrap();
+    receiver.set_validator_registry(registry).await.unwrap();
 
     let mut rx = receiver.subscribe(CONSENSUS_TOPIC).await.unwrap();
     let _publisher_rx = publisher.subscribe(CONSENSUS_TOPIC).await.unwrap();
@@ -399,7 +418,12 @@ async fn validator_registry_blocks_unknown_publisher() {
         .wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
         .await
         .unwrap();
-    assert!(m_pub >= 1 && m_recv >= 1, "mesh did not form: pub={}, recv={}", m_pub, m_recv);
+    assert!(
+        m_pub >= 1 && m_recv >= 1,
+        "mesh did not form: pub={}, recv={}",
+        m_pub,
+        m_recv
+    );
 
     let outbound = NetworkMessage::new(MessagePayload::Ping);
     publisher
@@ -474,8 +498,9 @@ async fn dynamic_admission_via_identify_propagates_consensus() {
     // admission happens via identify bindings, not via prior knowledge —
     // but the validator *identity* allow-list (the epoch/genesis set) is
     // shared knowledge, as it is in production.
-    let identities: HashSet<Vec<u8>> =
-        [pk0.clone(), pk1.clone(), pk2.clone(), pk3.clone()].into_iter().collect();
+    let identities: HashSet<Vec<u8>> = [pk0.clone(), pk1.clone(), pk2.clone(), pk3.clone()]
+        .into_iter()
+        .collect();
     for n in [&n0, &n1, &n2, &n3] {
         let reg = Arc::new(DynamicValidatorRegistry {
             identities: identities.clone(),
@@ -494,10 +519,18 @@ async fn dynamic_admission_via_identify_propagates_consensus() {
     n3.dial(target.clone()).await.unwrap();
 
     // Mesh formation
-    n0.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    n1.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    n2.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
-    n3.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT).await.unwrap();
+    n0.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    n1.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    n2.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
+    n3.wait_for_mesh(CONSENSUS_TOPIC, 1, MESH_WAIT)
+        .await
+        .unwrap();
 
     // Identify is a separate protocol from gossipsub. wait_for_mesh
     // confirms gossipsub is ready, but does NOT confirm identify has
@@ -543,8 +576,9 @@ async fn wait_for_admitted_mesh_is_sufficient_first_publish_gate() {
     let (n2, _, pk2) = spawn_bound_validator_node().await;
     let (n3, _, pk3) = spawn_bound_validator_node().await;
 
-    let identities: HashSet<Vec<u8>> =
-        [pk0.clone(), pk1.clone(), pk2.clone(), pk3.clone()].into_iter().collect();
+    let identities: HashSet<Vec<u8>> = [pk0.clone(), pk1.clone(), pk2.clone(), pk3.clone()]
+        .into_iter()
+        .collect();
     for n in [&n0, &n1, &n2, &n3] {
         let reg = Arc::new(DynamicValidatorRegistry {
             identities: identities.clone(),
@@ -586,7 +620,10 @@ async fn wait_for_admitted_mesh_is_sufficient_first_publish_gate() {
         a0 >= 1 && a1 >= 1 && a2 >= 1 && a3 >= 1,
         "wait_for_admitted_mesh did not converge: a0={}, a1={}, a2={}, a3={} \
          — this would mean identify is not firing or registry is not getting populated.",
-        a0, a1, a2, a3
+        a0,
+        a1,
+        a2,
+        a3
     );
 
     let outbound = NetworkMessage::new(MessagePayload::Ping);

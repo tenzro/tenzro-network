@@ -4,10 +4,10 @@
 //! issues real HTTP requests via reqwest, and asserts on the JSON-RPC responses.
 //! Every test gets its own temp directory so RocksDB instances never contend.
 
+use serde_json::{Value, json};
 use std::sync::Arc;
-use serde_json::{json, Value};
+use tenzro_node::{NodeConfig, RpcServer, TenzroNode};
 use tokio::sync::broadcast;
-use tenzro_node::{NodeConfig, TenzroNode, RpcServer};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,9 +41,8 @@ async fn setup_test_server() -> (
     let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
     let rpc = RpcServer::new(node.clone(), "127.0.0.1:0".to_string());
-    let handle = tokio::spawn(async move {
-        rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await
-    });
+    let handle =
+        tokio::spawn(async move { rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await });
 
     let addr = addr_rx.await.expect("receive bound address");
     let base_url = format!("http://{}", addr);
@@ -123,7 +122,11 @@ async fn test_rpc_block_number() {
     assert_eq!(resp["id"], 1);
     // Result should be a hex string like "0x0" or "0x1"
     let result = resp["result"].as_str().expect("result is string");
-    assert!(result.starts_with("0x"), "block number should be hex: {}", result);
+    assert!(
+        result.starts_with("0x"),
+        "block number should be hex: {}",
+        result
+    );
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -142,7 +145,11 @@ async fn test_rpc_get_balance() {
     assert_eq!(resp["jsonrpc"], "2.0");
     // Should return a hex balance (possibly "0x0")
     let result = resp["result"].as_str().expect("result is string");
-    assert!(result.starts_with("0x"), "balance should be hex: {}", result);
+    assert!(
+        result.starts_with("0x"),
+        "balance should be hex: {}",
+        result
+    );
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -193,7 +200,11 @@ async fn test_rpc_malformed_json() {
         assert_eq!(body["error"]["code"], -32700);
     } else {
         // axum rejects malformed JSON with 400/422 before it reaches the handler
-        assert!(status == 400 || status == 422, "unexpected status: {}", status);
+        assert!(
+            status == 400 || status == 422,
+            "unexpected status: {}",
+            status
+        );
     }
 
     let _ = shutdown_tx.send(());
@@ -236,10 +247,17 @@ async fn test_rpc_missing_params() {
     let body = rpc_request_no_params("tenzro_settle");
     let resp = rpc_call(&client, &base_url, body).await;
 
-    assert!(resp["error"].is_object(), "should have error for missing params");
+    assert!(
+        resp["error"].is_object(),
+        "should have error for missing params"
+    );
     let code = resp["error"]["code"].as_i64().unwrap();
     // -32602 (InvalidParams) or -32000 (server error)
-    assert!(code == -32602 || code == -32000, "unexpected error code: {}", code);
+    assert!(
+        code == -32602 || code == -32000,
+        "unexpected error code: {}",
+        code
+    );
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -258,15 +276,18 @@ async fn test_rpc_settle_inference() {
     let provider_addr = format!("0x{}", "aa".repeat(20));
     let customer_addr = format!("0x{}", "bb".repeat(20));
 
-    let body = rpc_request("tenzro_settle", json!({
-        "provider": provider_addr,
-        "customer": customer_addr,
-        "amount": 5000,
-        "service_type": "inference",
-        "model_id": "test-model",
-        "tokens": 100,
-        "proof": "deadbeef"
-    }));
+    let body = rpc_request(
+        "tenzro_settle",
+        json!({
+            "provider": provider_addr,
+            "customer": customer_addr,
+            "amount": 5000,
+            "service_type": "inference",
+            "model_id": "test-model",
+            "tokens": 100,
+            "proof": "deadbeef"
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
     if resp["error"].is_object() {
@@ -298,10 +319,13 @@ async fn test_rpc_settle_insufficient_balance() {
     let provider_addr = format!("0x{}", "cc".repeat(20));
 
     // Missing the customer field
-    let body = rpc_request("tenzro_settle", json!({
-        "provider": provider_addr,
-        "amount": 999999999999u64,
-    }));
+    let body = rpc_request(
+        "tenzro_settle",
+        json!({
+            "provider": provider_addr,
+            "amount": 999999999999u64,
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
     assert!(resp["error"].is_object(), "should return error");
@@ -325,14 +349,20 @@ async fn test_rpc_create_escrow_removed() {
     let payer = format!("0x{}", "11".repeat(20));
     let payee = format!("0x{}", "22".repeat(20));
 
-    let body = rpc_request("tenzro_createEscrow", json!({
-        "payer": payer,
-        "payee": payee,
-        "amount": 10000,
-    }));
+    let body = rpc_request(
+        "tenzro_createEscrow",
+        json!({
+            "payer": payer,
+            "payee": payee,
+            "amount": 10000,
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
-    assert!(resp["error"].is_object(), "removed RPC must return an error");
+    assert!(
+        resp["error"].is_object(),
+        "removed RPC must return an error"
+    );
     let code = resp["error"]["code"].as_i64().unwrap_or(0);
     assert_eq!(code, -32601, "expected Method not found, got {}", code);
 
@@ -345,13 +375,19 @@ async fn test_rpc_release_escrow_removed() {
     let (base_url, shutdown_tx, handle, _tmp, _node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
-    let body = rpc_request("tenzro_releaseEscrow", json!({
-        "escrow_id": "nonexistent-escrow-id",
-        "proof": "deadbeef"
-    }));
+    let body = rpc_request(
+        "tenzro_releaseEscrow",
+        json!({
+            "escrow_id": "nonexistent-escrow-id",
+            "proof": "deadbeef"
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
-    assert!(resp["error"].is_object(), "removed RPC must return an error");
+    assert!(
+        resp["error"].is_object(),
+        "removed RPC must return an error"
+    );
     let code = resp["error"]["code"].as_i64().unwrap_or(0);
     assert_eq!(code, -32601, "expected Method not found, got {}", code);
 
@@ -365,12 +401,18 @@ async fn test_rpc_get_escrow_not_found() {
     let (base_url, shutdown_tx, handle, _tmp, _node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
-    let body = rpc_request("tenzro_getEscrow", json!({
-        "escrow_id": format!("0x{}", "ab".repeat(32)),
-    }));
+    let body = rpc_request(
+        "tenzro_getEscrow",
+        json!({
+            "escrow_id": format!("0x{}", "ab".repeat(32)),
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
-    assert!(resp["error"].is_object(), "missing escrow must return error");
+    assert!(
+        resp["error"].is_object(),
+        "missing escrow must return error"
+    );
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
 }
@@ -385,9 +427,16 @@ async fn test_rpc_list_escrows_by_payer_empty() {
     let body = rpc_request("tenzro_listEscrowsByPayer", json!({ "payer": payer }));
     let resp = rpc_call(&client, &base_url, body).await;
 
-    assert!(resp["result"].is_object(), "expected result object: {}", resp);
+    assert!(
+        resp["result"].is_object(),
+        "expected result object: {}",
+        resp
+    );
     assert_eq!(resp["result"]["count"].as_u64().unwrap_or(99), 0);
-    assert_eq!(resp["result"]["escrows"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(
+        resp["result"]["escrows"].as_array().map(|a| a.len()),
+        Some(0)
+    );
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -403,9 +452,16 @@ async fn test_rpc_list_escrows_by_payee_empty() {
     let body = rpc_request("tenzro_listEscrowsByPayee", json!({ "payee": payee }));
     let resp = rpc_call(&client, &base_url, body).await;
 
-    assert!(resp["result"].is_object(), "expected result object: {}", resp);
+    assert!(
+        resp["result"].is_object(),
+        "expected result object: {}",
+        resp
+    );
     assert_eq!(resp["result"]["count"].as_u64().unwrap_or(99), 0);
-    assert_eq!(resp["result"]["escrows"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(
+        resp["result"]["escrows"].as_array().map(|a| a.len()),
+        Some(0)
+    );
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -417,9 +473,12 @@ async fn test_rpc_get_settlement() {
     let (base_url, shutdown_tx, handle, _tmp, _node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
-    let body = rpc_request("tenzro_getSettlement", json!({
-        "receipt_id": "nonexistent-receipt-id"
-    }));
+    let body = rpc_request(
+        "tenzro_getSettlement",
+        json!({
+            "receipt_id": "nonexistent-receipt-id"
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
     if resp["error"].is_object() {
@@ -431,7 +490,10 @@ async fn test_rpc_get_settlement() {
         );
     } else {
         // If engine is initialized, a missing receipt returns null
-        assert!(resp["result"].is_null(), "nonexistent receipt should return null");
+        assert!(
+            resp["result"].is_null(),
+            "nonexistent receipt should return null"
+        );
     }
 
     let _ = shutdown_tx.send(());
@@ -447,11 +509,14 @@ async fn test_rpc_open_payment_channel() {
     let sender = format!("0x{}", "aa".repeat(20));
     let counterparty = format!("0x{}", "bb".repeat(20));
 
-    let body = rpc_request("tenzro_openPaymentChannel", json!({
-        "sender": sender,
-        "counterparty": counterparty,
-        "deposit": 50000
-    }));
+    let body = rpc_request(
+        "tenzro_openPaymentChannel",
+        json!({
+            "sender": sender,
+            "counterparty": counterparty,
+            "deposit": 50000
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
     if resp["error"].is_object() {
@@ -478,9 +543,12 @@ async fn test_rpc_close_payment_channel() {
     let (base_url, shutdown_tx, handle, _tmp, _node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
-    let body = rpc_request("tenzro_closePaymentChannel", json!({
-        "channel_id": "nonexistent-channel-id"
-    }));
+    let body = rpc_request(
+        "tenzro_closePaymentChannel",
+        json!({
+            "channel_id": "nonexistent-channel-id"
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
     // Should error because the channel doesn't exist
@@ -530,9 +598,12 @@ async fn test_rpc_register_identity() {
     let (base_url, shutdown_tx, handle, _tmp, _node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
-    let body = rpc_request("tenzro_registerIdentity", json!({
-        "display_name": "Test User"
-    }));
+    let body = rpc_request(
+        "tenzro_registerIdentity",
+        json!({
+            "display_name": "Test User"
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
     if resp["error"].is_object() {
@@ -547,7 +618,11 @@ async fn test_rpc_register_identity() {
         let result = &resp["result"];
         assert!(result["did"].is_string(), "did missing");
         let did = result["did"].as_str().unwrap();
-        assert!(did.starts_with("did:tenzro:human:"), "DID format wrong: {}", did);
+        assert!(
+            did.starts_with("did:tenzro:human:"),
+            "DID format wrong: {}",
+            did
+        );
         assert!(result["status"].is_string(), "status missing");
     }
 
@@ -561,27 +636,34 @@ async fn test_rpc_participate() {
     let (base_url, shutdown_tx, handle, _tmp, _node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
-    let body = rpc_request("tenzro_participate", json!({
-        "display_name": "Integration Test User"
-    }));
+    let body = rpc_request(
+        "tenzro_participate",
+        json!({
+            "display_name": "Integration Test User"
+        }),
+    );
     let resp = rpc_call(&client, &base_url, body).await;
 
     if resp["error"].is_object() {
         let msg = resp["error"]["message"].as_str().unwrap_or("");
         // Hardware detection, wallet, or identity might not be available
         assert!(
-            msg.contains("not initialized")
-                || msg.contains("failed")
-                || msg.contains("Hardware"),
+            msg.contains("not initialized") || msg.contains("failed") || msg.contains("Hardware"),
             "unexpected error: {}",
             msg
         );
     } else {
         let result = &resp["result"];
         assert!(result["identity"].is_object(), "identity section missing");
-        assert!(result["identity"]["did"].is_string(), "identity.did missing");
+        assert!(
+            result["identity"]["did"].is_string(),
+            "identity.did missing"
+        );
         assert!(result["wallet"].is_object(), "wallet section missing");
-        assert!(result["wallet"]["address"].is_string(), "wallet.address missing");
+        assert!(
+            result["wallet"]["address"].is_string(),
+            "wallet.address missing"
+        );
     }
 
     let _ = shutdown_tx.send(());
@@ -691,7 +773,11 @@ async fn test_rpc_chain_id() {
 
     assert_eq!(resp["jsonrpc"], "2.0");
     let result = resp["result"].as_str().expect("result is string");
-    assert!(result.starts_with("0x"), "chain ID should be hex: {}", result);
+    assert!(
+        result.starts_with("0x"),
+        "chain ID should be hex: {}",
+        result
+    );
     // Default chain ID is 1337 = 0x539
     assert_eq!(result, "0x539", "default chain ID should be 1337");
 
@@ -777,13 +863,16 @@ async fn test_rpc_settle_then_get_settlement() {
     let customer = format!("0x{}", "ee".repeat(20));
 
     // Step 1: settle
-    let settle_body = rpc_request("tenzro_settle", json!({
-        "provider": provider,
-        "customer": customer,
-        "amount": 1000,
-        "service_type": "custom",
-        "proof": "test-proof"
-    }));
+    let settle_body = rpc_request(
+        "tenzro_settle",
+        json!({
+            "provider": provider,
+            "customer": customer,
+            "amount": 1000,
+            "service_type": "custom",
+            "proof": "test-proof"
+        }),
+    );
     let settle_resp = rpc_call(&client, &base_url, settle_body).await;
 
     // If settlement engine isn't initialized, skip the lookup
@@ -798,9 +887,12 @@ async fn test_rpc_settle_then_get_settlement() {
         .expect("receipt_id");
 
     // Step 2: look up the settlement
-    let get_body = rpc_request("tenzro_getSettlement", json!({
-        "receipt_id": receipt_id
-    }));
+    let get_body = rpc_request(
+        "tenzro_getSettlement",
+        json!({
+            "receipt_id": receipt_id
+        }),
+    );
     let get_resp = rpc_call(&client, &base_url, get_body).await;
 
     let result = &get_resp["result"];
@@ -886,7 +978,11 @@ async fn test_rpc_positional_scalar_array_preserved() {
 
     assert_eq!(resp["jsonrpc"], "2.0");
     let result = resp["result"].as_str().expect("result is string");
-    assert!(result.starts_with("0x"), "balance should be hex: {}", result);
+    assert!(
+        result.starts_with("0x"),
+        "balance should be hex: {}",
+        result
+    );
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -905,7 +1001,11 @@ async fn test_rpc_multi_element_positional_array_preserved() {
 
     assert_eq!(resp["jsonrpc"], "2.0");
     let result = resp["result"].as_str().expect("result is string");
-    assert!(result.starts_with("0x"), "balance should be hex: {}", result);
+    assert!(
+        result.starts_with("0x"),
+        "balance should be hex: {}",
+        result
+    );
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;

@@ -1,8 +1,8 @@
 //! Staking commands for the Tenzro CLI
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output::{self};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Staking commands
 #[derive(Debug, Subcommand)]
@@ -247,14 +247,26 @@ impl LiquidStakingCmd {
                 let mut rows = Vec::new();
                 for r in &arr {
                     rows.push(vec![
-                        r.get("request_id").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                        r.get("sttnzo_amount").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
-                        r.get("tnzo_amount").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
+                        r.get("request_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        r.get("sttnzo_amount")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0")
+                            .to_string(),
+                        r.get("tnzo_amount")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0")
+                            .to_string(),
                         r.get("unbonding_complete_at")
                             .and_then(|v| v.as_i64())
                             .map(|t| t.to_string())
                             .unwrap_or_else(|| "?".to_string()),
-                        r.get("claimed").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+                        r.get("claimed")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
@@ -390,13 +402,18 @@ impl StakeDepositCmd {
         // The RPC takes amounts in **wei** (10^-18 TNZO). The CLI accepts
         // human-friendly TNZO input and converts here.
         let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
-        let result: serde_json::Value = rpc.call("tenzro_stake", serde_json::json!([{
-            "amount": amount_wei,
-            "provider_type": provider_type.as_str(),
-            "accelerators": self.accelerators,
-            "terabytes": self.terabytes,
-            "cloud_tier": self.cloud_tier.as_deref(),
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_stake",
+                serde_json::json!([{
+                    "amount": amount_wei,
+                    "provider_type": provider_type.as_str(),
+                    "accelerators": self.accelerators,
+                    "terabytes": self.terabytes,
+                    "cloud_tier": self.cloud_tier.as_deref(),
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -440,9 +457,14 @@ impl StakeWithdrawCmd {
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
 
         let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
-        let result: serde_json::Value = rpc.call("tenzro_unstake", serde_json::json!([{
-            "amount": amount_wei,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_unstake",
+                serde_json::json!([{
+                    "amount": amount_wei,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -485,18 +507,21 @@ impl StakeInfoCmd {
 
         let address = match &self.address {
             Some(a) => a.clone(),
-            None => crate::config::load_config()
-                .wallet_address
-                .ok_or_else(|| anyhow::anyhow!(
+            None => crate::config::load_config().wallet_address.ok_or_else(|| {
+                anyhow::anyhow!(
                     "No wallet address found. Run `tenzro wallet create` first or pass --address."
-                ))?,
+                )
+            })?,
         };
 
         let spinner = output::create_spinner("Fetching voting power...");
 
         let rpc = RpcClient::new(&self.rpc);
         let info: serde_json::Value = rpc
-            .call("tenzro_getVotingPower", serde_json::json!({"address": address}))
+            .call(
+                "tenzro_getVotingPower",
+                serde_json::json!({"address": address}),
+            )
             .await?;
 
         spinner.finish_and_clear();

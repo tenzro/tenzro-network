@@ -34,16 +34,13 @@ use std::sync::Arc;
 use crate::{
     config::VmConfig,
     error::{Result, VmError},
-    gas::{svm_gas_costs, GasOracle},
+    gas::{GasOracle, svm_gas_costs},
     traits::{VmExecutor, VmState, VmType},
     types::{
         CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log,
         StateChange, VmTransaction,
     },
 };
-
-#[cfg(feature = "svm-full")]
-mod full;
 
 /// SVM executor dispatching SPL / cross-VM native paths and, under the
 /// `svm-full` feature, real SBF program execution via Anza's `solana-svm`.
@@ -312,7 +309,7 @@ impl SvmExecutor {
         sender_balance: u128,
         compute_units: u64,
     ) -> Result<ExecutionResult> {
-        use super::spl_adapter::{SplInstruction, SPL_TOKEN_PROGRAM_ID, WTNZO_SPL_MINT};
+        use super::spl_adapter::{SPL_TOKEN_PROGRAM_ID, SplInstruction, WTNZO_SPL_MINT};
         use tenzro_token::spl_to_native;
 
         // Conservative fixed CU cost for pure-Rust SPL dispatch. Matches
@@ -452,7 +449,11 @@ impl SvmExecutor {
                 }
                 let native_balance = state.get_balance(&accounts[0]);
                 let spl_balance = tenzro_token::native_to_spl(native_balance).unwrap_or(0);
-                ("spl_get_balance", spl_balance.to_le_bytes().to_vec(), vec![])
+                (
+                    "spl_get_balance",
+                    spl_balance.to_le_bytes().to_vec(),
+                    vec![],
+                )
             }
             SplInstruction::MintTo | SplInstruction::Burn => {
                 // In the pointer model the bridge layer is the authority for
@@ -545,7 +546,7 @@ impl SvmExecutor {
         compute_unit_limit: u64,
         state: &dyn VmState,
     ) -> Result<(Vec<u8>, u64, Vec<String>)> {
-        full::process_sbf_transaction(
+        super::full::process_sbf_transaction(
             program_id,
             program_elf,
             instruction_data,
@@ -712,10 +713,73 @@ impl VmExecutor for SvmExecutor {
                 return self.execute_spl_native(tx, state, sender_balance, compute_units);
             }
 
-            // Get program code
-            let program = state
-                .get_code(program_id)
-                .ok_or_else(|| VmError::ContractNotFound(hex::encode(program_id)))?;
+            // A target with no stored code is not a program — it is an ordinary
+            // account, and sending to one is a plain value transfer. Solana
+            // treats a transfer to a non-executable account as routine (it is
+            // what the System Program does), so returning `ContractNotFound`
+            // here would make it impossible to move value between SVM accounts
+            // at all: every `to`-bearing SVM transaction would have to name a
+            // deployed program.
+            let Some(program) = state.get_code(program_id) else {
+                let gas_cost = compute_units as u128 * tx.gas_price;
+                let total = gas_cost.saturating_add(tx.value);
+                if sender_balance < total {
+                    return Ok(ExecutionResult::failed(
+                        compute_units,
+                        format!(
+                            "SVM: insufficient balance for transfer: have {sender_balance}, need {total}"
+                        ),
+                    ));
+                }
+
+                let nonce = state.get_nonce(&tx.from);
+                let new_sender_balance = sender_balance - total;
+                let old_recipient_balance = state.get_balance(program_id);
+                let new_recipient_balance = old_recipient_balance.saturating_add(tx.value);
+
+                state.set_nonce(&tx.from, nonce + 1);
+                state.set_balance(&tx.from, new_sender_balance);
+                if tx.value > 0 {
+                    state.set_balance(program_id, new_recipient_balance);
+                }
+
+                // Emit the same state-change records a program call would, so
+                // conservation accounting sees the movement.
+                let mut state_changes = vec![
+                    StateChange::new(
+                        tx.from.clone(),
+                        b"nonce".to_vec(),
+                        Some(nonce.to_le_bytes().to_vec()),
+                        Some((nonce + 1).to_le_bytes().to_vec()),
+                    ),
+                    StateChange::new(
+                        tx.from.clone(),
+                        b"balance".to_vec(),
+                        Some(sender_balance.to_le_bytes().to_vec()),
+                        Some(new_sender_balance.to_le_bytes().to_vec()),
+                    ),
+                ];
+                if tx.value > 0 {
+                    state_changes.push(StateChange::new(
+                        program_id.clone(),
+                        b"balance".to_vec(),
+                        Some(old_recipient_balance.to_le_bytes().to_vec()),
+                        Some(new_recipient_balance.to_le_bytes().to_vec()),
+                    ));
+                }
+
+                tracing::debug!(
+                    "SVM: value transfer of {} to non-program account {}",
+                    tx.value,
+                    hex::encode(program_id)
+                );
+                return Ok(ExecutionResult::success(
+                    compute_units,
+                    Vec::new(),
+                    Vec::new(),
+                    state_changes,
+                ));
+            };
 
             tracing::debug!("SVM: Executing program at {}", hex::encode(program_id));
 
@@ -732,33 +796,29 @@ impl VmExecutor for SvmExecutor {
                 ));
             }
 
-            let (output, cu_consumed, log_messages) = match self.execute_sbf_program(
-                program_id,
-                &program,
-                &tx.data,
-                tx.gas_limit,
-                state,
-            ) {
-                Ok(result) => result,
-                Err(VmError::SvmFullFeatureRequired) => {
-                    // No interpreter fallback — the operator must build with
-                    // `svm-full` to run stored SBF programs. Do not charge the
-                    // sender for an unsupported build configuration.
-                    return Err(VmError::SvmFullFeatureRequired);
-                }
-                Err(e) => {
-                    // Program execution failed — charge gas + bump nonce
-                    // (Solana semantics) and return a failed result.
-                    let nonce = state.get_nonce(&tx.from);
-                    state.set_nonce(&tx.from, nonce + 1);
-                    let gas_cost = compute_units as u128 * tx.gas_price;
-                    state.set_balance(&tx.from, sender_balance - gas_cost);
-                    return Ok(ExecutionResult::failed(
-                        compute_units,
-                        format!("SBF execution failed: {}", e),
-                    ));
-                }
-            };
+            let (output, cu_consumed, log_messages) =
+                match self.execute_sbf_program(program_id, &program, &tx.data, tx.gas_limit, state)
+                {
+                    Ok(result) => result,
+                    Err(VmError::SvmFullFeatureRequired) => {
+                        // No interpreter fallback — the operator must build with
+                        // `svm-full` to run stored SBF programs. Do not charge the
+                        // sender for an unsupported build configuration.
+                        return Err(VmError::SvmFullFeatureRequired);
+                    }
+                    Err(e) => {
+                        // Program execution failed — charge gas + bump nonce
+                        // (Solana semantics) and return a failed result.
+                        let nonce = state.get_nonce(&tx.from);
+                        state.set_nonce(&tx.from, nonce + 1);
+                        let gas_cost = compute_units as u128 * tx.gas_price;
+                        state.set_balance(&tx.from, sender_balance - gas_cost);
+                        return Ok(ExecutionResult::failed(
+                            compute_units,
+                            format!("SBF execution failed: {}", e),
+                        ));
+                    }
+                };
 
             // Capture pre-state for state change tracking
             let nonce = state.get_nonce(&tx.from);
@@ -840,13 +900,7 @@ impl VmExecutor for SvmExecutor {
         }
 
         let compute_limit = call.gas_limit.min(self.max_compute_unit_limit);
-        match self.execute_sbf_program(
-            &call.contract,
-            &program,
-            &call.data,
-            compute_limit,
-            state,
-        ) {
+        match self.execute_sbf_program(&call.contract, &program, &call.data, compute_limit, state) {
             Ok((output, cu_consumed, _logs)) => Ok(CallResult::success(output, cu_consumed)),
             Err(VmError::SvmFullFeatureRequired) => Err(VmError::SvmFullFeatureRequired),
             Err(e) => {
@@ -1012,15 +1066,14 @@ mod tests {
             1337,
         );
 
-        let result = executor
-            .execute_transaction(&tx, &mut state)
-            .await
-            .unwrap();
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
         assert!(!result.success);
-        assert!(result
-            .revert_reason
-            .unwrap()
-            .contains("not a valid SBF ELF"));
+        assert!(
+            result
+                .revert_reason
+                .unwrap()
+                .contains("not a valid SBF ELF")
+        );
     }
 
     #[tokio::test]
@@ -1055,12 +1108,14 @@ mod tests {
             1337,
         );
 
-        let result = executor
-            .execute_transaction(&tx, &mut state)
-            .await
-            .unwrap();
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
         assert!(!result.success);
-        assert!(result.revert_reason.unwrap().contains("Insufficient balance"));
+        assert!(
+            result
+                .revert_reason
+                .unwrap()
+                .contains("Insufficient balance")
+        );
     }
 
     #[tokio::test]

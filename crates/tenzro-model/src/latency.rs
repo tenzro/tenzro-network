@@ -149,7 +149,9 @@ impl LatencyTail {
             self.init
                 .iter()
                 .copied()
-                .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.max(v))))?
+                .fold(None, |acc: Option<f64>, v| {
+                    Some(acc.map_or(v, |a| a.max(v)))
+                })?
         } else {
             self.q[2]
         };
@@ -195,14 +197,8 @@ mod tests {
         let p95 = t.estimate_ms().unwrap();
         // p95 should sit up near the tail (hundreds of ms), not at the
         // ~145ms mean of this distribution.
-        assert!(
-            p95 >= 100,
-            "p95 {p95} collapsed below the fast cluster"
-        );
-        assert!(
-            p95 <= 1000,
-            "p95 {p95} exceeded the observed maximum"
-        );
+        assert!(p95 >= 100, "p95 {p95} collapsed below the fast cluster");
+        assert!(p95 <= 1000, "p95 {p95} exceeded the observed maximum");
     }
 
     #[test]

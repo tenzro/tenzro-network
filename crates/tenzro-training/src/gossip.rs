@@ -87,9 +87,8 @@ pub fn encode_sync_round(round: &SyncRound) -> Result<Vec<u8>> {
 /// on [`TRAINING_TOPIC`] (Phase B2, #217).
 pub fn encode_install_sealed_manifest(manifest: &SealedDatasetManifest) -> Result<Vec<u8>> {
     let msg = TrainingGossipMessage::InstallSealedManifest(manifest.clone());
-    bincode::serialize(&msg).map_err(|e| {
-        TrainingError::Serialization(format!("encode InstallSealedManifest: {}", e))
-    })
+    bincode::serialize(&msg)
+        .map_err(|e| TrainingError::Serialization(format!("encode InstallSealedManifest: {}", e)))
 }
 
 /// Decode an inbound gossip payload and reject any message that does not
@@ -236,7 +235,9 @@ mod tests {
         let bytes = encode_outer_gradient(&g).unwrap();
         let err = decode_for_topic("tenzro/blocks", &bytes).unwrap_err();
         match err {
-            TrainingError::Serialization(s) => assert!(s.contains("unexpected training gossip topic")),
+            TrainingError::Serialization(s) => {
+                assert!(s.contains("unexpected training gossip topic"))
+            }
             _ => panic!("expected Serialization error, got {:?}", err),
         }
     }
@@ -251,7 +252,7 @@ mod tests {
             wrapped_data_key: vec![0xbb; 96],
             wrap_alg: "hpke-x25519-hkdf-sha256-aes-256-gcm".to_string(),
             enclave_pubkey: vec![0xcc; 32],
-            enclave_measurements_hex: "deadbeef".to_string(),
+            enclave_measurement_hex: "deadbeef".to_string(),
             created_at: Timestamp::now(),
         };
         SealedDatasetManifest {

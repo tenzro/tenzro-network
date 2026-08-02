@@ -6,22 +6,18 @@
 //! Display is the inverse: every URI emitted on the wire or persisted in
 //! storage is rendered via `fmt::Display`.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use tenzro_iroh::TenzroUri;
 
-const BLAKE3_HEX: &str =
-    "5b7a4d8c19f3e0a8b4c7d2e6f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9";
+const BLAKE3_HEX: &str = "5b7a4d8c19f3e0a8b4c7d2e6f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9";
 
 fn bench_parse(c: &mut Criterion) {
     let blob = format!("tenzro://blob/{}", BLAKE3_HEX);
-    let blob_hint = format!(
-        "tenzro://blob/{}?n={}",
-        BLAKE3_HEX,
-        "ab".repeat(32),
-    );
+    let blob_hint = format!("tenzro://blob/{}?n={}", BLAKE3_HEX, "ab".repeat(32),);
     let node = format!("tenzro://node/{}", "ab".repeat(32));
-    let did = "tenzro://did/did:tenzro:machine:autonomous:550e8400-e29b-41d4-a716-446655440000".to_string();
+    let did = "tenzro://did/did:tenzro:machine:autonomous:550e8400-e29b-41d4-a716-446655440000"
+        .to_string();
     let model = format!("tenzro://model/qwen3-0.6b@{}", BLAKE3_HEX);
     let gradient = format!("tenzro://gradient/run-42/17/{}", BLAKE3_HEX);
     let shard = format!("tenzro://shard/{}/{}", BLAKE3_HEX, BLAKE3_HEX);

@@ -7,8 +7,8 @@ use crate::error::Result;
 use crate::mastercard::types::{KyaLevel, KyaVerification};
 use chrono::Utc;
 use std::sync::Arc;
-use tenzro_identity::identity::{IdentityData, IdentityStatus};
 use tenzro_identity::IdentityRegistry;
+use tenzro_identity::identity::{IdentityData, IdentityStatus};
 use tracing::{debug, info};
 
 /// Know Your Agent verifier using TDIP identity registry
@@ -148,8 +148,7 @@ impl KyaVerifier {
                                 }
                             }
                             Err(e) => {
-                                audit_trail
-                                    .push(format!("✗ Controller identity not found: {}", e));
+                                audit_trail.push(format!("✗ Controller identity not found: {}", e));
                                 audit_trail.push("→ KYA Level: Basic".to_string());
                                 (KyaLevel::Basic, Some(controller.clone()))
                             }
@@ -163,7 +162,9 @@ impl KyaVerifier {
                 audit_trail.push("→ KYA Level: Basic".to_string());
                 (KyaLevel::Basic, None)
             }
-            IdentityData::Institution { legal_name, lei, .. } => {
+            IdentityData::Institution {
+                legal_name, lei, ..
+            } => {
                 // Institutions: treat as principal (not an agent), KYA Basic;
                 // delegated agents under the institution get the Full path
                 // via the Machine arm with `controller_did = institution DID`.
@@ -222,10 +223,7 @@ mod tests {
 
         // Register an autonomous agent
         let agent_did = registry
-            .register_autonomous_machine(
-                vec![1; 32],
-                vec!["inference".to_string()],
-            )
+            .register_autonomous_machine(vec![1; 32], vec!["inference".to_string()])
             .await
             .unwrap()
             .did_string();
@@ -247,10 +245,7 @@ mod tests {
 
         // Register an autonomous agent (no controller)
         let agent_did = registry
-            .register_autonomous_machine(
-                vec![2; 32],
-                vec!["inference".to_string()],
-            )
+            .register_autonomous_machine(vec![2; 32], vec!["inference".to_string()])
             .await
             .unwrap()
             .did_string();
@@ -315,10 +310,12 @@ mod tests {
         assert!(result.verified);
         assert_eq!(result.verification_level, KyaLevel::Enhanced);
         assert_eq!(result.controller_did, Some(controller_did.clone()));
-        assert!(result
-            .audit_trail
-            .iter()
-            .any(|s| s.contains("Controller identity is active")));
+        assert!(
+            result
+                .audit_trail
+                .iter()
+                .any(|s| s.contains("Controller identity is active"))
+        );
     }
 
     #[tokio::test]
@@ -359,10 +356,12 @@ mod tests {
         assert!(result.verified);
         assert_eq!(result.verification_level, KyaLevel::Full);
         assert_eq!(result.controller_did, Some(controller_did.clone()));
-        assert!(result
-            .audit_trail
-            .iter()
-            .any(|s| s.contains("Delegation scope configured")));
+        assert!(
+            result
+                .audit_trail
+                .iter()
+                .any(|s| s.contains("Delegation scope configured"))
+        );
     }
 
     #[tokio::test]
@@ -399,9 +398,11 @@ mod tests {
         // Agent itself is active, but controller is suspended, so only Basic level
         assert!(result.verified);
         assert_eq!(result.verification_level, KyaLevel::Basic);
-        assert!(result
-            .audit_trail
-            .iter()
-            .any(|s| s.contains("Controller identity is not active")));
+        assert!(
+            result
+                .audit_trail
+                .iter()
+                .any(|s| s.contains("Controller identity is not active"))
+        );
     }
 }

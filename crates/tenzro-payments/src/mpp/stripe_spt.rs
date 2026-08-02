@@ -507,7 +507,10 @@ impl StripeClient {
         &self,
         issued_token_id: &str,
     ) -> Result<SharedPaymentIssuedToken> {
-        info!("Revoking Stripe SharedPaymentIssuedToken: {}", issued_token_id);
+        info!(
+            "Revoking Stripe SharedPaymentIssuedToken: {}",
+            issued_token_id
+        );
 
         let body = self
             .post_form(
@@ -575,9 +578,7 @@ impl StripeClient {
 /// Mirrors the existing `MppWebhookEvent` pattern: parse the raw event,
 /// classify it into an [`SptWebhookEvent`] variant, and surface the
 /// embedded resource (issued or granted token) for the caller to act on.
-pub fn classify_spt_webhook(
-    event: &crate::mpp::stripe::WebhookEvent,
-) -> SptWebhookEvent {
+pub fn classify_spt_webhook(event: &crate::mpp::stripe::WebhookEvent) -> SptWebhookEvent {
     SptWebhookEvent::from_type(&event.event_type)
 }
 
@@ -780,12 +781,10 @@ mod tests {
     #[test]
     fn outcome_reputation_score_ordering() {
         assert!(
-            SptOutcome::Succeeded.reputation_score()
-                > SptOutcome::ChargebackWon.reputation_score()
+            SptOutcome::Succeeded.reputation_score() > SptOutcome::ChargebackWon.reputation_score()
         );
         assert!(
-            SptOutcome::ChargebackWon.reputation_score()
-                > SptOutcome::Disputed.reputation_score()
+            SptOutcome::ChargebackWon.reputation_score() > SptOutcome::Disputed.reputation_score()
         );
         assert!(
             SptOutcome::Disputed.reputation_score() > SptOutcome::ChargebackLost.reputation_score()
@@ -873,10 +872,19 @@ mod tests {
             Some(SptOutcome::Disputed)
         );
         // Closed dispute is ambiguous — caller must inspect payload.
-        assert_eq!(SptWebhookEvent::ChargeDisputeClosed.settlement_outcome(), None);
+        assert_eq!(
+            SptWebhookEvent::ChargeDisputeClosed.settlement_outcome(),
+            None
+        );
         // Lifecycle events have no settlement outcome.
-        assert_eq!(SptWebhookEvent::IssuedTokenCreated.settlement_outcome(), None);
-        assert_eq!(SptWebhookEvent::GrantedTokenDeactivated.settlement_outcome(), None);
+        assert_eq!(
+            SptWebhookEvent::IssuedTokenCreated.settlement_outcome(),
+            None
+        );
+        assert_eq!(
+            SptWebhookEvent::GrantedTokenDeactivated.settlement_outcome(),
+            None
+        );
     }
 
     #[test]

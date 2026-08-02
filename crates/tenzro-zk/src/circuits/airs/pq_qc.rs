@@ -136,12 +136,7 @@ impl<AB: AirBuilder> Air<AB> for PqQcAggregationAir {
 
         // Snapshot the live row cells before acquiring the `when_first_row`
         // filter, which mutably re-borrows the builder.
-        let (bits, verifieds, count, digest): (
-            Vec<AB::Var>,
-            Vec<AB::Var>,
-            AB::Var,
-            Vec<AB::Var>,
-        ) = {
+        let (bits, verifieds, count, digest): (Vec<AB::Var>, Vec<AB::Var>, AB::Var, Vec<AB::Var>) = {
             let main = builder.main();
             let row = main.current_slice();
             let bits: Vec<AB::Var> = (0..n).map(|i| row[bit_base + i]).collect();
@@ -160,8 +155,7 @@ impl<AB: AirBuilder> Air<AB> for PqQcAggregationAir {
             let pis = builder.public_values();
             let pi_bits: Vec<AB::PublicVar> = (0..n).map(|i| pis[i]).collect();
             let pi_count = pis[n];
-            let pi_digest: Vec<AB::PublicVar> =
-                (0..DIGEST_LEN).map(|k| pis[n + 1 + k]).collect();
+            let pi_digest: Vec<AB::PublicVar> = (0..DIGEST_LEN).map(|k| pis[n + 1 + k]).collect();
             (pi_bits, pi_count, pi_digest)
         };
 
@@ -247,7 +241,11 @@ pub fn generate_pq_qc_trace(
     for i in 0..n {
         let bit = bitmap[i];
         values[i] = if bit { KoalaBear::ONE } else { KoalaBear::ZERO };
-        values[n + i] = if verified[i] { KoalaBear::ONE } else { KoalaBear::ZERO };
+        values[n + i] = if verified[i] {
+            KoalaBear::ONE
+        } else {
+            KoalaBear::ZERO
+        };
         if bit {
             count += 1;
         }

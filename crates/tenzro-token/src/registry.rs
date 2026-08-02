@@ -13,7 +13,7 @@ use crate::error::{Result, TokenError};
 use crate::tnzo::TnzoToken;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tenzro_storage::kv::{KvStore, CF_TOKENS};
+use tenzro_storage::kv::{CF_TOKENS, KvStore};
 use tracing::{debug, info, warn};
 
 /// Unified Token Registry
@@ -158,8 +158,7 @@ impl TokenRegistry {
                     amount_bytes.copy_from_slice(&value[72..88]);
                     let amount = u128::from_le_bytes(amount_bytes);
                     let token_id = TokenId::new(token_bytes);
-                    self.approvals
-                        .insert((owner, spender, token_id), amount);
+                    self.approvals.insert((owner, spender, token_id), amount);
                 }
             }
         }
@@ -289,7 +288,11 @@ impl TokenRegistry {
         balance: u128,
     ) -> Result<()> {
         if let Some(storage) = &self.storage {
-            let key = format!("token_balance:{}:{}", hex::encode(owner), hex::encode(token_id.0));
+            let key = format!(
+                "token_balance:{}:{}",
+                hex::encode(owner),
+                hex::encode(token_id.0)
+            );
             storage.put(CF_TOKENS, key.as_bytes(), &balance.to_le_bytes())?;
         }
         Ok(())
@@ -437,7 +440,10 @@ impl TokenRegistry {
         self.persist_token(&def)?;
         self.tokens.insert(token_id, def);
 
-        info!("Registered Tempo TIP-20 token {} in unified registry", symbol);
+        info!(
+            "Registered Tempo TIP-20 token {} in unified registry",
+            symbol
+        );
         Ok(token_id)
     }
 
@@ -469,10 +475,7 @@ impl TokenRegistry {
         }
 
         // Assign token ID using creator nonce
-        let mut nonce = self
-            .creator_nonces
-            .entry(def.creator)
-            .or_insert(0);
+        let mut nonce = self.creator_nonces.entry(def.creator).or_insert(0);
         let token_id = TokenId::compute(&def.creator, *nonce);
         *nonce += 1;
         let new_nonce = *nonce;
@@ -509,11 +512,7 @@ impl TokenRegistry {
     }
 
     /// Updates VM addresses for an existing token (e.g., after deploying ERC-20 wrapper)
-    pub fn update_vm_addresses(
-        &self,
-        token_id: &TokenId,
-        addresses: VmAddresses,
-    ) -> Result<()> {
+    pub fn update_vm_addresses(&self, token_id: &TokenId, addresses: VmAddresses) -> Result<()> {
         let mut def = self
             .tokens
             .get_mut(token_id)
@@ -656,17 +655,19 @@ impl TokenRegistry {
                 available: from_balance,
             });
         }
-        let new_from = from_balance.checked_sub(amount).ok_or_else(|| {
-            TokenError::ArithmeticOverflow {
-                operation: "transfer subtraction".to_string(),
-            }
-        })?;
+        let new_from =
+            from_balance
+                .checked_sub(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "transfer subtraction".to_string(),
+                })?;
         let to_balance = self.token_balance(to, token_id);
-        let new_to = to_balance.checked_add(amount).ok_or_else(|| {
-            TokenError::ArithmeticOverflow {
-                operation: "transfer addition".to_string(),
-            }
-        })?;
+        let new_to =
+            to_balance
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "transfer addition".to_string(),
+                })?;
         self.token_balances.insert((*from, *token_id), new_from);
         self.token_balances.insert((*to, *token_id), new_to);
         self.persist_token_balance(from, token_id, new_from)?;
@@ -682,9 +683,10 @@ impl TokenRegistry {
         amount: u128,
         caller: &[u8; 32],
     ) -> Result<()> {
-        let mut def = self.tokens.get_mut(token_id).ok_or_else(|| {
-            TokenError::InvalidAmount(format!("Token {} not found", token_id))
-        })?;
+        let mut def = self
+            .tokens
+            .get_mut(token_id)
+            .ok_or_else(|| TokenError::InvalidAmount(format!("Token {} not found", token_id)))?;
         if !def.permissions.mintable {
             return Err(TokenError::Unauthorized {
                 reason: "Token is not mintable".to_string(),
@@ -702,17 +704,19 @@ impl TokenRegistry {
                 "Minting would exceed max supply".to_string(),
             ));
         }
-        def.total_supply = def.total_supply.checked_add(amount).ok_or_else(|| {
-            TokenError::ArithmeticOverflow {
-                operation: "mint supply increase".to_string(),
-            }
-        })?;
+        def.total_supply =
+            def.total_supply
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "mint supply increase".to_string(),
+                })?;
         let balance = self.token_balance(to, token_id);
-        let new_balance = balance.checked_add(amount).ok_or_else(|| {
-            TokenError::ArithmeticOverflow {
-                operation: "mint balance increase".to_string(),
-            }
-        })?;
+        let new_balance =
+            balance
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "mint balance increase".to_string(),
+                })?;
         self.token_balances.insert((*to, *token_id), new_balance);
         self.persist_token(def.value())?;
         self.persist_token_balance(to, token_id, new_balance)?;
@@ -720,15 +724,11 @@ impl TokenRegistry {
     }
 
     /// Burn tokens (only if token is burnable)
-    pub fn burn_token(
-        &self,
-        token_id: &TokenId,
-        from: &[u8; 32],
-        amount: u128,
-    ) -> Result<()> {
-        let mut def = self.tokens.get_mut(token_id).ok_or_else(|| {
-            TokenError::InvalidAmount(format!("Token {} not found", token_id))
-        })?;
+    pub fn burn_token(&self, token_id: &TokenId, from: &[u8; 32], amount: u128) -> Result<()> {
+        let mut def = self
+            .tokens
+            .get_mut(token_id)
+            .ok_or_else(|| TokenError::InvalidAmount(format!("Token {} not found", token_id)))?;
         if !def.permissions.burnable {
             return Err(TokenError::Unauthorized {
                 reason: "Token is not burnable".to_string(),
@@ -761,8 +761,7 @@ impl TokenRegistry {
         token_id: &TokenId,
         amount: u128,
     ) -> Result<()> {
-        self.approvals
-            .insert((*owner, *spender, *token_id), amount);
+        self.approvals.insert((*owner, *spender, *token_id), amount);
         self.persist_approval(owner, spender, token_id, amount)?;
         debug!(
             "Set approval: owner={} spender={} token={} amount={}",
@@ -775,12 +774,7 @@ impl TokenRegistry {
     }
 
     /// Gets ERC-20 approval for a token
-    pub fn get_approval(
-        &self,
-        owner: &[u8; 20],
-        spender: &[u8; 20],
-        token_id: &TokenId,
-    ) -> u128 {
+    pub fn get_approval(&self, owner: &[u8; 20], spender: &[u8; 20], token_id: &TokenId) -> u128 {
         self.approvals
             .get(&(*owner, *spender, *token_id))
             .map(|r| *r)

@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tenzro_storage::{KvStore, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_types::{WorkflowStepSpec, WorkflowTemplate};
 use thiserror::Error;
 use tracing::{error, info, warn};
@@ -116,9 +116,7 @@ impl WorkflowRunStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            WorkflowRunStatus::Completed
-                | WorkflowRunStatus::Failed
-                | WorkflowRunStatus::Cancelled
+            WorkflowRunStatus::Completed | WorkflowRunStatus::Failed | WorkflowRunStatus::Cancelled
         )
     }
 }
@@ -294,7 +292,9 @@ impl WorkflowExecutor {
         }
         run.status = WorkflowRunStatus::Running;
         self.persist(&run)?;
-        self.runs.lock().insert(workflow_id.to_string(), run.clone());
+        self.runs
+            .lock()
+            .insert(workflow_id.to_string(), run.clone());
         Ok(run)
     }
 
@@ -329,7 +329,9 @@ impl WorkflowExecutor {
         run.status = WorkflowRunStatus::Cancelled;
         run.finished_at = Some(now_secs());
         self.persist(&run)?;
-        self.runs.lock().insert(workflow_id.to_string(), run.clone());
+        self.runs
+            .lock()
+            .insert(workflow_id.to_string(), run.clone());
         Ok(run)
     }
 
@@ -583,8 +585,7 @@ impl WorkflowExecutor {
                 params,
                 ..
             } => {
-                let resolved =
-                    interpolate(params, &run.inputs, &run.step_outputs)?;
+                let resolved = interpolate(params, &run.inputs, &run.step_outputs)?;
                 let tool_id = interpolate_id(tool_id, &run.inputs, &run.step_outputs)?;
                 let out = self
                     .dispatcher
@@ -597,26 +598,18 @@ impl WorkflowExecutor {
                 params,
                 ..
             } => {
-                let resolved =
-                    interpolate(params, &run.inputs, &run.step_outputs)?;
-                let knowledge_id =
-                    interpolate_id(knowledge_id, &run.inputs, &run.step_outputs)?;
+                let resolved = interpolate(params, &run.inputs, &run.step_outputs)?;
+                let knowledge_id = interpolate_id(knowledge_id, &run.inputs, &run.step_outputs)?;
                 let out = self
                     .dispatcher
-                    .dispatch_knowledge(
-                        &knowledge_id,
-                        resolved.clone(),
-                        api_key,
-                        payer_wallet,
-                    )
+                    .dispatch_knowledge(&knowledge_id, resolved.clone(), api_key, payer_wallet)
                     .await?;
                 Ok((resolved, out))
             }
             WorkflowStepSpec::UseModel {
                 model_id, params, ..
             } => {
-                let resolved =
-                    interpolate(params, &run.inputs, &run.step_outputs)?;
+                let resolved = interpolate(params, &run.inputs, &run.step_outputs)?;
                 let model_id = interpolate_id(model_id, &run.inputs, &run.step_outputs)?;
                 let out = self
                     .dispatcher
@@ -636,8 +629,7 @@ impl WorkflowExecutor {
                         "SpawnAgent step requires payer_did on the run".to_string(),
                     )
                 })?;
-                let resolved_scope =
-                    interpolate(scope_overrides, &run.inputs, &run.step_outputs)?;
+                let resolved_scope = interpolate(scope_overrides, &run.inputs, &run.step_outputs)?;
                 let agent_template_id =
                     interpolate_id(agent_template_id, &run.inputs, &run.step_outputs)?;
                 let out = self
@@ -655,8 +647,7 @@ impl WorkflowExecutor {
                 Ok((resolved_scope, out))
             }
             WorkflowStepSpec::Wait { wait_kind, params } => {
-                let resolved =
-                    interpolate(params, &run.inputs, &run.step_outputs)?;
+                let resolved = interpolate(params, &run.inputs, &run.step_outputs)?;
                 match wait_kind.as_str() {
                     "duration" => {
                         // Sleep for `params.seconds`. Resolved from
@@ -689,8 +680,8 @@ impl WorkflowExecutor {
                             // implementation later. Today we sleep
                             // briefly and surface the receipt-shape
                             // output that downstream steps can read.
-                            let deadline = std::time::Instant::now()
-                                + Duration::from_secs(timeout_secs);
+                            let deadline =
+                                std::time::Instant::now() + Duration::from_secs(timeout_secs);
                             while std::time::Instant::now() < deadline {
                                 // The executor doesn't reach into the node
                                 // for chain state to keep the crate
@@ -711,10 +702,7 @@ impl WorkflowExecutor {
                                 }),
                             ))
                         } else {
-                            Ok((
-                                resolved,
-                                serde_json::json!({ "finality": "no_tx_hash" }),
-                            ))
+                            Ok((resolved, serde_json::json!({ "finality": "no_tx_hash" })))
                         }
                     }
                     "signal" | "event" => {
@@ -766,11 +754,14 @@ impl WorkflowExecutor {
                 // `advance_one` for how compound ids are dereferenced.
                 let merged_ids: Vec<usize> = match op.as_str() {
                     "branch" => {
-                        let cond_result =
-                            interpolate(&serde_json::json!("{{ steps.last.output }}"), &run.inputs, &run.step_outputs)
-                                .ok()
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true);
+                        let cond_result = interpolate(
+                            &serde_json::json!("{{ steps.last.output }}"),
+                            &run.inputs,
+                            &run.step_outputs,
+                        )
+                        .ok()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
                         if cond_result {
                             if_true_step_ids.clone()
                         } else {
@@ -839,10 +830,7 @@ fn interpolate(
                 out.push_str(&rest[..start]);
                 let after = &rest[start + 2..];
                 let end = after.find("}}").ok_or_else(|| {
-                    ExecutorError::UnknownReference(format!(
-                        "unterminated token in: {}",
-                        s
-                    ))
+                    ExecutorError::UnknownReference(format!("unterminated token in: {}", s))
                 })?;
                 let token = after[..end].trim();
                 let resolved = resolve_path(token, inputs, step_outputs)?;
@@ -921,19 +909,16 @@ fn resolve_path(
         return Err(ExecutorError::UnknownReference(path.to_string()));
     }
     match parts[0] {
-        "inputs" => {
-            walk_json(inputs, &parts[1..]).ok_or_else(|| {
-                ExecutorError::UnknownReference(path.to_string())
-            })
-        }
+        "inputs" => walk_json(inputs, &parts[1..])
+            .ok_or_else(|| ExecutorError::UnknownReference(path.to_string())),
         "steps" => {
             if parts.len() < 2 {
                 return Err(ExecutorError::UnknownReference(path.to_string()));
             }
             let name = parts[1];
-            let base = step_outputs.get(name).ok_or_else(|| {
-                ExecutorError::UnknownReference(path.to_string())
-            })?;
+            let base = step_outputs
+                .get(name)
+                .ok_or_else(|| ExecutorError::UnknownReference(path.to_string()))?;
             // After `steps.NAME`, the remaining path may be `.output.X` or
             // `.X` directly. Allow both for ergonomics.
             let rest: Vec<&str> = if parts.get(2) == Some(&"output") {
@@ -941,9 +926,7 @@ fn resolve_path(
             } else {
                 parts[2..].to_vec()
             };
-            walk_json(base, &rest).ok_or_else(|| {
-                ExecutorError::UnknownReference(path.to_string())
-            })
+            walk_json(base, &rest).ok_or_else(|| ExecutorError::UnknownReference(path.to_string()))
         }
         _ => Err(ExecutorError::UnknownReference(path.to_string())),
     }

@@ -2,9 +2,9 @@
 //!
 //! Sign, verify, encrypt, decrypt, hash, and generate keypairs.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Cryptographic operations
 #[derive(Debug, Subcommand)]
@@ -64,17 +64,34 @@ impl CryptoSignCmd {
         let spinner = output::create_spinner("Signing...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_signMessage", serde_json::json!({
-            "private_key": self.key,
-            "message_hex": self.message,
-            "key_type": self.key_type,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signMessage",
+                serde_json::json!({
+                    "private_key": self.key,
+                    "message_hex": self.message,
+                    "key_type": self.key_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Message signed!");
-        output::print_field("Signature", result.get("signature").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Public Key", result.get("public_key").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Signature",
+            result
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Public Key",
+            result
+                .get("public_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -108,16 +125,24 @@ impl CryptoVerifyCmd {
         let spinner = output::create_spinner("Verifying...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_verifySignature", serde_json::json!({
-            "public_key": self.key,
-            "message_hex": self.message,
-            "signature_hex": self.signature,
-            "key_type": self.key_type,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_verifySignature",
+                serde_json::json!({
+                    "public_key": self.key,
+                    "message_hex": self.message,
+                    "signature_hex": self.signature,
+                    "key_type": self.key_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        let valid = result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if valid {
             output::print_success("Signature is valid!");
         } else {
@@ -150,15 +175,26 @@ impl CryptoEncryptCmd {
         let spinner = output::create_spinner("Encrypting...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_encryptData", serde_json::json!({
-            "plaintext_hex": self.data,
-            "key_hex": self.key,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_encryptData",
+                serde_json::json!({
+                    "plaintext_hex": self.data,
+                    "key_hex": self.key,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Data encrypted (AES-256-GCM)!");
-        output::print_field("Ciphertext", result.get("ciphertext_hex").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Ciphertext",
+            result
+                .get("ciphertext_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -186,15 +222,26 @@ impl CryptoDecryptCmd {
         let spinner = output::create_spinner("Decrypting...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_decryptData", serde_json::json!({
-            "ciphertext_hex": self.data,
-            "key_hex": self.key,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_decryptData",
+                serde_json::json!({
+                    "ciphertext_hex": self.data,
+                    "key_hex": self.key,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Data decrypted!");
-        output::print_field("Plaintext", result.get("plaintext_hex").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Plaintext",
+            result
+                .get("plaintext_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -227,12 +274,20 @@ impl CryptoHashCmd {
             "tenzro_hashSha256"
         };
 
-        let result: serde_json::Value = rpc.call(method, serde_json::json!({
-            "data_hex": self.data,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                method,
+                serde_json::json!({
+                    "data_hex": self.data,
+                }),
+            )
+            .await?;
 
         output::print_field("Algorithm", &self.algorithm);
-        output::print_field("Hash", result.get("hash").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Hash",
+            result.get("hash").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -257,16 +312,36 @@ impl CryptoKeygenCmd {
         let spinner = output::create_spinner("Generating...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_generateKeypair", serde_json::json!({
-            "key_type": self.key_type,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_generateKeypair",
+                serde_json::json!({
+                    "key_type": self.key_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success(&format!("{} keypair generated!", self.key_type));
-        output::print_field("Public Key", result.get("public_key").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Private Key", result.get("private_key").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Public Key",
+            result
+                .get("public_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Private Key",
+            result
+                .get("private_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Address",
+            result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -294,15 +369,26 @@ impl CryptoDeriveKeyCmd {
         let spinner = output::create_spinner("Deriving key...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_deriveKey", serde_json::json!({
-            "private_key": self.private_key,
-            "peer_public_key": self.peer_public_key,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_deriveKey",
+                serde_json::json!({
+                    "private_key": self.private_key,
+                    "peer_public_key": self.peer_public_key,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Shared key derived!");
-        output::print_field("Shared Key", result.get("shared_key").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Shared Key",
+            result
+                .get("shared_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
 
         Ok(())
     }

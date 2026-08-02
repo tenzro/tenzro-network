@@ -1,8 +1,8 @@
 //! Provider management commands for the Tenzro CLI
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output::{self};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Provider management commands
 #[derive(Debug, Subcommand)]
@@ -92,7 +92,10 @@ const ZERO_ADDRESS: &str = "0x00000000000000000000000000000000000000000000000000
 /// Query nonce + chain_id for the sender.
 async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
     let nonce = rpc
-        .call::<serde_json::Value>("eth_getTransactionCount", serde_json::json!([address, "latest"]))
+        .call::<serde_json::Value>(
+            "eth_getTransactionCount",
+            serde_json::json!([address, "latest"]),
+        )
         .await
         .ok()
         .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
@@ -198,7 +201,10 @@ impl BondPostCmd {
         let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
         output::print_field("Provider DID", &self.did);
         output::print_field("Provider Address", &output::format_address(&self.address));
-        output::print_field("Amount", &format!("{} TNZO ({} wei)", self.amount, amount_wei));
+        output::print_field(
+            "Amount",
+            &format!("{} TNZO ({} wei)", self.amount, amount_wei),
+        );
         println!();
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
@@ -219,7 +225,9 @@ impl BondPostCmd {
         output::print_success("PostComputeBond transaction submitted");
         println!();
         output::print_field("Transaction Hash", &tx_hash);
-        output::print_info("Run `tenzro provider bond get` once the block finalizes to see the bond state.");
+        output::print_info(
+            "Run `tenzro provider bond get` once the block finalizes to see the bond state.",
+        );
         Ok(())
     }
 }
@@ -248,7 +256,10 @@ impl BondIncreaseCmd {
         output::print_header("Increase Compute Bond");
         let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
         output::print_field("Provider DID", &self.did);
-        output::print_field("Top-up", &format!("{} TNZO ({} wei)", self.amount, amount_wei));
+        output::print_field(
+            "Top-up",
+            &format!("{} TNZO ({} wei)", self.amount, amount_wei),
+        );
         println!();
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
@@ -330,15 +341,37 @@ impl BondListCmd {
             output::print_info("No compute bonds posted yet");
             return Ok(());
         }
-        let headers = vec!["Provider DID", "Address", "Amount (wei)", "Status", "Eligible"];
+        let headers = vec![
+            "Provider DID",
+            "Address",
+            "Amount (wei)",
+            "Status",
+            "Eligible",
+        ];
         let mut rows = Vec::new();
         for b in &bonds {
             rows.push(vec![
-                b.get("provider_did").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                output::format_address(b.get("provider_address").and_then(|v| v.as_str()).unwrap_or("")),
-                b.get("amount").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
-                b.get("status").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                b.get("is_eligible").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+                b.get("provider_did")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                output::format_address(
+                    b.get("provider_address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                ),
+                b.get("amount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string(),
+                b.get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string(),
+                b.get("is_eligible")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    .to_string(),
             ]);
         }
         output::print_table(&headers, &rows);
@@ -366,7 +399,9 @@ pub struct BondWithdrawCmd {
 impl BondWithdrawCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Withdraw Compute Bond");
-        output::print_info("Active → Cooldown starts the unbonding window. The vault stays funded — and stays slashable — until the cooldown elapses.");
+        output::print_info(
+            "Active → Cooldown starts the unbonding window. The vault stays funded — and stays slashable — until the cooldown elapses.",
+        );
         println!();
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
@@ -384,7 +419,9 @@ impl BondWithdrawCmd {
         output::print_success("WithdrawComputeBond transaction submitted");
         println!();
         output::print_field("Transaction Hash", &tx_hash);
-        output::print_info("Run `tenzro provider bond finalize` once the cooldown deadline passes to reclaim the vault.");
+        output::print_info(
+            "Run `tenzro provider bond finalize` once the cooldown deadline passes to reclaim the vault.",
+        );
         Ok(())
     }
 }
@@ -409,7 +446,10 @@ impl BondParamsCmd {
             output::print_field("Minimum Bond (wei)", v);
         }
         if let Some(v) = params.get("cooldown_ms").and_then(|v| v.as_u64()) {
-            output::print_field("Cooldown", &format!("{} ms ({:.1} days)", v, v as f64 / 86_400_000.0));
+            output::print_field(
+                "Cooldown",
+                &format!("{} ms ({:.1} days)", v, v as f64 / 86_400_000.0),
+            );
         }
         Ok(())
     }
@@ -433,7 +473,9 @@ pub struct BondFinalizeCmd {
 impl BondFinalizeCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Finalize Compute Bond Withdrawal");
-        output::print_info("Releases the vault balance back to the provider wallet. The cooldown deadline is checked against the block timestamp.");
+        output::print_info(
+            "Releases the vault balance back to the provider wallet. The cooldown deadline is checked against the block timestamp.",
+        );
         println!();
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
@@ -541,7 +583,10 @@ impl ProviderRegisterCmd {
         if stake_val > 0.0 {
             output::print_field("Stake Amount", &format!("{} TNZO", self.stake));
         }
-        output::print_field("Max Concurrent", &format!("{} requests", self.max_concurrent));
+        output::print_field(
+            "Max Concurrent",
+            &format!("{} requests", self.max_concurrent),
+        );
         if !self.accelerators.is_empty() {
             output::print_field("Accelerators", &self.accelerators.join(", "));
         }
@@ -575,16 +620,21 @@ impl ProviderRegisterCmd {
         } else {
             "0".to_string()
         };
-        let result: serde_json::Value = rpc.call("tenzro_registerProvider", serde_json::json!([{
-            "provider_type": provider_type.as_str(),
-            "name": self.name.as_deref(),
-            "provider_did": self.did.as_deref(),
-            "stake": stake_wei,
-            "max_concurrent": self.max_concurrent,
-            "accelerators": self.accelerators,
-            "terabytes": self.terabytes,
-            "cloud_tier": self.cloud_tier.as_deref(),
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_registerProvider",
+                serde_json::json!([{
+                    "provider_type": provider_type.as_str(),
+                    "name": self.name.as_deref(),
+                    "provider_did": self.did.as_deref(),
+                    "stake": stake_wei,
+                    "max_concurrent": self.max_concurrent,
+                    "accelerators": self.accelerators,
+                    "terabytes": self.terabytes,
+                    "cloud_tier": self.cloud_tier.as_deref(),
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -596,7 +646,10 @@ impl ProviderRegisterCmd {
         if let Some(v) = result.get("transaction_hash").and_then(|v| v.as_str()) {
             output::print_field("Registration TX", v);
         }
-        let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("Pending verification");
+        let status = result
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Pending verification");
         let is_active = status.to_lowercase().contains("active");
         output::print_status("Status", status, is_active);
         println!();
@@ -633,7 +686,8 @@ impl ProviderStatusCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // Fetch node info which includes provider status
-        let node_info: serde_json::Value = rpc.call("tenzro_nodeInfo", serde_json::json!([])).await?;
+        let node_info: serde_json::Value =
+            rpc.call("tenzro_nodeInfo", serde_json::json!([])).await?;
 
         spinner.finish_and_clear();
 
@@ -660,9 +714,15 @@ impl ProviderStatusCmd {
 
         if self.detailed {
             // Fetch detailed provider stats from node
-            let stats: serde_json::Value = rpc.call("tenzro_providerStats", serde_json::json!([{
-                "address": self.address.as_deref()
-            }])).await.unwrap_or(serde_json::json!({}));
+            let stats: serde_json::Value = rpc
+                .call(
+                    "tenzro_providerStats",
+                    serde_json::json!([{
+                        "address": self.address.as_deref()
+                    }]),
+                )
+                .await
+                .unwrap_or(serde_json::json!({}));
 
             println!();
             output::print_header("Performance Statistics");
@@ -671,8 +731,15 @@ impl ProviderStatusCmd {
                 output::print_field("Total Requests", &format!("{}", v));
             }
             if let Some(v) = stats.get("successful").and_then(|v| v.as_u64()) {
-                let total = stats.get("total_requests").and_then(|v| v.as_u64()).unwrap_or(1);
-                let pct = if total > 0 { (v as f64 / total as f64) * 100.0 } else { 0.0 };
+                let total = stats
+                    .get("total_requests")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                let pct = if total > 0 {
+                    (v as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
                 output::print_field("Successful", &format!("{} ({:.1}%)", v, pct));
             }
             if let Some(v) = stats.get("avg_latency").and_then(|v| v.as_str()) {
@@ -699,22 +766,38 @@ impl ProviderStatusCmd {
             }
 
             if let Some(activity) = stats.get("recent_activity").and_then(|v| v.as_array())
-                && !activity.is_empty() {
-                    println!();
-                    output::print_header("Recent Activity");
-                    let headers = vec!["Time", "Request ID", "Model", "Status", "Earned"];
-                    let mut rows = Vec::new();
-                    for item in activity {
-                        rows.push(vec![
-                            item.get("time").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            item.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            item.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            item.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            item.get("earned").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        ]);
-                    }
-                    output::print_table(&headers, &rows);
+                && !activity.is_empty()
+            {
+                println!();
+                output::print_header("Recent Activity");
+                let headers = vec!["Time", "Request ID", "Model", "Status", "Earned"];
+                let mut rows = Vec::new();
+                for item in activity {
+                    rows.push(vec![
+                        item.get("time")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        item.get("request_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        item.get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        item.get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        item.get("earned")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    ]);
                 }
+                output::print_table(&headers, &rows);
+            }
         }
 
         Ok(())
@@ -743,9 +826,14 @@ impl ProviderModelsCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let models: Vec<serde_json::Value> = rpc.call("tenzro_listModels", serde_json::json!([{
-            "provider": self.address.as_deref()
-        }])).await?;
+        let models: Vec<serde_json::Value> = rpc
+            .call(
+                "tenzro_listModels",
+                serde_json::json!([{
+                    "provider": self.address.as_deref()
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -759,22 +847,52 @@ impl ProviderModelsCmd {
             return Ok(());
         }
 
-        let headers = vec!["Model ID", "Name", "Status", "Requests", "Avg Price", "Earnings"];
+        let headers = vec![
+            "Model ID",
+            "Name",
+            "Status",
+            "Requests",
+            "Avg Price",
+            "Earnings",
+        ];
         let mut rows = Vec::new();
         let mut active_count = 0u64;
 
         for model in &models {
-            let status = model.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let status = model
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             if status.to_lowercase().contains("active") {
                 active_count += 1;
             }
             rows.push(vec![
-                model.get("model_id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                model.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                model
+                    .get("model_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                model
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
                 status.to_string(),
-                model.get("requests").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
-                model.get("avg_price").and_then(|v| v.as_str()).unwrap_or("N/A").to_string(),
-                model.get("earnings").and_then(|v| v.as_str()).unwrap_or("0 TNZO").to_string(),
+                model
+                    .get("requests")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .to_string(),
+                model
+                    .get("avg_price")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+                    .to_string(),
+                model
+                    .get("earnings")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0 TNZO")
+                    .to_string(),
             ]);
         }
         output::print_table(&headers, &rows);
@@ -893,7 +1011,10 @@ impl PricingSetCmd {
                 "price_per_cached_write_token",
                 self.price_per_cached_write_token_wei,
             ),
-            ("price_per_reasoning_loop", self.price_per_reasoning_loop_wei),
+            (
+                "price_per_reasoning_loop",
+                self.price_per_reasoning_loop_wei,
+            ),
             ("price_per_image_token", self.price_per_image_token_wei),
             ("price_per_audio_second", self.price_per_audio_second_wei),
             ("price_per_video_second", self.price_per_video_second_wei),
@@ -957,7 +1078,8 @@ impl PricingShowCmd {
         let spinner = output::create_spinner("Fetching pricing...");
 
         let rpc = RpcClient::new(&self.rpc);
-        let pricing: ProviderPricing = rpc.call("tenzro_getProviderPricing", serde_json::json!([]))
+        let pricing: ProviderPricing = rpc
+            .call("tenzro_getProviderPricing", serde_json::json!([]))
             .await?;
 
         spinner.finish_and_clear();
@@ -1039,9 +1161,7 @@ impl ProviderListCmd {
             serde_json::json!({})
         };
 
-        let providers: Vec<serde_json::Value> = rpc
-            .call("tenzro_listProviders", params)
-            .await?;
+        let providers: Vec<serde_json::Value> = rpc.call("tenzro_listProviders", params).await?;
 
         spinner.finish_and_clear();
 
@@ -1056,39 +1176,65 @@ impl ProviderListCmd {
             return Ok(());
         }
 
-        let headers = vec!["Peer ID", "Address", "Type", "Models", "Capabilities", "Status", "Endpoint"];
+        let headers = vec![
+            "Peer ID",
+            "Address",
+            "Type",
+            "Models",
+            "Capabilities",
+            "Status",
+            "Endpoint",
+        ];
         let mut rows = Vec::new();
 
         for p in &providers {
-            let peer_id = p.get("peer_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let peer_id = p
+                .get("peer_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let peer_id_short = if peer_id.len() > 16 {
-                format!("{}...{}", &peer_id[..8], &peer_id[peer_id.len()-6..])
+                format!("{}...{}", &peer_id[..8], &peer_id[peer_id.len() - 6..])
             } else {
                 peer_id.to_string()
             };
 
-            let address = p.get("provider_address").and_then(|v| v.as_str()).unwrap_or("");
+            let address = p
+                .get("provider_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let addr_short = output::format_address(address);
 
-            let provider_type = p.get("provider_type").and_then(|v| v.as_str()).unwrap_or("general");
+            let provider_type = p
+                .get("provider_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("general");
 
-            let models = p.get("served_models")
+            let models = p
+                .get("served_models")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter()
-                    .filter_map(|m| m.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "))
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
                 .unwrap_or_default();
 
-            let capabilities = p.get("capabilities")
+            let capabilities = p
+                .get("capabilities")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter()
-                    .filter_map(|m| m.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "))
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
                 .unwrap_or_default();
 
-            let status = p.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let status = p
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let is_local = p.get("is_local").and_then(|v| v.as_bool()).unwrap_or(false);
             let status_display = if is_local {
                 format!("{} (local)", status)
@@ -1113,7 +1259,8 @@ impl ProviderListCmd {
 
         println!();
         output::print_field("Total Providers", &providers.len().to_string());
-        let local_count = providers.iter()
+        let local_count = providers
+            .iter()
             .filter(|p| p.get("is_local").and_then(|v| v.as_bool()).unwrap_or(false))
             .count();
         if local_count > 0 {
@@ -1174,11 +1321,17 @@ impl ProviderCapacityCmd {
         ];
         let mut rows = Vec::new();
 
-        let fmt_f64 = |v: Option<f64>| v.map(|x| format!("{:.1}", x)).unwrap_or_else(|| "—".to_string());
+        let fmt_f64 = |v: Option<f64>| {
+            v.map(|x| format!("{:.1}", x))
+                .unwrap_or_else(|| "—".to_string())
+        };
         let fmt_u64 = |v: Option<u64>| v.map(|x| x.to_string()).unwrap_or_else(|| "—".to_string());
 
         for p in &providers {
-            let addr = p.get("provider_address").and_then(|v| v.as_str()).unwrap_or("");
+            let addr = p
+                .get("provider_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let source = p.get("source").and_then(|v| v.as_str()).unwrap_or("");
             let adv = p.get("advertised");
             let meas = p.get("measured");
@@ -1195,8 +1348,12 @@ impl ProviderCapacityCmd {
             let trust_tps = meas
                 .and_then(|m| m.get("reputation_discounted_tokens_per_sec"))
                 .and_then(|v| v.as_f64());
-            let p95 = meas.and_then(|m| m.get("p95_latency_ms")).and_then(|v| v.as_u64());
-            let reputation = meas.and_then(|m| m.get("reputation")).and_then(|v| v.as_u64());
+            let p95 = meas
+                .and_then(|m| m.get("p95_latency_ms"))
+                .and_then(|v| v.as_u64());
+            let reputation = meas
+                .and_then(|m| m.get("reputation"))
+                .and_then(|v| v.as_u64());
 
             rows.push(vec![
                 output::format_address(addr),

@@ -77,19 +77,19 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit, Payload},
 };
 use axum::{
+    Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dashmap::DashMap;
-use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey, SigningKey as EdSigningKey};
-use rand::{rngs::OsRng, RngCore};
+use ed25519_dalek::{Signature as EdSignature, SigningKey as EdSigningKey, Verifier, VerifyingKey};
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -180,12 +180,12 @@ impl ShareEscrow {
     /// Drop expired entries. Called on every escrow interaction so the
     /// map self-bounds without a separate sweeper task.
     fn sweep(&self, now_ms: u64) {
-        self.entries
-            .retain(|_, e| e.expires_at_ms > now_ms);
+        self.entries.retain(|_, e| e.expires_at_ms > now_ms);
     }
 
     fn key(credential_id: &str, surface_key: &str, nonce_b64: &str) -> String {
-        let mut k = String::with_capacity(credential_id.len() + surface_key.len() + nonce_b64.len() + 2);
+        let mut k =
+            String::with_capacity(credential_id.len() + surface_key.len() + nonce_b64.len() + 2);
         k.push_str(credential_id);
         k.push('\0');
         k.push_str(surface_key);
@@ -465,7 +465,10 @@ fn verify_assertion(
         return Err(wallet_error(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
-            &format!("clientDataJSON.type must be 'webauthn.get', got '{}'", cd.ty),
+            &format!(
+                "clientDataJSON.type must be 'webauthn.get', got '{}'",
+                cd.ty
+            ),
         ));
     }
     if cd.challenge != expected_nonce_b64 {
@@ -687,27 +690,31 @@ mod tests {
 
         // Correct AAD decrypts.
         let correct_aad = wrap_aad("cred-A", "vault.0");
-        assert!(cipher
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: &wrapped[12..],
-                    aad: &correct_aad,
-                },
-            )
-            .is_ok());
+        assert!(
+            cipher
+                .decrypt(
+                    nonce,
+                    Payload {
+                        msg: &wrapped[12..],
+                        aad: &correct_aad,
+                    },
+                )
+                .is_ok()
+        );
 
         // Wrong AAD fails.
         let wrong_aad = wrap_aad("cred-A", "vault.1");
-        assert!(cipher
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: &wrapped[12..],
-                    aad: &wrong_aad,
-                },
-            )
-            .is_err());
+        assert!(
+            cipher
+                .decrypt(
+                    nonce,
+                    Payload {
+                        msg: &wrapped[12..],
+                        aad: &wrong_aad,
+                    },
+                )
+                .is_err()
+        );
     }
 
     /// Full roundtrip: deterministic credential signing key

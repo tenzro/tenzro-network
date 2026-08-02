@@ -206,9 +206,9 @@ pub fn reconstruct(
     // Concatenate the k data shards and strip padding.
     let mut out = Vec::with_capacity(k * slots[0].as_ref().map_or(0, |s| s.len()));
     for slot in slots.iter().take(k) {
-        let bytes = slot.as_ref().ok_or_else(|| StorageProviderError::Erasure(
-            "data shard still missing after reconstruct".to_string(),
-        ))?;
+        let bytes = slot.as_ref().ok_or_else(|| {
+            StorageProviderError::Erasure("data shard still missing after reconstruct".to_string())
+        })?;
         out.extend_from_slice(bytes);
     }
     out.truncate(original_len);
@@ -235,7 +235,10 @@ mod tests {
         let data = vec![7u8; 1000];
         let shards = encode(&data, scheme).unwrap();
         // Drop 2 shards (== m): still reconstructs.
-        let surviving: Vec<Shard> = shards.into_iter().filter(|s| s.index != 1 && s.index != 4).collect();
+        let surviving: Vec<Shard> = shards
+            .into_iter()
+            .filter(|s| s.index != 1 && s.index != 4)
+            .collect();
         assert_eq!(surviving.len(), 4);
         let back = reconstruct(&surviving, scheme, data.len(), "obj2").unwrap();
         assert_eq!(back, data);
@@ -249,7 +252,14 @@ mod tests {
         // Drop 3 shards (> m): cannot reconstruct.
         let surviving: Vec<Shard> = shards.into_iter().take(3).collect();
         let err = reconstruct(&surviving, scheme, data.len(), "obj3").unwrap_err();
-        assert!(matches!(err, StorageProviderError::InsufficientShards { have: 3, need: 4, .. }));
+        assert!(matches!(
+            err,
+            StorageProviderError::InsufficientShards {
+                have: 3,
+                need: 4,
+                ..
+            }
+        ));
     }
 
     #[test]

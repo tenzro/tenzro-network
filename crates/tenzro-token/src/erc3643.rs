@@ -471,10 +471,7 @@ impl ComplianceRegistry {
             "Adding claim topic {} for address {} from issuer {}",
             claim.topic, address, claim.issuer
         );
-        self.identity_claims
-            .entry(address)
-            .or_default()
-            .push(claim);
+        self.identity_claims.entry(address).or_default().push(claim);
     }
 
     /// Returns `true` if the address holds a valid claim for the given topic
@@ -552,10 +549,7 @@ impl ComplianceRegistry {
     /// describe what a claim asserts (e.g. KYC tier, accredited investor
     /// status, country of residence).
     pub fn register_claim_topic(&self, info: ClaimTopicInfo) {
-        info!(
-            "Registered claim topic {}: {}",
-            info.topic_id, info.name
-        );
+        info!("Registered claim topic {}: {}", info.topic_id, info.name);
         self.claim_topics.insert(info.topic_id, info);
     }
 
@@ -652,12 +646,12 @@ impl ComplianceRegistry {
         address: Address,
         added_by: String,
     ) -> Result<()> {
-        let entry = self
-            .token_compliance
-            .get(token_id)
-            .ok_or_else(|| TokenError::AssetNotFound {
-                asset_id: token_id.to_hex(),
-            })?;
+        let entry =
+            self.token_compliance
+                .get(token_id)
+                .ok_or_else(|| TokenError::AssetNotFound {
+                    asset_id: token_id.to_hex(),
+                })?;
 
         entry.value().transfer_restrictions.whitelist.insert(
             address,
@@ -671,19 +665,19 @@ impl ComplianceRegistry {
     }
 
     /// Removes an address from the token's whitelist.
-    pub fn remove_from_whitelist(
-        &self,
-        token_id: &TokenId,
-        address: &Address,
-    ) -> Result<()> {
-        let entry = self
-            .token_compliance
-            .get(token_id)
-            .ok_or_else(|| TokenError::AssetNotFound {
-                asset_id: token_id.to_hex(),
-            })?;
+    pub fn remove_from_whitelist(&self, token_id: &TokenId, address: &Address) -> Result<()> {
+        let entry =
+            self.token_compliance
+                .get(token_id)
+                .ok_or_else(|| TokenError::AssetNotFound {
+                    asset_id: token_id.to_hex(),
+                })?;
 
-        entry.value().transfer_restrictions.whitelist.remove(address);
+        entry
+            .value()
+            .transfer_restrictions
+            .whitelist
+            .remove(address);
         Ok(())
     }
 
@@ -691,18 +685,9 @@ impl ComplianceRegistry {
 
     /// Records a token receipt for holding-period and holder-count tracking.
     /// Called by the settlement layer after a successful transfer.
-    pub fn record_receipt(
-        &self,
-        token_id: &TokenId,
-        address: Address,
-        amount: u128,
-    ) {
+    pub fn record_receipt(&self, token_id: &TokenId, address: Address, amount: u128) {
         let key = (address, *token_id);
-        let was_zero = self
-            .balances
-            .get(&key)
-            .map(|v| *v == 0)
-            .unwrap_or(true);
+        let was_zero = self.balances.get(&key).map(|v| *v == 0).unwrap_or(true);
 
         // Update balance
         self.balances
@@ -724,12 +709,7 @@ impl ComplianceRegistry {
     }
 
     /// Records a token send for holder-count tracking.
-    pub fn record_send(
-        &self,
-        token_id: &TokenId,
-        address: Address,
-        amount: u128,
-    ) {
+    pub fn record_send(&self, token_id: &TokenId, address: Address, amount: u128) {
         let key = (address, *token_id);
         let mut became_zero = false;
 
@@ -824,12 +804,12 @@ impl ComplianceRegistry {
         to: &Address,
         amount: u128,
     ) -> Result<ComplianceCheckResult> {
-        let rules = self
-            .token_compliance
-            .get(token_id)
-            .ok_or_else(|| TokenError::AssetNotFound {
-                asset_id: token_id.to_hex(),
-            })?;
+        let rules =
+            self.token_compliance
+                .get(token_id)
+                .ok_or_else(|| TokenError::AssetNotFound {
+                    asset_id: token_id.to_hex(),
+                })?;
 
         let mut result = ComplianceCheckResult::new();
 
@@ -911,10 +891,8 @@ impl ComplianceRegistry {
         if let Some(max) = rules.transfer_restrictions.max_transfer_amount {
             result.add_rule("max_transfer_amount");
             if amount > max {
-                result.add_violation(ComplianceViolation::AmountExceedsLimit {
-                    amount,
-                    limit: max,
-                });
+                result
+                    .add_violation(ComplianceViolation::AmountExceedsLimit { amount, limit: max });
             }
         }
 
@@ -957,10 +935,7 @@ impl ComplianceRegistry {
                 // This would be a new holder
                 let current = rules.holder_count();
                 if current >= max {
-                    result.add_violation(ComplianceViolation::MaxHoldersReached {
-                        max,
-                        current,
-                    });
+                    result.add_violation(ComplianceViolation::MaxHoldersReached { max, current });
                 }
             }
         }
@@ -1016,7 +991,12 @@ mod tests {
         }
     }
 
-    fn make_country_claim(issuer: &str, country: u16, valid_from: i64, valid_to: i64) -> IdentityClaim {
+    fn make_country_claim(
+        issuer: &str,
+        country: u16,
+        valid_from: i64,
+        valid_to: i64,
+    ) -> IdentityClaim {
         IdentityClaim {
             topic: CLAIM_TOPIC_COUNTRY,
             scheme: 1,
@@ -1043,13 +1023,15 @@ mod tests {
         let reg = ComplianceRegistry::new();
         let token = test_token();
 
-        reg.register_compliance(
-            ComplianceRules::new(token).with_kyc(2),
-        );
+        reg.register_compliance(ComplianceRules::new(token).with_kyc(2));
 
         reg.add_trusted_issuer(trusted_issuer(
             "did:tenzro:human:issuer1",
-            vec![CLAIM_TOPIC_KYC, CLAIM_TOPIC_ACCREDITED_INVESTOR, CLAIM_TOPIC_COUNTRY],
+            vec![
+                CLAIM_TOPIC_KYC,
+                CLAIM_TOPIC_ACCREDITED_INVESTOR,
+                CLAIM_TOPIC_COUNTRY,
+            ],
         ));
 
         let from = Address::new([0x01; 32]);
@@ -1058,8 +1040,14 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         // Both addresses have KYC tier 3 (satisfies tier 2 requirement)
-        reg.add_identity_claim(from, make_kyc_claim("did:tenzro:human:issuer1", 3, now - 1000, now + 100_000));
-        reg.add_identity_claim(to, make_kyc_claim("did:tenzro:human:issuer1", 3, now - 1000, now + 100_000));
+        reg.add_identity_claim(
+            from,
+            make_kyc_claim("did:tenzro:human:issuer1", 3, now - 1000, now + 100_000),
+        );
+        reg.add_identity_claim(
+            to,
+            make_kyc_claim("did:tenzro:human:issuer1", 3, now - 1000, now + 100_000),
+        );
 
         (reg, from, to)
     }
@@ -1079,7 +1067,9 @@ mod tests {
         let (reg, from, to) = setup_kyc_registry();
         let token = test_token();
 
-        let result = reg.can_transfer(&token, &from, &to, 100 * ONE_TNZO).unwrap();
+        let result = reg
+            .can_transfer(&token, &from, &to, 100 * ONE_TNZO)
+            .unwrap();
         assert!(result.compliant);
         assert!(result.violations.is_empty());
         assert!(result.checked_rules.contains(&"kyc_tier".to_string()));
@@ -1102,16 +1092,25 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         // `from` has tier 1 (below required 2)
-        reg.add_identity_claim(from, make_kyc_claim("did:tenzro:human:issuer1", 1, now - 100, now + 100_000));
+        reg.add_identity_claim(
+            from,
+            make_kyc_claim("did:tenzro:human:issuer1", 1, now - 100, now + 100_000),
+        );
         // `to` has tier 2 (exactly meets requirement)
-        reg.add_identity_claim(to, make_kyc_claim("did:tenzro:human:issuer1", 2, now - 100, now + 100_000));
+        reg.add_identity_claim(
+            to,
+            make_kyc_claim("did:tenzro:human:issuer1", 2, now - 100, now + 100_000),
+        );
 
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(!result.compliant);
         assert_eq!(result.violations.len(), 1);
         assert!(matches!(
             &result.violations[0],
-            ComplianceViolation::InsufficientKyc { actual_tier: Some(1), .. }
+            ComplianceViolation::InsufficientKyc {
+                actual_tier: Some(1),
+                ..
+            }
         ));
     }
 
@@ -1120,12 +1119,22 @@ mod tests {
         let (reg, from, to) = setup_kyc_registry();
         let token = test_token();
 
-        reg.freeze_address(token, from, "Suspicious activity".to_string(), "admin".to_string());
+        reg.freeze_address(
+            token,
+            from,
+            "Suspicious activity".to_string(),
+            "admin".to_string(),
+        );
         assert!(reg.is_frozen(&token, &from));
 
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(!result.compliant);
-        assert!(result.violations.iter().any(|v| matches!(v, ComplianceViolation::AddressFrozen { .. })));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, ComplianceViolation::AddressFrozen { .. }))
+        );
 
         // Unfreeze and retry
         reg.unfreeze_address(&token, &from);
@@ -1151,17 +1160,26 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         // US = 840, restricted
-        reg.add_identity_claim(from, make_country_claim("did:tenzro:human:issuer1", 840, now - 100, now + 100_000));
-        reg.add_identity_claim(to, make_country_claim("did:tenzro:human:issuer1", 276, now - 100, now + 100_000)); // Germany
+        reg.add_identity_claim(
+            from,
+            make_country_claim("did:tenzro:human:issuer1", 840, now - 100, now + 100_000),
+        );
+        reg.add_identity_claim(
+            to,
+            make_country_claim("did:tenzro:human:issuer1", 276, now - 100, now + 100_000),
+        ); // Germany
 
         reg.set_country_restriction(token, 840, false); // US not allowed
-        reg.set_country_restriction(token, 276, true);  // Germany allowed
+        reg.set_country_restriction(token, 276, true); // Germany allowed
 
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(!result.compliant);
         assert!(result.violations.iter().any(|v| matches!(
             v,
-            ComplianceViolation::CountryRestricted { country_code: 840, .. }
+            ComplianceViolation::CountryRestricted {
+                country_code: 840,
+                ..
+            }
         )));
     }
 
@@ -1181,10 +1199,12 @@ mod tests {
             .can_transfer(&token, &from, &to, 2_000 * ONE_TNZO)
             .unwrap();
         assert!(!result.compliant);
-        assert!(result.violations.iter().any(|v| matches!(
-            v,
-            ComplianceViolation::AmountExceedsLimit { .. }
-        )));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, ComplianceViolation::AmountExceedsLimit { .. }))
+        );
 
         // Under limit passes
         let result = reg
@@ -1206,11 +1226,18 @@ mod tests {
         // Neither address is whitelisted
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(!result.compliant);
-        assert!(result.violations.iter().any(|v| matches!(v, ComplianceViolation::NotWhitelisted { .. })));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, ComplianceViolation::NotWhitelisted { .. }))
+        );
 
         // Whitelist both
-        reg.add_to_whitelist(&token, from, "admin".to_string()).unwrap();
-        reg.add_to_whitelist(&token, to, "admin".to_string()).unwrap();
+        reg.add_to_whitelist(&token, from, "admin".to_string())
+            .unwrap();
+        reg.add_to_whitelist(&token, to, "admin".to_string())
+            .unwrap();
 
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(result.compliant);
@@ -1227,7 +1254,10 @@ mod tests {
         ));
 
         let now = chrono::Utc::now().timestamp();
-        reg.add_identity_claim(addr, make_kyc_claim("did:tenzro:human:issuer1", 2, now - 100, now + 100_000));
+        reg.add_identity_claim(
+            addr,
+            make_kyc_claim("did:tenzro:human:issuer1", 2, now - 100, now + 100_000),
+        );
 
         assert!(reg.verify_claim(&addr, CLAIM_TOPIC_KYC));
         // Different topic, no claim
@@ -1241,7 +1271,10 @@ mod tests {
 
         // Add a claim from an untrusted issuer
         let now = chrono::Utc::now().timestamp();
-        reg.add_identity_claim(addr, make_kyc_claim("did:tenzro:human:untrusted", 3, now - 100, now + 100_000));
+        reg.add_identity_claim(
+            addr,
+            make_kyc_claim("did:tenzro:human:untrusted", 3, now - 100, now + 100_000),
+        );
 
         // No trusted issuers registered, so claim should not verify
         assert!(!reg.verify_claim(&addr, CLAIM_TOPIC_KYC));
@@ -1280,10 +1313,7 @@ mod tests {
             reg.balances.get(&(from, token)).map(|v| *v).unwrap_or(0),
             500
         );
-        assert_eq!(
-            reg.balances.get(&(to, token)).map(|v| *v).unwrap_or(0),
-            500
-        );
+        assert_eq!(reg.balances.get(&(to, token)).map(|v| *v).unwrap_or(0), 500);
     }
 
     #[test]
@@ -1332,10 +1362,12 @@ mod tests {
         // Try to transfer immediately -- holding period not met
         let result = reg.can_transfer(&token, &from, &to, 500).unwrap();
         assert!(!result.compliant);
-        assert!(result.violations.iter().any(|v| matches!(
-            v,
-            ComplianceViolation::HoldingPeriodNotMet { .. }
-        )));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, ComplianceViolation::HoldingPeriodNotMet { .. }))
+        );
 
         // Manually backdate the first receipt to simulate time passing
         let old_ts = chrono::Utc::now().timestamp() - 100_000;
@@ -1359,7 +1391,12 @@ mod tests {
 
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(!result.compliant);
-        assert!(result.violations.iter().any(|v| matches!(v, ComplianceViolation::TokenPaused)));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, ComplianceViolation::TokenPaused))
+        );
     }
 
     #[test]
@@ -1379,15 +1416,26 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         // Only `from` is accredited
-        reg.add_identity_claim(from, make_accreditation_claim("did:tenzro:human:issuer1", now - 100, now + 100_000));
+        reg.add_identity_claim(
+            from,
+            make_accreditation_claim("did:tenzro:human:issuer1", now - 100, now + 100_000),
+        );
 
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(!result.compliant);
         // `to` is not accredited
-        assert!(result.violations.iter().any(|v| matches!(v, ComplianceViolation::NotAccredited { .. })));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, ComplianceViolation::NotAccredited { .. }))
+        );
 
         // Accredit `to` as well
-        reg.add_identity_claim(to, make_accreditation_claim("did:tenzro:human:issuer1", now - 100, now + 100_000));
+        reg.add_identity_claim(
+            to,
+            make_accreditation_claim("did:tenzro:human:issuer1", now - 100, now + 100_000),
+        );
 
         let result = reg.can_transfer(&token, &from, &to, 100).unwrap();
         assert!(result.compliant);

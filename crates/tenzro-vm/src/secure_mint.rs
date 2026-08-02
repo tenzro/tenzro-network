@@ -317,11 +317,13 @@ impl SecureMintRegistry {
             let rolled = policy.mint_window_secs > 0
                 && now.saturating_sub(policy.window_started_at) >= policy.mint_window_secs;
             let base = if rolled { 0 } else { policy.window_minted };
-            let next = base.checked_add(amount).ok_or(SecureMintError::VelocityExceeded {
-                window_minted: base,
-                amount,
-                cap: policy.mint_window_cap,
-            })?;
+            let next = base
+                .checked_add(amount)
+                .ok_or(SecureMintError::VelocityExceeded {
+                    window_minted: base,
+                    amount,
+                    cap: policy.mint_window_cap,
+                })?;
             if next > policy.mint_window_cap {
                 return Err(SecureMintError::VelocityExceeded {
                     window_minted: base,
@@ -331,14 +333,15 @@ impl SecureMintRegistry {
             }
             next
         };
-        let new_circulating = policy
-            .circulating
-            .checked_add(amount)
-            .ok_or(SecureMintError::ExceedsReserve {
-                circulating: policy.circulating,
-                amount,
-                reserve: policy.reserve,
-            })?;
+        let new_circulating =
+            policy
+                .circulating
+                .checked_add(amount)
+                .ok_or(SecureMintError::ExceedsReserve {
+                    circulating: policy.circulating,
+                    amount,
+                    reserve: policy.reserve,
+                })?;
         if new_circulating > policy.reserve {
             return Err(SecureMintError::ExceedsReserve {
                 circulating: policy.circulating,
@@ -370,9 +373,7 @@ impl SecureMintRegistry {
         policy.circulating += amount;
         if policy.mint_window_cap > 0 {
             // Restart the window at `now` when it rolled over or was empty.
-            if (window_minted == amount && policy.window_minted != 0)
-                || policy.window_minted == 0
-            {
+            if (window_minted == amount && policy.window_minted != 0) || policy.window_minted == 0 {
                 policy.window_started_at = now;
             }
             policy.window_minted = window_minted;
@@ -579,7 +580,9 @@ mod tests {
         let mut policy = policy_with_reserve(1_000);
         policy.ttl_secs = 60;
         reg.set_policy(token, policy);
-        let err = reg.check_and_mint(&token, 1, 1_700_000_000 + 120).unwrap_err();
+        let err = reg
+            .check_and_mint(&token, 1, 1_700_000_000 + 120)
+            .unwrap_err();
         assert!(matches!(err, SecureMintError::AttestationExpired { .. }));
     }
 
@@ -608,7 +611,9 @@ mod tests {
     #[test]
     fn mint_without_policy_is_fail_closed() {
         let reg = SecureMintRegistry::new();
-        let err = reg.check_and_mint(&[6u8; 20], 1, 1_700_000_000).unwrap_err();
+        let err = reg
+            .check_and_mint(&[6u8; 20], 1, 1_700_000_000)
+            .unwrap_err();
         assert!(matches!(err, SecureMintError::NotConfigured(_)));
     }
 
@@ -621,7 +626,9 @@ mod tests {
         policy.heartbeat_secs = 60; // but feed must refresh each minute
         reg.set_policy(token, policy);
         // 120s later: inside TTL, past heartbeat → FeedStale.
-        let err = reg.check_and_mint(&token, 1, 1_700_000_000 + 120).unwrap_err();
+        let err = reg
+            .check_and_mint(&token, 1, 1_700_000_000 + 120)
+            .unwrap_err();
         assert!(matches!(err, SecureMintError::FeedStale { .. }));
     }
 

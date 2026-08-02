@@ -30,8 +30,8 @@ use parking_lot::RwLock;
 use tenzro_settlement::obligations::ProviderObligations;
 use tenzro_settlement::rental::StakeLedger;
 use tenzro_storage_provider::{
-    answer_challenge, new_challenge, verify_challenge, ChargeOutcome, RedundancyScheme,
-    StorageDeal, StorageMeter, StoragePricing, StorageProvider,
+    ChargeOutcome, RedundancyScheme, StorageDeal, StorageMeter, StoragePricing, StorageProvider,
+    answer_challenge, new_challenge, verify_challenge,
 };
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::Address;
@@ -128,7 +128,15 @@ impl StorageProviderRuntime {
         obligations: Arc<ProviderObligations>,
         policy: PricingPolicy,
     ) -> Self {
-        Self::build(provider, resolver, balances, stake_ledger, obligations, policy, None)
+        Self::build(
+            provider,
+            resolver,
+            balances,
+            stake_ledger,
+            obligations,
+            policy,
+            None,
+        )
     }
 
     /// Like [`new`], but persists object descriptors and streaming deals to the
@@ -237,7 +245,14 @@ impl StorageProviderRuntime {
         confidential: Option<tenzro_types::access_policy::ConfidentialSeal>,
     ) -> tenzro_storage_provider::Result<tenzro_storage_provider::ObjectDescriptor> {
         self.store
-            .store_object(object_id, owner_hex, data, scheme, access_policy, confidential)
+            .store_object(
+                object_id,
+                owner_hex,
+                data,
+                scheme,
+                access_policy,
+                confidential,
+            )
             .await
     }
 
@@ -345,10 +360,12 @@ impl StorageProviderRuntime {
                 .iter()
                 .find(|s| s.index == idx)
                 .map(|s| s.bytes.clone())
-                .ok_or_else(|| tenzro_storage_provider::StorageProviderError::ShardNotFound {
-                    object_id: object_id.to_string(),
-                    shard_index: idx,
-                })
+                .ok_or_else(
+                    || tenzro_storage_provider::StorageProviderError::ShardNotFound {
+                        object_id: object_id.to_string(),
+                        shard_index: idx,
+                    },
+                )
         }) {
             Ok(r) => r,
             Err(e) => {
@@ -384,7 +401,8 @@ impl StorageProviderRuntime {
     /// [`step_pricing`]: StorageProviderRuntime::step_pricing
     pub fn enable_dynamic_pricing(&self, capacity: u128, min_rate: u128, max_rate: u128) {
         let start = self.effective_rate();
-        let dynamic = DynamicPricing::new(ResourceKind::Storage, capacity, start, min_rate, max_rate);
+        let dynamic =
+            DynamicPricing::new(ResourceKind::Storage, capacity, start, min_rate, max_rate);
         *self.pricing.write() = PricingPolicy::Dynamic(dynamic);
         info!(
             capacity,

@@ -138,7 +138,9 @@ mod onnx_backend {
     use ort::session::Session;
     use ort::value::Tensor;
     use std::time::Instant;
-    use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
+    use tokenizers::{
+        PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams,
+    };
 
     /// ORT-backed text encoder covering Qwen3-Embedding, BGE-M3,
     /// Snowflake Arctic Embed, and EmbeddingGemma. Pooling and padding
@@ -186,14 +188,15 @@ mod onnx_backend {
 
             // Introspect inputs.
             let input_names: Vec<String> = session.inputs.iter().map(|i| i.name.clone()).collect();
-            let input_ids_name = pick_input(&input_names, &["input_ids"])
-                .ok_or_else(|| ModelError::InvalidModel(
-                    "ONNX model is missing 'input_ids' input".to_string(),
-                ))?;
-            let attention_mask_name = pick_input(&input_names, &["attention_mask"])
-                .ok_or_else(|| ModelError::InvalidModel(
-                    "ONNX model is missing 'attention_mask' input".to_string(),
-                ))?;
+            let input_ids_name = pick_input(&input_names, &["input_ids"]).ok_or_else(|| {
+                ModelError::InvalidModel("ONNX model is missing 'input_ids' input".to_string())
+            })?;
+            let attention_mask_name =
+                pick_input(&input_names, &["attention_mask"]).ok_or_else(|| {
+                    ModelError::InvalidModel(
+                        "ONNX model is missing 'attention_mask' input".to_string(),
+                    )
+                })?;
             let position_ids_name = pick_input(&input_names, &["position_ids"]);
             let token_type_ids_name = pick_input(&input_names, &["token_type_ids"]);
 
@@ -204,20 +207,22 @@ mod onnx_backend {
                 session.outputs.iter().map(|o| o.name.clone()).collect();
             let (output_name, output_is_pooled) = match family {
                 TextEncoderFamily::SentenceEmbedding => {
-                    let n = pick_input(&output_names, &["sentence_embedding"])
-                        .ok_or_else(|| ModelError::InvalidModel(
-                            "SentenceEmbedding family requires a 'sentence_embedding' output"
-                                .to_string(),
-                        ))?;
+                    let n =
+                        pick_input(&output_names, &["sentence_embedding"]).ok_or_else(|| {
+                            ModelError::InvalidModel(
+                                "SentenceEmbedding family requires a 'sentence_embedding' output"
+                                    .to_string(),
+                            )
+                        })?;
                     (n, true)
                 }
                 _ => {
                     // Prefer last_hidden_state; fall back to first output.
                     let n = pick_input(&output_names, &["last_hidden_state", "hidden_states"])
                         .or_else(|| output_names.first().cloned())
-                        .ok_or_else(|| ModelError::InvalidModel(
-                            "ONNX model has no outputs".to_string(),
-                        ))?;
+                        .ok_or_else(|| {
+                            ModelError::InvalidModel("ONNX model has no outputs".to_string())
+                        })?;
                     (n, false)
                 }
             };
@@ -231,10 +236,7 @@ mod onnx_backend {
                 TextEncoderFamily::Qwen3 => PaddingDirection::Left,
                 _ => PaddingDirection::Right,
             };
-            let pad_id = tokenizer
-                .get_padding()
-                .map(|p| p.pad_id)
-                .unwrap_or(0);
+            let pad_id = tokenizer.get_padding().map(|p| p.pad_id).unwrap_or(0);
             let pad_token = tokenizer
                 .get_padding()
                 .map(|p| p.pad_token.clone())
@@ -278,13 +280,22 @@ mod onnx_backend {
                 .map_err(|e| ModelError::InferenceError(format!("tokenize: {}", e)))?;
 
             let batch_size = encodings.len();
-            let seq_len = encodings.iter().map(|e| e.get_ids().len()).max().unwrap_or(0);
+            let seq_len = encodings
+                .iter()
+                .map(|e| e.get_ids().len())
+                .max()
+                .unwrap_or(0);
 
             let mut input_ids = Array2::<i64>::zeros((batch_size, seq_len));
             let mut attention_mask = Array2::<i64>::zeros((batch_size, seq_len));
 
             for (b, enc) in encodings.iter().enumerate() {
-                for (i, (id, m)) in enc.get_ids().iter().zip(enc.get_attention_mask()).enumerate() {
+                for (i, (id, m)) in enc
+                    .get_ids()
+                    .iter()
+                    .zip(enc.get_attention_mask())
+                    .enumerate()
+                {
                     input_ids[[b, i]] = *id as i64;
                     attention_mask[[b, i]] = *m as i64;
                 }
@@ -330,8 +341,10 @@ mod onnx_backend {
             // cloned because the pooling step below still needs it.
             let input_ids_tensor = Tensor::from_array(input_ids)
                 .map_err(|e| ModelError::InferenceError(format!("ORT tensor input_ids: {}", e)))?;
-            let attention_mask_tensor = Tensor::from_array(attention_mask.clone())
-                .map_err(|e| ModelError::InferenceError(format!("ORT tensor attention_mask: {}", e)))?;
+            let attention_mask_tensor =
+                Tensor::from_array(attention_mask.clone()).map_err(|e| {
+                    ModelError::InferenceError(format!("ORT tensor attention_mask: {}", e))
+                })?;
 
             // Build the input feed dynamically — we may have 2, 3, or 4
             // inputs depending on whether the export declares position_ids
@@ -343,7 +356,10 @@ mod onnx_backend {
                 let mut feed: Vec<(String, ort::session::SessionInputValue<'_>)> =
                     Vec::with_capacity(4);
                 feed.push((self.input_ids_name.clone(), input_ids_tensor.into()));
-                feed.push((self.attention_mask_name.clone(), attention_mask_tensor.into()));
+                feed.push((
+                    self.attention_mask_name.clone(),
+                    attention_mask_tensor.into(),
+                ));
                 if let (Some(name), Some(arr)) = (&self.position_ids_name, position_ids) {
                     let t = Tensor::from_array(arr).map_err(|e| {
                         ModelError::InferenceError(format!("ORT tensor position_ids: {}", e))
@@ -674,11 +690,7 @@ mod tests {
         value: f32,
     }
     impl TextEncoder for ConstantEncoder {
-        fn embed(
-            &self,
-            inputs: &[String],
-            config: &TextEmbedConfig,
-        ) -> Result<TextEmbedResult> {
+        fn embed(&self, inputs: &[String], config: &TextEmbedConfig) -> Result<TextEmbedResult> {
             let mut embeddings: Vec<Vec<f32>> = (0..inputs.len())
                 .map(|_| vec![self.value; self.dim])
                 .collect();
@@ -724,7 +736,11 @@ mod tests {
         let rt = TextEmbeddingRuntime::new();
         rt.register("k", Arc::new(ConstantEncoder { dim: 4, value: 1.0 }));
         let r = rt
-            .embed("k", vec!["a".into(), "b".into()], TextEmbedConfig::default())
+            .embed(
+                "k",
+                vec!["a".into(), "b".into()],
+                TextEmbedConfig::default(),
+            )
             .await
             .unwrap();
         assert_eq!(r.dim, 4);
@@ -744,6 +760,10 @@ mod tests {
         assert_eq!(r.dim, 4);
         assert_eq!(r.embeddings[0].len(), 4);
         let n: f32 = r.embeddings[0].iter().map(|v| v * v).sum::<f32>().sqrt();
-        assert!((n - 1.0).abs() < 1e-6, "expected unit norm after MRL, got {}", n);
+        assert!(
+            (n - 1.0).abs() < 1e-6,
+            "expected unit norm after MRL, got {}",
+            n
+        );
     }
 }

@@ -37,21 +37,21 @@ torch = pytest.importorskip("torch")
 pd = pytest.importorskip("pandas")
 requests = pytest.importorskip("requests")
 
-from tenzro_trainer.adapters.timeseries import build_adapter  # noqa: E402
-from tenzro_trainer.gradient import (  # noqa: E402
+from tenzro_trainer.adapters.timeseries import build_adapter
+from tenzro_trainer.gradient import (
     TrainerKey,
     build_outer_gradient,
     compute_outer_delta,
     partition_state_dict,
     serialize_fragment,
 )
-from tenzro_trainer.inner_loop import (  # noqa: E402
+from tenzro_trainer.inner_loop import (
     load_partial_state,
     run_inner_loop,
     snapshot_state,
 )
-from tenzro_trainer.rpc_bridge import RpcClient  # noqa: E402
-from tenzro_trainer.types import (  # noqa: E402
+from tenzro_trainer.rpc_bridge import RpcClient
+from tenzro_trainer.types import (
     AggregationRule,
     ArchitectureSpec,
     GradientQuantization,
@@ -60,7 +60,6 @@ from tenzro_trainer.types import (  # noqa: E402
     TrainingTaskSpec,
     TrainingTier,
 )
-
 
 ARCHITECTURE = {"metadata": {"d_model": 64, "num_layers": 2, "num_heads": 4}}
 HYPERPARAMS = {"batch_size": 8}
@@ -200,10 +199,14 @@ def _spawn_node(data_dir: str, boot_nodes: str | None = None) -> _Node:
         cmd += ["--boot-nodes", boot_nodes]
     log_path = os.path.join(data_dir, "tenzro-node.log")
     node_env = {**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "info")}
-    log_fh = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen(
-        cmd, stdout=log_fh, stderr=subprocess.STDOUT, text=True, env=node_env
-    )
+    # The handle outlives this function deliberately: it is the child's stdout
+    # for the life of the process, and closing it here would truncate the log
+    # the test reads on failure. `Popen` dups the descriptor, so releasing our
+    # reference once the child holds it is safe.
+    with open(log_path, "w", encoding="utf-8") as log_fh:
+        proc = subprocess.Popen(
+            cmd, stdout=log_fh, stderr=subprocess.STDOUT, text=True, env=node_env
+        )
     return _Node(url=url, p2p_port=p2p_port, log_path=log_path, proc=proc)
 
 
@@ -257,13 +260,13 @@ def _write_shard(tmp_path, seed: int, n_points: int = 4096) -> str:
     return f"file://{path}"
 
 
-def _round_start_state() -> dict[str, "torch.Tensor"]:
+def _round_start_state() -> dict[str, torch.Tensor]:
     return snapshot_state(build_adapter(ARCHITECTURE, HYPERPARAMS).model())
 
 
 def _trainer_delta(
-    shard_uri: str, start_state: dict[str, "torch.Tensor"]
-) -> dict[str, "torch.Tensor"]:
+    shard_uri: str, start_state: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
     adapter = build_adapter(ARCHITECTURE, HYPERPARAMS)
     load_partial_state(adapter.model(), start_state)
     _pre, post, _report = run_inner_loop(adapter, shard_uri, INNER_STEPS)
@@ -388,8 +391,7 @@ def test_finalized_round_fans_out_to_peer_syncer(peered_nodes, tmp_path):
             f_idx: serialize_fragment(f_idx, frag, quant).digest
             for f_idx, frag in enumerate(frags0)
         }
-        sync_round = client_a.finalize_round(task_id, round_index, post_hashes)
-        root_a = sync_round["state_root"]
+        client_a.finalize_round(task_id, round_index, post_hashes)
 
         # A advanced synchronously (RPC path).
         run_a = client_a.get_run(task_id)

@@ -22,10 +22,8 @@ use std::path::PathBuf;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
-use tantivy::schema::{
-    Field, IndexRecordOption, Schema, FAST, INDEXED, STORED, STRING, TEXT,
-};
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::schema::{FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TEXT};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
 use super::{MemoryError, MemoryFilter, MemoryKind, MemoryRecord, MemorySource, Result};
 
@@ -59,9 +57,8 @@ impl TantivyTextBackend {
     pub fn new(index_path: impl Into<PathBuf>) -> Result<Self> {
         let mut path: PathBuf = index_path.into();
         path.push(TEXT_INDEX_DIR);
-        std::fs::create_dir_all(&path).map_err(|e| {
-            MemoryError::Text(format!("create_dir_all {:?}: {}", path, e))
-        })?;
+        std::fs::create_dir_all(&path)
+            .map_err(|e| MemoryError::Text(format!("create_dir_all {:?}: {}", path, e)))?;
 
         let schema = Self::build_schema();
         let index = match Index::open_in_dir(&path) {
@@ -238,7 +235,11 @@ impl TantivyTextBackend {
         self.insert(record_after_archive)
     }
 
-    fn combine_with_filter(&self, text_query: Box<dyn Query>, filter: &MemoryFilter) -> BooleanQuery {
+    fn combine_with_filter(
+        &self,
+        text_query: Box<dyn Query>,
+        filter: &MemoryFilter,
+    ) -> BooleanQuery {
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         clauses.push((Occur::Must, text_query));
         for (occur, q) in self.filter_clauses(filter) {
@@ -320,7 +321,6 @@ impl TantivyTextBackend {
             da_pointer,
         })
     }
-
 }
 
 fn first_text(doc: &TantivyDocument, field: Field) -> Option<String> {
@@ -383,13 +383,28 @@ mod tests {
         let dir = tempdir().unwrap();
         let backend = TantivyTextBackend::new(dir.path()).unwrap();
         backend
-            .insert(&rec("did:tenzro:machine:a", "alpha", MemoryKind::Granted, 100))
+            .insert(&rec(
+                "did:tenzro:machine:a",
+                "alpha",
+                MemoryKind::Granted,
+                100,
+            ))
             .unwrap();
         backend
-            .insert(&rec("did:tenzro:machine:a", "alpha", MemoryKind::Granted, 200))
+            .insert(&rec(
+                "did:tenzro:machine:a",
+                "alpha",
+                MemoryKind::Granted,
+                200,
+            ))
             .unwrap();
         backend
-            .insert(&rec("did:tenzro:machine:a", "alpha", MemoryKind::Granted, 300))
+            .insert(&rec(
+                "did:tenzro:machine:a",
+                "alpha",
+                MemoryKind::Granted,
+                300,
+            ))
             .unwrap();
         let mut f = MemoryFilter::for_agent("did:tenzro:machine:a");
         f.min_created_at_ms = Some(150);
@@ -407,7 +422,12 @@ mod tests {
             .insert(&rec("did:tenzro:machine:a", "old", MemoryKind::Granted, 1))
             .unwrap();
         backend
-            .insert(&rec("did:tenzro:machine:a", "new", MemoryKind::Granted, 1000))
+            .insert(&rec(
+                "did:tenzro:machine:a",
+                "new",
+                MemoryKind::Granted,
+                1000,
+            ))
             .unwrap();
         let f = MemoryFilter::for_agent("did:tenzro:machine:a");
         let res = backend.list(&f, 10).unwrap();
@@ -421,10 +441,20 @@ mod tests {
         let dir = tempdir().unwrap();
         let backend = TantivyTextBackend::new(dir.path()).unwrap();
         backend
-            .insert(&rec("did:tenzro:machine:a", "shared text", MemoryKind::Granted, 1))
+            .insert(&rec(
+                "did:tenzro:machine:a",
+                "shared text",
+                MemoryKind::Granted,
+                1,
+            ))
             .unwrap();
         backend
-            .insert(&rec("did:tenzro:machine:b", "shared text", MemoryKind::Granted, 2))
+            .insert(&rec(
+                "did:tenzro:machine:b",
+                "shared text",
+                MemoryKind::Granted,
+                2,
+            ))
             .unwrap();
         let f = MemoryFilter::for_agent("did:tenzro:machine:a");
         let res = backend.search_by_text("shared", 10, &f).unwrap();

@@ -16,8 +16,8 @@
 
 use crate::error::{CryptoError, Result};
 use crate::keys::{KeyType, PublicKey};
-use crate::pq::{ml_dsa_verify, MlDsaSigningKey};
-use crate::signatures::{verify as verify_classical, Signature, Signer};
+use crate::pq::{MlDsaSigningKey, ml_dsa_verify};
+use crate::signatures::{Signature, Signer, verify as verify_classical};
 use serde::{Deserialize, Serialize};
 use zeroize::ZeroizeOnDrop;
 
@@ -146,8 +146,7 @@ impl StandardHybridVerifier {
 impl HybridVerifier for StandardHybridVerifier {
     fn verify(&self, msg: &[u8], sig: &CompositeSignature) -> Result<()> {
         // 1. Classical leg.
-        let classical_sig =
-            Signature::new(self.public_key.key_type(), sig.classical.clone());
+        let classical_sig = Signature::new(self.public_key.key_type(), sig.classical.clone());
         verify_classical(&self.public_key.classical, msg, &classical_sig)?;
 
         // 2. PQ leg — both halves are mandatory, no downgrade path.

@@ -3,17 +3,19 @@
 use std::sync::Arc;
 
 use crate::{
-    account_abstraction::{Eip7702Authorization, EIP_7702_TX_TYPE, process_7702_authorizations},
+    account_abstraction::{EIP_7702_TX_TYPE, Eip7702Authorization, process_7702_authorizations},
     config::VmConfig,
+    daml::DamlExecutor,
     error::{Result, VmError},
     evm::EvmExecutor,
     gas::GasOracle,
+    native::NativeExecutor,
     precompiles::{PrecompileRegistry, TransientReentrancyGuard},
     svm::SvmExecutor,
-    daml::DamlExecutor,
-    native::NativeExecutor,
     traits::{VmExecutor, VmState, VmType},
-    types::{CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction},
+    types::{
+        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction,
+    },
 };
 
 /// Multi-VM runtime that routes transactions to the appropriate executor
@@ -77,17 +79,10 @@ impl MultiVmRuntime {
         )?);
 
         // Initialize SVM executor
-        let svm = Arc::new(SvmExecutor::new(
-            config.clone(),
-            gas_oracle.clone(),
-        )?);
+        let svm = Arc::new(SvmExecutor::new(config.clone(), gas_oracle.clone())?);
 
         // Initialize Daml executor (connects to co-located Canton participant)
-        let daml = Arc::new(DamlExecutor::new(
-            config.clone(),
-            canton_host,
-            canton_port,
-        )?);
+        let daml = Arc::new(DamlExecutor::new(config.clone(), canton_host, canton_port)?);
 
         // Initialize Native executor for Tenzro-specific transactions
         let native = Arc::new(NativeExecutor::new(config.clone())?);
@@ -195,9 +190,7 @@ impl MultiVmRuntime {
             }
 
             let pk_bytes = tx.public_key.as_ref().ok_or_else(|| {
-                VmError::ExecutionFailed(
-                    "Transaction has signature but no public key".to_string(),
-                )
+                VmError::ExecutionFailed("Transaction has signature but no public key".to_string())
             })?;
             if pk_bytes.is_empty() {
                 return Err(VmError::ExecutionFailed(
@@ -213,19 +206,21 @@ impl MultiVmRuntime {
                         tenzro_crypto::keys::KeyType::Secp256k1
                     };
 
-                    let public_key = tenzro_crypto::keys::PublicKey::new(key_type, pk_bytes.clone());
+                    let public_key =
+                        tenzro_crypto::keys::PublicKey::new(key_type, pk_bytes.clone());
                     let signature = tenzro_crypto::signatures::Signature::new(
                         key_type,
                         signature_bytes.clone(),
                     );
 
-                    tenzro_crypto::signatures::verify(&public_key, digest, &signature)
-                        .map_err(|e| {
+                    tenzro_crypto::signatures::verify(&public_key, digest, &signature).map_err(
+                        |e| {
                             VmError::ExecutionFailed(format!(
                                 "Transaction signature verification failed: {}",
                                 e
                             ))
-                        })?;
+                        },
+                    )?;
 
                     tracing::debug!(
                         "Transaction signature verified for {}",
@@ -326,11 +321,7 @@ impl MultiVmRuntime {
     }
 
     /// Perform a read-only contract call with automatic VM routing
-    pub async fn call(
-        &self,
-        call: &ContractCall,
-        state: &dyn VmState,
-    ) -> Result<CallResult> {
+    pub async fn call(&self, call: &ContractCall, state: &dyn VmState) -> Result<CallResult> {
         tracing::debug!(
             "Executing call: contract={}, vm_type={:?}",
             hex::encode(&call.contract),
@@ -368,11 +359,7 @@ impl MultiVmRuntime {
     }
 
     /// Estimate gas for a transaction
-    pub async fn estimate_gas(
-        &self,
-        tx: &VmTransaction,
-        state: &dyn VmState,
-    ) -> Result<u64> {
+    pub async fn estimate_gas(&self, tx: &VmTransaction, state: &dyn VmState) -> Result<u64> {
         // Get the appropriate executor
         let executor = self.get_executor(tx.vm_type)?;
 
@@ -415,7 +402,11 @@ impl MultiVmRuntime {
         VmStatus {
             evm: "ready",
             svm: "ready",
-            daml: if daml_connected { "connected" } else { "disconnected" },
+            daml: if daml_connected {
+                "connected"
+            } else {
+                "disconnected"
+            },
             daml_connected,
         }
     }

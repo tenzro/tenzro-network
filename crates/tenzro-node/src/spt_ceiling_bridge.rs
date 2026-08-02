@@ -36,11 +36,11 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tracing::debug;
 
+use tenzro_payments::Result;
 use tenzro_payments::mpp::stripe::StripeClient;
 use tenzro_payments::mpp::stripe_spt::{
     SharedPaymentGrantedToken, SptCeilingResolver, SptCeilingSnapshot,
 };
-use tenzro_payments::Result;
 
 /// `SptCeilingResolver` impl backed by [`StripeClient`] + an in-memory
 /// snapshot cache. See module docs.

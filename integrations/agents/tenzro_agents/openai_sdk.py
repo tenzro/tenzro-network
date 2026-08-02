@@ -21,7 +21,8 @@ imported lazily so this module imports without the SDK installed.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping, Optional, Tuple
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from .core import ReputationHook, TenzroClient, TenzroDidEnvelope
 
@@ -51,8 +52,8 @@ class TenzroOpenAIWrapper:
         did: str,
         *,
         signing_key: Any = None,
-        subject_agent_id: Optional[int] = None,
-        mandate_factory: Optional[Callable[[Any], Tuple[Mapping[str, Any], Mapping[str, Any]]]] = None,
+        subject_agent_id: int | None = None,
+        mandate_factory: Callable[[Any], tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
     ) -> None:
         self.client = client
         self.did = did

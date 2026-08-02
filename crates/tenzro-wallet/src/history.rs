@@ -538,9 +538,7 @@ mod tests {
             history.record(&addr, test_tx_record(addr, to));
         }
 
-        let filter = HistoryFilter::default()
-            .with_limit(3)
-            .with_offset(2);
+        let filter = HistoryFilter::default().with_limit(3).with_offset(2);
 
         let page = history.get_filtered(&addr, &filter);
         assert_eq!(page.len(), 3);

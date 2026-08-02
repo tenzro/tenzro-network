@@ -142,8 +142,10 @@ impl MessageContent {
                 ));
             };
             let Some((meta, payload)) = rest.split_once(',') else {
-                return Err("image_url data: URI has no ',' separating its metadata from its payload"
-                    .to_string());
+                return Err(
+                    "image_url data: URI has no ',' separating its metadata from its payload"
+                        .to_string(),
+                );
             };
             if !meta.ends_with(";base64") {
                 return Err(format!(
@@ -196,10 +198,9 @@ mod tests {
 
     #[test]
     fn multiple_text_parts_join_with_newlines() {
-        let c: MessageContent = serde_json::from_str(
-            r#"[{"type":"text","text":"one"},{"type":"text","text":"two"}]"#,
-        )
-        .unwrap();
+        let c: MessageContent =
+            serde_json::from_str(r#"[{"type":"text","text":"one"},{"type":"text","text":"two"}]"#)
+                .unwrap();
         assert_eq!(c.as_text(), "one\ntwo");
         assert!(c.unsupported_part(false).is_none());
     }
@@ -273,10 +274,8 @@ mod tests {
 
     #[test]
     fn detail_and_file_fields_are_omitted_when_unset() {
-        let c: MessageContent = serde_json::from_str(
-            r#"[{"type":"file","file":{"file_id":"f-1"}}]"#,
-        )
-        .unwrap();
+        let c: MessageContent =
+            serde_json::from_str(r#"[{"type":"file","file":{"file_id":"f-1"}}]"#).unwrap();
         assert_eq!(
             serde_json::to_string(&c).unwrap(),
             r#"[{"type":"file","file":{"file_id":"f-1"}}]"#

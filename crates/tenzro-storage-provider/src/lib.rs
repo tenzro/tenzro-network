@@ -34,16 +34,14 @@ pub mod provider;
 pub mod redundancy;
 
 pub use error::{Result, StorageProviderError};
+pub use metering::{ChargeOutcome, StorageDeal, StorageDealStatus, StorageMeter, StoragePricing};
 pub use placement::{
-    hrw_score, select_holders, select_tiered_holders, should_replicate, should_replicate_tiered,
-    MemberReachability, TieredCandidate, TieredHolders,
-};
-pub use metering::{
-    ChargeOutcome, StorageDeal, StorageDealStatus, StorageMeter, StoragePricing,
+    MemberReachability, TieredCandidate, TieredHolders, hrw_score, select_holders,
+    select_tiered_holders, should_replicate, should_replicate_tiered,
 };
 pub use por::{
-    answer_challenge, challenge_digest, new_challenge, verify_challenge, Challenge,
-    ChallengeResponse,
+    Challenge, ChallengeResponse, answer_challenge, challenge_digest, new_challenge,
+    verify_challenge,
 };
 pub use provider::{ObjectDescriptor, ShardRef, StorageProvider};
-pub use redundancy::{encode, reconstruct, RedundancyScheme, Shard};
+pub use redundancy::{RedundancyScheme, Shard, encode, reconstruct};

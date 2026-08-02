@@ -186,7 +186,6 @@ pub enum ToolStatus {
     Deprecated,
 }
 
-
 /// A tool (MCP server, API endpoint, or native capability) published
 /// to the Tenzro Network tools registry.
 ///
@@ -259,7 +258,6 @@ pub struct ToolDefinition {
     // ── Plugin-host extensions (operator brokerage of custom + third-
     // party MCPs). All optional; default-None preserves the legacy
     // remote-Streamable-HTTP behavior for existing entries.
-
     /// Upstream credential injection for this tool. When `Some`, the
     /// operator's sealed secret (looked up by `sealed_secret_ref` at
     /// invocation time) is injected per the variant rules — into a

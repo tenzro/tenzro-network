@@ -342,20 +342,19 @@ impl IdentityVerifier {
         // (issuer == subject == single visited entry), skip the insert
         // — the recursion termination logic below will handle the
         // self-issued case correctly.
-        let is_self_issued_at_root =
-            depth == 0 && credential.credential_subject.id == issuer_did;
+        let is_self_issued_at_root = depth == 0 && credential.credential_subject.id == issuer_did;
         if !is_self_issued_at_root && !visited.insert(issuer_did.clone()) {
             return Err(IdentityError::TrustChainCycle { issuer: issuer_did });
         }
 
         // Resolve issuer
-        let issuer = self
-            .registry
-            .resolve(&issuer_did)
-            .map_err(|e| IdentityError::TrustChainBroken {
-                issuer: issuer_did.clone(),
-                reason: format!("could not resolve issuer: {}", e),
-            })?;
+        let issuer =
+            self.registry
+                .resolve(&issuer_did)
+                .map_err(|e| IdentityError::TrustChainBroken {
+                    issuer: issuer_did.clone(),
+                    reason: format!("could not resolve issuer: {}", e),
+                })?;
 
         // Issuer must be Active
         if issuer.status != IdentityStatus::Active {
@@ -412,7 +411,10 @@ impl IdentityVerifier {
             .credentials
             .iter()
             .filter(|c| c.tenzro_type == credential.tenzro_type && c.is_valid())
-            .max_by_key(|c| c.expiration_date.unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC));
+            .max_by_key(|c| {
+                c.expiration_date
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+            });
 
         if let Some(next) = next_credential {
             return self.walk_chain(next, visited, chain_length, terminating_root, depth + 1);
@@ -425,7 +427,11 @@ impl IdentityVerifier {
     }
 
     /// Checks if an identity has a specific credential type
-    pub fn has_credential(&self, did: &str, credential_type: &TenzroCredentialType) -> Result<bool> {
+    pub fn has_credential(
+        &self,
+        did: &str,
+        credential_type: &TenzroCredentialType,
+    ) -> Result<bool> {
         let identity = self.registry.resolve(did)?;
         Ok(identity
             .credentials
@@ -445,7 +451,9 @@ impl IdentityVerifier {
                     let controller = self.registry.resolve(ctrl)?;
                     match &controller.identity_data {
                         IdentityData::Human { kyc_tier, .. } => Ok(*kyc_tier >= required_tier),
-                        IdentityData::Institution { kyb_tier, .. } => Ok(*kyb_tier >= required_tier),
+                        IdentityData::Institution { kyb_tier, .. } => {
+                            Ok(*kyb_tier >= required_tier)
+                        }
                         _ => Ok(false),
                     }
                 } else {
@@ -510,9 +518,7 @@ fn verify_credential_against_issuer(
     let assertion_keys: Vec<&[u8]> = issuer
         .public_keys
         .iter()
-        .filter(|k| {
-            k.purposes.is_empty() || k.purposes.contains(&KeyPurpose::AssertionMethod)
-        })
+        .filter(|k| k.purposes.is_empty() || k.purposes.contains(&KeyPurpose::AssertionMethod))
         .map(|k| k.public_key.as_slice())
         .collect();
 
@@ -630,9 +636,21 @@ mod tests {
             .unwrap()
             .identity;
 
-        assert!(verifier.meets_kyc_tier(&human.did_string(), KycTier::Basic).unwrap());
-        assert!(verifier.meets_kyc_tier(&human.did_string(), KycTier::Enhanced).unwrap());
-        assert!(!verifier.meets_kyc_tier(&human.did_string(), KycTier::Full).unwrap());
+        assert!(
+            verifier
+                .meets_kyc_tier(&human.did_string(), KycTier::Basic)
+                .unwrap()
+        );
+        assert!(
+            verifier
+                .meets_kyc_tier(&human.did_string(), KycTier::Enhanced)
+                .unwrap()
+        );
+        assert!(
+            !verifier
+                .meets_kyc_tier(&human.did_string(), KycTier::Full)
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -659,15 +677,21 @@ mod tests {
             .unwrap()
             .identity;
 
-        assert!(verifier
-            .validate_operation(&machine.did_string(), "inference", Some(5_000))
-            .unwrap());
-        assert!(!verifier
-            .validate_operation(&machine.did_string(), "admin", None)
-            .unwrap());
-        assert!(!verifier
-            .validate_operation(&machine.did_string(), "inference", Some(20_000))
-            .unwrap());
+        assert!(
+            verifier
+                .validate_operation(&machine.did_string(), "inference", Some(5_000))
+                .unwrap()
+        );
+        assert!(
+            !verifier
+                .validate_operation(&machine.did_string(), "admin", None)
+                .unwrap()
+        );
+        assert!(
+            !verifier
+                .validate_operation(&machine.did_string(), "inference", Some(20_000))
+                .unwrap()
+        );
     }
 
     // ─── CRITICAL #41 trust-chain tests ──────────────────────────────────
@@ -678,9 +702,9 @@ mod tests {
     /// an AssertionMethod.
     async fn build_chain_setup() -> (
         Arc<IdentityRegistry>,
-        TenzroIdentity, // root
-        TenzroIdentity, // intermediate
-        TenzroIdentity, // leaf
+        TenzroIdentity,       // root
+        TenzroIdentity,       // intermediate
+        TenzroIdentity,       // leaf
         VerifiableCredential, // intermediate cred (signed by root)
         VerifiableCredential, // leaf cred (signed by intermediate)
     ) {
@@ -742,7 +766,10 @@ mod tests {
             root.did_string(),
             intermediate.did_string(),
         );
-        let msg = serde_json::to_vec(&intermediate_cred.credential_subject).unwrap();
+        let msg = intermediate_cred
+            .credential_subject
+            .canonical_bytes()
+            .unwrap();
         let signer = Ed25519SignerImpl::new(root_kp).unwrap();
         let sig = signer.sign(&msg).unwrap();
         intermediate_cred = intermediate_cred.with_proof(CredentialProof::new(
@@ -757,7 +784,7 @@ mod tests {
             intermediate.did_string(),
             leaf.did_string(),
         );
-        let msg = serde_json::to_vec(&leaf_cred.credential_subject).unwrap();
+        let msg = leaf_cred.credential_subject.canonical_bytes().unwrap();
         let signer = Ed25519SignerImpl::new(intermediate_kp).unwrap();
         let sig = signer.sign(&msg).unwrap();
         leaf_cred = leaf_cred.with_proof(CredentialProof::new(
@@ -778,7 +805,14 @@ mod tests {
         leaf_with_cred.credentials.push(leaf_cred.clone());
         registry.upsert_identity_for_test(leaf_with_cred);
 
-        (registry, root, intermediate, leaf, intermediate_cred, leaf_cred)
+        (
+            registry,
+            root,
+            intermediate,
+            leaf,
+            intermediate_cred,
+            leaf_cred,
+        )
     }
 
     #[tokio::test]
@@ -842,8 +876,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_rejected_when_signature_invalid() {
-        let (registry, root, _intermediate, leaf, _ic, mut leaf_cred) =
-            build_chain_setup().await;
+        let (registry, root, _intermediate, leaf, _ic, mut leaf_cred) = build_chain_setup().await;
 
         // Tamper with the proof bytes
         if let Some(proof) = leaf_cred.proof.as_mut() {
@@ -857,10 +890,7 @@ mod tests {
         let result = verifier.verify_credential_chain(&leaf_cred, &leaf.did_string());
         assert!(!result.valid);
         assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.contains("signature")),
+            result.issues.iter().any(|i| i.contains("signature")),
             "expected signature issue, got {:?}",
             result.issues
         );
@@ -868,8 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_rejects_unsigned_credential() {
-        let (registry, root, _intermediate, leaf, _ic, mut leaf_cred) =
-            build_chain_setup().await;
+        let (registry, root, _intermediate, leaf, _ic, mut leaf_cred) = build_chain_setup().await;
 
         leaf_cred.proof = None;
 
@@ -909,10 +938,7 @@ mod tests {
             .unwrap()
             .identity;
 
-        for (did, key) in [
-            (id_a.did_string(), &pub_a),
-            (id_b.did_string(), &pub_b),
-        ] {
+        for (did, key) in [(id_a.did_string(), &pub_a), (id_b.did_string(), &pub_b)] {
             let mut id = registry.resolve(&did).unwrap();
             id.public_keys = vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -929,7 +955,7 @@ mod tests {
             id_a.did_string(),
             id_b.did_string(),
         );
-        let msg = serde_json::to_vec(&cred_a_to_b.credential_subject).unwrap();
+        let msg = cred_a_to_b.credential_subject.canonical_bytes().unwrap();
         let sig = Ed25519SignerImpl::new(kp_a).unwrap().sign(&msg).unwrap();
         cred_a_to_b = cred_a_to_b.with_proof(CredentialProof::new(
             "Ed25519Signature2020",
@@ -943,7 +969,7 @@ mod tests {
             id_b.did_string(),
             id_a.did_string(),
         );
-        let msg = serde_json::to_vec(&cred_b_to_a.credential_subject).unwrap();
+        let msg = cred_b_to_a.credential_subject.canonical_bytes().unwrap();
         let sig = Ed25519SignerImpl::new(kp_b).unwrap().sign(&msg).unwrap();
         cred_b_to_a = cred_b_to_a.with_proof(CredentialProof::new(
             "Ed25519Signature2020",
@@ -1030,7 +1056,11 @@ mod tests {
 
         // No trust roots configured → rootless mode → self-issued is terminal
         let result = verifier.verify_credential_chain(&cred, &id.did_string());
-        assert!(result.valid, "rootless mode self-issued should pass: {:?}", result.issues);
+        assert!(
+            result.valid,
+            "rootless mode self-issued should pass: {:?}",
+            result.issues
+        );
         assert_eq!(result.chain_length, 1);
     }
 
@@ -1046,7 +1076,11 @@ mod tests {
         let result = verifier.verify_trust_chain(&leaf.did_string()).unwrap();
         assert_eq!(result.chain_results.len(), 1);
         assert_eq!(result.verified_chains, 1);
-        assert!(result.valid, "leaf chain should verify: {:?}", result.issues);
+        assert!(
+            result.valid,
+            "leaf chain should verify: {:?}",
+            result.issues
+        );
         // Sanity check the embedded chain result
         assert_eq!(
             result.chain_results[0].terminating_root,

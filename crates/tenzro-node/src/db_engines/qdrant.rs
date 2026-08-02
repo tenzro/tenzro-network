@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use tenzro_database::{
-    catalog::engine_ids, DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth,
-    QueryRequest, QueryResponse, Result,
+    DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
+    Result, catalog::engine_ids,
 };
 
 /// A thin REST client to an operator-run Qdrant endpoint.
@@ -56,7 +56,9 @@ impl QdrantEngine {
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let mut b = self.http.request(method, format!("{}{path}", self.base_url));
+        let mut b = self
+            .http
+            .request(method, format!("{}{path}", self.base_url));
         if let Some(k) = &self.api_key {
             b = b.header("api-key", k);
         }
@@ -89,9 +91,9 @@ impl DatabaseEngine for QdrantEngine {
     async fn start_partition(&self, handle: &PartitionHandle) -> Result<()> {
         let cfg: QdrantCfg = serde_json::from_value(handle.engine_config.clone())
             .map_err(|e| DatabaseError::InvalidRequest(format!("qdrant config: {e}")))?;
-        let dimension = cfg
-            .dimension
-            .ok_or_else(|| DatabaseError::InvalidRequest("qdrant config missing dimension".into()))?;
+        let dimension = cfg.dimension.ok_or_else(|| {
+            DatabaseError::InvalidRequest("qdrant config missing dimension".into())
+        })?;
         let distance = match cfg.distance.as_deref().unwrap_or("cosine") {
             "cosine" | "Cosine" => "Cosine",
             "dot" | "Dot" => "Dot",
@@ -119,14 +121,19 @@ impl DatabaseEngine for QdrantEngine {
         } else {
             let status = resp.status();
             let txt = resp.text().await.unwrap_or_default();
-            Err(DatabaseError::Backend(format!("qdrant create {status}: {txt}")))
+            Err(DatabaseError::Backend(format!(
+                "qdrant create {status}: {txt}"
+            )))
         }
     }
 
     async fn stop_partition(&self, handle: &PartitionHandle) -> Result<()> {
         let collection = Self::collection_name(handle);
         let resp = self
-            .req(reqwest::Method::DELETE, &format!("/collections/{collection}"))
+            .req(
+                reqwest::Method::DELETE,
+                &format!("/collections/{collection}"),
+            )
             .send()
             .await
             .map_err(|e| DatabaseError::Backend(format!("qdrant delete: {e}")))?;
@@ -136,7 +143,9 @@ impl DatabaseEngine for QdrantEngine {
         } else {
             let status = resp.status();
             let txt = resp.text().await.unwrap_or_default();
-            Err(DatabaseError::Backend(format!("qdrant delete {status}: {txt}")))
+            Err(DatabaseError::Backend(format!(
+                "qdrant delete {status}: {txt}"
+            )))
         }
     }
 
@@ -156,7 +165,11 @@ impl DatabaseEngine for QdrantEngine {
                 )
                 .await?
             }
-            QdrantOp::Search { vector, limit, filter } => {
+            QdrantOp::Search {
+                vector,
+                limit,
+                filter,
+            } => {
                 let mut body = serde_json::json!({
                     "vector": vector,
                     "limit": limit,
@@ -174,15 +187,16 @@ impl DatabaseEngine for QdrantEngine {
                 )
                 .await?
             }
-            QdrantOp::Count => self
-                .send(
+            QdrantOp::Count => {
+                self.send(
                     self.req(
                         reqwest::Method::POST,
                         &format!("/collections/{collection}/points/count"),
                     )
                     .json(&serde_json::json!({ "exact": true })),
                 )
-                .await?,
+                .await?
+            }
         };
         // Qdrant wraps payloads in { "result": ..., "status": ..., "time": ... }.
         let inner = result.get("result").cloned().unwrap_or(result);

@@ -27,9 +27,7 @@ impl BabylonCommand {
     pub async fn execute(&self) -> Result<()> {
         match self {
             Self::RegisterFinalityProvider(c) => c.execute().await,
-            Self::GetFinalityProvider(c) => {
-                c.execute("tenzro_babylonGetFinalityProvider").await
-            }
+            Self::GetFinalityProvider(c) => c.execute("tenzro_babylonGetFinalityProvider").await,
             Self::ListFinalityProviders(c) => c.execute().await,
             Self::TotalStakeForProvider(c) => {
                 c.execute("tenzro_babylonTotalStakeForProvider").await

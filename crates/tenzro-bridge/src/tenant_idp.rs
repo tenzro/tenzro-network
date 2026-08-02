@@ -104,10 +104,7 @@ pub trait TenantIdpProvisioner: Send + Sync {
     /// re-provisioning an existing tenant should return the
     /// already-minted client (or rotate the secret only when the
     /// caller explicitly requests it).
-    async fn mint_tenant_client(
-        &self,
-        req: &TenantIdpRequest,
-    ) -> Result<TenantIdpClient>;
+    async fn mint_tenant_client(&self, req: &TenantIdpRequest) -> Result<TenantIdpClient>;
 
     /// Delete (or deactivate) the per-tenant client by id. Called
     /// from `tenzro_revokeApiKey` to tear down a tenant's upstream
@@ -184,15 +181,10 @@ impl Auth0ManagementClient {
     /// bare `auth0_domain` from it.
     pub fn new(mgmt_url: &str, mgmt_client_id: &str, mgmt_client_secret: &str) -> Result<Self> {
         let url = reqwest::Url::parse(mgmt_url).map_err(|e| {
-            BridgeError::ConfigurationError(format!(
-                "Auth0 mgmt URL parse failed: {}",
-                e
-            ))
+            BridgeError::ConfigurationError(format!("Auth0 mgmt URL parse failed: {}", e))
         })?;
         let host = url.host_str().ok_or_else(|| {
-            BridgeError::ConfigurationError(
-                "Auth0 mgmt URL has no host".to_string(),
-            )
+            BridgeError::ConfigurationError("Auth0 mgmt URL has no host".to_string())
         })?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -259,8 +251,7 @@ impl Auth0ManagementClient {
         })?;
         *self.mgmt_token_cache.write() = Some(CachedToken {
             token: tok.access_token.clone(),
-            expires_at: std::time::Instant::now()
-                + std::time::Duration::from_secs(tok.expires_in),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(tok.expires_in),
         });
         Ok(tok.access_token)
     }
@@ -298,10 +289,7 @@ impl Auth0ManagementClient {
 
 #[async_trait]
 impl TenantIdpProvisioner for Auth0ManagementClient {
-    async fn mint_tenant_client(
-        &self,
-        req: &TenantIdpRequest,
-    ) -> Result<TenantIdpClient> {
+    async fn mint_tenant_client(&self, req: &TenantIdpRequest) -> Result<TenantIdpClient> {
         // Build the Auth0 client create body. We use the
         // `non_interactive` app type because tenants will run the
         // client_credentials grant against this client. The audience
@@ -337,12 +325,7 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
             .json(&create_body)
             .send()
             .await
-            .map_err(|e| {
-                BridgeError::AdapterError(format!(
-                    "Auth0 create-client failed: {}",
-                    e
-                ))
-            })?;
+            .map_err(|e| BridgeError::AdapterError(format!("Auth0 create-client failed: {}", e)))?;
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -353,10 +336,7 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
             )));
         }
         let v: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
-            BridgeError::AdapterError(format!(
-                "Auth0 create-client response not JSON: {}",
-                e
-            ))
+            BridgeError::AdapterError(format!("Auth0 create-client response not JSON: {}", e))
         })?;
         let client_id = v
             .get("client_id")
@@ -436,12 +416,7 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
             .bearer_auth(&mgmt_bearer)
             .send()
             .await
-            .map_err(|e| {
-                BridgeError::AdapterError(format!(
-                    "Auth0 delete-client failed: {}",
-                    e
-                ))
-            })?;
+            .map_err(|e| BridgeError::AdapterError(format!("Auth0 delete-client failed: {}", e)))?;
         let status = resp.status();
         if !status.is_success() && status.as_u16() != 404 {
             let body_text = resp.text().await.unwrap_or_default();
@@ -483,10 +458,7 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
             .send()
             .await
             .map_err(|e| {
-                BridgeError::AdapterError(format!(
-                    "Auth0 tenant token request failed: {}",
-                    e
-                ))
+                BridgeError::AdapterError(format!("Auth0 tenant token request failed: {}", e))
             })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -498,10 +470,7 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
             )));
         }
         let tok: OauthTokenResponse = serde_json::from_str(&text).map_err(|e| {
-            BridgeError::AdapterError(format!(
-                "Auth0 tenant token response not JSON: {}",
-                e
-            ))
+            BridgeError::AdapterError(format!("Auth0 tenant token response not JSON: {}", e))
         })?;
         self.tenant_token_cache.insert(
             client_id.to_string(),

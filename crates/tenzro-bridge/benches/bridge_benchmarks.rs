@@ -9,7 +9,7 @@
 //! These run on every outbound LayerZero / CCIP / deBridge / Canton message,
 //! so any regression here multiplies across all bridge fan-out.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use tenzro_bridge::message_format::{MessageType, TenzroMessage};
 use tenzro_crypto::KeyPair;
@@ -124,14 +124,12 @@ fn bench_encode_decode(c: &mut Criterion) {
 // ---------- fee-in-TNZO + ERC-7683 benches ----------
 
 use std::sync::Arc;
-use tenzro_bridge::fee_oracle::{
-    BridgeAdapterId, GovernanceFeeRow, GovernanceSetFeeOracle,
-};
+use tenzro_bridge::fee_oracle::{BridgeAdapterId, GovernanceFeeRow, GovernanceSetFeeOracle};
 use tenzro_bridge::fee_sponsor::{BridgeFeeSponsor, WiredBridgeFeeSurface};
 use tenzro_bridge::router::BridgeRouter;
 use tenzro_types::intent_7683::{
-    compute_order_id, BridgeFeeHint, CrossChainOrder, ProofRoute, TenzroOrderData,
-    TENZRO_MAINNET_CHAIN_ID,
+    BridgeFeeHint, CrossChainOrder, ProofRoute, TENZRO_MAINNET_CHAIN_ID, TenzroOrderData,
+    compute_order_id,
 };
 use tenzro_types::primitives::{Address, Hash};
 
@@ -189,7 +187,11 @@ fn bench_fee_oracle_quote(c: &mut Criterion) {
                 BridgeAdapterId::Canton,
             ] {
                 let q = rt
-                    .block_on(surface.oracle.quote(adapter, "eip155:1", black_box(1_000_000)))
+                    .block_on(
+                        surface
+                            .oracle
+                            .quote(adapter, "eip155:1", black_box(1_000_000)),
+                    )
                     .unwrap();
                 black_box(q);
             }

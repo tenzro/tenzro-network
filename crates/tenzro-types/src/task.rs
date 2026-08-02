@@ -182,7 +182,6 @@ pub enum DisputeResolution {
     RefundToPoster,
 }
 
-
 /// A task posted to the Tenzro Network task marketplace
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskInfo {

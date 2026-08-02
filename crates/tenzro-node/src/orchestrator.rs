@@ -471,13 +471,27 @@ impl LlmPlanner {
         let skills = catalog
             .skills
             .iter()
-            .map(|c| format!("  - skill \"{}\": {} [{}]", c.id, c.description, c.tags.join(",")))
+            .map(|c| {
+                format!(
+                    "  - skill \"{}\": {} [{}]",
+                    c.id,
+                    c.description,
+                    c.tags.join(",")
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let tools = catalog
             .tools
             .iter()
-            .map(|c| format!("  - tool \"{}\": {} [{}]", c.id, c.description, c.tags.join(",")))
+            .map(|c| {
+                format!(
+                    "  - tool \"{}\": {} [{}]",
+                    c.id,
+                    c.description,
+                    c.tags.join(",")
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         format!(
@@ -495,8 +509,16 @@ AGENTS_AVAILABLE: {agents}",
             use_cases = UseCase::ALL.join("|"),
             max = MAX_PLAN_STEPS,
             intent = request.intent,
-            skills = if skills.is_empty() { "  (none)".into() } else { skills },
-            tools = if tools.is_empty() { "  (none)".into() } else { tools },
+            skills = if skills.is_empty() {
+                "  (none)".into()
+            } else {
+                skills
+            },
+            tools = if tools.is_empty() {
+                "  (none)".into()
+            } else {
+                tools
+            },
             agents = catalog.agents_available,
         )
     }
@@ -589,16 +611,32 @@ pub trait StepExecutor: Send + Sync {
     ) -> Result<(String, u128, serde_json::Value)>;
 
     /// Runs a skill invocation, returning `(output_text, detail)`.
-    async fn run_skill(&self, skill_id: &str, input: &serde_json::Value) -> Result<(String, serde_json::Value)>;
+    async fn run_skill(
+        &self,
+        skill_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<(String, serde_json::Value)>;
 
     /// Runs a tool invocation, returning `(output_text, detail)`.
-    async fn run_tool(&self, tool_id: &str, input: &serde_json::Value) -> Result<(String, serde_json::Value)>;
+    async fn run_tool(
+        &self,
+        tool_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<(String, serde_json::Value)>;
 
     /// Delegates a task to an agent, returning `(reply_text, detail)`.
-    async fn run_agent(&self, capabilities: &[String], task: &str) -> Result<(String, serde_json::Value)>;
+    async fn run_agent(
+        &self,
+        capabilities: &[String],
+        task: &str,
+    ) -> Result<(String, serde_json::Value)>;
 
     /// Fans a task to a swarm, returning `(aggregated_text, detail)`.
-    async fn run_swarm(&self, members: &[SwarmMemberSpec], task: &str) -> Result<(String, serde_json::Value)>;
+    async fn run_swarm(
+        &self,
+        members: &[SwarmMemberSpec],
+        task: &str,
+    ) -> Result<(String, serde_json::Value)>;
 
     /// Estimates the cost of a model step at plan time, for the wallet-ceiling
     /// pre-check, without dispatching. Returns `0` when the step is free or
@@ -654,10 +692,13 @@ impl Orchestrator {
                 .steps
                 .iter()
                 .map(|s| match s {
-                    PlanStep::Model { use_case, model_id, .. } => {
+                    PlanStep::Model {
+                        use_case, model_id, ..
+                    } => {
                         let uc = UseCase::parse(use_case).unwrap_or(request.use_case);
                         let intent = request.model_route_intent(uc, 256);
-                        self.executor.estimate_model_cost(model_id.as_deref(), &intent)
+                        self.executor
+                            .estimate_model_cost(model_id.as_deref(), &intent)
                     }
                     _ => 0,
                 })
@@ -711,7 +752,11 @@ impl Orchestrator {
         };
 
         match step {
-            PlanStep::Model { use_case, model_id, input } => {
+            PlanStep::Model {
+                use_case,
+                model_id,
+                input,
+            } => {
                 let uc = UseCase::parse(use_case).unwrap_or(request.use_case);
                 let intent = request.model_route_intent(uc, (input.len() / 4).max(1) as u64);
                 let (output, cost, detail) = self
@@ -719,27 +764,79 @@ impl Orchestrator {
                     .run_model(model_id.as_deref(), &intent, input)
                     .await
                     .map_err(map_fail)?;
-                Ok((StepResult { kind: "model".into(), output, detail }, cost, false))
+                Ok((
+                    StepResult {
+                        kind: "model".into(),
+                        output,
+                        detail,
+                    },
+                    cost,
+                    false,
+                ))
             }
             PlanStep::Skill { skill_id, input } => {
-                let (output, detail) =
-                    self.executor.run_skill(skill_id, input).await.map_err(map_fail)?;
-                Ok((StepResult { kind: "skill".into(), output, detail }, 0, false))
+                let (output, detail) = self
+                    .executor
+                    .run_skill(skill_id, input)
+                    .await
+                    .map_err(map_fail)?;
+                Ok((
+                    StepResult {
+                        kind: "skill".into(),
+                        output,
+                        detail,
+                    },
+                    0,
+                    false,
+                ))
             }
             PlanStep::Tool { tool_id, input } => {
-                let (output, detail) =
-                    self.executor.run_tool(tool_id, input).await.map_err(map_fail)?;
-                Ok((StepResult { kind: "tool".into(), output, detail }, 0, false))
+                let (output, detail) = self
+                    .executor
+                    .run_tool(tool_id, input)
+                    .await
+                    .map_err(map_fail)?;
+                Ok((
+                    StepResult {
+                        kind: "tool".into(),
+                        output,
+                        detail,
+                    },
+                    0,
+                    false,
+                ))
             }
             PlanStep::Agent { capabilities, task } => {
-                let (output, detail) =
-                    self.executor.run_agent(capabilities, task).await.map_err(map_fail)?;
-                Ok((StepResult { kind: "agent".into(), output, detail }, 0, false))
+                let (output, detail) = self
+                    .executor
+                    .run_agent(capabilities, task)
+                    .await
+                    .map_err(map_fail)?;
+                Ok((
+                    StepResult {
+                        kind: "agent".into(),
+                        output,
+                        detail,
+                    },
+                    0,
+                    false,
+                ))
             }
             PlanStep::Swarm { members, task } => {
-                let (output, detail) =
-                    self.executor.run_swarm(members, task).await.map_err(map_fail)?;
-                Ok((StepResult { kind: "swarm".into(), output, detail }, 0, false))
+                let (output, detail) = self
+                    .executor
+                    .run_swarm(members, task)
+                    .await
+                    .map_err(map_fail)?;
+                Ok((
+                    StepResult {
+                        kind: "swarm".into(),
+                        output,
+                        detail,
+                    },
+                    0,
+                    false,
+                ))
             }
         }
     }
@@ -783,16 +880,32 @@ mod tests {
                 serde_json::json!({ "model_id": model_id }),
             ))
         }
-        async fn run_skill(&self, skill_id: &str, _input: &serde_json::Value) -> Result<(String, serde_json::Value)> {
+        async fn run_skill(
+            &self,
+            skill_id: &str,
+            _input: &serde_json::Value,
+        ) -> Result<(String, serde_json::Value)> {
             Ok((format!("skill-out:{skill_id}"), serde_json::Value::Null))
         }
-        async fn run_tool(&self, tool_id: &str, _input: &serde_json::Value) -> Result<(String, serde_json::Value)> {
+        async fn run_tool(
+            &self,
+            tool_id: &str,
+            _input: &serde_json::Value,
+        ) -> Result<(String, serde_json::Value)> {
             Ok((format!("tool-out:{tool_id}"), serde_json::Value::Null))
         }
-        async fn run_agent(&self, _caps: &[String], task: &str) -> Result<(String, serde_json::Value)> {
+        async fn run_agent(
+            &self,
+            _caps: &[String],
+            task: &str,
+        ) -> Result<(String, serde_json::Value)> {
             Ok((format!("agent-out:{task}"), serde_json::Value::Null))
         }
-        async fn run_swarm(&self, _members: &[SwarmMemberSpec], task: &str) -> Result<(String, serde_json::Value)> {
+        async fn run_swarm(
+            &self,
+            _members: &[SwarmMemberSpec],
+            task: &str,
+        ) -> Result<(String, serde_json::Value)> {
             Ok((format!("swarm-out:{task}"), serde_json::Value::Null))
         }
         fn estimate_model_cost(&self, _model_id: Option<&str>, _intent: &RouteIntent) -> u128 {
@@ -816,13 +929,19 @@ mod tests {
     fn deterministic_prepends_matched_skill() {
         let planner = DeterministicPlanner;
         let catalog = CatalogSnapshot {
-            skills: vec![card("web-search", "web search", &["search", "web", "retrieval"])],
+            skills: vec![card(
+                "web-search",
+                "web search",
+                &["search", "web", "retrieval"],
+            )],
             ..Default::default()
         };
         let req = OrchestrationRequest::new("search the web for rust release notes");
         let plan = planner.plan(&req, &catalog, &[]).unwrap();
         assert_eq!(plan.steps.len(), 2);
-        assert!(matches!(&plan.steps[0], PlanStep::Skill { skill_id, .. } if skill_id == "web-search"));
+        assert!(
+            matches!(&plan.steps[0], PlanStep::Skill { skill_id, .. } if skill_id == "web-search")
+        );
         assert!(matches!(plan.steps[1], PlanStep::Model { .. }));
     }
 
@@ -831,7 +950,11 @@ mod tests {
         let planner = DeterministicPlanner;
         let catalog = CatalogSnapshot {
             skills: vec![card("analysis", "data analysis", &["analysis", "data"])],
-            tools: vec![card("analysis-tool", "analysis tool", &["analysis", "data"])],
+            tools: vec![card(
+                "analysis-tool",
+                "analysis tool",
+                &["analysis", "data"],
+            )],
             ..Default::default()
         };
         let req = OrchestrationRequest::new("run a data analysis over this dataset");
@@ -900,8 +1023,7 @@ mod tests {
             model_cost: 100,
         });
         let orch = Orchestrator::new(planner, executor);
-        let req = OrchestrationRequest::new("expensive")
-            .with_payer_address(Address::default());
+        let req = OrchestrationRequest::new("expensive").with_payer_address(Address::default());
         let err = orch.execute(&req, &empty_catalog()).await.unwrap_err();
         assert!(matches!(err, OrchestratorError::OverBudget { .. }));
     }

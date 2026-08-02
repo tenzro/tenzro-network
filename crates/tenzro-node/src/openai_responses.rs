@@ -18,7 +18,7 @@
 //! ignored the ask.
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Response fields carried through from the chat body untouched. These are the
 /// Tenzro additions to the OpenAI shape — the settlement figure, the throughput
@@ -494,7 +494,10 @@ impl ResponseBuilder {
         );
         out.insert(
             "temperature".to_string(),
-            self.echo.temperature.map(|v| json!(v)).unwrap_or(Value::Null),
+            self.echo
+                .temperature
+                .map(|v| json!(v))
+                .unwrap_or(Value::Null),
         );
         out.insert(
             "top_p".to_string(),

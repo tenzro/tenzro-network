@@ -296,9 +296,10 @@ impl DownloadManager {
         }
 
         // Send request
-        let response = request.send().await.map_err(|e| {
-            ModelError::DownloadError(format!("HTTP request failed: {}", e))
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ModelError::DownloadError(format!("HTTP request failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(ModelError::DownloadError(format!(
@@ -311,9 +312,10 @@ impl DownloadManager {
         // Note: This loads the entire response into memory. For production,
         // enable reqwest's "stream" feature and use bytes_stream() for
         // chunk-by-chunk streaming with progress updates.
-        let bytes = response.bytes().await.map_err(|e| {
-            ModelError::DownloadError(format!("Failed to download bytes: {}", e))
-        })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ModelError::DownloadError(format!("Failed to download bytes: {}", e)))?;
 
         let mut file = file;
         let mut downloaded_bytes = starting_byte;
@@ -353,7 +355,10 @@ impl DownloadManager {
 
         // Verify model integrity against registry if available
         if let Some(reg) = registry {
-            info!("Verifying model integrity against registry for {}", model_id);
+            info!(
+                "Verifying model integrity against registry for {}",
+                model_id
+            );
             let model_data = fs::read(file_path).await?;
             reg.verify_model_integrity(model_id, &model_data)?;
             info!("Registry integrity verification passed for {}", model_id);
@@ -686,8 +691,7 @@ mod tests {
 
         let temp_dir = std::env::temp_dir().join("tenzro-test-with-registry");
         let registry = ModelRegistry::new();
-        let manager = DownloadManager::new(temp_dir.clone())
-            .with_registry(registry);
+        let manager = DownloadManager::new(temp_dir.clone()).with_registry(registry);
 
         // Verify manager was created successfully
         assert_eq!(manager.active_download_count(), 0);

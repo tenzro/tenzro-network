@@ -266,7 +266,9 @@ mod onnx_backend {
     impl Detector for GenericDetrDetector {
         fn detect(&self, image_bytes: &[u8], score_threshold: f32) -> Result<DetectResult> {
             if image_bytes.is_empty() {
-                return Err(ModelError::InvalidModel("image bytes are empty".to_string()));
+                return Err(ModelError::InvalidModel(
+                    "image bytes are empty".to_string(),
+                ));
             }
 
             let start = Instant::now();
@@ -397,7 +399,11 @@ mod onnx_backend {
             }
 
             // Sort descending by score so callers can take top-K cheaply.
-            out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            out.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             Ok(out)
         }
 

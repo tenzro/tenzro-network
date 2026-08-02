@@ -1,14 +1,14 @@
 //! Integration tests for tenzro-wallet
 
+use tempfile::TempDir;
+use tenzro_types::AssetId;
+use tenzro_types::primitives::Address;
 use tenzro_wallet::{
+    builder::TransactionBuilder,
     provisioning::WalletProvisioner,
     service::{TenzroWalletService, WalletServiceConfig},
     traits::WalletService,
-    builder::TransactionBuilder,
 };
-use tenzro_types::AssetId;
-use tenzro_types::primitives::Address;
-use tempfile::TempDir;
 
 #[tokio::test]
 async fn test_wallet_provisioning_and_signing() {
@@ -27,10 +27,7 @@ async fn test_wallet_provisioning_and_signing() {
 
     // Sign raw data using sign_data
     let data = b"test data for signing";
-    let signature = service
-        .sign_data(&wallet.wallet_id, data)
-        .await
-        .unwrap();
+    let signature = service.sign_data(&wallet.wallet_id, data).await.unwrap();
 
     // Hybrid signature: classical leg (sign_data uses MPC threshold combine —
     // returns the combined classical signature) + mandatory ML-DSA-65 leg.
@@ -98,8 +95,8 @@ async fn test_balance_tracking() {
 
 #[test]
 fn test_provisioner_custom_config() {
-    use tenzro_wallet::provisioning::ProvisioningConfig;
     use tenzro_crypto::KeyType;
+    use tenzro_wallet::provisioning::ProvisioningConfig;
 
     // Custom 3-of-5 FROST config (FROST-Ed25519 per RFC 9591).
     let config = ProvisioningConfig::new(3, 5).unwrap();

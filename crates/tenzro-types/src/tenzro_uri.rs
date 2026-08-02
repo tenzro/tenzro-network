@@ -121,10 +121,15 @@ pub enum TenzroUriError {
     WrongScheme(String),
     #[error("empty path after `tenzro://`")]
     EmptyPath,
-    #[error("unknown path prefix `{0}` — expected one of blob, node, did, model, gradient, shard, manifest, memory, receipt")]
+    #[error(
+        "unknown path prefix `{0}` — expected one of blob, node, did, model, gradient, shard, manifest, memory, receipt"
+    )]
     UnknownPrefix(String),
     #[error("missing required segment in `{prefix}` URI: {detail}")]
-    MissingSegment { prefix: &'static str, detail: &'static str },
+    MissingSegment {
+        prefix: &'static str,
+        detail: &'static str,
+    },
     #[error("invalid BLAKE3 hash `{0}` — expected 64 lowercase hex characters")]
     InvalidHash(String),
     #[error("invalid round number `{0}` in gradient URI: {1}")]
@@ -151,9 +156,7 @@ impl TenzroUri {
         };
 
         let mut segments = path.split('/');
-        let prefix = segments
-            .next()
-            .ok_or(TenzroUriError::EmptyPath)?;
+        let prefix = segments.next().ok_or(TenzroUriError::EmptyPath)?;
 
         match prefix {
             "blob" => {
@@ -202,9 +205,8 @@ impl TenzroUri {
                     prefix: "model",
                     detail: "<model-id>@<hash>",
                 })?;
-                let (model_id, hash) = spec
-                    .split_once('@')
-                    .ok_or(TenzroUriError::MissingSegment {
+                let (model_id, hash) =
+                    spec.split_once('@').ok_or(TenzroUriError::MissingSegment {
                         prefix: "model",
                         detail: "expected <model-id>@<hash>",
                     })?;
@@ -298,7 +300,11 @@ impl TenzroUri {
 }
 
 fn validate_blake3_hex(s: &str) -> Result<(), TenzroUriError> {
-    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+    if s.len() != 64
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return Err(TenzroUriError::InvalidHash(s.to_string()));
     }
     Ok(())
@@ -317,14 +323,21 @@ fn parse_node_query(q: &str) -> Result<String, TenzroUriError> {
 impl fmt::Display for TenzroUri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TenzroUri::Blob { hash, provider_hint } => match provider_hint {
+            TenzroUri::Blob {
+                hash,
+                provider_hint,
+            } => match provider_hint {
                 None => write!(f, "tenzro://blob/{hash}"),
                 Some(n) => write!(f, "tenzro://blob/{hash}?n={n}"),
             },
             TenzroUri::Node { node_id } => write!(f, "tenzro://node/{node_id}"),
             TenzroUri::Did { did } => write!(f, "tenzro://did/{did}"),
             TenzroUri::Model { model_id, hash } => write!(f, "tenzro://model/{model_id}@{hash}"),
-            TenzroUri::Gradient { run_id, round, hash } => {
+            TenzroUri::Gradient {
+                run_id,
+                round,
+                hash,
+            } => {
                 write!(f, "tenzro://gradient/{run_id}/{round}/{hash}")
             }
             TenzroUri::Shard {
@@ -332,7 +345,10 @@ impl fmt::Display for TenzroUri {
                 envelope_hash,
             } => write!(f, "tenzro://shard/{manifest_hash}/{envelope_hash}"),
             TenzroUri::Manifest { manifest_hash } => write!(f, "tenzro://manifest/{manifest_hash}"),
-            TenzroUri::Memory { agent_did, record_uuid } => {
+            TenzroUri::Memory {
+                agent_did,
+                record_uuid,
+            } => {
                 write!(f, "tenzro://memory/{agent_did}/{record_uuid}")
             }
             TenzroUri::Receipt { kind, hash } => write!(f, "tenzro://receipt/{kind}/{hash}"),
@@ -363,7 +379,10 @@ mod tests {
     fn parses_blob() {
         let u = roundtrip(&format!("tenzro://blob/{ZERO_HASH}"));
         match u {
-            TenzroUri::Blob { hash, provider_hint } => {
+            TenzroUri::Blob {
+                hash,
+                provider_hint,
+            } => {
                 assert_eq!(hash, ZERO_HASH);
                 assert!(provider_hint.is_none());
             }
@@ -375,7 +394,9 @@ mod tests {
     fn parses_blob_with_provider_hint() {
         let u = roundtrip(&format!("tenzro://blob/{ZERO_HASH}?n=abc123"));
         match u {
-            TenzroUri::Blob { provider_hint, .. } => assert_eq!(provider_hint.as_deref(), Some("abc123")),
+            TenzroUri::Blob { provider_hint, .. } => {
+                assert_eq!(provider_hint.as_deref(), Some("abc123"))
+            }
             _ => panic!("wrong variant"),
         }
     }

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::account_abstraction::{
-    build_7702_designator, parse_7702_designator, Eip7702Authorization,
+    Eip7702Authorization, build_7702_designator, parse_7702_designator,
 };
 use crate::error::VmError;
 use tenzro_types::primitives::Address;

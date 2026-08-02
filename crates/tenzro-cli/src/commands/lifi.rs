@@ -4,9 +4,9 @@
 //! multi-bridge cross-chain routing, token discovery, gas prices,
 //! and transfer status tracking.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 const LIFI_API_BASE: &str = "https://li.quest/v1";
 
@@ -82,9 +82,13 @@ impl LifiChainsCmd {
             println!();
             for chain in chains {
                 let id = chain.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                let name = chain.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let name = chain
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let key = chain.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                let native = chain.get("nativeToken")
+                let native = chain
+                    .get("nativeToken")
                     .and_then(|t| t.get("symbol"))
                     .and_then(|s| s.as_str())
                     .unwrap_or("");
@@ -186,7 +190,8 @@ impl LifiToolsCmd {
             for b in bridges {
                 let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                 let key = b.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                let chains_count = b.get("supportedChains")
+                let chains_count = b
+                    .get("supportedChains")
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
@@ -198,7 +203,8 @@ impl LifiToolsCmd {
             for e in exchanges {
                 let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                 let key = e.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                let chains_count = e.get("supportedChains")
+                let chains_count = e
+                    .get("supportedChains")
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
@@ -245,7 +251,12 @@ impl LifiQuoteCmd {
         let client = http_client()?;
         let url = format!(
             "{LIFI_API_BASE}/quote?fromChain={}&toChain={}&fromToken={}&toToken={}&fromAmount={}&fromAddress={}",
-            self.from_chain, self.to_chain, self.from_token, self.to_token, self.amount, self.from_address,
+            self.from_chain,
+            self.to_chain,
+            self.from_token,
+            self.to_token,
+            self.amount,
+            self.from_address,
         );
 
         let resp: serde_json::Value = client
@@ -260,13 +271,45 @@ impl LifiQuoteCmd {
 
         // Display key quote fields
         if let Some(action) = resp.get("action") {
-            output::print_field("From Chain", &action.get("fromChainId").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-            output::print_field("To Chain", &action.get("toChainId").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-            output::print_field("From Amount", action.get("fromAmount").and_then(|v| v.as_str()).unwrap_or("N/A"));
+            output::print_field(
+                "From Chain",
+                &action
+                    .get("fromChainId")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .to_string(),
+            );
+            output::print_field(
+                "To Chain",
+                &action
+                    .get("toChainId")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .to_string(),
+            );
+            output::print_field(
+                "From Amount",
+                action
+                    .get("fromAmount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A"),
+            );
         }
         if let Some(estimate) = resp.get("estimate") {
-            output::print_field("To Amount", estimate.get("toAmount").and_then(|v| v.as_str()).unwrap_or("N/A"));
-            output::print_field("Approval Address", estimate.get("approvalAddress").and_then(|v| v.as_str()).unwrap_or("N/A"));
+            output::print_field(
+                "To Amount",
+                estimate
+                    .get("toAmount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A"),
+            );
+            output::print_field(
+                "Approval Address",
+                estimate
+                    .get("approvalAddress")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A"),
+            );
             if let Some(fee_costs) = estimate.get("feeCosts").and_then(|v| v.as_array()) {
                 for fc in fee_costs {
                     let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or("fee");
@@ -283,11 +326,24 @@ impl LifiQuoteCmd {
         }
         if let Some(tx) = resp.get("transactionRequest") {
             println!();
-            output::print_field("TX To", tx.get("to").and_then(|v| v.as_str()).unwrap_or("N/A"));
-            output::print_field("TX Value", tx.get("value").and_then(|v| v.as_str()).unwrap_or("0"));
+            output::print_field(
+                "TX To",
+                tx.get("to").and_then(|v| v.as_str()).unwrap_or("N/A"),
+            );
+            output::print_field(
+                "TX Value",
+                tx.get("value").and_then(|v| v.as_str()).unwrap_or("0"),
+            );
             let data_preview = tx.get("data").and_then(|v| v.as_str()).unwrap_or("");
             if data_preview.len() > 66 {
-                output::print_field("TX Data", &format!("{}...({} bytes)", &data_preview[..66], (data_preview.len() - 2) / 2));
+                output::print_field(
+                    "TX Data",
+                    &format!(
+                        "{}...({} bytes)",
+                        &data_preview[..66],
+                        (data_preview.len() - 2) / 2
+                    ),
+                );
             } else {
                 output::print_field("TX Data", data_preview);
             }
@@ -427,15 +483,51 @@ impl LifiStatusCmd {
 
         spinner.finish_and_clear();
 
-        output::print_field("Status", resp.get("status").and_then(|v| v.as_str()).unwrap_or("UNKNOWN"));
-        output::print_field("Substatus", resp.get("substatus").and_then(|v| v.as_str()).unwrap_or("N/A"));
+        output::print_field(
+            "Status",
+            resp.get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UNKNOWN"),
+        );
+        output::print_field(
+            "Substatus",
+            resp.get("substatus")
+                .and_then(|v| v.as_str())
+                .unwrap_or("N/A"),
+        );
         if let Some(sending) = resp.get("sending") {
-            output::print_field("Sending TX", sending.get("txHash").and_then(|v| v.as_str()).unwrap_or("N/A"));
-            output::print_field("Sending Chain", &sending.get("chainId").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
+            output::print_field(
+                "Sending TX",
+                sending
+                    .get("txHash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A"),
+            );
+            output::print_field(
+                "Sending Chain",
+                &sending
+                    .get("chainId")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .to_string(),
+            );
         }
         if let Some(receiving) = resp.get("receiving") {
-            output::print_field("Receiving TX", receiving.get("txHash").and_then(|v| v.as_str()).unwrap_or("N/A"));
-            output::print_field("Receiving Chain", &receiving.get("chainId").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
+            output::print_field(
+                "Receiving TX",
+                receiving
+                    .get("txHash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A"),
+            );
+            output::print_field(
+                "Receiving Chain",
+                &receiving
+                    .get("chainId")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .to_string(),
+            );
         }
         if let Some(tool) = resp.get("tool").and_then(|v| v.as_str()) {
             output::print_field("Bridge Tool", tool);
@@ -516,8 +608,14 @@ fn format_gas(v: &serde_json::Value) -> String {
     } else if let Some(n) = v.as_u64() {
         format!("{} wei", n)
     } else if let Some(obj) = v.as_object() {
-        let max_fee = obj.get("maxFeePerGas").and_then(|v| v.as_str()).unwrap_or("?");
-        let priority = obj.get("maxPriorityFeePerGas").and_then(|v| v.as_str()).unwrap_or("?");
+        let max_fee = obj
+            .get("maxFeePerGas")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let priority = obj
+            .get("maxPriorityFeePerGas")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         format!("maxFee={} priority={}", max_fee, priority)
     } else {
         v.to_string()
@@ -564,11 +662,13 @@ impl LifiConnectionsCmd {
             output::print_field("Connections", &connections.len().to_string());
             println!();
             for conn in connections {
-                let from_token = conn.get("fromToken")
+                let from_token = conn
+                    .get("fromToken")
                     .and_then(|t| t.get("symbol"))
                     .and_then(|s| s.as_str())
                     .unwrap_or("?");
-                let to_tokens = conn.get("toTokens")
+                let to_tokens = conn
+                    .get("toTokens")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
                         arr.iter()

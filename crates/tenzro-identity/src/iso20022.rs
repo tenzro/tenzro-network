@@ -32,13 +32,19 @@ pub enum Iso20022Error {
     #[error("xml parse failed: {0}")]
     Parse(String),
     #[error("unexpected namespace `{found}`, expected `{expected}`")]
-    Namespace { expected: &'static str, found: String },
+    Namespace {
+        expected: &'static str,
+        found: String,
+    },
     #[error("missing or empty mandatory field: {0}")]
     MissingField(&'static str),
     #[error("field {field} exceeds {max} characters")]
     FieldTooLong { field: &'static str, max: usize },
     #[error("invalid amount `{amount}`: {reason}")]
-    InvalidAmount { amount: String, reason: &'static str },
+    InvalidAmount {
+        amount: String,
+        reason: &'static str,
+    },
     #[error("invalid currency code `{0}` (expected 3 uppercase ASCII letters)")]
     InvalidCurrency(String),
     #[error("invalid charge bearer `{0}` (expected DEBT|CRED|SHAR|SLEV)")]
@@ -303,8 +309,8 @@ impl Pacs008Document {
     /// Serialize to pacs.008.001.08 XML. Validates before writing.
     pub fn to_xml(&self) -> Result<String, Iso20022Error> {
         self.validate()?;
-        let body = quick_xml::se::to_string(self)
-            .map_err(|e| Iso20022Error::Serialize(e.to_string()))?;
+        let body =
+            quick_xml::se::to_string(self).map_err(|e| Iso20022Error::Serialize(e.to_string()))?;
         Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{body}"))
     }
 
@@ -371,7 +377,10 @@ impl Pacs008Document {
             }
             require(&tx.debtor.name, "CdtTrfTxInf.Dbtr.Nm")?;
             require(&tx.creditor.name, "CdtTrfTxInf.Cdtr.Nm")?;
-            for acct in [&tx.debtor_account, &tx.creditor_account].into_iter().flatten() {
+            for acct in [&tx.debtor_account, &tx.creditor_account]
+                .into_iter()
+                .flatten()
+            {
                 if acct.id.iban.is_some() == acct.id.other.is_some() {
                     return Err(Iso20022Error::AmbiguousAccountId);
                 }
@@ -518,7 +527,10 @@ fn party_from_person(person: &Ivms101Person) -> Result<PartyIdentification, Iso2
         };
         (name, np.geographic_address.first())
     } else if let Some(lp) = &person.legal_person {
-        (lp.name.legal_person_name.clone(), lp.geographic_address.first())
+        (
+            lp.name.legal_person_name.clone(),
+            lp.geographic_address.first(),
+        )
     } else {
         return Err(Iso20022Error::Mapping(
             "person record has neither naturalPerson nor legalPerson".into(),
@@ -815,7 +827,9 @@ mod tests {
         let envelope = sample_envelope();
         let doc = Pacs008Document::from_ivms101(&envelope, sample_details()).unwrap();
 
-        let tx = &doc.fi_to_fi_customer_credit_transfer.credit_transfer_transactions[0];
+        let tx = &doc
+            .fi_to_fi_customer_credit_transfer
+            .credit_transfer_transactions[0];
         assert_eq!(tx.debtor.name, "Jane Doe");
         assert_eq!(tx.creditor.name, "Smith");
         assert_eq!(
@@ -834,7 +848,12 @@ mod tests {
             "eip155:1:0xdef"
         );
         assert_eq!(
-            tx.debtor.postal_address.as_ref().unwrap().country.as_deref(),
+            tx.debtor
+                .postal_address
+                .as_ref()
+                .unwrap()
+                .country
+                .as_deref(),
             Some("DE")
         );
 

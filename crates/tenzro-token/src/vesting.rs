@@ -37,7 +37,7 @@ use crate::error::{Result, TokenError};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -251,7 +251,14 @@ impl VestingManager {
         amount: u128,
         start_ms: i64,
     ) -> Result<VestingSchedule> {
-        self.create_schedule(address, VestingKind::Reward, amount, start_ms, 0, REWARD_VESTING_MS)
+        self.create_schedule(
+            address,
+            VestingKind::Reward,
+            amount,
+            start_ms,
+            0,
+            REWARD_VESTING_MS,
+        )
     }
 
     /// Grant tranche: 6-month linear, no cliff.
@@ -261,7 +268,14 @@ impl VestingManager {
         amount: u128,
         start_ms: i64,
     ) -> Result<VestingSchedule> {
-        self.create_schedule(address, VestingKind::Grant, amount, start_ms, 0, GRANT_VESTING_MS)
+        self.create_schedule(
+            address,
+            VestingKind::Grant,
+            amount,
+            start_ms,
+            0,
+            GRANT_VESTING_MS,
+        )
     }
 
     /// Core-contributor lock: 12-month cliff, then 36-month linear.
@@ -438,9 +452,7 @@ mod tests {
     fn linear_accrual_midpoint() {
         let m = VestingManager::new();
         let a = addr(1);
-        let s = m
-            .create_reward_vesting(a, 1_000_000, 0)
-            .expect("create");
+        let s = m.create_reward_vesting(a, 1_000_000, 0).expect("create");
         assert_eq!(s.vested_at(-1), 0);
         assert_eq!(s.vested_at(0), 0);
         assert_eq!(s.vested_at(REWARD_VESTING_MS / 2), 500_000);

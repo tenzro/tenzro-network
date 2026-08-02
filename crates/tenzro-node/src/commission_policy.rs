@@ -33,7 +33,7 @@ use crate::app_registry::AppRecord;
 use tenzro_token::TnzoToken;
 use tenzro_types::agent_template::AgentTemplate;
 use tenzro_types::fees::apply_developer_margin;
-use tenzro_types::marketplace::{split_marketplace_fee, MARKETPLACE_COMMISSION_BPS};
+use tenzro_types::marketplace::{MARKETPLACE_COMMISSION_BPS, split_marketplace_fee};
 use tenzro_types::primitives::Address;
 
 /// Outcome of a successful commission settlement on a paid template
@@ -215,7 +215,14 @@ where
     if template.pricing.is_free() {
         return Ok(None);
     }
-    settle_paid_invocation(template.creator_wallet, fee, payer_wallet, token, app, parse)
+    settle_paid_invocation(
+        template.creator_wallet,
+        fee,
+        payer_wallet,
+        token,
+        app,
+        parse,
+    )
 }
 
 #[cfg(test)]
@@ -261,16 +268,15 @@ mod tests {
     fn zero_fee_returns_none() {
         let tmpl = paid_template(Some(Address::default()));
         // fee=0 short-circuits even on a paid template (e.g. dry_run).
-        let receipt =
-            settle_invocation_fee(&tmpl, 0, Some("payer"), None, None, ok_parse).unwrap();
+        let receipt = settle_invocation_fee(&tmpl, 0, Some("payer"), None, None, ok_parse).unwrap();
         assert!(receipt.is_none());
     }
 
     #[test]
     fn paid_without_creator_wallet_rejects() {
         let tmpl = paid_template(None);
-        let err = settle_invocation_fee(&tmpl, 1_000, Some("payer"), None, None, ok_parse)
-            .unwrap_err();
+        let err =
+            settle_invocation_fee(&tmpl, 1_000, Some("payer"), None, None, ok_parse).unwrap_err();
         assert!(matches!(err, CommissionError::MissingCreatorWallet));
     }
 
@@ -444,10 +450,16 @@ mod tests {
         let app = app_record(0, app_wallet);
         let parse = |_: &str| Ok(payer);
 
-        let receipt =
-            settle_invocation_fee(&tmpl, 10_000, Some("payer"), Some(&token), Some(&app), parse)
-                .unwrap()
-                .unwrap();
+        let receipt = settle_invocation_fee(
+            &tmpl,
+            10_000,
+            Some("payer"),
+            Some(&token),
+            Some(&app),
+            parse,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(receipt.margin_amount, 0);
         assert_eq!(receipt.app_id.as_deref(), Some("app-test"));
@@ -475,9 +487,15 @@ mod tests {
         let app = app_record(tenzro_types::fees::MAX_DEVELOPER_MARGIN_BPS + 1, app_wallet);
         let parse = |_: &str| Ok(payer);
 
-        let err =
-            settle_invocation_fee(&tmpl, 10_000, Some("payer"), Some(&token), Some(&app), parse)
-                .unwrap_err();
+        let err = settle_invocation_fee(
+            &tmpl,
+            10_000,
+            Some("payer"),
+            Some(&token),
+            Some(&app),
+            parse,
+        )
+        .unwrap_err();
         assert!(matches!(err, CommissionError::MarginRejected(_)));
 
         // No transfer happened at all.

@@ -52,7 +52,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use tenzro_bridge::evm_signer::EvmTransactionSigner;
-use tenzro_identity::erc8004::{abi, addresses, selectors, OnChainAgentRegistry};
+use tenzro_identity::erc8004::{OnChainAgentRegistry, abi, addresses, selectors};
 use tenzro_payments::mpp::stripe_spt::{SptOutcome, SptWebhookEvent};
 
 use crate::error::{NodeError, Result};
@@ -248,14 +248,16 @@ pub fn dispatch_reputation_feedback(
     signer: &Arc<EvmTransactionSigner>,
     agent_registry: &Arc<dyn OnChainAgentRegistry>,
 ) -> Result<u64> {
-    let agent_id = agent_registry.lookup_agent_id_by_did(machine_did).ok_or_else(|| {
-        NodeError::Other(format!(
-            "ERC-8004 reputation dispatch: machine DID {} has no allocated \
+    let agent_id = agent_registry
+        .lookup_agent_id_by_did(machine_did)
+        .ok_or_else(|| {
+            NodeError::Other(format!(
+                "ERC-8004 reputation dispatch: machine DID {} has no allocated \
              agentId on the on-chain mirror — register the machine identity \
              and wait for the Registered event before submitting feedback",
-            machine_did
-        ))
-    })?;
+                machine_did
+            ))
+        })?;
 
     // Build calldata synchronously — pure, no I/O.
     let calldata =
@@ -375,7 +377,9 @@ mod tests {
         // Pre-populate the DID index so the dispatcher's resolution
         // succeeds and we're actually testing the lifecycle-event
         // rejection branch, not the unknown-DID branch.
-        mirror.mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         // Lifecycle events must not produce a feedback row — that path
         // belongs to the revocation dispatcher / ceiling cache.
@@ -394,11 +398,7 @@ mod tests {
                 &signer,
                 &mirror,
             );
-            assert!(
-                res.is_err(),
-                "lifecycle event {:?} must be rejected",
-                event
-            );
+            assert!(res.is_err(), "lifecycle event {:?} must be rejected", event);
         }
     }
 
@@ -421,7 +421,10 @@ mod tests {
             &signer,
             &mirror,
         );
-        assert!(res.is_err(), "unknown DID must be rejected, not silently mapped");
+        assert!(
+            res.is_err(),
+            "unknown DID must be rejected, not silently mapped"
+        );
     }
 
     #[tokio::test]
@@ -429,7 +432,9 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let machine_did = "did:tenzro:machine:test:succeed";
-        mirror.mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
         let agent_id = mirror.lookup_agent_id_by_did(machine_did).unwrap();
 
         let outcome = dispatch_settlement_outcome(
@@ -454,7 +459,9 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let machine_did = "did:tenzro:machine:test:dispute";
-        mirror.mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         // No dispute_status → reject.
         let res = dispatch_settlement_outcome(
@@ -466,7 +473,10 @@ mod tests {
             &signer,
             &mirror,
         );
-        assert!(res.is_err(), "dispute.closed without status must be rejected");
+        assert!(
+            res.is_err(),
+            "dispute.closed without status must be rejected"
+        );
 
         // status="won" → ChargebackWon (75).
         let won = dispatch_settlement_outcome(
@@ -514,7 +524,9 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let machine_did = "did:tenzro:machine:test:fail";
-        mirror.mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         let outcome = dispatch_settlement_outcome(
             &SptWebhookEvent::PaymentIntentFailed,
@@ -536,7 +548,9 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let machine_did = "did:tenzro:machine:test:disputed";
-        mirror.mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         let outcome = dispatch_settlement_outcome(
             &SptWebhookEvent::ChargeDisputeCreated,
@@ -558,7 +572,9 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let machine_did = "did:tenzro:machine:test:multi";
-        mirror.mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(machine_did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
         let agent_id = mirror.lookup_agent_id_by_did(machine_did).unwrap();
 
         // Three separate webhook events for the same agent → three

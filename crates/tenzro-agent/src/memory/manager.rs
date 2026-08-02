@@ -27,8 +27,8 @@ use tenzro_model::text_embedding_runtime::{TextEmbedConfig, TextEmbeddingRuntime
 use tenzro_storage::da::{DaBackend, ReceiptKind};
 
 use super::{
-    text_backend::TantivyTextBackend, vector_backend::LanceVectorBackend, MemoryError,
-    MemoryFilter, MemoryKind, MemoryRecord, MemorySource, Result, SearchModes,
+    MemoryError, MemoryFilter, MemoryKind, MemoryRecord, MemorySource, Result, SearchModes,
+    text_backend::TantivyTextBackend, vector_backend::LanceVectorBackend,
 };
 
 /// Reciprocal Rank Fusion smoothing constant. The classic value (k=60) from
@@ -114,7 +114,8 @@ impl MemoryManager {
     ) -> Result<MemoryRecord> {
         let text = text.into();
         let embedding = self.embed(&text).await?;
-        let mut record = MemoryRecord::new(agent_did, kind, source, text, Some(embedding), metadata);
+        let mut record =
+            MemoryRecord::new(agent_did, kind, source, text, Some(embedding), metadata);
         self.vector.insert(&record).await?;
         self.text.insert(&record)?;
         // The text backend strips the embedding when reading back; keep the
@@ -295,11 +296,7 @@ impl MemoryManager {
 /// Reciprocal Rank Fusion of two ranked lists. Records are deduplicated by
 /// `id`; the merged list is truncated to `k`. The classic Cormack et al.
 /// k=60 smoothing is hard-coded as [`RRF_K`].
-fn rrf_merge(
-    a: Vec<MemoryRecord>,
-    b: Vec<MemoryRecord>,
-    k: usize,
-) -> Vec<MemoryRecord> {
+fn rrf_merge(a: Vec<MemoryRecord>, b: Vec<MemoryRecord>, k: usize) -> Vec<MemoryRecord> {
     let mut scores: HashMap<String, f32> = HashMap::new();
     let mut by_id: HashMap<String, MemoryRecord> = HashMap::new();
     for (rank, rec) in a.into_iter().enumerate() {

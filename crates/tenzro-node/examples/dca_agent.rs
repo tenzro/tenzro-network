@@ -137,10 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scope = DelegationScope::unrestricted()
         .with_max_transaction_value(100 * ONE_USDC)
         .with_max_daily_spend(1_000 * ONE_USDC)
-        .with_allowed_operations(vec![
-            "dca-buy".to_string(),
-            "trade".to_string(),
-        ])
+        .with_allowed_operations(vec!["dca-buy".to_string(), "trade".to_string()])
         .with_time_bound(TimeBound::new(now, now + chrono::Duration::days(30)));
 
     let agent = registry
@@ -176,17 +173,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let customer = Address::new([0x11; 32]);
     let asset_id = tenzro_types::asset::AssetId::tnzo();
     settlement_engine.set_balance(&customer, &asset_id, 1_000_000_000); // 1000 USDC worth
-    println!("→ customer pre-funded balance = {}", settlement_engine.get_balance(&customer, &asset_id));
+    println!(
+        "→ customer pre-funded balance = {}",
+        settlement_engine.get_balance(&customer, &asset_id)
+    );
 
     // ------------------------------------------------------------------
     // Step 4: run the DCA schedule — for each buy, MPP + settlement
     // ------------------------------------------------------------------
     println!("\n=== Step 4: Execute DCA schedule ===");
     let schedule = [
-        ScheduledBuy { asset: "BTC", spend_usdc: 25 * ONE_USDC },
-        ScheduledBuy { asset: "ETH", spend_usdc: 25 * ONE_USDC },
-        ScheduledBuy { asset: "SOL", spend_usdc: 25 * ONE_USDC },
-        ScheduledBuy { asset: "BTC", spend_usdc: 75 * ONE_USDC },
+        ScheduledBuy {
+            asset: "BTC",
+            spend_usdc: 25 * ONE_USDC,
+        },
+        ScheduledBuy {
+            asset: "ETH",
+            spend_usdc: 25 * ONE_USDC,
+        },
+        ScheduledBuy {
+            asset: "SOL",
+            spend_usdc: 25 * ONE_USDC,
+        },
+        ScheduledBuy {
+            asset: "BTC",
+            spend_usdc: 75 * ONE_USDC,
+        },
     ];
 
     let mut total_spent = 0u128;
@@ -257,7 +269,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // (4d) Verify and settle through the MPP server.
-        let verification = mpp_server.verify_credential(&challenge, &credential).await?;
+        let verification = mpp_server
+            .verify_credential(&challenge, &credential)
+            .await?;
         let receipt = mpp_server.settle(&verification).await?;
         println!(
             "  MPP receipt: {} {} settled via {}",

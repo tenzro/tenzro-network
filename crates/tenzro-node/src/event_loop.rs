@@ -13,27 +13,35 @@
 //! 6. Event loop subscribes to finality notifications and executes transactions via VM
 //! 7. State changes are committed to RocksDB with fsync
 
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, error, info, warn};
-use dashmap::DashMap;
 
-use tenzro_consensus::{BlockProvider, ConsensusOutMessage, FinalityNotification, HotStuff2Engine, StateRootProvider, VoteType as ConsVoteType};
+use tenzro_consensus::{
+    BlockProvider, ConsensusOutMessage, FinalityNotification, HotStuff2Engine, StateRootProvider,
+    VoteType as ConsVoteType,
+};
 use tenzro_identity::IdentityRegistry;
-use tenzro_network::{ConsensusMessage, NetworkMessage, MessagePayload, NetworkService, TenzroNetworkService, VoteType as NetVoteType};
-use tenzro_storage::{RocksDbStore, KvStore, BlockStoreImpl, WriteOp, CF_MODELS, CF_MODEL_SERVICES, CF_TRANSACTIONS};
+use tenzro_iroh::IrohResolver;
+use tenzro_network::{
+    ConsensusMessage, MessagePayload, NetworkMessage, NetworkService, TenzroNetworkService,
+    VoteType as NetVoteType,
+};
 use tenzro_storage::traits::BlockStore;
+use tenzro_storage::{
+    BlockStoreImpl, CF_MODEL_SERVICES, CF_MODELS, CF_TRANSACTIONS, KvStore, RocksDbStore, WriteOp,
+};
 use tenzro_token::StakingManager;
 use tenzro_token::bond::BondManager;
 use tenzro_token::compute_bond::ComputeBondManager;
-use tenzro_types::kill_switch::{KillSwitchAction, KillSwitchReceipt};
-use tenzro_vm::{MultiVmRuntime, StateAdapter, VmTransaction, VmType};
 use tenzro_types::block::Block;
-use tenzro_types::transaction::{SignedTransaction, TransactionType};
+use tenzro_types::kill_switch::{KillSwitchAction, KillSwitchReceipt};
 use tenzro_types::primitives::{Address, BlockHeight, Hash};
-use tenzro_iroh::IrohResolver;
+use tenzro_types::transaction::{SignedTransaction, TransactionType};
+use tenzro_vm::{MultiVmRuntime, StateAdapter, VmTransaction, VmType};
 
 use crate::error::{NodeError, Result};
 use crate::metrics::MetricsCollector;
@@ -89,7 +97,10 @@ const ANNOUNCE_MAX_FUTURE_SKEW_MS: i64 = 60_000;
 /// The signature covers `timestamp` + `ttl_secs`, so a captured
 /// announcement is only replayable inside its own TTL window; after the
 /// provider stops serving (or changes endpoint), the stale capture expires.
-fn check_announcement_freshness(timestamp_ms: i64, ttl_secs: u64) -> std::result::Result<(), String> {
+fn check_announcement_freshness(
+    timestamp_ms: i64,
+    ttl_secs: u64,
+) -> std::result::Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
     let age_ms = now.saturating_sub(timestamp_ms);
     let ttl_ms = (ttl_secs as i64).saturating_mul(1000);
@@ -307,9 +318,7 @@ impl NodeStateRootProvider {
 
 impl StateRootProvider for NodeStateRootProvider {
     fn current_state_root(&self) -> Hash {
-        self.state_adapter
-            .lock()
-            .compute_state_root()
+        self.state_adapter.lock().compute_state_root()
     }
 }
 
@@ -448,6 +457,13 @@ pub struct EventLoop {
     network_models: Option<Arc<DashMap<String, crate::node::NetworkModelEntry>>>,
     /// Shared reference to the node's served_models for heartbeat re-announcements
     served_models: Option<Arc<DashMap<String, tenzro_types::model::ModelVisibility>>>,
+    /// Which capabilities this node advertises.
+    ///
+    /// Read live per tick rather than captured at startup, so an operator who
+    /// makes a capability private stops announcing it on the next heartbeat
+    /// instead of at the next restart.
+    node_visibility:
+        Option<Arc<parking_lot::RwLock<tenzro_types::node_visibility::NodeVisibility>>>,
     /// Shared reference to the node's provider pricing for heartbeat announcements
     provider_pricing: Option<Arc<parking_lot::RwLock<crate::node::ProviderPricing>>>,
     /// Shared reference to the node's provider schedule for heartbeat announcements
@@ -743,9 +759,9 @@ impl EventLoop {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         // Create state adapter with storage backend, behind Mutex for shared access
-        let state_adapter = Arc::new(Mutex::new(
-            StateAdapter::with_storage(storage.clone() as Arc<dyn KvStore>)
-        ));
+        let state_adapter = Arc::new(Mutex::new(StateAdapter::with_storage(
+            storage.clone() as Arc<dyn KvStore>
+        )));
 
         Self {
             event_tx,
@@ -765,6 +781,7 @@ impl EventLoop {
             metrics,
             network_models: None,
             served_models: None,
+            node_visibility: None,
             provider_pricing: None,
             provider_schedule: None,
             rpc_addr: String::new(),
@@ -821,11 +838,7 @@ impl EventLoop {
     /// import is rejected — defeating long-range forks that pass QC
     /// verification. Left unset, block-sync imports are accepted on QC
     /// verification alone.
-    pub fn with_weak_subjectivity_anchor(
-        mut self,
-        height: u64,
-        root: Hash,
-    ) -> Self {
+    pub fn with_weak_subjectivity_anchor(mut self, height: u64, root: Hash) -> Self {
         self.weak_subjectivity_anchor = Some((height, root));
         self
     }
@@ -877,6 +890,27 @@ impl EventLoop {
         self
     }
 
+    /// Wires this node's advertisement policy into the event loop.
+    ///
+    /// Absent, the loop advertises everything — the behaviour before the
+    /// policy existed, and the right default for a node whose operator has
+    /// expressed no preference.
+    pub fn with_node_visibility(
+        mut self,
+        policy: Arc<parking_lot::RwLock<tenzro_types::node_visibility::NodeVisibility>>,
+    ) -> Self {
+        self.node_visibility = Some(policy);
+        self
+    }
+
+    /// Whether `capability` may be announced right now.
+    fn advertises(&self, capability: tenzro_types::node_visibility::Capability) -> bool {
+        self.node_visibility
+            .as_ref()
+            .map(|p| p.read().is_advertised(capability))
+            .unwrap_or(true)
+    }
+
     /// Wires the network model discovery state into the event loop.
     pub fn with_model_discovery(
         mut self,
@@ -895,19 +929,13 @@ impl EventLoop {
     }
 
     /// Wires the agent runtime into the event loop for gossipsub heartbeat announcements.
-    pub fn with_agent_runtime(
-        mut self,
-        agent_runtime: Arc<tenzro_agent::AgentRuntime>,
-    ) -> Self {
+    pub fn with_agent_runtime(mut self, agent_runtime: Arc<tenzro_agent::AgentRuntime>) -> Self {
         self.agent_runtime = Some(agent_runtime);
         self
     }
 
     /// Wires the swarm manager into the event loop for periodic liveness sweep.
-    pub fn with_swarm_manager(
-        mut self,
-        swarm_manager: Arc<tenzro_agent::SwarmManager>,
-    ) -> Self {
+    pub fn with_swarm_manager(mut self, swarm_manager: Arc<tenzro_agent::SwarmManager>) -> Self {
         self.swarm_manager = Some(swarm_manager);
         self
     }
@@ -947,10 +975,7 @@ impl EventLoop {
     /// Wires the identity registry. Required to map the machine DID
     /// carried on a kill-switch log to the staker `Address` that
     /// `StakingManager` keys on.
-    pub fn with_identity_registry(
-        mut self,
-        identity_registry: Arc<IdentityRegistry>,
-    ) -> Self {
+    pub fn with_identity_registry(mut self, identity_registry: Arc<IdentityRegistry>) -> Self {
         self.identity_registry = Some(identity_registry);
         self
     }
@@ -1090,10 +1115,7 @@ impl EventLoop {
 
     /// Wires the same-segment peer set so storage-shard self-selection can
     /// prefer local-segment holders before spilling onto the wider network.
-    pub fn with_local_peers(
-        mut self,
-        local_peers: Arc<tenzro_network::LocalPeerSet>,
-    ) -> Self {
+    pub fn with_local_peers(mut self, local_peers: Arc<tenzro_network::LocalPeerSet>) -> Self {
         self.local_peers = Some(local_peers);
         self
     }
@@ -1116,10 +1138,7 @@ impl EventLoop {
     /// Without this wired, the heartbeat only evicts stale `network_providers`
     /// entries — peers will never learn about this node's served models /
     /// hardware / geography.
-    pub fn with_provider_announcement(
-        mut self,
-        ctx: ProviderAnnouncementContext,
-    ) -> Self {
+    pub fn with_provider_announcement(mut self, ctx: ProviderAnnouncementContext) -> Self {
         self.provider_announcement_ctx = Some(ctx);
         self
     }
@@ -1139,10 +1158,7 @@ impl EventLoop {
     /// Wires the node's iroh resolver so the `blob_heartbeat` tick can
     /// announce locally held blobs on `tenzro/blobs` and inbound peer
     /// announcements can populate the resolver's blob-provider hint cache.
-    pub fn with_iroh_resolver(
-        mut self,
-        resolver: Arc<tenzro_iroh::IrohBackedResolver>,
-    ) -> Self {
+    pub fn with_iroh_resolver(mut self, resolver: Arc<tenzro_iroh::IrohBackedResolver>) -> Self {
         self.iroh_resolver = Some(resolver);
         self
     }
@@ -1162,10 +1178,7 @@ impl EventLoop {
     /// `TrainingGossipReceived` events into the local syncer state. Without
     /// this wired, training payloads decoded off the wire are dropped with
     /// a debug-level log.
-    pub fn with_training_runtime(
-        mut self,
-        runtime: Arc<tenzro_training::TrainingRuntime>,
-    ) -> Self {
+    pub fn with_training_runtime(mut self, runtime: Arc<tenzro_training::TrainingRuntime>) -> Self {
         self.training_runtime = Some(runtime);
         self
     }
@@ -1221,10 +1234,7 @@ impl EventLoop {
     /// Wires the work-gated reward engine. Every finalized block records
     /// consensus participation; every epoch boundary ingests provider
     /// usage meters and closes the epoch into reward coupons.
-    pub fn with_reward_engine(
-        mut self,
-        engine: Arc<tenzro_token::RewardEngine>,
-    ) -> Self {
+    pub fn with_reward_engine(mut self, engine: Arc<tenzro_token::RewardEngine>) -> Self {
         self.reward_engine = Some(engine);
         self
     }
@@ -1241,10 +1251,7 @@ impl EventLoop {
 
     /// Wires the usage tracker consumed by the reward engine's epoch
     /// boundary ingestion of cumulative provider meters.
-    pub fn with_usage_tracker(
-        mut self,
-        tracker: Arc<tenzro_model::UsageTracker>,
-    ) -> Self {
+    pub fn with_usage_tracker(mut self, tracker: Arc<tenzro_model::UsageTracker>) -> Self {
         self.usage_tracker = Some(tracker);
         self
     }
@@ -1293,7 +1300,10 @@ impl EventLoop {
     ///
     /// This is the typed entry point for the finality subscription in `run()`.
     /// It logs the notification details and delegates to `handle_block_finalized()`.
-    async fn process_finality_notification(&mut self, notification: FinalityNotification) -> Result<()> {
+    async fn process_finality_notification(
+        &mut self,
+        notification: FinalityNotification,
+    ) -> Result<()> {
         info!(
             height = notification.height.0,
             hash = %notification.hash,
@@ -1336,19 +1346,17 @@ impl EventLoop {
             // Snapshot production walks 27 column families and is
             // I/O-bound; run it off the event-loop thread so finality
             // processing stays unblocked.
-            tokio::task::spawn_blocking(move || {
-                match store.produce_at(height, sr) {
-                    Ok(m) => info!(
-                        height = m.height,
-                        num_chunks = m.num_chunks,
-                        "Produced state-sync snapshot"
-                    ),
-                    Err(e) => warn!(
-                        height = height,
-                        error = %e,
-                        "Failed to produce state-sync snapshot"
-                    ),
-                }
+            tokio::task::spawn_blocking(move || match store.produce_at(height, sr) {
+                Ok(m) => info!(
+                    height = m.height,
+                    num_chunks = m.num_chunks,
+                    "Produced state-sync snapshot"
+                ),
+                Err(e) => warn!(
+                    height = height,
+                    error = %e,
+                    "Failed to produce state-sync snapshot"
+                ),
             });
         }
 
@@ -1356,8 +1364,13 @@ impl EventLoop {
     }
 
     /// Submits a finalized block to the event loop for execution
-    pub fn submit_block(&self, block: Block) -> std::result::Result<(), Box<mpsc::error::TrySendError<NodeEvent>>> {
-        self.event_tx.try_send(NodeEvent::BlockFinalized(block)).map_err(Box::new)
+    pub fn submit_block(
+        &self,
+        block: Block,
+    ) -> std::result::Result<(), Box<mpsc::error::TrySendError<NodeEvent>>> {
+        self.event_tx
+            .try_send(NodeEvent::BlockFinalized(block))
+            .map_err(Box::new)
     }
 
     /// Syncs the current block height from storage on startup.
@@ -1392,7 +1405,10 @@ impl EventLoop {
                 if let Some(ref consensus) = self.consensus {
                     consensus.resume_from_height(height);
                 }
-                info!(height = self.current_height, "Synced block height from storage");
+                info!(
+                    height = self.current_height,
+                    "Synced block height from storage"
+                );
             }
             Ok(Some(orphan)) => {
                 warn!(
@@ -1849,7 +1865,16 @@ impl EventLoop {
                     // signer) so the heartbeat carries the same `provider` key and
                     // signature that consumers require — an unsigned or provider-empty
                     // heartbeat is dropped on ingest and never refreshes the TTL.
-                    if let (Some(network), Some(served), Some(ctx), Some(signer)) = (
+                    //
+                    // Skipped entirely when the operator has made AI private. The
+                    // models still serve at full speed to anyone holding the right
+                    // credential and this node's address; they are simply not
+                    // published, so nobody browsing the network finds them. Checked
+                    // per tick rather than at startup so the change takes effect on
+                    // the next heartbeat.
+                    if !self.advertises(tenzro_types::node_visibility::Capability::Ai) {
+                        // fall through to the provider heartbeat below
+                    } else if let (Some(network), Some(served), Some(ctx), Some(signer)) = (
                         &self.network,
                         &self.served_models,
                         &self.provider_announcement_ctx,
@@ -2161,6 +2186,57 @@ impl EventLoop {
                             pubkey: Vec::new(),
                             signature: Vec::new(),
                         };
+                        // Strip the capabilities the operator has made private
+                        // before signing, rather than suppressing the whole
+                        // announcement. A node that is public for hosting and
+                        // private for AI must still appear as a hosting
+                        // provider — an all-or-nothing suppression would force
+                        // the operator to run two nodes to express one intent.
+                        //
+                        // Note this removes what is *advertised*, not what is
+                        // served: a private capability answers the same callers
+                        // at the same speed, it is simply not published.
+                        {
+                            use tenzro_types::node_visibility::Capability;
+                            if !self.advertises(Capability::Ai) {
+                                ann.served_models.clear();
+                                ann.capacity.max_concurrent_requests = 0;
+                            }
+                            if !self.advertises(Capability::Hosting) {
+                                ann.runtime_support.hosting_runtimes.clear();
+                                ann.runtime_support.hosting_price_per_hour = 0;
+                            }
+                            if !self.advertises(Capability::Rpc) {
+                                ann.rpc_endpoint.clear();
+                            }
+                            ann.capabilities.retain(|c| {
+                                let cap = match c.as_str() {
+                                    "inference" | "ai" => Some(Capability::Ai),
+                                    "storage" => Some(Capability::Storage),
+                                    "database" => Some(Capability::Database),
+                                    "hosting" | "ingress" => Some(Capability::Hosting),
+                                    "rpc" => Some(Capability::Rpc),
+                                    "tee-attestation" | "tee" => Some(Capability::Tee),
+                                    "compute" => Some(Capability::Compute),
+                                    // A label this mapping does not know is left
+                                    // alone: dropping it would silently unadvertise
+                                    // a capability nobody asked to hide.
+                                    _ => None,
+                                };
+                                cap.map(|c| self.advertises(c)).unwrap_or(true)
+                            });
+
+                            // Everything hidden means there is nothing to say.
+                            // Skip the heartbeat rather than publish an empty
+                            // record that still tells peers this node exists.
+                            let nothing_left = ann.capabilities.is_empty()
+                                && ann.served_models.is_empty()
+                                && ann.rpc_endpoint.is_empty()
+                                && ann.runtime_support.hosting_runtimes.is_empty();
+                            if nothing_left {
+                                continue;
+                            }
+                        }
                         if let Err(e) = ann.sign(signer.as_ref()) {
                             warn!(error = %e, "Skipping provider announcement: signing failed");
                             continue;
@@ -3601,7 +3677,9 @@ impl EventLoop {
 
         if tx.signature.public_key.is_empty() {
             warn!("Rejecting transaction with empty public key: {}", tx_hash);
-            return Err(NodeError::InvalidTransaction("Empty public key".to_string()));
+            return Err(NodeError::InvalidTransaction(
+                "Empty public key".to_string(),
+            ));
         }
 
         if tx.transaction.gas_limit == 0 {
@@ -3617,7 +3695,10 @@ impl EventLoop {
                 error = %e,
                 "Rejecting transaction with invalid signature"
             );
-            return Err(NodeError::InvalidTransaction(format!("Invalid signature: {}", e)));
+            return Err(NodeError::InvalidTransaction(format!(
+                "Invalid signature: {}",
+                e
+            )));
         }
 
         // Off-chain spend-ceiling enforcement on the gossip-relay path.
@@ -3725,7 +3806,10 @@ impl EventLoop {
     ///
     /// Path executed:
     ///   3. broadcast on `tenzro/transactions` so peers can pick it up
-    async fn handle_locally_admitted_transaction(&mut self, mut tx: SignedTransaction) -> Result<()> {
+    async fn handle_locally_admitted_transaction(
+        &mut self,
+        mut tx: SignedTransaction,
+    ) -> Result<()> {
         let tx_hash = tx.hash();
 
         if let Some(ref network) = self.network {
@@ -3835,8 +3919,8 @@ impl EventLoop {
         })?;
 
         // (1) Extract QC.
-        let qc = tenzro_consensus::QuorumCertificate::extract_from_block(&block)
-            .ok_or_else(|| {
+        let qc =
+            tenzro_consensus::QuorumCertificate::extract_from_block(&block).ok_or_else(|| {
                 crate::error::NodeError::Other(format!(
                     "block-sync rejected block at height {}: no embedded commit-QC \
                      (consensus_proof.proof_data empty or undeserializable)",
@@ -3877,10 +3961,7 @@ impl EventLoop {
         // needs more than one transition), staging the registry plan before
         // each. Gated by `should_transition`, so this is strictly forward
         // catch-up, never historical replay.
-        while consensus
-            .epoch_manager()
-            .should_transition(block.height())
-        {
+        while consensus.epoch_manager().should_transition(block.height()) {
             if let Some(registry) = self.validator_registry.as_ref() {
                 Self::stage_registry_epoch_plan(&consensus.epoch_manager(), registry);
             }
@@ -4135,11 +4216,7 @@ impl EventLoop {
         );
     }
 
-    async fn handle_block_finalized_inner(
-        &mut self,
-        block: Block,
-        from_sync: bool,
-    ) -> Result<()> {
+    async fn handle_block_finalized_inner(&mut self, block: Block, from_sync: bool) -> Result<()> {
         let block_hash = block.hash();
         let block_height = block.height();
         let tx_count = block.tx_count();
@@ -4150,7 +4227,7 @@ impl EventLoop {
         // amplifies a self-sustaining storm with peers — the underlying cause
         // of the testnet OOMKill cycle. The first dedup happens at the
         // NetworkBlock entry point in run(); this guard catches any other
-        // event source (consensus emitting BlockFinalized, RPC submit_block,
+        // event source (consensus emitting BlockFinalized, block-sync import,
         // future paths) that bypasses that check.
         if block_height.0 <= self.current_height {
             debug!(
@@ -4174,9 +4251,10 @@ impl EventLoop {
         self.metrics.record_transaction(tx_count as u64);
         // Refresh peer count on every finalized block so the metric stays current
         if let Some(ref network) = self.network
-            && let Ok(peers) = network.connected_peers().await {
-                self.metrics.set_peer_count(peers.len() as u64);
-            }
+            && let Ok(peers) = network.connected_peers().await
+        {
+            self.metrics.set_peer_count(peers.len() as u64);
+        }
 
         // Execute all transactions in the block
         let mut gas_used_total = 0u64;
@@ -4194,10 +4272,8 @@ impl EventLoop {
         // attribution is `writes=1 per unique address per tx, reexecutions=0`.
         // Block-STM parallel path (when wired) will populate the reexecution
         // counter directly via `ParallelExecutionResult.account_contention`.
-        let mut block_contention: std::collections::HashMap<
-            Vec<u8>,
-            tenzro_vm::AccountSample,
-        > = std::collections::HashMap::new();
+        let mut block_contention: std::collections::HashMap<Vec<u8>, tenzro_vm::AccountSample> =
+            std::collections::HashMap::new();
 
         for signed_tx in &block.transactions {
             let tx_hash = signed_tx.transaction.hash();
@@ -4236,7 +4312,9 @@ impl EventLoop {
             // Acquire state adapter lock for VM execution (tokio::Mutex, safe to hold across .await)
             let result = {
                 let mut state_adapter = self.state_adapter.lock().await;
-                self.vm_runtime.execute_transaction(&vm_tx, &mut *state_adapter).await
+                self.vm_runtime
+                    .execute_transaction(&vm_tx, &mut *state_adapter)
+                    .await
             };
 
             match result {
@@ -4254,9 +4332,7 @@ impl EventLoop {
                             std::collections::HashSet::new();
                         for sc in &result.state_changes {
                             if seen.insert(sc.address.clone()) {
-                                let entry = block_contention
-                                    .entry(sc.address.clone())
-                                    .or_default();
+                                let entry = block_contention.entry(sc.address.clone()).or_default();
                                 entry.merge(tenzro_vm::AccountSample {
                                     reexecutions: 0,
                                     writes: 1,
@@ -4313,7 +4389,8 @@ impl EventLoop {
                         // architecture — the EVM tx is submitted by the
                         // mirror's `tokio::spawn`, and the resulting log
                         // lands here when the block applies.
-                        self.process_erc8004_registered_logs(&result, block_height).await;
+                        self.process_erc8004_registered_logs(&result, block_height)
+                            .await;
 
                         // Post-execute escrow scan: mirrors VM-emitted
                         // `EscrowCreated` / `EscrowReleased` / `EscrowRefunded`
@@ -4354,11 +4431,15 @@ impl EventLoop {
                         );
                     }
 
-                    let logs: Vec<TxReceiptLog> = result.logs.iter().map(|l| TxReceiptLog {
-                        address: hex::encode(&l.address),
-                        topics: l.topics.iter().map(hex::encode).collect(),
-                        data: hex::encode(&l.data),
-                    }).collect();
+                    let logs: Vec<TxReceiptLog> = result
+                        .logs
+                        .iter()
+                        .map(|l| TxReceiptLog {
+                            address: hex::encode(&l.address),
+                            topics: l.topics.iter().map(hex::encode).collect(),
+                            data: hex::encode(&l.data),
+                        })
+                        .collect();
 
                     receipts_for_index.push((
                         tx_hash,
@@ -4368,9 +4449,7 @@ impl EventLoop {
                             cumulative_gas_used: gas_used_total,
                             effective_gas_price: signed_tx.transaction.gas_price,
                             revert_reason: result.revert_reason.clone(),
-                            contract_address: result.contract_address
-                                .as_ref()
-                                .map(hex::encode),
+                            contract_address: result.contract_address.as_ref().map(hex::encode),
                             logs,
                         },
                     ));
@@ -4417,14 +4496,16 @@ impl EventLoop {
         // completely separate thread pool (default: up to 512 threads) and immediately
         // yields the worker thread back to the async scheduler.
         let state_arc = self.state_adapter.clone();
-        let state_root = tokio::task::spawn_blocking(move || -> std::result::Result<Hash, NodeError> {
-            let state_adapter = state_arc.blocking_lock();
-            state_adapter.commit()
-                .map_err(|e| NodeError::Other(format!("State commit error: {}", e)))?;
-            Ok(state_adapter.compute_state_root())
-        })
-        .await
-        .map_err(|e| NodeError::Other(format!("State commit task panicked: {}", e)))??;
+        let state_root =
+            tokio::task::spawn_blocking(move || -> std::result::Result<Hash, NodeError> {
+                let state_adapter = state_arc.blocking_lock();
+                state_adapter
+                    .commit()
+                    .map_err(|e| NodeError::Other(format!("State commit error: {}", e)))?;
+                Ok(state_adapter.compute_state_root())
+            })
+            .await
+            .map_err(|e| NodeError::Other(format!("State commit task panicked: {}", e)))??;
 
         info!(
             height = %block_height,
@@ -4617,11 +4698,14 @@ impl EventLoop {
             .record_block_contention(block_contention);
 
         // Remove finalized transactions from pending pool
-        let finalized_hashes: Vec<Hash> = block.transactions.iter()
+        let finalized_hashes: Vec<Hash> = block
+            .transactions
+            .iter()
             .map(|tx| tx.transaction.hash())
             .collect();
 
-        self.pending_txs.retain(|tx| !finalized_hashes.contains(&tx.transaction.hash()));
+        self.pending_txs
+            .retain(|tx| !finalized_hashes.contains(&tx.transaction.hash()));
 
         // Broadcast finalized block to gossipsub so other nodes can sync.
         // Only the block producer (node with consensus engine) broadcasts.
@@ -4641,27 +4725,28 @@ impl EventLoop {
         // with current-tip blocks, defeating gossipsub recency dedup.
         if !from_sync
             && self.consensus_participant
-            && let Some(ref network) = self.network {
-                let network_clone = network.clone();
-                let msg = NetworkMessage::new(MessagePayload::Block(block.clone()));
-                let height_for_log = block_height;
-                let hash_for_log = block_hash;
-                tokio::spawn(async move {
-                    if let Err(e) = network_clone.broadcast("tenzro/blocks", msg).await {
-                        warn!(
-                            height = %height_for_log,
-                            error = %e,
-                            "Failed to broadcast finalized block to gossipsub"
-                        );
-                    } else {
-                        info!(
-                            height = %height_for_log,
-                            hash = %hash_for_log,
-                            "Broadcast finalized block to network"
-                        );
-                    }
-                });
-            }
+            && let Some(ref network) = self.network
+        {
+            let network_clone = network.clone();
+            let msg = NetworkMessage::new(MessagePayload::Block(block.clone()));
+            let height_for_log = block_height;
+            let hash_for_log = block_hash;
+            tokio::spawn(async move {
+                if let Err(e) = network_clone.broadcast("tenzro/blocks", msg).await {
+                    warn!(
+                        height = %height_for_log,
+                        error = %e,
+                        "Failed to broadcast finalized block to gossipsub"
+                    );
+                } else {
+                    info!(
+                        height = %height_for_log,
+                        hash = %hash_for_log,
+                        "Broadcast finalized block to network"
+                    );
+                }
+            });
+        }
 
         // Epoch boundary hook: every block, ask the consensus EpochManager
         // whether the next block will trigger an epoch transition. If yes,
@@ -4683,13 +4768,12 @@ impl EventLoop {
         if !from_sync
             && self.consensus_participant
             && let (Some(consensus), Some(registry)) =
-            (self.consensus.as_ref(), self.validator_registry.as_ref())
+                (self.consensus.as_ref(), self.validator_registry.as_ref())
         {
             let em = consensus.epoch_manager();
             // Will the *next* block trigger transition? Use block_height + 1
             // so we set up the plan before HotStuff-2 finalizes its own.
-            let next_height =
-                tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
+            let next_height = tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
             if em.should_transition(next_height) {
                 Self::stage_registry_epoch_plan(&em, registry);
             }
@@ -4759,8 +4843,7 @@ impl EventLoop {
             )
         {
             let em = consensus.epoch_manager();
-            let next_height =
-                tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
+            let next_height = tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
             if em.should_transition(next_height) {
                 use tenzro_token::adaptive_burn::{
                     BurnBreakdown, EmissionBreakdown, SupplyMetricsSnapshot,
@@ -4810,8 +4893,7 @@ impl EventLoop {
                 let rolling_bps: i32 = if circulating == 0 {
                     0
                 } else {
-                    let window_epochs =
-                        burn_rate.targets().rolling_window_epochs.max(1) as i128;
+                    let window_epochs = burn_rate.targets().rolling_window_epochs.max(1) as i128;
                     let annualized = epoch_delta.saturating_mul(window_epochs);
                     let bps = annualized
                         .saturating_mul(10_000)
@@ -4830,14 +4912,12 @@ impl EventLoop {
                 let base_fee_burn_delta = if self.last_observed_base_fee_burn == 0 {
                     0
                 } else {
-                    cumulative_base_fee_burn
-                        .saturating_sub(self.last_observed_base_fee_burn)
+                    cumulative_base_fee_burn.saturating_sub(self.last_observed_base_fee_burn)
                 };
                 let slash_burn_delta = if self.last_observed_slash_burn == 0 {
                     0
                 } else {
-                    cumulative_slash_burn
-                        .saturating_sub(self.last_observed_slash_burn)
+                    cumulative_slash_burn.saturating_sub(self.last_observed_slash_burn)
                 };
 
                 // Remaining `BurnBreakdown` lanes (local_fee, paymaster)
@@ -4931,8 +5011,7 @@ impl EventLoop {
                 );
             }
 
-            let next_height =
-                tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
+            let next_height = tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
             if em.should_transition(next_height) {
                 // Settled provider usage only — the tracker records real
                 // routed inference, never self-reported capacity.
@@ -4971,9 +5050,7 @@ impl EventLoop {
                 }
 
                 if let Some(sponsorship) = self.sponsorship_manager.as_ref() {
-                    match sponsorship
-                        .expire_due(tenzro_types::primitives::Timestamp::now())
-                    {
+                    match sponsorship.expire_due(tenzro_types::primitives::Timestamp::now()) {
                         Ok(expired) if !expired.is_empty() => info!(
                             expired = expired.len(),
                             "Sponsorship expiry sweep returned delegations to pool"
@@ -5084,11 +5161,14 @@ impl EventLoop {
     ) {
         // Cheap early exit: most blocks contain zero kill-switch logs.
         let any_killswitch = result.logs.iter().any(|l| {
-            l.topics.first().map(|t| {
-                t.as_slice() == b"KillSwitchPause"
-                    || t.as_slice() == b"KillSwitchQuarantine"
-                    || t.as_slice() == b"KillSwitchTerminate"
-            }).unwrap_or(false)
+            l.topics
+                .first()
+                .map(|t| {
+                    t.as_slice() == b"KillSwitchPause"
+                        || t.as_slice() == b"KillSwitchQuarantine"
+                        || t.as_slice() == b"KillSwitchTerminate"
+                })
+                .unwrap_or(false)
         });
         if !any_killswitch {
             return;
@@ -5124,9 +5204,10 @@ impl EventLoop {
             // Recover the receipt blob the VM stashed under
             // SYSTEM_ADDRESS storage with key `killswitch:<id>`.
             let storage_key = format!("killswitch:{}", receipt_id_hex);
-            let receipt_blob = result.state_changes.iter().find(|sc| {
-                sc.key.as_slice() == storage_key.as_bytes() && sc.new_value.is_some()
-            });
+            let receipt_blob = result
+                .state_changes
+                .iter()
+                .find(|sc| sc.key.as_slice() == storage_key.as_bytes() && sc.new_value.is_some());
             let mut receipt: KillSwitchReceipt = match receipt_blob
                 .and_then(|sc| sc.new_value.as_ref())
                 .and_then(|v| serde_json::from_slice(v).ok())
@@ -5145,7 +5226,8 @@ impl EventLoop {
             // a stand-in) with the real finalized block height.
             receipt.frozen_at_block = block_height;
 
-            self.apply_kill_switch_action(&action, &agent_did, &receipt).await;
+            self.apply_kill_switch_action(&action, &agent_did, &receipt)
+                .await;
 
             // Persist the canonical receipt last so the audit trail
             // matches what actually happened (lifecycle + stake side
@@ -5171,10 +5253,9 @@ impl EventLoop {
             // same termination (+ proportional slash) to each
             // descendant. Depth-bounded to 32 to defend against
             // pathological spawn graphs.
-            if matches!(action, KillSwitchAction::Terminate)
-                && receipt.cascade.unwrap_or(false)
-            {
-                self.cascade_terminate(&agent_did, &receipt, block_height).await;
+            if matches!(action, KillSwitchAction::Terminate) && receipt.cascade.unwrap_or(false) {
+                self.cascade_terminate(&agent_did, &receipt, block_height)
+                    .await;
             }
         }
     }
@@ -5210,14 +5291,17 @@ impl EventLoop {
         block_height: BlockHeight,
     ) {
         let any_bond = result.logs.iter().any(|l| {
-            l.topics.first().map(|t| {
-                let s = t.as_slice();
-                s == b"BondPosted"
-                    || s == b"BondIncreased"
-                    || s == b"BondWithdrawInitiated"
-                    || s == b"BondSlashed"
-                    || s == b"InsuranceClaimPaid"
-            }).unwrap_or(false)
+            l.topics
+                .first()
+                .map(|t| {
+                    let s = t.as_slice();
+                    s == b"BondPosted"
+                        || s == b"BondIncreased"
+                        || s == b"BondWithdrawInitiated"
+                        || s == b"BondSlashed"
+                        || s == b"InsuranceClaimPaid"
+                })
+                .unwrap_or(false)
         });
         if !any_bond {
             return;
@@ -5656,9 +5740,7 @@ impl EventLoop {
             // 1. Write the off-chain did → agentId index.
             let key = crate::erc8004_mirror::did_index_key(&did);
             let val = agent_id.to_be_bytes();
-            if let Err(e) =
-                self.storage.put(tenzro_storage::CF_IDENTITIES, &key, &val)
-            {
+            if let Err(e) = self.storage.put(tenzro_storage::CF_IDENTITIES, &key, &val) {
                 warn!(
                     target: "tenzro::erc8004::listener",
                     did = %did,
@@ -5677,8 +5759,9 @@ impl EventLoop {
             if owner_topic.len() == 32 {
                 let owner_addr = &owner_topic[12..32];
                 let owner_key = crate::erc8004_mirror::owner_index_key(owner_addr);
-                if let Err(e) =
-                    self.storage.put(tenzro_storage::CF_IDENTITIES, &owner_key, &val)
+                if let Err(e) = self
+                    .storage
+                    .put(tenzro_storage::CF_IDENTITIES, &owner_key, &val)
                 {
                     warn!(
                         target: "tenzro::erc8004::listener",
@@ -5759,10 +5842,13 @@ impl EventLoop {
         block_height: BlockHeight,
     ) {
         let any_escrow = result.logs.iter().any(|l| {
-            l.topics.first().map(|t| {
-                let s = t.as_slice();
-                s == b"EscrowCreated" || s == b"EscrowReleased" || s == b"EscrowRefunded"
-            }).unwrap_or(false)
+            l.topics
+                .first()
+                .map(|t| {
+                    let s = t.as_slice();
+                    s == b"EscrowCreated" || s == b"EscrowReleased" || s == b"EscrowRefunded"
+                })
+                .unwrap_or(false)
         });
         if !any_escrow {
             return;
@@ -5885,12 +5971,15 @@ impl EventLoop {
         block_height: BlockHeight,
     ) {
         let any_validator = result.logs.iter().any(|l| {
-            l.topics.first().map(|t| {
-                let s = t.as_slice();
-                s == b"ValidatorRegister"
-                    || s == b"ValidatorExit"
-                    || s == b"ValidatorMetadataUpdate"
-            }).unwrap_or(false)
+            l.topics
+                .first()
+                .map(|t| {
+                    let s = t.as_slice();
+                    s == b"ValidatorRegister"
+                        || s == b"ValidatorExit"
+                        || s == b"ValidatorMetadataUpdate"
+                })
+                .unwrap_or(false)
         });
         if !any_validator {
             return;
@@ -6004,11 +6093,9 @@ impl EventLoop {
                     } else {
                         Some(parsed.metadata_uri)
                     };
-                    if let Err(e) = registry.update_metadata(
-                        &from_addr,
-                        uri,
-                        parsed.tee_attestation_hash,
-                    ) {
+                    if let Err(e) =
+                        registry.update_metadata(&from_addr, uri, parsed.tee_attestation_hash)
+                    {
                         warn!(
                             address = %from_addr,
                             error = %e,
@@ -6055,21 +6142,24 @@ impl EventLoop {
         block_height: BlockHeight,
     ) {
         let any_workflow = result.logs.iter().any(|l| {
-            l.topics.first().map(|t| {
-                let s = t.as_slice();
-                s == b"WorkflowCreate"
-                    || s == b"WorkflowSign"
-                    || s == b"WorkflowTransition"
-                    || s == b"WorkflowObligationRegister"
-                    || s == b"WorkflowObligationDischarge"
-                    || s == b"WorkflowObligationDefault"
-                    || s == b"WorkflowGateRegister"
-                    || s == b"WorkflowApprovalOpen"
-                    || s == b"WorkflowApprovalDecision"
-                    || s == b"WorkflowKillSwitch"
-                    || s == b"WorkflowPrivacyDomainRegister"
-                    || s == b"WorkflowPrivacyDomainFreeze"
-            }).unwrap_or(false)
+            l.topics
+                .first()
+                .map(|t| {
+                    let s = t.as_slice();
+                    s == b"WorkflowCreate"
+                        || s == b"WorkflowSign"
+                        || s == b"WorkflowTransition"
+                        || s == b"WorkflowObligationRegister"
+                        || s == b"WorkflowObligationDischarge"
+                        || s == b"WorkflowObligationDefault"
+                        || s == b"WorkflowGateRegister"
+                        || s == b"WorkflowApprovalOpen"
+                        || s == b"WorkflowApprovalDecision"
+                        || s == b"WorkflowKillSwitch"
+                        || s == b"WorkflowPrivacyDomainRegister"
+                        || s == b"WorkflowPrivacyDomainFreeze"
+                })
+                .unwrap_or(false)
         });
         if !any_workflow {
             return;
@@ -6134,27 +6224,29 @@ impl EventLoop {
         if let Some(ref runtime) = self.agent_runtime {
             let result = match action {
                 KillSwitchAction::Pause => {
-                    runtime.pause_agent(
-                        agent_did,
-                        receipt.controller_did.clone(),
-                        receipt.reason_code as u32,
-                        receipt.reason_text.clone(),
-                    ).await
+                    runtime
+                        .pause_agent(
+                            agent_did,
+                            receipt.controller_did.clone(),
+                            receipt.reason_code as u32,
+                            receipt.reason_text.clone(),
+                        )
+                        .await
                 }
                 KillSwitchAction::Quarantine => {
-                    runtime.quarantine_agent(
-                        agent_did,
-                        receipt.controller_did.clone(),
-                        receipt.reason_code as u32,
-                        receipt.reason_text.clone(),
-                    ).await
+                    runtime
+                        .quarantine_agent(
+                            agent_did,
+                            receipt.controller_did.clone(),
+                            receipt.reason_code as u32,
+                            receipt.reason_text.clone(),
+                        )
+                        .await
                 }
                 KillSwitchAction::Terminate => {
-                    let reason = receipt.reason_text.clone()
-                        .unwrap_or_else(|| format!(
-                            "kill-switch terminate (code={})",
-                            receipt.reason_code
-                        ));
+                    let reason = receipt.reason_text.clone().unwrap_or_else(|| {
+                        format!("kill-switch terminate (code={})", receipt.reason_code)
+                    });
                     runtime.terminate_agent(agent_did, reason).await
                 }
             };
@@ -6167,9 +6259,7 @@ impl EventLoop {
                 );
             }
         } else {
-            debug!(
-                "AgentRuntime not wired; kill-switch lifecycle transition skipped"
-            );
+            debug!("AgentRuntime not wired; kill-switch lifecycle transition skipped");
         }
 
         // Stake side-effects.
@@ -6217,12 +6307,8 @@ impl EventLoop {
                             receipt.reason_code, receipt.controller_did
                         )
                     });
-                    if let Err(e) = staking.slash(
-                        &staker_address,
-                        slash_amount,
-                        reason,
-                        slashed_by,
-                    ) {
+                    if let Err(e) = staking.slash(&staker_address, slash_amount, reason, slashed_by)
+                    {
                         warn!(
                             agent_did = %agent_did,
                             staker = %staker_address,
@@ -6252,8 +6338,7 @@ impl EventLoop {
         };
 
         let mut frontier: Vec<(String, usize)> = vec![(root_did.to_string(), 0)];
-        let mut visited: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         visited.insert(root_did.to_string());
 
         while let Some((parent, depth)) = frontier.pop() {
@@ -6287,20 +6372,18 @@ impl EventLoop {
                     frozen_at_block: receipt.frozen_at_block,
                     timestamp: receipt.timestamp,
                 };
-                self.apply_kill_switch_action(
-                    &KillSwitchAction::Terminate,
-                    &child,
-                    &child_receipt,
-                ).await;
+                self.apply_kill_switch_action(&KillSwitchAction::Terminate, &child, &child_receipt)
+                    .await;
                 if let Some(ref store) = self.kill_switch_store
-                    && let Err(e) = store.record(child_receipt) {
-                        error!(
-                            parent = %parent,
-                            child = %child,
-                            error = %e,
-                            "Failed to persist cascade KillSwitchReceipt"
-                        );
-                    }
+                    && let Err(e) = store.record(child_receipt)
+                {
+                    error!(
+                        parent = %parent,
+                        child = %child,
+                        error = %e,
+                        "Failed to persist cascade KillSwitchReceipt"
+                    );
+                }
                 frontier.push((child, depth + 1));
             }
         }
@@ -6309,10 +6392,7 @@ impl EventLoop {
     /// Resolve a machine DID to the staker `Address` that the
     /// `StakingManager` keys on. Returns `None` if the DID is unknown or
     /// the identity has no wallet binding.
-    fn resolve_staker_address(
-        &self,
-        agent_did: &str,
-    ) -> Option<tenzro_types::primitives::Address> {
+    fn resolve_staker_address(&self, agent_did: &str) -> Option<tenzro_types::primitives::Address> {
         let registry = self.identity_registry.as_ref()?;
         registry.resolve(agent_did).ok().map(|id| id.wallet_address)
     }
@@ -6328,10 +6408,7 @@ impl EventLoop {
     ///   - Senders that do not resolve to a registered DID (human EOAs).
     ///   - Lifecycle/validator/TEE ops (authorized via separate gates).
     ///   - Nodes without an identity registry wired (early bootstrap).
-    fn enforce_relay_spend_ceilings(
-        &self,
-        tx: &tenzro_types::Transaction,
-    ) -> Result<()> {
+    fn enforce_relay_spend_ceilings(&self, tx: &tenzro_types::Transaction) -> Result<()> {
         let registry = match self.identity_registry.as_ref() {
             Some(r) => r,
             None => return Ok(()),
@@ -6350,24 +6427,34 @@ impl EventLoop {
             tenzro_types::TransactionType::ModelInference { .. } => ("model_inference", 0),
             tenzro_types::TransactionType::ProviderStake { amount, .. } => ("stake", *amount),
             tenzro_types::TransactionType::ProviderUnstake { .. } => ("unstake", 0),
-            tenzro_types::TransactionType::CreateEscrow { amount, .. } => ("create_escrow", *amount),
+            tenzro_types::TransactionType::CreateEscrow { amount, .. } => {
+                ("create_escrow", *amount)
+            }
             tenzro_types::TransactionType::ReleaseEscrow { .. } => ("release_escrow", 0),
             tenzro_types::TransactionType::RefundEscrow { .. } => ("refund_escrow", 0),
             tenzro_types::TransactionType::BridgeTransfer { amount, .. } => ("bridge", *amount),
             tenzro_types::TransactionType::GovernancePropose { .. } => ("governance_propose", 0),
             tenzro_types::TransactionType::GovernanceVote { .. } => ("governance_vote", 0),
             tenzro_types::TransactionType::PostAgentBond { amount, .. } => ("post_bond", *amount),
-            tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => ("increase_bond", *amount),
+            tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => {
+                ("increase_bond", *amount)
+            }
             tenzro_types::TransactionType::WithdrawAgentBond { .. } => ("withdraw_bond", 0),
-            tenzro_types::TransactionType::PostComputeBond { amount, .. } => ("post_compute_bond", *amount),
+            tenzro_types::TransactionType::PostComputeBond { amount, .. } => {
+                ("post_compute_bond", *amount)
+            }
             tenzro_types::TransactionType::IncreaseComputeBond { amount, .. } => {
                 ("increase_compute_bond", *amount)
             }
-            tenzro_types::TransactionType::WithdrawComputeBond { .. } => ("withdraw_compute_bond", 0),
+            tenzro_types::TransactionType::WithdrawComputeBond { .. } => {
+                ("withdraw_compute_bond", 0)
+            }
             tenzro_types::TransactionType::FinalizeComputeBondWithdrawal { .. } => {
                 ("finalize_compute_bond_withdrawal", 0)
             }
-            tenzro_types::TransactionType::PayInsuranceClaim { amount, .. } => ("insurance_claim", *amount),
+            tenzro_types::TransactionType::PayInsuranceClaim { amount, .. } => {
+                ("insurance_claim", *amount)
+            }
             tenzro_types::TransactionType::PauseAgent { .. }
             | tenzro_types::TransactionType::QuarantineAgent { .. }
             | tenzro_types::TransactionType::TerminateAgent { .. } => return Ok(()),
@@ -6476,8 +6563,9 @@ fn decode_killswitch_log_data(data: &[u8]) -> Option<(String, String, String)> {
     if data.len() < cursor2 + 32 {
         return None;
     }
-    let controller_did =
-        std::str::from_utf8(&data[cursor + 4..cursor2]).ok()?.to_string();
+    let controller_did = std::str::from_utf8(&data[cursor + 4..cursor2])
+        .ok()?
+        .to_string();
     let receipt_id_hex = hex::encode(&data[cursor2..cursor2 + 32]);
     Some((agent_did, controller_did, receipt_id_hex))
 }
@@ -6500,8 +6588,7 @@ fn decode_bond_lifecycle_log(data: &[u8]) -> Option<(String, String, u128, u8)> 
         return None;
     }
     let agent_did = std::str::from_utf8(&data[4..after_agent]).ok()?.to_string();
-    let ctrl_len =
-        u32::from_le_bytes(data[after_agent..after_agent + 4].try_into().ok()?) as usize;
+    let ctrl_len = u32::from_le_bytes(data[after_agent..after_agent + 4].try_into().ok()?) as usize;
     let after_ctrl = after_agent.checked_add(4)?.checked_add(ctrl_len)?;
     if data.len() < after_ctrl + 16 + 1 {
         return None;
@@ -6548,7 +6635,13 @@ fn decode_compute_bond_lifecycle_log(data: &[u8]) -> Option<(String, Address, u1
     let cooldown_start = after_addr + 17;
     let cooldown_until_ms =
         i64::from_le_bytes(data[cooldown_start..cooldown_start + 8].try_into().ok()?);
-    Some((provider_did, provider_address, amount, op_tag, cooldown_until_ms))
+    Some((
+        provider_did,
+        provider_address,
+        amount,
+        op_tag,
+        cooldown_until_ms,
+    ))
 }
 
 /// Decode a `BondSlashed` log.
@@ -6569,8 +6662,7 @@ fn decode_bond_slashed_log(data: &[u8]) -> Option<(String, String, u128, u16, bo
         return None;
     }
     let agent_did = std::str::from_utf8(&data[4..after_agent]).ok()?.to_string();
-    let ctrl_len =
-        u32::from_le_bytes(data[after_agent..after_agent + 4].try_into().ok()?) as usize;
+    let ctrl_len = u32::from_le_bytes(data[after_agent..after_agent + 4].try_into().ok()?) as usize;
     let after_ctrl = after_agent.checked_add(4)?.checked_add(ctrl_len)?;
     if data.len() < after_ctrl + 16 + 2 + 1 {
         return None;
@@ -6578,11 +6670,8 @@ fn decode_bond_slashed_log(data: &[u8]) -> Option<(String, String, u128, u16, bo
     let controller_did = std::str::from_utf8(&data[after_agent + 4..after_ctrl])
         .ok()?
         .to_string();
-    let slashed_amount =
-        u128::from_le_bytes(data[after_ctrl..after_ctrl + 16].try_into().ok()?);
-    let bps = u16::from_le_bytes(
-        data[after_ctrl + 16..after_ctrl + 18].try_into().ok()?,
-    );
+    let slashed_amount = u128::from_le_bytes(data[after_ctrl..after_ctrl + 16].try_into().ok()?);
+    let bps = u16::from_le_bytes(data[after_ctrl + 16..after_ctrl + 18].try_into().ok()?);
     let terminal = data[after_ctrl + 18] != 0;
     Some((agent_did, controller_did, slashed_amount, bps, terminal))
 }
@@ -6609,7 +6698,9 @@ fn decode_insurance_claim_paid_log(data: &[u8]) -> Option<(String, [u8; 32], u12
     let mut claimant = [0u8; 32];
     claimant.copy_from_slice(&data[after_claim_id..after_claim_id + 32]);
     let amount = u128::from_le_bytes(
-        data[after_claim_id + 32..after_claim_id + 48].try_into().ok()?,
+        data[after_claim_id + 32..after_claim_id + 48]
+            .try_into()
+            .ok()?,
     );
     Some((claim_id_hex, claimant, amount))
 }
@@ -6654,16 +6745,17 @@ fn decode_validator_register_log(data: &[u8]) -> Option<ParsedValidatorRegister>
         tenzro_types::primitives::Address::from_bytes(&data[after_pq..after_pq + 32])?;
     let after_withdrawal = after_pq + 32;
     let uri_len = u32::from_le_bytes(
-        data[after_withdrawal..after_withdrawal + 4].try_into().ok()?,
+        data[after_withdrawal..after_withdrawal + 4]
+            .try_into()
+            .ok()?,
     ) as usize;
     let after_uri_len = after_withdrawal + 4;
     if data.len() < after_uri_len + uri_len {
         return None;
     }
-    let metadata_uri =
-        std::str::from_utf8(&data[after_uri_len..after_uri_len + uri_len])
-            .ok()?
-            .to_string();
+    let metadata_uri = std::str::from_utf8(&data[after_uri_len..after_uri_len + uri_len])
+        .ok()?
+        .to_string();
     Some(ParsedValidatorRegister {
         from,
         self_stake,
@@ -6688,9 +6780,7 @@ struct ParsedValidatorMetadataUpdate {
 /// `tenzro_vm::native::execute_validator_update_metadata`):
 /// `from(32) || metadata_uri_len_le(4) || metadata_uri ||
 ///  tee_hash_present(1) || [tee_hash(32)]`.
-fn decode_validator_metadata_update_log(
-    data: &[u8],
-) -> Option<ParsedValidatorMetadataUpdate> {
+fn decode_validator_metadata_update_log(data: &[u8]) -> Option<ParsedValidatorMetadataUpdate> {
     // 32 from + 4 uri_len + 1 tee_present = 37 bytes minimum
     if data.len() < 37 {
         return None;
@@ -6702,8 +6792,9 @@ fn decode_validator_metadata_update_log(
     if data.len() < after_uri + 1 {
         return None;
     }
-    let metadata_uri =
-        std::str::from_utf8(&data[after_uri_len..after_uri]).ok()?.to_string();
+    let metadata_uri = std::str::from_utf8(&data[after_uri_len..after_uri])
+        .ok()?
+        .to_string();
     let tee_present = data[after_uri];
     let tee_attestation_hash = match tee_present {
         0 => None,
@@ -6742,7 +6833,7 @@ fn decode_validator_metadata_update_log(
 /// otherwise.
 fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
     use subtle::ConstantTimeEq;
-    use tenzro_crypto::{PublicKey, KeyType, signatures};
+    use tenzro_crypto::{KeyType, PublicKey, signatures};
 
     // Compute the transaction hash (this is the signed message for both legs).
     let tx_hash = signed_tx.transaction.hash();
@@ -6775,10 +6866,8 @@ fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
     }
 
     // 1. Classical Ed25519 leg.
-    let crypto_sig = tenzro_crypto::Signature::new(
-        KeyType::Ed25519,
-        signed_tx.signature.bytes.clone(),
-    );
+    let crypto_sig =
+        tenzro_crypto::Signature::new(KeyType::Ed25519, signed_tx.signature.bytes.clone());
     signatures::verify(&public_key, message, &crypto_sig).map_err(|e| {
         NodeError::InvalidTransaction(format!(
             "Classical Ed25519 signature verification failed: {}",
@@ -6796,10 +6885,7 @@ fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
         &signed_tx.pq_signature,
     )
     .map_err(|e| {
-        NodeError::InvalidTransaction(format!(
-            "ML-DSA-65 signature verification failed: {}",
-            e
-        ))
+        NodeError::InvalidTransaction(format!("ML-DSA-65 signature verification failed: {}", e))
     })?;
 
     Ok(())
@@ -6816,15 +6902,12 @@ fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
 fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
     use tenzro_vm::native::{
         SELECTOR_ESCROW_CREATE, SELECTOR_ESCROW_REFUND, SELECTOR_ESCROW_RELEASE,
-        SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE,
-        SELECTOR_KILLSWITCH_TERMINATE,
-        SELECTOR_POST_AGENT_BOND, SELECTOR_INCREASE_AGENT_BOND,
-        SELECTOR_WITHDRAW_AGENT_BOND, SELECTOR_PAY_INSURANCE_CLAIM,
-        SELECTOR_POST_COMPUTE_BOND, SELECTOR_INCREASE_COMPUTE_BOND,
-        SELECTOR_WITHDRAW_COMPUTE_BOND, SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL,
-        SELECTOR_X402_SETTLE,
-        SELECTOR_VALIDATOR_REGISTER, SELECTOR_VALIDATOR_EXIT,
-        SELECTOR_VALIDATOR_UPDATE_METADATA,
+        SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL, SELECTOR_INCREASE_AGENT_BOND,
+        SELECTOR_INCREASE_COMPUTE_BOND, SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE,
+        SELECTOR_KILLSWITCH_TERMINATE, SELECTOR_PAY_INSURANCE_CLAIM, SELECTOR_POST_AGENT_BOND,
+        SELECTOR_POST_COMPUTE_BOND, SELECTOR_VALIDATOR_EXIT, SELECTOR_VALIDATOR_REGISTER,
+        SELECTOR_VALIDATOR_UPDATE_METADATA, SELECTOR_WITHDRAW_AGENT_BOND,
+        SELECTOR_WITHDRAW_COMPUTE_BOND, SELECTOR_X402_SETTLE,
     };
 
     let tx = &signed_tx.transaction;
@@ -6843,7 +6926,13 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             (0, data, VmType::Evm)
         }
         // ---- Escrow primitive (native VM dispatch) ------------------------
-        TransactionType::CreateEscrow { payee, amount, asset_id, expires_at, release_conditions } => {
+        TransactionType::CreateEscrow {
+            payee,
+            amount,
+            asset_id,
+            expires_at,
+            release_conditions,
+        } => {
             #[derive(serde::Serialize)]
             struct CreateEscrowPayload<'a> {
                 payee: &'a tenzro_types::primitives::Address,
@@ -6861,8 +6950,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_ESCROW_CREATE.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("CreateEscrow payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("CreateEscrow payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -6875,8 +6963,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             let payload = ReleaseEscrowPayload { escrow_id, proof };
             let mut data = SELECTOR_ESCROW_RELEASE.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("ReleaseEscrow payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("ReleaseEscrow payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -6888,13 +6975,18 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             let payload = RefundEscrowPayload { escrow_id };
             let mut data = SELECTOR_ESCROW_REFUND.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("RefundEscrow payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("RefundEscrow payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
         // ---- Kill-switch (Agent-Swarm Spec 1, native VM dispatch) ---------
-        TransactionType::PauseAgent { agent_did, controller_did, reason_code, reason_text, until } => {
+        TransactionType::PauseAgent {
+            agent_did,
+            controller_did,
+            reason_code,
+            reason_text,
+            until,
+        } => {
             #[derive(serde::Serialize)]
             struct PauseAgentPayload<'a> {
                 agent_did: &'a str,
@@ -6915,12 +7007,17 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_KILLSWITCH_PAUSE.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("PauseAgent payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("PauseAgent payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
-        TransactionType::QuarantineAgent { agent_did, controller_did, reason_code, reason_text, evidence_hash } => {
+        TransactionType::QuarantineAgent {
+            agent_did,
+            controller_did,
+            reason_code,
+            reason_text,
+            evidence_hash,
+        } => {
             #[derive(serde::Serialize)]
             struct QuarantineAgentPayload<'a> {
                 agent_did: &'a str,
@@ -6942,12 +7039,17 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_KILLSWITCH_QUARANTINE.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("QuarantineAgent payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("QuarantineAgent payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
-        TransactionType::TerminateAgent { agent_did, controller_did, reason_code, slash_bps, cascade } => {
+        TransactionType::TerminateAgent {
+            agent_did,
+            controller_did,
+            reason_code,
+            slash_bps,
+            cascade,
+        } => {
             #[derive(serde::Serialize)]
             struct TerminateAgentPayload<'a> {
                 agent_did: &'a str,
@@ -6965,8 +7067,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_KILLSWITCH_TERMINATE.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("TerminateAgent payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("TerminateAgent payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -6976,7 +7077,11 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         // `PayInsuranceClaimPayload` structs in
         // `tenzro-vm/src/native/mod.rs` — they are deserialized via
         // `serde_json::from_slice(&tx.data[4..])`.
-        TransactionType::PostAgentBond { agent_did, controller_did, amount } => {
+        TransactionType::PostAgentBond {
+            agent_did,
+            controller_did,
+            amount,
+        } => {
             #[derive(serde::Serialize)]
             struct PostAgentBondPayload<'a> {
                 agent_did: &'a str,
@@ -6990,8 +7095,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_POST_AGENT_BOND.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("PostAgentBond payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("PostAgentBond payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7007,8 +7111,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_INCREASE_AGENT_BOND.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("IncreaseAgentBond payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("IncreaseAgentBond payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7020,8 +7123,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             let payload = WithdrawAgentBondPayload { agent_did };
             let mut data = SELECTOR_WITHDRAW_AGENT_BOND.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("WithdrawAgentBond payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("WithdrawAgentBond payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7030,7 +7132,10 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         // `PostComputeBondPayload`, `IncreaseComputeBondPayload`,
         // `WithdrawComputeBondPayload`, `FinalizeComputeBondWithdrawalPayload`
         // structs in `tenzro-vm/src/native/mod.rs`.
-        TransactionType::PostComputeBond { provider_did, amount } => {
+        TransactionType::PostComputeBond {
+            provider_did,
+            amount,
+        } => {
             #[derive(serde::Serialize)]
             struct PostComputeBondPayload<'a> {
                 provider_did: &'a str,
@@ -7042,12 +7147,14 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_POST_COMPUTE_BOND.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("PostComputeBond payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("PostComputeBond payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
-        TransactionType::IncreaseComputeBond { provider_did, amount } => {
+        TransactionType::IncreaseComputeBond {
+            provider_did,
+            amount,
+        } => {
             #[derive(serde::Serialize)]
             struct IncreaseComputeBondPayload<'a> {
                 provider_did: &'a str,
@@ -7059,8 +7166,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_INCREASE_COMPUTE_BOND.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("IncreaseComputeBond payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("IncreaseComputeBond payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7072,8 +7178,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             let payload = WithdrawComputeBondPayload { provider_did };
             let mut data = SELECTOR_WITHDRAW_COMPUTE_BOND.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("WithdrawComputeBond payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("WithdrawComputeBond payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7090,7 +7195,11 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             );
             (0, data, VmType::Tenzro)
         }
-        TransactionType::PayInsuranceClaim { claim_id_hex, claimant, amount } => {
+        TransactionType::PayInsuranceClaim {
+            claim_id_hex,
+            claimant,
+            amount,
+        } => {
             #[derive(serde::Serialize)]
             struct PayInsuranceClaimPayload<'a> {
                 claim_id_hex: &'a str,
@@ -7104,8 +7213,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_PAY_INSURANCE_CLAIM.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("PayInsuranceClaim payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("PayInsuranceClaim payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7138,8 +7246,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_X402_SETTLE.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("X402Settle payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("X402Settle payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7173,8 +7280,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             };
             let mut data = SELECTOR_VALIDATOR_REGISTER.to_vec();
             data.extend_from_slice(
-                &serde_json::to_vec(&payload)
-                    .expect("RegisterValidator payload is JSON-safe"),
+                &serde_json::to_vec(&payload).expect("RegisterValidator payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }
@@ -7182,7 +7288,10 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             // No payload — selector alone signals voluntary exit.
             (0, SELECTOR_VALIDATOR_EXIT.to_vec(), VmType::Tenzro)
         }
-        TransactionType::UpdateValidatorMetadata { metadata_uri, tee_attestation_hash } => {
+        TransactionType::UpdateValidatorMetadata {
+            metadata_uri,
+            tee_attestation_hash,
+        } => {
             #[derive(serde::Serialize)]
             struct ValidatorUpdateMetadataPayload<'a> {
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -7241,9 +7350,9 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
 mod tests {
     use super::*;
     use tenzro_crypto::pq::MlDsaSigningKey;
+    use tenzro_types::Signature;
     use tenzro_types::primitives::{Address, ChainId, Nonce};
     use tenzro_types::transaction::Transaction;
-    use tenzro_types::Signature;
 
     fn create_test_transaction(nonce: u64) -> SignedTransaction {
         let pq_key = MlDsaSigningKey::generate();
@@ -7265,9 +7374,7 @@ mod tests {
     fn weak_subjectivity_disabled_accepts_any_root() {
         // No anchor configured — every height/root passes.
         let root = Hash::new([7u8; 32]);
-        assert!(
-            EventLoop::check_weak_subjectivity_anchor(None, 100, root).is_ok()
-        );
+        assert!(EventLoop::check_weak_subjectivity_anchor(None, 100, root).is_ok());
     }
 
     #[test]
@@ -7276,23 +7383,15 @@ mod tests {
         // At a height other than the anchor, the committed root is not pinned,
         // even a mismatching one.
         let other_root = Hash::new([2u8; 32]);
-        assert!(
-            EventLoop::check_weak_subjectivity_anchor(anchor, 99, other_root)
-                .is_ok()
-        );
-        assert!(
-            EventLoop::check_weak_subjectivity_anchor(anchor, 101, other_root)
-                .is_ok()
-        );
+        assert!(EventLoop::check_weak_subjectivity_anchor(anchor, 99, other_root).is_ok());
+        assert!(EventLoop::check_weak_subjectivity_anchor(anchor, 101, other_root).is_ok());
     }
 
     #[test]
     fn weak_subjectivity_accepts_matching_root_at_anchor() {
         let root = Hash::new([1u8; 32]);
         let anchor = Some((100u64, root));
-        assert!(
-            EventLoop::check_weak_subjectivity_anchor(anchor, 100, root).is_ok()
-        );
+        assert!(EventLoop::check_weak_subjectivity_anchor(anchor, 100, root).is_ok());
     }
 
     #[test]
@@ -7301,10 +7400,7 @@ mod tests {
         let forked_root = Hash::new([9u8; 32]);
         // A block at the anchor height whose committed root differs is a
         // long-range fork and must be rejected.
-        assert!(
-            EventLoop::check_weak_subjectivity_anchor(anchor, 100, forked_root)
-                .is_err()
-        );
+        assert!(EventLoop::check_weak_subjectivity_anchor(anchor, 100, forked_root).is_err());
     }
 
     #[test]
@@ -7346,7 +7442,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_block_and_shutdown() {
-        use tenzro_types::block::{BlockHeader, ConsensusProof, ConsensusAlgorithm};
+        use tenzro_types::block::{BlockHeader, ConsensusAlgorithm, ConsensusProof};
         use tenzro_types::primitives::{BlockHeight, Hash};
         use tenzro_vm::VmConfig;
 
@@ -7433,9 +7529,8 @@ mod tests {
         bps: u16,
         terminal: bool,
     ) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            4 + agent_did.len() + 4 + controller_did.len() + 16 + 2 + 1,
-        );
+        let mut out =
+            Vec::with_capacity(4 + agent_did.len() + 4 + controller_did.len() + 16 + 2 + 1);
         out.extend_from_slice(&(agent_did.len() as u32).to_le_bytes());
         out.extend_from_slice(agent_did.as_bytes());
         out.extend_from_slice(&(controller_did.len() as u32).to_le_bytes());
@@ -7503,8 +7598,7 @@ mod tests {
         assert_eq!(bps, 500);
         assert!(terminal);
 
-        let encoded_nonterm =
-            encode_bond_slashed_log("a", "b", 1, 1, false);
+        let encoded_nonterm = encode_bond_slashed_log("a", "b", 1, 1, false);
         let (_, _, _, _, terminal2) = decode_bond_slashed_log(&encoded_nonterm).unwrap();
         assert!(!terminal2);
 
@@ -7514,11 +7608,7 @@ mod tests {
     #[test]
     fn insurance_claim_paid_log_decoder_roundtrip() {
         let claimant_addr = [9u8; 32];
-        let encoded = encode_insurance_claim_paid_log(
-            "deadbeef",
-            &claimant_addr,
-            7_000_000_000,
-        );
+        let encoded = encode_insurance_claim_paid_log("deadbeef", &claimant_addr, 7_000_000_000);
         let (claim_id, recovered_claimant, amount) =
             decode_insurance_claim_paid_log(&encoded).expect("decode");
         assert_eq!(claim_id, "deadbeef");
@@ -7531,9 +7621,7 @@ mod tests {
     /// Build a minimal `EventLoop` with only the storage + VM runtime
     /// wired (no consensus/network), suitable for exercising the
     /// `process_bond_logs` reflection path in isolation.
-    async fn make_event_loop_with_bond_manager(
-        bond_manager: Arc<BondManager>,
-    ) -> EventLoop {
+    async fn make_event_loop_with_bond_manager(bond_manager: Arc<BondManager>) -> EventLoop {
         use tenzro_vm::VmConfig;
 
         let dir = tempfile::tempdir().unwrap();
@@ -7563,7 +7651,9 @@ mod tests {
             encode_bond_lifecycle_log(agent, controller, 5_000, 0),
         );
         let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![post_log], vec![]);
-        event_loop.process_bond_logs(&result, BlockHeight::from(10)).await;
+        event_loop
+            .process_bond_logs(&result, BlockHeight::from(10))
+            .await;
 
         let bond = bond_manager.get(agent).expect("bond exists");
         assert_eq!(bond.amount, 5_000);
@@ -7579,7 +7669,9 @@ mod tests {
             encode_bond_lifecycle_log(agent, controller, 2_000, 1),
         );
         let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![inc_log], vec![]);
-        event_loop.process_bond_logs(&result, BlockHeight::from(11)).await;
+        event_loop
+            .process_bond_logs(&result, BlockHeight::from(11))
+            .await;
 
         let bond = bond_manager.get(agent).expect("bond exists");
         assert_eq!(bond.amount, 7_000);
@@ -7593,9 +7685,10 @@ mod tests {
             b"BondWithdrawInitiated",
             encode_bond_lifecycle_log(agent, controller, 7_000, 2),
         );
-        let result =
-            tenzro_vm::ExecutionResult::success(0, vec![], vec![withdraw_log], vec![]);
-        event_loop.process_bond_logs(&result, BlockHeight::from(12)).await;
+        let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![withdraw_log], vec![]);
+        event_loop
+            .process_bond_logs(&result, BlockHeight::from(12))
+            .await;
 
         let bond = bond_manager.get(agent).expect("bond exists");
         assert!(matches!(
@@ -7618,7 +7711,9 @@ mod tests {
         // above the residual floor so the slash stays non-terminal.
         // 100 TNZO bond → 10 TNZO slashed → 90 TNZO remainder ≥ 10 TNZO floor.
         let bond_amount: u128 = 100 * 1_000_000_000_000_000_000;
-        bond_manager.post(agent, controller, bond_amount, 100).expect("seed bond");
+        bond_manager
+            .post(agent, controller, bond_amount, 100)
+            .expect("seed bond");
 
         // VM-driven slash: 1000 bps = 10%. The VM has already moved
         // funds; the log mirrors the math.
@@ -7629,7 +7724,9 @@ mod tests {
             encode_bond_slashed_log(agent, controller, slashed_amount, 1000, false),
         );
         let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![slash_log], vec![]);
-        event_loop.process_bond_logs(&result, BlockHeight::from(20)).await;
+        event_loop
+            .process_bond_logs(&result, BlockHeight::from(20))
+            .await;
 
         let bond = bond_manager.get(agent).expect("bond exists");
         assert_eq!(bond.amount, bond_amount - slashed_amount);
@@ -7682,7 +7779,9 @@ mod tests {
             encode_insurance_claim_paid_log(&claim.claim_id, &claimant_bytes, 10_000),
         );
         let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![paid_log], vec![]);
-        event_loop.process_bond_logs(&result, BlockHeight::from(30)).await;
+        event_loop
+            .process_bond_logs(&result, BlockHeight::from(30))
+            .await;
 
         let updated = bond_manager
             .get_claim(&claim.claim_id)
@@ -7706,15 +7805,13 @@ mod tests {
         let vm_runtime = Arc::new(MultiVmRuntime::new(VmConfig::default()).await.unwrap());
         let chain_tip = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let metrics = Arc::new(MetricsCollector::new());
-        let event_loop =
-            EventLoop::new(storage, vm_runtime, None, None, chain_tip, metrics);
+        let event_loop = EventLoop::new(storage, vm_runtime, None, None, chain_tip, metrics);
 
-        let log = synth_bond_log(
-            b"BondPosted",
-            encode_bond_lifecycle_log("a", "b", 1, 0),
-        );
+        let log = synth_bond_log(b"BondPosted", encode_bond_lifecycle_log("a", "b", 1, 0));
         let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![log], vec![]);
-        event_loop.process_bond_logs(&result, BlockHeight::from(1)).await;
+        event_loop
+            .process_bond_logs(&result, BlockHeight::from(1))
+            .await;
         // No assertion needed — test passes if no panic.
     }
 
@@ -7727,7 +7824,9 @@ mod tests {
         // (the early-exit `any_bond` check skips the whole loop).
         let unrelated = synth_bond_log(b"KillSwitchPause", vec![1, 2, 3, 4]);
         let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![unrelated], vec![]);
-        event_loop.process_bond_logs(&result, BlockHeight::from(1)).await;
+        event_loop
+            .process_bond_logs(&result, BlockHeight::from(1))
+            .await;
 
         // Confirm BondManager is untouched.
         assert!(bond_manager.get("anything").is_none());

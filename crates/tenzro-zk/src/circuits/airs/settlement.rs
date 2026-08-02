@@ -86,7 +86,15 @@ impl<F> BaseAir<F> for SettlementAir {
 impl<AB: AirBuilder> Air<AB> for SettlementAir {
     fn eval(&self, builder: &mut AB) {
         // Snapshot trace cells before acquiring the when_first_row mut borrow.
-        let (payer_balance, _service_proof, nonce, prev_nonce, remaining_balance, service_hash, settlement_hash) = {
+        let (
+            payer_balance,
+            _service_proof,
+            nonce,
+            prev_nonce,
+            remaining_balance,
+            service_hash,
+            settlement_hash,
+        ) = {
             let main = builder.main();
             let local: &SettlementRow<AB::Var> = main.current_slice().borrow();
             (
@@ -162,8 +170,7 @@ pub fn generate_settlement_trace(
     // Trace cells 5..5+DIGEST_LEN = service digest, then settlement digest.
     let service_base: usize = 5;
     let settlement_base: usize = 5 + DIGEST_LEN;
-    values[service_base..service_base + DIGEST_LEN]
-        .copy_from_slice(&service_digest[..DIGEST_LEN]);
+    values[service_base..service_base + DIGEST_LEN].copy_from_slice(&service_digest[..DIGEST_LEN]);
     values[settlement_base..settlement_base + DIGEST_LEN]
         .copy_from_slice(&settlement_digest[..DIGEST_LEN]);
 
@@ -172,10 +179,7 @@ pub fn generate_settlement_trace(
 
 /// Build the public-input vector matching a witness produced by
 /// [`generate_settlement_trace`].
-pub fn settlement_public_inputs(
-    service_proof: KoalaBear,
-    amount: KoalaBear,
-) -> Vec<KoalaBear> {
+pub fn settlement_public_inputs(service_proof: KoalaBear, amount: KoalaBear) -> Vec<KoalaBear> {
     let service_digest = hash_one(service_proof);
     let settlement_input = service_digest[0] + amount;
     let settlement_digest = hash_one(settlement_input);
@@ -229,7 +233,12 @@ mod tests {
         let amount = KoalaBear::from_u64(100);
 
         let trace = generate_settlement_trace(
-            payer_balance, service_proof, nonce, prev_nonce, amount, 1 << 3,
+            payer_balance,
+            service_proof,
+            nonce,
+            prev_nonce,
+            amount,
+            1 << 3,
         );
         let pis = settlement_public_inputs(service_proof, amount);
 
@@ -237,6 +246,9 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             prover.prove_air(&SettlementAir, trace, &pis)
         }));
-        assert!(result.is_err(), "replayed nonce must not produce a valid proof");
+        assert!(
+            result.is_err(),
+            "replayed nonce must not produce a valid proof"
+        );
     }
 }

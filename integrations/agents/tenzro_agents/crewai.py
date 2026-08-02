@@ -25,7 +25,8 @@ https://github.com/crewAIInc/crewAI
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from .core import ReputationHook, TenzroClient
 
@@ -43,8 +44,8 @@ def _crewai_agent() -> type:
 def tenzro_task(
     client: TenzroClient,
     *,
-    subject_agent_id: Optional[int] = None,
-    mandate_factory: Optional[Callable[..., Any]] = None,
+    subject_agent_id: int | None = None,
+    mandate_factory: Callable[..., Any] | None = None,
 ) -> Callable[[Callable], Callable]:
     """Decorator wrapping a CrewAI ``@task`` method.
 
@@ -84,8 +85,8 @@ def make_tenzro_agent(
     client: TenzroClient,
     did: str,
     *,
-    subject_agent_id: Optional[int] = None,
-    mandate_factory: Optional[Callable[[Any], Any]] = None,
+    subject_agent_id: int | None = None,
+    mandate_factory: Callable[[Any], Any] | None = None,
     **agent_kwargs: Any,
 ):
     """Construct a ``TenzroAgent`` (an ``Agent`` subclass).
@@ -113,8 +114,8 @@ def make_tenzro_agent(
         def execute_task(
             self,
             task: Any,
-            context: Optional[str] = None,
-            tools: Optional[Sequence[Any]] = None,
+            context: str | None = None,
+            tools: Sequence[Any] | None = None,
         ) -> str:
             if self._tenzro_mandate_factory is not None:
                 checkout, payment = self._tenzro_mandate_factory(task)
@@ -134,4 +135,4 @@ def make_tenzro_agent(
     return TenzroAgent(**agent_kwargs)
 
 
-__all__ = ["tenzro_task", "make_tenzro_agent"]
+__all__ = ["make_tenzro_agent", "tenzro_task"]

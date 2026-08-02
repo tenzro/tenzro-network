@@ -154,6 +154,9 @@ impl SagaWorkflow {
     /// Returns true when every step has reached `Verified`.
     pub fn all_verified(&self) -> bool {
         !self.steps.is_empty()
-            && self.steps.iter().all(|s| s.status == SagaStepStatus::Verified)
+            && self
+                .steps
+                .iter()
+                .all(|s| s.status == SagaStepStatus::Verified)
     }
 }

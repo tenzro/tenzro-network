@@ -475,8 +475,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Validate AP2 checkout/payment pair (metadata.checkout_vdc, payment_vdc)",
                     "List AP2 mandates (metadata.controller_did)",
                     "x402 protocol info",
-                    "x402 register resource (metadata: sellerDid, resource, payTo, "
-                    "maxAmountRequired, scheme, network, asset, tags)",
+                    ("x402 register resource (metadata: sellerDid, resource, payTo, "
+                    "maxAmountRequired, scheme, network, asset, tags)"),
                     "x402 discover resources (metadata: scheme, network, asset, tags, limit)",
                     "x402 deregister resource (metadata: listingId, sellerDid)",
                     "x402 verify offer (metadata: requirement)",
@@ -509,13 +509,13 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 ],
                 "examples": [
                     "Stripe SPT protocol info",
-                    "Stripe SPT settlement outcome (metadata: machine_did, "
-                    "granted_token_id, event_type=payment_intent.succeeded)",
-                    "Stripe SPT dispute closed (metadata: machine_did, "
+                    ("Stripe SPT settlement outcome (metadata: machine_did, "
+                    "granted_token_id, event_type=payment_intent.succeeded)"),
+                    ("Stripe SPT dispute closed (metadata: machine_did, "
                     "granted_token_id, event_type=charge.dispute.closed, "
-                    "dispute_status=won)",
-                    "Stripe SPT granted token deactivated (metadata: "
-                    "machine_did, granted_token_id)",
+                    "dispute_status=won)"),
+                    ("Stripe SPT granted token deactivated (metadata: "
+                    "machine_did, granted_token_id)"),
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
@@ -1060,6 +1060,73 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "rpc-gateway",
+                "name": "Universal RPC Gateway",
+                "description": (
+                    "Discover and invoke any of the ~900 JSON-RPC methods this "
+                    "node serves. The named skills in this card cover the "
+                    "surfaces worth a dedicated description; this covers "
+                    "everything else, so no node capability is unreachable "
+                    "over A2A. `rpc.methods` enumerates the directory with the "
+                    "gate class (admin token vs open) and API-key scope of "
+                    "each entry — filterable by namespace or substring, since "
+                    "unfiltered it is ~900 rows — and `rpc.call` invokes one "
+                    "by name. Authorization is unchanged: calls run behind the "
+                    "same admin-token gate, API-key scope gate, and "
+                    "default-deny classification as a direct JSON-RPC request, "
+                    "reaching exactly what the caller's credentials already "
+                    "allow. The directory comes from the node itself rather "
+                    "than a list in this server, so it cannot fall behind a "
+                    "node newer than this agent."
+                ),
+                "tags": [
+                    "rpc", "gateway", "discovery", "introspection",
+                    "capability", "passthrough",
+                ],
+                "examples": [
+                    "List every method in the `canton` namespace",
+                    "Find the methods whose name contains 'forecast'",
+                    "Does this node serve tenzro_previewServe?",
+                    "Call tenzro_previewServe with model_id qwen3-0.6b",
+                    "Which API-key scope does tenzro_uploadFile need?",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "object-storage",
+                "name": "Tenant Object Storage",
+                "description": (
+                    "Multi-tenant file storage over the /v1/files surface. "
+                    "Uploads are erasure-coded (4 data + 2 parity shards, "
+                    "surviving two simultaneous provider losses) and "
+                    "distributed across independent providers, with a "
+                    "streaming storage deal funding the shards. Every file is "
+                    "owned by the subject on the presenting API key, and "
+                    "there is no cross-tenant read — including for lookups by "
+                    "id, which report another tenant's file identically to a "
+                    "file that does not exist. Deletion unlinks the reference "
+                    "and stops the deal; it does NOT erase shards, which "
+                    "expire only when the deal stops paying for them, so it "
+                    "must not be treated as redaction. Operations: "
+                    "files.upload, files.list, files.get, files.download, "
+                    "files.delete, files.usage."
+                ),
+                "tags": [
+                    "storage", "files", "objects", "erasure-coding",
+                    "multi-tenant", "openai-compatible", "storage-deal",
+                ],
+                "examples": [
+                    "Upload corpus.jsonl with purpose 'assistants'",
+                    "List my stored files, newest first",
+                    "Download file-9f3c… and return its contents",
+                    "Delete file-9f3c… and report what deletion did and did not do",
+                    "How many bytes am I storing, and how many files are unfunded?",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "agent-memory",
                 "name": "Agent Memory Tier",
                 "description": (
@@ -1450,6 +1517,32 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "node-addressing",
+                "name": "Node Addressing",
+                "description": (
+                    "Resolve every way of reaching a Tenzro node from any "
+                    "one of its identifiers. A node is addressed five ways "
+                    "— TDIP DID, Ed25519 public key, iroh EndpointId "
+                    "(byte-identical to the Ed25519 key since Phase C2), "
+                    "libp2p PeerId, and its Pkarr record — plus its "
+                    "JSON-RPC / MCP / A2A / web service URLs. The node "
+                    "self-publishes a W3C DID Document carrying all of "
+                    "them, served at /.well-known/did.json with "
+                    "Content-Type application/did+json and over "
+                    "tenzro_nodeDidDocument. Unroutable addresses "
+                    "(wildcard and loopback, in URLs and multiaddrs alike) "
+                    "are omitted rather than advertised, and an ALPN "
+                    "appears only when a handler is actually installed."
+                ),
+                "tags": ["did", "addressing", "discovery", "iroh", "libp2p"],
+                "examples": [
+                    "Resolve this node's DID Document",
+                    "What iroh EndpointId and libp2p PeerId does this node have?",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "operability",
                 "name": "Operability Inspection",
                 "description": (
@@ -1658,25 +1751,33 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "developer, run an engine-dialect query against the partition a "
                     "node holds (or receive the holder endpoints when it does not), "
                     "rescale a database in place, and drop it. Databases may be "
-                    "marked confidential for encryption at rest."
+                    "marked confidential for encryption at rest. Reachable over "
+                    "JSON-RPC, MCP tools, and a REST surface at /v1/databases; "
+                    "every operation that names an actual database requires an "
+                    "API key carrying the `database` scope, whose subject is the "
+                    "caller DID the access policy is adjudicated against. The "
+                    "engine catalog is the one exception and stays open, so a "
+                    "caller can discover what a node serves before asking it for "
+                    "anything."
                 ),
                 "tags": [
                     "database", "sql", "vector", "kv", "search", "partition",
                     "access-policy", "capability", "confidential",
+                    "multi-tenant", "rest",
                 ],
                 "examples": [
                     "List database engines",
-                    "Create database (metadata: database_id, engine_id=qdrant, "
+                    ("Create database (metadata: database_id, engine_id=qdrant, "
                     "owner_did, placement=lan_cluster, partitions=3, "
-                    "min_replication=2, max_replication=4)",
+                    "min_replication=2, max_replication=4)"),
                     "List databases",
                     "List database partitions (metadata: database_id)",
-                    "Issue database connection (metadata: database_id, caller_did, "
-                    "bearer_did, write=true, ttl_secs=3600)",
+                    ("Issue database connection (metadata: database_id, caller_did, "
+                    "bearer_did, write=true, ttl_secs=3600)"),
                     "Database query (metadata: database_id, caller_did, body)",
                     "Authorize database read (metadata: database_id, caller_did)",
-                    "Rescale database (metadata: database_id, caller_did, "
-                    "placement=network, partitions=6)",
+                    ("Rescale database (metadata: database_id, caller_did, "
+                    "placement=network, partitions=6)"),
                     "Drop database (metadata: database_id)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
@@ -1842,7 +1943,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "surface: deploy / get / list / remove / status, plus "
                     "machine_sealing_key to fetch the node's X25519 key for "
                     "wrapping env-var ciphertext (alg "
-                    "x25519-envelope-aes-256-gcm) before deploy. Placement "
+                    "x25519-hkdf-sha256-envelope-aes-256-gcm) before deploy. Placement "
                     "leases (list_leases, get_leases_for_app) surface the "
                     "bid/lease bindings and tenzro/sla heartbeat failover. "
                     "Requests can be x402-gated per request. All mutations "

@@ -9,7 +9,7 @@
 //! loses precision through f64. We parse the input as a string, split on the
 //! decimal point, and scale exactly.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 const DECIMALS: u32 = 18;
 
@@ -82,7 +82,10 @@ mod tests {
     fn whole_tnzo() {
         assert_eq!(tnzo_to_wei_string("1").unwrap(), "1000000000000000000");
         assert_eq!(tnzo_to_wei_string("100").unwrap(), "100000000000000000000");
-        assert_eq!(tnzo_to_wei_string("1000").unwrap(), "1000000000000000000000");
+        assert_eq!(
+            tnzo_to_wei_string("1000").unwrap(),
+            "1000000000000000000000"
+        );
     }
 
     #[test]

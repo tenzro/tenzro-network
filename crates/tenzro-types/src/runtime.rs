@@ -80,7 +80,6 @@ pub enum ArtifactType {
     QuantVariant,
 }
 
-
 /// KV-cache compression profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

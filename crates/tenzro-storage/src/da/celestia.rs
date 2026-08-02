@@ -80,14 +80,9 @@ impl CelestiaBackend {
     /// Connect to a celestia-node JSON-RPC endpoint (`http://...` or `ws://...`)
     /// and bind the backend to a v0 namespace derived from `namespace_id` (which
     /// must be a 1–10 byte suffix per Celestia's namespace v0 rules).
-    pub async fn connect(
-        url: &str,
-        auth_token: &str,
-        namespace_id: &[u8],
-    ) -> Result<Self> {
-        let namespace = Namespace::new_v0(namespace_id).map_err(|e| {
-            StorageError::Generic(format!("invalid Celestia namespace id: {e}"))
-        })?;
+    pub async fn connect(url: &str, auth_token: &str, namespace_id: &[u8]) -> Result<Self> {
+        let namespace = Namespace::new_v0(namespace_id)
+            .map_err(|e| StorageError::Generic(format!("invalid Celestia namespace id: {e}")))?;
         let client = Client::new(
             url,
             Some(auth_token),
@@ -132,13 +127,11 @@ fn decode_locator(locator: &[u8]) -> Result<(u64, Vec<u8>)> {
         StorageError::InvalidValue(format!("Celestia locator not valid UTF-8: {e}"))
     })?;
     let (height_str, hex_str) = s.split_once(':').ok_or_else(|| {
-        StorageError::InvalidValue(format!(
-            "Celestia locator missing ':' separator: {s}"
-        ))
+        StorageError::InvalidValue(format!("Celestia locator missing ':' separator: {s}"))
     })?;
-    let height = height_str.parse::<u64>().map_err(|e| {
-        StorageError::InvalidValue(format!("Celestia locator height invalid: {e}"))
-    })?;
+    let height = height_str
+        .parse::<u64>()
+        .map_err(|e| StorageError::InvalidValue(format!("Celestia locator height invalid: {e}")))?;
     let bytes = hex::decode(hex_str).map_err(|e| {
         StorageError::InvalidValue(format!("Celestia locator commitment hex invalid: {e}"))
     })?;
@@ -197,9 +190,7 @@ impl DaBackend for CelestiaBackend {
             .client
             .blob_submit(&[blob], TxConfig::default())
             .await
-            .map_err(|e| {
-                StorageError::Generic(format!("Celestia blob_submit failed: {e}"))
-            })?;
+            .map_err(|e| StorageError::Generic(format!("Celestia blob_submit failed: {e}")))?;
 
         *self.last_submission_ms.write().await = Some(now_ms());
 
@@ -226,9 +217,7 @@ impl DaBackend for CelestiaBackend {
             .client
             .blob_get(height, ns, commitment)
             .await
-            .map_err(|e| {
-                StorageError::Generic(format!("Celestia blob_get failed: {e}"))
-            })?;
+            .map_err(|e| StorageError::Generic(format!("Celestia blob_get failed: {e}")))?;
 
         *self.last_fetch_ms.write().await = Some(now_ms());
         Ok(blob.data)
@@ -248,9 +237,7 @@ impl DaBackend for CelestiaBackend {
             .client
             .blob_get_proof(height, ns, commitment)
             .await
-            .map_err(|e| {
-                StorageError::Generic(format!("Celestia blob_get_proof failed: {e}"))
-            })?;
+            .map_err(|e| StorageError::Generic(format!("Celestia blob_get_proof failed: {e}")))?;
         if proofs.is_empty() {
             return Err(StorageError::Generic(
                 "Celestia returned empty proof set for blob".into(),
@@ -269,9 +256,7 @@ impl DaBackend for CelestiaBackend {
             .client
             .blob_included(height, ns, &proofs[0], commitment)
             .await
-            .map_err(|e| {
-                StorageError::Generic(format!("Celestia blob_included failed: {e}"))
-            })?;
+            .map_err(|e| StorageError::Generic(format!("Celestia blob_included failed: {e}")))?;
         if included {
             Ok(())
         } else {

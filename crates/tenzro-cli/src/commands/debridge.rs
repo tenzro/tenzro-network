@@ -4,9 +4,9 @@
 //! Search tokens, list supported chains, create cross-chain transactions,
 //! and execute same-chain swaps via deBridge DLN.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// deBridge cross-chain operations
 #[derive(Debug, Subcommand)]
@@ -87,7 +87,9 @@ impl DebridgeChainsCmd {
         let spinner = output::create_spinner("Fetching chains...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_debridgeGetChains", serde_json::json!({})).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_debridgeGetChains", serde_json::json!({}))
+            .await?;
         spinner.finish_and_clear();
 
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -111,7 +113,9 @@ impl DebridgeInstructionsCmd {
         let spinner = output::create_spinner("Fetching instructions...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_debridgeGetInstructions", serde_json::json!({})).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_debridgeGetInstructions", serde_json::json!({}))
+            .await?;
         spinner.finish_and_clear();
 
         println!("{}", serde_json::to_string_pretty(&result)?);

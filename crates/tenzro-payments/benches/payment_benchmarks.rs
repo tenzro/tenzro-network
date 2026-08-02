@@ -2,21 +2,26 @@
 //!
 //! Run with: cargo bench -p tenzro-payments
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 
+use tenzro_payments::ChallengeStore;
+use tenzro_payments::gateway::TenzroPaymentGateway;
 use tenzro_payments::mpp::{MppChallenge, MppCredential, MppPaymentServer};
 use tenzro_payments::traits::{PaymentGateway, PaymentProtocol};
 use tenzro_payments::types::{PaymentChallenge, PaymentCredential};
-use tenzro_payments::gateway::TenzroPaymentGateway;
-use tenzro_payments::ChallengeStore;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 fn make_mpp_challenge() -> MppChallenge {
-    MppChallenge::new("/api/inference", 1000, "USDC", "did:tenzro:human:recipient-1")
+    MppChallenge::new(
+        "/api/inference",
+        1000,
+        "USDC",
+        "did:tenzro:human:recipient-1",
+    )
 }
 
 fn _make_mpp_credential(challenge_id: &str) -> MppCredential {
@@ -79,7 +84,12 @@ fn bench_mpp_credential_verification(c: &mut Criterion) {
     // Pre-create a challenge
     let challenge = rt.block_on(async {
         server
-            .create_challenge("/api/inference", 1000, "USDC", "did:tenzro:human:recipient-1")
+            .create_challenge(
+                "/api/inference",
+                1000,
+                "USDC",
+                "did:tenzro:human:recipient-1",
+            )
             .await
             .unwrap()
     });
@@ -173,10 +183,8 @@ fn bench_credential_parsing(c: &mut Criterion) {
     };
 
     let json = serde_json::to_string(&credential).unwrap();
-    let base64_encoded = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        json.as_bytes(),
-    );
+    let base64_encoded =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, json.as_bytes());
 
     group.bench_function("parse_from_json", |b| {
         b.iter(|| {

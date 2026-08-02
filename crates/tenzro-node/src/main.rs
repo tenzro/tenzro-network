@@ -4,10 +4,10 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{error, info, warn, Level};
+use tracing::{Level, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use tenzro_node::config::{NodeConfig, GenesisConfig};
+use tenzro_node::config::{GenesisConfig, NodeConfig};
 use tenzro_node::error::{self, Result};
 use tenzro_node::node::TenzroNode;
 use tenzro_node::rpc::RpcServer;
@@ -64,7 +64,14 @@ struct Cli {
     #[arg(long, value_name = "ADDRS")]
     external_p2p_addr: Option<String>,
 
-    /// Bootstrap nodes (comma-separated multiaddrs)
+    /// Bootstrap nodes (comma-separated multiaddrs).
+    ///
+    /// Omitting this resolves the network's bootstrap DNS name, so a fresh
+    /// install joins the network with zero flags.
+    ///
+    /// Pass an explicitly empty value — `--boot-nodes ""` — to stay **isolated**:
+    /// no bootstrap DNS resolution, no dialling out. That is what a local or
+    /// solo node wants, and it is distinct from omitting the flag.
     #[arg(short, long, value_name = "NODES")]
     boot_nodes: Option<String>,
 
@@ -265,10 +272,13 @@ enum Command {
     #[command(name = "init")]
     Init {
         /// Data directory where the three validator key files are
-        /// written. Defaults to `./data` to match the node's own
-        /// default `data_dir`.
-        #[arg(long, value_name = "DIR", default_value = "./data")]
-        data_dir: PathBuf,
+        /// written. Defaults to the same directory the node reads them
+        /// from with no flags — previously `./data` while the node used
+        /// `./data/user`, so initialising and then starting in the
+        /// default configuration left the keys where the node did not
+        /// look for them.
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
 
         /// Genesis stake to print in the emitted `[[validators]]`
         /// stanza. Does not write anything on-chain — this is purely
@@ -431,20 +441,20 @@ async fn main() -> Result<()> {
         // alongside the peer URL — the snapshot manifest's declared
         // state_root must match this value bit-for-bit before any
         // chunk is applied. Without it the bootstrap is unauthenticated.
-        let anchor_hex = cli
-            .state_sync_anchor
-            .clone()
-            .ok_or_else(|| error::NodeError::Other(
+        let anchor_hex = cli.state_sync_anchor.clone().ok_or_else(|| {
+            error::NodeError::Other(
                 "--state-sync-from requires --state-sync-anchor (32-byte hex state \
                  root). The anchor is matched bit-for-bit against the snapshot \
                  manifest's declared state_root before any chunk is applied — \
                  without it the peer's RPC has no cryptographic authority to \
-                 seed local state.".to_string()
-            ))?;
+                 seed local state."
+                    .to_string(),
+            )
+        })?;
         let cleaned = anchor_hex.trim_start_matches("0x");
-        let anchor_bytes = hex::decode(cleaned).map_err(|e| error::NodeError::Other(
-            format!("--state-sync-anchor is not valid hex: {e}")
-        ))?;
+        let anchor_bytes = hex::decode(cleaned).map_err(|e| {
+            error::NodeError::Other(format!("--state-sync-anchor is not valid hex: {e}"))
+        })?;
         if anchor_bytes.len() != 32 {
             return Err(error::NodeError::Other(format!(
                 "--state-sync-anchor must be exactly 32 bytes (got {})",
@@ -495,11 +505,11 @@ async fn main() -> Result<()> {
             .map(|w| w.state_root_hex.clone())
             .expect("auto_state_sync guard ensured weak_subjectivity is set");
         let cleaned = anchor_hex.trim_start_matches("0x");
-        let anchor_bytes = hex::decode(cleaned).map_err(|e| error::NodeError::Other(
-            format!(
+        let anchor_bytes = hex::decode(cleaned).map_err(|e| {
+            error::NodeError::Other(format!(
                 "genesis weak_subjectivity.state_root_hex is not valid hex: {e}"
-            ),
-        ))?;
+            ))
+        })?;
         if anchor_bytes.len() != 32 {
             return Err(error::NodeError::Other(format!(
                 "genesis weak_subjectivity.state_root_hex must be exactly 32 \
@@ -533,23 +543,19 @@ async fn main() -> Result<()> {
         // This holds for the canonical Tenzro fleet (RPC bound on every
         // validator). When operators decouple ports the same logic can
         // be extended to consume an explicit `_tenzro-rpc._tcp.<name>` SRV.
-        let peer_url = config
-            .network
-            .boot_nodes
-            .iter()
-            .find_map(|ma| {
-                let s = ma.to_string();
-                // Multiaddrs look like `/ip4/203.0.113.10/tcp/9000/p2p/...`.
-                // Pull the first /ip4 or /ip6 component.
-                let mut parts = s.split('/').filter(|p| !p.is_empty());
-                let proto = parts.next()?;
-                let addr = parts.next()?;
-                match proto {
-                    "ip4" => Some(format!("http://{}:8545", addr)),
-                    "ip6" => Some(format!("http://[{}]:8545", addr)),
-                    _ => None,
-                }
-            });
+        let peer_url = config.network.boot_nodes.iter().find_map(|ma| {
+            let s = ma.to_string();
+            // Multiaddrs look like `/ip4/203.0.113.10/tcp/9000/p2p/...`.
+            // Pull the first /ip4 or /ip6 component.
+            let mut parts = s.split('/').filter(|p| !p.is_empty());
+            let proto = parts.next()?;
+            let addr = parts.next()?;
+            match proto {
+                "ip4" => Some(format!("http://{}:8545", addr)),
+                "ip6" => Some(format!("http://[{}]:8545", addr)),
+                _ => None,
+            }
+        });
         if let Some(url) = peer_url {
             info!(
                 peer = %url,
@@ -574,27 +580,26 @@ async fn main() -> Result<()> {
     // revocation dispatcher's invalidate path. Constructing once,
     // sharing via Arc, guarantees the binder read path and the
     // dispatcher invalidate path see the same cache state.
-    let spt_ceiling_cache: Option<
-        std::sync::Arc<spt_ceiling_bridge::SptCeilingResolverAdapter>,
-    > = config
-        .payments
-        .stripe_api_key
-        .as_ref()
-        .filter(|k| !k.trim().is_empty())
-        .map(|api_key| {
-            let mut stripe = tenzro_payments::mpp::StripeClient::new(api_key.clone());
-            if let Some(api_base) = config
-                .payments
-                .stripe_api_base
-                .as_ref()
-                .filter(|b| !b.trim().is_empty())
-            {
-                stripe = stripe.with_api_base(api_base.clone());
-            }
-            std::sync::Arc::new(spt_ceiling_bridge::SptCeilingResolverAdapter::new(
-                std::sync::Arc::new(stripe),
-            ))
-        });
+    let spt_ceiling_cache: Option<std::sync::Arc<spt_ceiling_bridge::SptCeilingResolverAdapter>> =
+        config
+            .payments
+            .stripe_api_key
+            .as_ref()
+            .filter(|k| !k.trim().is_empty())
+            .map(|api_key| {
+                let mut stripe = tenzro_payments::mpp::StripeClient::new(api_key.clone());
+                if let Some(api_base) = config
+                    .payments
+                    .stripe_api_base
+                    .as_ref()
+                    .filter(|b| !b.trim().is_empty())
+                {
+                    stripe = stripe.with_api_base(api_base.clone());
+                }
+                std::sync::Arc::new(spt_ceiling_bridge::SptCeilingResolverAdapter::new(
+                    std::sync::Arc::new(stripe),
+                ))
+            });
     if let Some(ref cache) = spt_ceiling_cache {
         node.set_spt_ceiling_cache(cache.clone());
         tracing::info!("Stripe SPT ceiling-resolver cache registered on TenzroNode");
@@ -610,60 +615,58 @@ async fn main() -> Result<()> {
     // Build the optional identity binder for payer validation in HTTP 402 middleware.
     // When available, this validates that the payer's DID is active and that the
     // payment amount/protocol/chain are within the payer's delegation scope.
-    let identity_binder: Option<std::sync::Arc<tenzro_payments::identity_binding::IdentityPaymentBinder>> =
-        node_arc.identity_registry().map(|registry| {
-            let mut binder = tenzro_payments::identity_binding::IdentityPaymentBinder::new(
-                registry.clone(),
-                std::sync::Arc::new(tenzro_identity::IdentityVerifier::new(registry.clone())),
-            );
-            // Phase C: bridge the per-machine SpendingPolicy registry on
-            // AgentRuntime into the payment gate. With the resolver wired,
-            // `validate_payer_for_protocol` enforces both the protocol-level
-            // DelegationScope and the runtime-level SpendingPolicy on every
-            // machine-DID-initiated payment.
-            if let Some(agent_runtime) = node_arc.agent_runtime() {
-                let resolver: std::sync::Arc<dyn tenzro_payments::SpendingPolicyResolver> =
-                    std::sync::Arc::new(
-                        spending_policy_bridge::AgentRuntimeSpendingPolicyResolver::new(
-                            agent_runtime.clone(),
-                        ),
-                    );
-                binder = binder.with_spending_policy_resolver(resolver);
+    let identity_binder: Option<
+        std::sync::Arc<tenzro_payments::identity_binding::IdentityPaymentBinder>,
+    > = node_arc.identity_registry().map(|registry| {
+        let mut binder = tenzro_payments::identity_binding::IdentityPaymentBinder::new(
+            registry.clone(),
+            std::sync::Arc::new(tenzro_identity::IdentityVerifier::new(registry.clone())),
+        );
+        // Phase C: bridge the per-machine SpendingPolicy registry on
+        // AgentRuntime into the payment gate. With the resolver wired,
+        // `validate_payer_for_protocol` enforces both the protocol-level
+        // DelegationScope and the runtime-level SpendingPolicy on every
+        // machine-DID-initiated payment.
+        if let Some(agent_runtime) = node_arc.agent_runtime() {
+            let resolver: std::sync::Arc<dyn tenzro_payments::SpendingPolicyResolver> =
+                std::sync::Arc::new(
+                    spending_policy_bridge::AgentRuntimeSpendingPolicyResolver::new(
+                        agent_runtime.clone(),
+                    ),
+                );
+            binder = binder.with_spending_policy_resolver(resolver);
 
-                // Kill-switch lifecycle gate: bridge AgentRuntime's lifecycle
-                // FSM into the payment binder so Paused / Quarantined /
-                // Terminated agents are refused at the payment boundary
-                // (separate axis from DelegationScope + SpendingPolicy; the
-                // operational `Suspended` state stays Operational here).
-                let lifecycle_resolver:
-                    std::sync::Arc<dyn tenzro_payments::LifecycleStateResolver> =
-                    std::sync::Arc::new(
-                        lifecycle_state_bridge::AgentRuntimeLifecycleResolver::new(
-                            agent_runtime.clone(),
-                        ),
-                    );
-                binder = binder.with_lifecycle_resolver(lifecycle_resolver);
-            }
-            // Phase D (Stripe SPT): consume the shared
-            // `spt_ceiling_cache` Arc constructed and registered on the
-            // node above. Reusing the same adapter Arc as the binder's
-            // resolver and the dispatcher's invalidate handle is the
-            // whole point — it guarantees cache state stays in lockstep
-            // between payment-admission reads and revocation invalidates.
-            // The four-ceiling enforcement path (`validate_payer_with_spt`)
-            // consults the resolver to verify a granted-token is Active
-            // and within `usage_limits` before admitting the payment.
-            // Cache-first reads with `Ok(None)` fallback semantics — see
-            // `spt_ceiling_bridge` module docs.
-            if let Some(cache) = spt_ceiling_cache.clone() {
-                let spt_resolver: std::sync::Arc<
-                    dyn tenzro_payments::mpp::stripe_spt::SptCeilingResolver,
-                > = cache;
-                binder = binder.with_spt_ceiling_resolver(spt_resolver);
-                tracing::info!("Stripe SPT ceiling resolver wired into IdentityPaymentBinder");
-            }
-            std::sync::Arc::new(binder)
-        });
+            // Kill-switch lifecycle gate: bridge AgentRuntime's lifecycle
+            // FSM into the payment binder so Paused / Quarantined /
+            // Terminated agents are refused at the payment boundary
+            // (separate axis from DelegationScope + SpendingPolicy; the
+            // operational `Suspended` state stays Operational here).
+            let lifecycle_resolver: std::sync::Arc<dyn tenzro_payments::LifecycleStateResolver> =
+                std::sync::Arc::new(lifecycle_state_bridge::AgentRuntimeLifecycleResolver::new(
+                    agent_runtime.clone(),
+                ));
+            binder = binder.with_lifecycle_resolver(lifecycle_resolver);
+        }
+        // Phase D (Stripe SPT): consume the shared
+        // `spt_ceiling_cache` Arc constructed and registered on the
+        // node above. Reusing the same adapter Arc as the binder's
+        // resolver and the dispatcher's invalidate handle is the
+        // whole point — it guarantees cache state stays in lockstep
+        // between payment-admission reads and revocation invalidates.
+        // The four-ceiling enforcement path (`validate_payer_with_spt`)
+        // consults the resolver to verify a granted-token is Active
+        // and within `usage_limits` before admitting the payment.
+        // Cache-first reads with `Ok(None)` fallback semantics — see
+        // `spt_ceiling_bridge` module docs.
+        if let Some(cache) = spt_ceiling_cache.clone() {
+            let spt_resolver: std::sync::Arc<
+                dyn tenzro_payments::mpp::stripe_spt::SptCeilingResolver,
+            > = cache;
+            binder = binder.with_spt_ceiling_resolver(spt_resolver);
+            tracing::info!("Stripe SPT ceiling resolver wired into IdentityPaymentBinder");
+        }
+        std::sync::Arc::new(binder)
+    });
 
     // Serving models is what the network pays providers for, so a node in the
     // `ai` role gates its inference routes by default, settling to its own
@@ -671,36 +674,35 @@ async fn main() -> Result<()> {
     // opted out. The amount defaults to whatever the config carries (0 on a
     // freshly launched node), so the gate can be wired and proven before a
     // real price is set.
-    let default_recipient = node_arc
-        .local_validator_address()
-        .map(|a| a.to_string());
+    let default_recipient = node_arc.local_validator_address().map(|a| a.to_string());
     let payments = config
         .payments
         .effective(&config.roles, default_recipient.as_deref());
 
     if payments.gate_on
-        && let Some(gateway) = node_arc.payment_gateway() {
-            let mut rpc_gate = tenzro_payments::middleware::PaymentGateMiddleware::new(
-                gateway.clone(),
-                tenzro_payments::middleware::PaymentGateConfig {
-                    default_amount: payments.amount,
-                    default_asset: payments.asset.clone(),
-                    recipient: payments.recipient.clone(),
-                    default_protocol: payments.protocol.clone(),
-                },
-                gateway.challenge_store(),
-            );
-            if let Some(ref binder) = identity_binder {
-                rpc_gate = rpc_gate.with_identity_binder(binder.clone());
-            }
-            info!(
-                recipient = %payments.recipient,
-                amount = %payments.amount,
-                asset = %payments.asset,
-                "HTTP 402 payment gate enabled for RPC /v1/chat/completions",
-            );
-            rpc_server = rpc_server.with_payment_gate(rpc_gate);
+        && let Some(gateway) = node_arc.payment_gateway()
+    {
+        let mut rpc_gate = tenzro_payments::middleware::PaymentGateMiddleware::new(
+            gateway.clone(),
+            tenzro_payments::middleware::PaymentGateConfig {
+                default_amount: payments.amount,
+                default_asset: payments.asset.clone(),
+                recipient: payments.recipient.clone(),
+                default_protocol: payments.protocol.clone(),
+            },
+            gateway.challenge_store(),
+        );
+        if let Some(ref binder) = identity_binder {
+            rpc_gate = rpc_gate.with_identity_binder(binder.clone());
         }
+        info!(
+            recipient = %payments.recipient,
+            amount = %payments.amount,
+            asset = %payments.asset,
+            "HTTP 402 payment gate enabled for RPC /v1/chat/completions",
+        );
+        rpc_server = rpc_server.with_payment_gate(rpc_gate);
+    }
 
     // Spawn RPC server with graceful shutdown
     let rpc_shutdown_rx = shutdown_tx.subscribe();
@@ -731,30 +733,34 @@ async fn main() -> Result<()> {
     // from the same address that holds the funds.
     if let Some(ref genesis) = config.genesis
         && let Some(ref faucet) = genesis.faucet
-            && faucet.enabled {
-                let runtime_faucet_address = node_arc
-                    .storage()
-                    .and_then(|s| s.get("metadata", genesis::FAUCET_SIGNING_KEY_ADDRESS).ok().flatten())
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-                    .map(|hex| format!("0x{}", hex))
-                    .unwrap_or_else(|| {
-                        warn!(
-                            "Faucet signing-key address not found in CF_METADATA; \
+        && faucet.enabled
+    {
+        let runtime_faucet_address = node_arc
+            .storage()
+            .and_then(|s| {
+                s.get("metadata", genesis::FAUCET_SIGNING_KEY_ADDRESS)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|hex| format!("0x{}", hex))
+            .unwrap_or_else(|| {
+                warn!(
+                    "Faucet signing-key address not found in CF_METADATA; \
                              falling back to legacy sentinel {}. /faucet will fail \
                              until provision_faucet_signing_key() runs.",
-                            faucet.address
-                        );
-                        faucet.address.clone()
-                    });
-                let dispense_amount =
-                    genesis::resolve_faucet_grant_tnzo(faucet.amount_per_request);
-                info!("Faucet dispensing {} TNZO per request", dispense_amount);
-                web_state = web_state.with_faucet(
-                    runtime_faucet_address,
-                    dispense_amount,
-                    faucet.cooldown_seconds,
+                    faucet.address
                 );
-            }
+                faucet.address.clone()
+            });
+        let dispense_amount = genesis::resolve_faucet_grant_tnzo(faucet.amount_per_request);
+        info!("Faucet dispensing {} TNZO per request", dispense_amount);
+        web_state = web_state.with_faucet(
+            runtime_faucet_address,
+            dispense_amount,
+            faucet.cooldown_seconds,
+        );
+    }
 
     // Wire event sender if available
     if let Some(event_sender) = node_arc.event_sender() {
@@ -778,8 +784,8 @@ async fn main() -> Result<()> {
     // `init_payments()`. Both share the same `ChallengeStore`, so a
     // challenge created by the middleware is later visible to the
     // gateway during verify-and-settle.
-    let mut web_server = web::WebServer::new(config.web_addr.clone())
-        .with_state_arc(web_state.clone());
+    let mut web_server =
+        web::WebServer::new(config.web_addr.clone()).with_state_arc(web_state.clone());
 
     if payments.gate_on {
         if let Some(gateway) = node_arc.payment_gateway() {
@@ -796,10 +802,8 @@ async fn main() -> Result<()> {
             if let Some(ref binder) = identity_binder {
                 middleware = middleware.with_identity_binder(binder.clone());
             }
-            let setup = web::server::PaymentGateSetup::new(
-                middleware,
-                payments.paid_routes.clone(),
-            );
+            let setup =
+                web::server::PaymentGateSetup::new(middleware, payments.paid_routes.clone());
             info!(
                 routes = ?payments.paid_routes,
                 protocol = %payments.protocol,
@@ -857,8 +861,9 @@ async fn main() -> Result<()> {
     // connected before this point received `-32603` "dispatcher not yet
     // bound" envelopes — after this swap they get the full A2A surface.
     if let Some(deferred) = node_arc.iroh_a2a_dispatcher.as_ref() {
-        let dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> =
-            Arc::new(a2a::iroh_transport::IrohA2aDispatcher::new(a2a_state.clone()));
+        let dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = Arc::new(
+            a2a::iroh_transport::IrohA2aDispatcher::new(a2a_state.clone()),
+        );
         deferred.set(dispatcher);
         info!("A2A dispatcher installed on iroh transport (ALPN tenzro/a2a, Phase D2)");
     }
@@ -890,6 +895,55 @@ async fn main() -> Result<()> {
         info!("Inference dispatcher installed on iroh transport (ALPN tenzro/infer)");
     }
 
+    // Reclaim what expired leases were holding.
+    //
+    // Expiry already stops new sessions, but that is only half of it: without
+    // a sweep an expired lease goes on holding its reserved concurrency, its
+    // committed accelerator memory and its pinned models indefinitely. A node
+    // that rented capacity for an hour last month would still be short that
+    // capacity today, with nothing obviously wrong to look at.
+    //
+    // A minute is the right cadence — leases are billed by the hour at the
+    // finest, so a minute of over-hold is immaterial, and sweeping more often
+    // would just take the lock for nothing.
+    {
+        let leases = node_arc.lease_registry().cloned();
+        if let Some(leases) = leases {
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let swept = leases.sweep_expired(now_ms);
+                    if !swept.is_empty() {
+                        info!(
+                            count = swept.len(),
+                            "Reclaimed capacity from expired leases"
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    // Start the autotune sampler. Needs `Arc<TenzroNode>` to read the three
+    // bounds, so it starts here rather than in `init_ai_infrastructure`.
+    //
+    // It runs whether or not it is enabled: when disabled it observes and
+    // records what it *would* have done, which is how an operator builds
+    // confidence before letting a node change its own configuration.
+    {
+        let sampler = tenzro_node::autotune_sampler::AutotuneSampler::spawn(
+            node_arc.clone(),
+            config.autotune.clone(),
+        );
+        *node_arc.autotune.write() = Some(sampler);
+    }
+
     // Install the iroh-side ingress handler. The iroh router registered the
     // `tenzro/http` ALPN at bind time backed by a deferred handler (see
     // `init_ai_infrastructure`); now that we have `Arc<TenzroNode>` we swap the
@@ -903,6 +957,16 @@ async fn main() -> Result<()> {
         info!("Ingress handler installed on iroh transport (ALPN tenzro/http)");
     }
 
+    // Install the iroh-side shell handler. Same trampoline: the `tenzro/shell`
+    // ALPN was registered at bind time, and the real handler needs the lease
+    // registry that startup built afterwards. A node with no registry — or
+    // with no confinement backend — keeps refusing every session, which is
+    // the right default for the great majority of nodes, which rent out no
+    // hardware.
+    if node_arc.install_shell_handler() {
+        info!("Remote-access shell handler installed on iroh transport (ALPN tenzro/shell)");
+    }
+
     // MoE replication repair. Each pass raises replication on the experts
     // this node was rendezvous-selected to hold; nodes serving no experts
     // return immediately, so this is spawned unconditionally.
@@ -911,12 +975,9 @@ async fn main() -> Result<()> {
     let a2a_shutdown_rx = shutdown_tx.subscribe();
     let a2a_addr_https = a2a_addr.clone();
     let mut a2a_handle = tokio::spawn(async move {
-        if let Err(e) = a2a::server::start_a2a_server_with_shutdown(
-            a2a_addr_https,
-            a2a_state,
-            a2a_shutdown_rx,
-        )
-        .await
+        if let Err(e) =
+            a2a::server::start_a2a_server_with_shutdown(a2a_addr_https, a2a_state, a2a_shutdown_rx)
+                .await
         {
             error!("A2A server error: {}", e);
         }
@@ -929,8 +990,8 @@ async fn main() -> Result<()> {
     // `tokio::select!` cancellation on the running future.
     let solana_addr = config.solana_mcp_addr.clone();
     let solana_shutdown_rx = shutdown_tx.subscribe();
-    let solana_rpc_url = std::env::var("SOLANA_RPC_URL")
-        .unwrap_or_else(|_| mcp::solana::default_solana_rpc_url());
+    let solana_rpc_url =
+        std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| mcp::solana::default_solana_rpc_url());
     tokio::spawn(async move {
         if let Err(e) = mcp::solana::start_solana_mcp_server_with_rpc_and_shutdown(
             solana_addr,
@@ -1060,11 +1121,8 @@ async fn main() -> Result<()> {
     let lifi_addr = config.lifi_mcp_addr.clone();
     let lifi_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        if let Err(e) = mcp::lifi::start_lifi_mcp_server_with_shutdown(
-            lifi_addr,
-            lifi_shutdown_rx,
-        )
-        .await
+        if let Err(e) =
+            mcp::lifi::start_lifi_mcp_server_with_shutdown(lifi_addr, lifi_shutdown_rx).await
         {
             error!("LI.FI MCP server error: {}", e);
         }
@@ -1077,9 +1135,9 @@ async fn main() -> Result<()> {
 
         #[cfg(unix)]
         {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ).expect("Failed to install SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to install SIGTERM handler");
             tokio::select! {
                 _ = ctrl_c => info!("Received SIGINT (Ctrl+C)"),
                 _ = sigterm.recv() => info!("Received SIGTERM"),
@@ -1163,12 +1221,10 @@ async fn run_subcommand(cmd: Command) -> Result<()> {
 /// This is the only path in the binary that creates validator key
 /// material. The running node strictly loads and errors on missing
 /// keys — see `keygen.rs` for the rationale.
-fn run_init(
-    data_dir: PathBuf,
-    stake: u64,
-    force: bool,
-    format: String,
-) -> Result<()> {
+fn run_init(data_dir: Option<PathBuf>, stake: u64, force: bool, format: String) -> Result<()> {
+    let data_dir = data_dir
+        .map(tenzro_types::paths::expand_tilde)
+        .unwrap_or_else(tenzro_types::paths::default_data_dir);
     info!(
         data_dir = %data_dir.display(),
         stake,
@@ -1281,8 +1337,14 @@ async fn run_graceful_exit(
         )));
     }
 
-    let result = body.get("result").cloned().unwrap_or(serde_json::Value::Null);
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    let result = body
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    );
     info!("graceful-exit accepted by node; process will exit after server drain");
     Ok(())
 }
@@ -1348,7 +1410,10 @@ fn load_config(cli: &Cli) -> Result<NodeConfig> {
 /// Apply CLI argument overrides to configuration
 async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     if let Some(data_dir) = &cli.data_dir {
-        config.data_dir = data_dir.clone();
+        // Expanded rather than taken literally: a tilde survives quoting and
+        // systemd unit files, and unexpanded it creates a directory named `~`
+        // beside whatever the working directory happened to be.
+        config.data_dir = tenzro_types::paths::expand_tilde(data_dir);
     }
 
     // Model-license acceptance. CLI flags are additive on top of any policy
@@ -1361,8 +1426,17 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     }
     for id in &cli.accept_license {
         let id = id.trim();
-        if !id.is_empty() && !config.model_licensing.accepted_license_ids.iter().any(|a| a == id) {
-            config.model_licensing.accepted_license_ids.push(id.to_string());
+        if !id.is_empty()
+            && !config
+                .model_licensing
+                .accepted_license_ids
+                .iter()
+                .any(|a| a == id)
+        {
+            config
+                .model_licensing
+                .accepted_license_ids
+                .push(id.to_string());
         }
     }
 
@@ -1459,7 +1533,10 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         }
         if !addrs.is_empty() {
             config.network.boot_nodes = addrs;
-            info!("Boot nodes override: {} nodes", config.network.boot_nodes.len());
+            info!(
+                "Boot nodes override: {} nodes",
+                config.network.boot_nodes.len()
+            );
         }
     }
 
@@ -1469,7 +1546,10 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     {
         let env_boot = tenzro_network::BootstrapConfig::from_env();
         if !env_boot.boot_nodes.is_empty() {
-            config.network.boot_nodes.extend(env_boot.boot_nodes.iter().cloned());
+            config
+                .network
+                .boot_nodes
+                .extend(env_boot.boot_nodes.iter().cloned());
             info!(
                 "TENZRO_BOOT_NODES appended: {} nodes (total {})",
                 env_boot.boot_nodes.len(),
@@ -1487,11 +1567,33 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     // When the operator supplies neither --boot-nodes nor --bootstrap-dns and
     // the config file carries no boot nodes, fall back to the network
     // bootstrap name so a fresh install joins the network with zero flags.
+    // An explicitly empty `--boot-nodes ""` means "no peers, do not discover
+    // any" — isolated mode. That is deliberately distinct from *omitting* the
+    // flag, which means "I have no preference, use the network default".
+    //
+    // Without this distinction there was no way to run a node that does not
+    // join the live network: an empty boot-node list is exactly the state a
+    // fresh install is in, so the fallback below fired and a node started with
+    // no flags at all silently dialled production. That is the right default
+    // for an operator joining the network and a trap for anyone bringing up a
+    // local or solo node — which is the first thing you do on new hardware.
+    let isolated = cli
+        .boot_nodes
+        .as_deref()
+        .is_some_and(|s| s.trim().is_empty());
+
     let bootstrap_dns_name = cli.bootstrap_dns.clone().or_else(|| {
-        if config.network.boot_nodes.is_empty() {
+        if isolated {
+            info!(
+                "Isolated mode: --boot-nodes was given empty, so no bootstrap DNS \
+                 resolution is performed and this node will not dial the network"
+            );
+            None
+        } else if config.network.boot_nodes.is_empty() {
             info!(
                 "No boot nodes configured; using default bootstrap DNS name tenzro.xyz \
-                 (override with --boot-nodes or --bootstrap-dns)"
+                 (override with --boot-nodes or --bootstrap-dns, or pass --boot-nodes \"\" \
+                 to stay isolated)"
             );
             Some("tenzro.xyz".to_string())
         } else {
@@ -1569,8 +1671,9 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     if let Some(genesis_path) = &cli.genesis {
         let contents = std::fs::read_to_string(genesis_path)
             .map_err(|e| error::NodeError::Config(format!("Failed to read genesis file: {}", e)))?;
-        let genesis: GenesisConfig = toml::from_str(&contents)
-            .map_err(|e| error::NodeError::Config(format!("Failed to parse genesis config: {}", e)))?;
+        let genesis: GenesisConfig = toml::from_str(&contents).map_err(|e| {
+            error::NodeError::Config(format!("Failed to parse genesis config: {}", e))
+        })?;
         config.genesis = Some(genesis);
     }
 
@@ -1643,7 +1746,8 @@ fn parse_roles(roles: &str) -> Result<tenzro_types::RoleSet> {
 
 /// Print startup banner
 fn print_banner() {
-    println!(r#"
+    println!(
+        r#"
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║
 ║   ████████╗███████╗███╗   ██╗███████╗██████╗  ██████╗    ║
@@ -1657,7 +1761,8 @@ fn print_banner() {
 ║                      Version 0.1.0                         ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
-"#);
+"#
+    );
 }
 
 /// Print node information

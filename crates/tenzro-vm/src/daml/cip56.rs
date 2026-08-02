@@ -233,11 +233,7 @@ impl Cip56TokenAdapter {
     /// the JsCommands envelope (`{"commands": {"commandId": ..., "userId":
     /// ..., "actAs": [...], "commands": [<this>]}}`). Canton 3.5+ requires
     /// each command to be externally tagged as `CreateCommand`.
-    pub fn build_create_holding_command(
-        &self,
-        owner: &str,
-        amount: &str,
-    ) -> serde_json::Value {
+    pub fn build_create_holding_command(&self, owner: &str, amount: &str) -> serde_json::Value {
         serde_json::json!({
             "commands": [{
                 "CreateCommand": {
@@ -286,7 +282,7 @@ impl Cip56TokenAdapter {
 /// Party IDs in Canton are strings like "Alice::1234" or hex-encoded keys.
 /// We hash the party ID to produce a deterministic 32-byte address.
 fn party_to_address(party: &str) -> Address {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"tenzro-daml-party:");
     hasher.update(party.as_bytes());
@@ -452,16 +448,20 @@ mod tests {
         let adapter = setup();
 
         let cmd = adapter.build_create_holding_command("Alice::1234", "100.0");
-        assert!(cmd["commands"][0]["CreateCommand"]["templateId"]
-            .as_str()
-            .unwrap()
-            .contains("TnzoHolding"));
+        assert!(
+            cmd["commands"][0]["CreateCommand"]["templateId"]
+                .as_str()
+                .unwrap()
+                .contains("TnzoHolding")
+        );
 
         let cmd = adapter.build_transfer_command("contract-123", "Bob::5678", "50.0");
-        assert!(cmd["commands"][0]["ExerciseCommand"]["choice"]
-            .as_str()
-            .unwrap()
-            == "Transfer");
+        assert!(
+            cmd["commands"][0]["ExerciseCommand"]["choice"]
+                .as_str()
+                .unwrap()
+                == "Transfer"
+        );
     }
 
     #[test]

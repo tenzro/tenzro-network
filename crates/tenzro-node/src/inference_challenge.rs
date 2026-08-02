@@ -53,7 +53,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tenzro_model::toploc::InferenceCommitment;
-use tenzro_storage::{KvStore, CF_CHALLENGES};
+use tenzro_storage::{CF_CHALLENGES, KvStore};
 use tenzro_types::primitives::Hash;
 
 use crate::error::{NodeError, Result};
@@ -181,20 +181,18 @@ pub fn select_challenge_committee(
         return Vec::new();
     }
     let dids: Vec<String> = staked.iter().map(|(v, _)| v.clone()).collect();
-    let chosen = tenzro_training::select_witness_committee(
-        challenge_id,
-        0,
-        chain_entropy,
-        &dids,
-        k,
-    );
+    let chosen =
+        tenzro_training::select_witness_committee(challenge_id, 0, chain_entropy, &dids, k);
     chosen
         .into_iter()
         .filter_map(|voter| {
             staked
                 .iter()
                 .find(|(v, _)| *v == voter)
-                .map(|(_, stake)| CommitteeSeat { voter, stake: *stake })
+                .map(|(_, stake)| CommitteeSeat {
+                    voter,
+                    stake: *stake,
+                })
         })
         .collect()
 }
@@ -347,9 +345,7 @@ impl ChallengeManager {
         committee: Vec<CommitteeSeat>,
     ) -> Result<InferenceChallenge> {
         let stored = self.get_commitment(commitment_hash)?.ok_or_else(|| {
-            NodeError::Other(format!(
-                "no stored commitment with hash {commitment_hash}"
-            ))
+            NodeError::Other(format!("no stored commitment with hash {commitment_hash}"))
         })?;
         if committee.is_empty() {
             return Err(NodeError::Other(
@@ -506,7 +502,9 @@ impl ChallengeManager {
         let mut uphold_stake: u128 = 0;
         let mut dismiss_stake: u128 = 0;
         for vote in &entry.votes {
-            let Some(verdict) = vote.verdict else { continue };
+            let Some(verdict) = vote.verdict else {
+                continue;
+            };
             let Some(seat) = entry.seat_for(&vote.voter) else {
                 continue;
             };
@@ -596,8 +594,14 @@ mod tests {
             steps: vec![StepRecord {
                 token_id: 42,
                 top_k: vec![
-                    TopKEntry { token_id: 42, logit: 1.5 },
-                    TopKEntry { token_id: 7, logit: 0.5 },
+                    TopKEntry {
+                        token_id: 42,
+                        logit: 1.5,
+                    },
+                    TopKEntry {
+                        token_id: 7,
+                        logit: 0.5,
+                    },
                 ],
             }],
         }
@@ -614,15 +618,26 @@ mod tests {
     /// A 3-seat committee with equal stake — quorum threshold is 2 of 3.
     fn committee_3() -> Vec<CommitteeSeat> {
         vec![
-            CommitteeSeat { voter: "0xv0".into(), stake: 100 },
-            CommitteeSeat { voter: "0xv1".into(), stake: 100 },
-            CommitteeSeat { voter: "0xv2".into(), stake: 100 },
+            CommitteeSeat {
+                voter: "0xv0".into(),
+                stake: 100,
+            },
+            CommitteeSeat {
+                voter: "0xv1".into(),
+                stake: 100,
+            },
+            CommitteeSeat {
+                voter: "0xv2".into(),
+                stake: 100,
+            },
         ]
     }
 
     fn filed_challenge(m: &ChallengeManager) -> InferenceChallenge {
         let c = sample_commitment();
-        let hash = m.store_commitment("test-model", "0xabc", &c).expect("store");
+        let hash = m
+            .store_commitment("test-model", "0xabc", &c)
+            .expect("store");
         m.file(&hash, "0xdef", "suspect output", entropy(1), committee_3())
             .expect("file")
     }
@@ -645,7 +660,13 @@ mod tests {
     fn file_requires_stored_commitment() {
         let m = manager();
         let err = m
-            .file("deadbeef", "0xdef", "suspect output", entropy(1), committee_3())
+            .file(
+                "deadbeef",
+                "0xdef",
+                "suspect output",
+                entropy(1),
+                committee_3(),
+            )
             .expect_err("must reject unknown hash");
         assert!(err.to_string().contains("no stored commitment"));
     }
@@ -654,7 +675,9 @@ mod tests {
     fn file_requires_nonempty_committee() {
         let m = manager();
         let c = sample_commitment();
-        let hash = m.store_commitment("test-model", "0xabc", &c).expect("store");
+        let hash = m
+            .store_commitment("test-model", "0xabc", &c)
+            .expect("store");
         let err = m
             .file(&hash, "0xdef", "suspect", entropy(1), Vec::new())
             .expect_err("must reject empty committee");
@@ -672,27 +695,38 @@ mod tests {
         let salt1 = b"salt-one";
         let c0 = compute_vote_commit(true, salt0, &ch.challenge_id, "0xv0");
         let c1 = compute_vote_commit(true, salt1, &ch.challenge_id, "0xv1");
-        m.commit_vote(&ch.challenge_id, "0xv0", &c0).expect("commit v0");
-        let after = m.commit_vote(&ch.challenge_id, "0xv1", &c1).expect("commit v1");
+        m.commit_vote(&ch.challenge_id, "0xv0", &c0)
+            .expect("commit v0");
+        let after = m
+            .commit_vote(&ch.challenge_id, "0xv1", &c1)
+            .expect("commit v1");
         // Committed stake 200 >= threshold ((300/3)*2+1 = 201)? 200 < 201, so
         // still commit phase; a third commit crosses it.
         assert_eq!(after.status, ChallengeStatus::VotingCommit);
         let salt2 = b"salt-two";
         let c2 = compute_vote_commit(true, salt2, &ch.challenge_id, "0xv2");
-        let after = m.commit_vote(&ch.challenge_id, "0xv2", &c2).expect("commit v2");
+        let after = m
+            .commit_vote(&ch.challenge_id, "0xv2", &c2)
+            .expect("commit v2");
         assert_eq!(after.status, ChallengeStatus::VotingReveal);
 
         // Non-committee voter is rejected.
         assert!(m.commit_vote(&ch.challenge_id, "0xstranger", &c0).is_err());
 
         // Reveals must match commits.
-        assert!(m.reveal_vote(&ch.challenge_id, "0xv0", false, salt0).is_err());
-        m.reveal_vote(&ch.challenge_id, "0xv0", true, salt0).expect("reveal v0");
-        m.reveal_vote(&ch.challenge_id, "0xv1", true, salt1).expect("reveal v1");
+        assert!(
+            m.reveal_vote(&ch.challenge_id, "0xv0", false, salt0)
+                .is_err()
+        );
+        m.reveal_vote(&ch.challenge_id, "0xv0", true, salt0)
+            .expect("reveal v0");
+        m.reveal_vote(&ch.challenge_id, "0xv1", true, salt1)
+            .expect("reveal v1");
 
         // 200 revealed-uphold stake >= 201? No — needs the third reveal.
         assert!(m.finalize(&ch.challenge_id, false).is_err());
-        m.reveal_vote(&ch.challenge_id, "0xv2", true, salt2).expect("reveal v2");
+        m.reveal_vote(&ch.challenge_id, "0xv2", true, salt2)
+            .expect("reveal v2");
         let done = m.finalize(&ch.challenge_id, false).expect("finalize");
         assert_eq!(done.status, ChallengeStatus::Upheld);
         assert!(done.resolved_at.is_some());
@@ -725,7 +759,8 @@ mod tests {
         let salt = b"lonely";
         let c = compute_vote_commit(true, salt, &ch.challenge_id, "0xv0");
         m.commit_vote(&ch.challenge_id, "0xv0", &c).expect("commit");
-        m.reveal_vote(&ch.challenge_id, "0xv0", true, salt).expect("reveal");
+        m.reveal_vote(&ch.challenge_id, "0xv0", true, salt)
+            .expect("reveal");
         // Without force, no quorum → error.
         assert!(m.finalize(&ch.challenge_id, false).is_err());
         // With force (windows elapsed), the provider prevails.
@@ -786,7 +821,10 @@ mod tests {
             ChallengeStatus::parse("voting_reveal"),
             Some(ChallengeStatus::VotingReveal)
         );
-        assert_eq!(ChallengeStatus::parse("upheld"), Some(ChallengeStatus::Upheld));
+        assert_eq!(
+            ChallengeStatus::parse("upheld"),
+            Some(ChallengeStatus::Upheld)
+        );
         assert_eq!(
             ChallengeStatus::parse("dismissed"),
             Some(ChallengeStatus::Dismissed)

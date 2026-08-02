@@ -8,7 +8,7 @@
 //! See `AI.md` for the architecture.
 
 use crate::output;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 const DEFAULT_RPC: &str = "http://127.0.0.1:8545";
@@ -741,8 +741,8 @@ impl MediaGenPublishOutputCmd {
         use crate::rpc::RpcClient;
         use base64::Engine as _;
 
-        let bytes = std::fs::read(&self.file)
-            .map_err(|e| anyhow!("read file '{}': {}", self.file, e))?;
+        let bytes =
+            std::fs::read(&self.file).map_err(|e| anyhow!("read file '{}': {}", self.file, e))?;
         if bytes.is_empty() {
             return Err(anyhow!("file '{}' is empty", self.file));
         }
@@ -769,7 +769,10 @@ impl MediaGenPublishOutputCmd {
         );
         output::print_field(
             "Locator (BLAKE3)",
-            result.get("locator").and_then(|v| v.as_str()).unwrap_or("-"),
+            result
+                .get("locator")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         );
         output::print_field(
             "Bytes",

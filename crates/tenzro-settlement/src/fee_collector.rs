@@ -62,7 +62,10 @@ impl std::fmt::Debug for FeeCollector {
         f.debug_struct("FeeCollector")
             .field("treasury", &self.treasury)
             .field("total_collected", &*self.total_collected.read())
-            .field("collection_history_len", &self.collection_history.read().len())
+            .field(
+                "collection_history_len",
+                &self.collection_history.read().len(),
+            )
             .field("collection_counts", &*self.collection_counts.read())
             .field("storage", &self.storage.as_ref().map(|_| "<dyn KvStore>"))
             .finish()
@@ -231,9 +234,8 @@ impl FeeCollector {
             None => return Ok(()),
         };
 
-        let record_bytes = serde_json::to_vec(record).map_err(|e| {
-            SettlementError::StorageError(format!("serialize fee record: {}", e))
-        })?;
+        let record_bytes = serde_json::to_vec(record)
+            .map_err(|e| SettlementError::StorageError(format!("serialize fee record: {}", e)))?;
 
         let ops = vec![
             tenzro_storage::WriteOp::Put {
@@ -265,12 +267,7 @@ impl FeeCollector {
     /// * `settlement_id` - ID of the settlement this fee is from
     /// * `asset_id` - Asset type of the fee
     /// * `amount` - Fee amount
-    pub fn collect_fee(
-        &self,
-        settlement_id: &str,
-        asset_id: &AssetId,
-        amount: u128,
-    ) -> Result<()> {
+    pub fn collect_fee(&self, settlement_id: &str, asset_id: &AssetId, amount: u128) -> Result<()> {
         if amount == 0 {
             return Err(SettlementError::InvalidAmount(
                 "Fee amount must be greater than zero".to_string(),
@@ -442,10 +439,7 @@ impl FeeCollector {
 
         for record in history.iter() {
             if record.timestamp >= start && record.timestamp <= end {
-                let current = period_collected
-                    .get(&record.asset_id)
-                    .copied()
-                    .unwrap_or(0);
+                let current = period_collected.get(&record.asset_id).copied().unwrap_or(0);
                 period_collected.insert(record.asset_id.clone(), current + record.amount);
                 period_count += 1;
             }
@@ -564,8 +558,12 @@ mod tests {
 
         let asset_id = AssetId::tnzo();
 
-        collector.collect_fee("settlement-1", &asset_id, 100).unwrap();
-        collector.collect_fee("settlement-2", &asset_id, 50).unwrap();
+        collector
+            .collect_fee("settlement-1", &asset_id, 100)
+            .unwrap();
+        collector
+            .collect_fee("settlement-2", &asset_id, 50)
+            .unwrap();
 
         let history = collector.get_history();
         assert_eq!(history.len(), 2);

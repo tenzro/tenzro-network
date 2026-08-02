@@ -78,10 +78,7 @@ impl SignerBackend {
                 rs[..32].copy_from_slice(&output.r);
                 rs[32..].copy_from_slice(&output.s);
                 let signature = Signature::from_slice(&rs).map_err(|e| {
-                    BridgeError::AdapterError(format!(
-                        "Threshold signature decode failed: {}",
-                        e
-                    ))
+                    BridgeError::AdapterError(format!("Threshold signature decode failed: {}", e))
                 })?;
                 let recovery_id = RecoveryId::from_byte(output.v).ok_or_else(|| {
                     BridgeError::AdapterError(format!(
@@ -156,16 +153,11 @@ impl EvmTransactionSigner {
     /// Creates a new EVM transaction signer wrapping a TEE-sealed key.
     ///
     /// The sealed key was derived inside the enclave via
-    /// [`SealedSecp256k1Key::derive_from_snp`],
-    /// [`SealedSecp256k1Key::derive_from_tdx`], or
-    /// [`SealedSecp256k1Key::derive_auto`]. The 20-byte sender address is
+    /// [`SealedSecp256k1Key::derive_auto`], which roots in the SEV-SNP
+    /// PSP-derived key or the TDX MRTD. The 20-byte sender address is
     /// taken directly from the sealed key's public-side metadata; no
     /// secret material crosses this API.
-    pub fn with_sealed_key(
-        sealed: SealedSecp256k1Key,
-        chain_id: u64,
-        rpc_url: String,
-    ) -> Self {
+    pub fn with_sealed_key(sealed: SealedSecp256k1Key, chain_id: u64, rpc_url: String) -> Self {
         let sender_address = sealed.address();
         Self::with_backend(
             SignerBackend::SealedKey(sealed),
@@ -181,11 +173,7 @@ impl EvmTransactionSigner {
     ///
     /// Returns `BridgeError::ConfigurationError` if no TEE is available
     /// — there is **no simulation fallback** per testnet policy.
-    pub async fn with_tee_sealed(
-        label: &[u8],
-        chain_id: u64,
-        rpc_url: String,
-    ) -> Result<Self> {
+    pub async fn with_tee_sealed(label: &[u8], chain_id: u64, rpc_url: String) -> Result<Self> {
         let sealed = SealedSecp256k1Key::derive_auto(label).await.map_err(|e| {
             BridgeError::ConfigurationError(format!(
                 "TEE-sealed bridge key derivation failed: {}",
@@ -295,10 +283,7 @@ impl EvmTransactionSigner {
             .await
             .map_err(|e| BridgeError::NetworkError(format!("Invalid nonce response: {}", e)))?;
 
-        let nonce_hex = json
-            .get("result")
-            .and_then(|r| r.as_str())
-            .unwrap_or("0x0");
+        let nonce_hex = json.get("result").and_then(|r| r.as_str()).unwrap_or("0x0");
 
         let nonce_hex = nonce_hex.strip_prefix("0x").unwrap_or(nonce_hex);
         let chain_nonce = u64::from_str_radix(nonce_hex, 16).unwrap_or(0);
@@ -399,12 +384,7 @@ impl EvmTransactionSigner {
     ///
     /// # Returns
     /// The transaction hash as a hex string
-    pub async fn send_transaction(
-        &self,
-        to: &str,
-        calldata: &[u8],
-        value: u128,
-    ) -> Result<String> {
+    pub async fn send_transaction(&self, to: &str, calldata: &[u8], value: u128) -> Result<String> {
         let nonce = self.sync_nonce().await?;
         let gas_limit = self.estimate_gas(to, calldata, value).await?;
         let base_fee = self.get_base_fee().await?;
@@ -659,8 +639,9 @@ impl EvmSignerConfig {
 
     /// Builds an EvmTransactionSigner from this config
     pub fn build(&self) -> Result<EvmTransactionSigner> {
-        let key_bytes = hex::decode(&self.private_key_hex)
-            .map_err(|e| BridgeError::ConfigurationError(format!("Invalid private key hex: {}", e)))?;
+        let key_bytes = hex::decode(&self.private_key_hex).map_err(|e| {
+            BridgeError::ConfigurationError(format!("Invalid private key hex: {}", e))
+        })?;
 
         if key_bytes.len() != 32 {
             return Err(BridgeError::ConfigurationError(format!(
@@ -754,9 +735,9 @@ mod tests {
     fn test_keccak256() {
         let hash = keccak256(b"hello");
         // Known keccak256("hello")
-        let expected = hex::decode(
-            "1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8"
-        ).unwrap();
+        let expected =
+            hex::decode("1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8")
+                .unwrap();
         assert_eq!(&hash[..], &expected[..]);
     }
 
@@ -764,11 +745,9 @@ mod tests {
     fn test_evm_signer_creation() {
         // Use a known test private key (DO NOT use in production)
         let private_key = [0x01u8; 32];
-        let signer = EvmTransactionSigner::new(
-            &private_key,
-            1,
-            "http://localhost:8545".to_string(),
-        ).unwrap();
+        let signer =
+            EvmTransactionSigner::new(&private_key, 1, "http://localhost:8545".to_string())
+                .unwrap();
 
         let addr = signer.sender_address();
         assert!(addr.starts_with("0x"));
@@ -806,7 +785,10 @@ mod tests {
             "http://localhost:8545".to_string(),
         )
         .await;
-        assert!(result.is_err(), "must error off-hardware, not silently fall back");
+        assert!(
+            result.is_err(),
+            "must error off-hardware, not silently fall back"
+        );
         let err = result.err().unwrap();
         let msg = err.to_string();
         assert!(
@@ -820,33 +802,31 @@ mod tests {
     fn test_raw_key_signer_is_not_tee_sealed() {
         // RawKey path should report itself as non-TEE for posture telemetry.
         let private_key = [0x01u8; 32];
-        let signer = EvmTransactionSigner::new(
-            &private_key,
-            1,
-            "http://localhost:8545".to_string(),
-        )
-        .unwrap();
-        assert!(!signer.is_tee_sealed(), "RawKey backend must not report TEE-sealed");
+        let signer =
+            EvmTransactionSigner::new(&private_key, 1, "http://localhost:8545".to_string())
+                .unwrap();
+        assert!(
+            !signer.is_tee_sealed(),
+            "RawKey backend must not report TEE-sealed"
+        );
     }
 
     #[tokio::test]
     async fn test_eip1559_transaction_encoding() {
         let private_key = [0x01u8; 32];
-        let signer = EvmTransactionSigner::new(
-            &private_key,
-            1,
-            "http://localhost:8545".to_string(),
-        ).unwrap();
+        let signer =
+            EvmTransactionSigner::new(&private_key, 1, "http://localhost:8545".to_string())
+                .unwrap();
 
         let result = signer
             .encode_eip1559_transaction(
-                0,                       // nonce
-                2_000_000_000,           // max priority fee (2 gwei)
-                30_000_000_000,          // max fee per gas (30 gwei)
-                21_000,                  // gas limit
+                0,              // nonce
+                2_000_000_000,  // max priority fee (2 gwei)
+                30_000_000_000, // max fee per gas (30 gwei)
+                21_000,         // gas limit
                 "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
-                0,                       // value
-                &[],                     // empty data
+                0,   // value
+                &[], // empty data
             )
             .await;
 
@@ -876,7 +856,8 @@ mod tests {
         async fn sign_prehash(
             &self,
             _msg_hash: [u8; 32],
-        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError> {
+        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError>
+        {
             // Construct a (r, s, v) triple that round-trips through
             // `Signature::from_slice`. The actual scalar values are not
             // cryptographically meaningful — this exercises only the
@@ -902,7 +883,10 @@ mod tests {
             1,
             "http://localhost:8545".to_string(),
         );
-        assert!(signer.is_threshold(), "ThresholdKey backend must report is_threshold()");
+        assert!(
+            signer.is_threshold(),
+            "ThresholdKey backend must report is_threshold()"
+        );
         assert!(
             !signer.is_tee_sealed(),
             "ThresholdKey backend must NOT report is_tee_sealed()"
@@ -922,7 +906,8 @@ mod tests {
         async fn sign_prehash(
             &self,
             _msg_hash: [u8; 32],
-        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError> {
+        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError>
+        {
             let mut r = [0u8; 32];
             let mut s = [0u8; 32];
             r[31] = 0x01;
@@ -943,7 +928,8 @@ mod tests {
         async fn sign_prehash(
             &self,
             _msg_hash: [u8; 32],
-        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError> {
+        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError>
+        {
             Ok(crate::mpc::sign::SignOutput {
                 r: [0u8; 32],
                 s: [0u8; 32],
@@ -1031,7 +1017,11 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok(), "threshold-signed encode must succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "threshold-signed encode must succeed: {:?}",
+            result.err()
+        );
         let raw_tx = result.unwrap();
         assert_eq!(raw_tx[0], 0x02);
         assert!(raw_tx.len() > 100);

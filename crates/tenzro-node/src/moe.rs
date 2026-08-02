@@ -37,18 +37,18 @@ use std::time::Instant;
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::Bytes;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use tenzro_iroh::{
-    jsonrpc_call, EndpointId, IrohError, IrohResolver, IrohResult, JsonRpcDispatcher, ALPN_MOE,
+    ALPN_MOE, EndpointId, IrohError, IrohResolver, IrohResult, JsonRpcDispatcher, jsonrpc_call,
 };
 use tenzro_model::{
-    build_expert_receipt, quantize_expert_blob, to_token_routing, verify_expert_receipt,
-    ExpertActivationCommitment, ExpertBatch, ExpertExecuteRequest, ExpertExecuteResponse,
-    ExpertExecutionReceipt, ExpertId, ExpertQuantPlan, MoeCombiner, MoeExpertRuntime, MoeExtractor,
-    MoeShardView, MoeTensorNaming, QuantKind, ReplicationPolicy, RoutedToken, TokenRouting,
-    DEFAULT_ACTIVATION_K,
+    DEFAULT_ACTIVATION_K, ExpertActivationCommitment, ExpertBatch, ExpertExecuteRequest,
+    ExpertExecuteResponse, ExpertExecutionReceipt, ExpertId, ExpertQuantPlan, MoeCombiner,
+    MoeExpertRuntime, MoeExtractor, MoeShardView, MoeTensorNaming, QuantKind, ReplicationPolicy,
+    RoutedToken, TokenRouting, build_expert_receipt, quantize_expert_blob, to_token_routing,
+    verify_expert_receipt,
 };
 use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -173,7 +173,7 @@ impl MoeIrohDispatcher {
                                 id,
                                 -32602,
                                 format!("invalid moe/execute params: {e}"),
-                            )
+                            );
                         }
                     };
                 match self.runtime.execute(&req) {
@@ -181,11 +181,7 @@ impl MoeIrohDispatcher {
                         if let Some(identity) = &self.identity
                             && let Err(e) = attach_execution_receipt(&req, &mut resp, identity)
                         {
-                            return error_envelope(
-                                id,
-                                -32603,
-                                format!("execution receipt: {e}"),
-                            );
+                            return error_envelope(id, -32603, format!("execution receipt: {e}"));
                         }
                         match serde_json::to_value(&resp) {
                             Ok(v) => json!({ "jsonrpc": "2.0", "result": v, "id": id }),
@@ -220,9 +216,8 @@ impl JsonRpcDispatcher for MoeIrohDispatcher {
         let req: Value = match serde_json::from_slice(&request) {
             Ok(v) => v,
             Err(e) => {
-                let body =
-                    serde_json::to_vec(&error_envelope(Value::Null, -32700, format!("{e}")))
-                        .map_err(|e| IrohError::Backend(format!("encode parse-error: {e}")))?;
+                let body = serde_json::to_vec(&error_envelope(Value::Null, -32700, format!("{e}")))
+                    .map_err(|e| IrohError::Backend(format!("encode parse-error: {e}")))?;
                 return Ok(Bytes::from(body));
             }
         };
@@ -579,26 +574,23 @@ pub(crate) async fn handle_moe_expert_load(
     let layer = req_u32(&p, "layer")?;
     let expert = req_u32(&p, "expert")?;
     let blob = resolve_blob(node, &p).await?;
-    let source_uri = p
-        .get("uri")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let source_uri = p.get("uri").and_then(|v| v.as_str()).map(str::to_string);
 
     let runtime = Arc::clone(&node.moe_runtime);
     let row = tokio::task::spawn_blocking(move || {
         runtime.load_expert(model_id, layer, expert, &blob, source_uri)
     })
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32603,
-            message: format!("load join: {e}"),
-            data: None,
-        })?
-        .map_err(|e| JsonRpcError {
-            code: -32004,
-            message: format!("expert load: {e}"),
-            data: None,
-        })?;
+    .await
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("load join: {e}"),
+        data: None,
+    })?
+    .map_err(|e| JsonRpcError {
+        code: -32004,
+        message: format!("expert load: {e}"),
+        data: None,
+    })?;
     sync_moe_declaration(node);
     serde_json::to_value(&row).map_err(|e| JsonRpcError {
         code: -32603,
@@ -744,8 +736,8 @@ pub(crate) async fn handle_moe_execute(
         .cloned()
         .zip(node.self_provider_address())
         .map(|(signer, provider)| MoeReceiptIdentity { signer, provider });
-    let resp = tokio::task::spawn_blocking(
-        move || -> Result<ExpertExecuteResponse, JsonRpcError> {
+    let resp =
+        tokio::task::spawn_blocking(move || -> Result<ExpertExecuteResponse, JsonRpcError> {
             let mut resp = runtime.execute(&req).map_err(|e| JsonRpcError {
                 code: -32004,
                 message: format!("moe execute: {e}"),
@@ -759,14 +751,13 @@ pub(crate) async fn handle_moe_execute(
                 })?;
             }
             Ok(resp)
-        },
-    )
-    .await
-    .map_err(|e| JsonRpcError {
-        code: -32603,
-        message: format!("execute join: {e}"),
-        data: None,
-    })??;
+        })
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("execute join: {e}"),
+            data: None,
+        })??;
     serde_json::to_value(&resp).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("serialize: {e}"),
@@ -826,7 +817,10 @@ pub(crate) async fn handle_moe_prepare_experts(
     let p = params.unwrap_or(json!({}));
     let model_id = req_str(&p, "model_id")?.to_string();
     let layer = req_u32(&p, "layer")?;
-    let include_gate = p.get("include_gate").and_then(|v| v.as_bool()).unwrap_or(true);
+    let include_gate = p
+        .get("include_gate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let quant_plan = parse_quant_plan(&p)?;
 
     let entry = tenzro_model::catalog::get_model_by_id(&model_id).ok_or_else(|| JsonRpcError {
@@ -867,13 +861,12 @@ pub(crate) async fn handle_moe_prepare_experts(
     // Checkpoints with a fused shared-expert FFN expose it as one extra
     // preparable slot at index `num_experts` — the same index the gating
     // network appends it under at routing time.
-    let shared_extra: u32 = if shape.shared_experts > 0
-        && matches!(naming, MoeTensorNaming::DeepSeekMoe)
-    {
-        1
-    } else {
-        0
-    };
+    let shared_extra: u32 =
+        if shape.shared_experts > 0 && matches!(naming, MoeTensorNaming::DeepSeekMoe) {
+            1
+        } else {
+            0
+        };
     let id_space = shape.num_experts + shared_extra;
 
     let expert_ids: Vec<u32> = match p.get("experts").and_then(|v| v.as_array()) {
@@ -892,7 +885,10 @@ pub(crate) async fn handle_moe_prepare_experts(
                             "expert {id} out of range: {model_id} has {} routed experts{}",
                             shape.num_experts,
                             if shared_extra > 0 {
-                                format!(" plus the fused shared expert at index {}", shape.num_experts)
+                                format!(
+                                    " plus the fused shared expert at index {}",
+                                    shape.num_experts
+                                )
                             } else {
                                 String::new()
                             }
@@ -1021,11 +1017,14 @@ pub(crate) async fn handle_moe_prepare_status(
 ) -> Result<Value, JsonRpcError> {
     let p = params.unwrap_or(json!({}));
     let job_id = req_str(&p, "job_id")?;
-    let job = node.moe_prepare_jobs.get(job_id).ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: format!("unknown prepare job: {job_id}"),
-        data: None,
-    })?;
+    let job = node
+        .moe_prepare_jobs
+        .get(job_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("unknown prepare job: {job_id}"),
+            data: None,
+        })?;
     serde_json::to_value(&*job).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("serialize: {e}"),
@@ -1054,9 +1053,7 @@ fn resolve_top_k(p: &Value, model_id: &str) -> Result<usize, JsonRpcError> {
         .map(|s| s.experts_per_token as usize)
         .ok_or_else(|| JsonRpcError {
             code: -32602,
-            message: format!(
-                "top_k not given and no catalog MoE shape for model_id: {model_id}"
-            ),
+            message: format!("top_k not given and no catalog MoE shape for model_id: {model_id}"),
             data: None,
         })
 }
@@ -1242,7 +1239,9 @@ pub(crate) async fn handle_moe_forward(
         // minus every provider that already failed.
         let retry_view = tenzro_model::MoeShardView::build(
             &model_id,
-            providers.iter().filter(|pr| !excluded.contains(&pr.address)),
+            providers
+                .iter()
+                .filter(|pr| !excluded.contains(&pr.address)),
         );
         let mut by_token: BTreeMap<u32, Vec<ExpertId>> = BTreeMap::new();
         for f in &failures {
@@ -2051,11 +2050,14 @@ fn parse_holder_response(
             data: None,
         });
     }
-    let result = envelope.get("result").cloned().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "holder response has neither result nor error".into(),
-        data: None,
-    })?;
+    let result = envelope
+        .get("result")
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "holder response has neither result nor error".into(),
+            data: None,
+        })?;
     serde_json::from_value(result).map_err(|e| JsonRpcError {
         code: -32000,
         message: format!("holder result decode: {e}"),

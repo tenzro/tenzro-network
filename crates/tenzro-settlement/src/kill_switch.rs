@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tenzro_storage::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::kill_switch::KillSwitchReceipt;
 use tracing::{debug, info, warn};
 
@@ -71,7 +71,10 @@ impl std::fmt::Debug for KillSwitchStore {
             .field("receipts", &self.receipts.len())
             .field("by_agent", &self.by_agent.len())
             .field("by_controller", &self.by_controller.len())
-            .field("storage", &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"))
+            .field(
+                "storage",
+                &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"),
+            )
             .finish()
     }
 }
@@ -108,7 +111,10 @@ impl KillSwitchStore {
     pub fn record(&self, receipt: KillSwitchReceipt) -> Result<()> {
         let id = receipt.receipt_id.clone();
         if self.receipts.contains_key(&id) {
-            debug!("KillSwitchStore::record skipped: receipt {} already present", id);
+            debug!(
+                "KillSwitchStore::record skipped: receipt {} already present",
+                id
+            );
             return Ok(());
         }
 
@@ -130,10 +136,7 @@ impl KillSwitchStore {
         // Persist atomically.
         if let Some(storage) = &self.storage {
             let blob = serde_json::to_vec(&receipt).map_err(|e| {
-                SettlementError::StorageError(format!(
-                    "serialize KillSwitchReceipt {}: {}",
-                    id, e
-                ))
+                SettlementError::StorageError(format!("serialize KillSwitchReceipt {}: {}", id, e))
             })?;
             let id_blob = serde_json::to_vec(&id).map_err(|e| {
                 SettlementError::StorageError(format!(
@@ -161,10 +164,7 @@ impl KillSwitchStore {
             ];
 
             storage.write_batch_sync(ops).map_err(|e| {
-                SettlementError::StorageError(format!(
-                    "write_batch_sync for receipt {}: {}",
-                    id, e
-                ))
+                SettlementError::StorageError(format!("write_batch_sync for receipt {}: {}", id, e))
             })?;
         }
 
@@ -234,8 +234,7 @@ impl KillSwitchStore {
         // numeric order. Negative timestamps would never occur here
         // (Timestamp is always a wall-clock millis since epoch).
         let ts_padded = format!("{:0>width$}", ts_millis.max(0), width = TS_PAD_WIDTH);
-        let mut out =
-            Vec::with_capacity(prefix.len() + did.len() + 1 + ts_padded.len());
+        let mut out = Vec::with_capacity(prefix.len() + did.len() + 1 + ts_padded.len());
         out.extend_from_slice(prefix);
         out.extend_from_slice(did.as_bytes());
         out.push(b':');
@@ -291,8 +290,7 @@ impl KillSwitchStore {
                             .entry(receipt.controller_did.clone())
                             .or_default()
                             .push((receipt.timestamp.0, receipt.receipt_id.clone()));
-                        self.receipts
-                            .insert(receipt.receipt_id.clone(), receipt);
+                        self.receipts.insert(receipt.receipt_id.clone(), receipt);
                         hydrated += 1;
                     }
                     Err(e) => {
@@ -419,13 +417,7 @@ mod tests {
     fn list_by_agent_preserves_insertion_order() {
         let store = KillSwitchStore::new();
         let r1 = mk_receipt("01", KillSwitchAction::Pause, "agent", "ctrl", 100);
-        let r2 = mk_receipt(
-            "02",
-            KillSwitchAction::Quarantine,
-            "agent",
-            "ctrl",
-            200,
-        );
+        let r2 = mk_receipt("02", KillSwitchAction::Quarantine, "agent", "ctrl", 200);
         let r3 = mk_receipt("03", KillSwitchAction::Terminate, "agent", "ctrl", 300);
         store.record(r1).unwrap();
         store.record(r2).unwrap();
@@ -445,13 +437,7 @@ mod tests {
             .record(mk_receipt("a1", KillSwitchAction::Pause, "ag1", "c1", 1))
             .unwrap();
         store
-            .record(mk_receipt(
-                "a2",
-                KillSwitchAction::Pause,
-                "ag2",
-                "c1",
-                2,
-            ))
+            .record(mk_receipt("a2", KillSwitchAction::Pause, "ag2", "c1", 2))
             .unwrap();
         store
             .record(mk_receipt(

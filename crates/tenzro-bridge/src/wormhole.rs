@@ -334,8 +334,7 @@ impl Vaa {
             )));
         }
         if guardian_set.expiration_time != 0
-            && (guardian_set.expiration_time as i64)
-                < chrono::Utc::now().timestamp()
+            && (guardian_set.expiration_time as i64) < chrono::Utc::now().timestamp()
         {
             return Err(BridgeError::AdapterError(format!(
                 "guardian set {} is expired",
@@ -369,24 +368,19 @@ impl Vaa {
                 )));
             }
             let idx = sig.guardian_index as usize;
-            let expected_address = guardian_set
-                .guardians
-                .get(idx)
-                .ok_or_else(|| {
-                    BridgeError::AdapterError(format!(
-                        "guardian_index {idx} is out of range for set of size {}",
-                        guardian_set.guardians.len()
-                    ))
-                })?;
+            let expected_address = guardian_set.guardians.get(idx).ok_or_else(|| {
+                BridgeError::AdapterError(format!(
+                    "guardian_index {idx} is out of range for set of size {}",
+                    guardian_set.guardians.len()
+                ))
+            })?;
 
-            let sig64: &[u8; 64] = sig
-                .signature
-                .as_slice()
-                .try_into()
-                .map_err(|_| BridgeError::AdapterError(format!(
+            let sig64: &[u8; 64] = sig.signature.as_slice().try_into().map_err(|_| {
+                BridgeError::AdapterError(format!(
                     "guardian {idx}: signature wrong length, expected 64 bytes got {}",
                     sig.signature.len()
-                )))?;
+                ))
+            })?;
             let recovered = recover_eth_address(&digest, sig64, sig.recovery_id)?;
             if &recovered != expected_address {
                 return Err(BridgeError::AdapterError(format!(
@@ -409,11 +403,7 @@ impl Vaa {
 
 /// Recover the 20-byte Ethereum address from a secp256k1 ECDSA
 /// signature over `digest`.
-fn recover_eth_address(
-    digest: &[u8; 32],
-    sig64: &[u8; 64],
-    recovery_id: u8,
-) -> Result<[u8; 20]> {
+fn recover_eth_address(digest: &[u8; 32], sig64: &[u8; 64], recovery_id: u8) -> Result<[u8; 20]> {
     use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
     use sha3::{Digest as _, Keccak256};
 
@@ -663,9 +653,9 @@ impl WormholeAdapter {
             self.seen_messages.insert(key, ());
         }
         self.seen_storage = Some(storage.clone());
-        self.inbound_nonce_tracker = Arc::new(
-            crate::message_format::NonceTracker::with_storage("wormhole", storage),
-        );
+        self.inbound_nonce_tracker = Arc::new(crate::message_format::NonceTracker::with_storage(
+            "wormhole", storage,
+        ));
         self
     }
 
@@ -746,13 +736,11 @@ impl WormholeAdapter {
     /// Returns a placeholder VAA id until Guardians observe and sign. The
     /// caller can later use [`WormholeAdapter::fetch_vaa`] to retrieve the
     /// signed VAA bytes.
-    pub async fn publish_message(
-        &self,
-        emitter_address: &str,
-        payload: Vec<u8>,
-    ) -> Result<String> {
+    pub async fn publish_message(&self, emitter_address: &str, payload: Vec<u8>) -> Result<String> {
         if payload.is_empty() {
-            return Err(BridgeError::InvalidParameter("payload cannot be empty".into()));
+            return Err(BridgeError::InvalidParameter(
+                "payload cannot be empty".into(),
+            ));
         }
         let emitter_bytes = Self::pad_address_32(emitter_address);
         let sequence = self.next_sequence(&hex::encode(emitter_bytes));
@@ -879,7 +867,10 @@ impl BridgeAdapter for WormholeAdapter {
 
     fn classes(&self) -> Vec<crate::traits::BridgeAdapterClass> {
         use crate::traits::BridgeAdapterClass;
-        vec![BridgeAdapterClass::RegulatedRail, BridgeAdapterClass::Generic]
+        vec![
+            BridgeAdapterClass::RegulatedRail,
+            BridgeAdapterClass::Generic,
+        ]
     }
 
     fn supported_chains(&self) -> Vec<ChainInfo> {
@@ -918,9 +909,10 @@ impl BridgeAdapter for WormholeAdapter {
         source_chain: &str,
         payload: Vec<u8>,
     ) -> Result<Option<crate::message_format::TenzroMessage>> {
-        let chain_id = self.config.chain_id(source_chain).ok_or_else(|| {
-            BridgeError::ChainNotSupported(source_chain.to_string())
-        })?;
+        let chain_id = self
+            .config
+            .chain_id(source_chain)
+            .ok_or_else(|| BridgeError::ChainNotSupported(source_chain.to_string()))?;
         if payload.is_empty() {
             return Err(BridgeError::InvalidParameter("empty payload".into()));
         }
@@ -952,10 +944,7 @@ impl BridgeAdapter for WormholeAdapter {
             ))
         })?;
         self.verify_vaa(&vaa).map_err(|e| {
-            BridgeError::AdapterError(format!(
-                "Wormhole VAA quorum check failed: {}",
-                e
-            ))
+            BridgeError::AdapterError(format!("Wormhole VAA quorum check failed: {}", e))
         })?;
 
         // Inner Tenzro-side checks: when the VAA payload carries a
@@ -1012,13 +1001,14 @@ impl BridgeAdapter for WormholeAdapter {
         // fixed wei amount (e.g., 100 wei on Ethereum). Token Bridge calls
         // add destination-chain gas via a relayer. We approximate:
         //   base_fee + per_byte * payload_size + dest_premium.
-        let _ = self.config.chain_id(dest_chain).ok_or_else(|| {
-            BridgeError::ChainNotSupported(dest_chain.to_string())
-        })?;
+        let _ = self
+            .config
+            .chain_id(dest_chain)
+            .ok_or_else(|| BridgeError::ChainNotSupported(dest_chain.to_string()))?;
         let base_fee: u128 = 100; // wei
         let per_byte: u128 = 16; // rough calldata gas estimate
         let dest_premium: u128 = match dest_chain {
-            "solana" => 5_000_000_000,      // lamports ≈ 0.005 SOL
+            "solana" => 5_000_000_000,           // lamports ≈ 0.005 SOL
             "ethereum" => 2_000_000_000_000_000, // ≈ 0.002 ETH
             "arbitrum" | "optimism" | "base" => 200_000_000_000_000, // ≈ 0.0002 ETH
             _ => 1_000_000_000_000_000,
@@ -1107,7 +1097,9 @@ impl WormholescanVaa {
     fn parse_guardian_signatures(raw: &[serde_json::Value]) -> Vec<GuardianSignature> {
         let mut out = Vec::with_capacity(raw.len());
         for entry in raw {
-            let Some(obj) = entry.as_object() else { continue };
+            let Some(obj) = entry.as_object() else {
+                continue;
+            };
             let idx_opt = obj
                 .get("guardianSetIndex")
                 .or_else(|| obj.get("guardian_set_index"))

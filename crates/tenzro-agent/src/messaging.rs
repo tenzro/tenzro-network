@@ -11,18 +11,18 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tenzro_crypto::PublicKey;
 use tenzro_crypto::composite::{
     CompositePublicKey, CompositeSignature, HybridSigner, HybridVerifier, InMemoryHybridSigner,
     StandardHybridVerifier,
 };
-use tenzro_crypto::PublicKey;
-use tenzro_storage::kv::{KvStore, CF_AGENTS};
+use tenzro_storage::kv::{CF_AGENTS, KvStore};
 use tenzro_storage::{
-    compute_commitment, InlineFallbackBackend, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode,
-    ReceiptSummary,
+    InlineFallbackBackend, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+    compute_commitment,
 };
 use tenzro_types::{AgentIdentity, AgentMessage, AgentMessageType};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, warn};
 
 /// RocksDB key prefix for persisted agent-message receipts. Lives in
@@ -398,8 +398,9 @@ impl Default for GossipsubTransport {
 impl NetworkTransport for GossipsubTransport {
     async fn send_remote(&self, peer_id: String, message: AgentMessage) -> Result<()> {
         // Serialize message for network transport
-        let serialized = serde_json::to_vec(&message)
-            .map_err(|e| AgentError::MessageDeliveryFailed(format!("Serialization failed: {}", e)))?;
+        let serialized = serde_json::to_vec(&message).map_err(|e| {
+            AgentError::MessageDeliveryFailed(format!("Serialization failed: {}", e))
+        })?;
 
         if let Some(ref outbound) = self.outbound_tx {
             // Publish to real gossipsub via the node's network service
@@ -466,7 +467,7 @@ impl Default for MessageRouterConfig {
             max_queue_size: DEFAULT_QUEUE_CAPACITY,
             enable_signing: true,
             max_message_size: 1024 * 1024, // 1 MB
-            message_retention_secs: 3600,   // 1 hour
+            message_retention_secs: 3600,  // 1 hour
             rate_limit: RateLimitConfig::default(),
         }
     }
@@ -803,10 +804,9 @@ impl MessageRouter {
 
     /// Sends a message to a remote node via network transport
     pub async fn send_remote_message(&self, peer_id: String, message: AgentMessage) -> Result<()> {
-        let transport = self
-            .network_transport
-            .as_ref()
-            .ok_or_else(|| AgentError::MessageDeliveryFailed("No network transport configured".to_string()))?;
+        let transport = self.network_transport.as_ref().ok_or_else(|| {
+            AgentError::MessageDeliveryFailed("No network transport configured".to_string())
+        })?;
 
         transport.send_remote(peer_id, message).await
     }
@@ -847,7 +847,11 @@ impl MessageRouter {
     }
 
     /// Registers a message handler for an agent
-    pub fn register_handler(&self, agent_id: String, handler: Arc<dyn MessageHandler>) -> Result<()> {
+    pub fn register_handler(
+        &self,
+        agent_id: String,
+        handler: Arc<dyn MessageHandler>,
+    ) -> Result<()> {
         self.handlers.insert(agent_id, handler);
         Ok(())
     }
@@ -891,26 +895,24 @@ impl MessageRouter {
 
             // Both legs must be present together. Reject any unsigned or
             // half-signed message.
-            let (classical_bytes, pq_bytes) =
-                match (&message.signature, &message.pq_signature) {
-                    (Some(c), Some(p)) => (c.clone(), p.clone()),
-                    (None, None) => {
-                        *self.rejected_signature_count.lock() += 1;
-                        return Err(AgentError::InvalidMessageSignature {
-                            agent_id: sender_id,
-                            reason: "missing signature".to_string(),
-                        });
-                    }
-                    (Some(_), None) | (None, Some(_)) => {
-                        *self.rejected_signature_count.lock() += 1;
-                        return Err(AgentError::InvalidMessageSignature {
-                            agent_id: sender_id,
-                            reason:
-                                "mixed-mode signature: both classical and PQ legs are required"
-                                    .to_string(),
-                        });
-                    }
-                };
+            let (classical_bytes, pq_bytes) = match (&message.signature, &message.pq_signature) {
+                (Some(c), Some(p)) => (c.clone(), p.clone()),
+                (None, None) => {
+                    *self.rejected_signature_count.lock() += 1;
+                    return Err(AgentError::InvalidMessageSignature {
+                        agent_id: sender_id,
+                        reason: "missing signature".to_string(),
+                    });
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    *self.rejected_signature_count.lock() += 1;
+                    return Err(AgentError::InvalidMessageSignature {
+                        agent_id: sender_id,
+                        reason: "mixed-mode signature: both classical and PQ legs are required"
+                            .to_string(),
+                    });
+                }
+            };
 
             let keys = match self.key_resolver.resolve(&sender_id).await {
                 Some(k) => k,
@@ -927,8 +929,7 @@ impl MessageRouter {
             // a composite signature carrying both signature bytes. The
             // hybrid verifier checks each leg independently and requires
             // BOTH to verify.
-            let composite_pk =
-                CompositePublicKey::new(keys.classical, keys.pq_verifying_key);
+            let composite_pk = CompositePublicKey::new(keys.classical, keys.pq_verifying_key);
             let composite_sig = CompositeSignature {
                 classical: classical_bytes,
                 pq: pq_bytes,
@@ -967,10 +968,7 @@ impl MessageRouter {
     /// signing → verifying always agrees as long as the sender's
     /// hybrid keys are registered with the router's
     /// [`PublicKeyResolver`].
-    pub fn sign_message(
-        message: &mut AgentMessage,
-        signer: &InMemoryHybridSigner,
-    ) -> Result<()> {
+    pub fn sign_message(message: &mut AgentMessage, signer: &InMemoryHybridSigner) -> Result<()> {
         let message_hash = message.hash();
         let composite = signer.sign(message_hash.as_bytes())?;
         if composite.pq.is_empty() {
@@ -1044,7 +1042,8 @@ impl MessageRouter {
         let mut message_ids = Vec::new();
 
         for recipient in recipients {
-            let message = AgentMessage::new(sender.clone(), recipient, message_type, payload.clone());
+            let message =
+                AgentMessage::new(sender.clone(), recipient, message_type, payload.clone());
             message_ids.push(message.message_id.clone());
             self.send_message(message).await?;
         }
@@ -1053,7 +1052,10 @@ impl MessageRouter {
     }
 
     /// Subscribes to messages for an agent
-    pub async fn subscribe_to_messages(&self, agent_id: &str) -> Result<mpsc::Receiver<AgentMessage>> {
+    pub async fn subscribe_to_messages(
+        &self,
+        agent_id: &str,
+    ) -> Result<mpsc::Receiver<AgentMessage>> {
         let queue = self
             .queues
             .get(agent_id)
@@ -1096,7 +1098,11 @@ impl MessageRouter {
     }
 
     /// Gets message history for an agent
-    pub fn get_message_history(&self, agent_id: &str, limit: Option<usize>) -> Result<Vec<AgentMessage>> {
+    pub fn get_message_history(
+        &self,
+        agent_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<AgentMessage>> {
         let history = self
             .history
             .get(agent_id)
@@ -1181,10 +1187,7 @@ impl MessageRouter {
         let envelope = ReceiptEnvelope::offloaded(kind, summary, pointer, commitment);
 
         envelope.validate().map_err(|e| {
-            AgentError::SerializationError(format!(
-                "AgentMessage receipt envelope invalid: {}",
-                e
-            ))
+            AgentError::SerializationError(format!("AgentMessage receipt envelope invalid: {}", e))
         })?;
 
         let value = bincode::serialize(&envelope).map_err(|e| {
@@ -1197,12 +1200,7 @@ impl MessageRouter {
         // Key layout: `message:<agent_id>:<ts_ms_be>:<message_id>`. Big-endian
         // timestamp keeps a per-agent prefix scan chronologically ordered.
         let mut key = Vec::with_capacity(
-            MESSAGE_KEY_PREFIX.len()
-                + agent_id.len()
-                + 1
-                + 8
-                + 1
-                + message.message_id.len(),
+            MESSAGE_KEY_PREFIX.len() + agent_id.len() + 1 + 8 + 1 + message.message_id.len(),
         );
         key.extend_from_slice(MESSAGE_KEY_PREFIX);
         key.extend_from_slice(agent_id.as_bytes());
@@ -1374,7 +1372,10 @@ mod tests {
         router.register_agent(sender.agent_id.clone()).unwrap();
         router.register_agent(recipient.agent_id.clone()).unwrap();
 
-        assert_eq!(router.pending_message_count(&recipient.agent_id).unwrap(), 0);
+        assert_eq!(
+            router.pending_message_count(&recipient.agent_id).unwrap(),
+            0
+        );
 
         for _ in 0..3 {
             let message = AgentMessage::new(
@@ -1385,10 +1386,16 @@ mod tests {
             );
             router.send_message(message).await.unwrap();
         }
-        assert_eq!(router.pending_message_count(&recipient.agent_id).unwrap(), 3);
+        assert_eq!(
+            router.pending_message_count(&recipient.agent_id).unwrap(),
+            3
+        );
 
         router.receive_message(&recipient.agent_id).await.unwrap();
-        assert_eq!(router.pending_message_count(&recipient.agent_id).unwrap(), 2);
+        assert_eq!(
+            router.pending_message_count(&recipient.agent_id).unwrap(),
+            2
+        );
 
         assert!(router.pending_message_count("nonexistent").is_err());
     }
@@ -1407,7 +1414,12 @@ mod tests {
 
         let recipients = vec![recipient1.clone(), recipient2.clone()];
         let message_ids = router
-            .broadcast_message(sender, recipients, AgentMessageType::Notification, b"Broadcast".to_vec())
+            .broadcast_message(
+                sender,
+                recipients,
+                AgentMessageType::Notification,
+                b"Broadcast".to_vec(),
+            )
             .await
             .unwrap();
 
@@ -1433,7 +1445,9 @@ mod tests {
 
         router.send_message(message).await.unwrap();
 
-        let history = router.get_message_history(&recipient.agent_id, None).unwrap();
+        let history = router
+            .get_message_history(&recipient.agent_id, None)
+            .unwrap();
         assert_eq!(history.len(), 1);
     }
 
@@ -1514,7 +1528,11 @@ mod tests {
         );
         let err = router.send_message(msg).await.unwrap_err();
         match err {
-            AgentError::RateLimitExceeded { scope, agent_id, retry_after_secs } => {
+            AgentError::RateLimitExceeded {
+                scope,
+                agent_id,
+                retry_after_secs,
+            } => {
                 assert_eq!(scope, "sender");
                 assert_eq!(agent_id, sender.agent_id);
                 assert!(retry_after_secs >= 1);
@@ -1564,7 +1582,9 @@ mod tests {
         );
         let err = router.send_message(msg).await.unwrap_err();
         match err {
-            AgentError::RateLimitExceeded { scope, agent_id, .. } => {
+            AgentError::RateLimitExceeded {
+                scope, agent_id, ..
+            } => {
                 assert_eq!(scope, "recipient");
                 assert_eq!(agent_id, victim.agent_id);
             }
@@ -1609,7 +1629,9 @@ mod tests {
         );
         let err = router.send_message(msg).await.unwrap_err();
         match err {
-            AgentError::RateLimitExceeded { scope, agent_id, .. } => {
+            AgentError::RateLimitExceeded {
+                scope, agent_id, ..
+            } => {
                 assert_eq!(scope, "global");
                 assert_eq!(agent_id, "");
             }
@@ -1760,8 +1782,7 @@ mod tests {
     /// hybrid signer plus its `AgentVerifyingKeys` bundle so callers
     /// can register it with the router.
     fn build_test_hybrid_signer() -> (InMemoryHybridSigner, AgentVerifyingKeys) {
-        let classical =
-            tenzro_crypto::signatures::Ed25519SignerImpl::generate().unwrap();
+        let classical = tenzro_crypto::signatures::Ed25519SignerImpl::generate().unwrap();
         let classical_pk = classical.public_key().clone();
         let pq = tenzro_crypto::pq::MlDsaSigningKey::generate();
         let pq_vk = pq.verifying_key_bytes().to_vec();
@@ -2060,19 +2081,11 @@ mod tests {
         router.register_local_key("rotating".to_string(), keys);
 
         // Sanity: key is on file
-        assert!(router
-            .key_resolver
-            .resolve("rotating")
-            .await
-            .is_some());
+        assert!(router.key_resolver.resolve("rotating").await.is_some());
 
         router.unregister_agent("rotating").unwrap();
 
         // After unregistration, the key is no longer resolvable
-        assert!(router
-            .key_resolver
-            .resolve("rotating")
-            .await
-            .is_none());
+        assert!(router.key_resolver.resolve("rotating").await.is_none());
     }
 }

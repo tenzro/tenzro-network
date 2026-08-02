@@ -159,7 +159,11 @@ pub fn capability_multiplier_bps(
     let w = hardware.class().advertised_weight();
     let class_frac = ((w - 0.2) / 0.8).clamp(0.0, 1.0);
     let class_bonus = (class_frac * class_span as f64) as u128;
-    let tee_bonus = if tee_attested { CAPABILITY_TEE_SPAN_BPS } else { 0 };
+    let tee_bonus = if tee_attested {
+        CAPABILITY_TEE_SPAN_BPS
+    } else {
+        0
+    };
     (CAPABILITY_BASELINE_BPS + class_bonus + tee_bonus).min(CAPABILITY_MAX_BPS)
 }
 
@@ -460,11 +464,7 @@ impl LeaderReputation {
     ///      - Else → FAILED_WEIGHT
     ///    - Multiply by stake. Multiply by TEE multiplier if attested.
     /// 3. Return the map.
-    pub fn compute_weights(
-        &self,
-        round: u64,
-        validator_set: &ValidatorSet,
-    ) -> ValidatorWeights {
+    pub fn compute_weights(&self, round: u64, validator_set: &ValidatorSet) -> ValidatorWeights {
         let n = validator_set.len();
         let p_window = proposer_window(round, n);
         let v_window = voter_window(round, n);
@@ -527,7 +527,8 @@ impl LeaderReputation {
             // full 10000 = "apply the multiplier as computed") lets tests and
             // future tuning damp the whole capability axis toward 1× without
             // changing the per-class shape.
-            let capability = capability_multiplier_bps(&v.capability, v.has_valid_tee_attestation());
+            let capability =
+                capability_multiplier_bps(&v.capability, v.has_valid_tee_attestation());
             // Interpolate between baseline (1×) and the computed multiplier by
             // capability_scale_bps: scale=10000 → full multiplier, scale=0 → 1×.
             let excess = capability.saturating_sub(CAPABILITY_BASELINE_BPS);
@@ -643,18 +644,30 @@ mod tests {
         Address::new(addr_bytes)
     }
 
+    /// A CPU-class validator, so the capability multiplier is exactly 1.0×
+    /// and the weight assertions below are about reputation alone.
+    ///
+    /// This has to be explicit. `HardwareCapabilities::default()` is
+    /// `detected: false`, which classes as [`HardwareClass::Unknown`] and
+    /// carries an advertised weight of 0.5 — versus 0.2 for a *detected*
+    /// CPU-only node. An undetected validator therefore picks up a class bonus
+    /// (1.1499× at the default scale) that a known CPU-only validator does not,
+    /// which silently skewed every weight assertion here.
     fn validator(stake: u128) -> ValidatorInfo {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let address = convert_address(keypair.address());
         let pq = MlDsaSigningKey::generate();
         let bls = BlsKeyPair::generate().unwrap();
-        ValidatorInfo::new(
+        let mut v = ValidatorInfo::new(
             address,
             keypair.public_key().clone(),
             pq.verifying_key_bytes().to_vec(),
             bls.public_key().to_bytes().to_vec(),
             stake,
-        )
+        );
+        v.capability.detected = true;
+        v.capability.vram_gb = 0; // HardwareClass::Cpu → advertised_weight 0.2
+        v
     }
 
     fn vset(validators: Vec<ValidatorInfo>) -> ValidatorSet {
@@ -888,13 +901,42 @@ mod tests {
         }
         // Expected ≈ 1000 / 3001 ≈ 0.33. Allow up to 5 in 1000 to absorb
         // statistical noise; even at p=0.001, 95% CI is well below 5.
-        assert!(v4_count <= 5, "v4 was selected {} times out of 1000", v4_count);
+        assert!(
+            v4_count <= 5,
+            "v4 was selected {} times out of 1000",
+            v4_count
+        );
     }
 
     fn caps(vram_gb: u32) -> tenzro_types::hardware::HardwareCapabilities {
         tenzro_types::hardware::HardwareCapabilities {
             vram_gb,
             detected: true,
+            ..Default::default()
+        }
+    }
+
+    /// Top hardware class: several accelerators, not one large pool.
+    ///
+    /// VRAM alone does not reach [`HardwareClass::MultiAccelerator`] — the
+    /// classifier requires `gpus.len() > 1`, because a single 192 GiB card or a
+    /// coherent CPU/GPU memory pool (a DGX Spark, say) is *one* accelerator
+    /// however large its memory reads. Without populating `gpus`, `caps(200)`
+    /// classes as `DatacenterGpu` and tops out below the ceiling.
+    fn caps_multi_accelerator(vram_gb: u32) -> tenzro_types::hardware::HardwareCapabilities {
+        use tenzro_types::hardware::{GpuDevice, GpuVendor};
+        let gpu = |name: &str| GpuDevice {
+            vendor: GpuVendor::Nvidia,
+            name: name.to_string(),
+            vram_gb: vram_gb / 2,
+            compute_capability: "9.0".to_string(),
+            fp8: true,
+            fp4: false,
+        };
+        tenzro_types::hardware::HardwareCapabilities {
+            vram_gb,
+            detected: true,
+            gpus: vec![gpu("acc-0"), gpu("acc-1")],
             ..Default::default()
         }
     }
@@ -909,7 +951,7 @@ mod tests {
         );
         // Top hardware class + TEE → exactly the ceiling (1.5×).
         assert_eq!(
-            capability_multiplier_bps(&caps(200), true),
+            capability_multiplier_bps(&caps_multi_accelerator(200), true),
             CAPABILITY_MAX_BPS
         );
         // TEE alone on CPU hardware lifts only by the TEE span.
@@ -919,13 +961,27 @@ mod tests {
         );
         // Top hardware without TEE reaches ceiling minus the TEE span.
         assert_eq!(
-            capability_multiplier_bps(&caps(200), false),
+            capability_multiplier_bps(&caps_multi_accelerator(200), false),
             CAPABILITY_MAX_BPS - CAPABILITY_TEE_SPAN_BPS
         );
         // Monotonic in hardware class: consumer < datacenter < multi.
-        let consumer = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 16, detected: true, ..Default::default() }, false);
-        let datacenter = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 80, detected: true, ..Default::default() }, false);
-        let multi = capability_multiplier_bps(&caps(200), false);
+        let consumer = capability_multiplier_bps(
+            &HardwareCapabilities {
+                vram_gb: 16,
+                detected: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let datacenter = capability_multiplier_bps(
+            &HardwareCapabilities {
+                vram_gb: 80,
+                detected: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let multi = capability_multiplier_bps(&caps_multi_accelerator(200), false);
         assert!(consumer < datacenter);
         assert!(datacenter < multi);
     }
@@ -935,7 +991,7 @@ mod tests {
         // Two equally-staked validators; v1 declares top hardware + TEE, v2
         // declares CPU-only, no TEE. v1's draw weight is exactly 1.5× v2's.
         let v1 = validator(1000)
-            .with_capability(caps(200))
+            .with_capability(caps_multi_accelerator(200))
             .with_tee_attestation(
                 tenzro_types::tee::AttestationReport::default(),
                 tenzro_types::tee::AttestationResult::success(
@@ -951,7 +1007,10 @@ mod tests {
 
         let v1_w = weights.weights[&v1.address];
         let v2_w = weights.weights[&v2.address];
-        assert_eq!(v1_w, INACTIVE_WEIGHT * 1000 * CAPABILITY_MAX_BPS / CAPABILITY_BASELINE_BPS);
+        assert_eq!(
+            v1_w,
+            INACTIVE_WEIGHT * 1000 * CAPABILITY_MAX_BPS / CAPABILITY_BASELINE_BPS
+        );
         assert_eq!(v2_w, INACTIVE_WEIGHT * 1000);
         assert_eq!(v1_w, v2_w * 3 / 2);
     }
@@ -961,7 +1020,7 @@ mod tests {
         // With capability_scale_bps = 0, the strongest and weakest validators
         // draw identically — capability axis is off, stake × reputation only.
         let v1 = validator(1000)
-            .with_capability(caps(200))
+            .with_capability(caps_multi_accelerator(200))
             .with_tee_attestation(
                 tenzro_types::tee::AttestationReport::default(),
                 tenzro_types::tee::AttestationResult::success(

@@ -57,9 +57,8 @@ impl WasmEngine {
         // keeping it off-by-default is the wasmtime default, so the
         // explicit toggle is unnecessary here.
 
-        let engine = Engine::new(&config).map_err(|e| {
-            WasmError::Wasmtime(format!("constructing wasmtime engine: {e:#}"))
-        })?;
+        let engine = Engine::new(&config)
+            .map_err(|e| WasmError::Wasmtime(format!("constructing wasmtime engine: {e:#}")))?;
 
         Ok(Self {
             inner: Arc::new(engine),

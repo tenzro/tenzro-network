@@ -105,7 +105,7 @@ class MediaGenExpertRole(str, Enum):
     LOW_NOISE = "low_noise"
 
     @property
-    def partner(self) -> "MediaGenExpertRole":
+    def partner(self) -> MediaGenExpertRole:
         return (
             MediaGenExpertRole.LOW_NOISE
             if self is MediaGenExpertRole.HIGH_NOISE
@@ -129,14 +129,14 @@ class Signature:
         return {"bytes": list(self.bytes_), "public_key": list(self.public_key)}
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "Signature":
+    def from_json(cls, obj: dict[str, Any]) -> Signature:
         return cls(
             bytes_=bytes(obj.get("bytes") or []),
             public_key=bytes(obj.get("public_key") or []),
         )
 
     @classmethod
-    def empty(cls) -> "Signature":
+    def empty(cls) -> Signature:
         return cls(bytes_=b"", public_key=b"")
 
 
@@ -191,9 +191,7 @@ class MediaGenParams:
             raise ValueError("input_image_hash is required for this media-gen kind")
         if kind.is_video:
             if self.num_frames is None or self.fps is None:
-                raise ValueError(
-                    "num_frames and fps are required for video media-gen kinds"
-                )
+                raise ValueError("num_frames and fps are required for video media-gen kinds")
             if self.num_frames <= 0 or self.fps <= 0:
                 raise ValueError("num_frames and fps must be greater than zero")
             if self.num_frames > MAX_MEDIA_GEN_FRAMES:
@@ -217,16 +215,14 @@ class MediaGenParams:
         }
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenParams":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenParams:
         raw_input_hash = obj.get("input_image_hash")
         return cls(
             prompt=obj["prompt"],
             negative_prompt=obj.get("negative_prompt"),
             width=int(obj["width"]),
             height=int(obj["height"]),
-            num_frames=(
-                int(obj["num_frames"]) if obj.get("num_frames") is not None else None
-            ),
+            num_frames=(int(obj["num_frames"]) if obj.get("num_frames") is not None else None),
             fps=int(obj["fps"]) if obj.get("fps") is not None else None,
             steps=int(obj["steps"]),
             guidance_scale=float(obj["guidance_scale"]),
@@ -269,7 +265,7 @@ class MediaGenTaskSpec:
         }
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenTaskSpec":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenTaskSpec:
         return cls(
             job_id=obj["job_id"],
             requester_did=obj["requester_did"],
@@ -297,7 +293,7 @@ class MediaGenExpertHolding:
         return {"model_id": self.model_id, "role": self.role.value}
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenExpertHolding":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenExpertHolding:
         return cls(model_id=obj["model_id"], role=MediaGenExpertRole(obj["role"]))
 
 
@@ -325,19 +321,16 @@ class MediaGenWorkerCapability:
         }
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenWorkerCapability":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenWorkerCapability:
         return cls(
             worker_did=obj["worker_did"],
             worker_address=address_from_json(obj["worker_address"]),
             supported_models=list(obj.get("supported_models") or []),
             expert_holdings=[
-                MediaGenExpertHolding.from_json(h)
-                for h in (obj.get("expert_holdings") or [])
+                MediaGenExpertHolding.from_json(h) for h in (obj.get("expert_holdings") or [])
             ],
             max_resolution=int(obj["max_resolution"]),
-            max_frames=(
-                int(obj["max_frames"]) if obj.get("max_frames") is not None else None
-            ),
+            max_frames=(int(obj["max_frames"]) if obj.get("max_frames") is not None else None),
             gpu_vram_gb=float(obj["gpu_vram_gb"]),
             registered_at=int(obj["registered_at"]),
         )
@@ -392,7 +385,7 @@ class MediaGenHandoff:
         }
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenHandoff":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenHandoff:
         return cls(
             job_id=obj["job_id"],
             from_worker_did=obj["from_worker_did"],
@@ -442,7 +435,7 @@ class MediaGenReceipt:
         }
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenReceipt":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenReceipt:
         return cls(
             job_id=obj["job_id"],
             task_spec=MediaGenTaskSpec.from_json(obj["task_spec"]),
@@ -473,7 +466,7 @@ class MediaGenAssignment:
     share_bps: int
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenAssignment":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenAssignment:
         raw_role = obj.get("role")
         return cls(
             worker_did=obj["worker_did"],
@@ -494,7 +487,7 @@ class MediaGenPayout:
     amount: int
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenPayout":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenPayout:
         raw_role = obj.get("role")
         return cls(
             worker_did=obj["worker_did"],
@@ -517,7 +510,7 @@ class MediaGenSettlement:
     payouts: list[MediaGenPayout]
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenSettlement":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenSettlement:
         return cls(
             price_paid=int(obj["price_paid"]),
             commission_wei=int(obj["commission_wei"]),
@@ -545,17 +538,13 @@ class MediaGenJob:
     settlement: MediaGenSettlement | None = None
 
     @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "MediaGenJob":
+    def from_json(cls, obj: dict[str, Any]) -> MediaGenJob:
         return cls(
             job_id=obj["job_id"],
             task_spec=MediaGenTaskSpec.from_json(obj["task_spec"]),
             status=MediaGenStatus(obj["status"]),
-            required_roles=[
-                MediaGenExpertRole(r) for r in (obj.get("required_roles") or [])
-            ],
-            assignments=[
-                MediaGenAssignment.from_json(a) for a in (obj.get("assignments") or [])
-            ],
+            required_roles=[MediaGenExpertRole(r) for r in (obj.get("required_roles") or [])],
+            assignments=[MediaGenAssignment.from_json(a) for a in (obj.get("assignments") or [])],
             handoff=(
                 MediaGenHandoff.from_json(obj["handoff"])
                 if obj.get("handoff") is not None
@@ -580,9 +569,7 @@ class MediaGenJob:
     def is_split(self) -> bool:
         return bool(self.required_roles)
 
-    def assignment_of_role(
-        self, role: MediaGenExpertRole
-    ) -> MediaGenAssignment | None:
+    def assignment_of_role(self, role: MediaGenExpertRole) -> MediaGenAssignment | None:
         return next((a for a in self.assignments if a.role is role), None)
 
     def assignment_for(self, worker_did: str) -> MediaGenAssignment | None:

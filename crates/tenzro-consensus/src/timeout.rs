@@ -171,9 +171,9 @@ impl TimeoutMsg {
             )));
         }
 
-        let validator = validator_set.get_by_address(&self.voter).ok_or_else(|| {
-            ConsensusError::NonValidator(format!("Address: {}", self.voter))
-        })?;
+        let validator = validator_set
+            .get_by_address(&self.voter)
+            .ok_or_else(|| ConsensusError::NonValidator(format!("Address: {}", self.voter)))?;
 
         if !validator.is_active() {
             return Err(ConsensusError::NonValidator(format!(
@@ -546,9 +546,7 @@ impl TimeoutCollector {
         );
 
         // Tally signed stake weight, not a head-count of signers.
-        let signed_power = self
-            .validator_set
-            .voting_power_of(state.by_voter.keys());
+        let signed_power = self.validator_set.voting_power_of(state.by_voter.keys());
 
         // Check the quorum first — if we crossed both thresholds in one shot
         // (concentrated stake), prefer reporting the stronger event.
@@ -716,9 +714,9 @@ impl NoEndorsementMsg {
             ));
         }
 
-        let validator = validator_set.get_by_address(&self.voter).ok_or_else(|| {
-            ConsensusError::NonValidator(format!("Address: {}", self.voter))
-        })?;
+        let validator = validator_set
+            .get_by_address(&self.voter)
+            .ok_or_else(|| ConsensusError::NonValidator(format!("Address: {}", self.voter)))?;
 
         if !validator.is_active() {
             return Err(ConsensusError::NonValidator(format!(
@@ -994,9 +992,7 @@ impl NoEndorsementCollector {
             },
         );
 
-        let signed_power = self
-            .validator_set
-            .voting_power_of(state.by_voter.keys());
+        let signed_power = self.validator_set.voting_power_of(state.by_voter.keys());
 
         if signed_power >= self.bracha_power {
             state.nec_formed = true;
@@ -1113,7 +1109,10 @@ mod tests {
         let (kp_other, pq_other, addr_other, _) = build_validator(1000);
         let msg = sign_timeout(42, 41, addr_other, &kp_other, &pq_other);
         let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::NonValidator(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::NonValidator(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1123,7 +1122,10 @@ mod tests {
         let mut msg = sign_timeout(42, 41, addr, &kp, &pq);
         msg.format_version = 99;
         let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1136,7 +1138,10 @@ mod tests {
             let mut msg = sign_timeout(42, 41, addr, &kp, &pq);
             msg.format_version = old_version;
             let err = msg.verify(&validator_set).unwrap_err();
-            assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+            assert!(
+                matches!(err, ConsensusError::InvalidSignature(_)),
+                "got {err:?}"
+            );
         }
     }
 
@@ -1148,7 +1153,10 @@ mod tests {
         let mut msg = sign_timeout(42, 41, addr, &kp, &pq);
         msg.view = 99;
         let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1160,7 +1168,10 @@ mod tests {
         let mut msg = sign_timeout(42, 10, addr, &kp, &pq);
         msg.high_qc_view = 41;
         let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1174,7 +1185,10 @@ mod tests {
         let mut msg = sign_timeout(42, 41, addr, &kp, &pq);
         msg.finalized_height = TEST_FINALIZED_HEIGHT + 1_000_000;
         let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1189,7 +1203,10 @@ mod tests {
         // verify rejects.
         let msg = sign_timeout(42, 42, addr, &kp, &pq);
         let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     // --- TimeoutCertificate unit tests ---
@@ -1240,8 +1257,7 @@ mod tests {
     #[test]
     fn tc_verifies_with_2f_plus_1_signers() {
         // n=4 → f=1 → quorum=3
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         // Take 3 of 4 (2f+1)
         let tc = tc_from_timeouts(100, &timeouts[..3]);
         tc.verify(&vset).expect("TC verifies");
@@ -1251,17 +1267,18 @@ mod tests {
     #[test]
     fn tc_rejects_below_quorum() {
         // Only 2 signers when 3 needed
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let tc = tc_from_timeouts(100, &timeouts[..2]);
         let err = tc.verify(&vset).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn tc_rejects_duplicate_signers() {
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         // Same voter included twice
         let mut signers: Vec<TcSigner> = timeouts[..3]
             .iter()
@@ -1276,18 +1293,23 @@ mod tests {
         signers.push(signers[0].clone());
         let tc = TimeoutCertificate::new(100, signers);
         let err = tc.verify(&vset).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn tc_rejects_tampered_high_qc_view() {
         // Flip a signer's high_qc_view post-signing — signature will fail
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let mut tc = tc_from_timeouts(100, &timeouts[..3]);
         tc.signers[0].high_qc_view = 60;
         let err = tc.verify(&vset).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1295,31 +1317,34 @@ mod tests {
         // Flip a signer's finalized_height post-signing — the TC verify
         // reconstructs the per-signer TimeoutMsg payload including
         // finalized_height, so the signature must fail.
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let mut tc = tc_from_timeouts(100, &timeouts[..3]);
         tc.signers[0].finalized_height = TEST_FINALIZED_HEIGHT + 1_000_000;
         let err = tc.verify(&vset).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn tc_rejects_tampered_view() {
         // Flip the TC's view post-construction — embedded signatures bind
         // to the original view via the per-signer payload reconstruction.
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let mut tc = tc_from_timeouts(100, &timeouts[..3]);
         tc.view = 200;
         let err = tc.verify(&vset).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn tc_rejects_unregistered_signer() {
         // Sign a TimeoutMsg from someone not in the active validator set
-        let (vset, _keys, mut timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, mut timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let (kp_outsider, pq_outsider, addr_outsider, _) = build_validator(1000);
         let outsider_msg = sign_timeout(100, 50, addr_outsider, &kp_outsider, &pq_outsider);
         timeouts.push(outsider_msg);
@@ -1328,23 +1353,27 @@ mod tests {
         t3.push(timeouts[4].clone());
         let tc = tc_from_timeouts(100, &t3);
         let err = tc.verify(&vset).unwrap_err();
-        assert!(matches!(err, ConsensusError::NonValidator(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::NonValidator(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn tc_format_version_mismatch_rejected() {
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let mut tc = tc_from_timeouts(100, &timeouts[..3]);
         tc.format_version = 99;
         let err = tc.verify(&vset).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn tc_max_high_qc_view_is_max() {
-        let (_vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[10, 99, 50, 30]);
+        let (_vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[10, 99, 50, 30]);
         let tc = tc_from_timeouts(100, &timeouts);
         // Max of 10, 99, 50, 30 is 99
         assert_eq!(tc.max_high_qc_view(), 99);
@@ -1354,8 +1383,7 @@ mod tests {
 
     #[test]
     fn collector_emits_added_for_first_timeout() {
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset);
         // n=4 validators each stake 1000 → total 4000; quorum_power=2667 (3 of
         // 4), bracha_power=1334 (2 of 4). (The slice arg is high_qc_views, not
@@ -1369,8 +1397,7 @@ mod tests {
 
     #[test]
     fn collector_emits_bracha_boost_at_f_plus_1() {
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset);
 
         assert_eq!(collector.add(&timeouts[0]), CollectOutcome::Added);
@@ -1401,8 +1428,7 @@ mod tests {
 
     #[test]
     fn collector_emits_certificate_at_quorum() {
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset.clone());
 
         assert_eq!(collector.add(&timeouts[0]), CollectOutcome::Added);
@@ -1423,8 +1449,7 @@ mod tests {
     fn collector_certificate_is_idempotent() {
         // Once the TC is formed, additional timeouts at the same view must
         // not re-emit `CertificateFormed`.
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset);
 
         let _ = collector.add(&timeouts[0]);
@@ -1437,8 +1462,7 @@ mod tests {
 
     #[test]
     fn collector_dedupes_same_voter() {
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset);
 
         assert_eq!(collector.add(&timeouts[0]), CollectOutcome::Added);
@@ -1450,13 +1474,15 @@ mod tests {
 
     #[test]
     fn collector_separates_views() {
-        let (vset, _keys, timeouts_v100) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts_v100) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset);
 
         // Two timeouts at view 100 → BrachaBoost
         assert_eq!(collector.add(&timeouts_v100[0]), CollectOutcome::Added);
-        assert_eq!(collector.add(&timeouts_v100[1]), CollectOutcome::BrachaBoost);
+        assert_eq!(
+            collector.add(&timeouts_v100[1]),
+            CollectOutcome::BrachaBoost
+        );
 
         // One timeout at view 200 (using the same voter is fine — different view)
         // We need to re-sign at view 200 to keep the signature valid.
@@ -1467,8 +1493,7 @@ mod tests {
 
     #[test]
     fn collector_cleanup_below_drops_old_views() {
-        let (vset, _keys, timeouts) =
-            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let (vset, _keys, timeouts) = build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset);
 
         let _ = collector.add(&timeouts[0]);
@@ -1589,7 +1614,10 @@ mod tests {
         let (kp_other, pq_other, addr_other, _) = build_validator(1000);
         let msg = sign_no_endorsement(42, addr_other, &kp_other, &pq_other);
         let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::NonValidator(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::NonValidator(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]

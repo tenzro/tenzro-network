@@ -59,11 +59,11 @@
 //! callers that already hold ceremony outputs (Tauri desktop,
 //! `sdk/tenzro-ts-sdk`).
 
-use anyhow::{bail, Context, Result};
-use clap::{Args, Subcommand};
 use crate::output;
 use crate::rpc::RpcClient;
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use clap::{Args, Subcommand};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tenzro_crypto::pq::MlDsaSigningKey;
@@ -179,18 +179,30 @@ impl EnrollCmd {
             )
             .await?;
         println!("Passkey enrollment");
-        output::print_field("DID", result.get("did").and_then(|v| v.as_str()).unwrap_or("?"));
+        output::print_field(
+            "DID",
+            result.get("did").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
         output::print_field(
             "Smart Account",
-            result.get("smart_account_address").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("smart_account_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "Credential ID",
-            result.get("credential_id_hex").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("credential_id_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "WebAuthn Validator",
-            result.get("webauthn_validator_address").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("webauthn_validator_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         Ok(())
     }
@@ -281,18 +293,30 @@ impl InitiateRecoveryCmd {
         println!("Recovery initiated");
         output::print_field(
             "Recovery ID",
-            result.get("recovery_id").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("recovery_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "Op Hash",
-            result.get("recovery_op_hash_hex").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("recovery_op_hash_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "Quorum required",
             &format!(
                 "{} of {}",
-                result.get("guardians_required").and_then(|v| v.as_u64()).unwrap_or(0),
-                result.get("guardians_total").and_then(|v| v.as_u64()).unwrap_or(0),
+                result
+                    .get("guardians_required")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                result
+                    .get("guardians_total")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
             ),
         );
         Ok(())
@@ -327,13 +351,23 @@ impl SubmitRecoverySignatureCmd {
             "Collected",
             &format!(
                 "{} of {}",
-                result.get("guardian_signatures_collected").and_then(|v| v.as_u64()).unwrap_or(0),
-                result.get("guardians_required").and_then(|v| v.as_u64()).unwrap_or(0),
+                result
+                    .get("guardian_signatures_collected")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                result
+                    .get("guardians_required")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
             ),
         );
         output::print_field(
             "Quorum reached",
-            &result.get("quorum_reached").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+            &result
+                .get("quorum_reached")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                .to_string(),
         );
         Ok(())
     }
@@ -356,13 +390,22 @@ impl FinalizeRecoveryCmd {
         println!("Recovery finalized");
         output::print_field(
             "Account",
-            result.get("account_address").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("account_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "New Credential",
-            result.get("new_credential_id_hex").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("new_credential_id_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
-        if let Some(validators) = result.get("installed_validators").and_then(|v| v.as_array()) {
+        if let Some(validators) = result
+            .get("installed_validators")
+            .and_then(|v| v.as_array())
+        {
             output::print_field(
                 "Installed Validators",
                 &validators
@@ -427,11 +470,17 @@ impl GrantSessionKeyCmd {
         println!("Session key granted");
         output::print_field(
             "Account",
-            result.get("account_address").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("account_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "Session Pubkey",
-            result.get("session_pubkey_hex").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("session_pubkey_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field("Valid Until", &self.valid_until.to_string());
         Ok(())
@@ -455,11 +504,18 @@ impl RevokeSessionKeyCmd {
         println!("Session key revoked");
         output::print_field(
             "Account",
-            result.get("account_address").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("account_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "Revoked",
-            &result.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+            &result
+                .get("revoked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                .to_string(),
         );
         Ok(())
     }
@@ -539,11 +595,17 @@ impl AddHardwareSignerCmd {
         println!("Hardware signer installed");
         output::print_field(
             "Device",
-            result.get("device_kind").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("device_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "Validator",
-            result.get("validator_module_address").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("validator_module_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         Ok(())
     }
@@ -600,7 +662,11 @@ fn print_smart_account(v: &Value) {
     if let Some(installed) = v.get("installed_validators").and_then(|x| x.as_array()) {
         let addrs: Vec<String> = installed
             .iter()
-            .filter_map(|m| m.get("module_address").and_then(|a| a.as_str()).map(String::from))
+            .filter_map(|m| {
+                m.get("module_address")
+                    .and_then(|a| a.as_str())
+                    .map(String::from)
+            })
             .collect();
         output::print_field("Validators", &addrs.join(", "));
     }
@@ -644,7 +710,10 @@ impl ListPendingRecoveriesCmd {
                 );
                 output::print_field(
                     "Finalized",
-                    &r.get("finalized").and_then(|x| x.as_bool()).unwrap_or(false).to_string(),
+                    &r.get("finalized")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false)
+                        .to_string(),
                 );
                 println!();
             }
@@ -660,7 +729,7 @@ impl ListPendingRecoveriesCmd {
 /// Resolve the web-API base URL that serves `/auth/passkey`. The web API
 /// listens on a different port/host than JSON-RPC, so it cannot be
 /// derived mechanically — only the two well-known layouts are inferred.
-fn derive_web_url(explicit: Option<&str>, rpc_url: &str) -> Result<String> {
+pub(crate) fn derive_web_url(explicit: Option<&str>, rpc_url: &str) -> Result<String> {
     if let Some(url) = explicit {
         return Ok(url.trim_end_matches('/').to_string());
     }
@@ -676,7 +745,7 @@ fn derive_web_url(explicit: Option<&str>, rpc_url: &str) -> Result<String> {
     )
 }
 
-fn launch_browser(url: &str) {
+pub(crate) fn launch_browser(url: &str) {
     println!("Open this link in your browser to continue:");
     println!("  {url}");
     println!();
@@ -693,11 +762,14 @@ fn launch_browser(url: &str) {
 
 /// Poll `tenzro_getPasskeySession` until the session is terminal.
 /// Returns the handler result on completion.
-async fn poll_session(rpc: &RpcClient, session_id: &str) -> Result<Value> {
+pub(crate) async fn poll_session(rpc: &RpcClient, session_id: &str) -> Result<Value> {
     println!("Waiting for the browser ceremony to complete (Ctrl-C to abort)…");
     loop {
         let session: Value = rpc
-            .call("tenzro_getPasskeySession", json!({ "session_id": session_id }))
+            .call(
+                "tenzro_getPasskeySession",
+                json!({ "session_id": session_id }),
+            )
             .await?;
         match session.get("status").and_then(|v| v.as_str()).unwrap_or("") {
             "completed" => return Ok(session.get("result").cloned().unwrap_or(Value::Null)),
@@ -708,16 +780,17 @@ async fn poll_session(rpc: &RpcClient, session_id: &str) -> Result<Value> {
                     .unwrap_or("unknown error");
                 bail!("passkey ceremony failed: {err}");
             }
-            "expired" => bail!("passkey session expired before the ceremony completed — run the command again"),
+            "expired" => bail!(
+                "passkey session expired before the ceremony completed — run the command again"
+            ),
             _ => tokio::time::sleep(Duration::from_secs(2)).await,
         }
     }
 }
 
 fn passkey_state_dir() -> Result<PathBuf> {
-    let dir = dirs::home_dir()
-        .context("cannot resolve home directory for ~/.tenzro/passkey")?
-        .join(".tenzro")
+    let dir = tenzro_types::paths::try_tenzro_home()
+        .context("cannot resolve the Tenzro root for the passkey seed store")?
         .join("passkey");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
@@ -742,7 +815,11 @@ fn write_seed_file(path: &Path, seed_hex: &str) -> Result<()> {
 
 /// Rename a `pending-*` seed file to its account/credential-keyed name
 /// once the ceremony has bound the key to an account.
-fn finalize_seed_file(pending: &Path, account_address: &str, credential_id_hex: &str) -> Result<PathBuf> {
+fn finalize_seed_file(
+    pending: &Path,
+    account_address: &str,
+    credential_id_hex: &str,
+) -> Result<PathBuf> {
     let account = account_address.trim_start_matches("0x");
     let cred8: String = credential_id_hex
         .trim_start_matches("0x")
@@ -820,8 +897,14 @@ impl LoginCmd {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         println!("Passkey account created");
-        output::print_field("DID", result.get("did").and_then(|v| v.as_str()).unwrap_or("?"));
-        output::print_field("Smart Account", if account.is_empty() { "?" } else { account });
+        output::print_field(
+            "DID",
+            result.get("did").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
+        output::print_field(
+            "Smart Account",
+            if account.is_empty() { "?" } else { account },
+        );
         output::print_field("Credential ID", if cred.is_empty() { "?" } else { cred });
         let seed_path = if !account.is_empty() && !cred.is_empty() {
             finalize_seed_file(&pending, account, cred)?
@@ -829,12 +912,21 @@ impl LoginCmd {
             pending
         };
         output::print_field("ML-DSA seed file", &seed_path.display().to_string());
-        println!("Keep the seed file safe — `tenzro passkey sign` needs it for the post-quantum leg.");
+        println!(
+            "Keep the seed file safe — `tenzro passkey sign` needs it for the post-quantum leg."
+        );
         Ok(())
     }
 }
 
 #[derive(Debug, Args)]
+/// Link a new device to an existing account.
+///
+/// Two browser ceremonies, in this order: confirm with a device already on the
+/// account, then register the new one. The confirmation is what makes this
+/// safe — the account address is a public identifier, so without it anyone who
+/// knew the address could add themselves as a signer. The CLI does not see
+/// either private key; both stay in their devices' secure elements.
 pub struct AddCmd {
     /// Smart account to add the credential to
     #[arg(long)]
@@ -870,6 +962,10 @@ impl AddCmd {
             .and_then(|v| v.as_str())
             .context("node returned no verification_path")?;
 
+        println!(
+            "Adding a device takes two confirmations in the browser: first with a device \
+             already on this account, then the new one."
+        );
         launch_browser(&format!("{web_base}{verification_path}"));
         let result = poll_session(rpc, &session_id).await?;
 
@@ -914,7 +1010,10 @@ impl ListCmd {
         println!(
             "{} credential(s) on {}",
             count,
-            result.get("account_address").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("account_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         if let Some(ids) = result.get("credential_ids").and_then(|v| v.as_array()) {
             for id in ids.iter().filter_map(|v| v.as_str()) {
@@ -948,7 +1047,11 @@ impl RemoveCmd {
         println!("Passkey removal");
         output::print_field(
             "Removed",
-            &result.get("removed").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+            &result
+                .get("removed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                .to_string(),
         );
         output::print_field(
             "Credentials remaining",
@@ -1057,7 +1160,10 @@ impl SignCmd {
         let op_hash = hex::decode(self.op_hash_hex.trim_start_matches("0x"))
             .context("op-hash-hex is not valid hex")?;
         if op_hash.len() != 32 {
-            bail!("op-hash-hex must be exactly 32 bytes, got {}", op_hash.len());
+            bail!(
+                "op-hash-hex must be exactly 32 bytes, got {}",
+                op_hash.len()
+            );
         }
         let ml_dsa_signature_hex = match &self.ml_dsa_seed_file {
             Some(path) => Some(hex::encode(load_ml_dsa_seed(path)?.sign(&op_hash))),
@@ -1090,17 +1196,26 @@ impl SignCmd {
         println!("Passkey approval");
         output::print_field(
             "Verified",
-            &result.get("verified").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+            &result
+                .get("verified")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                .to_string(),
         );
         output::print_field(
             "Op Hash",
-            result.get("op_hash_hex").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("op_hash_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         output::print_field(
             "Validator",
-            result.get("validator").and_then(|v| v.as_str()).unwrap_or("?"),
+            result
+                .get("validator")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
         Ok(())
     }
 }
-

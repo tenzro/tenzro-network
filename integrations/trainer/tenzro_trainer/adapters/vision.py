@@ -19,9 +19,10 @@ Wraps cleanly under :class:`torch.distributed.fsdp.FullyShardedDataParallel`
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 try:
     import torch
@@ -62,8 +63,8 @@ class VisionAdapter:
     cross-entropy classification loss.
     """
 
-    _model: "nn.Module"
-    _optimizer: "torch.optim.Optimizer"
+    _model: nn.Module
+    _optimizer: torch.optim.Optimizer
     img_size: int = 224
     batch_size: int = 8
     device: str = "cpu"
@@ -71,10 +72,10 @@ class VisionAdapter:
     std: tuple[float, float, float] = IMAGENET_STD
     _class_to_idx: dict[str, int] = field(default_factory=dict)
 
-    def model(self) -> "nn.Module":
+    def model(self) -> nn.Module:
         return self._model
 
-    def optimizer(self) -> "torch.optim.Optimizer":
+    def optimizer(self) -> torch.optim.Optimizer:
         return self._optimizer
 
     def shard_batches(self, shard_uri: str) -> Iterable[object]:
@@ -122,7 +123,7 @@ class VisionAdapter:
             y = torch.tensor(labels, dtype=torch.long)
             yield x.to(self.device), y.to(self.device)
 
-    def compute_loss(self, batch: object) -> "torch.Tensor":
+    def compute_loss(self, batch: object) -> torch.Tensor:
         if torch is None:
             raise RuntimeError("PyTorch is required")
         x, y = batch  # type: ignore[misc]
@@ -160,7 +161,7 @@ def _load_and_preprocess(
     img_size: int,
     mean: tuple[float, float, float],
     std: tuple[float, float, float],
-) -> "torch.Tensor":
+) -> torch.Tensor:
     """Decode → resize-shortest → center-crop → normalize → CHW float tensor."""
     try:
         from PIL import Image
@@ -174,9 +175,9 @@ def _load_and_preprocess(
     # Resize so the shortest side == img_size, then center-crop to square.
     w, h = img.size
     if w < h:
-        new_w, new_h = img_size, int(round(h * img_size / w))
+        new_w, new_h = img_size, round(h * img_size / w)
     else:
-        new_w, new_h = int(round(w * img_size / h)), img_size
+        new_w, new_h = round(w * img_size / h), img_size
     img = img.resize((new_w, new_h), Image.BICUBIC)
     left = (new_w - img_size) // 2
     top = (new_h - img_size) // 2
@@ -275,4 +276,4 @@ def build_adapter(
     )
 
 
-__all__ = ["VisionAdapter", "build_adapter", "DEFAULT_TIMM_MODEL"]
+__all__ = ["DEFAULT_TIMM_MODEL", "VisionAdapter", "build_adapter"]

@@ -24,7 +24,7 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use tenzro_model::{ProviderSlashingCallback, ModelError, Result as ModelResult};
+use tenzro_model::{ModelError, ProviderSlashingCallback, Result as ModelResult};
 use tenzro_token::ComputeBondManager;
 use tracing::{info, warn};
 
@@ -44,7 +44,10 @@ impl ComputeBondSlashingBridge {
     /// Construct a new bridge. `block_height_fn` should return the latest
     /// finalized height; an early-startup fallback of `0` is acceptable.
     pub fn new(bonds: Arc<ComputeBondManager>, block_height_fn: BlockHeightFn) -> Self {
-        Self { bonds, block_height_fn }
+        Self {
+            bonds,
+            block_height_fn,
+        }
     }
 }
 
@@ -148,8 +151,14 @@ mod tests {
             )
             .expect("post bond");
         let bridge = ComputeBondSlashingBridge::new(bonds.clone(), block_fn(101));
-        bridge.record_probe_miss("did:tenzro:provider:p1").await.unwrap();
-        bridge.reset_failure_count("did:tenzro:provider:p1").await.unwrap();
+        bridge
+            .record_probe_miss("did:tenzro:provider:p1")
+            .await
+            .unwrap();
+        bridge
+            .reset_failure_count("did:tenzro:provider:p1")
+            .await
+            .unwrap();
         let bond = bonds.get("did:tenzro:provider:p1").unwrap();
         assert_eq!(bond.failure_count, 0);
     }

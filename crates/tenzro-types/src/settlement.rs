@@ -468,7 +468,11 @@ mod settlement_authorization_tests {
 
     #[test]
     fn preimage_starts_with_domain() {
-        assert!(sample().signing_preimage().starts_with(SETTLEMENT_AUTHORIZATION_DOMAIN));
+        assert!(
+            sample()
+                .signing_preimage()
+                .starts_with(SETTLEMENT_AUTHORIZATION_DOMAIN)
+        );
     }
 
     #[test]

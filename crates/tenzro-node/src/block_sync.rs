@@ -32,17 +32,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::time::{interval, Interval};
+use tokio::time::{Interval, interval};
 use tracing::{debug, info, warn};
 
 use libp2p::PeerId;
 use tenzro_consensus::HotStuff2Engine;
 use tenzro_consensus::QuorumCertificate;
 use tenzro_network::{
-    BlockSyncError, BlockSyncRequest, BlockSyncResponse,
-    InboundBlockSync, InboundRequestId, NetworkService, OutboundBlockSyncResult,
-    OutboundRequestId, PeerEvent, TenzroNetworkService, MAX_BLOCKS_PER_RANGE,
-    MAX_INFLIGHT_REQUESTS_PER_PEER,
+    BlockSyncError, BlockSyncRequest, BlockSyncResponse, InboundBlockSync, InboundRequestId,
+    MAX_BLOCKS_PER_RANGE, MAX_INFLIGHT_REQUESTS_PER_PEER, NetworkService, OutboundBlockSyncResult,
+    OutboundRequestId, PeerEvent, TenzroNetworkService,
 };
 use tenzro_storage::traits::BlockStore;
 use tenzro_storage::{BlockStoreImpl, RocksDbStore};
@@ -396,7 +395,11 @@ impl BlockSyncEngine {
         match event {
             PeerEvent::Connected(peer) => {
                 self.note_peer(peer);
-                debug!(?peer, total = self.peers.len(), "Block-sync: peer connected");
+                debug!(
+                    ?peer,
+                    total = self.peers.len(),
+                    "Block-sync: peer connected"
+                );
             }
             PeerEvent::Disconnected(peer) => {
                 self.peers.remove(&peer);
@@ -409,7 +412,11 @@ impl BlockSyncEngine {
                     );
                     self.state = SyncState::Stalled;
                 }
-                debug!(?peer, remaining = self.peers.len(), "Block-sync: peer disconnected");
+                debug!(
+                    ?peer,
+                    remaining = self.peers.len(),
+                    "Block-sync: peer disconnected"
+                );
             }
         }
     }
@@ -566,8 +573,8 @@ impl BlockSyncEngine {
     ) -> Result<()> {
         let our_height = self.local_tip().await?;
         let next_start = BlockHeight(our_height.0 + 1);
-        let count = (target_height.0.saturating_sub(our_height.0))
-            .min(MAX_BLOCKS_PER_RANGE as u64) as u32;
+        let count =
+            (target_height.0.saturating_sub(our_height.0)).min(MAX_BLOCKS_PER_RANGE as u64) as u32;
         if count == 0 {
             self.state = SyncState::Synced;
             return Ok(());
@@ -579,7 +586,11 @@ impl BlockSyncEngine {
         if !self.peer_has_capacity(&peer) {
             warn!(
                 ?peer,
-                in_flight = self.peers.get(&peer).map(|p| p.in_flight.len()).unwrap_or(0),
+                in_flight = self
+                    .peers
+                    .get(&peer)
+                    .map(|p| p.in_flight.len())
+                    .unwrap_or(0),
                 cap = MAX_INFLIGHT_PER_PEER,
                 "Block-sync: peer saturated, deferring sync start"
             );
@@ -697,15 +708,12 @@ impl BlockSyncEngine {
                     ))),
                 }
             }
-            BlockSyncRequest::GetBlockByHash { hash } => {
-                match block_store.get_block(hash).await {
-                    Ok(block) => BlockSyncResponse::BlockByHash { block },
-                    Err(e) => BlockSyncResponse::Error(BlockSyncError::Storage(format!(
-                        "get_block: {}",
-                        e
-                    ))),
+            BlockSyncRequest::GetBlockByHash { hash } => match block_store.get_block(hash).await {
+                Ok(block) => BlockSyncResponse::BlockByHash { block },
+                Err(e) => {
+                    BlockSyncResponse::Error(BlockSyncError::Storage(format!("get_block: {}", e)))
                 }
-            }
+            },
         }
     }
 
@@ -740,11 +748,12 @@ impl BlockSyncEngine {
         }
 
         match response {
-            BlockSyncResponse::TipInfo { tip_height, tip_hash, .. } => {
-                self.peers
-                    .entry(peer)
-                    .or_default()
-                    .advertised_tip = Some((tip_height, tip_hash));
+            BlockSyncResponse::TipInfo {
+                tip_height,
+                tip_hash,
+                ..
+            } => {
+                self.peers.entry(peer).or_default().advertised_tip = Some((tip_height, tip_hash));
 
                 let our_height = self.local_tip().await?;
                 if matches!(self.state, SyncState::Synced | SyncState::Stalled)
@@ -794,7 +803,11 @@ impl BlockSyncEngine {
             .saturating_add(delta)
             .clamp(PEER_SCORE_HARD_BAN_THRESHOLD, PEER_SCORE_CEILING);
         if entry.score < PEER_SCORE_DROP_THRESHOLD {
-            warn!(?peer, score = entry.score, "Block-sync: dropping peer below threshold");
+            warn!(
+                ?peer,
+                score = entry.score,
+                "Block-sync: dropping peer below threshold"
+            );
         }
     }
 
@@ -810,7 +823,11 @@ impl BlockSyncEngine {
     /// Records a newly-issued outbound request against a peer. Inserts a
     /// default `PeerScore` entry if this peer was previously unknown.
     fn reserve_inflight(&mut self, peer: PeerId, request_id: OutboundRequestId) {
-        self.peers.entry(peer).or_default().in_flight.insert(request_id);
+        self.peers
+            .entry(peer)
+            .or_default()
+            .in_flight
+            .insert(request_id);
     }
 
     /// Removes a previously-reserved in-flight request. Idempotent — if the
@@ -824,7 +841,9 @@ impl BlockSyncEngine {
     fn handle_outbound_failure(&mut self, peer: PeerId, _request_id: OutboundRequestId) {
         // If the failed request was the active sync request, mark stalled so
         // the next probe tick can pick a different peer.
-        if let SyncState::Syncing { peer: active_peer, .. } = &self.state
+        if let SyncState::Syncing {
+            peer: active_peer, ..
+        } = &self.state
             && *active_peer == peer
         {
             self.state = SyncState::Stalled;
@@ -840,7 +859,11 @@ impl BlockSyncEngine {
         // Empty range is treated as the peer running out of blocks at our tip
         // — return to Synced. Not necessarily a fault.
         if blocks.is_empty() {
-            debug!(?peer, ?request_id, "Block-sync: empty range, ending sync run");
+            debug!(
+                ?peer,
+                ?request_id,
+                "Block-sync: empty range, ending sync run"
+            );
             self.finish_sync().await?;
             return Ok(());
         }
@@ -856,7 +879,12 @@ impl BlockSyncEngine {
 
         // After import, decide whether to continue.
         let our_height = self.local_tip().await?;
-        let SyncState::Syncing { target_height, target_hash, .. } = self.state.clone() else {
+        let SyncState::Syncing {
+            target_height,
+            target_hash,
+            ..
+        } = self.state.clone()
+        else {
             return Ok(());
         };
 

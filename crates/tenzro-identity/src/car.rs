@@ -266,11 +266,7 @@ mod tests {
         let registry = IdentityRegistry::new();
         let result = tokio_test_block_on(async {
             registry
-                .register_human_with_fee(
-                    vec![7u8; 32],
-                    "Carol".to_string(),
-                    KycTier::Basic,
-                )
+                .register_human_with_fee(vec![7u8; 32], "Carol".to_string(), KycTier::Basic)
                 .await
                 .unwrap()
         });
@@ -345,5 +341,4 @@ mod tests {
         // Sorted BTreeMap + deterministic DAG-CBOR ⇒ byte-identical output.
         assert_eq!(a, b);
     }
-
 }

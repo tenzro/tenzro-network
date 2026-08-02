@@ -59,8 +59,7 @@ pub fn quantize(values: &[f32], quantization: GradientQuantization) -> Vec<u8> {
         }
         GradientQuantization::Int4 { block_size } => {
             let block = block_size.max(1) as usize;
-            let mut out =
-                Vec::with_capacity(values.len() / 2 + values.len().div_ceil(block) * 5);
+            let mut out = Vec::with_capacity(values.len() / 2 + values.len().div_ceil(block) * 5);
             for chunk in values.chunks(block) {
                 let max_abs = chunk.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
                 let scale = max_abs / 7.0;

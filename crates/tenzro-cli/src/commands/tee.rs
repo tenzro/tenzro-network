@@ -2,9 +2,9 @@
 //!
 //! Detect TEE hardware, get attestations, seal/unseal data, and list providers.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// TEE operations
 #[derive(Debug, Subcommand)]
@@ -56,11 +56,26 @@ impl TeeDetectCmd {
 
         spinner.finish_and_clear();
 
-        let available = result.get("available").and_then(|v| v.as_bool()).unwrap_or(false);
+        let available = result
+            .get("available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if available {
             output::print_success("TEE hardware detected!");
-            output::print_field("Provider", result.get("provider").and_then(|v| v.as_str()).unwrap_or("unknown"));
-            output::print_field("Type", result.get("tee_type").and_then(|v| v.as_str()).unwrap_or("unknown"));
+            output::print_field(
+                "Provider",
+                result
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+            );
+            output::print_field(
+                "Type",
+                result
+                    .get("tee_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+            );
         } else {
             output::print_warning("No TEE hardware detected. Simulation mode available.");
         }
@@ -85,18 +100,38 @@ impl TeeAttestCmd {
         use crate::rpc::RpcClient;
 
         output::print_header("TEE Attestation");
-        let spinner = output::create_spinner(&format!("Getting attestation from {}...", self.provider));
+        let spinner =
+            output::create_spinner(&format!("Getting attestation from {}...", self.provider));
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getTeeAttestation", serde_json::json!({
-            "provider": self.provider,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getTeeAttestation",
+                serde_json::json!({
+                    "provider": self.provider,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Attestation retrieved!");
-        output::print_field("Provider", result.get("provider").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Quote", &output::format_hash(result.get("quote_hex").and_then(|v| v.as_str()).unwrap_or("")));
+        output::print_field(
+            "Provider",
+            result
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Quote",
+            &output::format_hash(
+                result
+                    .get("quote_hex")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            ),
+        );
 
         Ok(())
     }
@@ -124,14 +159,22 @@ impl TeeVerifyCmd {
         let spinner = output::create_spinner("Verifying...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_verifyTeeAttestation", serde_json::json!({
-            "provider": self.provider,
-            "quote_hex": self.quote,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_verifyTeeAttestation",
+                serde_json::json!({
+                    "provider": self.provider,
+                    "quote_hex": self.quote,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        let valid = result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if valid {
             output::print_success("Attestation is valid!");
         } else {
@@ -164,15 +207,26 @@ impl TeeSealCmd {
         let spinner = output::create_spinner("Sealing...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_sealData", serde_json::json!({
-            "plaintext_hex": self.data,
-            "key_id": self.key_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_sealData",
+                serde_json::json!({
+                    "plaintext_hex": self.data,
+                    "key_id": self.key_id,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Data sealed!");
-        output::print_field("Ciphertext", result.get("ciphertext_hex").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Ciphertext",
+            result
+                .get("ciphertext_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -200,15 +254,26 @@ impl TeeUnsealCmd {
         let spinner = output::create_spinner("Unsealing...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_unsealData", serde_json::json!({
-            "ciphertext_hex": self.data,
-            "key_id": self.key_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_unsealData",
+                serde_json::json!({
+                    "ciphertext_hex": self.data,
+                    "key_id": self.key_id,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Data unsealed!");
-        output::print_field("Plaintext", result.get("plaintext_hex").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Plaintext",
+            result
+                .get("plaintext_hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -230,7 +295,9 @@ impl TeeProvidersCmd {
         let spinner = output::create_spinner("Fetching providers...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_listTeeProviders", serde_json::json!([])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_listTeeProviders", serde_json::json!([]))
+            .await?;
 
         spinner.finish_and_clear();
 

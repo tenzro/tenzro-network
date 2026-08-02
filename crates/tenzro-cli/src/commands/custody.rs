@@ -3,9 +3,9 @@
 //! Create MPC wallets, export/import keystores, rotate keys, manage spending
 //! limits, and create/revoke session keys.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Custody & MPC wallet operations
 #[derive(Debug, Subcommand)]
@@ -71,17 +71,28 @@ impl CustodyCreateWalletCmd {
         let spinner = output::create_spinner("Creating wallet...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_createMpcWallet", serde_json::json!({
-            "threshold": self.threshold,
-            "total_shares": self.shares,
-            "key_type": self.key_type,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createMpcWallet",
+                serde_json::json!({
+                    "threshold": self.threshold,
+                    "total_shares": self.shares,
+                    "key_type": self.key_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("MPC wallet created!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Threshold", &format!("{}-of-{}", self.threshold, self.shares));
+        output::print_field(
+            "Address",
+            result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Threshold",
+            &format!("{}-of-{}", self.threshold, self.shares),
+        );
         output::print_field("Key Type", &self.key_type);
 
         Ok(())
@@ -110,10 +121,15 @@ impl CustodyExportCmd {
         let spinner = output::create_spinner("Encrypting keystore...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_exportKeystore", serde_json::json!({
-            "address": self.address,
-            "password": self.password,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_exportKeystore",
+                serde_json::json!({
+                    "address": self.address,
+                    "password": self.password,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -152,15 +168,23 @@ impl CustodyImportCmd {
         let spinner = output::create_spinner("Decrypting keystore...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_importKeystore", serde_json::json!({
-            "keystore_json": keystore_json,
-            "password": self.password,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_importKeystore",
+                serde_json::json!({
+                    "keystore_json": keystore_json,
+                    "password": self.password,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Keystore imported!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Address",
+            result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -185,15 +209,26 @@ impl CustodyRotateCmd {
         let spinner = output::create_spinner("Rotating...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_rotateKeys", serde_json::json!({
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_rotateKeys",
+                serde_json::json!({
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Key shares rotated! Address unchanged.");
         output::print_field("Address", &self.address);
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or("ok"));
+        output::print_field(
+            "Status",
+            result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ok"),
+        );
 
         Ok(())
     }
@@ -223,11 +258,16 @@ impl CustodySetLimitsCmd {
         output::print_header("Set Spending Limits");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_setSpendingLimits", serde_json::json!({
-            "address": self.address,
-            "daily_limit": self.daily,
-            "per_tx_limit": self.per_tx,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_setSpendingLimits",
+                serde_json::json!({
+                    "address": self.address,
+                    "daily_limit": self.daily,
+                    "per_tx_limit": self.per_tx,
+                }),
+            )
+            .await?;
 
         output::print_success("Spending limits updated!");
         output::print_field("Address", &self.address);
@@ -257,25 +297,58 @@ impl CustodyGetLimitsCmd {
         output::print_header("Spending Limits");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getSpendingLimits", serde_json::json!({
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getSpendingLimits",
+                serde_json::json!({
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         output::print_field("Address", &self.address);
-        output::print_field("Daily Limit", result.get("daily_limit").and_then(|v| v.as_str()).unwrap_or("unlimited"));
-        output::print_field("Per-Tx Limit", result.get("per_tx_limit").and_then(|v| v.as_str()).unwrap_or("unlimited"));
-        output::print_field("Daily Used", result.get("daily_used").and_then(|v| v.as_str()).unwrap_or("0"));
+        output::print_field(
+            "Daily Limit",
+            result
+                .get("daily_limit")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unlimited"),
+        );
+        output::print_field(
+            "Per-Tx Limit",
+            result
+                .get("per_tx_limit")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unlimited"),
+        );
+        output::print_field(
+            "Daily Used",
+            result
+                .get("daily_used")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0"),
+        );
 
         Ok(())
     }
 }
 
-/// Create session key
+/// Create session key.
+///
+/// Authorized by the DID that owns the wallet, resolved from `--wallet-id`
+/// through the identity registry. The node takes no `address` — it keys on
+/// the wallet handle, which is what the session record and the ownership
+/// lookup both use.
 #[derive(Debug, Parser)]
 pub struct CustodySessionCmd {
-    /// Wallet address (hex)
+    /// Wallet id to open the session over
     #[arg(long)]
-    address: String,
+    wallet_id: String,
+    /// Hex DID envelope proving control of the DID that owns --wallet-id,
+    /// bound to method `tenzro_authorizeSession` with the wallet id as the
+    /// params hash.
+    #[arg(long)]
+    did_envelope: String,
     /// Session duration in seconds
     #[arg(long)]
     duration: u64,
@@ -295,16 +368,28 @@ impl CustodySessionCmd {
         let spinner = output::create_spinner("Creating session...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_authorizeSession", serde_json::json!({
-            "address": self.address,
-            "duration_secs": self.duration,
-            "max_amount": self.max_amount,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_authorizeSession",
+                serde_json::json!({
+                    "wallet_id": self.wallet_id,
+                    "did_envelope": self.did_envelope,
+                    "duration_secs": self.duration,
+                    "max_amount": self.max_amount,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Session key created!");
-        output::print_field("Session ID", result.get("session_id").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Session ID",
+            result
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
         output::print_field("Duration", &format!("{}s", self.duration));
         output::print_field("Max Amount", &format!("{} TNZO", self.max_amount));
 
@@ -312,15 +397,20 @@ impl CustodySessionCmd {
     }
 }
 
-/// Revoke session key
+/// Revoke session key.
+///
+/// Authorized by the DID that owns the wallet the session was opened over —
+/// a session id is a handle, not a credential.
 #[derive(Debug, Parser)]
 pub struct CustodyRevokeSessionCmd {
-    /// Wallet address (hex)
-    #[arg(long)]
-    address: String,
     /// Session ID to revoke
     #[arg(long)]
     session_id: String,
+    /// Hex DID envelope proving control of the DID that owns the session's
+    /// wallet, bound to method `tenzro_revokeSession` with the session id as
+    /// the params hash.
+    #[arg(long)]
+    did_envelope: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -333,10 +423,15 @@ impl CustodyRevokeSessionCmd {
         output::print_header("Revoke Session Key");
         let rpc = RpcClient::new(&self.rpc);
 
-        let _result: serde_json::Value = rpc.call("tenzro_revokeSession", serde_json::json!({
-            "address": self.address,
-            "session_id": self.session_id,
-        })).await?;
+        let _result: serde_json::Value = rpc
+            .call(
+                "tenzro_revokeSession",
+                serde_json::json!({
+                    "session_id": self.session_id,
+                    "did_envelope": self.did_envelope,
+                }),
+            )
+            .await?;
 
         output::print_success("Session revoked!");
         output::print_field("Session ID", &self.session_id);
@@ -364,23 +459,59 @@ impl CustodyKeySharesCmd {
         let spinner = output::create_spinner("Fetching key shares...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getKeyShares", serde_json::json!({
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getKeyShares",
+                serde_json::json!({
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_field("Address", &self.address);
-        output::print_field("Threshold", result.get("threshold").and_then(|v| v.as_u64()).map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()).as_str());
-        output::print_field("Total Shares", result.get("total_shares").and_then(|v| v.as_u64()).map(|v| v.to_string()).unwrap_or_else(|| "?".to_string()).as_str());
-        output::print_field("Key Type", result.get("key_type").and_then(|v| v.as_str()).unwrap_or("unknown"));
+        output::print_field(
+            "Threshold",
+            result
+                .get("threshold")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".to_string())
+                .as_str(),
+        );
+        output::print_field(
+            "Total Shares",
+            result
+                .get("total_shares")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".to_string())
+                .as_str(),
+        );
+        output::print_field(
+            "Key Type",
+            result
+                .get("key_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
 
         if let Some(shares) = result.get("shares").and_then(|v| v.as_array()) {
             println!();
             for (i, share) in shares.iter().enumerate() {
-                let status = share.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let location = share.get("location").and_then(|v| v.as_str()).unwrap_or("unknown");
-                output::print_field(&format!("Share {}", i + 1), &format!("{} ({})", location, status));
+                let status = share
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let location = share
+                    .get("location")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                output::print_field(
+                    &format!("Share {}", i + 1),
+                    &format!("{} ({})", location, status),
+                );
             }
         }
 

@@ -7,14 +7,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::Signature as CryptoSignature;
+use tenzro_storage::{
+    ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary, compute_commitment,
+};
 use tenzro_token::NetworkTreasury;
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, BlockHeight, Hash};
 use tenzro_types::principal_chain::{
-    anonymous_chain_for_address, PrincipalChain, PrincipalChainResolver,
-};
-use tenzro_storage::{
-    compute_commitment, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+    PrincipalChain, PrincipalChainResolver, anonymous_chain_for_address,
 };
 use tenzro_types::settlement::{
     ProofType, ServiceProof, SettlementReceipt, SettlementRequest, SettlementStatus,
@@ -352,12 +352,7 @@ impl SettlementEngine {
     /// Big-endian seconds give correct lexicographic ordering when scanned.
     fn principal_actor_key(actor_did: &str, settled_at_secs: u64, receipt_id: &str) -> Vec<u8> {
         let mut k = Vec::with_capacity(
-            Self::PRINCIPAL_ACTOR_PREFIX.len()
-                + actor_did.len()
-                + 1
-                + 8
-                + 1
-                + receipt_id.len(),
+            Self::PRINCIPAL_ACTOR_PREFIX.len() + actor_did.len() + 1 + 8 + 1 + receipt_id.len(),
         );
         k.extend_from_slice(Self::PRINCIPAL_ACTOR_PREFIX);
         k.extend_from_slice(actor_did.as_bytes());
@@ -456,10 +451,7 @@ impl SettlementEngine {
     /// of falling back to a synthetic anonymous chain.
     ///
     /// Builder form for use during construction.
-    pub fn with_principal_resolver(
-        self,
-        resolver: Arc<dyn PrincipalChainResolver>,
-    ) -> Self {
+    pub fn with_principal_resolver(self, resolver: Arc<dyn PrincipalChainResolver>) -> Self {
         *self.principal_resolver.write() = Some(resolver);
         self
     }
@@ -539,9 +531,7 @@ impl SettlementEngine {
                         let payload = match envelope.inline_payload.as_ref() {
                             Some(p) => p,
                             None => {
-                                warn!(
-                                    "skip offloaded receipt envelope (escrow should be inline)"
-                                );
+                                warn!("skip offloaded receipt envelope (escrow should be inline)");
                                 continue;
                             }
                         };
@@ -559,10 +549,7 @@ impl SettlementEngine {
 
         // Per-address indices.
         let index_keys = storage
-            .get_keys_with_prefix(
-                tenzro_storage::CF_SETTLEMENTS,
-                Self::SETTLEMENT_ADDR_PREFIX,
-            )
+            .get_keys_with_prefix(tenzro_storage::CF_SETTLEMENTS, Self::SETTLEMENT_ADDR_PREFIX)
             .map_err(|e| SettlementError::StorageError(e.to_string()))?;
 
         for key in index_keys {
@@ -628,9 +615,8 @@ impl SettlementEngine {
 
         // Canonical payload: serde_json over the SettlementReceipt itself.
         // Same encoding used by hydration to deserialize the wrapped payload.
-        let payload = serde_json::to_vec(receipt).map_err(|e| {
-            SettlementError::StorageError(format!("serialize receipt: {}", e))
-        })?;
+        let payload = serde_json::to_vec(receipt)
+            .map_err(|e| SettlementError::StorageError(format!("serialize receipt: {}", e)))?;
 
         // Build the inline-summary that's surfaced to indexes regardless of
         // storage mode. Receipt id is hashed so the summary fits the typed
@@ -650,9 +636,9 @@ impl SettlementEngine {
         let kind = ReceiptKind::SettlementEscrow;
         debug_assert_eq!(kind.default_mode(), ReceiptStorageMode::Inline);
         let envelope = ReceiptEnvelope::inline(kind, summary, payload);
-        envelope.validate().map_err(|e| {
-            SettlementError::StorageError(format!("envelope validate: {}", e))
-        })?;
+        envelope
+            .validate()
+            .map_err(|e| SettlementError::StorageError(format!("envelope validate: {}", e)))?;
         let receipt_bytes = serde_json::to_vec(&envelope).map_err(|e| {
             SettlementError::StorageError(format!("serialize receipt envelope: {}", e))
         })?;
@@ -743,9 +729,8 @@ impl SettlementEngine {
     /// to a full in-memory scan when no storage backend is attached.
     pub fn list_receipts_by_actor(&self, actor_did: &str) -> Vec<String> {
         if let Some(storage) = &self.storage {
-            let mut prefix = Vec::with_capacity(
-                Self::PRINCIPAL_ACTOR_PREFIX.len() + actor_did.len() + 1,
-            );
+            let mut prefix =
+                Vec::with_capacity(Self::PRINCIPAL_ACTOR_PREFIX.len() + actor_did.len() + 1);
             prefix.extend_from_slice(Self::PRINCIPAL_ACTOR_PREFIX);
             prefix.extend_from_slice(actor_did.as_bytes());
             prefix.push(b':');
@@ -756,7 +741,12 @@ impl SettlementEngine {
             .receipts
             .iter()
             .filter(|e| e.value().principal_chain.actor == actor_did)
-            .map(|e| (e.value().settled_at.as_millis(), e.value().receipt_id.clone()))
+            .map(|e| {
+                (
+                    e.value().settled_at.as_millis(),
+                    e.value().receipt_id.clone(),
+                )
+            })
             .collect();
         hits.sort_by_key(|(t, _)| *t);
         hits.into_iter().map(|(_, id)| id).collect()
@@ -779,7 +769,12 @@ impl SettlementEngine {
             .receipts
             .iter()
             .filter(|e| e.value().principal_chain.controller_did() == controller_did)
-            .map(|e| (e.value().settled_at.as_millis(), e.value().receipt_id.clone()))
+            .map(|e| {
+                (
+                    e.value().settled_at.as_millis(),
+                    e.value().receipt_id.clone(),
+                )
+            })
             .collect();
         hits.sort_by_key(|(t, _)| *t);
         hits.into_iter().map(|(_, id)| id).collect()
@@ -904,10 +899,7 @@ impl SettlementEngine {
     pub async fn settle(&self, request: SettlementRequest) -> Result<SettlementReceipt> {
         info!(
             "Processing settlement: {} for {} from {} to {}",
-            request.request_id,
-            request.amount,
-            request.customer,
-            request.provider
+            request.request_id, request.amount, request.customer, request.provider
         );
 
         // Validate amount
@@ -988,7 +980,8 @@ impl SettlementEngine {
         );
 
         // Store receipt
-        self.receipts.insert(receipt.receipt_id.clone(), receipt.clone());
+        self.receipts
+            .insert(receipt.receipt_id.clone(), receipt.clone());
 
         // Update settlement history for both parties (and write through to
         // storage in the same transaction so the indices never desync from
@@ -1233,7 +1226,10 @@ impl SettlementEngine {
                     .zk_verifier
                     .verify_zk_proof(&proof.proof_data)
                     .map_err(|e| {
-                        SettlementError::InvalidProof(format!("ZK proof verification failed: {}", e))
+                        SettlementError::InvalidProof(format!(
+                            "ZK proof verification failed: {}",
+                            e
+                        ))
                     })?;
 
                 if !valid {
@@ -1330,7 +1326,6 @@ impl SettlementEngine {
 
                 debug!("Merkle proof shape ok (inclusion checked at task layer)");
             }
-
         }
 
         Ok(())
@@ -1386,10 +1381,7 @@ impl SettlementEngine {
             ))
         })?;
 
-        debug!(
-            "Ed25519 signature verified for {:?} signer",
-            proof_sig.role
-        );
+        debug!("Ed25519 signature verified for {:?} signer", proof_sig.role);
         Ok(())
     }
 
@@ -1402,12 +1394,12 @@ impl SettlementEngine {
         let mut entry = self.balances.entry(key).or_insert(0);
         let current = *entry;
 
-        *entry = current.checked_sub(amount).ok_or(
-            SettlementError::InsufficientFunds {
+        *entry = current
+            .checked_sub(amount)
+            .ok_or(SettlementError::InsufficientFunds {
                 required: amount,
                 available: current,
-            },
-        )?;
+            })?;
         Ok(())
     }
 
@@ -1464,8 +1456,8 @@ mod tests {
     use super::*;
     use tenzro_crypto::keys::KeyPair;
     use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
-    use tenzro_types::settlement::{ProofType, ServiceProof};
     use tenzro_types::ServiceType;
+    use tenzro_types::settlement::{ProofType, ServiceProof};
 
     /// Helper: create a signed proof using a real Ed25519 keypair
     fn make_signed_proof(proof_data: &[u8]) -> (Address, ServiceProof) {
@@ -1656,10 +1648,11 @@ mod tests {
         assert!(!zk_verifier.verify_zk_proof(&[]).unwrap());
 
         // Random bytes that aren't valid JSON
-        let result = zk_verifier
-            .verify_zk_proof(&[0xAB; 128])
-            .unwrap();
-        assert!(!result, "raw bytes must be rejected (no structural fallback)");
+        let result = zk_verifier.verify_zk_proof(&[0xAB; 128]).unwrap();
+        assert!(
+            !result,
+            "raw bytes must be rejected (no structural fallback)"
+        );
     }
 
     /// `DefaultZkVerifier` rejects malformed Plonky3 proof bytes for a known

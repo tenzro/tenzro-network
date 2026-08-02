@@ -247,10 +247,7 @@ impl TempoRpcClient {
             .map_err(|e| PaymentError::NetworkError(e.to_string()))?;
 
         if let Some(error) = body.get("error") {
-            return Err(PaymentError::NetworkError(format!(
-                "RPC error: {}",
-                error
-            )));
+            return Err(PaymentError::NetworkError(format!("RPC error: {}", error)));
         }
 
         body.get("result")
@@ -265,9 +262,7 @@ impl TempoRpcClient {
 
     /// Gets the current gas price via `eth_gasPrice`
     pub async fn gas_price(&self) -> Result<u128> {
-        let result = self
-            .rpc_call("eth_gasPrice", serde_json::json!([]))
-            .await?;
+        let result = self.rpc_call("eth_gasPrice", serde_json::json!([])).await?;
         let hex_str = result.as_str().unwrap_or("0x0");
         Ok(parse_hex_u128(hex_str))
     }
@@ -275,10 +270,7 @@ impl TempoRpcClient {
     /// Gets the native balance of an address via `eth_getBalance`
     pub async fn get_balance(&self, address: &str) -> Result<u128> {
         let result = self
-            .rpc_call(
-                "eth_getBalance",
-                serde_json::json!([address, "latest"]),
-            )
+            .rpc_call("eth_getBalance", serde_json::json!([address, "latest"]))
             .await?;
         let hex_str = result.as_str().unwrap_or("0x0");
         Ok(parse_hex_u128(hex_str))
@@ -297,11 +289,7 @@ impl TempoRpcClient {
     }
 
     /// Calls a contract via `eth_call` (read-only, no gas needed)
-    pub async fn eth_call(
-        &self,
-        to: &str,
-        data: &[u8],
-    ) -> Result<String> {
+    pub async fn eth_call(&self, to: &str, data: &[u8]) -> Result<String> {
         let call_obj = serde_json::json!({
             "to": to,
             "data": format!("0x{}", hex::encode(data)),
@@ -318,17 +306,11 @@ impl TempoRpcClient {
     /// Sends a signed raw transaction via `eth_sendRawTransaction`
     pub async fn send_raw_transaction(&self, signed_tx_hex: &str) -> Result<String> {
         let result = self
-            .rpc_call(
-                "eth_sendRawTransaction",
-                serde_json::json!([signed_tx_hex]),
-            )
+            .rpc_call("eth_sendRawTransaction", serde_json::json!([signed_tx_hex]))
             .await?;
-        result
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                PaymentError::NetworkError("invalid sendRawTransaction response".to_string())
-            })
+        result.as_str().map(|s| s.to_string()).ok_or_else(|| {
+            PaymentError::NetworkError("invalid sendRawTransaction response".to_string())
+        })
     }
 
     /// Gets a transaction receipt via `eth_getTransactionReceipt`
@@ -337,10 +319,7 @@ impl TempoRpcClient {
         tx_hash: &str,
     ) -> Result<Option<serde_json::Value>> {
         let result = self
-            .rpc_call(
-                "eth_getTransactionReceipt",
-                serde_json::json!([tx_hash]),
-            )
+            .rpc_call("eth_getTransactionReceipt", serde_json::json!([tx_hash]))
             .await?;
         if result.is_null() {
             Ok(None)
@@ -430,24 +409,20 @@ impl TempoParticipant {
     /// Queries the balance of a TIP-20 stablecoin on Tempo via `eth_call`
     ///
     /// Encodes `balanceOf(address)` and calls the token contract.
-    pub async fn get_stablecoin_balance(
-        &self,
-        address: &str,
-        token: &str,
-    ) -> Result<Tip20Balance> {
+    pub async fn get_stablecoin_balance(&self, address: &str, token: &str) -> Result<Tip20Balance> {
         info!("Querying {} balance for {} on Tempo", token, address);
 
-        let contract_address = self
-            .config
-            .stablecoin_addresses
-            .get(token)
-            .ok_or_else(|| {
+        let contract_address =
+            self.config.stablecoin_addresses.get(token).ok_or_else(|| {
                 PaymentError::ConfigError(format!("unknown stablecoin: {}", token))
             })?;
 
         // If no contract address configured, return zero
         if contract_address.is_empty() {
-            debug!("No contract address configured for {}, returning zero balance", token);
+            debug!(
+                "No contract address configured for {}, returning zero balance",
+                token
+            );
             return Ok(Tip20Balance {
                 symbol: token.to_string(),
                 balance: 0,
@@ -480,22 +455,11 @@ impl TempoParticipant {
     /// and submits via `eth_sendRawTransaction`. Returns the transaction hash.
     ///
     /// If no signing key is configured, returns unsigned calldata for external signing.
-    pub async fn transfer_stablecoin(
-        &self,
-        to: &str,
-        amount: u128,
-        token: &str,
-    ) -> Result<String> {
-        info!(
-            "Transferring {} {} to {} on Tempo",
-            amount, token, to
-        );
+    pub async fn transfer_stablecoin(&self, to: &str, amount: u128, token: &str) -> Result<String> {
+        info!("Transferring {} {} to {} on Tempo", amount, token, to);
 
-        let contract_address = self
-            .config
-            .stablecoin_addresses
-            .get(token)
-            .ok_or_else(|| {
+        let contract_address =
+            self.config.stablecoin_addresses.get(token).ok_or_else(|| {
                 PaymentError::ConfigError(format!("unknown stablecoin: {}", token))
             })?;
 
@@ -516,11 +480,7 @@ impl TempoParticipant {
             .await
             .unwrap_or(65_000); // Default ERC-20 transfer gas
 
-        let gas_price = self
-            .rpc_client
-            .gas_price()
-            .await
-            .unwrap_or(1_000_000_000); // 1 Gwei default
+        let gas_price = self.rpc_client.gas_price().await.unwrap_or(1_000_000_000); // 1 Gwei default
 
         debug!(
             "Transfer gas estimate: {} units @ {} wei/gas",
@@ -528,9 +488,7 @@ impl TempoParticipant {
         );
 
         // If we have a signing key, build and submit a real signed transaction
-        if let (Some(signing_key), Some(sender_addr)) =
-            (&self.signing_key, &self.sender_address)
-        {
+        if let (Some(signing_key), Some(sender_addr)) = (&self.signing_key, &self.sender_address) {
             let sender_hex = format_address(sender_addr);
             let nonce = self.rpc_client.get_nonce(&sender_hex).await?;
             let contract_addr = parse_address(contract_address)?;
@@ -574,10 +532,7 @@ impl TempoParticipant {
     /// Processes each settlement entry as an individual TIP-20 transfer.
     /// When a signing key is configured, each transfer is signed and submitted.
     /// Returns a batch reference with individual transaction hashes.
-    pub async fn settle_mpp_batch(
-        &self,
-        settlements: Vec<SettlementEntry>,
-    ) -> Result<String> {
+    pub async fn settle_mpp_batch(&self, settlements: Vec<SettlementEntry>) -> Result<String> {
         info!(
             "Settling batch of {} MPP sessions on Tempo",
             settlements.len()
@@ -706,17 +661,9 @@ impl TempoParticipant {
     }
 
     /// Estimates the fee for a TIP-20 transfer in wei
-    pub async fn estimate_transfer_fee(
-        &self,
-        token: &str,
-        to: &str,
-        amount: u128,
-    ) -> Result<u128> {
-        let contract_address = self
-            .config
-            .stablecoin_addresses
-            .get(token)
-            .ok_or_else(|| {
+    pub async fn estimate_transfer_fee(&self, token: &str, to: &str, amount: u128) -> Result<u128> {
+        let contract_address =
+            self.config.stablecoin_addresses.get(token).ok_or_else(|| {
                 PaymentError::ConfigError(format!("unknown stablecoin: {}", token))
             })?;
 
@@ -817,17 +764,13 @@ mod tests {
         assert_eq!(addr.len(), 20);
         // Verify it matches the expected Ethereum address for privkey=1
         let addr_hex = hex::encode(addr);
-        assert_eq!(
-            addr_hex,
-            "7e5f4552091a69125d5dfcb7b8c2659029395bdf"
-        );
+        assert_eq!(addr_hex, "7e5f4552091a69125d5dfcb7b8c2659029395bdf");
     }
 
     #[test]
     fn test_format_address_eip55() {
         // Test EIP-55 checksum encoding
-        let addr_bytes =
-            hex::decode("7e5f4552091a69125d5dfcb7b8c2659029395bdf").unwrap();
+        let addr_bytes = hex::decode("7e5f4552091a69125d5dfcb7b8c2659029395bdf").unwrap();
         let mut addr = [0u8; 20];
         addr.copy_from_slice(&addr_bytes);
         let formatted = format_address(&addr);
@@ -863,7 +806,7 @@ mod tests {
             nonce: 9,
             gas_price: 20_000_000_000, // 20 Gwei
             gas_limit: 21000,
-            to: [0u8; 20], // zero address
+            to: [0u8; 20],                    // zero address
             value: 1_000_000_000_000_000_000, // 1 ETH
             data: vec![],
         };

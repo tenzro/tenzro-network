@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 torch = pytest.importorskip("torch")
-from torch import nn  # noqa: E402
+from torch import nn
 
-from tenzro_trainer.adapters.language import (  # noqa: E402
+from tenzro_trainer.adapters.language import (
     LanguageAdapter,
     is_moe_config,
     moe_parameter_names,
@@ -66,7 +66,7 @@ class _AuxLossLm(nn.Module):
         self.embed = nn.Embedding(vocab, 8)
         self._aux = aux
 
-    def forward(self, input_ids: "torch.Tensor") -> SimpleNamespace:
+    def forward(self, input_ids: torch.Tensor) -> SimpleNamespace:
         logits = self.proj(self.embed(input_ids))
         aux = (
             None

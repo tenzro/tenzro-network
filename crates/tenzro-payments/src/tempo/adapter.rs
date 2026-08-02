@@ -9,7 +9,7 @@ use tenzro_bridge::traits::{
     BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus,
 };
 use tenzro_types::primitives::Hash;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// Tempo RPC transfer request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +75,12 @@ impl TempoBridgeAdapter {
     /// Creates a new Tempo bridge adapter (unsigned mode — calldata only).
     pub fn new(config: TempoConfig) -> Self {
         let rpc_client = TempoRpcClient::new(&config.rpc_url, config.chain_id);
-        Self { config, rpc_client, signing_key: None, sender_address: None }
+        Self {
+            config,
+            rpc_client,
+            signing_key: None,
+            sender_address: None,
+        }
     }
 
     /// Creates a Tempo bridge adapter with a signing key for real transaction submission.
@@ -95,13 +100,13 @@ impl TempoBridgeAdapter {
     /// Encodes a TIP-20 `transfer(address, uint256)` call and sends it via
     /// `eth_sendRawTransaction`. If no stablecoin contract is configured for
     /// the requested asset, falls back to returning a reference for manual settlement.
-    async fn submit_tempo_transfer(&self, request: TempoTransferRequest) -> PaymentResult<TempoTransferResult> {
+    async fn submit_tempo_transfer(
+        &self,
+        request: TempoTransferRequest,
+    ) -> PaymentResult<TempoTransferResult> {
         debug!(
             "Submitting Tempo transfer: {} -> {} amount={} asset={}",
-            request.from_participant,
-            request.to_participant,
-            request.amount,
-            request.asset_id
+            request.from_participant, request.to_participant, request.amount, request.asset_id
         );
 
         // Look up the contract address for the asset
@@ -128,10 +133,8 @@ impl TempoBridgeAdapter {
         }
 
         // Encode transfer(to, amount) calldata
-        let calldata = crate::tempo::stablecoin::encode_transfer(
-            &request.to_participant,
-            request.amount,
-        );
+        let calldata =
+            crate::tempo::stablecoin::encode_transfer(&request.to_participant, request.amount);
 
         // Estimate gas for the transfer
         let gas_estimate = self
@@ -150,10 +153,13 @@ impl TempoBridgeAdapter {
         if let (Some(signing_key), Some(sender_addr)) = (&self.signing_key, &self.sender_address) {
             // Real signed transaction path
             let sender_hex = crate::tempo::participant::format_address(sender_addr);
-            let nonce = self.rpc_client.get_nonce(&sender_hex).await
-                .map_err(|e| crate::error::PaymentError::SettlementError(format!("nonce fetch: {}", e)))?;
+            let nonce = self.rpc_client.get_nonce(&sender_hex).await.map_err(|e| {
+                crate::error::PaymentError::SettlementError(format!("nonce fetch: {}", e))
+            })?;
             let contract_addr = crate::tempo::participant::parse_address(&contract_address)
-                .map_err(|e| crate::error::PaymentError::SettlementError(format!("bad address: {}", e)))?;
+                .map_err(|e| {
+                    crate::error::PaymentError::SettlementError(format!("bad address: {}", e))
+                })?;
 
             let tx = crate::tempo::participant::EvmTransaction {
                 nonce,
@@ -164,12 +170,21 @@ impl TempoBridgeAdapter {
                 data: calldata,
             };
 
-            let signed_tx_hex = tx.sign_eip155(signing_key, self.config.chain_id)
-                .map_err(|e| crate::error::PaymentError::SettlementError(format!("signing: {}", e)))?;
+            let signed_tx_hex = tx
+                .sign_eip155(signing_key, self.config.chain_id)
+                .map_err(|e| {
+                    crate::error::PaymentError::SettlementError(format!("signing: {}", e))
+                })?;
 
-            info!("Submitting signed Tempo transfer (nonce={}, gas={})", nonce, gas_estimate);
+            info!(
+                "Submitting signed Tempo transfer (nonce={}, gas={})",
+                nonce, gas_estimate
+            );
 
-            let tx_hash = self.rpc_client.send_raw_transaction(&signed_tx_hex).await
+            let tx_hash = self
+                .rpc_client
+                .send_raw_transaction(&signed_tx_hex)
+                .await
                 .map_err(|e| crate::error::PaymentError::SettlementError(format!("send: {}", e)))?;
 
             info!("Tempo transfer submitted: {}", tx_hash);
@@ -288,8 +303,7 @@ impl BridgeAdapter for TempoBridgeAdapter {
         &self,
         source_chain: &str,
         _payload: Vec<u8>,
-    ) -> tenzro_bridge::error::Result<Option<tenzro_bridge::message_format::TenzroMessage>>
-    {
+    ) -> tenzro_bridge::error::Result<Option<tenzro_bridge::message_format::TenzroMessage>> {
         // Fail-closed. Tempo settlement finality is observed on the
         // Tempo chain itself (EIP-155 transactions queried over RPC),
         // not attested by a committee this adapter can verify. An
@@ -320,7 +334,9 @@ impl BridgeAdapter for TempoBridgeAdapter {
         .with_memo(format!("Bridge transfer {}", request.sender));
 
         // Submit the transfer to Tempo
-        let tempo_result = self.submit_tempo_transfer(tempo_request).await
+        let tempo_result = self
+            .submit_tempo_transfer(tempo_request)
+            .await
             .map_err(|e| tenzro_bridge::error::BridgeError::TransferFailed(e.to_string()))?;
 
         debug!("Tempo transfer submitted: {}", tempo_result.transfer_id);
@@ -348,7 +364,9 @@ impl BridgeAdapter for TempoBridgeAdapter {
         info!("Checking transfer status: {}", transfer_id);
 
         // Query the Tempo network for transfer status
-        let tempo_result = self.query_tempo_transfer(transfer_id).await
+        let tempo_result = self
+            .query_tempo_transfer(transfer_id)
+            .await
             .map_err(|e| tenzro_bridge::error::BridgeError::TransferFailed(e.to_string()))?;
 
         // Map Tempo status to TransferStatus

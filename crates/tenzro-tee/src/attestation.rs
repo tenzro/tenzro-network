@@ -16,12 +16,12 @@
 //! Pinned root certificates are in [`crate::certs`].
 
 use chrono::Duration;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-use tenzro_types::tee::*;
 use crate::certs;
 use crate::error::{Result, TeeError};
+use tenzro_types::tee::*;
 
 /// Attestation verifier for cross-vendor TEE attestation.
 ///
@@ -72,6 +72,41 @@ impl AttestationVerifier {
         self.strict_cert_validation = strict;
     }
 
+    /// Verifies an attestation report and rejects anything short of a real,
+    /// chain-verified attestation.
+    ///
+    /// [`Self::verify_report`] reports what it found and leaves the judgement
+    /// to the caller: a simulated report comes back with `valid: true`,
+    /// `cert_chain_valid: false` and `details["simulated"] = "true"`. Any
+    /// gate that grants access to data, keys, or a workload wants this method
+    /// instead, so the three conditions are enforced in one place rather than
+    /// re-derived per call site.
+    pub fn verify_report_strict(&self, report: &AttestationReport) -> Result<AttestationResult> {
+        let result = self.verify_report(report)?;
+        if !result.valid {
+            return Err(TeeError::AttestationVerificationFailed(
+                "report did not verify".to_string(),
+            ));
+        }
+        if result
+            .details
+            .get("simulated")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            return Err(TeeError::AttestationVerificationFailed(
+                "report is simulated; a simulated report is not evidence about hardware"
+                    .to_string(),
+            ));
+        }
+        if !result.cert_chain_valid {
+            return Err(TeeError::AttestationVerificationFailed(
+                "certificate chain did not verify against a pinned vendor root".to_string(),
+            ));
+        }
+        Ok(result)
+    }
+
     /// Verifies an attestation report.
     ///
     /// This performs comprehensive validation:
@@ -80,11 +115,15 @@ impl AttestationVerifier {
     /// - Verifies TCB version meets requirements
     /// - Validates measurements
     /// - Detects simulated attestations
+    ///
+    /// The returned [`AttestationResult`] describes what verification found;
+    /// it does not itself decide whether the report is good enough to act on.
+    /// Callers gating access should use [`Self::verify_report_strict`].
     pub fn verify_report(&self, report: &AttestationReport) -> Result<AttestationResult> {
         // Check if attestation data is empty or malformed
         if report.attestation_data.is_empty() {
             return Err(TeeError::InvalidAttestationReport(
-                "Attestation data is empty".to_string()
+                "Attestation data is empty".to_string(),
             ));
         }
 
@@ -102,13 +141,16 @@ impl AttestationVerifier {
         let measurements = self.extract_measurements(report)?;
 
         // Detect if this is a simulated attestation by checking metadata
-        let simulated = report.metadata.get("simulated")
+        let simulated = report
+            .metadata
+            .get("simulated")
             .map(|v| v == "true")
             .unwrap_or(false);
 
-        let mut details = HashMap::from([
-            ("verification_method".to_string(), "tenzro_verifier".to_string()),
-        ]);
+        let mut details = HashMap::from([(
+            "verification_method".to_string(),
+            "tenzro_verifier".to_string(),
+        )]);
         if simulated {
             details.insert("simulated".to_string(), "true".to_string());
         }
@@ -151,12 +193,17 @@ impl AttestationVerifier {
     /// - **NVIDIA GPU**: Returns true (verification via NRAS API, no local cert chain)
     fn verify_certificate_chain(&self, report: &AttestationReport) -> Result<bool> {
         // Check if this is a simulated attestation — simulated reports don't have real certs
-        let simulated = report.metadata.get("simulated")
+        let simulated = report
+            .metadata
+            .get("simulated")
             .map(|v| v == "true")
             .unwrap_or(false);
 
         if simulated {
-            tracing::debug!("Skipping certificate chain verification for simulated {:?} attestation", report.vendor);
+            tracing::debug!(
+                "Skipping certificate chain verification for simulated {:?} attestation",
+                report.vendor
+            );
             return Ok(false);
         }
 
@@ -177,16 +224,17 @@ impl AttestationVerifier {
         }
 
         // Get the pinned root CA for this vendor
-        let root_ca_pem = certs::get_root_ca_pem(report.vendor)
-            .ok_or_else(|| TeeError::CertificateValidationFailed(
-                format!("No pinned root CA for vendor {:?}", report.vendor)
-            ))?;
+        let root_ca_pem = certs::get_root_ca_pem(report.vendor).ok_or_else(|| {
+            TeeError::CertificateValidationFailed(format!(
+                "No pinned root CA for vendor {:?}",
+                report.vendor
+            ))
+        })?;
 
         // Decode the pinned root CA
-        let root_ca_der = certs::pem_to_der(root_ca_pem)
-            .map_err(|e| TeeError::CertificateValidationFailed(
-                format!("Failed to decode pinned root CA: {}", e)
-            ))?;
+        let root_ca_der = certs::pem_to_der(root_ca_pem).map_err(|e| {
+            TeeError::CertificateValidationFailed(format!("Failed to decode pinned root CA: {}", e))
+        })?;
 
         // Parse the root CA certificate
         let root_cert = parse_x509_certificate(&root_ca_der)?;
@@ -213,7 +261,7 @@ impl AttestationVerifier {
 
         if chain_certs.is_empty() {
             return Err(TeeError::CertificateValidationFailed(
-                "No valid certificates in chain".to_string()
+                "No valid certificates in chain".to_string(),
             ));
         }
 
@@ -231,24 +279,24 @@ impl AttestationVerifier {
             verify_validity_period(cert)?;
 
             // For the last cert in chain, verify it was signed by the root
-            if i == chain_certs.len() - 1
-                && cert.issuer_cn != root_cert.subject_cn {
-                    // Last cert in chain might BE the root — check if it matches
-                    if cert.subject_cn == root_cert.subject_cn {
-                        tracing::debug!("Chain includes root CA itself");
-                    } else {
-                        tracing::warn!(
-                            "Certificate chain gap: last cert issuer '{}' != root subject '{}'",
+            if i == chain_certs.len() - 1 && cert.issuer_cn != root_cert.subject_cn {
+                // Last cert in chain might BE the root — check if it matches
+                if cert.subject_cn == root_cert.subject_cn {
+                    tracing::debug!("Chain includes root CA itself");
+                } else {
+                    tracing::warn!(
+                        "Certificate chain gap: last cert issuer '{}' != root subject '{}'",
+                        cert.issuer_cn,
+                        root_cert.subject_cn
+                    );
+                    if self.strict_cert_validation {
+                        return Err(TeeError::CertificateValidationFailed(format!(
+                            "Chain does not terminate at root: issuer='{}', expected root='{}'",
                             cert.issuer_cn, root_cert.subject_cn
-                        );
-                        if self.strict_cert_validation {
-                            return Err(TeeError::CertificateValidationFailed(format!(
-                                "Chain does not terminate at root: issuer='{}', expected root='{}'",
-                                cert.issuer_cn, root_cert.subject_cn
-                            )));
-                        }
+                        )));
                     }
                 }
+            }
 
             // For intermediate certs, verify issuer/subject chain
             if i + 1 < chain_certs.len() {
@@ -256,7 +304,9 @@ impl AttestationVerifier {
                 if cert.issuer_cn != parent.subject_cn {
                     tracing::warn!(
                         "Certificate chain break at position {}: issuer '{}' != parent subject '{}'",
-                        i, cert.issuer_cn, parent.subject_cn
+                        i,
+                        cert.issuer_cn,
+                        parent.subject_cn
                     );
                     if self.strict_cert_validation {
                         return Err(TeeError::CertificateValidationFailed(format!(
@@ -270,7 +320,9 @@ impl AttestationVerifier {
 
         tracing::info!(
             "Certificate chain verified for {:?}: {} certificates, root={}",
-            report.vendor, chain_certs.len(), root_cert.subject_cn
+            report.vendor,
+            chain_certs.len(),
+            root_cert.subject_cn
         );
 
         Ok(true)
@@ -282,7 +334,8 @@ impl AttestationVerifier {
         match report.vendor {
             TeeVendor::IntelTdx => {
                 // Parse TDX quote to get TCB SVN
-                if let Ok(quote_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                if let Ok(quote_data) =
+                    serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
                     && let Some(tcb_svn) = quote_data.get("tdx_tcb_svn").and_then(|v| v.as_str())
                 {
                     return Ok(tcb_svn.to_string());
@@ -291,7 +344,8 @@ impl AttestationVerifier {
             }
             TeeVendor::AmdSevSnp => {
                 // Parse SEV-SNP report to get TCB components
-                if let Ok(report_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                if let Ok(report_data) =
+                    serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
                     && let Some(tcb) = report_data.get("reported_tcb")
                 {
                     return Ok(serde_json::to_string(tcb).unwrap_or_else(|_| "unknown".to_string()));
@@ -300,7 +354,8 @@ impl AttestationVerifier {
             }
             TeeVendor::AwsNitro => {
                 // Parse Nitro attestation document version
-                if let Ok(doc_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                if let Ok(doc_data) =
+                    serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
                     && let Some(version) = doc_data.get("version")
                 {
                     return Ok(version.to_string());
@@ -339,7 +394,9 @@ impl AttestationVerifier {
         match report.vendor {
             TeeVendor::IntelTdx => {
                 // Extract RTMR values from TDX quote
-                if let Ok(quote_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data) {
+                if let Ok(quote_data) =
+                    serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                {
                     for i in 0..4 {
                         let rtmr_key = format!("rtmr{}", i);
                         if let Some(rtmr_val) = quote_data.get(&rtmr_key).and_then(|v| v.as_str())
@@ -357,8 +414,10 @@ impl AttestationVerifier {
             }
             TeeVendor::AmdSevSnp => {
                 // Extract measurement from SEV-SNP report
-                if let Ok(report_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
-                    && let Some(measurement) = report_data.get("measurement").and_then(|v| v.as_str())
+                if let Ok(report_data) =
+                    serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                    && let Some(measurement) =
+                        report_data.get("measurement").and_then(|v| v.as_str())
                     && let Ok(value) = hex::decode(measurement)
                 {
                     measurements.push(Measurement {
@@ -371,7 +430,8 @@ impl AttestationVerifier {
             }
             TeeVendor::AwsNitro => {
                 // Extract PCR values from Nitro document
-                if let Ok(doc_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                if let Ok(doc_data) =
+                    serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
                     && let Some(pcrs) = doc_data.get("pcrs").and_then(|v| v.as_object())
                 {
                     for (key, value) in pcrs {
@@ -489,36 +549,34 @@ pub struct ParsedCertificate {
 /// Uses the `x509-cert` crate for parsing. Extracts fields needed for
 /// chain verification: subject, issuer, validity, SPKI, CA status.
 pub fn parse_x509_certificate(der: &[u8]) -> Result<ParsedCertificate> {
-    use x509_cert::Certificate;
     use der::Decode;
+    use x509_cert::Certificate;
 
-    let cert = Certificate::from_der(der)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to parse X.509 certificate: {}", e)
-        ))?;
+    let cert = Certificate::from_der(der).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!("Failed to parse X.509 certificate: {}", e))
+    })?;
 
     let tbs = &cert.tbs_certificate;
 
     // Extract subject CN
-    let subject_cn = extract_common_name(&tbs.subject)
-        .unwrap_or_else(|| "unknown".to_string());
+    let subject_cn = extract_common_name(&tbs.subject).unwrap_or_else(|| "unknown".to_string());
 
     // Extract issuer CN
-    let issuer_cn = extract_common_name(&tbs.issuer)
-        .unwrap_or_else(|| "unknown".to_string());
+    let issuer_cn = extract_common_name(&tbs.issuer).unwrap_or_else(|| "unknown".to_string());
 
     // Extract validity period
     let not_before_ms = time_to_millis(&tbs.validity.not_before);
     let not_after_ms = time_to_millis(&tbs.validity.not_after);
 
     // Extract SPKI
-    let spki_der = der::Encode::to_der(&tbs.subject_public_key_info)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to encode SPKI: {}", e)
-        ))?;
+    let spki_der = der::Encode::to_der(&tbs.subject_public_key_info).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!("Failed to encode SPKI: {}", e))
+    })?;
 
     // Check basic constraints for CA
-    let is_ca = tbs.extensions.as_ref()
+    let is_ca = tbs
+        .extensions
+        .as_ref()
         .map(|exts| {
             exts.iter().any(|ext| {
                 // BasicConstraints OID: 2.5.29.19
@@ -540,10 +598,9 @@ pub fn parse_x509_certificate(der: &[u8]) -> Result<ParsedCertificate> {
     let sig_bytes = cert.signature.raw_bytes().to_vec();
 
     // Extract TBS certificate DER
-    let tbs_der = der::Encode::to_der(&cert.tbs_certificate)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to encode TBS certificate: {}", e)
-        ))?;
+    let tbs_der = der::Encode::to_der(&cert.tbs_certificate).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!("Failed to encode TBS certificate: {}", e))
+    })?;
 
     Ok(ParsedCertificate {
         subject_cn,
@@ -613,7 +670,8 @@ fn verify_self_signed(cert: &ParsedCertificate, vendor: TeeVendor) -> Result<()>
 
     tracing::debug!(
         "Root CA for {:?} is self-signed: CN={}",
-        vendor, cert.subject_cn
+        vendor,
+        cert.subject_cn
     );
 
     Ok(())
@@ -629,7 +687,8 @@ fn verify_root_fingerprint(root_der: &[u8], vendor: TeeVendor) -> Result<()> {
 
     if let Some(expected) = expected_fingerprint {
         let hash = Sha256::digest(root_der);
-        let actual = hash.iter()
+        let actual = hash
+            .iter()
             .map(|b| format!("{:02X}", b))
             .collect::<Vec<String>>()
             .join(":");
@@ -641,10 +700,7 @@ fn verify_root_fingerprint(root_der: &[u8], vendor: TeeVendor) -> Result<()> {
             )));
         }
 
-        tracing::debug!(
-            "Root CA fingerprint verified for {:?}: {}",
-            vendor, actual
-        );
+        tracing::debug!("Root CA fingerprint verified for {:?}: {}", vendor, actual);
     }
 
     Ok(())
@@ -680,13 +736,15 @@ pub fn verify_ecdsa_p256_signature(
     tbs_data: &[u8],
     signature: &[u8],
 ) -> Result<bool> {
-    use p256::ecdsa::{VerifyingKey, Signature, signature::Verifier};
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
     use spki::DecodePublicKey;
 
-    let verifying_key = VerifyingKey::from_public_key_der(public_key_spki)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to parse ECDSA P-256 public key: {}", e)
-        ))?;
+    let verifying_key = VerifyingKey::from_public_key_der(public_key_spki).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!(
+            "Failed to parse ECDSA P-256 public key: {}",
+            e
+        ))
+    })?;
 
     // Hash the TBS data with SHA-256 and verify
     let tbs_hash = Sha256::digest(tbs_data);
@@ -733,13 +791,15 @@ pub fn verify_ecdsa_p384_signature(
     tbs_data: &[u8],
     signature: &[u8],
 ) -> Result<bool> {
-    use p384::ecdsa::{VerifyingKey, Signature, signature::Verifier};
+    use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
     use spki::DecodePublicKey;
 
-    let verifying_key = VerifyingKey::from_public_key_der(public_key_spki)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to parse ECDSA P-384 public key: {}", e)
-        ))?;
+    let verifying_key = VerifyingKey::from_public_key_der(public_key_spki).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!(
+            "Failed to parse ECDSA P-384 public key: {}",
+            e
+        ))
+    })?;
 
     // Try to parse as DER-encoded signature first, then try raw
     let result = if let Ok(sig) = Signature::from_der(signature) {
@@ -754,7 +814,10 @@ pub fn verify_ecdsa_p384_signature(
             }
         }
     } else {
-        tracing::debug!("ECDSA P-384 signature has unexpected length: {}", signature.len());
+        tracing::debug!(
+            "ECDSA P-384 signature has unexpected length: {}",
+            signature.len()
+        );
         return Ok(false);
     };
 
@@ -779,7 +842,7 @@ pub fn verify_ecdsa_p256_raw_pubkey(
     data: &[u8],
     signature: &[u8],
 ) -> Result<bool> {
-    use p256::ecdsa::{VerifyingKey, Signature, signature::Verifier};
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 
     if pubkey_xy.len() != 64 {
         return Err(TeeError::CertificateValidationFailed(format!(
@@ -793,10 +856,12 @@ pub fn verify_ecdsa_p256_raw_pubkey(
     sec1.push(0x04);
     sec1.extend_from_slice(pubkey_xy);
 
-    let verifying_key = VerifyingKey::from_sec1_bytes(&sec1)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to parse ECDSA P-256 raw pubkey: {}", e)
-        ))?;
+    let verifying_key = VerifyingKey::from_sec1_bytes(&sec1).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!(
+            "Failed to parse ECDSA P-256 raw pubkey: {}",
+            e
+        ))
+    })?;
 
     let result = if let Ok(sig) = Signature::from_der(signature) {
         verifying_key.verify(data, &sig)
@@ -809,7 +874,10 @@ pub fn verify_ecdsa_p256_raw_pubkey(
             }
         }
     } else {
-        tracing::debug!("ECDSA P-256 signature has unexpected length: {}", signature.len());
+        tracing::debug!(
+            "ECDSA P-256 signature has unexpected length: {}",
+            signature.len()
+        );
         return Ok(false);
     };
 
@@ -819,7 +887,10 @@ pub fn verify_ecdsa_p256_raw_pubkey(
             Ok(true)
         }
         Err(e) => {
-            tracing::warn!("ECDSA P-256 signature verification failed (raw pubkey): {}", e);
+            tracing::warn!(
+                "ECDSA P-256 signature verification failed (raw pubkey): {}",
+                e
+            );
             Ok(false)
         }
     }
@@ -835,7 +906,7 @@ pub fn verify_ecdsa_p384_raw_pubkey(
     data: &[u8],
     signature: &[u8],
 ) -> Result<bool> {
-    use p384::ecdsa::{VerifyingKey, Signature, signature::Verifier};
+    use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 
     if pubkey_xy.len() != 96 {
         return Err(TeeError::CertificateValidationFailed(format!(
@@ -848,10 +919,12 @@ pub fn verify_ecdsa_p384_raw_pubkey(
     sec1.push(0x04);
     sec1.extend_from_slice(pubkey_xy);
 
-    let verifying_key = VerifyingKey::from_sec1_bytes(&sec1)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to parse ECDSA P-384 raw pubkey: {}", e)
-        ))?;
+    let verifying_key = VerifyingKey::from_sec1_bytes(&sec1).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!(
+            "Failed to parse ECDSA P-384 raw pubkey: {}",
+            e
+        ))
+    })?;
 
     let result = if let Ok(sig) = Signature::from_der(signature) {
         verifying_key.verify(data, &sig)
@@ -864,7 +937,10 @@ pub fn verify_ecdsa_p384_raw_pubkey(
             }
         }
     } else {
-        tracing::debug!("ECDSA P-384 signature has unexpected length: {}", signature.len());
+        tracing::debug!(
+            "ECDSA P-384 signature has unexpected length: {}",
+            signature.len()
+        );
         return Ok(false);
     };
 
@@ -874,7 +950,10 @@ pub fn verify_ecdsa_p384_raw_pubkey(
             Ok(true)
         }
         Err(e) => {
-            tracing::warn!("ECDSA P-384 signature verification failed (raw pubkey): {}", e);
+            tracing::warn!(
+                "ECDSA P-384 signature verification failed (raw pubkey): {}",
+                e
+            );
             Ok(false)
         }
     }
@@ -908,10 +987,7 @@ pub fn extract_ec_point_from_spki(spki_der: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Dispatches to the appropriate signature verification function based on
 /// the signature algorithm OID.
-pub fn verify_certificate_signature(
-    cert: &ParsedCertificate,
-    parent_spki: &[u8],
-) -> Result<bool> {
+pub fn verify_certificate_signature(cert: &ParsedCertificate, parent_spki: &[u8]) -> Result<bool> {
     // Common ECDSA with SHA-256 OID: 1.2.840.10045.4.3.2
     // Common ECDSA with SHA-384 OID: 1.2.840.10045.4.3.3
     // RSASSA-PSS OID: 1.2.840.113549.1.1.10
@@ -948,26 +1024,24 @@ fn verify_rsa_pss_signature(
     tbs_data: &[u8],
     signature: &[u8],
 ) -> Result<bool> {
-    use rsa::{RsaPublicKey, pss::VerifyingKey as PssVerifyingKey};
     use rsa::pss::Signature as PssSignature;
+    use rsa::{RsaPublicKey, pss::VerifyingKey as PssVerifyingKey};
     use sha2::Sha384;
     // rsa 0.9 still uses spki 0.7 (and signature 2.x). p256/p384 0.14-rc use
     // spki 0.8 (and signature 3.x). Import each version under its own alias
     // at the call site that consumes it.
-    use spki_v07::DecodePublicKey;
     use signature_v2::Verifier;
+    use spki_v07::DecodePublicKey;
 
-    let rsa_key = RsaPublicKey::from_public_key_der(public_key_spki)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to parse RSA public key: {}", e)
-        ))?;
+    let rsa_key = RsaPublicKey::from_public_key_der(public_key_spki).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!("Failed to parse RSA public key: {}", e))
+    })?;
 
     let verifying_key = PssVerifyingKey::<Sha384>::new(rsa_key);
 
-    let sig = PssSignature::try_from(signature)
-        .map_err(|e| TeeError::CertificateValidationFailed(
-            format!("Failed to parse RSA-PSS signature: {}", e)
-        ))?;
+    let sig = PssSignature::try_from(signature).map_err(|e| {
+        TeeError::CertificateValidationFailed(format!("Failed to parse RSA-PSS signature: {}", e))
+    })?;
 
     match verifying_key.verify(tbs_data, &sig) {
         Ok(()) => {
@@ -988,27 +1062,21 @@ mod tests {
 
     fn create_test_report(vendor: TeeVendor) -> AttestationReport {
         let attestation_data = match vendor {
-            TeeVendor::IntelTdx => {
-                serde_json::to_vec(&serde_json::json!({
-                    "tdx_tcb_svn": "03000600000000000000000000000000",
-                    "rtmr0": "0".repeat(96),
-                }))
-                .unwrap()
-            }
-            TeeVendor::AmdSevSnp => {
-                serde_json::to_vec(&serde_json::json!({
-                    "reported_tcb": {"boot_loader": 3, "tee": 0, "snp": 12},
-                    "measurement": "e".repeat(96),
-                }))
-                .unwrap()
-            }
-            TeeVendor::AwsNitro => {
-                serde_json::to_vec(&serde_json::json!({
-                    "version": 4,
-                    "pcrs": {"0": "0".repeat(96)},
-                }))
-                .unwrap()
-            }
+            TeeVendor::IntelTdx => serde_json::to_vec(&serde_json::json!({
+                "tdx_tcb_svn": "03000600000000000000000000000000",
+                "rtmr0": "0".repeat(96),
+            }))
+            .unwrap(),
+            TeeVendor::AmdSevSnp => serde_json::to_vec(&serde_json::json!({
+                "reported_tcb": {"boot_loader": 3, "tee": 0, "snp": 12},
+                "measurement": "e".repeat(96),
+            }))
+            .unwrap(),
+            TeeVendor::AwsNitro => serde_json::to_vec(&serde_json::json!({
+                "version": 4,
+                "pcrs": {"0": "0".repeat(96)},
+            }))
+            .unwrap(),
             _ => vec![],
         };
 
@@ -1034,7 +1102,9 @@ mod tests {
         verifier.set_strict_cert_validation(false);
 
         let mut report = create_test_report(TeeVendor::IntelTdx);
-        report.metadata.insert("simulated".to_string(), "true".to_string());
+        report
+            .metadata
+            .insert("simulated".to_string(), "true".to_string());
 
         let result = verifier.verify_report(&report);
         assert!(result.is_ok());
@@ -1050,7 +1120,9 @@ mod tests {
         verifier.set_strict_cert_validation(false);
 
         let mut report = create_test_report(TeeVendor::AmdSevSnp);
-        report.metadata.insert("simulated".to_string(), "true".to_string());
+        report
+            .metadata
+            .insert("simulated".to_string(), "true".to_string());
 
         let result = verifier.verify_report(&report);
         assert!(result.is_ok());
@@ -1062,7 +1134,9 @@ mod tests {
         verifier.set_strict_cert_validation(false);
 
         let mut report = create_test_report(TeeVendor::AwsNitro);
-        report.metadata.insert("simulated".to_string(), "true".to_string());
+        report
+            .metadata
+            .insert("simulated".to_string(), "true".to_string());
 
         let result = verifier.verify_report(&report);
         assert!(result.is_ok());
@@ -1074,11 +1148,12 @@ mod tests {
         verifier.set_max_attestation_age(Duration::seconds(10));
 
         let mut report = create_test_report(TeeVendor::IntelTdx);
-        report.metadata.insert("simulated".to_string(), "true".to_string());
+        report
+            .metadata
+            .insert("simulated".to_string(), "true".to_string());
         // Set timestamp to 60 seconds ago (60000 milliseconds)
-        report.timestamp = tenzro_types::Timestamp::new(
-            tenzro_types::Timestamp::now().as_millis() - 60_000
-        );
+        report.timestamp =
+            tenzro_types::Timestamp::new(tenzro_types::Timestamp::now().as_millis() - 60_000);
 
         let result = verifier.verify_report(&report);
         assert!(result.is_err());
@@ -1099,7 +1174,11 @@ mod tests {
     fn test_parse_intel_root_ca() {
         let der = certs::pem_to_der(certs::INTEL_SGX_ROOT_CA_PEM).unwrap();
         let cert = parse_x509_certificate(&der);
-        assert!(cert.is_ok(), "Should parse Intel SGX Root CA: {:?}", cert.err());
+        assert!(
+            cert.is_ok(),
+            "Should parse Intel SGX Root CA: {:?}",
+            cert.err()
+        );
 
         let cert = cert.unwrap();
         assert_eq!(cert.subject_cn, "Intel SGX Root CA");
@@ -1111,7 +1190,11 @@ mod tests {
     fn test_parse_aws_nitro_root_ca() {
         let der = certs::pem_to_der(certs::AWS_NITRO_ROOT_CA_PEM).unwrap();
         let cert = parse_x509_certificate(&der);
-        assert!(cert.is_ok(), "Should parse AWS Nitro Root CA: {:?}", cert.err());
+        assert!(
+            cert.is_ok(),
+            "Should parse AWS Nitro Root CA: {:?}",
+            cert.err()
+        );
 
         let cert = cert.unwrap();
         assert_eq!(cert.subject_cn, "aws.nitro-enclaves");
@@ -1178,13 +1261,17 @@ mod tests {
         let der = certs::pem_to_der(certs::INTEL_SGX_ROOT_CA_PEM).unwrap();
         let cert = parse_x509_certificate(&der).unwrap();
 
-        let result = verify_ecdsa_p256_signature(
-            &cert.spki_der,
-            &cert.tbs_der,
-            &cert.signature_bytes,
+        let result =
+            verify_ecdsa_p256_signature(&cert.spki_der, &cert.tbs_der, &cert.signature_bytes);
+        assert!(
+            result.is_ok(),
+            "Signature verification should not error: {:?}",
+            result.err()
         );
-        assert!(result.is_ok(), "Signature verification should not error: {:?}", result.err());
-        assert!(result.unwrap(), "Intel SGX Root CA self-signature should verify");
+        assert!(
+            result.unwrap(),
+            "Intel SGX Root CA self-signature should verify"
+        );
     }
 
     #[test]
@@ -1193,13 +1280,17 @@ mod tests {
         let der = certs::pem_to_der(certs::AWS_NITRO_ROOT_CA_PEM).unwrap();
         let cert = parse_x509_certificate(&der).unwrap();
 
-        let result = verify_ecdsa_p384_signature(
-            &cert.spki_der,
-            &cert.tbs_der,
-            &cert.signature_bytes,
+        let result =
+            verify_ecdsa_p384_signature(&cert.spki_der, &cert.tbs_der, &cert.signature_bytes);
+        assert!(
+            result.is_ok(),
+            "Signature verification should not error: {:?}",
+            result.err()
         );
-        assert!(result.is_ok(), "Signature verification should not error: {:?}", result.err());
-        assert!(result.unwrap(), "AWS Nitro Root CA self-signature should verify");
+        assert!(
+            result.unwrap(),
+            "AWS Nitro Root CA self-signature should verify"
+        );
     }
 
     #[test]
@@ -1208,13 +1299,16 @@ mod tests {
         let der = certs::pem_to_der(certs::AMD_ARK_MILAN_PEM).unwrap();
         let cert = parse_x509_certificate(&der).unwrap();
 
-        let result = verify_rsa_pss_signature(
-            &cert.spki_der,
-            &cert.tbs_der,
-            &cert.signature_bytes,
+        let result = verify_rsa_pss_signature(&cert.spki_der, &cert.tbs_der, &cert.signature_bytes);
+        assert!(
+            result.is_ok(),
+            "Signature verification should not error: {:?}",
+            result.err()
         );
-        assert!(result.is_ok(), "Signature verification should not error: {:?}", result.err());
-        assert!(result.unwrap(), "AMD ARK Milan self-signature should verify");
+        assert!(
+            result.unwrap(),
+            "AMD ARK Milan self-signature should verify"
+        );
     }
 
     #[test]
@@ -1230,7 +1324,14 @@ mod tests {
         assert_eq!(ark.subject_cn, "ARK-Milan");
 
         let result = verify_certificate_signature(&ask, &ark.spki_der);
-        assert!(result.is_ok(), "ASK verification should not error: {:?}", result.err());
-        assert!(result.unwrap(), "AMD ASK Milan should be signed by ARK Milan");
+        assert!(
+            result.is_ok(),
+            "ASK verification should not error: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap(),
+            "AMD ASK Milan should be signed by ARK Milan"
+        );
     }
 }

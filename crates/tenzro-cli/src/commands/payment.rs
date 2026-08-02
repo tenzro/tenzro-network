@@ -2,9 +2,9 @@
 //!
 //! Supports MPP (Machine Payments Protocol), x402, and direct settlement.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output::{self, colors};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Payment protocol commands (MPP / x402)
 #[derive(Debug, Subcommand)]
@@ -85,13 +85,18 @@ impl PaymentChallengeCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_createPaymentChallenge", serde_json::json!([{
-            "resource": self.resource,
-            "amount": self.amount,
-            "asset": self.asset,
-            "protocol": self.protocol,
-            "recipient": self.recipient.as_deref()
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createPaymentChallenge",
+                serde_json::json!([{
+                    "resource": self.resource,
+                    "amount": self.amount,
+                    "asset": self.asset,
+                    "protocol": self.protocol,
+                    "recipient": self.recipient.as_deref()
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -167,12 +172,17 @@ impl PaymentPayCmd {
 
         spinner.set_message("Signing payment credential...");
 
-        let result: serde_json::Value = rpc.call(method, serde_json::json!([{
-            "url": self.url,
-            "payer_did": self.payer_did.as_deref(),
-            "wallet": self.wallet.as_deref(),
-            "max_amount": self.max_amount
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                method,
+                serde_json::json!([{
+                    "url": self.url,
+                    "payer_did": self.payer_did.as_deref(),
+                    "wallet": self.wallet.as_deref(),
+                    "max_amount": self.max_amount
+                }]),
+            )
+            .await?;
 
         spinner.set_message("Submitting payment...");
 
@@ -223,9 +233,14 @@ impl PaymentSessionsCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let sessions: Vec<serde_json::Value> = rpc.call("tenzro_listPaymentSessions", serde_json::json!([{
-            "include_closed": self.all
-        }])).await?;
+        let sessions: Vec<serde_json::Value> = rpc
+            .call(
+                "tenzro_listPaymentSessions",
+                serde_json::json!([{
+                    "include_closed": self.all
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -233,11 +248,23 @@ impl PaymentSessionsCmd {
         let mut rows = Vec::new();
 
         for session in &sessions {
-            let session_id = session.get("session_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let protocol = session.get("protocol").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let resource = session.get("resource").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let session_id = session
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let protocol = session
+                .get("protocol")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let resource = session
+                .get("resource")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let spent = session.get("spent").and_then(|v| v.as_str()).unwrap_or("0");
-            let status = session.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let status = session
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
 
             rows.push(vec![
                 session_id.to_string(),
@@ -279,7 +306,12 @@ impl PaymentReceiptCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let receipt: serde_json::Value = rpc.call("tenzro_getPaymentReceipt", serde_json::json!([self.receipt_id])).await?;
+        let receipt: serde_json::Value = rpc
+            .call(
+                "tenzro_getPaymentReceipt",
+                serde_json::json!([self.receipt_id]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -330,7 +362,9 @@ impl PaymentInfoCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let info: serde_json::Value = rpc.call("tenzro_paymentGatewayInfo", serde_json::json!([])).await?;
+        let info: serde_json::Value = rpc
+            .call("tenzro_paymentGatewayInfo", serde_json::json!([]))
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -348,7 +382,10 @@ impl PaymentInfoCmd {
         if let Some(protocols) = info.get("protocols").and_then(|v| v.as_array()) {
             for protocol in protocols {
                 if let Some(name) = protocol.get("name").and_then(|v| v.as_str()) {
-                    let desc = protocol.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let desc = protocol
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     output::print_field(&format!("  {}", name), desc);
                 }
             }
@@ -363,7 +400,10 @@ impl PaymentInfoCmd {
         if let Some(networks) = info.get("networks").and_then(|v| v.as_array()) {
             for network in networks {
                 if let Some(name) = network.get("name").and_then(|v| v.as_str()) {
-                    let desc = network.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let desc = network
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     output::print_field(&format!("  {}", name), desc);
                 }
             }
@@ -377,7 +417,10 @@ impl PaymentInfoCmd {
         if let Some(assets) = info.get("assets").and_then(|v| v.as_array()) {
             for asset in assets {
                 if let Some(symbol) = asset.get("symbol").and_then(|v| v.as_str()) {
-                    let desc = asset.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let desc = asset
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     output::print_field(&format!("  {}", symbol), desc);
                 }
             }
@@ -405,7 +448,9 @@ impl PaymentProtocolsCmd {
         output::print_header("Payment Protocols");
         let spinner = output::create_spinner("Fetching...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_listPaymentProtocols", serde_json::json!([])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_listPaymentProtocols", serde_json::json!([]))
+            .await?;
         spinner.finish_and_clear();
         if let Some(protocols) = result.as_array() {
             for p in protocols {
@@ -414,7 +459,9 @@ impl PaymentProtocolsCmd {
                     p.get("description").and_then(|v| v.as_str()).unwrap_or(""),
                 );
             }
-        } else { output::print_json(&result)?; }
+        } else {
+            output::print_json(&result)?;
+        }
         Ok(())
     }
 }
@@ -439,12 +486,24 @@ impl PaymentVerifyCmd {
         output::print_header("Verify Payment");
         let spinner = output::create_spinner("Verifying...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_verifyPayment", serde_json::json!({
-            "challenge_id": self.challenge_id, "credential": self.credential,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_verifyPayment",
+                serde_json::json!({
+                    "challenge_id": self.challenge_id, "credential": self.credential,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
-        let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
-        if valid { output::print_success("Payment verified!"); } else { output::print_error("Verification failed."); }
+        let valid = result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if valid {
+            output::print_success("Payment verified!");
+        } else {
+            output::print_error("Verification failed.");
+        }
         Ok(())
     }
 }
@@ -466,10 +525,17 @@ impl PaymentSettleCmd {
         output::print_header("Settle Payment");
         let spinner = output::create_spinner("Settling...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_settlePayment", serde_json::json!({ "payment_id": self.payment_id })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_settlePayment",
+                serde_json::json!({ "payment_id": self.payment_id }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Payment settled!");
-        if let Some(v) = result.get("tx_hash").and_then(|v| v.as_str()) { output::print_field("Tx Hash", v); }
+        if let Some(v) = result.get("tx_hash").and_then(|v| v.as_str()) {
+            output::print_field("Tx Hash", v);
+        }
         Ok(())
     }
 }
@@ -493,10 +559,17 @@ impl PaymentVisaTapCmd {
         output::print_header("Visa Tap-to-Pay");
         let spinner = output::create_spinner("Processing...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_payVisaTap", serde_json::json!({ "url": self.url, "amount": self.amount })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_payVisaTap",
+                serde_json::json!({ "url": self.url, "amount": self.amount }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Payment processed!");
-        if let Some(v) = result.get("receipt_id").and_then(|v| v.as_str()) { output::print_field("Receipt", v); }
+        if let Some(v) = result.get("receipt_id").and_then(|v| v.as_str()) {
+            output::print_field("Receipt", v);
+        }
         Ok(())
     }
 }
@@ -520,10 +593,17 @@ impl PaymentMastercardCmd {
         output::print_header("Mastercard Payment");
         let spinner = output::create_spinner("Processing...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_payMastercard", serde_json::json!({ "url": self.url, "amount": self.amount })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_payMastercard",
+                serde_json::json!({ "url": self.url, "amount": self.amount }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Payment processed!");
-        if let Some(v) = result.get("receipt_id").and_then(|v| v.as_str()) { output::print_field("Receipt", v); }
+        if let Some(v) = result.get("receipt_id").and_then(|v| v.as_str()) {
+            output::print_field("Receipt", v);
+        }
         Ok(())
     }
 }

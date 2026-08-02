@@ -104,9 +104,9 @@ pub struct MachineDeployCmd {
 
 impl MachineDeployCmd {
     pub async fn execute(&self) -> Result<()> {
-        use base64::Engine as _;
-        use crate::rpc::RpcClient;
         use crate::commands::lease::print_placement;
+        use crate::rpc::RpcClient;
+        use base64::Engine as _;
 
         output::print_header("Deploy Machine");
         if !self.image.is_file() {
@@ -205,7 +205,7 @@ impl MachineDeployCmd {
     /// Read the `--env` JSON file, fetch the node's sealing key, and envelope-wrap
     /// each value. Returns the `sealed_env` array for `tenzro_machineDeploy`.
     async fn seal_env(&self, rpc: &crate::rpc::RpcClient) -> Result<Vec<serde_json::Value>> {
-        use tenzro_crypto::encryption::{envelope_encrypt, X25519PublicKey};
+        use tenzro_crypto::encryption::{X25519PublicKey, envelope_encrypt};
 
         let Some(path) = &self.env else {
             return Ok(Vec::new());

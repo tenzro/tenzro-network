@@ -131,15 +131,21 @@ impl NetworkConfig {
     /// Validates the configuration
     pub fn validate(&self) -> crate::error::Result<()> {
         if self.max_inbound_peers == 0 && self.max_outbound_peers == 0 {
-            return Err(crate::error::NetworkError::InvalidConfig("At least one peer connection must be allowed".to_string()));
+            return Err(crate::error::NetworkError::InvalidConfig(
+                "At least one peer connection must be allowed".to_string(),
+            ));
         }
 
         if self.listen_addresses.is_empty() {
-            return Err(crate::error::NetworkError::InvalidConfig("At least one listen address must be specified".to_string()));
+            return Err(crate::error::NetworkError::InvalidConfig(
+                "At least one listen address must be specified".to_string(),
+            ));
         }
 
         if self.gossip_topics.is_empty() {
-            return Err(crate::error::NetworkError::InvalidConfig("At least one gossip topic must be specified".to_string()));
+            return Err(crate::error::NetworkError::InvalidConfig(
+                "At least one gossip topic must be specified".to_string(),
+            ));
         }
 
         Ok(())

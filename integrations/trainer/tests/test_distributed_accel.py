@@ -7,7 +7,7 @@ import os
 import pytest
 
 torch = pytest.importorskip("torch")
-import torch.nn as nn  # noqa: E402
+from torch import nn
 
 from tenzro_trainer.accel import maybe_convert_fp8, resolve_attn_implementation
 from tenzro_trainer.distributed import (
@@ -23,7 +23,6 @@ from tenzro_trainer.inner_loop import (
     load_partial_state,
     snapshot_state,
 )
-
 
 # ---------------------------------------------------------------------------
 # accel

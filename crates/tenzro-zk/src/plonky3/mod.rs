@@ -29,8 +29,7 @@ pub mod verify_envelope;
 
 pub use config::{TenzroStarkConfig, Val, build_testnet_config};
 pub use envelope::{
-    decode_kb, decode_proof, decode_public_inputs, encode_kb, encode_proof,
-    encode_public_inputs,
+    decode_kb, decode_proof, decode_public_inputs, encode_kb, encode_proof, encode_public_inputs,
 };
 pub use poseidon2_hash::{DIGEST_LEN, hash_many, hash_one, hash_pair};
 pub use prover::Plonky3Prover;

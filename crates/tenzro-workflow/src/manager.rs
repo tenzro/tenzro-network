@@ -32,7 +32,7 @@ use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tenzro_storage::kv::{KvStore, WriteOp, CF_APPROVALS, CF_SETTLEMENTS};
+use tenzro_storage::kv::{CF_APPROVALS, CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::primitives::{Hash, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -42,13 +42,9 @@ use crate::approval::{
 };
 use crate::error::{Result, WorkflowError};
 use crate::lifecycle::{KillSwitchScope, LifecycleTransition, TransitionTrigger};
-use crate::obligation::{
-    DischargeProof, Obligation, ObligationId, ObligationStatus,
-};
+use crate::obligation::{DischargeProof, Obligation, ObligationId, ObligationStatus};
 use crate::receipt::{WorkflowEventKind, WorkflowReceipt};
-use crate::workflow::{
-    ParticipantSignature, Workflow, WorkflowId, WorkflowStatus,
-};
+use crate::workflow::{ParticipantSignature, Workflow, WorkflowId, WorkflowStatus};
 
 /// Per-workflow lifecycle history + last-receipt pointer for chaining.
 #[derive(Default)]
@@ -150,7 +146,10 @@ impl WorkflowManager {
             seq_bytes.copy_from_slice(&key[13 + 32 + 1..13 + 32 + 1 + 8]);
             let seq = u64::from_le_bytes(seq_bytes);
             let rec: LifecycleRecord = bincode::deserialize(&value)?;
-            let entry = self.meta.entry(wf_id).or_insert_with(|| RwLock::new(WorkflowMeta::default()));
+            let entry = self
+                .meta
+                .entry(wf_id)
+                .or_insert_with(|| RwLock::new(WorkflowMeta::default()));
             let mut m = entry.write();
             m.lifecycle.push(rec.0);
             if seq + 1 > m.next_lifecycle_seq {
@@ -165,7 +164,10 @@ impl WorkflowManager {
         // Receipt chain head — derive from highest-`at` receipt per workflow.
         for (_, value) in store.scan_prefix(CF_SETTLEMENTS, b"wf_receipt:")? {
             let rec: WorkflowReceipt = bincode::deserialize(&value)?;
-            let entry = self.meta.entry(rec.workflow_id).or_insert_with(|| RwLock::new(WorkflowMeta::default()));
+            let entry = self
+                .meta
+                .entry(rec.workflow_id)
+                .or_insert_with(|| RwLock::new(WorkflowMeta::default()));
             let mut m = entry.write();
             if rec.at.0 >= 0 && rec.receipt_id != Hash::default() {
                 // Last write wins ordering — we re-anchor to the latest below.
@@ -330,8 +332,16 @@ impl WorkflowManager {
         Ok(())
     }
 
-    fn emit_receipt(&self, wf_id: &WorkflowId, event: WorkflowEventKind, at: i64) -> Result<WorkflowReceipt> {
-        let entry = self.meta.entry(*wf_id).or_insert_with(|| RwLock::new(WorkflowMeta::default()));
+    fn emit_receipt(
+        &self,
+        wf_id: &WorkflowId,
+        event: WorkflowEventKind,
+        at: i64,
+    ) -> Result<WorkflowReceipt> {
+        let entry = self
+            .meta
+            .entry(*wf_id)
+            .or_insert_with(|| RwLock::new(WorkflowMeta::default()));
         let prev = entry.read().last_receipt;
         let receipt = WorkflowReceipt::new(*wf_id, event, Timestamp(at), prev);
         entry.write().last_receipt = receipt.receipt_id;
@@ -340,7 +350,10 @@ impl WorkflowManager {
     }
 
     fn append_lifecycle(&self, transition: LifecycleTransition) -> Result<()> {
-        let entry = self.meta.entry(transition.workflow_id).or_insert_with(|| RwLock::new(WorkflowMeta::default()));
+        let entry = self
+            .meta
+            .entry(transition.workflow_id)
+            .or_insert_with(|| RwLock::new(WorkflowMeta::default()));
         let seq = {
             let mut m = entry.write();
             let seq = m.next_lifecycle_seq;
@@ -406,9 +419,10 @@ impl WorkflowManager {
     /// `tenzro_crypto::signatures::verify`. Manager only checks structural
     /// invariants (no double-sign, participant exists, status correct).
     pub fn sign(&self, wf_id: &WorkflowId, sig: ParticipantSignature, at: i64) -> Result<()> {
-        let mut entry = self.workflows.get_mut(wf_id).ok_or_else(|| {
-            WorkflowError::WorkflowNotFound(hex::encode(wf_id.as_bytes()))
-        })?;
+        let mut entry = self
+            .workflows
+            .get_mut(wf_id)
+            .ok_or_else(|| WorkflowError::WorkflowNotFound(hex::encode(wf_id.as_bytes())))?;
         if entry.status != WorkflowStatus::AwaitingSignatures {
             return Err(WorkflowError::InvalidTransition {
                 from: entry.status.as_str().into(),
@@ -539,15 +553,12 @@ impl WorkflowManager {
         // If every obligation on the workflow is terminal, transition
         // Active → Settling automatically.
         if let Some(wf) = self.workflows.get(&wf_id) {
-            let all_terminal = wf
-                .obligations
-                .iter()
-                .all(|oid| {
-                    self.obligations
-                        .get(oid)
-                        .map(|o| o.status.is_terminal())
-                        .unwrap_or(false)
-                });
+            let all_terminal = wf.obligations.iter().all(|oid| {
+                self.obligations
+                    .get(oid)
+                    .map(|o| o.status.is_terminal())
+                    .unwrap_or(false)
+            });
             let in_active = wf.status == WorkflowStatus::Active;
             drop(wf);
             if all_terminal && in_active {
@@ -679,10 +690,9 @@ impl WorkflowManager {
                 request_id.as_bytes(),
             )));
         }
-        let gate = self
-            .gates
-            .get(&entry.gate_id)
-            .ok_or_else(|| WorkflowError::ApprovalGateNotFound(hex::encode(entry.gate_id.as_bytes())))?;
+        let gate = self.gates.get(&entry.gate_id).ok_or_else(|| {
+            WorkflowError::ApprovalGateNotFound(hex::encode(entry.gate_id.as_bytes()))
+        })?;
         if !is_authorized_approver(&gate.approvers, &decision.by) {
             return Err(WorkflowError::UnauthorizedApprover {
                 did: decision.by.clone(),
@@ -751,9 +761,10 @@ impl WorkflowManager {
         trigger: TransitionTrigger,
         at: i64,
     ) -> Result<()> {
-        let mut entry = self.workflows.get_mut(wf_id).ok_or_else(|| {
-            WorkflowError::WorkflowNotFound(hex::encode(wf_id.as_bytes()))
-        })?;
+        let mut entry = self
+            .workflows
+            .get_mut(wf_id)
+            .ok_or_else(|| WorkflowError::WorkflowNotFound(hex::encode(wf_id.as_bytes())))?;
         let from = entry.status;
         if !from.can_transition_to(next) {
             return Err(WorkflowError::InvalidTransition {
@@ -813,7 +824,7 @@ impl WorkflowManager {
                 return Err(WorkflowError::InvalidTransition {
                     from: from.as_str().into(),
                     to: format!("kill_switch:{:?}", scope),
-                })
+                });
             }
         };
         let trigger = TransitionTrigger::KillSwitch {
@@ -1188,7 +1199,10 @@ mod tests {
             130,
         )
         .unwrap();
-        assert_eq!(mgr.get_workflow(&id).unwrap().status, WorkflowStatus::Active);
+        assert_eq!(
+            mgr.get_workflow(&id).unwrap().status,
+            WorkflowStatus::Active
+        );
     }
 
     #[test]
@@ -1240,7 +1254,10 @@ mod tests {
             200,
         )
         .unwrap();
-        assert_eq!(mgr.get_workflow(&id).unwrap().status, WorkflowStatus::Settling);
+        assert_eq!(
+            mgr.get_workflow(&id).unwrap().status,
+            WorkflowStatus::Settling
+        );
     }
 
     #[test]
@@ -1459,7 +1476,7 @@ mod tests {
     #[test]
     fn hydration_restores_workflows_after_restart() {
         use std::sync::Arc;
-        use tenzro_storage::{kv::RocksDbStore, StorageConfig};
+        use tenzro_storage::{StorageConfig, kv::RocksDbStore};
 
         let tmp = tempfile::tempdir().unwrap();
         let storage_cfg = StorageConfig::new(tmp.path().to_path_buf());

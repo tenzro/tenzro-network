@@ -47,7 +47,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use tenzro_identity::IdentityRegistry;
 use tenzro_types::agent_template::{
@@ -186,8 +186,7 @@ impl RunReport {
             StepStatus::SkippedByHardCap => self.steps_skipped_by_hard_cap += 1,
             StepStatus::Failed => self.steps_failed += 1,
         }
-        self.total_value_dispatched =
-            self.total_value_dispatched.saturating_add(value_dispatched);
+        self.total_value_dispatched = self.total_value_dispatched.saturating_add(value_dispatched);
         self.step_results.push(result);
     }
 
@@ -266,10 +265,7 @@ pub struct Executor {
 
 impl Executor {
     /// Constructs a new executor.
-    pub fn new(
-        registry: Arc<RegistryClient>,
-        identity_registry: Arc<IdentityRegistry>,
-    ) -> Self {
+    pub fn new(registry: Arc<RegistryClient>, identity_registry: Arc<IdentityRegistry>) -> Self {
         Self {
             registry,
             identity_registry,
@@ -283,11 +279,10 @@ impl Executor {
         spawned: &SpawnedAgent,
         run_opts: RunOptions,
     ) -> Result<RunReport, AgentKitError> {
-        let spec = spawned
-            .template
-            .execution_spec
-            .as_ref()
-            .ok_or_else(|| AgentKitError::MissingExecutionSpec(spawned.template.name.clone()))?;
+        let spec =
+            spawned.template.execution_spec.as_ref().ok_or_else(|| {
+                AgentKitError::MissingExecutionSpec(spawned.template.name.clone())
+            })?;
 
         let mut ctx = ExecutionContext::new(spawned.context.clone());
         let mut report = RunReport::default();
@@ -413,8 +408,10 @@ impl Executor {
                 recipient,
                 session_ttl_secs: _,
             } => {
-                self.dispatch_mpp(spawned, spec, amount, asset, recipient, ctx, run_opts, report)
-                    .await
+                self.dispatch_mpp(
+                    spawned, spec, amount, asset, recipient, ctx, run_opts, report,
+                )
+                .await
             }
             ExecutionStep::X402Pay {
                 resource_url,
@@ -423,7 +420,8 @@ impl Executor {
                 recipient,
                 facilitator: _,
             } => {
-                let url = resource_url.as_deref()
+                let url = resource_url
+                    .as_deref()
                     .or(recipient.as_deref())
                     .unwrap_or("");
                 self.dispatch_x402(spawned, spec, url, amount, asset, ctx, run_opts, report)
@@ -442,28 +440,22 @@ impl Executor {
             } => {
                 // Support both old-style (template_package/module/entity/command_variant/fields_json)
                 // and new-style (template_id/choice/args_template)
-                let pkg = template_package.as_deref()
+                let pkg = template_package
+                    .as_deref()
                     .or(template_id.as_deref())
                     .unwrap_or("");
                 let mod_name = module.as_deref().unwrap_or("");
                 let ent = entity.as_deref().unwrap_or("");
-                let cmd = command_variant.as_deref()
+                let cmd = command_variant
+                    .as_deref()
                     .or(choice.as_deref())
                     .unwrap_or("Create");
-                let fields = fields_json.as_deref()
+                let fields = fields_json
+                    .as_deref()
                     .or(args_template.as_deref())
                     .unwrap_or("{}");
                 self.dispatch_daml(
-                    spawned,
-                    spec,
-                    pkg,
-                    mod_name,
-                    ent,
-                    cmd,
-                    fields,
-                    ctx,
-                    run_opts,
-                    report,
+                    spawned, spec, pkg, mod_name, ent, cmd, fields, ctx, run_opts, report,
                 )
                 .await
             }
@@ -473,7 +465,8 @@ impl Executor {
                 arguments_json,
                 params_template,
             } => {
-                let args = params_template.as_deref()
+                let args = params_template
+                    .as_deref()
                     .or(arguments_json.as_deref())
                     .unwrap_or("{}");
                 self.dispatch_tool(spawned, tool_tag, args, ctx, run_opts, report)
@@ -485,7 +478,8 @@ impl Executor {
                 input_json,
                 params_template,
             } => {
-                let input = input_json.as_deref()
+                let input = input_json
+                    .as_deref()
                     .or(params_template.as_deref())
                     .unwrap_or("{}");
                 self.dispatch_skill(spawned, skill_tag, input, ctx, run_opts, report)
@@ -705,10 +699,7 @@ impl Executor {
         {
             Ok(output) => {
                 ctx.running_total = ctx.running_total.saturating_add(value_u128);
-                let tx_hash = output
-                    .get("tx_hash")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let tx_hash = output.get("tx_hash").and_then(|v| v.as_str()).unwrap_or("");
                 report.push(
                     StepResult {
                         step_kind: "EvmDispatch".into(),
@@ -843,7 +834,11 @@ impl Executor {
             }
         };
 
-        match self.registry.call_raw_with_auth(method, params, creds).await {
+        match self
+            .registry
+            .call_raw_with_auth(method, params, creds)
+            .await
+        {
             Ok(output) => report.push(
                 StepResult {
                     step_kind: "NodeRpc".into(),
@@ -1063,9 +1058,7 @@ impl Executor {
                         step_kind: "SvmDispatch".into(),
                         operation: operation.into(),
                         status: StepStatus::Failed,
-                        message: format!(
-                            "SVM dispatch failed: {e}. program={program_id_resolved}"
-                        ),
+                        message: format!("SVM dispatch failed: {e}. program={program_id_resolved}"),
                         output: None,
                     },
                     0,
@@ -1268,7 +1261,9 @@ impl Executor {
                         step_kind: "MppPay".into(),
                         operation: operation.into(),
                         status: StepStatus::Executed,
-                        message: format!("paid {amount_resolved} {asset_resolved} to {recipient_resolved}"),
+                        message: format!(
+                            "paid {amount_resolved} {asset_resolved} to {recipient_resolved}"
+                        ),
                         output: Some(output),
                     },
                     amount_u128,
@@ -1367,7 +1362,9 @@ impl Executor {
                         step_kind: "X402Pay".into(),
                         operation: operation.into(),
                         status: StepStatus::Executed,
-                        message: format!("paid {amount_resolved} {asset_resolved} for {url_resolved}"),
+                        message: format!(
+                            "paid {amount_resolved} {asset_resolved} for {url_resolved}"
+                        ),
                         output: Some(output),
                     },
                     amount_u128,
@@ -1480,10 +1477,11 @@ impl Executor {
             let contract_id = fields_value
                 .get("contract_id")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| AgentKitError::Other(
-                    "DAML exercise requires `contract_id` in fields_json"
-                        .to_string(),
-                ))?
+                .ok_or_else(|| {
+                    AgentKitError::Other(
+                        "DAML exercise requires `contract_id` in fields_json".to_string(),
+                    )
+                })?
                 .to_string();
             let choice_argument = fields_value
                 .get("choice_argument")
@@ -1582,9 +1580,8 @@ impl Executor {
         };
 
         let args_resolved = substitute(arguments_json, &ctx.vars)?;
-        let args_value: Value = serde_json::from_str(&args_resolved).map_err(|e| {
-            AgentKitError::Other(format!("tool arguments not valid json: {e}"))
-        })?;
+        let args_value: Value = serde_json::from_str(&args_resolved)
+            .map_err(|e| AgentKitError::Other(format!("tool arguments not valid json: {e}")))?;
 
         if run_opts.dry_run {
             report.push(
@@ -1982,10 +1979,7 @@ mod tests {
         let mut ctx = ExecutionContext::new(HashMap::new());
         ctx.bind_output("k", Value::String("hello".to_string()));
         assert_eq!(ctx.vars.get("k").map(String::as_str), Some("hello"));
-        assert_eq!(
-            ctx.outputs.get("k").and_then(|v| v.as_str()),
-            Some("hello")
-        );
+        assert_eq!(ctx.outputs.get("k").and_then(|v| v.as_str()), Some("hello"));
     }
 
     #[test]

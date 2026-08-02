@@ -34,7 +34,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tenzro_crypto::{
     keys::{KeyType, PublicKey},
-    signatures::{verify, Signature as CryptoSignature, Signer},
+    signatures::{Signature as CryptoSignature, Signer, verify},
 };
 use tenzro_identity::IdentityRegistry;
 
@@ -438,9 +438,7 @@ impl PaymentMandate {
             .iter()
             .map(|i| i.total)
             .try_fold(0u128, |acc, t| acc.checked_add(t))
-            .ok_or_else(|| {
-                PaymentError::CredentialError("cart total overflow".into())
-            })?;
+            .ok_or_else(|| PaymentError::CredentialError("cart total overflow".into()))?;
         if computed != self.total_amount {
             return Err(PaymentError::CredentialError(format!(
                 "cart total mismatch: claimed={}, computed={}",
@@ -523,7 +521,12 @@ impl Vdc {
         let sig = signer
             .sign(&preimage)
             .map_err(|e| PaymentError::CryptoError(e.to_string()))?;
-        Self::assemble(payload, signer_did, signer_public_key, sig.as_bytes().to_vec())
+        Self::assemble(
+            payload,
+            signer_did,
+            signer_public_key,
+            sig.as_bytes().to_vec(),
+        )
     }
 
     /// Canonical preimage bytes for a mandate + signer pair.
@@ -603,8 +606,7 @@ impl Vdc {
 
         let pk = PublicKey::new(KeyType::Ed25519, self.signer_public_key.clone());
         let sig = CryptoSignature::new(KeyType::Ed25519, self.signature.clone());
-        verify(&pk, &preimage, &sig)
-            .map_err(|e| PaymentError::VerificationFailed(e.to_string()))
+        verify(&pk, &preimage, &sig).map_err(|e| PaymentError::VerificationFailed(e.to_string()))
     }
 
     /// Verify like [`Self::verify`] *and* enforce the `cnf` (key-binding)
@@ -654,17 +656,15 @@ impl Vdc {
                 // signing key the VDC already verified against. RFC 7517
                 // OKP keys (Ed25519) carry the raw public key in `x` as
                 // base64url-no-pad.
-                let x_str = jwk
-                    .get("x")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        PaymentError::VerificationFailed(
-                            "cnf.jwk missing 'x' parameter (Ed25519 OKP)".into(),
-                        )
-                    })?;
-                use base64::{engine::general_purpose, Engine as _};
-                let x_bytes =
-                    general_purpose::URL_SAFE_NO_PAD.decode(x_str).map_err(|e| {
+                let x_str = jwk.get("x").and_then(|v| v.as_str()).ok_or_else(|| {
+                    PaymentError::VerificationFailed(
+                        "cnf.jwk missing 'x' parameter (Ed25519 OKP)".into(),
+                    )
+                })?;
+                use base64::{Engine as _, engine::general_purpose};
+                let x_bytes = general_purpose::URL_SAFE_NO_PAD
+                    .decode(x_str)
+                    .map_err(|e| {
                         PaymentError::VerificationFailed(format!(
                             "cnf.jwk.x is not base64url-no-pad: {e}"
                         ))
@@ -731,11 +731,8 @@ impl Vdc {
     /// payload, signer_did, signer_public_key) so any mutation of the
     /// parent invalidates the binding.
     pub fn checkout_hash(&self) -> Result<String> {
-        let preimage = Self::canonical_preimage(
-            &self.payload,
-            &self.signer_did,
-            &self.signer_public_key,
-        )?;
+        let preimage =
+            Self::canonical_preimage(&self.payload, &self.signer_did, &self.signer_public_key)?;
         let digest = tenzro_crypto::hash::sha256(&preimage);
         Ok(hex::encode(digest.as_bytes()))
     }
@@ -826,7 +823,10 @@ impl MandateValidator {
         // they must reference the same Stripe SharedPaymentToken. The
         // principal binds the SPT at CheckoutMandate-issue time; the
         // agent settles against it at PaymentMandate-confirm time.
-        match (checkout.spt_grant_id.as_ref(), payment.spt_grant_id.as_ref()) {
+        match (
+            checkout.spt_grant_id.as_ref(),
+            payment.spt_grant_id.as_ref(),
+        ) {
             (Some(c), Some(p)) if c != p => {
                 return Err(PaymentError::VerificationFailed(format!(
                     "spt_grant_id mismatch: checkout={}, payment={}",
@@ -938,12 +938,7 @@ impl MandateValidator {
         payment_vdc: &Vdc,
         identity_registry: &IdentityRegistry,
     ) -> Result<()> {
-        self.validate_with_delegation_and_policy(
-            checkout_vdc,
-            payment_vdc,
-            identity_registry,
-            None,
-        )
+        self.validate_with_delegation_and_policy(checkout_vdc, payment_vdc, identity_registry, None)
     }
 
     /// Like [`Self::validate_with_delegation`], but additionally consults a
@@ -1261,8 +1256,7 @@ mod tests {
         .unwrap();
 
         let payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
-        let payment_vdc =
-            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+        let payment_vdc = Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
 
         MandateValidator::new()
             .validate(&checkout_vdc, &payment_vdc)
@@ -1284,8 +1278,7 @@ mod tests {
         .unwrap();
 
         let payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
-        let payment_vdc =
-            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+        let payment_vdc = Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
 
         let err = MandateValidator::new()
             .validate(&checkout_vdc, &payment_vdc)
@@ -1352,8 +1345,7 @@ mod tests {
         // Agent picks "ethereum" — not on the whitelist.
         let mut payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
         payment.chain = "ethereum".into();
-        let payment_vdc =
-            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+        let payment_vdc = Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
 
         let err = MandateValidator::new()
             .validate(&checkout_vdc, &payment_vdc)
@@ -1382,8 +1374,7 @@ mod tests {
 
         // `make_payment` defaults `chain = "tenzro"`.
         let payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
-        let payment_vdc =
-            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+        let payment_vdc = Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
 
         MandateValidator::new()
             .validate(&checkout_vdc, &payment_vdc)
@@ -1408,8 +1399,7 @@ mod tests {
 
         let mut payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
         payment.chain = "ethereum".into(); // exotic rail, but whitelist is open
-        let payment_vdc =
-            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+        let payment_vdc = Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
 
         MandateValidator::new()
             .validate(&checkout_vdc, &payment_vdc)
@@ -1420,8 +1410,8 @@ mod tests {
     // validate_with_delegation — AP2 + TDIP cross-validation
     // -----------------------------------------------------------------
 
-    use tenzro_identity::delegation::DelegationScope;
     use tenzro_identity::IdentityRegistry;
+    use tenzro_identity::delegation::DelegationScope;
     use tenzro_types::identity::KycTier;
 
     /// Build a registry containing a human controller and a machine agent
@@ -1462,8 +1452,7 @@ mod tests {
         )
         .unwrap();
         let payment = make_payment(&checkout.mandate_id, agent_did, payment_total);
-        let payment_vdc =
-            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+        let payment_vdc = Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
         (checkout_vdc, payment_vdc)
     }
 
@@ -1472,8 +1461,7 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(10_000);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
@@ -1489,8 +1477,7 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["inference".into()])
             .with_max_transaction_value(10_000);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
@@ -1511,8 +1498,7 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(1_000);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
@@ -1533,8 +1519,7 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(10_000);
-        let (registry, human_did, _machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, _machine_did) = registry_with_human_and_machine(scope).await;
 
         let bogus_agent = "did:tenzro:machine:not-registered";
         let (checkout_vdc, payment_vdc) =
@@ -1556,8 +1541,7 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(u128::MAX);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 1_000, 5_000);
@@ -1594,20 +1578,17 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(10_000);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
 
-        let resolver = StaticPolicyResolver(
-            crate::identity_binding::SpendingPolicySnapshot {
-                max_per_transaction: 2_000,
-                max_daily_spend: 100_000,
-                current_daily_spend: 0,
-                enabled: true,
-            },
-        );
+        let resolver = StaticPolicyResolver(crate::identity_binding::SpendingPolicySnapshot {
+            max_per_transaction: 2_000,
+            max_daily_spend: 100_000,
+            current_daily_spend: 0,
+            enabled: true,
+        });
 
         let err = MandateValidator::new()
             .validate_with_delegation_and_policy(
@@ -1628,22 +1609,19 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(u128::MAX);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
 
         // Per-tx OK, but already 8_000 spent today against a 10_000 cap →
         // 8_000 + 5_000 > 10_000.
-        let resolver = StaticPolicyResolver(
-            crate::identity_binding::SpendingPolicySnapshot {
-                max_per_transaction: 1_000_000,
-                max_daily_spend: 10_000,
-                current_daily_spend: 8_000,
-                enabled: true,
-            },
-        );
+        let resolver = StaticPolicyResolver(crate::identity_binding::SpendingPolicySnapshot {
+            max_per_transaction: 1_000_000,
+            max_daily_spend: 10_000,
+            current_daily_spend: 8_000,
+            enabled: true,
+        });
 
         let err = MandateValidator::new()
             .validate_with_delegation_and_policy(
@@ -1664,20 +1642,17 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(10_000);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
 
-        let resolver = StaticPolicyResolver(
-            crate::identity_binding::SpendingPolicySnapshot {
-                max_per_transaction: 10_000,
-                max_daily_spend: 100_000,
-                current_daily_spend: 0,
-                enabled: true,
-            },
-        );
+        let resolver = StaticPolicyResolver(crate::identity_binding::SpendingPolicySnapshot {
+            max_per_transaction: 10_000,
+            max_daily_spend: 100_000,
+            current_daily_spend: 0,
+            enabled: true,
+        });
 
         MandateValidator::new()
             .validate_with_delegation_and_policy(
@@ -1694,22 +1669,19 @@ mod tests {
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
             .with_max_transaction_value(10_000);
-        let (registry, human_did, machine_did) =
-            registry_with_human_and_machine(scope).await;
+        let (registry, human_did, machine_did) = registry_with_human_and_machine(scope).await;
 
         let (checkout_vdc, payment_vdc) =
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
 
         // Tight ceilings that *would* reject — but `enabled: false` flips
         // the policy off entirely, so the payment goes through.
-        let resolver = StaticPolicyResolver(
-            crate::identity_binding::SpendingPolicySnapshot {
-                max_per_transaction: 1,
-                max_daily_spend: 1,
-                current_daily_spend: 0,
-                enabled: false,
-            },
-        );
+        let resolver = StaticPolicyResolver(crate::identity_binding::SpendingPolicySnapshot {
+            max_per_transaction: 1,
+            max_daily_spend: 1,
+            current_daily_spend: 0,
+            enabled: false,
+        });
 
         MandateValidator::new()
             .validate_with_delegation_and_policy(
@@ -1770,12 +1742,8 @@ mod tests {
 
         let payment = make_payment(&checkout.mandate_id, agent_did, payment_total)
             .with_cnf(MandateCnf::Did(agent_did.to_string()));
-        let payment_vdc = Vdc::sign(
-            agent_signer,
-            agent_did,
-            MandatePayload::Payment(payment),
-        )
-        .unwrap();
+        let payment_vdc =
+            Vdc::sign(agent_signer, agent_did, MandatePayload::Payment(payment)).unwrap();
         (checkout_vdc, payment_vdc)
     }
 
@@ -1885,12 +1853,8 @@ mod tests {
 
         let mut payment = make_payment("checkout-id", &machine_did, 5_000);
         payment = payment.with_cnf(MandateCnf::Did(machine_did.clone()));
-        let payment_vdc = Vdc::sign(
-            &other_agent,
-            &machine_did,
-            MandatePayload::Payment(payment),
-        )
-        .unwrap();
+        let payment_vdc =
+            Vdc::sign(&other_agent, &machine_did, MandatePayload::Payment(payment)).unwrap();
 
         let err = payment_vdc.verify_with_registry(&registry).unwrap_err();
         assert!(
@@ -1924,7 +1888,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_with_registry_jwk_must_match_signer_key() {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
         let agent = Ed25519SignerImpl::generate().unwrap();
         let agent_pk_bytes = agent.public_key().as_bytes().to_vec();
 
@@ -1952,8 +1916,7 @@ mod tests {
             "crv": "Ed25519",
             "x": general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]),
         });
-        let mut bad_payment =
-            make_payment("checkout-id", "did:tenzro:machine:a:1", 5_000);
+        let mut bad_payment = make_payment("checkout-id", "did:tenzro:machine:a:1", 5_000);
         bad_payment = bad_payment.with_cnf(MandateCnf::Jwk(bad_jwk));
         let bad_vdc = Vdc::sign(
             &agent,
@@ -2026,12 +1989,8 @@ mod tests {
         let payment = make_payment(&checkout.mandate_id, agent_did, payment_total)
             .with_cnf(MandateCnf::Did(agent_did.to_string()))
             .with_escrow(escrow_id);
-        let payment_vdc = Vdc::sign(
-            agent_signer,
-            agent_did,
-            MandatePayload::Payment(payment),
-        )
-        .unwrap();
+        let payment_vdc =
+            Vdc::sign(agent_signer, agent_did, MandatePayload::Payment(payment)).unwrap();
         (checkout_vdc, payment_vdc)
     }
 
@@ -2158,8 +2117,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            err.to_string()
-                .contains("no EscrowResolver is wired"),
+            err.to_string().contains("no EscrowResolver is wired"),
             "expected wiring error, got: {err}"
         );
     }
@@ -2358,9 +2316,7 @@ mod tests {
 
     // ─── SptCeilingResolver wiring (#383 SPT payment-mandate ceiling) ────
 
-    use crate::mpp::stripe_spt::{
-        SptCeilingResolver, SptCeilingSnapshot, SptStatus, UsageLimits,
-    };
+    use crate::mpp::stripe_spt::{SptCeilingResolver, SptCeilingSnapshot, SptStatus, UsageLimits};
 
     /// In-memory `SptCeilingResolver` for tests. Returns whatever the
     /// test configured for a given `granted_token_id`.
@@ -2437,8 +2393,7 @@ mod tests {
         .with_cnf(MandateCnf::Did(agent_did.to_string()))
         .with_spt_grant(spt_grant_id);
         let payment_vdc =
-            Vdc::sign(agent_signer, agent_did, MandatePayload::Payment(payment))
-                .unwrap();
+            Vdc::sign(agent_signer, agent_did, MandatePayload::Payment(payment)).unwrap();
         (checkout_vdc, payment_vdc)
     }
 
@@ -2737,14 +2692,9 @@ mod tests {
         )
         .unwrap();
 
-        let payment = make_payment(&checkout.mandate_id, agent_did, 5_000)
-            .with_spt_grant("spt_grant_B");
-        let payment_vdc = Vdc::sign(
-            &agent,
-            agent_did,
-            MandatePayload::Payment(payment),
-        )
-        .unwrap();
+        let payment =
+            make_payment(&checkout.mandate_id, agent_did, 5_000).with_spt_grant("spt_grant_B");
+        let payment_vdc = Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
 
         let validator = MandateValidator::new();
         let err = validator.validate(&checkout_vdc, &payment_vdc).unwrap_err();

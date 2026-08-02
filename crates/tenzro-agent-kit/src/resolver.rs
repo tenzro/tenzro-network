@@ -46,12 +46,16 @@ pub struct DiscoveredResources {
 impl DiscoveredResources {
     /// Returns the tool registered under the given tag, if any.
     pub fn tool_by_tag(&self, tag: &str) -> Option<&ToolDefinition> {
-        self.tools.iter().find_map(|(t, def)| (t == tag).then_some(def))
+        self.tools
+            .iter()
+            .find_map(|(t, def)| (t == tag).then_some(def))
     }
 
     /// Returns the skill registered under the given tag, if any.
     pub fn skill_by_tag(&self, tag: &str) -> Option<&SkillDefinition> {
-        self.skills.iter().find_map(|(t, def)| (t == tag).then_some(def))
+        self.skills
+            .iter()
+            .find_map(|(t, def)| (t == tag).then_some(def))
     }
 
     /// Number of resolved tools.
@@ -79,7 +83,10 @@ impl TemplateResolver {
 
     /// Walks the spec's `required_tool_tags` + `required_skill_tags` and
     /// resolves each one against the live registry.
-    pub async fn resolve(&self, spec: &ExecutionSpec) -> Result<DiscoveredResources, AgentKitError> {
+    pub async fn resolve(
+        &self,
+        spec: &ExecutionSpec,
+    ) -> Result<DiscoveredResources, AgentKitError> {
         let mut out = DiscoveredResources::default();
 
         for tag in &spec.required_tool_tags {
@@ -111,7 +118,10 @@ impl TemplateResolver {
         if let Some(idx) = results.iter().position(|t| t.category == tag) {
             return Ok(results.swap_remove(idx));
         }
-        if let Some(idx) = results.iter().position(|t| t.capabilities.iter().any(|c| c == tag)) {
+        if let Some(idx) = results
+            .iter()
+            .position(|t| t.capabilities.iter().any(|c| c == tag))
+        {
             return Ok(results.swap_remove(idx));
         }
         results

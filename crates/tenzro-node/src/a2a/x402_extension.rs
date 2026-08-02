@@ -254,7 +254,10 @@ impl MessageMetadataExt for HashMap<String, serde_json::Value> {
 
     fn fail_x402(&mut self, status: PaymentStatus) {
         debug_assert!(
-            matches!(status, PaymentStatus::PaymentRejected | PaymentStatus::PaymentFailed),
+            matches!(
+                status,
+                PaymentStatus::PaymentRejected | PaymentStatus::PaymentFailed
+            ),
             "fail_x402 must be called with a failure terminal status"
         );
         set_status(self, status);
@@ -305,10 +308,16 @@ impl VerifyFailure {
     pub fn message(&self) -> String {
         match self {
             Self::TaskIdMismatch { expected, got } => {
-                format!("payment payload taskId {} does not match task {}", got, expected)
+                format!(
+                    "payment payload taskId {} does not match task {}",
+                    got, expected
+                )
             }
             Self::SchemeNotOffered { scheme, network } => {
-                format!("scheme {}/{} is not in the offered requirements", scheme, network)
+                format!(
+                    "scheme {}/{} is not in the offered requirements",
+                    scheme, network
+                )
             }
             Self::SchemeNotImplemented { scheme } => {
                 format!("scheme {} is not implemented on this node", scheme)
@@ -522,7 +531,10 @@ mod tests {
     fn malformed_value_decodes_to_none_not_panic() {
         let mut md: HashMap<String, serde_json::Value> = HashMap::new();
         md.insert(KEY_PAYMENT_REQUIRED.to_string(), serde_json::json!(42));
-        md.insert(KEY_PAYMENT_PAYLOAD.to_string(), serde_json::json!("not-an-object"));
+        md.insert(
+            KEY_PAYMENT_PAYLOAD.to_string(),
+            serde_json::json!("not-an-object"),
+        );
         assert!(md.get_payment_required().is_none());
         assert!(md.get_payment_payload().is_none());
     }

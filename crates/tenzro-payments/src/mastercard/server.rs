@@ -139,10 +139,7 @@ impl PaymentProtocol for MastercardAgentPayServer {
         };
 
         let mut extra = HashMap::new();
-        extra.insert(
-            "requires_kya".to_string(),
-            serde_json::Value::Bool(true),
-        );
+        extra.insert("requires_kya".to_string(), serde_json::Value::Bool(true));
         extra.insert(
             "merchant_id".to_string(),
             serde_json::Value::String(self.merchant_id.clone()),
@@ -253,14 +250,20 @@ impl PaymentProtocol for MastercardAgentPayServer {
             .extra
             .get("public_key")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PaymentError::VerificationFailed("Missing public_key in extra".to_string()))?;
+            .ok_or_else(|| {
+                PaymentError::VerificationFailed("Missing public_key in extra".to_string())
+            })?;
 
         let public_key_bytes = hex::decode(public_key_hex).map_err(|e| {
             PaymentError::VerificationFailed(format!("Invalid public_key hex: {}", e))
         })?;
 
         // 8. Verify agent exists in registry (using DID as key_id for Tenzro registry)
-        if !self.agent_registry.verify_agent(&credential.payer_did).await? {
+        if !self
+            .agent_registry
+            .verify_agent(&credential.payer_did)
+            .await?
+        {
             return Err(PaymentError::VerificationFailed(format!(
                 "Agent {} not found in registry",
                 credential.payer_did
@@ -304,7 +307,7 @@ impl PaymentProtocol for MastercardAgentPayServer {
             // Addresses are derived from DID strings via UTF-8 SHA-256 hash (first 32 bytes).
             use sha2::{Digest, Sha256};
             use tenzro_types::primitives::Address;
-            use tenzro_types::settlement::{ServiceProof, ServiceType, ProofType};
+            use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 
             let payer_hash = Sha256::digest(verification.payer_did.as_bytes());
             let recipient_hash = Sha256::digest(challenge.recipient.as_bytes());
@@ -501,10 +504,7 @@ mod tests {
 
         // Register an autonomous agent
         let agent_did = identity_registry
-            .register_autonomous_machine(
-                vec![10; 32],
-                vec!["payment".to_string()],
-            )
+            .register_autonomous_machine(vec![10; 32], vec!["payment".to_string()])
             .await
             .unwrap()
             .did_string();
@@ -522,7 +522,10 @@ mod tests {
             .unwrap();
 
         // Verify the credential
-        let verification = server.verify_credential(&challenge, &credential).await.unwrap();
+        let verification = server
+            .verify_credential(&challenge, &credential)
+            .await
+            .unwrap();
 
         assert!(verification.verified);
         assert_eq!(verification.payer_did, agent_did);
@@ -552,10 +555,7 @@ mod tests {
 
         // Register an autonomous agent
         let agent_did = identity_registry
-            .register_autonomous_machine(
-                vec![11; 32],
-                vec!["payment".to_string()],
-            )
+            .register_autonomous_machine(vec![11; 32], vec!["payment".to_string()])
             .await
             .unwrap()
             .did_string();
@@ -571,7 +571,10 @@ mod tests {
             .await
             .unwrap();
 
-        let verification = server.verify_credential(&challenge, &credential).await.unwrap();
+        let verification = server
+            .verify_credential(&challenge, &credential)
+            .await
+            .unwrap();
 
         // Settle
         let receipt = server.settle(&verification).await.unwrap();

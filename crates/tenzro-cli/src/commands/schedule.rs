@@ -1,9 +1,9 @@
 //! Provider schedule management commands
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
 use crate::rpc::RpcClient;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 /// Provider schedule management
@@ -92,7 +92,8 @@ impl ScheduleSetCmd {
         let spinner = output::create_spinner("Updating schedule...");
 
         let rpc = RpcClient::new(&self.rpc);
-        let _: serde_json::Value = rpc.call("tenzro_setProviderSchedule", serde_json::json!([schedule]))
+        let _: serde_json::Value = rpc
+            .call("tenzro_setProviderSchedule", serde_json::json!([schedule]))
             .await?;
 
         spinner.finish_and_clear();
@@ -118,13 +119,18 @@ impl ScheduleShowCmd {
         let spinner = output::create_spinner("Fetching schedule...");
 
         let rpc = RpcClient::new(&self.rpc);
-        let schedule: ProviderSchedule = rpc.call("tenzro_getProviderSchedule", serde_json::json!([]))
+        let schedule: ProviderSchedule = rpc
+            .call("tenzro_getProviderSchedule", serde_json::json!([]))
             .await?;
 
         spinner.finish_and_clear();
 
         println!();
-        output::print_status("Enabled", if schedule.enabled { "Yes" } else { "No" }, schedule.enabled);
+        output::print_status(
+            "Enabled",
+            if schedule.enabled { "Yes" } else { "No" },
+            schedule.enabled,
+        );
         output::print_field("Start Time", &format!("{:02}:00", schedule.start_hour));
         output::print_field("End Time", &format!("{:02}:00", schedule.end_hour));
         output::print_field("Timezone", &schedule.timezone);
@@ -151,14 +157,16 @@ impl ScheduleEnableCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // Get current schedule
-        let mut schedule: ProviderSchedule = rpc.call("tenzro_getProviderSchedule", serde_json::json!([]))
+        let mut schedule: ProviderSchedule = rpc
+            .call("tenzro_getProviderSchedule", serde_json::json!([]))
             .await?;
 
         schedule.enabled = true;
 
         let spinner = output::create_spinner("Enabling schedule...");
 
-        let _: serde_json::Value = rpc.call("tenzro_setProviderSchedule", serde_json::json!([schedule]))
+        let _: serde_json::Value = rpc
+            .call("tenzro_setProviderSchedule", serde_json::json!([schedule]))
             .await?;
 
         spinner.finish_and_clear();
@@ -184,14 +192,16 @@ impl ScheduleDisableCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // Get current schedule
-        let mut schedule: ProviderSchedule = rpc.call("tenzro_getProviderSchedule", serde_json::json!([]))
+        let mut schedule: ProviderSchedule = rpc
+            .call("tenzro_getProviderSchedule", serde_json::json!([]))
             .await?;
 
         schedule.enabled = false;
 
         let spinner = output::create_spinner("Disabling schedule...");
 
-        let _: serde_json::Value = rpc.call("tenzro_setProviderSchedule", serde_json::json!([schedule]))
+        let _: serde_json::Value = rpc
+            .call("tenzro_setProviderSchedule", serde_json::json!([schedule]))
             .await?;
 
         spinner.finish_and_clear();
@@ -210,7 +220,8 @@ fn parse_time(time_str: &str) -> Result<u8> {
         anyhow::bail!("Invalid time format. Use HH:MM (e.g., 09:00, 17:30)");
     }
 
-    let hour: u8 = parts[0].parse()
+    let hour: u8 = parts[0]
+        .parse()
         .map_err(|_| anyhow::anyhow!("Invalid hour: {}", parts[0]))?;
 
     if hour > 23 {
@@ -229,7 +240,10 @@ fn parse_days(days_str: &str) -> Result<[bool; 7]> {
         if let Some(index) = day_names.iter().position(|&d| d == day) {
             days[index] = true;
         } else {
-            anyhow::bail!("Invalid day: {}. Use mon, tue, wed, thu, fri, sat, sun", day);
+            anyhow::bail!(
+                "Invalid day: {}. Use mon, tue, wed, thu, fri, sat, sun",
+                day
+            );
         }
     }
 
@@ -238,7 +252,8 @@ fn parse_days(days_str: &str) -> Result<[bool; 7]> {
 
 fn format_days(days: &[bool; 7]) -> String {
     let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    let active_days: Vec<&str> = days.iter()
+    let active_days: Vec<&str> = days
+        .iter()
         .enumerate()
         .filter_map(|(i, &active)| if active { Some(day_names[i]) } else { None })
         .collect();

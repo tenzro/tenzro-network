@@ -6,7 +6,7 @@
 use crate::config::StorageConfig;
 use crate::error::{Result, StorageError};
 use parking_lot::RwLock;
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Options, WriteBatch, WriteOptions};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -344,13 +344,20 @@ impl RocksDbStore {
         // info LOG, not WAL archives, so it never bounded this and is dropped.
 
         // Attempt to open the database, handling WAL corruption gracefully
-        let db = match DB::open_cf_descriptors(&opts, &config.db_path, Self::column_family_descriptors(config)) {
+        let db = match DB::open_cf_descriptors(
+            &opts,
+            &config.db_path,
+            Self::column_family_descriptors(config),
+        ) {
             Ok(db) => db,
             Err(e) => {
                 let error_str = e.to_string();
                 // Check if the error indicates WAL corruption
-                if error_str.contains("Corruption") || error_str.contains("corruption") ||
-                   error_str.contains("log") || error_str.contains("WAL") {
+                if error_str.contains("Corruption")
+                    || error_str.contains("corruption")
+                    || error_str.contains("log")
+                    || error_str.contains("WAL")
+                {
                     tracing::warn!(
                         "Database corruption detected at {:?}, attempting repair: {}",
                         config.db_path,
@@ -362,19 +369,24 @@ impl RocksDbStore {
                         tracing::error!("Database repair failed: {}", repair_err);
                         return Err(StorageError::DatabaseError(format!(
                             "Failed to open database and repair failed: {} (repair error: {})",
-                            error_str,
-                            repair_err
+                            error_str, repair_err
                         )));
                     }
 
                     tracing::info!("Database repair completed, reopening...");
 
                     // Try opening again after repair with fresh descriptors
-                    DB::open_cf_descriptors(&opts, &config.db_path, Self::column_family_descriptors(config))
-                        .map_err(|e| StorageError::DatabaseError(format!(
+                    DB::open_cf_descriptors(
+                        &opts,
+                        &config.db_path,
+                        Self::column_family_descriptors(config),
+                    )
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!(
                             "Failed to open database after repair: {}",
                             e
-                        )))?
+                        ))
+                    })?
                 } else {
                     // Not a corruption error, propagate it
                     return Err(e.into());
@@ -656,10 +668,7 @@ impl Default for MemoryStore {
 impl KvStore for MemoryStore {
     fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let data = self.data.read();
-        Ok(data
-            .get(cf)
-            .and_then(|cf_data| cf_data.get(key))
-            .cloned())
+        Ok(data.get(cf).and_then(|cf_data| cf_data.get(key)).cloned())
     }
 
     fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
@@ -683,9 +692,7 @@ impl KvStore for MemoryStore {
         for op in operations {
             match op {
                 WriteOp::Put { cf, key, value } => {
-                    data.entry(cf)
-                        .or_default()
-                        .insert(key, value);
+                    data.entry(cf).or_default().insert(key, value);
                 }
                 WriteOp::Delete { cf, key } => {
                     if let Some(cf_data) = data.get_mut(&cf) {
@@ -781,7 +788,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        std::env::temp_dir().join(format!("tenzro-storage-test-{}-{}-{}-{}", label, pid, id, nanos))
+        std::env::temp_dir().join(format!(
+            "tenzro-storage-test-{}-{}-{}-{}",
+            label, pid, id, nanos
+        ))
     }
 
     #[test]

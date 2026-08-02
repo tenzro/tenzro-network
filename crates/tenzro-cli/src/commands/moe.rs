@@ -436,10 +436,7 @@ pub struct ForwardCmd {
 
 impl ForwardCmd {
     pub async fn execute(&self) -> Result<()> {
-        output::print_header(&format!(
-            "MoE Forward — {} l{}",
-            self.model_id, self.layer
-        ));
+        output::print_header(&format!("MoE Forward — {} l{}", self.model_id, self.layer));
         let bytes = std::fs::read(&self.hidden_file)?;
         if bytes.len() % 4 != 0 {
             anyhow::bail!("hidden-state file length must be a multiple of 4 (f32 LE)");

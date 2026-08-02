@@ -144,7 +144,7 @@ impl CredentialProof {
             "MlDsa65Signature2026" | "ML-DSA-65" => {
                 // Pure post-quantum signature. Forward compat for the post-2030
                 // pure-PQ era; today, hybrid credentials use the hybrid path.
-                use tenzro_crypto::pq::{ml_dsa_verify, ML_DSA_65_VK_LEN};
+                use tenzro_crypto::pq::{ML_DSA_65_VK_LEN, ml_dsa_verify};
                 if issuer_pubkey.len() != ML_DSA_65_VK_LEN {
                     return Err(crate::error::IdentityError::VerificationFailed(format!(
                         "Invalid ML-DSA-65 verifying key length: expected {}, got {}",
@@ -157,7 +157,10 @@ impl CredentialProof {
                     Err(_) => Ok(false),
                 }
             }
-            other => Err(crate::error::IdentityError::VerificationFailed(format!("Unsupported proof type: {}", other))),
+            other => Err(crate::error::IdentityError::VerificationFailed(format!(
+                "Unsupported proof type: {}",
+                other
+            ))),
         }
     }
 
@@ -220,10 +223,7 @@ pub fn sign_credential_hybrid(
     verification_method: impl Into<String>,
 ) -> crate::error::Result<CredentialProof> {
     let composite = signer.sign(message).map_err(|e| {
-        crate::error::IdentityError::CryptoError(format!(
-            "hybrid credential sign failed: {}",
-            e
-        ))
+        crate::error::IdentityError::CryptoError(format!("hybrid credential sign failed: {}", e))
     })?;
     let bytes = bincode::serialize(&composite).map_err(|e| {
         crate::error::IdentityError::SerializationError(format!(
@@ -275,16 +275,64 @@ pub struct CredentialSubject {
     pub claims: HashMap<String, serde_json::Value>,
 }
 
+/// Canonical JSON: recursively emits object keys in sorted order.
+///
+/// Independent of `serde_json`'s `preserve_order` feature, so the byte string
+/// a signer produces does not depend on which other crates share the build.
+/// See [`CredentialSubject::canonical_bytes`].
+fn canonical_json(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => serde_json::to_string(s).unwrap_or_default(),
+        Value::Array(arr) => {
+            let parts: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_json(&map[*k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+    }
+}
+
 impl CredentialSubject {
     /// Canonical byte form of the subject used as the proof message.
     ///
-    /// Round-trips through `serde_json::Value` so map keys serialize in
-    /// sorted order — `HashMap` iteration order is process-random, and a
-    /// proof signed in one process must verify in another. Every signer
-    /// and verifier of a credential proof MUST use these bytes.
+    /// Emits every object key in sorted order — `HashMap` iteration order is
+    /// process-random, and a proof signed in one process must verify in
+    /// another. Every signer and verifier of a credential proof MUST use these
+    /// bytes.
+    ///
+    /// The sort is done explicitly rather than by round-tripping through
+    /// `serde_json::Value`. That round-trip only sorts when `serde_json`'s
+    /// `preserve_order` feature is **off**: with it on, `Map` is an `IndexMap`
+    /// that keeps insertion order and the round-trip is a no-op.
+    ///
+    /// That feature is not ours to control. Cargo unifies features across a
+    /// build, and `revm` (via `jmespath_community`) and the `lance` stack both
+    /// enable `serde_json/preserve_order` — so whether this function sorted
+    /// depended on which *other* crates happened to be in the build graph.
+    /// Building `tenzro-identity` alone sorted; building it alongside
+    /// `tenzro-vm` did not. Two nodes compiled with different feature sets
+    /// would therefore derive different signing preimages for the same
+    /// credential and be unable to verify each other's proofs.
     pub fn canonical_bytes(&self) -> crate::error::Result<Vec<u8>> {
         let value = serde_json::to_value(self)?;
-        Ok(serde_json::to_vec(&value)?)
+        Ok(canonical_json(&value).into_bytes())
     }
 }
 
@@ -368,7 +416,11 @@ impl VerifiableCredential {
         // Check if proof exists
         let proof = match &self.proof {
             Some(p) => p,
-            None => return Err(crate::error::IdentityError::CredentialError("No proof attached to credential".to_string())),
+            None => {
+                return Err(crate::error::IdentityError::CredentialError(
+                    "No proof attached to credential".to_string(),
+                ));
+            }
         };
 
         // Canonical message from the credential (excluding proof): the
@@ -452,7 +504,10 @@ mod tests {
 
         assert!(cred.is_valid());
         assert!(!cred.is_signed());
-        assert!(cred.context.contains(&"https://www.w3.org/2018/credentials/v1".to_string()));
+        assert!(
+            cred.context
+                .contains(&"https://www.w3.org/2018/credentials/v1".to_string())
+        );
         assert_eq!(cred.issuer, "did:tenzro:human:issuer-id");
         assert_eq!(cred.credential_subject.id, "did:tenzro:human:subject-id");
     }
@@ -476,21 +531,15 @@ mod tests {
 
     #[test]
     fn test_credential_expiration() {
-        let expired = VerifiableCredential::new(
-            TenzroCredentialType::AgeVerification,
-            "issuer",
-            "subject",
-        )
-        .with_expiration(Utc::now() - chrono::Duration::days(1));
+        let expired =
+            VerifiableCredential::new(TenzroCredentialType::AgeVerification, "issuer", "subject")
+                .with_expiration(Utc::now() - chrono::Duration::days(1));
 
         assert!(!expired.is_valid());
 
-        let valid = VerifiableCredential::new(
-            TenzroCredentialType::AgeVerification,
-            "issuer",
-            "subject",
-        )
-        .with_expiration(Utc::now() + chrono::Duration::days(365));
+        let valid =
+            VerifiableCredential::new(TenzroCredentialType::AgeVerification, "issuer", "subject")
+                .with_expiration(Utc::now() + chrono::Duration::days(365));
 
         assert!(valid.is_valid());
     }
@@ -515,8 +564,14 @@ mod tests {
 
     #[test]
     fn test_credential_type_name() {
-        assert_eq!(TenzroCredentialType::KycAttestation.type_name(), "KycAttestation");
-        assert_eq!(TenzroCredentialType::ModelProvider.type_name(), "ModelProvider");
+        assert_eq!(
+            TenzroCredentialType::KycAttestation.type_name(),
+            "KycAttestation"
+        );
+        assert_eq!(
+            TenzroCredentialType::ModelProvider.type_name(),
+            "ModelProvider"
+        );
         assert_eq!(
             TenzroCredentialType::Custom("MyType".to_string()).type_name(),
             "MyType"
@@ -525,8 +580,8 @@ mod tests {
 
     #[test]
     fn test_credential_proof_verification() {
+        use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
         use tenzro_crypto::{KeyPair, KeyType};
-        use tenzro_crypto::signatures::{Signer, Ed25519SignerImpl};
 
         // Generate a keypair for the issuer
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
@@ -546,19 +601,23 @@ mod tests {
         );
 
         // Verify the proof
-        let result = proof.verify(message, signer.public_key().as_bytes()).unwrap();
+        let result = proof
+            .verify(message, signer.public_key().as_bytes())
+            .unwrap();
         assert!(result, "Valid signature should verify");
 
         // Test with wrong message
         let wrong_message = b"wrong message";
-        let result = proof.verify(wrong_message, signer.public_key().as_bytes()).unwrap();
+        let result = proof
+            .verify(wrong_message, signer.public_key().as_bytes())
+            .unwrap();
         assert!(!result, "Invalid signature should not verify");
     }
 
     #[test]
     fn test_verifiable_credential_proof_verification() {
+        use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
         use tenzro_crypto::{KeyPair, KeyType};
-        use tenzro_crypto::signatures::{Signer, Ed25519SignerImpl};
 
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let signer = Ed25519SignerImpl::new(keypair).unwrap();
@@ -587,7 +646,9 @@ mod tests {
 
         // Test with wrong public key
         let wrong_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
-        let result = cred.verify_proof(wrong_keypair.public_key().as_bytes()).unwrap();
+        let result = cred
+            .verify_proof(wrong_keypair.public_key().as_bytes())
+            .unwrap();
         assert!(!result, "Credential with wrong key should not verify");
     }
 
@@ -624,9 +685,7 @@ mod tests {
 
         // Wrong key: must not verify.
         let wrong = InMemoryHybridSigner::new(
-            Box::new(
-                Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap(),
-            ),
+            Box::new(Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap()),
             MlDsaSigningKey::generate(),
         );
         assert!(!cred.verify_proof_hybrid(wrong.public_key()).unwrap());
@@ -658,7 +717,10 @@ mod tests {
         let err = cred.verify_proof(&classical_bytes).unwrap_err();
         match err {
             crate::error::IdentityError::VerificationFailed(msg) => {
-                assert!(msg.contains("HybridEd25519MlDsa65Signature2026") || msg.contains("Unsupported"));
+                assert!(
+                    msg.contains("HybridEd25519MlDsa65Signature2026")
+                        || msg.contains("Unsupported")
+                );
             }
             other => panic!("expected VerificationFailed, got {:?}", other),
         }
@@ -666,18 +728,15 @@ mod tests {
 
     #[test]
     fn test_expired_credential_fails_verification() {
+        use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
         use tenzro_crypto::{KeyPair, KeyType};
-        use tenzro_crypto::signatures::{Signer, Ed25519SignerImpl};
 
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let signer = Ed25519SignerImpl::new(keypair).unwrap();
 
-        let mut cred = VerifiableCredential::new(
-            TenzroCredentialType::AgeVerification,
-            "issuer",
-            "subject",
-        )
-        .with_expiration(Utc::now() - chrono::Duration::days(1));
+        let mut cred =
+            VerifiableCredential::new(TenzroCredentialType::AgeVerification, "issuer", "subject")
+                .with_expiration(Utc::now() - chrono::Duration::days(1));
 
         // Sign it
         let message = cred.credential_subject.canonical_bytes().unwrap();

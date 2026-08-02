@@ -10,7 +10,7 @@
 //! Throughput is reported in bytes of source blob per second, so the numbers
 //! compare directly against other DA layers' MB/s figures.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use tenzro_storage::redstuff::{self, CommitteeShape, SliverPair};
 
@@ -119,5 +119,10 @@ fn bench_reconstruct(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_verify_sliver, bench_reconstruct);
+criterion_group!(
+    benches,
+    bench_encode,
+    bench_verify_sliver,
+    bench_reconstruct
+);
 criterion_main!(benches);

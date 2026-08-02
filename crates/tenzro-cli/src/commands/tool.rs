@@ -70,9 +70,7 @@ impl PruneToolsCmd {
             Some(s) => serde_json::json!({ "purge_after_secs": s }),
             None => serde_json::Value::Null,
         };
-        let result: serde_json::Value = rpc
-            .call("tenzro_pruneToolRegistry", params)
-            .await?;
+        let result: serde_json::Value = rpc.call("tenzro_pruneToolRegistry", params).await?;
         spinner.finish_and_clear();
 
         if self.format == "json" {
@@ -126,7 +124,9 @@ impl ListToolsCmd {
             filter["status"] = serde_json::json!(s);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_listTools", serde_json::json!([filter])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_listTools", serde_json::json!([filter]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -137,7 +137,8 @@ impl ListToolsCmd {
                 println!();
                 for tool in &arr {
                     let tool_id = tool["tool_id"].as_str().unwrap_or("?");
-                    let name = tool["name"].as_str()
+                    let name = tool["name"]
+                        .as_str()
                         .or_else(|| tool["tool_id"].as_str())
                         .unwrap_or("Unnamed");
                     let tool_type = tool["tool_type"].as_str().unwrap_or("mcp");
@@ -152,12 +153,13 @@ impl ListToolsCmd {
                     output::print_field("Category", category);
                     output::print_field("Status", status);
                     output::print_field("Endpoint", endpoint);
-                    output::print_field("Description", &description.chars().take(80).collect::<String>());
+                    output::print_field(
+                        "Description",
+                        &description.chars().take(80).collect::<String>(),
+                    );
 
                     if let Some(caps) = tool["capabilities"].as_array() {
-                        let cap_list: Vec<&str> = caps.iter()
-                            .filter_map(|c| c.as_str())
-                            .collect();
+                        let cap_list: Vec<&str> = caps.iter().filter_map(|c| c.as_str()).collect();
                         if !cap_list.is_empty() {
                             output::print_field("Capabilities", &cap_list.join(", "));
                         }
@@ -233,7 +235,9 @@ impl RegisterToolCmd {
             params["creator_did"] = serde_json::json!(did);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_registerTool", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_registerTool", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -283,7 +287,9 @@ impl SearchToolsCmd {
             "limit": self.limit,
         });
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_searchTools", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_searchTools", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -294,7 +300,8 @@ impl SearchToolsCmd {
                 println!();
                 for tool in &arr {
                     let tool_id = tool["tool_id"].as_str().unwrap_or("?");
-                    let name = tool["name"].as_str()
+                    let name = tool["name"]
+                        .as_str()
                         .or_else(|| tool["tool_id"].as_str())
                         .unwrap_or("Unnamed");
                     let tool_type = tool["tool_type"].as_str().unwrap_or("mcp");
@@ -307,7 +314,10 @@ impl SearchToolsCmd {
                     output::print_field("Type", tool_type);
                     output::print_field("Status", status);
                     output::print_field("Endpoint", endpoint);
-                    output::print_field("Description", &description.chars().take(80).collect::<String>());
+                    output::print_field(
+                        "Description",
+                        &description.chars().take(80).collect::<String>(),
+                    );
                     println!();
                 }
                 if arr.is_empty() {
@@ -340,8 +350,8 @@ impl UseToolCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header("Use Tool");
 
-        let input_params: serde_json::Value = serde_json::from_str(&self.params)
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let input_params: serde_json::Value =
+            serde_json::from_str(&self.params).unwrap_or_else(|_| serde_json::json!({}));
 
         let spinner = output::create_spinner(&format!("Invoking tool {}...", self.tool_id));
         let rpc = rpc::RpcClient::new(&self.rpc);
@@ -354,7 +364,9 @@ impl UseToolCmd {
             call_params["tool_name"] = serde_json::json!(tool_name);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_useTool", serde_json::json!([call_params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_useTool", serde_json::json!([call_params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -399,10 +411,12 @@ impl GetToolCmd {
         let spinner = output::create_spinner("Fetching tool...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let result: Result<serde_json::Value> = rpc.call(
-            "tenzro_getTool",
-            serde_json::json!([{ "tool_id": self.tool_id }]),
-        ).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_getTool",
+                serde_json::json!([{ "tool_id": self.tool_id }]),
+            )
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -411,12 +425,11 @@ impl GetToolCmd {
                 if let Some(obj) = tool.as_object() {
                     for (key, val) in obj {
                         let display = match val {
-                            serde_json::Value::Array(arr) => {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            }
+                            serde_json::Value::Array(arr) => arr
+                                .iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
                             _ => val.to_string().trim_matches('"').to_string(),
                         };
                         output::print_field(key, &display);
@@ -444,12 +457,38 @@ impl ToolUsageCmd {
         output::print_header("Tool Usage");
         let spinner = output::create_spinner("Fetching usage...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_getToolUsage", serde_json::json!([{ "tool_id": self.tool_id }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getToolUsage",
+                serde_json::json!([{ "tool_id": self.tool_id }]),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_field("Tool ID", &self.tool_id);
-        output::print_field("Total Invocations", &result.get("total_invocations").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Success Rate", &result.get("success_rate").and_then(|v| v.as_f64()).map(|r| format!("{:.1}%", r * 100.0)).unwrap_or_else(|| "N/A".to_string()));
-        output::print_field("Avg Latency", &result.get("avg_latency_ms").and_then(|v| v.as_u64()).map(|l| format!("{}ms", l)).unwrap_or_else(|| "N/A".to_string()));
+        output::print_field(
+            "Total Invocations",
+            &result
+                .get("total_invocations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Success Rate",
+            &result
+                .get("success_rate")
+                .and_then(|v| v.as_f64())
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "N/A".to_string()),
+        );
+        output::print_field(
+            "Avg Latency",
+            &result
+                .get("avg_latency_ms")
+                .and_then(|v| v.as_u64())
+                .map(|l| format!("{}ms", l))
+                .unwrap_or_else(|| "N/A".to_string()),
+        );
         Ok(())
     }
 }
@@ -478,10 +517,18 @@ impl UpdateToolCmd {
         let spinner = output::create_spinner("Updating...");
         let rpc = rpc::RpcClient::new(&self.rpc);
         let mut params = serde_json::json!({ "tool_id": self.tool_id });
-        if let Some(ref d) = self.description { params["description"] = serde_json::json!(d); }
-        if let Some(ref v) = self.version { params["version"] = serde_json::json!(v); }
-        if let Some(ref e) = self.endpoint { params["endpoint"] = serde_json::json!(e); }
-        let _result: serde_json::Value = rpc.call("tenzro_updateTool", serde_json::json!([params])).await?;
+        if let Some(ref d) = self.description {
+            params["description"] = serde_json::json!(d);
+        }
+        if let Some(ref v) = self.version {
+            params["version"] = serde_json::json!(v);
+        }
+        if let Some(ref e) = self.endpoint {
+            params["endpoint"] = serde_json::json!(e);
+        }
+        let _result: serde_json::Value = rpc
+            .call("tenzro_updateTool", serde_json::json!([params]))
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Tool updated!");
         Ok(())

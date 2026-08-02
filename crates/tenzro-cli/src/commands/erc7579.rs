@@ -19,7 +19,7 @@
 //! - `tenzro erc7579 uninstall --account 0x.. --type-id 1 --module 0x101d --deinit-data 0x..`
 //! - `tenzro erc7579 is-installed --account 0x.. --type-id 1 --module 0x101d`
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 
 use crate::output;
@@ -276,7 +276,9 @@ impl Erc7579IsInstalledCmd {
             "to": self.account,
             "data": format!("0x{}", hex::encode(&calldata)),
         });
-        let result_hex: String = rpc.call("eth_call", serde_json::json!([call, "latest"])).await?;
+        let result_hex: String = rpc
+            .call("eth_call", serde_json::json!([call, "latest"]))
+            .await?;
         // bool return: last byte non-zero → true
         let installed = result_hex
             .trim_start_matches("0x")

@@ -14,13 +14,13 @@ from __future__ import annotations
 import pytest
 
 torch = pytest.importorskip("torch")
-from torch import nn  # noqa: E402
+from torch import nn
 
-from tenzro_trainer.adapters.language import (  # noqa: E402
+from tenzro_trainer.adapters.language import (
     LanguageAdapter,
     lora_factor_names,
 )
-from tenzro_trainer.inner_loop import (  # noqa: E402
+from tenzro_trainer.inner_loop import (
     snapshot_state,
     trainable_param_names,
 )

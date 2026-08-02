@@ -25,7 +25,8 @@ classes are imported lazily so this module imports without the framework.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Mapping, Optional, Tuple
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
 
 from .core import ReputationHook, TenzroClient, TenzroDidEnvelope
 
@@ -57,8 +58,8 @@ def make_agent_framework_middleware(
     did: str,
     *,
     signing_key: Any = None,
-    subject_agent_id: Optional[int] = None,
-    mandate_factory: Optional[Callable[[Any], Tuple[Mapping[str, Any], Mapping[str, Any]]]] = None,
+    subject_agent_id: int | None = None,
+    mandate_factory: Callable[[Any], tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
 ) -> Any:
     """Construct a ``TenzroAgentFrameworkMiddleware`` instance.
 
@@ -105,7 +106,7 @@ def make_agent_framework_middleware(
 def make_function_middleware(
     client: TenzroClient,
     *,
-    mandate_factory: Optional[Callable[[Any], Tuple[Mapping[str, Any], Mapping[str, Any]]]] = None,
+    mandate_factory: Callable[[Any], tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
 ) -> Any:
     """Construct a ``FunctionMiddleware`` that validates mandates per tool call."""
     FunctionMiddleware = _function_middleware_base()

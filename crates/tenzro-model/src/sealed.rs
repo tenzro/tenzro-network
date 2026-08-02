@@ -4,16 +4,22 @@
 //! artifact into fixed-size shards, each encrypted under a single content key
 //! (AES-256-GCM), publishes the ciphertext shards to the content-addressed
 //! blob store, and wraps the content key once per named recipient using
-//! X25519 envelope encryption (`x25519-envelope-aes-256-gcm`). The signed
+//! X25519 envelope encryption
+//! (`x25519-hkdf-sha256-envelope-aes-256-gcm`). The signed
 //! [`SealedModelManifest`] binds the shard set, the recipient set, and the
 //! plaintext artifact hash together — a recipient fetches the ciphertext
 //! shards by `tenzro://` URI, unwraps the content key with their X25519
 //! secret, decrypts, reassembles, and verifies the plaintext hash.
 //!
 //! Recipients are identified by DID + X25519 public key. A recipient entry
-//! may additionally carry an attestation report hash, pinning the key to a
-//! specific TEE identity the owner verified out-of-band (same binding model
-//! as Confidential-tier training enrollment).
+//! may additionally carry an enclave measurement. When it does, the
+//! installing node must produce a fresh attestation report that verifies
+//! against a pinned vendor root, is not simulated, commits to the
+//! recipient's X25519 public key in its user data, and carries that
+//! measurement — the same binding model as Confidential-tier training
+//! enrollment. Pinning the measurement rather than a report hash is what
+//! makes the check satisfiable: every fresh report carries a distinct nonce
+//! and timestamp, so no two reports ever hash alike.
 //!
 //! This module owns the seal/unseal pipeline and the write-through
 //! [`SealedModelStore`]. Manifest signing is Ed25519 over
@@ -30,12 +36,12 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 use tenzro_crypto::encryption::{
-    envelope_decrypt, envelope_encrypt, EncryptedEnvelope, SymmetricKey, X25519KeyPair,
-    X25519PublicKey,
+    EncryptedEnvelope, SymmetricKey, X25519KeyPair, X25519PublicKey, envelope_decrypt,
+    envelope_encrypt,
 };
 use tenzro_crypto::keys::{KeyType, PublicKey};
-use tenzro_crypto::signatures::{verify as verify_ed25519, Signature};
-use tenzro_storage::kv::{KvStore, CF_MODELS};
+use tenzro_crypto::signatures::{Signature, verify as verify_ed25519};
+use tenzro_storage::kv::{CF_MODELS, KvStore};
 use tenzro_types::primitives::Hash;
 use tenzro_types::tenzro_uri::TenzroUri;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,9 +54,14 @@ pub const SEALED_SHARD_DOMAIN: &[u8] = b"tenzro/model/sealed-shard";
 pub const SEALED_MANIFEST_DOMAIN: &[u8] = b"tenzro/model/sealed-manifest";
 
 /// The only key-wrap scheme this module produces or accepts: X25519
-/// ephemeral-static envelope encryption carrying an AES-256-GCM content key
-/// (`tenzro_crypto::encryption::envelope_encrypt`).
-pub const SEALED_WRAP_ALG: &str = "x25519-envelope-aes-256-gcm";
+/// ephemeral-static envelope encryption, HKDF-SHA256 over the exchange, and an
+/// AES-256-GCM content key (`tenzro_crypto::encryption::envelope_encrypt`).
+///
+/// This is not HPKE. The construction is Tenzro's own envelope format and the
+/// identifier must not be confused with the `hpke-x25519-hkdf-sha256-…` label
+/// used for sealed training shards, which is a genuine RFC 9180 base-mode
+/// exchange.
+pub const SEALED_WRAP_ALG: &str = "x25519-hkdf-sha256-envelope-aes-256-gcm";
 
 /// Default plaintext shard size: 256 MiB.
 pub const DEFAULT_SHARD_BYTES: u64 = 256 * 1024 * 1024;
@@ -83,10 +94,14 @@ pub struct SealedRecipient {
     pub x25519_pubkey: [u8; 32],
     /// Content key wrapped for this recipient (`SEALED_WRAP_ALG`).
     pub wrapped_key: EncryptedEnvelope,
-    /// Optional TEE attestation report hash the owner verified before
-    /// sealing to this key — pins the recipient key to an enclave identity.
+    /// Enclave measurement the recipient must prove at install time.
+    ///
+    /// When set, the installing node must produce a fresh, vendor-verified
+    /// attestation report whose user data commits to `x25519_pubkey` and
+    /// whose measurement equals this value. `None` means the owner sealed
+    /// to a bare key with no enclave requirement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attestation_hash: Option<Hash>,
+    pub enclave_measurement_hex: Option<String>,
 }
 
 /// Recipient specification supplied to [`seal_model_file`].
@@ -96,9 +111,26 @@ pub struct RecipientSpec {
     pub did: String,
     /// Recipient X25519 public key (32 bytes).
     pub x25519_pubkey: [u8; 32],
-    /// Optional attestation report hash to record on the entry.
+    /// Enclave measurement to require of this recipient at install time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attestation_hash: Option<Hash>,
+    pub enclave_measurement_hex: Option<String>,
+}
+
+/// Proves the local enclave to the sealed-model install path.
+///
+/// The installing node is the recipient. It holds the X25519 secret key,
+/// so it can produce a fresh attestation report binding the matching
+/// public key. Implementations verify that report against a pinned vendor
+/// root, refuse simulated reports, confirm the report's user data commits
+/// to `x25519_pubkey`, and return the measurement the report carries.
+///
+/// Returning a measurement is not the same as approving it — the caller
+/// compares against the measurement the sealer recorded.
+#[async_trait::async_trait]
+pub trait RecipientEnclaveAttester: Send + Sync {
+    /// Attests the local enclave against `x25519_pubkey` and returns the
+    /// verified measurement as lowercase hex.
+    async fn attest(&self, recipient_did: &str, x25519_pubkey: &[u8; 32]) -> Result<String>;
 }
 
 /// Signed manifest binding a sealed model's shard set and recipient set.
@@ -213,10 +245,11 @@ pub fn compute_manifest_hash(m: &SealedModelManifest) -> Hash {
         hasher.update((r.wrapped_key.encrypted_data.len() as u32).to_le_bytes());
         hasher.update(&r.wrapped_key.encrypted_data);
         hasher.update(r.wrapped_key.sender_public_key);
-        match &r.attestation_hash {
-            Some(h) => {
+        match &r.enclave_measurement_hex {
+            Some(m) => {
                 hasher.update([1u8]);
-                hasher.update(h.as_bytes());
+                hasher.update((m.len() as u32).to_le_bytes());
+                hasher.update(m.as_bytes());
             }
             None => hasher.update([0u8]),
         }
@@ -263,7 +296,9 @@ pub async fn seal_model_file(
         ));
     }
     if shard_bytes == 0 {
-        return Err(ModelError::SealedModel("shard_bytes must be non-zero".to_string()));
+        return Err(ModelError::SealedModel(
+            "shard_bytes must be non-zero".to_string(),
+        ));
     }
 
     let content_key = SymmetricKey::generate();
@@ -342,7 +377,7 @@ pub async fn seal_model_file(
             did: spec.did.clone(),
             x25519_pubkey: spec.x25519_pubkey,
             wrapped_key,
-            attestation_hash: spec.attestation_hash,
+            enclave_measurement_hex: spec.enclave_measurement_hex.clone(),
         });
     }
 
@@ -380,12 +415,19 @@ pub async fn seal_model_file(
 /// The manifest signature is verified first — an unsigned or tampered
 /// manifest never reaches the fetch path. Writes to `<dest>.partial` and
 /// renames on success.
+///
+/// When the recipient entry carries `enclave_measurement_hex`, `attester`
+/// must be present and must prove the local enclave: a fresh report bound
+/// to the recipient's X25519 public key, carrying that measurement. With
+/// no attester installed the install is refused rather than allowed
+/// through unchecked.
 pub async fn unseal_model_to_file(
     manifest: &SealedModelManifest,
     recipient_did: &str,
     keypair: &X25519KeyPair,
     dest: &Path,
     fetcher: &dyn BlobFetcher,
+    attester: Option<&dyn RecipientEnclaveAttester>,
 ) -> Result<()> {
     manifest.verify_signature()?;
     if manifest.wrap_alg != SEALED_WRAP_ALG {
@@ -406,6 +448,26 @@ pub async fn unseal_model_to_file(
             recipient_did
         )));
     }
+    if let Some(expected) = &recipient.enclave_measurement_hex {
+        let attester = attester.ok_or_else(|| {
+            ModelError::SealedModel(format!(
+                "sealed model '{}' requires an enclave measurement for '{}' but no \
+                 enclave attester is installed on this node",
+                manifest.model_id, recipient_did
+            ))
+        })?;
+        let measured = attester
+            .attest(recipient_did, &recipient.x25519_pubkey)
+            .await?;
+        if !measured.eq_ignore_ascii_case(expected.trim()) {
+            return Err(ModelError::SealedModel(format!(
+                "enclave measurement mismatch for '{}' on sealed model '{}': manifest \
+                 requires {}, local enclave measured {}",
+                recipient_did, manifest.model_id, expected, measured
+            )));
+        }
+    }
+
     let key_bytes = envelope_decrypt(keypair, &recipient.wrapped_key).map_err(|e| {
         ModelError::SealedModel(format!("unwrap content key for '{}': {}", recipient_did, e))
     })?;
@@ -541,7 +603,10 @@ impl SealedModelStore {
                     }
                 }
                 if hydrated > 0 {
-                    info!("Hydrated {} sealed-model manifest(s) from CF_MODELS", hydrated);
+                    info!(
+                        "Hydrated {} sealed-model manifest(s) from CF_MODELS",
+                        hydrated
+                    );
                 }
             }
             Err(e) => warn!("Sealed-model hydration scan failure: {}", e),
@@ -668,7 +733,7 @@ mod tests {
         let specs = vec![RecipientSpec {
             did: "did:tenzro:machine:abc".to_string(),
             x25519_pubkey: recipient_kp.public_key_bytes(),
-            attestation_hash: None,
+            enclave_measurement_hex: None,
         }];
         // 512 KiB shards → 3 shards for ~1.2 MB input.
         let mut manifest = seal_model_file(
@@ -701,6 +766,7 @@ mod tests {
             &recipient_kp,
             &dest,
             &fetcher,
+            None,
         )
         .await
         .unwrap();
@@ -715,7 +781,7 @@ mod tests {
         let specs = vec![RecipientSpec {
             did: "did:tenzro:machine:abc".to_string(),
             x25519_pubkey: recipient_kp.public_key_bytes(),
-            attestation_hash: None,
+            enclave_measurement_hex: None,
         }];
         let mut manifest = seal_model_file(
             &path,
@@ -743,6 +809,7 @@ mod tests {
             &other_kp,
             &dest,
             &fetcher,
+            None,
         )
         .await
         .unwrap_err();
@@ -757,6 +824,7 @@ mod tests {
             &recipient_kp,
             &dest,
             &fetcher,
+            None,
         )
         .await
         .unwrap_err();

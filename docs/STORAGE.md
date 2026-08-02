@@ -114,13 +114,46 @@ Before a deal can stream, the renter funds a prepaid balance: TNZO is locked out
 
 ## 7. Interfaces
 
-### RPC
+Two layers sit on the same deals, aimed at two different callers.
+
+The **market layer** below addresses an object by an id you choose and leaves ownership, funding, and naming to you. It is the primitive, and it is what you want when you are building a storage product on top of Tenzro.
+
+The **tenant layer** — `/v1/files` — carries all three for you: the subject on your API key owns the file, a deal is opened on upload, and a filename comes back on every listing. It is shaped like OpenAI's files API, so an SDK already pointed at `/v1/chat/completions` uploads against the same base URL and the same key.
+
+### `/v1/files` (tenant layer)
+
+| Route | Does |
+|---|---|
+| `POST /v1/files` | multipart upload; erasure-codes the bytes and opens a deal |
+| `GET /v1/files` | the caller's own files, newest first, with their total stored bytes |
+| `GET /v1/files/{id}` | one record |
+| `GET /v1/files/{id}/content` | the bytes, rebuilt from shards |
+| `DELETE /v1/files/{id}` | unlink the reference and stop the deal |
+
+Every route — reads included — requires an `X-Tenzro-Api-Key` carrying the `storage` scope, and the key's `subject` becomes the file's `owner`. There is no unauthenticated path: a file with no owner is one nobody can list, retrieve, or be billed for. Cross-tenant reads are refused, and a file belonging to another tenant reports the same "no such file" as one that does not exist, so ownership cannot be probed by guessing ids.
+
+Uploads are coded at 4 data + 2 parity shards — surviving two simultaneous provider losses at 1.5× amplification — rather than letting the caller choose. A caller who wants to pick the scheme is on the market layer.
+
+**Deletion is not erasure.** `DELETE` unlinks your reference and stops the deal paying for the shards. It cannot reach into every independent provider holding one and wipe it; shards expire when the deal stops funding them. Every deletion response repeats this, because "deleted: true" on its own invites exactly the wrong conclusion. Do not treat deletion as redaction, and do not store material where that distinction matters.
+
+If an upload stores successfully but its deal cannot be opened, the file is kept and listed with a null `deal_id` rather than discarded — throwing away bytes the node has already coded and published would be worse for the tenant than a file the operator is carrying unbilled. `tenzro_fileStorageUsage` reports how many of your files are in that state, and both the CLI and the SDKs surface it, because unfunded storage should not be mistaken for durable storage.
+
+The same six operations are available as JSON-RPC (`tenzro_uploadFile`, `tenzro_listFiles`, `tenzro_getFile`, `tenzro_downloadFile`, `tenzro_deleteFile`, `tenzro_fileStorageUsage`) and as MCP tools, so an agent with a tool list and no HTTP client reaches the same surface. The RPC path takes base64 rather than multipart, which caps the practical upload well below the REST ceiling — base64 inflates by a third and the envelope is buffered as one JSON value.
+
+### RPC (market layer)
 
 The node exposes storage endpoints for opening deals, charging epochs, querying deal state, setting pricing, and reporting storage-provider status. Prepaid balances are funded and read through `tenzro_prepaidDeposit`, `tenzro_prepaidWithdraw`, and `tenzro_prepaidBalance`.
 
 ### CLI
 
 ```
+tenzro files upload <path> [--purpose <p>] [--api-key <key>]
+tenzro files list [--purpose <p>] [--limit <n>]
+tenzro files get <file-id>
+tenzro files download <file-id> [--out <path>]
+tenzro files delete <file-id>
+tenzro files usage
+
 tenzro node storage status
 tenzro node storage open-deal --object <id> --epochs <n>
 tenzro node storage deal --deal <id>
@@ -131,7 +164,7 @@ tenzro escrow prepaid-withdraw --renter <addr> --amount <wei>
 
 ### SDKs
 
-Both the Rust and TypeScript SDKs expose a `storage` client mirroring the RPC surface. Prepaid balances are managed through the `settlement` client (`prepaid_deposit` / `prepaid_withdraw` / `prepaid_balance`).
+Both the Rust and TypeScript SDKs expose a `files` client for the tenant layer (`upload` / `list` / `get` / `download` / `delete` / `usage`) and a `storage` client mirroring the market-layer RPC surface. Prepaid balances are managed through the `settlement` client (`prepaid_deposit` / `prepaid_withdraw` / `prepaid_balance`).
 
 ---
 

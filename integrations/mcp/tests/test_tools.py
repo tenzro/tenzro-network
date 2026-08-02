@@ -8,8 +8,7 @@ params dispatched, plus result passthrough."""
 
 from unittest.mock import call
 
-import tenzro_mcp_server.server as server
-
+from tenzro_mcp_server import server
 
 # ---------------------------------------------------------------------------
 # Tool registry
@@ -197,10 +196,17 @@ async def test_resolve_did(mock_rpc):
 
 
 async def test_revoke_did_default_reason(mock_rpc):
-    await server.revoke_did("did:tenzro:human:u1")
+    # The envelope is required and forwarded verbatim: the node proves it
+    # against the DID's own key, and revoking gossips network-wide, so the
+    # operator's admin token alone is not the whole of the authorization.
+    await server.revoke_did("did:tenzro:human:u1", "de-adbe-ef")
     mock_rpc.assert_awaited_once_with(
         "tenzro_revokeDid",
-        {"did": "did:tenzro:human:u1", "reason": "revoked via MCP"},
+        {
+            "did": "did:tenzro:human:u1",
+            "did_envelope": "de-adbe-ef",
+            "reason": "revoked via MCP",
+        },
     )
 
 

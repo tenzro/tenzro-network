@@ -146,8 +146,10 @@ impl StreamCursorStore {
     /// same handler is invoked twice for the same uuid, which is a bug
     /// upstream and is left as a no-op-overwrite rather than an error.
     pub fn create(&self, request_id: &str) {
-        self.inner
-            .insert(request_id.to_string(), StreamCursor::new(request_id.to_string()));
+        self.inner.insert(
+            request_id.to_string(),
+            StreamCursor::new(request_id.to_string()),
+        );
     }
 
     /// Record a chunk against `request_id`. Returns the assigned `seq`,
@@ -222,8 +224,7 @@ impl StreamCursorStore {
                 ticker.tick().await;
                 let n = store.gc(Instant::now());
                 if n > 0 {
-                    tracing::debug!(evicted = n, total = store.len(),
-                        "stream cursor gc");
+                    tracing::debug!(evicted = n, total = store.len(), "stream cursor gc");
                 }
             }
         })
@@ -380,8 +381,7 @@ mod tests {
         // Push past the in-flight window.
         {
             let mut entry = s.inner.get_mut("a").unwrap();
-            entry.last_activity =
-                Instant::now() - IN_FLIGHT_IDLE_TIMEOUT - Duration::from_secs(1);
+            entry.last_activity = Instant::now() - IN_FLIGHT_IDLE_TIMEOUT - Duration::from_secs(1);
         }
         let removed = s.gc(Instant::now());
         assert_eq!(removed, 1);

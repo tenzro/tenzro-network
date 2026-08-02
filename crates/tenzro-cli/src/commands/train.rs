@@ -7,7 +7,7 @@
 //! See `AI.md` for the full architecture.
 
 use crate::output;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 /// Tenzro Train operations
@@ -93,8 +93,8 @@ impl TrainPostTaskCmd {
 
         let spec_text = std::fs::read_to_string(&self.spec)
             .map_err(|e| anyhow!("read spec file '{}': {}", self.spec, e))?;
-        let spec: serde_json::Value = serde_json::from_str(&spec_text)
-            .map_err(|e| anyhow!("parse spec JSON: {}", e))?;
+        let spec: serde_json::Value =
+            serde_json::from_str(&spec_text).map_err(|e| anyhow!("parse spec JSON: {}", e))?;
 
         output::print_header("Post Training Task");
         let spinner = output::create_spinner("Submitting...");
@@ -144,7 +144,9 @@ impl TrainListRunsCmd {
         use crate::rpc::RpcClient;
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_training_listRuns", serde_json::json!({})).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_training_listRuns", serde_json::json!({}))
+            .await?;
 
         if self.format == "json" {
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -164,7 +166,10 @@ impl TrainListRunsCmd {
         for run in runs {
             let task_id = run.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
             let status = run.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-            let round = run.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0);
+            let round = run
+                .get("current_round")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let trainers = run
                 .get("trainers")
                 .and_then(|v| v.as_array())
@@ -242,7 +247,10 @@ impl TrainDecideRoundCmd {
             )
             .await?;
 
-        let decision = result.get("decision").and_then(|v| v.as_str()).unwrap_or("?");
+        let decision = result
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         output::print_field("Decision", decision);
         match decision {
             "wait" => {
@@ -401,19 +409,13 @@ pub struct TrainEnrollCmd {
     /// Trainer DID (`did:tenzro:machine:...`)
     #[arg(long)]
     trainer_did: String,
-    /// Path to JSON file containing a `TrainingAttestation`
-    /// (required for Confidential tier)
+    /// Path to JSON file containing a `TrainingAttestation`. Required for
+    /// Confidential tier, where the report is verified against pinned vendor
+    /// roots and must commit to the enclave key the sponsor sealed to. The
+    /// expected key and measurement come from the sealed manifest, so there is
+    /// nothing else to pass.
     #[arg(long)]
     attestation: Option<String>,
-    /// Hex-encoded enclave public key the trainer's TEE exposes
-    /// (required for Confidential tier; must match what the sponsor
-    /// sealed the trainer's shard envelope to)
-    #[arg(long)]
-    enclave_pubkey: Option<String>,
-    /// Hex-encoded enclave measurements (e.g. concatenated MRTD / MRENCLAVE
-    /// / measurement registers); required for Confidential tier
-    #[arg(long)]
-    measurements_hex: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -434,17 +436,9 @@ impl TrainEnrollCmd {
                 .map_err(|e| anyhow!("parse attestation JSON: {}", e))?;
             params["attestation"] = attestation;
         }
-        if let Some(pk) = &self.enclave_pubkey {
-            params["enclave_pubkey"] = serde_json::Value::String(pk.clone());
-        }
-        if let Some(m) = &self.measurements_hex {
-            params["measurements_hex"] = serde_json::Value::String(m.clone());
-        }
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
-            .call("tenzro_training_enrollTrainer", params)
-            .await?;
+        let result: serde_json::Value = rpc.call("tenzro_training_enrollTrainer", params).await?;
 
         output::print_success("Trainer enrolled!");
         output::print_field(
@@ -534,9 +528,8 @@ impl TrainFinalizeRoundCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
 
-        let post_step: serde_json::Value =
-            serde_json::from_str(&self.post_step_hashes)
-                .map_err(|e| anyhow!("parse post_step_hashes JSON: {}", e))?;
+        let post_step: serde_json::Value = serde_json::from_str(&self.post_step_hashes)
+            .map_err(|e| anyhow!("parse post_step_hashes JSON: {}", e))?;
 
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
@@ -670,7 +663,10 @@ impl TrainDaemonStatusCmd {
         }
 
         output::print_header("Trainer Daemon");
-        let running = result.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+        let running = result
+            .get("running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         output::print_field("running", &running.to_string());
         if !running {
             output::print_info("No [training] section (or enabled=false) on this node.");
@@ -679,9 +675,15 @@ impl TrainDaemonStatusCmd {
         if let Some(did) = result.get("trainer_did").and_then(|v| v.as_str()) {
             output::print_field("trainer_did", did);
         }
-        let live = result.get("live_trainers").and_then(|v| v.as_u64()).unwrap_or(0);
+        let live = result
+            .get("live_trainers")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         output::print_field("live_trainers", &live.to_string());
-        if let Some(max) = result.get("max_concurrent_trainers").and_then(|v| v.as_u64()) {
+        if let Some(max) = result
+            .get("max_concurrent_trainers")
+            .and_then(|v| v.as_u64())
+        {
             output::print_field("max_concurrent_trainers", &max.to_string());
         }
         Ok(())

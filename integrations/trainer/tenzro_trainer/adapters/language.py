@@ -35,8 +35,9 @@ ROCm FlashAttention); QLoRA on ROCm needs the patched bitsandbytes wheel.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 try:
     import torch
@@ -114,7 +115,7 @@ def is_moe_config(config: Any) -> bool:
     return False
 
 
-def moe_parameter_names(model: "nn.Module") -> tuple[list[str], list[str]]:
+def moe_parameter_names(model: nn.Module) -> tuple[list[str], list[str]]:
     """Split a MoE model's parameter names into ``(expert, router)`` lists.
 
     Expert weights live under ``.experts.`` submodules; router/gating
@@ -135,7 +136,7 @@ def moe_parameter_names(model: "nn.Module") -> tuple[list[str], list[str]]:
     return expert_names, router_names
 
 
-def lora_factor_names(model: "nn.Module") -> tuple[list[str], list[str]]:
+def lora_factor_names(model: nn.Module) -> tuple[list[str], list[str]]:
     """Split a PEFT-wrapped model's trainable params into ``(a_names, b_names)``.
 
     PEFT names LoRA matrices ``...lora_A.<adapter>.weight`` and
@@ -171,8 +172,8 @@ class LanguageAdapter:
     correct for.
     """
 
-    _model: "nn.Module"
-    _optimizer: "torch.optim.Optimizer"
+    _model: nn.Module
+    _optimizer: torch.optim.Optimizer
     _tokenizer: Any
     seq_len: int = 1024
     batch_size: int = 1
@@ -182,10 +183,10 @@ class LanguageAdapter:
     _lora_a_names: list[str] = field(default_factory=list)
     _lora_b_names: list[str] = field(default_factory=list)
 
-    def model(self) -> "nn.Module":
+    def model(self) -> nn.Module:
         return self._model
 
-    def optimizer(self) -> "torch.optim.Optimizer":
+    def optimizer(self) -> torch.optim.Optimizer:
         return self._optimizer
 
     def set_round(self, round_index: int) -> None:
@@ -250,7 +251,7 @@ class LanguageAdapter:
             y = torch.stack([ids[o + 1 : o + 1 + self.seq_len] for o in offsets])
             yield x.to(self.device), y.to(self.device)
 
-    def compute_loss(self, batch: object) -> "torch.Tensor":
+    def compute_loss(self, batch: object) -> torch.Tensor:
         if torch is None:
             raise RuntimeError("PyTorch is required")
         x, y = batch  # type: ignore[misc]
@@ -283,16 +284,16 @@ class LanguageRolloutAdapter:
     and the k3 KL penalty in :func:`tenzro_trainer.rl.grpo_loss`).
     """
 
-    _model: "nn.Module"
-    _optimizer: "torch.optim.Optimizer"
+    _model: nn.Module
+    _optimizer: torch.optim.Optimizer
     _tokenizer: Any
     max_prompt_len: int = 512
     device: str = "cpu"
 
-    def model(self) -> "nn.Module":
+    def model(self) -> nn.Module:
         return self._model
 
-    def optimizer(self) -> "torch.optim.Optimizer":
+    def optimizer(self) -> torch.optim.Optimizer:
         return self._optimizer
 
     def shard_prompts(self, shard_uri: str) -> Iterable[str]:
@@ -304,7 +305,7 @@ class LanguageRolloutAdapter:
             raise ValueError(f"prompt shard {path!r} has no non-empty lines")
         return prompts
 
-    def _encode_prompt(self, prompt: str) -> "torch.Tensor":
+    def _encode_prompt(self, prompt: str) -> torch.Tensor:
         ids = self._tokenizer(
             prompt,
             return_tensors="pt",
@@ -333,7 +334,7 @@ class LanguageRolloutAdapter:
             for _ in range(group_size):
                 ids = prompt_ids.clone()
                 token_ids: list[int] = []
-                logprobs: list["torch.Tensor"] = []
+                logprobs: list[torch.Tensor] = []
                 for _step in range(max_new_tokens):
                     logits = self._forward_logits(ids)[0, -1, :]
                     lp = torch.log_softmax(
@@ -366,7 +367,7 @@ class LanguageRolloutAdapter:
 
     def rollout_logprobs(
         self, prompt: str, rollout: Any, temperature: float
-    ) -> "torch.Tensor":
+    ) -> torch.Tensor:
         if torch is None:
             raise RuntimeError("PyTorch is required")
         prompt_ids = self._encode_prompt(prompt)
@@ -383,7 +384,7 @@ class LanguageRolloutAdapter:
         lp = torch.log_softmax(pred.float() / temperature, dim=-1)
         return lp.gather(1, completion_ids[0].unsqueeze(1)).squeeze(1)
 
-    def _forward_logits(self, input_ids: "torch.Tensor") -> "torch.Tensor":
+    def _forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         out = self._model(input_ids=input_ids)
         return out.logits if hasattr(out, "logits") else out[0]
 
@@ -609,11 +610,11 @@ def build_adapter(
 
 
 __all__ = [
+    "DEFAULT_HF_REPO",
     "LanguageAdapter",
     "LanguageRolloutAdapter",
     "build_adapter",
     "build_rollout_adapter",
     "is_moe_config",
     "moe_parameter_names",
-    "DEFAULT_HF_REPO",
 ]

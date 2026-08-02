@@ -183,7 +183,11 @@ pub fn single_box_fit<'a>(
     members
         .into_iter()
         .filter(|m| m.vram_gb >= model.total_vram_gb)
-        .max_by(|a, b| a.vram_gb.partial_cmp(&b.vram_gb).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.vram_gb
+                .partial_cmp(&b.vram_gb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|m| m.address)
 }
 
@@ -247,7 +251,10 @@ pub fn hardware_gate(
 /// highest-VRAM members first. Members must already be ordered (see
 /// [`order_stages`]); this assigns the *sizes*, ordering assigns *which*
 /// contiguous slice each holds.
-pub fn assign_layers(total_layers: u32, members: &[ClusterMember]) -> HashMap<Address, PipelineStage> {
+pub fn assign_layers(
+    total_layers: u32,
+    members: &[ClusterMember],
+) -> HashMap<Address, PipelineStage> {
     let mut out = HashMap::new();
     if members.is_empty() || total_layers == 0 {
         return out;
@@ -259,7 +266,13 @@ pub fn assign_layers(total_layers: u32, members: &[ClusterMember]) -> HashMap<Ad
         for m in members {
             let end = (cursor + 1).min(total_layers);
             if cursor < total_layers {
-                out.insert(m.address, PipelineStage { start_layer: cursor, end_layer: end });
+                out.insert(
+                    m.address,
+                    PipelineStage {
+                        start_layer: cursor,
+                        end_layer: end,
+                    },
+                );
                 cursor = end;
             }
         }
@@ -285,7 +298,12 @@ pub fn assign_layers(total_layers: u32, members: &[ClusterMember]) -> HashMap<Ad
         let mut remainder = total_layers - assigned;
         // Hand leftover layers to the largest fractional remainders first.
         let mut order: Vec<usize> = (0..counts.len()).collect();
-        order.sort_by(|&a, &b| counts[b].2.partial_cmp(&counts[a].2).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            counts[b]
+                .2
+                .partial_cmp(&counts[a].2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for &idx in &order {
             if remainder == 0 {
                 break;
@@ -297,7 +315,12 @@ pub fn assign_layers(total_layers: u32, members: &[ClusterMember]) -> HashMap<Ad
         // Over-assigned by the floor-at-1 step; trim from smallest remainders.
         let mut over = assigned - total_layers;
         let mut order: Vec<usize> = (0..counts.len()).collect();
-        order.sort_by(|&a, &b| counts[a].2.partial_cmp(&counts[b].2).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            counts[a]
+                .2
+                .partial_cmp(&counts[b].2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for &idx in &order {
             if over == 0 {
                 break;
@@ -312,7 +335,13 @@ pub fn assign_layers(total_layers: u32, members: &[ClusterMember]) -> HashMap<Ad
     let mut cursor = 0u32;
     for (i, count, _) in counts {
         let end = cursor + count;
-        out.insert(members[i].address, PipelineStage { start_layer: cursor, end_layer: end });
+        out.insert(
+            members[i].address,
+            PipelineStage {
+                start_layer: cursor,
+                end_layer: end,
+            },
+        );
         cursor = end;
     }
     out
@@ -347,12 +376,15 @@ pub fn order_stages(
     probes: &HashMap<(Address, Address), LinkProbe>,
     activation_bytes: u32,
 ) -> NetworkGate {
-    use tenzro_cluster::{order_members, CostMember, MemberId};
+    use tenzro_cluster::{CostMember, MemberId, order_members};
 
     let head_id = address_member_id(head);
     let cost_members: Vec<CostMember> = members
         .iter()
-        .map(|m| CostMember { id: address_member_id(m.address), reachability: m.reachability })
+        .map(|m| CostMember {
+            id: address_member_id(m.address),
+            reachability: m.reachability,
+        })
         .collect();
 
     // Re-key the probe graph onto opaque member ids. `address_member_id` is
@@ -360,22 +392,32 @@ pub fn order_stages(
     let id_probes: HashMap<(MemberId, MemberId), LinkProbe> = probes
         .iter()
         .map(|((a, b), p)| {
-            (tenzro_cluster::link_key(&address_member_id(*a), &address_member_id(*b)), *p)
+            (
+                tenzro_cluster::link_key(&address_member_id(*a), &address_member_id(*b)),
+                *p,
+            )
         })
         .collect();
 
     let out = order_members(&head_id, &cost_members, &id_probes, activation_bytes);
 
     // Map ids back to addresses via the member roster.
-    let by_id: HashMap<String, Address> =
-        members.iter().map(|m| (address_member_id(m.address).0, m.address)).collect();
-    let ordered: Vec<Address> =
-        out.ordered.iter().filter_map(|id| by_id.get(&id.0).copied()).collect();
+    let by_id: HashMap<String, Address> = members
+        .iter()
+        .map(|m| (address_member_id(m.address).0, m.address))
+        .collect();
+    let ordered: Vec<Address> = out
+        .ordered
+        .iter()
+        .filter_map(|id| by_id.get(&id.0).copied())
+        .collect();
     let excluded: Vec<(Address, RejectReason)> = out
         .excluded
         .into_iter()
         .filter_map(|(id, reach)| {
-            by_id.get(&id.0).map(|a| (*a, RejectReason::NotDataPlaneReachable(reach)))
+            by_id
+                .get(&id.0)
+                .map(|a| (*a, RejectReason::NotDataPlaneReachable(reach)))
         })
         .collect();
 
@@ -391,11 +433,7 @@ fn address_member_id(addr: Address) -> tenzro_cluster::MemberId {
 
 /// Canonical (order-independent) key for a member-pair probe.
 pub fn link_key(a: Address, b: Address) -> (Address, Address) {
-    if a.0 <= b.0 {
-        (a, b)
-    } else {
-        (b, a)
-    }
+    if a.0 <= b.0 { (a, b) } else { (b, a) }
 }
 
 /// A concrete, launchable cluster plan: the pipeline-ordered members, each with
@@ -454,7 +492,10 @@ pub fn launch_plan(
             });
         }
     }
-    LaunchPlan { stages, tensor_split }
+    LaunchPlan {
+        stages,
+        tensor_split,
+    }
 }
 
 /// Per-member sustained compute, in tokens/s, used by the time-aware balancer.
@@ -537,7 +578,13 @@ pub fn assign_layers_timed(
             continue;
         }
         let end = cursor + count;
-        out.insert(members[*i].address, PipelineStage { start_layer: cursor, end_layer: end });
+        out.insert(
+            members[*i].address,
+            PipelineStage {
+                start_layer: cursor,
+                end_layer: end,
+            },
+        );
         cursor = end;
     }
     out
@@ -761,7 +808,11 @@ mod tests {
     }
 
     fn shape(layers: u32, hidden: u32, total_gb: f32) -> ModelShape {
-        ModelShape { layers, hidden_dim: hidden, total_vram_gb: total_gb }
+        ModelShape {
+            layers,
+            hidden_dim: hidden,
+            total_vram_gb: total_gb,
+        }
     }
 
     #[test]
@@ -769,7 +820,10 @@ mod tests {
         let big = member(1, 80.0, "c", MemberReachability::LocalDirect);
         let small = member(2, 24.0, "c", MemberReachability::LocalDirect);
         let model = shape(80, 8192, 70.0);
-        assert_eq!(should_cluster(model, [&big, &small], false), FitDecision::RunLocal);
+        assert_eq!(
+            should_cluster(model, [&big, &small], false),
+            FitDecision::RunLocal
+        );
         assert_eq!(single_box_fit(model, [&big, &small]), Some(big.address));
     }
 
@@ -778,7 +832,10 @@ mod tests {
         let a = member(1, 24.0, "c", MemberReachability::LocalDirect);
         let b = member(2, 24.0, "c", MemberReachability::LocalDirect);
         let model = shape(80, 8192, 70.0);
-        assert_eq!(should_cluster(model, [&a, &b], false), FitDecision::ClusterRequired);
+        assert_eq!(
+            should_cluster(model, [&a, &b], false),
+            FitDecision::ClusterRequired
+        );
         assert_eq!(single_box_fit(model, [&a, &b]), None);
     }
 
@@ -786,7 +843,10 @@ mod tests {
     fn fit_policy_honours_user_force() {
         let big = member(1, 80.0, "c", MemberReachability::LocalDirect);
         let model = shape(80, 8192, 70.0);
-        assert_eq!(should_cluster(model, [&big], true), FitDecision::ClusterForced);
+        assert_eq!(
+            should_cluster(model, [&big], true),
+            FitDecision::ClusterForced
+        );
         assert!(FitDecision::ClusterForced.forms_cluster());
         assert!(!FitDecision::RunLocal.forms_cluster());
     }
@@ -808,7 +868,10 @@ mod tests {
         let tiny = member(2, 0.5, "abc", MemberReachability::LocalDirect);
         let gate = hardware_gate("abc", 1.0, [ok, tiny]);
         assert_eq!(gate.admitted.len(), 1);
-        assert!(matches!(gate.rejected[0].1, RejectReason::InsufficientVram { .. }));
+        assert!(matches!(
+            gate.rejected[0].1,
+            RejectReason::InsufficientVram { .. }
+        ));
     }
 
     #[test]
@@ -850,7 +913,9 @@ mod tests {
 
     #[test]
     fn assign_layers_handles_more_members_than_layers() {
-        let members: Vec<_> = (1..=4).map(|i| member(i, 8.0, "c", MemberReachability::LocalDirect)).collect();
+        let members: Vec<_> = (1..=4)
+            .map(|i| member(i, 8.0, "c", MemberReachability::LocalDirect))
+            .collect();
         let plan = assign_layers(2, &members);
         // Only 2 layers: only 2 members get a range.
         let total: u32 = plan.values().map(|s| s.layer_count()).sum();
@@ -865,7 +930,12 @@ mod tests {
         let relay = member(3, 24.0, "c", MemberReachability::RelayOnly);
         let nat = member(4, 24.0, "c", MemberReachability::SymmetricNat);
         let probes = HashMap::new();
-        let gate = order_stages(head, &[direct.clone(), relay.clone(), nat.clone()], &probes, 16384);
+        let gate = order_stages(
+            head,
+            &[direct.clone(), relay.clone(), nat.clone()],
+            &probes,
+            16384,
+        );
         assert_eq!(gate.ordered, vec![direct.address]);
         assert_eq!(gate.excluded.len(), 2);
     }
@@ -877,18 +947,42 @@ mod tests {
         let far = member(3, 24.0, "c", MemberReachability::LocalDirect);
         let mut probes = HashMap::new();
         // Head -> near is fast; head -> far is slow.
-        probes.insert(link_key(head, near.address), LinkProbe { rtt_ms: 1.0, bandwidth_gbps: 10.0 });
-        probes.insert(link_key(head, far.address), LinkProbe { rtt_ms: 50.0, bandwidth_gbps: 1.0 });
+        probes.insert(
+            link_key(head, near.address),
+            LinkProbe {
+                rtt_ms: 1.0,
+                bandwidth_gbps: 10.0,
+            },
+        );
+        probes.insert(
+            link_key(head, far.address),
+            LinkProbe {
+                rtt_ms: 50.0,
+                bandwidth_gbps: 1.0,
+            },
+        );
         // near -> far link so the chain can complete.
-        probes.insert(link_key(near.address, far.address), LinkProbe { rtt_ms: 2.0, bandwidth_gbps: 10.0 });
+        probes.insert(
+            link_key(near.address, far.address),
+            LinkProbe {
+                rtt_ms: 2.0,
+                bandwidth_gbps: 10.0,
+            },
+        );
         let gate = order_stages(head, &[far.clone(), near.clone()], &probes, 16384);
         assert_eq!(gate.ordered, vec![near.address, far.address]);
     }
 
     #[test]
     fn link_probe_transfer_cost_accounts_for_bandwidth() {
-        let fast = LinkProbe { rtt_ms: 1.0, bandwidth_gbps: 100.0 };
-        let slow = LinkProbe { rtt_ms: 1.0, bandwidth_gbps: 1.0 };
+        let fast = LinkProbe {
+            rtt_ms: 1.0,
+            bandwidth_gbps: 100.0,
+        };
+        let slow = LinkProbe {
+            rtt_ms: 1.0,
+            bandwidth_gbps: 1.0,
+        };
         let bytes = 16384;
         assert!(fast.transfer_ms(bytes) < slow.transfer_ms(bytes));
     }
@@ -941,7 +1035,11 @@ mod tests {
             llama_commit: "abc".into(),
             cpu_arch: "aarch64".into(),
             os: "macos".into(),
-            devices: vec![gpu_device(Backend::Cuda, 24.0), gpu_device(Backend::Cuda, 24.0), cpu_device(64.0)],
+            devices: vec![
+                gpu_device(Backend::Cuda, 24.0),
+                gpu_device(Backend::Cuda, 24.0),
+                cpu_device(64.0),
+            ],
         };
         // Two 24GB GPUs -> 48GB serving capacity; CPU not counted when GPUs present.
         assert!((profile.serving_vram_gb() - 48.0).abs() < 0.01);
@@ -993,7 +1091,12 @@ mod tests {
         let b = member(2, 24.0, "c", MemberReachability::LocalDirect);
         let model = shape(80, 8192, 70.0);
         let probes = HashMap::new();
-        let gate = order_stages(a.address, &[a.clone(), b.clone()], &probes, model.activation_bytes_per_token());
+        let gate = order_stages(
+            a.address,
+            &[a.clone(), b.clone()],
+            &probes,
+            model.activation_bytes_per_token(),
+        );
         let assignment = assign_layers(model.layers, &[a.clone(), b.clone()]);
         let plan = launch_plan(&gate, &assignment, &[a.clone(), b.clone()]);
 

@@ -657,7 +657,9 @@ impl LiFiAdapter {
 
     /// Generates a unique transfer ID.
     fn next_transfer_id(&self) -> String {
-        let counter = self.transfer_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let counter = self
+            .transfer_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         format!("lifi-{}-{}", Timestamp::now().as_millis(), counter)
     }
 
@@ -715,17 +717,20 @@ impl LiFiAdapter {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("LI.FI: /quote returned HTTP {}: {}", status, &body[..200.min(body.len())]);
+            error!(
+                "LI.FI: /quote returned HTTP {}: {}",
+                status,
+                &body[..200.min(body.len())]
+            );
             return Err(BridgeError::AdapterError(format!(
                 "LI.FI /quote returned HTTP {}: {}",
                 status, body
             )));
         }
 
-        let quote: LiFiQuoteResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("LI.FI /quote parse failed: {}", e)))?;
+        let quote: LiFiQuoteResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("LI.FI /quote parse failed: {}", e))
+        })?;
 
         debug!(
             "LI.FI: Quote received — tool={:?}, estimated_output={:?}",
@@ -797,7 +802,9 @@ impl LiFiAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::NetworkError(format!("LI.FI /advanced/routes request failed: {}", e)))?;
+            .map_err(|e| {
+                BridgeError::NetworkError(format!("LI.FI /advanced/routes request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -808,12 +815,9 @@ impl LiFiAdapter {
             )));
         }
 
-        let routes: LiFiRoutesResponse = response
-            .json()
-            .await
-            .map_err(|e| {
-                BridgeError::SerializationError(format!("LI.FI /advanced/routes parse failed: {}", e))
-            })?;
+        let routes: LiFiRoutesResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("LI.FI /advanced/routes parse failed: {}", e))
+        })?;
 
         debug!("LI.FI: Received {} routes", routes.routes.len());
         Ok(routes)
@@ -823,7 +827,10 @@ impl LiFiAdapter {
     ///
     /// `GET /advanced/stepTransaction` — returns the unsigned transaction data
     /// needed to execute one step of a multi-step route.
-    pub async fn get_step_transaction(&self, step: &LiFiRouteStep) -> Result<LiFiTransactionRequest> {
+    pub async fn get_step_transaction(
+        &self,
+        step: &LiFiRouteStep,
+    ) -> Result<LiFiTransactionRequest> {
         let url = format!("{}/advanced/stepTransaction", self.config.api_url);
 
         let response = self
@@ -832,7 +839,10 @@ impl LiFiAdapter {
             .send()
             .await
             .map_err(|e| {
-                BridgeError::NetworkError(format!("LI.FI /advanced/stepTransaction request failed: {}", e))
+                BridgeError::NetworkError(format!(
+                    "LI.FI /advanced/stepTransaction request failed: {}",
+                    e
+                ))
             })?;
 
         if !response.status().is_success() {
@@ -844,15 +854,12 @@ impl LiFiAdapter {
             )));
         }
 
-        let tx: LiFiTransactionRequest = response
-            .json()
-            .await
-            .map_err(|e| {
-                BridgeError::SerializationError(format!(
-                    "LI.FI /advanced/stepTransaction parse failed: {}",
-                    e
-                ))
-            })?;
+        let tx: LiFiTransactionRequest = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!(
+                "LI.FI /advanced/stepTransaction parse failed: {}",
+                e
+            ))
+        })?;
 
         Ok(tx)
     }
@@ -887,7 +894,9 @@ impl LiFiAdapter {
             .query(&query)
             .send()
             .await
-            .map_err(|e| BridgeError::NetworkError(format!("LI.FI /status request failed: {}", e)))?;
+            .map_err(|e| {
+                BridgeError::NetworkError(format!("LI.FI /status request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -898,10 +907,9 @@ impl LiFiAdapter {
             )));
         }
 
-        let status_resp: LiFiStatusResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("LI.FI /status parse failed: {}", e)))?;
+        let status_resp: LiFiStatusResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("LI.FI /status parse failed: {}", e))
+        })?;
 
         debug!(
             "LI.FI: Status for {} = {:?} (substatus={:?})",
@@ -921,7 +929,9 @@ impl LiFiAdapter {
             .request_builder(reqwest::Method::GET, &url)
             .send()
             .await
-            .map_err(|e| BridgeError::NetworkError(format!("LI.FI /chains request failed: {}", e)))?;
+            .map_err(|e| {
+                BridgeError::NetworkError(format!("LI.FI /chains request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -932,10 +942,9 @@ impl LiFiAdapter {
             )));
         }
 
-        let chains: LiFiChainsResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("LI.FI /chains parse failed: {}", e)))?;
+        let chains: LiFiChainsResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("LI.FI /chains parse failed: {}", e))
+        })?;
 
         debug!("LI.FI: Fetched {} chains", chains.chains.len());
         Ok(chains)
@@ -953,10 +962,9 @@ impl LiFiAdapter {
             builder = builder.query(&[("chains", ids_str.join(","))]);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| BridgeError::NetworkError(format!("LI.FI /tokens request failed: {}", e)))?;
+        let response = builder.send().await.map_err(|e| {
+            BridgeError::NetworkError(format!("LI.FI /tokens request failed: {}", e))
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -967,15 +975,11 @@ impl LiFiAdapter {
             )));
         }
 
-        let tokens: LiFiTokensResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("LI.FI /tokens parse failed: {}", e)))?;
+        let tokens: LiFiTokensResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("LI.FI /tokens parse failed: {}", e))
+        })?;
 
-        debug!(
-            "LI.FI: Fetched tokens for {} chains",
-            tokens.tokens.len()
-        );
+        debug!("LI.FI: Fetched tokens for {} chains", tokens.tokens.len());
         Ok(tokens)
     }
 
@@ -989,7 +993,9 @@ impl LiFiAdapter {
             .request_builder(reqwest::Method::GET, &url)
             .send()
             .await
-            .map_err(|e| BridgeError::NetworkError(format!("LI.FI /tools request failed: {}", e)))?;
+            .map_err(|e| {
+                BridgeError::NetworkError(format!("LI.FI /tools request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1000,10 +1006,9 @@ impl LiFiAdapter {
             )));
         }
 
-        let tools: LiFiToolsResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("LI.FI /tools parse failed: {}", e)))?;
+        let tools: LiFiToolsResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("LI.FI /tools parse failed: {}", e))
+        })?;
 
         debug!(
             "LI.FI: Fetched {} bridges and {} exchanges",
@@ -1136,7 +1141,6 @@ impl LiFiAdapter {
         }
     }
 
-
     /// Offline, heuristic-only fee estimate used as a fallback when the
     /// real /quote API call is unavailable.
     fn estimate_fee_static(payload_size: usize) -> u128 {
@@ -1256,11 +1260,7 @@ impl BridgeAdapter for LiFiAdapter {
             })?;
             let data_hex = tx_req.data.as_deref().unwrap_or("0x");
             let calldata = hex::decode(data_hex.trim_start_matches("0x")).unwrap_or_default();
-            let value = tx_req
-                .value
-                .as_deref()
-                .map(Self::parse_value)
-                .unwrap_or(0);
+            let value = tx_req.value.as_deref().map(Self::parse_value).unwrap_or(0);
 
             let tx_hash = signer
                 .send_transaction(to, &calldata, value)
@@ -1271,7 +1271,9 @@ impl BridgeAdapter for LiFiAdapter {
 
             info!(
                 "LI.FI: Submitted message tx {} to chain {} (payload_size={})",
-                tx_hash, dest_chain, payload.len()
+                tx_hash,
+                dest_chain,
+                payload.len()
             );
 
             // Track the transfer
@@ -1367,13 +1369,8 @@ impl BridgeAdapter for LiFiAdapter {
                     BridgeError::AdapterError("LI.FI: Quote returned no 'to' address".to_string())
                 })?;
                 let data_hex = tx_req.data.as_deref().unwrap_or("0x");
-                let calldata =
-                    hex::decode(data_hex.trim_start_matches("0x")).unwrap_or_default();
-                let value = tx_req
-                    .value
-                    .as_deref()
-                    .map(Self::parse_value)
-                    .unwrap_or(0);
+                let calldata = hex::decode(data_hex.trim_start_matches("0x")).unwrap_or_default();
+                let value = tx_req.value.as_deref().map(Self::parse_value).unwrap_or(0);
 
                 let tx_hash_str = signer
                     .send_transaction(to, &calldata, value)
@@ -1400,8 +1397,8 @@ impl BridgeAdapter for LiFiAdapter {
                 );
 
                 // Parse hex hash into Hash type
-                let hash_bytes =
-                    hex::decode(tx_hash_str.trim_start_matches("0x")).unwrap_or_else(|_| vec![0u8; 32]);
+                let hash_bytes = hex::decode(tx_hash_str.trim_start_matches("0x"))
+                    .unwrap_or_else(|_| vec![0u8; 32]);
                 let mut hash_array = [0u8; 32];
                 let len = hash_bytes.len().min(32);
                 hash_array[32 - len..].copy_from_slice(&hash_bytes[..len]);
@@ -1570,10 +1567,8 @@ impl LiFiAdapter {
         // Map common symbols to native/zero address
         // (LI.FI uses 0x0 for native tokens, actual contract addresses for ERC-20s)
         match asset_id.to_uppercase().as_str() {
-            "ETH" | "MATIC" | "POL" | "BNB" | "AVAX" | "FTM" | "SOL" | "CELO" | "GLMR"
-            | "MNT" | "SEI" | "XDAI" => {
-                "0x0000000000000000000000000000000000000000".to_string()
-            }
+            "ETH" | "MATIC" | "POL" | "BNB" | "AVAX" | "FTM" | "SOL" | "CELO" | "GLMR" | "MNT"
+            | "SEI" | "XDAI" => "0x0000000000000000000000000000000000000000".to_string(),
             // Well-known ERC-20 addresses (Ethereum mainnet)
             "USDC" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
             "USDT" => "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
@@ -1695,16 +1690,25 @@ mod tests {
     #[test]
     fn test_chain_name_to_evm_id() {
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("ethereum").unwrap(), 1);
-        assert_eq!(LiFiAdapter::chain_name_to_evm_id("arbitrum").unwrap(), 42161);
+        assert_eq!(
+            LiFiAdapter::chain_name_to_evm_id("arbitrum").unwrap(),
+            42161
+        );
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("optimism").unwrap(), 10);
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("polygon").unwrap(), 137);
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("bsc").unwrap(), 56);
-        assert_eq!(LiFiAdapter::chain_name_to_evm_id("avalanche").unwrap(), 43114);
+        assert_eq!(
+            LiFiAdapter::chain_name_to_evm_id("avalanche").unwrap(),
+            43114
+        );
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("base").unwrap(), 8453);
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("zksync").unwrap(), 324);
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("linea").unwrap(), 59144);
         assert_eq!(LiFiAdapter::chain_name_to_evm_id("scroll").unwrap(), 534352);
-        assert_eq!(LiFiAdapter::chain_name_to_evm_id("solana").unwrap(), 1151111081099710);
+        assert_eq!(
+            LiFiAdapter::chain_name_to_evm_id("solana").unwrap(),
+            1151111081099710
+        );
 
         assert!(LiFiAdapter::chain_name_to_evm_id("unknown_chain").is_err());
     }
@@ -1768,14 +1772,16 @@ mod tests {
         assert_eq!(LiFiAdapter::parse_value("0x1"), 1);
         assert_eq!(LiFiAdapter::parse_value("0xff"), 255);
         assert_eq!(LiFiAdapter::parse_value("1000000"), 1_000_000);
-        assert_eq!(LiFiAdapter::parse_value("0xDE0B6B3A7640000"), 1_000_000_000_000_000_000);
+        assert_eq!(
+            LiFiAdapter::parse_value("0xDE0B6B3A7640000"),
+            1_000_000_000_000_000_000
+        );
         assert_eq!(LiFiAdapter::parse_value("invalid"), 0);
     }
 
     #[tokio::test]
     async fn test_estimate_fee_offline_fallback() {
-        let config = LiFiConfig::new()
-            .with_api_url("http://localhost:99999"); // Unreachable
+        let config = LiFiConfig::new().with_api_url("http://localhost:99999"); // Unreachable
         let adapter = LiFiAdapter::new(config);
 
         // Should fall back to static estimate
@@ -2119,4 +2125,3 @@ mod tests {
         assert!(id1.starts_with("lifi-"));
     }
 }
-

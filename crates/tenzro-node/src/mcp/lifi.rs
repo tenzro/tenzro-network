@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router, Json, ServerHandler,
+    Json, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 
@@ -19,15 +17,21 @@ pub struct GetChainsParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetTokensParams {
-    #[schemars(description = "Comma-separated chain IDs to filter tokens (e.g. '1,137,42161'). Omit for all chains.")]
+    #[schemars(
+        description = "Comma-separated chain IDs to filter tokens (e.g. '1,137,42161'). Omit for all chains."
+    )]
     pub chains: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetTokenParams {
-    #[schemars(description = "Chain ID (e.g. 1 for Ethereum, 137 for Polygon, 42161 for Arbitrum)")]
+    #[schemars(
+        description = "Chain ID (e.g. 1 for Ethereum, 137 for Polygon, 42161 for Arbitrum)"
+    )]
     pub chain_id: u64,
-    #[schemars(description = "Token contract address (e.g. '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' for USDC on Ethereum). Use '0x0000000000000000000000000000000000000000' for native tokens.")]
+    #[schemars(
+        description = "Token contract address (e.g. '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' for USDC on Ethereum). Use '0x0000000000000000000000000000000000000000' for native tokens."
+    )]
     pub token_address: String,
 }
 
@@ -40,9 +44,13 @@ pub struct GetConnectionsParams {
     pub from_chain: u64,
     #[schemars(description = "Destination chain ID (e.g. 137 for Polygon)")]
     pub to_chain: u64,
-    #[schemars(description = "Source token address (optional, filters connections to specific token)")]
+    #[schemars(
+        description = "Source token address (optional, filters connections to specific token)"
+    )]
     pub from_token: Option<String>,
-    #[schemars(description = "Destination token address (optional, filters connections to specific token)")]
+    #[schemars(
+        description = "Destination token address (optional, filters connections to specific token)"
+    )]
     pub to_token: Option<String>,
 }
 
@@ -52,7 +60,9 @@ pub struct GetQuoteParams {
     pub from_chain: u64,
     #[schemars(description = "Destination chain ID (e.g. 137 for Polygon)")]
     pub to_chain: u64,
-    #[schemars(description = "Source token address (e.g. '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' for USDC)")]
+    #[schemars(
+        description = "Source token address (e.g. '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' for USDC)"
+    )]
     pub from_token: String,
     #[schemars(description = "Destination token address")]
     pub to_token: String,
@@ -96,7 +106,9 @@ pub struct GetStatusParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetGasPricesParams {
-    #[schemars(description = "Comma-separated chain IDs (e.g. '1,137,42161'). Omit for all chains.")]
+    #[schemars(
+        description = "Comma-separated chain IDs (e.g. '1,137,42161'). Omit for all chains."
+    )]
     pub chains: Option<String>,
 }
 
@@ -130,7 +142,9 @@ fn err_internal(msg: impl Into<String>) -> ErrorData {
     ErrorData::internal_error(msg.into(), None)
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn json_result(
+    value: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
@@ -213,17 +227,16 @@ impl LifiMcpServer {
 
     // ─── Discovery Tools ───
 
-    #[tool(description = "Get all blockchain networks supported by LI.FI for cross-chain transfers and swaps. Returns chain IDs, names, native tokens, and supported bridge/exchange protocols.")]
+    #[tool(
+        description = "Get all blockchain networks supported by LI.FI for cross-chain transfers and swaps. Returns chain IDs, names, native tokens, and supported bridge/exchange protocols."
+    )]
     async fn lifi_get_chains(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<GetChainsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let data = self.api_get("/chains", &[]).await?;
 
-        let chains = data
-            .get("chains")
-            .cloned()
-            .unwrap_or_else(|| data.clone());
+        let chains = data.get("chains").cloned().unwrap_or_else(|| data.clone());
 
         let count = chains.as_array().map(|a| a.len()).unwrap_or(0);
 
@@ -235,7 +248,9 @@ impl LifiMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get tokens available on LI.FI-supported chains. Optionally filter by chain IDs. Returns token addresses, symbols, decimals, and logos.")]
+    #[tool(
+        description = "Get tokens available on LI.FI-supported chains. Optionally filter by chain IDs. Returns token addresses, symbols, decimals, and logos."
+    )]
     async fn lifi_get_tokens(
         &self,
         Parameters(params): Parameters<GetTokensParams>,
@@ -249,10 +264,7 @@ impl LifiMcpServer {
 
         let data = self.api_get("/tokens", &query).await?;
 
-        let tokens = data
-            .get("tokens")
-            .cloned()
-            .unwrap_or_else(|| data.clone());
+        let tokens = data.get("tokens").cloned().unwrap_or_else(|| data.clone());
 
         let result = serde_json::json!({
             "source": "lifi_api",
@@ -261,7 +273,9 @@ impl LifiMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get detailed information about a specific token on a specific chain, including address, symbol, decimals, name, and logo URI.")]
+    #[tool(
+        description = "Get detailed information about a specific token on a specific chain, including address, symbol, decimals, name, and logo URI."
+    )]
     async fn lifi_get_token(
         &self,
         Parameters(params): Parameters<GetTokenParams>,
@@ -283,15 +297,23 @@ impl LifiMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get available bridge and DEX exchange tools integrated into LI.FI. Returns protocol names, supported chains, and tool types (bridge vs exchange).")]
+    #[tool(
+        description = "Get available bridge and DEX exchange tools integrated into LI.FI. Returns protocol names, supported chains, and tool types (bridge vs exchange)."
+    )]
     async fn lifi_get_tools(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<GetToolsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let data = self.api_get("/tools", &[]).await?;
 
-        let bridges = data.get("bridges").cloned().unwrap_or(serde_json::json!([]));
-        let exchanges = data.get("exchanges").cloned().unwrap_or(serde_json::json!([]));
+        let bridges = data
+            .get("bridges")
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
+        let exchanges = data
+            .get("exchanges")
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
         let bridge_count = bridges.as_array().map(|a| a.len()).unwrap_or(0);
         let exchange_count = exchanges.as_array().map(|a| a.len()).unwrap_or(0);
 
@@ -307,7 +329,9 @@ impl LifiMcpServer {
 
     // ─── Routing Tools ───
 
-    #[tool(description = "Get available cross-chain connections between two chains. Optionally filter by source and destination tokens. Shows which bridges and exchanges can transfer between the specified chains.")]
+    #[tool(
+        description = "Get available cross-chain connections between two chains. Optionally filter by source and destination tokens. Shows which bridges and exchanges can transfer between the specified chains."
+    )]
     async fn lifi_get_connections(
         &self,
         Parameters(params): Parameters<GetConnectionsParams>,
@@ -346,7 +370,9 @@ impl LifiMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get a single best quote for a cross-chain swap or bridge transfer. Returns the optimal route with estimated output, fees, execution time, and transaction data ready to sign.")]
+    #[tool(
+        description = "Get a single best quote for a cross-chain swap or bridge transfer. Returns the optimal route with estimated output, fees, execution time, and transaction data ready to sign."
+    )]
     async fn lifi_get_quote(
         &self,
         Parameters(params): Parameters<GetQuoteParams>,
@@ -382,7 +408,9 @@ impl LifiMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get multiple route options for a cross-chain swap or bridge transfer, ranked by output amount. Use this for comparing routes across different bridges and DEXes. Returns routes with fees, estimated time, and step-by-step breakdown.")]
+    #[tool(
+        description = "Get multiple route options for a cross-chain swap or bridge transfer, ranked by output amount. Use this for comparing routes across different bridges and DEXes. Returns routes with fees, estimated time, and step-by-step breakdown."
+    )]
     async fn lifi_get_routes(
         &self,
         Parameters(params): Parameters<GetRoutesParams>,
@@ -423,7 +451,9 @@ impl LifiMcpServer {
 
     // ─── Tracking Tools ───
 
-    #[tool(description = "Check the status of a cross-chain transfer by transaction hash. Returns status (PENDING, DONE, FAILED, NOT_FOUND), bridge used, source/destination chain info, and amounts.")]
+    #[tool(
+        description = "Check the status of a cross-chain transfer by transaction hash. Returns status (PENDING, DONE, FAILED, NOT_FOUND), bridge used, source/destination chain info, and amounts."
+    )]
     async fn lifi_get_status(
         &self,
         Parameters(params): Parameters<GetStatusParams>,
@@ -464,7 +494,9 @@ impl LifiMcpServer {
 
     // ─── Gas Tools ───
 
-    #[tool(description = "Get current gas prices for LI.FI-supported chains. Optionally filter by chain IDs. Returns gas prices in native units for each chain.")]
+    #[tool(
+        description = "Get current gas prices for LI.FI-supported chains. Optionally filter by chain IDs. Returns gas prices in native units for each chain."
+    )]
     async fn lifi_get_gas_prices(
         &self,
         Parameters(params): Parameters<GetGasPricesParams>,
@@ -544,7 +576,7 @@ pub async fn start_lifi_mcp_server_with_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let config = StreamableHttpServerConfig::default()
@@ -567,7 +599,9 @@ pub async fn start_lifi_mcp_server_with_shutdown(
     let app = axum::Router::new()
         .nest_service("/mcp", service)
         .layer(tower::limit::ConcurrencyLimitLayer::new(100))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            2 * 1024 * 1024,
+        ));
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
         addr = %listen_addr,

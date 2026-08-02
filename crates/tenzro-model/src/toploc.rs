@@ -143,9 +143,7 @@ pub fn top_k_from_logits(logits: &[f32], k: usize) -> Vec<TopKEntry> {
         .enumerate()
         .map(|(i, &v)| (i as u32, v))
         .collect();
-    let cmp = |a: &(u32, f32), b: &(u32, f32)| {
-        b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
-    };
+    let cmp = |a: &(u32, f32), b: &(u32, f32)| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0));
     if k < indexed.len() {
         indexed.select_nth_unstable_by(k - 1, cmp);
         indexed.truncate(k);
@@ -296,7 +294,11 @@ mod tests {
         // One index swapped out (3/4 = 0.75 overlap) + 0.1 logit drift.
         let recomputed = vec![entry(5, 10.1), entry(9, 8.9), entry(2, 8.6), entry(77, 7.1)];
         let cmp = compare_step(&step, &recomputed);
-        assert!(cmp.pass, "overlap {} delta {}", cmp.index_overlap, cmp.mean_logit_delta);
+        assert!(
+            cmp.pass,
+            "overlap {} delta {}",
+            cmp.index_overlap, cmp.mean_logit_delta
+        );
     }
 
     #[test]

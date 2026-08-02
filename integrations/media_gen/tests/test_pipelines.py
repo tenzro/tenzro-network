@@ -49,29 +49,35 @@ def qwen_row(**overrides) -> dict:
 
 
 def wan_row(**overrides) -> dict:
-    return qwen_row(
-        id="wan2.2-t2v-a14b",
-        name="Wan 2.2 T2V A14B",
-        family="wan",
-        hf_repo="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        pipeline_class="WanPipeline",
-        kinds=["text2video"],
-        default_width=1280,
-        default_height=720,
-        max_resolution=1280,
-        default_steps=40,
-        default_guidance_scale=4.0,
-        default_num_frames=81,
-        default_fps=16,
-        min_vram_gb=80,
-        expert_pair={
+    # Wan's own defaults are merged into `overrides` rather than passed
+    # alongside them. Passing both means any caller overriding a key Wan sets
+    # explicitly — `wan_row(id="...")` — hits "got multiple values for keyword
+    # argument", because the explicit kwarg and the one inside `**overrides`
+    # are the same parameter.
+    wan_defaults = {
+        "id": "wan2.2-t2v-a14b",
+        "name": "Wan 2.2 T2V A14B",
+        "family": "wan",
+        "hf_repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        "pipeline_class": "WanPipeline",
+        "kinds": ["text2video"],
+        "default_width": 1280,
+        "default_height": 720,
+        "max_resolution": 1280,
+        "default_steps": 40,
+        "default_guidance_scale": 4.0,
+        "default_num_frames": 81,
+        "default_fps": 16,
+        "min_vram_gb": 80,
+        "expert_pair": {
             "high_noise_component": "transformer",
             "low_noise_component": "transformer_2",
             "boundary_ratio": 0.875,
             "min_vram_gb_per_expert": 48,
         },
-        **overrides,
-    )
+    }
+    # Caller's overrides win, which is the whole point of the parameter.
+    return qwen_row(**{**wan_defaults, **overrides})
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +157,7 @@ def test_a_class_that_already_covers_image_input_keeps_it():
             kinds=["image2image"],
         )
     )
-    assert entry.pipeline_class_for(MediaGenKind.IMAGE2IMAGE) == (
-        "QwenImageEditPlusPipeline"
-    )
+    assert entry.pipeline_class_for(MediaGenKind.IMAGE2IMAGE) == ("QwenImageEditPlusPipeline")
 
 
 # ---------------------------------------------------------------------------
@@ -265,3 +269,86 @@ def test_the_boundary_scales_with_the_training_timestep_count():
     """``boundary_ratio`` is a fraction of the scheduler's own range."""
     pipe = StubPipe([1500, 1400, 1300, 1200], num_train_timesteps=1500)
     assert boundary_index(pipe, 4, 0.875) == 2
+
+
+# ── precision selection ───────────────────────────────────────────────────
+
+
+def test_every_precision_tier_is_recognised() -> None:
+    from tenzro_media_gen.pipelines import DIFFUSION_PRECISIONS
+
+    # Coarsest first, so a caller scanning the tuple reads it as a ladder from
+    # "smallest" to "most faithful".
+    assert DIFFUSION_PRECISIONS == (
+        "nf4",
+        "int4",
+        "int8",
+        "float16",
+        "bfloat16",
+        "float32",
+    )
+
+
+def test_floating_point_tiers_need_no_quantizer() -> None:
+    # These are expressed as torch_dtype, not as a bitsandbytes config, so a
+    # node without bitsandbytes still serves them.
+    from tenzro_media_gen.pipelines import _quantization_for
+
+    for p in ("float16", "bfloat16", "float32"):
+        assert _quantization_for(p, None) is None
+
+
+def test_a_quantized_pipeline_declares_itself_unmovable() -> None:
+    # A bitsandbytes module is placed on its device at load and raises if
+    # moved afterwards. Callers need to be able to ask before they try.
+    from tenzro_media_gen.pipelines import LoadedPipeline
+
+    def loaded(precision: str) -> LoadedPipeline:
+        return LoadedPipeline(
+            pipe=object(),
+            entry=_entry(),
+            kind=MediaGenKind.TEXT2IMAGE,
+            role=None,
+            precision=precision,
+        )
+
+    assert loaded("nf4").is_quantized
+    assert loaded("int4").is_quantized
+    assert loaded("int8").is_quantized
+    assert not loaded("bfloat16").is_quantized
+    assert not loaded("float16").is_quantized
+    assert not loaded("float32").is_quantized
+
+
+def _entry() -> CatalogEntry:
+    return CatalogEntry(
+        id="test-model",
+        name="Test",
+        family="test",
+        hf_repo="test/test",
+        pipeline_class="TestPipeline",
+        kinds=[MediaGenKind.TEXT2IMAGE],
+        default_width=1024,
+        default_height=1024,
+        max_resolution=2048,
+        default_steps=20,
+        default_guidance_scale=4.0,
+        default_num_frames=None,
+        default_fps=None,
+        min_vram_gb=8,
+        license="Apache-2.0",
+        expert_pair=None,
+    )
+
+
+def test_precision_defaults_to_the_dtype_so_existing_callers_are_unchanged() -> None:
+    # Adding a knob must not silently change what a caller who never set it
+    # gets — a pipeline that quietly became 4-bit would return different
+    # pixels for the same seed.
+    import inspect
+
+    from tenzro_media_gen.pipelines import LoadedPipeline, load_pipeline
+
+    sig = inspect.signature(load_pipeline)
+    assert sig.parameters["precision"].default is None
+    assert LoadedPipeline.__dataclass_fields__["precision"].default == "bfloat16"

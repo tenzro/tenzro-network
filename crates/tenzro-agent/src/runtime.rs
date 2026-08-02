@@ -10,18 +10,21 @@ use crate::{
     capabilities::CapabilityRegistry,
     error::{AgentError, Result},
     identity::{AgentIdentityManager, AgentStatus, RegisteredAgent},
-    lifecycle::{AgentLifecycle, AgentLifecycleEvent, AgentLifecycleInfo, AgentState, HeartbeatConfig},
+    lifecycle::{
+        AgentLifecycle, AgentLifecycleEvent, AgentLifecycleInfo, AgentState, HeartbeatConfig,
+    },
     messaging::{AgentVerifyingKeys, MessageRouter},
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tenzro_storage::kv::{KvStore, CF_AGENTS};
+use tenzro_storage::kv::{CF_AGENTS, KvStore};
 use tenzro_types::{
-    agent::{Capability, ResourceLimits}, primitives::Address, AgentIdentity, AgentMessage,
-    AgentMessageType,
+    AgentIdentity, AgentMessage, AgentMessageType,
+    agent::{Capability, ResourceLimits},
+    primitives::Address,
 };
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 /// Storage key prefix for persisted `RegisteredAgent` records in CF_AGENTS.
@@ -180,12 +183,10 @@ impl AgentRuntime {
     /// Creates a new agent runtime with custom configuration
     pub fn with_config(config: AgentRuntimeConfig) -> Result<Self> {
         let identity_manager = Arc::new(AgentIdentityManager::new()?);
-        let lifecycle_manager = Arc::new(AgentLifecycle::with_heartbeat_config(
-            HeartbeatConfig {
-                interval_secs: config.heartbeat_interval as i64,
-                timeout_multiplier: 1,
-            },
-        ));
+        let lifecycle_manager = Arc::new(AgentLifecycle::with_heartbeat_config(HeartbeatConfig {
+            interval_secs: config.heartbeat_interval as i64,
+            timeout_multiplier: 1,
+        }));
         let message_router = Arc::new(MessageRouter::new());
         let capability_registry = Arc::new(CapabilityRegistry::new());
         let a2a_protocol = Arc::new(A2aProtocol::new());
@@ -226,15 +227,11 @@ impl AgentRuntime {
     ) -> Result<Self> {
         let config = AgentRuntimeConfig::default();
         let identity_manager = Arc::new(AgentIdentityManager::new()?);
-        let lifecycle_manager = Arc::new(AgentLifecycle::with_heartbeat_config(
-            HeartbeatConfig {
-                interval_secs: config.heartbeat_interval as i64,
-                timeout_multiplier: 1,
-            },
-        ));
-        let message_router = Arc::new(
-            MessageRouter::new().with_network_transport(transport),
-        );
+        let lifecycle_manager = Arc::new(AgentLifecycle::with_heartbeat_config(HeartbeatConfig {
+            interval_secs: config.heartbeat_interval as i64,
+            timeout_multiplier: 1,
+        }));
+        let message_router = Arc::new(MessageRouter::new().with_network_transport(transport));
         let capability_registry = Arc::new(CapabilityRegistry::new());
         let a2a_protocol = Arc::new(A2aProtocol::new());
 
@@ -297,12 +294,10 @@ impl AgentRuntime {
     ) -> Result<Self> {
         let config = AgentRuntimeConfig::default();
         let identity_manager = Arc::new(AgentIdentityManager::new()?);
-        let lifecycle_manager = Arc::new(AgentLifecycle::with_heartbeat_config(
-            HeartbeatConfig {
-                interval_secs: config.heartbeat_interval as i64,
-                timeout_multiplier: 1,
-            },
-        ));
+        let lifecycle_manager = Arc::new(AgentLifecycle::with_heartbeat_config(HeartbeatConfig {
+            interval_secs: config.heartbeat_interval as i64,
+            timeout_multiplier: 1,
+        }));
         // Wire storage into the router so accepted agent messages are
         // wrapped in `ReceiptEnvelope { kind: AgentMessage, OffloadedDA }`
         // and persisted to `CF_AGENTS / message:<agent_id>:...`.
@@ -321,9 +316,7 @@ impl AgentRuntime {
         // Step 1: restore RegisteredAgent records.
         let agent_keys = storage
             .get_keys_with_prefix(CF_AGENTS, AGENT_KEY_PREFIX)
-            .map_err(|e| AgentError::StorageError(format!(
-                "Failed to scan agent keys: {}", e
-            )))?;
+            .map_err(|e| AgentError::StorageError(format!("Failed to scan agent keys: {}", e)))?;
 
         let mut hydrated_agent_ids: Vec<String> = Vec::new();
         for key in agent_keys {
@@ -376,34 +369,29 @@ impl AgentRuntime {
         // Step 3: restore AgentLifecycleInfo records.
         let lifecycle_keys = storage
             .get_keys_with_prefix(CF_AGENTS, LIFECYCLE_KEY_PREFIX)
-            .map_err(|e| AgentError::StorageError(format!(
-                "Failed to scan lifecycle keys: {}", e
-            )))?;
+            .map_err(|e| {
+                AgentError::StorageError(format!("Failed to scan lifecycle keys: {}", e))
+            })?;
 
         let mut hydrated_lifecycle_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for key in lifecycle_keys {
             match storage.get(CF_AGENTS, &key) {
-                Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<AgentLifecycleInfo>(&bytes) {
-                        Ok(info) => {
-                            let id = info.agent_id.clone();
-                            if let Err(e) = lifecycle_manager.insert_hydrated(info) {
-                                warn!(
-                                    "Failed to hydrate lifecycle for agent {}: {}",
-                                    id, e
-                                );
-                            } else {
-                                hydrated_lifecycle_ids.insert(id);
-                            }
+                Ok(Some(bytes)) => match serde_json::from_slice::<AgentLifecycleInfo>(&bytes) {
+                    Ok(info) => {
+                        let id = info.agent_id.clone();
+                        if let Err(e) = lifecycle_manager.insert_hydrated(info) {
+                            warn!("Failed to hydrate lifecycle for agent {}: {}", id, e);
+                        } else {
+                            hydrated_lifecycle_ids.insert(id);
                         }
-                        Err(e) => warn!(
-                            "Corrupt lifecycle record at key {:?}: {}",
-                            String::from_utf8_lossy(&key),
-                            e
-                        ),
                     }
-                }
+                    Err(e) => warn!(
+                        "Corrupt lifecycle record at key {:?}: {}",
+                        String::from_utf8_lossy(&key),
+                        e
+                    ),
+                },
                 Ok(None) => {}
                 Err(e) => warn!(
                     "Failed to read lifecycle key {:?}: {}",
@@ -419,10 +407,7 @@ impl AgentRuntime {
             if !hydrated_lifecycle_ids.contains(agent_id) {
                 let info = AgentLifecycleInfo::new(agent_id.clone());
                 if let Err(e) = lifecycle_manager.insert_hydrated(info) {
-                    warn!(
-                        "Failed to seed lifecycle for agent {}: {}",
-                        agent_id, e
-                    );
+                    warn!("Failed to seed lifecycle for agent {}: {}", agent_id, e);
                 }
             }
         }
@@ -430,9 +415,9 @@ impl AgentRuntime {
         // Step 5: restore parent → children spawn tree.
         let children_keys = storage
             .get_keys_with_prefix(CF_AGENTS, CHILDREN_KEY_PREFIX)
-            .map_err(|e| AgentError::StorageError(format!(
-                "Failed to scan children keys: {}", e
-            )))?;
+            .map_err(|e| {
+                AgentError::StorageError(format!("Failed to scan children keys: {}", e))
+            })?;
 
         for key in children_keys {
             match storage.get(CF_AGENTS, &key) {
@@ -471,9 +456,9 @@ impl AgentRuntime {
         let agent_tx_counters: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
         let tx_keys = storage
             .get_keys_with_prefix(CF_AGENTS, AGENT_TX_KEY_PREFIX)
-            .map_err(|e| AgentError::StorageError(format!(
-                "Failed to scan agent transaction keys: {}", e
-            )))?;
+            .map_err(|e| {
+                AgentError::StorageError(format!("Failed to scan agent transaction keys: {}", e))
+            })?;
         for key in tx_keys {
             // Key layout: `agenttx:<did>:<seq_be_u64>`. The DID itself can
             // contain `:` so we slice off the trailing 8 bytes (BE seq) and
@@ -590,10 +575,7 @@ impl AgentRuntime {
     /// the first attachment wins; subsequent calls are silently ignored
     /// (returns `false` to signal the manager was already set). The node
     /// calls this exactly once during `init_ai_infrastructure`.
-    pub fn set_memory_manager(
-        &self,
-        memory_manager: Arc<crate::memory::MemoryManager>,
-    ) -> bool {
+    pub fn set_memory_manager(&self, memory_manager: Arc<crate::memory::MemoryManager>) -> bool {
         self.memory_manager.set(memory_manager).is_ok()
     }
 
@@ -638,9 +620,7 @@ impl AgentRuntime {
             let key = Self::agent_key(&agent.identity.agent_id);
             storage
                 .put(CF_AGENTS, &key, &bytes)
-                .map_err(|e| AgentError::StorageError(format!(
-                    "Failed to persist agent: {}", e
-                )))?;
+                .map_err(|e| AgentError::StorageError(format!("Failed to persist agent: {}", e)))?;
         }
         Ok(())
     }
@@ -654,11 +634,9 @@ impl AgentRuntime {
                 AgentError::StorageError(format!("Failed to serialize lifecycle: {}", e))
             })?;
             let key = Self::lifecycle_key(agent_id);
-            storage
-                .put(CF_AGENTS, &key, &bytes)
-                .map_err(|e| AgentError::StorageError(format!(
-                    "Failed to persist lifecycle: {}", e
-                )))?;
+            storage.put(CF_AGENTS, &key, &bytes).map_err(|e| {
+                AgentError::StorageError(format!("Failed to persist lifecycle: {}", e))
+            })?;
         }
         Ok(())
     }
@@ -675,11 +653,9 @@ impl AgentRuntime {
                 AgentError::StorageError(format!("Failed to serialize children: {}", e))
             })?;
             let key = Self::children_key(parent_id);
-            storage
-                .put(CF_AGENTS, &key, &bytes)
-                .map_err(|e| AgentError::StorageError(format!(
-                    "Failed to persist children: {}", e
-                )))?;
+            storage.put(CF_AGENTS, &key, &bytes).map_err(|e| {
+                AgentError::StorageError(format!("Failed to persist children: {}", e))
+            })?;
         }
         Ok(())
     }
@@ -738,7 +714,9 @@ impl AgentRuntime {
         // with a custom (non-local) resolver this is a no-op — that
         // resolver is expected to be populated out-of-band.
         if let Some(keys) = build_agent_verifying_keys(&agent) {
-            let _ = self.message_router.register_local_key(agent_id.clone(), keys);
+            let _ = self
+                .message_router
+                .register_local_key(agent_id.clone(), keys);
         } else {
             warn!(
                 "Agent {} registered without classical/PQ verifying keys — \
@@ -825,7 +803,9 @@ impl AgentRuntime {
         // resolver. This is the whole point of BYOK — the caller signs
         // off-node and we verify here.
         if let Some(keys) = build_agent_verifying_keys(&agent) {
-            let _ = self.message_router.register_local_key(agent_id.clone(), keys);
+            let _ = self
+                .message_router
+                .register_local_key(agent_id.clone(), keys);
         } else {
             warn!(
                 "BYOK agent {} registered without verifying keys after construction \
@@ -945,11 +925,7 @@ impl AgentRuntime {
     }
 
     /// Resumes a paused agent back to Active.
-    pub async fn resume_paused_agent(
-        &self,
-        agent_id: &str,
-        controller_did: String,
-    ) -> Result<()> {
+    pub async fn resume_paused_agent(&self, agent_id: &str, controller_did: String) -> Result<()> {
         self.lifecycle_manager
             .resume_from_pause(agent_id, controller_did)?;
         self.persist_lifecycle(agent_id)?;
@@ -1088,15 +1064,19 @@ impl AgentRuntime {
         }
 
         // Create A2A message
-        let a2a_message = self
-            .a2a_protocol
-            .delegate_task(sender.clone(), receiver.clone(), task_type, parameters)?;
+        let a2a_message = self.a2a_protocol.delegate_task(
+            sender.clone(),
+            receiver.clone(),
+            task_type,
+            parameters,
+        )?;
 
         let task_id = a2a_message.message_id.clone();
 
         // Convert to AgentMessage and send
         let payload = a2a_message.to_bytes()?.to_vec();
-        let agent_message = AgentMessage::new(sender, receiver, AgentMessageType::TaskRequest, payload);
+        let agent_message =
+            AgentMessage::new(sender, receiver, AgentMessageType::TaskRequest, payload);
 
         self.send_message(agent_message).await?;
 
@@ -1136,14 +1116,16 @@ impl AgentRuntime {
         capabilities: Vec<String>,
     ) -> Result<RegisteredAgent> {
         // Enforce max 50 children per parent
-        let child_count = self.child_agents
+        let child_count = self
+            .child_agents
             .get(parent_id)
             .map(|v| v.len())
             .unwrap_or(0);
         if child_count >= 50 {
-            return Err(AgentError::ResourceLimitExceeded(
-                format!("Agent {} has reached the maximum child agent limit (50)", parent_id),
-            ));
+            return Err(AgentError::ResourceLimitExceeded(format!(
+                "Agent {} has reached the maximum child agent limit (50)",
+                parent_id
+            )));
         }
 
         // Look up parent to inherit creator address
@@ -1151,22 +1133,19 @@ impl AgentRuntime {
         let creator = parent.identity.creator;
 
         // Convert string capability names to typed Capability::Custom variants
-        let typed_caps: Vec<Capability> = capabilities.iter().map(|c| {
-            Capability::Custom {
+        let typed_caps: Vec<Capability> = capabilities
+            .iter()
+            .map(|c| Capability::Custom {
                 name: c.clone(),
                 parameters: std::collections::HashMap::new(),
-            }
-        }).collect();
+            })
+            .collect();
 
         // Register child agent with a unique nonce to avoid ID collision with parent
         let nonce = uuid::Uuid::new_v4().as_u128() as u64;
-        let child = self.register_agent(
-            name.to_string(),
-            creator,
-            typed_caps,
-            false,
-            nonce,
-        ).await?;
+        let child = self
+            .register_agent(name.to_string(), creator, typed_caps, false, nonce)
+            .await?;
 
         // Track parent→child relationship
         self.child_agents
@@ -1265,9 +1244,7 @@ impl AgentRuntime {
     /// Layout: `agenttx:<machine_did>:<seq_be_u64>` — the BE-encoded seq
     /// keeps lex-order aligned with insertion order.
     fn agent_tx_key(machine_did: &str, seq: u64) -> Vec<u8> {
-        let mut k = Vec::with_capacity(
-            AGENT_TX_KEY_PREFIX.len() + machine_did.len() + 1 + 8,
-        );
+        let mut k = Vec::with_capacity(AGENT_TX_KEY_PREFIX.len() + machine_did.len() + 1 + 8);
         k.extend_from_slice(AGENT_TX_KEY_PREFIX);
         k.extend_from_slice(machine_did.as_bytes());
         k.push(b':');
@@ -1286,10 +1263,7 @@ impl AgentRuntime {
     /// daily caps. The wallet-kernel-facing RPC `tenzro_agentPayForService`
     /// calls both — first `record_spend` (gate), then settles, then this
     /// (history).
-    pub fn record_agent_transaction(
-        &self,
-        record: AgentTransactionRecord,
-    ) -> Result<()> {
+    pub fn record_agent_transaction(&self, record: AgentTransactionRecord) -> Result<()> {
         let Some(ref storage) = self.storage else {
             return Ok(());
         };
@@ -1305,16 +1279,11 @@ impl AgentRuntime {
         drop(seq);
         let key = Self::agent_tx_key(&did, seq_val);
         let bytes = serde_json::to_vec(&record).map_err(|e| {
-            AgentError::StorageError(format!(
-                "Failed to serialize agent transaction: {}",
-                e
-            ))
+            AgentError::StorageError(format!("Failed to serialize agent transaction: {}", e))
         })?;
-        storage
-            .put(CF_AGENTS, &key, &bytes)
-            .map_err(|e| AgentError::StorageError(format!(
-                "Failed to persist agent transaction: {}", e
-            )))?;
+        storage.put(CF_AGENTS, &key, &bytes).map_err(|e| {
+            AgentError::StorageError(format!("Failed to persist agent transaction: {}", e))
+        })?;
         Ok(())
     }
 
@@ -1333,18 +1302,16 @@ impl AgentRuntime {
         };
         // Prefix scan over `agenttx:<did>:` — note the trailing ':' so we
         // don't pick up sibling DIDs that share a string prefix.
-        let mut prefix = Vec::with_capacity(
-            AGENT_TX_KEY_PREFIX.len() + machine_did.len() + 1,
-        );
+        let mut prefix = Vec::with_capacity(AGENT_TX_KEY_PREFIX.len() + machine_did.len() + 1);
         prefix.extend_from_slice(AGENT_TX_KEY_PREFIX);
         prefix.extend_from_slice(machine_did.as_bytes());
         prefix.push(b':');
 
         let mut keys = storage
             .get_keys_with_prefix(CF_AGENTS, &prefix)
-            .map_err(|e| AgentError::StorageError(format!(
-                "Failed to scan agent transaction keys: {}", e
-            )))?;
+            .map_err(|e| {
+                AgentError::StorageError(format!("Failed to scan agent transaction keys: {}", e))
+            })?;
         // RocksDB iterators return lex-ordered keys; in-memory backends
         // (e.g. `MemoryStore` for tests) use a HashMap whose iteration
         // order is non-deterministic. Sort here so chronology is
@@ -1355,16 +1322,14 @@ impl AgentRuntime {
         let mut records: Vec<AgentTransactionRecord> = Vec::with_capacity(keys.len());
         for key in keys {
             match storage.get(CF_AGENTS, &key) {
-                Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<AgentTransactionRecord>(&bytes) {
-                        Ok(rec) => records.push(rec),
-                        Err(e) => warn!(
-                            "Corrupt agent transaction record at key {:?}: {}",
-                            String::from_utf8_lossy(&key),
-                            e
-                        ),
-                    }
-                }
+                Ok(Some(bytes)) => match serde_json::from_slice::<AgentTransactionRecord>(&bytes) {
+                    Ok(rec) => records.push(rec),
+                    Err(e) => warn!(
+                        "Corrupt agent transaction record at key {:?}: {}",
+                        String::from_utf8_lossy(&key),
+                        e
+                    ),
+                },
                 Ok(None) => {}
                 Err(e) => warn!(
                     "Failed to read agent transaction key {:?}: {}",
@@ -1424,7 +1389,9 @@ impl AgentRuntime {
     }
 
     /// Subscribes to lifecycle events
-    pub fn subscribe_to_lifecycle_events(&self) -> tokio::sync::broadcast::Receiver<AgentLifecycleEvent> {
+    pub fn subscribe_to_lifecycle_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<AgentLifecycleEvent> {
         self.lifecycle_manager.subscribe()
     }
 
@@ -1468,7 +1435,10 @@ impl AgentRuntime {
                 warn!("Failed to persist suspended agent {}: {}", agent_id, e);
             }
             if let Err(e) = self.persist_lifecycle(agent_id) {
-                warn!("Failed to persist lifecycle for suspended agent {}: {}", agent_id, e);
+                warn!(
+                    "Failed to persist lifecycle for suspended agent {}: {}",
+                    agent_id, e
+                );
             }
         }
 
@@ -1524,11 +1494,19 @@ impl AgentRuntime {
         info!("Shutting down agent runtime");
 
         // Terminate all active agents
-        let active_agents = self.lifecycle_manager.get_agents_in_state(AgentState::Active);
+        let active_agents = self
+            .lifecycle_manager
+            .get_agents_in_state(AgentState::Active);
 
         for agent_id in active_agents {
-            if let Err(e) = self.terminate_agent(&agent_id, "Runtime shutdown".to_string()).await {
-                error!("Error terminating agent {} during shutdown: {}", agent_id, e);
+            if let Err(e) = self
+                .terminate_agent(&agent_id, "Runtime shutdown".to_string())
+                .await
+            {
+                error!(
+                    "Error terminating agent {} during shutdown: {}",
+                    agent_id, e
+                );
             }
         }
 
@@ -1635,12 +1613,24 @@ mod tests {
         let capability = Capability::MultiAgentCoordination;
 
         runtime
-            .register_agent("Agent1".to_string(), creator, vec![capability.clone()], false, 0)
+            .register_agent(
+                "Agent1".to_string(),
+                creator,
+                vec![capability.clone()],
+                false,
+                0,
+            )
             .await
             .unwrap();
 
         runtime
-            .register_agent("Agent2".to_string(), creator, vec![capability.clone()], false, 1)
+            .register_agent(
+                "Agent2".to_string(),
+                creator,
+                vec![capability.clone()],
+                false,
+                1,
+            )
             .await
             .unwrap();
 
@@ -1713,7 +1703,11 @@ mod tests {
             .unwrap();
 
         let after = runtime2.list_agent_transactions(did, None).unwrap();
-        assert_eq!(after.len(), 4, "post-restart write should append, not collide");
+        assert_eq!(
+            after.len(),
+            4,
+            "post-restart write should append, not collide"
+        );
         assert_eq!(after[3].provider, "provider-3");
     }
 

@@ -145,7 +145,8 @@ impl StargateV2Adapter {
         pay_in_lz_token: bool,
     ) -> Result<Vec<u8>> {
         let _ = self.config.local_eid;
-        let mut out = Vec::with_capacity(4 + 32 * 8 + send.extra_options.len() + send.compose_msg.len());
+        let mut out =
+            Vec::with_capacity(4 + 32 * 8 + send.extra_options.len() + send.compose_msg.len());
         // `quoteSend(SendParam,bool)` selector — bytes4(keccak256(sig)). We
         // record the canonical Stargate V2 selector here so the encoded
         // blob can be dispatched directly to `eth_call`.
@@ -168,7 +169,8 @@ impl StargateV2Adapter {
         lz_token_fee: u128,
         refund_address: [u8; 20],
     ) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(4 + 32 * 12 + send.extra_options.len() + send.compose_msg.len());
+        let mut out =
+            Vec::with_capacity(4 + 32 * 12 + send.extra_options.len() + send.compose_msg.len());
         // `send(SendParam,MessagingFee,address)` selector 0xc7c7f5b3
         out.extend_from_slice(&[0xc7, 0xc7, 0xf5, 0xb3]);
         encode_send_param(send, &mut out);
@@ -282,7 +284,8 @@ mod tests {
     #[test]
     fn register_and_get_pool() {
         let a = StargateV2Adapter::new(cfg());
-        a.register_pool(HydraAsset::Usdc, known::ethereum_usdc()).unwrap();
+        a.register_pool(HydraAsset::Usdc, known::ethereum_usdc())
+            .unwrap();
         assert_eq!(
             a.get_pool(HydraAsset::Usdc).unwrap().pool_address,
             "0xc026395860db2d07ee33e05fe50ed7bd583189c7"

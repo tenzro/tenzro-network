@@ -1,25 +1,25 @@
 use axum::{
+    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
-    Json,
 };
-use std::sync::Arc;
-use std::collections::HashMap;
-use parking_lot::Mutex;
-use tokio::sync::mpsc;
 use chrono::Utc;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use super::types::*;
 use crate::event_loop::NodeEvent;
 use crate::node::TenzroNode;
-use tenzro_types::primitives::{Address, BlockHeight, Timestamp};
-use tenzro_storage::KvStore;
-use tenzro_types::tee::{AttestationReport, TeeVendor};
-use tenzro_tee::AttestationVerifier;
-use tenzro_network::NetworkService;
-use tenzro_zk::{Proof, VerifyEnvelopeError, verify_proof_envelope};
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::Signature as CryptoSignature;
+use tenzro_network::NetworkService;
+use tenzro_storage::KvStore;
+use tenzro_tee::AttestationVerifier;
+use tenzro_types::primitives::{Address, BlockHeight, Timestamp};
+use tenzro_types::tee::{AttestationReport, TeeVendor};
+use tenzro_zk::{Proof, VerifyEnvelopeError, verify_proof_envelope};
 
 /// Shared state for web handlers
 pub struct WebState {
@@ -32,8 +32,7 @@ pub struct WebState {
     pub metrics: Option<crate::metrics::MetricsCollector>,
     /// Shared Prometheus registry for the network layer (gossipsub, dials, peer counts).
     /// When populated, `/metrics` will append the encoded `tenzro_network_*` metrics.
-    pub network_metrics_registry:
-        Option<Arc<Mutex<prometheus_client::registry::Registry>>>,
+    pub network_metrics_registry: Option<Arc<Mutex<prometheus_client::registry::Registry>>>,
     /// Inference router for chat endpoint
     pub inference_router: Option<Arc<tenzro_model::InferenceRouter>>,
     /// Faucet rate limiter: address hex -> last request timestamp
@@ -188,7 +187,12 @@ pub(crate) async fn verify_did_web_envelope(
     };
     let key = match tenzro_identity::envelope::ed25519_from_did_document(&doc) {
         Some(k) => k,
-        None => return fail(&envelope.did, "no Ed25519 verification method in did.json".to_string()),
+        None => {
+            return fail(
+                &envelope.did,
+                "no Ed25519 verification method in did.json".to_string(),
+            );
+        }
     };
     match tenzro_identity::envelope::verify_envelope_with_key(envelope, &key) {
         Ok(()) => VerificationResponse {
@@ -226,7 +230,7 @@ pub async fn verify_did_envelope(
                 valid: false,
                 details: serde_json::json!({ "error": "missing X-Tenzro-DID-Envelope header" }),
                 verified_at: now(),
-            })
+            });
         }
     };
 
@@ -237,7 +241,7 @@ pub async fn verify_did_envelope(
                 valid: false,
                 details: serde_json::json!({ "error": format!("malformed envelope: {e}") }),
                 verified_at: now(),
-            })
+            });
         }
     };
 
@@ -253,7 +257,7 @@ pub async fn verify_did_envelope(
                 valid: false,
                 details: serde_json::json!({ "error": "node not available" }),
                 verified_at: now(),
-            })
+            });
         }
     };
     let registry = match node.identity_registry() {
@@ -263,7 +267,7 @@ pub async fn verify_did_envelope(
                 valid: false,
                 details: serde_json::json!({ "error": "identity registry not initialized" }),
                 verified_at: now(),
-            })
+            });
         }
     };
 
@@ -299,7 +303,10 @@ pub async fn verify_zk_proof(
     let circuit_id = request.circuit_id.clone();
 
     // Decode proof bytes from hex
-    let proof_hex = request.proof_bytes.strip_prefix("0x").unwrap_or(&request.proof_bytes);
+    let proof_hex = request
+        .proof_bytes
+        .strip_prefix("0x")
+        .unwrap_or(&request.proof_bytes);
     let proof_bytes = match hex::decode(proof_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -346,13 +353,14 @@ pub async fn verify_zk_proof(
     // Run verification on a blocking thread — the verifier is CPU-bound and
     // would otherwise stall the axum executor on large proofs.
     let envelope_for_verify = envelope.clone();
-    let verify_result = tokio::task::spawn_blocking(move || verify_proof_envelope(&envelope_for_verify))
-        .await
-        .unwrap_or_else(|join_err| {
-            Err(VerifyEnvelopeError::VerifierRejected(format!(
-                "spawn_blocking join error: {join_err}"
-            )))
-        });
+    let verify_result =
+        tokio::task::spawn_blocking(move || verify_proof_envelope(&envelope_for_verify))
+            .await
+            .unwrap_or_else(|join_err| {
+                Err(VerifyEnvelopeError::VerifierRejected(format!(
+                    "spawn_blocking join error: {join_err}"
+                )))
+            });
 
     match verify_result {
         Ok(()) => {
@@ -418,12 +426,13 @@ pub async fn verify_zk_proof(
                 }),
                 verified_at: now(),
             })
-        },
+        }
         Err(e) => {
             let (status, error) = match &e {
-                VerifyEnvelopeError::UnknownCircuit(id) => {
-                    ("unknown_circuit", format!("no AIR registered for circuit_id={id}"))
-                }
+                VerifyEnvelopeError::UnknownCircuit(id) => (
+                    "unknown_circuit",
+                    format!("no AIR registered for circuit_id={id}"),
+                ),
                 VerifyEnvelopeError::EnvelopeDecode(zk_err) => {
                     ("envelope_decode_failed", zk_err.to_string())
                 }
@@ -471,7 +480,10 @@ pub async fn verify_tee_attestation(
     };
 
     // Decode attestation report data from hex
-    let report_hex = request.report_data.strip_prefix("0x").unwrap_or(&request.report_data);
+    let report_hex = request
+        .report_data
+        .strip_prefix("0x")
+        .unwrap_or(&request.report_data);
     let attestation_data = match hex::decode(report_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -486,17 +498,20 @@ pub async fn verify_tee_attestation(
     };
 
     // Parse certificate chain if provided
-    let certificates: Vec<Vec<u8>> = request.certificate_chain
+    let certificates: Vec<Vec<u8>> = request
+        .certificate_chain
         .as_ref()
         .map(|certs| {
-            certs.iter()
+            certs
+                .iter()
                 .filter_map(|pem| pem.as_bytes().to_vec().into())
                 .collect()
         })
         .unwrap_or_default();
 
     // Parse expected measurement if provided
-    let measurement = request.measurement
+    let measurement = request
+        .measurement
         .as_ref()
         .and_then(|m| {
             let hex_str = m.strip_prefix("0x").unwrap_or(m);
@@ -538,17 +553,15 @@ pub async fn verify_tee_attestation(
                 verified_at: Utc::now().to_rfc3339(),
             })
         }
-        Err(e) => {
-            Json(VerificationResponse {
-                valid: false,
-                details: serde_json::json!({
-                    "vendor": request.vendor,
-                    "error": format!("{}", e),
-                    "status": "tee_verification_failed",
-                }),
-                verified_at: Utc::now().to_rfc3339(),
-            })
-        }
+        Err(e) => Json(VerificationResponse {
+            valid: false,
+            details: serde_json::json!({
+                "vendor": request.vendor,
+                "error": format!("{}", e),
+                "status": "tee_verification_failed",
+            }),
+            verified_at: Utc::now().to_rfc3339(),
+        }),
     }
 }
 
@@ -557,7 +570,10 @@ pub async fn verify_transaction(
     Json(request): Json<VerifyTransactionRequest>,
 ) -> Json<VerificationResponse> {
     // Decode transaction hash (the message that was signed)
-    let hash_hex = request.tx_hash.strip_prefix("0x").unwrap_or(&request.tx_hash);
+    let hash_hex = request
+        .tx_hash
+        .strip_prefix("0x")
+        .unwrap_or(&request.tx_hash);
     let tx_hash_bytes = match hex::decode(hash_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -572,7 +588,10 @@ pub async fn verify_transaction(
     };
 
     // Decode signature
-    let sig_hex = request.signature.strip_prefix("0x").unwrap_or(&request.signature);
+    let sig_hex = request
+        .signature
+        .strip_prefix("0x")
+        .unwrap_or(&request.signature);
     let sig_bytes = match hex::decode(sig_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -602,7 +621,10 @@ pub async fn verify_transaction(
     };
 
     // Decode the mandatory PQ leg (ML-DSA-65 signature + verifying key).
-    let pq_sig_hex = request.pq_signature.strip_prefix("0x").unwrap_or(&request.pq_signature);
+    let pq_sig_hex = request
+        .pq_signature
+        .strip_prefix("0x")
+        .unwrap_or(&request.pq_signature);
     let pq_sig_bytes = match hex::decode(pq_sig_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -615,7 +637,10 @@ pub async fn verify_transaction(
             });
         }
     };
-    let pq_vk_hex = request.pq_public_key.strip_prefix("0x").unwrap_or(&request.pq_public_key);
+    let pq_vk_hex = request
+        .pq_public_key
+        .strip_prefix("0x")
+        .unwrap_or(&request.pq_public_key);
     let pq_vk_bytes = match hex::decode(pq_vk_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -704,7 +729,11 @@ pub async fn verify_settlement(
     };
 
     // Validate settlement metadata
-    let amount_valid = request.amount.parse::<f64>().map(|a| a > 0.0).unwrap_or(false);
+    let amount_valid = request
+        .amount
+        .parse::<f64>()
+        .map(|a| a > 0.0)
+        .unwrap_or(false);
     let payer_valid = !request.payer.is_empty();
     let payee_valid = !request.payee.is_empty();
     let receipt_valid = !request.receipt_id.is_empty();
@@ -731,11 +760,17 @@ pub async fn verify_settlement(
                                 Ok(report) => {
                                     let tee_result = verifier.verify_report(&report);
                                     let tee_valid = tee_result.map(|r| r.valid).unwrap_or(false);
-                                    (tee_valid && amount_valid, "settlement_tee_attestation_verified")
+                                    (
+                                        tee_valid && amount_valid,
+                                        "settlement_tee_attestation_verified",
+                                    )
                                 }
                                 Err(_) => {
                                     // Structural validation fallback
-                                    (amount_valid && proof.proof_data.len() >= 64, "settlement_tee_structural_validation")
+                                    (
+                                        amount_valid && proof.proof_data.len() >= 64,
+                                        "settlement_tee_structural_validation",
+                                    )
                                 }
                             }
                         } else {
@@ -746,12 +781,18 @@ pub async fn verify_settlement(
                         // Verify Ed25519 signature presence in proof
                         let has_signature = proof.proof_data.len() >= 64;
                         let has_signatures = !proof.signatures.is_empty();
-                        (has_signature && has_signatures && amount_valid, "settlement_cryptographic_verified")
+                        (
+                            has_signature && has_signatures && amount_valid,
+                            "settlement_cryptographic_verified",
+                        )
                     }
                     SettlementProofType::MultiParty => {
                         // Multi-party proof — verify sufficient signatures
                         let has_signatures = proof.signatures.len() >= 2;
-                        (has_signatures && amount_valid, "settlement_multiparty_verified")
+                        (
+                            has_signatures && amount_valid,
+                            "settlement_multiparty_verified",
+                        )
                     }
                     SettlementProofType::Merkle => {
                         // Merkle proof — validate minimum size
@@ -932,9 +973,45 @@ pub async fn verify_inference(
 /// `Unhealthy`. TEE/network/etc being merely `Degraded` does not break verification:
 /// the API can still serve ZK proof, transaction signature, settlement, and remote
 /// attestation verification (all crypto-only paths that don't require local TEE).
-pub async fn health(
-    State(state): State<Arc<WebState>>,
-) -> Json<HealthResponse> {
+/// `GET /.well-known/did.json` — this node's self-published DID Document.
+///
+/// The W3C well-known path, so a generic DID resolver reaches it without
+/// knowing anything Tenzro-specific. Returns 404 when the node has no
+/// provisioned identity: a document for a DID that does not exist would
+/// resolve to nothing anywhere else, and inventing one is worse than saying
+/// there is none.
+pub async fn node_did_document(State(state): State<Arc<WebState>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let Some(node) = state.node.as_ref() else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no node attached to this web server" })),
+        )
+            .into_response();
+    };
+
+    let addressing = node.self_addressing().await;
+    match crate::node_did_document::build_node_did_document(&addressing) {
+        Some(doc) => (
+            axum::http::StatusCode::OK,
+            // The registered media type for a DID Document, so a generic
+            // resolver content-negotiates correctly rather than guessing.
+            [(axum::http::header::CONTENT_TYPE, "application/did+json")],
+            Json(doc),
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "this node has no provisioned identity, so it has no DID Document"
+            })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn health(State(state): State<Arc<WebState>>) -> Json<HealthResponse> {
     let (status, verification_service) = if let Some(ref node) = state.node {
         let monitor = node.health_monitor();
         let overall = monitor.check_health();
@@ -979,9 +1056,7 @@ pub async fn health(
 ///
 /// When network tip is unknown (no fresh peer status), readiness gates
 /// purely on `peer_count >= 1`, so a fresh testnet bootstrap can come up.
-pub async fn ready(
-    State(state): State<Arc<WebState>>,
-) -> (StatusCode, Json<ReadyResponse>) {
+pub async fn ready(State(state): State<Arc<WebState>>) -> (StatusCode, Json<ReadyResponse>) {
     const BLOCK_LAG_TOLERANCE: u64 = 5;
     const VIEW_LAG_TOLERANCE: u64 = 2;
 
@@ -1004,10 +1079,7 @@ pub async fn ready(
     let block_height = node_status.block_height;
     let peer_count = node_status.peer_count;
     let network_tip = node.network_tip();
-    let high_qc_view = node
-        .consensus()
-        .map(|c| c.high_qc_view())
-        .unwrap_or(0);
+    let high_qc_view = node.consensus().map(|c| c.high_qc_view()).unwrap_or(0);
     // A node that does not vote runs no view loop, so its high-QC view stays
     // at zero however far the chain advances. Block lag is the whole readiness
     // signal there.
@@ -1017,7 +1089,21 @@ pub async fn ready(
     let block_lag = network_tip.map(|tip| tip.saturating_sub(block_height));
 
     // Gating logic.
-    let (ready, reason) = if peer_count == 0 {
+    //
+    // Peers are a readiness requirement only for a node that needs the
+    // network to do its job. A validator with no peers cannot participate in
+    // consensus and is genuinely not ready. A model-serving node running
+    // isolated has nothing to sync and serves inference perfectly well with
+    // zero peers — failing its readiness probe would have a load balancer
+    // pull a healthy node out of rotation, and made `/ready` disagree with
+    // `/status`, which reported the same node as "All systems operational".
+    //
+    // "Isolated" is the operator's explicit choice (`--boot-nodes ""`), not
+    // an inference from an empty peer list: a node that WAS given bootstrap
+    // peers and has none connected has failed to join, and that is a real
+    // readiness failure worth reporting.
+    let isolated = node.config().network.boot_nodes.is_empty();
+    let (ready, reason) = if peer_count == 0 && !isolated {
         (false, "no peers".to_string())
     } else if let Some(tip) = network_tip {
         let lag = tip.saturating_sub(block_height);
@@ -1047,10 +1133,19 @@ pub async fn ready(
                 (true, "caught up".to_string())
             }
         }
+    } else if isolated {
+        // Deliberately isolated: there is no network to be behind, so there is
+        // nothing to be ready *for* beyond the services being up.
+        (true, "isolated node; services up".to_string())
     } else {
-        // No fresh peer status — bootstrap or isolated node. Allow Ready
-        // as long as we have at least one peer to gossip with.
-        (true, "no network tip yet, peer present".to_string())
+        // Bootstrapping: peers exist (the check above would have caught zero)
+        // but none has reported a tip yet, so there is nothing to measure lag
+        // against. Ready rather than blocked, or a fresh network could never
+        // come up — every node would wait for a tip nobody can publish.
+        (
+            true,
+            format!("no network tip yet; {peer_count} peer(s) connected"),
+        )
     };
 
     let status_code = if ready {
@@ -1074,9 +1169,7 @@ pub async fn ready(
 }
 
 /// Node status endpoint
-pub async fn status(
-    State(state): State<Arc<WebState>>,
-) -> Json<NodeStatusResponse> {
+pub async fn status(State(state): State<Arc<WebState>>) -> Json<NodeStatusResponse> {
     if let Some(ref node) = state.node {
         let node_status = node.status().await;
         let health_status = node.health_monitor().get_status(
@@ -1085,7 +1178,11 @@ pub async fn status(
         );
         Json(NodeStatusResponse {
             node_state: node_status.state,
-            roles: node_status.roles.iter().map(|r| r.as_str().to_string()).collect(),
+            roles: node_status
+                .roles
+                .iter()
+                .map(|r| r.as_str().to_string())
+                .collect(),
             health: format!("{:?}", node_status.health_status),
             block_height: node_status.block_height,
             peer_count: node_status.peer_count,
@@ -1118,9 +1215,7 @@ pub async fn status(
 ///
 /// Suspended/revoked identities are still listed but with `active: false`.
 /// Verifiers SHOULD reject signatures from inactive keys.
-pub async fn jwks(
-    State(state): State<Arc<WebState>>,
-) -> Json<tenzro_payments::rfc9421::JwkSet> {
+pub async fn jwks(State(state): State<Arc<WebState>>) -> Json<tenzro_payments::rfc9421::JwkSet> {
     let agents = if let Some(ref node) = state.node {
         if let Some(registry) = node.identity_registry() {
             let agent_registry =
@@ -1147,7 +1242,8 @@ pub async fn jwks(
 pub async fn jwks_get(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(keyid): axum::extract::Path<String>,
-) -> Result<Json<tenzro_payments::rfc9421::Jwk>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<tenzro_payments::rfc9421::Jwk>, (axum::http::StatusCode, Json<serde_json::Value>)>
+{
     use axum::http::StatusCode;
     use tenzro_payments::rfc9421::{AgentRegistryClient, Jwk, TenzroAgentRegistry};
 
@@ -1186,23 +1282,25 @@ pub async fn jwks_get(
 fn extract_client_ip(headers: &HeaderMap) -> String {
     // Check X-Forwarded-For first (set by Caddy/nginx reverse proxy)
     if let Some(xff) = headers.get("x-forwarded-for")
-        && let Ok(val) = xff.to_str() {
-            // X-Forwarded-For can be comma-separated; take the first (original client)
-            if let Some(first_ip) = val.split(',').next() {
-                let ip = first_ip.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
-        }
-    // Fallback to X-Real-Ip (set by some proxies)
-    if let Some(xri) = headers.get("x-real-ip")
-        && let Ok(val) = xri.to_str() {
-            let ip = val.trim();
+        && let Ok(val) = xff.to_str()
+    {
+        // X-Forwarded-For can be comma-separated; take the first (original client)
+        if let Some(first_ip) = val.split(',').next() {
+            let ip = first_ip.trim();
             if !ip.is_empty() {
                 return ip.to_string();
             }
         }
+    }
+    // Fallback to X-Real-Ip (set by some proxies)
+    if let Some(xri) = headers.get("x-real-ip")
+        && let Ok(val) = xri.to_str()
+    {
+        let ip = val.trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
     // No proxy header found — use "unknown"
     "unknown".to_string()
 }
@@ -1283,34 +1381,40 @@ pub async fn faucet(
     // Check if faucet is configured
     let faucet_addr = match &state.faucet_address {
         Some(addr) => addr.clone(),
-        None => return Json(FaucetResponse {
-            success: false,
-            tx_hash: None,
-            amount: "0".to_string(),
-            message: "Faucet not configured".to_string(),
-        }),
+        None => {
+            return Json(FaucetResponse {
+                success: false,
+                tx_hash: None,
+                amount: "0".to_string(),
+                message: "Faucet not configured".to_string(),
+            });
+        }
     };
 
     // Get node reference for token operations
     let node = match &state.node {
         Some(n) => n.clone(),
-        None => return Json(FaucetResponse {
-            success: false,
-            tx_hash: None,
-            amount: "0".to_string(),
-            message: "Node not available".to_string(),
-        }),
+        None => {
+            return Json(FaucetResponse {
+                success: false,
+                tx_hash: None,
+                amount: "0".to_string(),
+                message: "Node not available".to_string(),
+            });
+        }
     };
 
     // Get token system
     let token = match node.token() {
         Some(t) => t,
-        None => return Json(FaucetResponse {
-            success: false,
-            tx_hash: None,
-            amount: "0".to_string(),
-            message: "Token system not initialized".to_string(),
-        }),
+        None => {
+            return Json(FaucetResponse {
+                success: false,
+                tx_hash: None,
+                amount: "0".to_string(),
+                message: "Token system not initialized".to_string(),
+            });
+        }
     };
 
     // Extract client IP for IP-based rate limiting
@@ -1332,15 +1436,20 @@ pub async fn faucet(
     }
 
     // Validate recipient address
-    let addr_hex = request.address.strip_prefix("0x").unwrap_or(&request.address);
+    let addr_hex = request
+        .address
+        .strip_prefix("0x")
+        .unwrap_or(&request.address);
     let addr_bytes = match hex::decode(addr_hex) {
         Ok(b) if b.len() <= 32 => b,
-        _ => return Json(FaucetResponse {
-            success: false,
-            tx_hash: None,
-            amount: "0".to_string(),
-            message: "Invalid address format".to_string(),
-        }),
+        _ => {
+            return Json(FaucetResponse {
+                success: false,
+                tx_hash: None,
+                amount: "0".to_string(),
+                message: "Invalid address format".to_string(),
+            });
+        }
     };
 
     // Address-based rate limit — 24h cooldown per address
@@ -1356,7 +1465,10 @@ pub async fn faucet(
                     success: false,
                     tx_hash: None,
                     amount: "0".to_string(),
-                    message: format!("Rate limited by address. Try again in {} seconds", remaining),
+                    message: format!(
+                        "Rate limited by address. Try again in {} seconds",
+                        remaining
+                    ),
                 });
             }
         }
@@ -1376,7 +1488,10 @@ pub async fn faucet(
                         success: false,
                         tx_hash: None,
                         amount: "0".to_string(),
-                        message: format!("Rate limited by address. Try again in {} seconds", remaining),
+                        message: format!(
+                            "Rate limited by address. Try again in {} seconds",
+                            remaining
+                        ),
                     });
                 }
             }
@@ -1387,12 +1502,14 @@ pub async fn faucet(
     let faucet_hex = faucet_addr.strip_prefix("0x").unwrap_or(&faucet_addr);
     let faucet_bytes = match hex::decode(faucet_hex) {
         Ok(b) => b,
-        Err(_) => return Json(FaucetResponse {
-            success: false,
-            tx_hash: None,
-            amount: "0".to_string(),
-            message: "Invalid faucet address configuration".to_string(),
-        }),
+        Err(_) => {
+            return Json(FaucetResponse {
+                success: false,
+                tx_hash: None,
+                amount: "0".to_string(),
+                message: "Invalid faucet address configuration".to_string(),
+            });
+        }
     };
 
     // Build addresses
@@ -1408,13 +1525,15 @@ pub async fn faucet(
 
     // Amount in base units (whole TNZO * 10^18)
     let amount_base = state.faucet_amount;
-    let amount_wei = amount_base.checked_mul(1_000_000_000_000_000_000u128).unwrap_or(0);
+    let amount_wei = amount_base
+        .checked_mul(1_000_000_000_000_000_000u128)
+        .unwrap_or(0);
 
     // Transfer directly via TnzoToken (persists to RocksDB immediately)
     match token.transfer(&from_addr, &to_addr, amount_wei) {
         Ok(_) => {
             // Generate a tx hash from the transfer details
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(from_addr.as_bytes());
             hasher.update(to_addr.as_bytes());
@@ -1452,9 +1571,7 @@ pub async fn faucet(
 }
 
 /// Prometheus metrics endpoint — exports metrics in Prometheus text exposition format
-pub async fn prometheus_metrics(
-    State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+pub async fn prometheus_metrics(State(state): State<Arc<WebState>>) -> axum::response::Response {
     use axum::http::header;
     use axum::response::IntoResponse;
 
@@ -1484,27 +1601,42 @@ pub async fn prometheus_metrics(
     // Uptime
     body.push_str("# HELP tenzro_node_uptime_seconds Node uptime in seconds\n");
     body.push_str("# TYPE tenzro_node_uptime_seconds counter\n");
-    body.push_str(&format!("tenzro_node_uptime_seconds {}\n\n", metrics.uptime_secs));
+    body.push_str(&format!(
+        "tenzro_node_uptime_seconds {}\n\n",
+        metrics.uptime_secs
+    ));
 
     // Blocks
     body.push_str("# HELP tenzro_blocks_processed_total Total blocks processed\n");
     body.push_str("# TYPE tenzro_blocks_processed_total counter\n");
-    body.push_str(&format!("tenzro_blocks_processed_total {}\n\n", metrics.blocks_processed));
+    body.push_str(&format!(
+        "tenzro_blocks_processed_total {}\n\n",
+        metrics.blocks_processed
+    ));
 
     // Transactions
     body.push_str("# HELP tenzro_transactions_processed_total Total transactions processed\n");
     body.push_str("# TYPE tenzro_transactions_processed_total counter\n");
-    body.push_str(&format!("tenzro_transactions_processed_total {}\n\n", metrics.transactions_processed));
+    body.push_str(&format!(
+        "tenzro_transactions_processed_total {}\n\n",
+        metrics.transactions_processed
+    ));
 
     // Inference
     body.push_str("# HELP tenzro_inference_requests_total Total AI inference requests handled\n");
     body.push_str("# TYPE tenzro_inference_requests_total counter\n");
-    body.push_str(&format!("tenzro_inference_requests_total {}\n\n", metrics.inference_requests));
+    body.push_str(&format!(
+        "tenzro_inference_requests_total {}\n\n",
+        metrics.inference_requests
+    ));
 
     // Settlements
     body.push_str("# HELP tenzro_settlements_total Total settlements processed\n");
     body.push_str("# TYPE tenzro_settlements_total counter\n");
-    body.push_str(&format!("tenzro_settlements_total {}\n\n", metrics.settlements));
+    body.push_str(&format!(
+        "tenzro_settlements_total {}\n\n",
+        metrics.settlements
+    ));
 
     // Peers
     body.push_str("# HELP tenzro_peer_count Current number of connected peers\n");
@@ -1512,18 +1644,29 @@ pub async fn prometheus_metrics(
     body.push_str(&format!("tenzro_peer_count {}\n\n", metrics.peer_count));
 
     // Derived rate gauges (computed from cumulative counters + uptime)
-    body.push_str("# HELP tenzro_blocks_per_second Average blocks processed per second since node start\n");
+    body.push_str(
+        "# HELP tenzro_blocks_per_second Average blocks processed per second since node start\n",
+    );
     body.push_str("# TYPE tenzro_blocks_per_second gauge\n");
-    body.push_str(&format!("tenzro_blocks_per_second {:.4}\n\n", metrics.blocks_per_second()));
+    body.push_str(&format!(
+        "tenzro_blocks_per_second {:.4}\n\n",
+        metrics.blocks_per_second()
+    ));
 
     body.push_str("# HELP tenzro_transactions_per_second Average transactions processed per second since node start\n");
     body.push_str("# TYPE tenzro_transactions_per_second gauge\n");
-    body.push_str(&format!("tenzro_transactions_per_second {:.4}\n\n", metrics.transactions_per_second()));
+    body.push_str(&format!(
+        "tenzro_transactions_per_second {:.4}\n\n",
+        metrics.transactions_per_second()
+    ));
 
     // Uptime info metric — value is always 1; human-readable form lives in the label
     body.push_str("# HELP tenzro_node_uptime_info Node uptime in human-readable form\n");
     body.push_str("# TYPE tenzro_node_uptime_info gauge\n");
-    body.push_str(&format!("tenzro_node_uptime_info{{uptime=\"{}\"}} 1\n\n", metrics.uptime_human()));
+    body.push_str(&format!(
+        "tenzro_node_uptime_info{{uptime=\"{}\"}} 1\n\n",
+        metrics.uptime_human()
+    ));
 
     // Node health
     if let Some(ref node) = state.node {
@@ -1534,7 +1677,9 @@ pub async fn prometheus_metrics(
             crate::health::OverallHealth::Unhealthy => -1,
             crate::health::OverallHealth::Unknown => -2,
         };
-        body.push_str("# HELP tenzro_node_health Node health status (1=healthy, 0=degraded, -1=unhealthy)\n");
+        body.push_str(
+            "# HELP tenzro_node_health Node health status (1=healthy, 0=degraded, -1=unhealthy)\n",
+        );
         body.push_str("# TYPE tenzro_node_health gauge\n");
         body.push_str(&format!("tenzro_node_health {}\n\n", health_val));
 
@@ -1544,7 +1689,9 @@ pub async fn prometheus_metrics(
 
         // Model services count
         let model_count = node.list_model_services().len();
-        body.push_str("# HELP tenzro_model_services_count Number of active model service instances\n");
+        body.push_str(
+            "# HELP tenzro_model_services_count Number of active model service instances\n",
+        );
         body.push_str("# TYPE tenzro_model_services_count gauge\n");
         body.push_str(&format!("tenzro_model_services_count {}\n\n", model_count));
 
@@ -1605,67 +1752,71 @@ pub async fn prometheus_metrics(
     //   - tenzro_mempool_queue_depth{lane}                (gauge)
     //   - tenzro_mempool_bucket_count                     (gauge)
     if let Some(ref node) = state.node
-        && let Some(admission) = node.admission() {
-            use tenzro_consensus::admission::Lane;
+        && let Some(admission) = node.admission()
+    {
+        use tenzro_consensus::admission::Lane;
 
-            let stats = admission.stats();
+        let stats = admission.stats();
 
-            // admitted_total{lane}
-            body.push_str("# HELP tenzro_mempool_admitted_total Transactions admitted to the mempool, broken down by Spec 2 admission lane\n");
-            body.push_str("# TYPE tenzro_mempool_admitted_total counter\n");
-            for lane in Lane::all() {
-                body.push_str(&format!(
-                    "tenzro_mempool_admitted_total{{lane=\"{}\"}} {}\n",
-                    lane.as_str(),
-                    stats.admitted(lane),
-                ));
-            }
-            body.push('\n');
-
-            // rejected_total{lane,reason}
-            body.push_str("# HELP tenzro_mempool_rejected_total Transactions rejected at admission, broken down by lane and reason\n");
-            body.push_str("# TYPE tenzro_mempool_rejected_total counter\n");
-            for lane in Lane::all() {
-                body.push_str(&format!(
-                    "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"rate_limited\"}} {}\n",
-                    lane.as_str(),
-                    stats.rejected_rate_limited(lane),
-                ));
-                body.push_str(&format!(
-                    "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"fee_floor\"}} {}\n",
-                    lane.as_str(),
-                    stats.rejected_fee_floor(lane),
-                ));
-                body.push_str(&format!(
-                    "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"mempool_full\"}} {}\n",
-                    lane.as_str(),
-                    stats.rejected_mempool_full(lane),
-                ));
-            }
-            body.push('\n');
-
-            // bucket_count (gauge — the number of distinct controllers
-            // with a live token bucket on this validator)
-            body.push_str("# HELP tenzro_mempool_bucket_count Number of distinct controllers with an active per-DID admission bucket on this validator\n");
-            body.push_str("# TYPE tenzro_mempool_bucket_count gauge\n");
-            body.push_str(&format!("tenzro_mempool_bucket_count {}\n\n", stats.bucket_count));
-
-            // queue_depth{lane} — only emitted when consensus is wired
-            // (the mempool lives on the consensus engine).
-            if let Some(consensus) = node.consensus() {
-                let depths = consensus.mempool().lane_depths();
-                body.push_str("# HELP tenzro_mempool_queue_depth Current number of pending transactions in the mempool, broken down by lane\n");
-                body.push_str("# TYPE tenzro_mempool_queue_depth gauge\n");
-                for lane in Lane::all() {
-                    body.push_str(&format!(
-                        "tenzro_mempool_queue_depth{{lane=\"{}\"}} {}\n",
-                        lane.as_str(),
-                        depths[lane as usize],
-                    ));
-                }
-                body.push('\n');
-            }
+        // admitted_total{lane}
+        body.push_str("# HELP tenzro_mempool_admitted_total Transactions admitted to the mempool, broken down by Spec 2 admission lane\n");
+        body.push_str("# TYPE tenzro_mempool_admitted_total counter\n");
+        for lane in Lane::all() {
+            body.push_str(&format!(
+                "tenzro_mempool_admitted_total{{lane=\"{}\"}} {}\n",
+                lane.as_str(),
+                stats.admitted(lane),
+            ));
         }
+        body.push('\n');
+
+        // rejected_total{lane,reason}
+        body.push_str("# HELP tenzro_mempool_rejected_total Transactions rejected at admission, broken down by lane and reason\n");
+        body.push_str("# TYPE tenzro_mempool_rejected_total counter\n");
+        for lane in Lane::all() {
+            body.push_str(&format!(
+                "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"rate_limited\"}} {}\n",
+                lane.as_str(),
+                stats.rejected_rate_limited(lane),
+            ));
+            body.push_str(&format!(
+                "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"fee_floor\"}} {}\n",
+                lane.as_str(),
+                stats.rejected_fee_floor(lane),
+            ));
+            body.push_str(&format!(
+                "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"mempool_full\"}} {}\n",
+                lane.as_str(),
+                stats.rejected_mempool_full(lane),
+            ));
+        }
+        body.push('\n');
+
+        // bucket_count (gauge — the number of distinct controllers
+        // with a live token bucket on this validator)
+        body.push_str("# HELP tenzro_mempool_bucket_count Number of distinct controllers with an active per-DID admission bucket on this validator\n");
+        body.push_str("# TYPE tenzro_mempool_bucket_count gauge\n");
+        body.push_str(&format!(
+            "tenzro_mempool_bucket_count {}\n\n",
+            stats.bucket_count
+        ));
+
+        // queue_depth{lane} — only emitted when consensus is wired
+        // (the mempool lives on the consensus engine).
+        if let Some(consensus) = node.consensus() {
+            let depths = consensus.mempool().lane_depths();
+            body.push_str("# HELP tenzro_mempool_queue_depth Current number of pending transactions in the mempool, broken down by lane\n");
+            body.push_str("# TYPE tenzro_mempool_queue_depth gauge\n");
+            for lane in Lane::all() {
+                body.push_str(&format!(
+                    "tenzro_mempool_queue_depth{{lane=\"{}\"}} {}\n",
+                    lane.as_str(),
+                    depths[lane as usize],
+                ));
+            }
+            body.push('\n');
+        }
+    }
 
     // Consensus liveness + safety metrics for on-call alerting.
     // Emitted whenever the consensus engine is wired, independent of
@@ -1675,46 +1826,77 @@ pub async fn prometheus_metrics(
     //   - tenzro_consensus_equivocation_evidence > 0 → a validator
     //     double-voted or double-proposed (slashable)
     if let Some(ref node) = state.node
-        && let Some(consensus) = node.consensus() {
-            body.push_str("# HELP tenzro_consensus_current_view Current HotStuff-2 view on this validator\n");
-            body.push_str("# TYPE tenzro_consensus_current_view gauge\n");
-            body.push_str(&format!("tenzro_consensus_current_view {}\n\n", consensus.current_view()));
+        && let Some(consensus) = node.consensus()
+    {
+        body.push_str(
+            "# HELP tenzro_consensus_current_view Current HotStuff-2 view on this validator\n",
+        );
+        body.push_str("# TYPE tenzro_consensus_current_view gauge\n");
+        body.push_str(&format!(
+            "tenzro_consensus_current_view {}\n\n",
+            consensus.current_view()
+        ));
 
-            body.push_str("# HELP tenzro_consensus_high_qc_view View of the highest quorum certificate this validator has seen\n");
-            body.push_str("# TYPE tenzro_consensus_high_qc_view gauge\n");
-            body.push_str(&format!("tenzro_consensus_high_qc_view {}\n\n", consensus.high_qc_view()));
+        body.push_str("# HELP tenzro_consensus_high_qc_view View of the highest quorum certificate this validator has seen\n");
+        body.push_str("# TYPE tenzro_consensus_high_qc_view gauge\n");
+        body.push_str(&format!(
+            "tenzro_consensus_high_qc_view {}\n\n",
+            consensus.high_qc_view()
+        ));
 
-            body.push_str("# HELP tenzro_consensus_finalized_height Height of the most recently finalized block\n");
-            body.push_str("# TYPE tenzro_consensus_finalized_height gauge\n");
-            body.push_str(&format!("tenzro_consensus_finalized_height {}\n\n", consensus.current_finalized_height()));
+        body.push_str("# HELP tenzro_consensus_finalized_height Height of the most recently finalized block\n");
+        body.push_str("# TYPE tenzro_consensus_finalized_height gauge\n");
+        body.push_str(&format!(
+            "tenzro_consensus_finalized_height {}\n\n",
+            consensus.current_finalized_height()
+        ));
 
-            body.push_str("# HELP tenzro_consensus_view_timeouts_total Cumulative local view timeouts since process start (never resets on progress)\n");
-            body.push_str("# TYPE tenzro_consensus_view_timeouts_total counter\n");
-            body.push_str(&format!("tenzro_consensus_view_timeouts_total {}\n\n", consensus.view_timeouts_total()));
+        body.push_str("# HELP tenzro_consensus_view_timeouts_total Cumulative local view timeouts since process start (never resets on progress)\n");
+        body.push_str("# TYPE tenzro_consensus_view_timeouts_total counter\n");
+        body.push_str(&format!(
+            "tenzro_consensus_view_timeouts_total {}\n\n",
+            consensus.view_timeouts_total()
+        ));
 
-            // Absent until the first block finalizes after boot — a
-            // scrape-side `absent()` guard covers the startup window.
-            if let Some(age) = consensus.seconds_since_last_finalized() {
-                body.push_str("# HELP tenzro_consensus_last_finalized_age_seconds Seconds since the last block was finalized on this validator\n");
-                body.push_str("# TYPE tenzro_consensus_last_finalized_age_seconds gauge\n");
-                body.push_str(&format!("tenzro_consensus_last_finalized_age_seconds {}\n\n", age));
-            }
-
-            let (vote_evidence, proposal_evidence) = consensus.equivocation_evidence_counts();
-            body.push_str("# HELP tenzro_consensus_equivocation_evidence Recorded equivocation evidence entries, broken down by kind\n");
-            body.push_str("# TYPE tenzro_consensus_equivocation_evidence gauge\n");
-            body.push_str(&format!("tenzro_consensus_equivocation_evidence{{kind=\"vote\"}} {}\n", vote_evidence));
-            body.push_str(&format!("tenzro_consensus_equivocation_evidence{{kind=\"proposal\"}} {}\n\n", proposal_evidence));
-
-            body.push_str("# HELP tenzro_mempool_size Total pending transactions in the mempool across all lanes\n");
-            body.push_str("# TYPE tenzro_mempool_size gauge\n");
-            body.push_str(&format!("tenzro_mempool_size {}\n\n", consensus.mempool().len()));
+        // Absent until the first block finalizes after boot — a
+        // scrape-side `absent()` guard covers the startup window.
+        if let Some(age) = consensus.seconds_since_last_finalized() {
+            body.push_str("# HELP tenzro_consensus_last_finalized_age_seconds Seconds since the last block was finalized on this validator\n");
+            body.push_str("# TYPE tenzro_consensus_last_finalized_age_seconds gauge\n");
+            body.push_str(&format!(
+                "tenzro_consensus_last_finalized_age_seconds {}\n\n",
+                age
+            ));
         }
 
+        let (vote_evidence, proposal_evidence) = consensus.equivocation_evidence_counts();
+        body.push_str("# HELP tenzro_consensus_equivocation_evidence Recorded equivocation evidence entries, broken down by kind\n");
+        body.push_str("# TYPE tenzro_consensus_equivocation_evidence gauge\n");
+        body.push_str(&format!(
+            "tenzro_consensus_equivocation_evidence{{kind=\"vote\"}} {}\n",
+            vote_evidence
+        ));
+        body.push_str(&format!(
+            "tenzro_consensus_equivocation_evidence{{kind=\"proposal\"}} {}\n\n",
+            proposal_evidence
+        ));
+
+        body.push_str("# HELP tenzro_mempool_size Total pending transactions in the mempool across all lanes\n");
+        body.push_str("# TYPE tenzro_mempool_size gauge\n");
+        body.push_str(&format!(
+            "tenzro_mempool_size {}\n\n",
+            consensus.mempool().len()
+        ));
+    }
+
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Chat completion endpoint with SSE streaming support
@@ -1722,8 +1904,11 @@ pub async fn chat_completion(
     State(state): State<Arc<WebState>>,
     Json(request): Json<super::types::ChatRequest>,
 ) -> axum::response::Response {
-    use axum::response::{IntoResponse, sse::{Event, Sse}};
     use axum::http::StatusCode;
+    use axum::response::{
+        IntoResponse,
+        sse::{Event, Sse},
+    };
 
     // Check if inference router is available
     let router = match &state.inference_router {
@@ -1742,21 +1927,23 @@ pub async fn chat_completion(
 
     // Validate inputs at API boundary (MEDIUM #115)
     use tenzro_types::validation;
-    if let Err(e) = validation::validate_string_len(
-        &request.model, "model", validation::MAX_MODEL_ID_LEN,
-    ) {
+    if let Err(e) =
+        validation::validate_string_len(&request.model, "model", validation::MAX_MODEL_ID_LEN)
+    {
         let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "invalid_model" }});
         return (StatusCode::BAD_REQUEST, Json(error)).into_response();
     }
-    if let Err(e) = validation::validate_vec_len(
-        &request.messages, "messages", validation::MAX_CHAT_MESSAGES,
-    ) {
+    if let Err(e) =
+        validation::validate_vec_len(&request.messages, "messages", validation::MAX_CHAT_MESSAGES)
+    {
         let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "too_many_messages" }});
         return (StatusCode::BAD_REQUEST, Json(error)).into_response();
     }
     for msg in &request.messages {
         if let Err(e) = validation::validate_string_len(
-            &msg.content, "message.content", validation::MAX_CHAT_MESSAGE_LEN,
+            &msg.content,
+            "message.content",
+            validation::MAX_CHAT_MESSAGE_LEN,
         ) {
             let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "message_too_long" }});
             return (StatusCode::BAD_REQUEST, Json(error)).into_response();
@@ -1764,16 +1951,20 @@ pub async fn chat_completion(
     }
     if let Some(max_tokens) = request.max_tokens
         && let Err(e) = validation::validate_numeric_bound(
-            max_tokens, "max_tokens", validation::MAX_INFERENCE_TOKENS,
-        ) {
-            let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "max_tokens_exceeded" }});
-            return (StatusCode::BAD_REQUEST, Json(error)).into_response();
-        }
+            max_tokens,
+            "max_tokens",
+            validation::MAX_INFERENCE_TOKENS,
+        )
+    {
+        let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "max_tokens_exceeded" }});
+        return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+    }
     if let Some(temp) = request.temperature
-        && let Err(e) = validation::validate_temperature(temp) {
-            let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "invalid_temperature" }});
-            return (StatusCode::BAD_REQUEST, Json(error)).into_response();
-        }
+        && let Err(e) = validation::validate_temperature(temp)
+    {
+        let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "invalid_temperature" }});
+        return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+    }
 
     // Generate unique chat completion ID
     let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
@@ -1815,7 +2006,10 @@ pub async fn chat_completion(
 
     if !stream {
         // Non-streaming: forward request and return full response
-        match router.forward_request_with_config(&inference_request, &routing_config).await {
+        match router
+            .forward_request_with_config(&inference_request, &routing_config)
+            .await
+        {
             Ok(response) => {
                 let output_text = String::from_utf8_lossy(&response.output).to_string();
 
@@ -1830,7 +2024,10 @@ pub async fn chat_completion(
                             role: "assistant".to_string(),
                             content: output_text,
                         },
-                        finish_reason: response.metadata.finish_reason.unwrap_or_else(|| "stop".to_string()),
+                        finish_reason: response
+                            .metadata
+                            .finish_reason
+                            .unwrap_or_else(|| "stop".to_string()),
                     }],
                     // `input_tokens` counts only what was prefilled fresh, because
                     // the cached share is metered at its own rate. The wire field
@@ -1839,7 +2036,8 @@ pub async fn chat_completion(
                         prompt_tokens: response.metadata.units.prompt_tokens() as u64,
                         completion_tokens: response.metadata.units.output_tokens as u64,
                         total_tokens: (response.metadata.units.prompt_tokens()
-                            + response.metadata.units.output_tokens) as u64,
+                            + response.metadata.units.output_tokens)
+                            as u64,
                     },
                 };
 
@@ -1996,7 +2194,10 @@ pub async fn resolve_execution(
             .filter(|p| {
                 // Apply routing_policy: require_attestation filters to attested providers
                 if routing.is_some_and(|r| r.require_attestation) {
-                    p.announcement.capabilities.iter().any(|c| c.contains("tee"))
+                    p.announcement
+                        .capabilities
+                        .iter()
+                        .any(|c| c.contains("tee"))
                 } else {
                     true
                 }
@@ -2065,10 +2266,7 @@ pub async fn list_model_artifacts(
 ) -> Json<ModelArtifactsResponse> {
     if let Some(ref node) = state.node {
         let models = node.network_models_snapshot();
-        if let Some(entry) = models
-            .iter()
-            .find(|m| m.registration.model_id == model_id)
-        {
+        if let Some(entry) = models.iter().find(|m| m.registration.model_id == model_id) {
             return Json(ModelArtifactsResponse {
                 model_id: entry.registration.model_id.clone(),
                 artifacts: entry.registration.artifacts.clone(),
@@ -2208,8 +2406,7 @@ mod tests {
 
     #[test]
     fn test_webstate_builder() {
-        let state = WebState::new()
-            .with_faucet("0x1234".to_string(), 100, 3600);
+        let state = WebState::new().with_faucet("0x1234".to_string(), 100, 3600);
 
         assert_eq!(state.faucet_address, Some("0x1234".to_string()));
         assert_eq!(state.faucet_amount, 100);

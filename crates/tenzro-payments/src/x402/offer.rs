@@ -132,8 +132,9 @@ impl SignedOffer {
     /// carried signer key.
     pub fn verify(&self, requirement: &X402PaymentRequirement) -> Result<()> {
         let expected = compute_offer_commitment(requirement);
-        let carried = hex::decode(&self.offer_commitment)
-            .map_err(|e| PaymentError::VerificationFailed(format!("bad offer commitment hex: {e}")))?;
+        let carried = hex::decode(&self.offer_commitment).map_err(|e| {
+            PaymentError::VerificationFailed(format!("bad offer commitment hex: {e}"))
+        })?;
         if carried != expected {
             return Err(PaymentError::VerificationFailed(
                 "offer commitment does not match requirement".to_string(),
@@ -143,14 +144,13 @@ impl SignedOffer {
             .map_err(|e| PaymentError::VerificationFailed(format!("bad offer sig hex: {e}")))?;
         let key_bytes = hex::decode(&self.offer_signer)
             .map_err(|e| PaymentError::VerificationFailed(format!("bad offer signer hex: {e}")))?;
-        let public_key =
-            tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, key_bytes);
-        let signature =
-            tenzro_crypto::Signature::new(tenzro_crypto::KeyType::Ed25519, sig_bytes);
+        let public_key = tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, key_bytes);
+        let signature = tenzro_crypto::Signature::new(tenzro_crypto::KeyType::Ed25519, sig_bytes);
         // `verify` returns Ok(()) only for a valid signature; any error (bad
         // key, bad signature, mismatch) becomes a VerificationFailed.
-        tenzro_crypto::signatures::verify(&public_key, &expected, &signature)
-            .map_err(|e| PaymentError::VerificationFailed(format!("offer signature invalid: {e}")))?;
+        tenzro_crypto::signatures::verify(&public_key, &expected, &signature).map_err(|e| {
+            PaymentError::VerificationFailed(format!("offer signature invalid: {e}"))
+        })?;
         Ok(())
     }
 
@@ -197,7 +197,10 @@ impl SignedOffer {
 /// Deterministic: the same offer commitment + payer always yields the same
 /// identifier, which is what makes settlement idempotent. Domain-separated so
 /// it can never collide with an offer commitment.
-pub fn derive_payment_id(offer_commitment: &[u8; X402_OFFER_COMMITMENT_LEN], payer_did: &str) -> String {
+pub fn derive_payment_id(
+    offer_commitment: &[u8; X402_OFFER_COMMITMENT_LEN],
+    payer_did: &str,
+) -> String {
     let mut h = Sha256::new();
     h.update(X402_PAYMENT_ID_DOMAIN.as_bytes());
     h.update(offer_commitment);
@@ -355,20 +358,40 @@ mod tests {
 
     #[test]
     fn offer_commitment_moves_when_price_or_payto_changes() {
-        let base = compute_offer_commitment(&requirement());
+        // One requirement, cloned per case. Calling `requirement()` again would
+        // build a *different* offer: `X402PaymentRequirement::new` derives
+        // `expires_at` from `Utc::now()`, and the commitment binds it as an
+        // RFC-3339 string, so two fixtures constructed microseconds apart
+        // already differ — which would make the "description is advisory"
+        // assertion below fail for a reason that has nothing to do with the
+        // description.
+        let original = requirement();
+        let base = compute_offer_commitment(&original);
 
-        let mut r = requirement();
+        let mut r = original.clone();
         r.max_amount_required = "1001".to_string();
-        assert_ne!(compute_offer_commitment(&r), base);
+        assert_ne!(
+            compute_offer_commitment(&r),
+            base,
+            "price is bound into the commitment"
+        );
 
-        let mut r = requirement();
+        let mut r = original.clone();
         r.pay_to = "0xother".to_string();
-        assert_ne!(compute_offer_commitment(&r), base);
+        assert_ne!(
+            compute_offer_commitment(&r),
+            base,
+            "payTo is bound into the commitment"
+        );
 
         // Description is advisory — must NOT move the commitment.
-        let mut r = requirement();
+        let mut r = original.clone();
         r.description = "totally different copy".to_string();
-        assert_eq!(compute_offer_commitment(&r), base);
+        assert_eq!(
+            compute_offer_commitment(&r),
+            base,
+            "advisory copy must not move the commitment"
+        );
     }
 
     #[test]
@@ -424,7 +447,9 @@ mod tests {
     #[test]
     fn is_payment_id_rejects_malformed() {
         assert!(!is_payment_id("pay_short"));
-        assert!(!is_payment_id("nope_0000000000000000000000000000000000000000000000000000000000000000"));
+        assert!(!is_payment_id(
+            "nope_0000000000000000000000000000000000000000000000000000000000000000"
+        ));
         assert!(!is_payment_id(&format!("pay_{}", "z".repeat(64))));
     }
 
@@ -461,11 +486,18 @@ mod tests {
     }
     impl IdempotencyStore for MemStore {
         fn put(&self, payment_id: &str, receipt: &PaymentReceipt) -> Result<()> {
-            self.rows.write().insert(payment_id.to_string(), receipt.clone());
+            self.rows
+                .write()
+                .insert(payment_id.to_string(), receipt.clone());
             Ok(())
         }
         fn load_all(&self) -> Result<Vec<(String, PaymentReceipt)>> {
-            Ok(self.rows.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            Ok(self
+                .rows
+                .read()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
         }
     }
 

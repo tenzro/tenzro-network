@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::{error::Result, VmError};
+use crate::{VmError, error::Result};
 
 // Re-export types for service injection
 use tenzro_model::routing::InferenceRouter;
@@ -17,68 +17,113 @@ use tenzro_storage::KvStore;
 pub type PrecompileAddress = Vec<u8>;
 
 /// Standard EVM precompile addresses (Ethereum-compatible)
-pub const PRECOMPILE_ECRECOVER: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+pub const PRECOMPILE_ECRECOVER: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 pub const PRECOMPILE_SHA256: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
-pub const PRECOMPILE_RIPEMD160: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3];
-pub const PRECOMPILE_IDENTITY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];
+pub const PRECOMPILE_RIPEMD160: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3];
+pub const PRECOMPILE_IDENTITY: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];
 pub const PRECOMPILE_MODEXP: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
 pub const PRECOMPILE_ECADD: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
 pub const PRECOMPILE_ECMUL: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7];
-pub const PRECOMPILE_ECPAIRING: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8];
+pub const PRECOMPILE_ECPAIRING: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8];
 pub const PRECOMPILE_BLAKE2F: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9];
 
 /// EIP-2537 BLS12-381 precompile addresses (Pectra upgrade, 0x0a-0x10)
-pub const PRECOMPILE_BLS12_G1ADD: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a];
-pub const PRECOMPILE_BLS12_G1MSM: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b];
-pub const PRECOMPILE_BLS12_G2ADD: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0c];
-pub const PRECOMPILE_BLS12_G2MSM: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0d];
-pub const PRECOMPILE_BLS12_PAIRING_CHECK: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0e];
-pub const PRECOMPILE_BLS12_MAP_FP_TO_G1: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f];
-pub const PRECOMPILE_BLS12_MAP_FP2_TO_G2: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10];
+pub const PRECOMPILE_BLS12_G1ADD: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a,
+];
+pub const PRECOMPILE_BLS12_G1MSM: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b,
+];
+pub const PRECOMPILE_BLS12_G2ADD: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0c,
+];
+pub const PRECOMPILE_BLS12_G2MSM: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0d,
+];
+pub const PRECOMPILE_BLS12_PAIRING_CHECK: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0e,
+];
+pub const PRECOMPILE_BLS12_MAP_FP_TO_G1: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f,
+];
+pub const PRECOMPILE_BLS12_MAP_FP2_TO_G2: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+];
 
 /// EIP-7951 P256VERIFY precompile (Fusaka/Osaka, Dec 2025) — secp256r1 ECDSA verification at 0x100.
 ///
 /// Canonical mainnet address (160-bit, big-endian = `0x000000…000100`) so callers using
 /// FIDO2 / WebAuthn / Apple Secure Enclave / Android Keystore P-256 signatures get
 /// bit-exact compatibility with Ethereum.
-pub const PRECOMPILE_P256VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
+pub const PRECOMPILE_P256VERIFY: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
 
 /// Tenzro-specific precompile addresses (`0x010000` upward). Distinct numerical range
 /// from EIP-7951 (`0x100`); the comment in the original code labelled this "0x100" but
 /// the byte pattern `0x010000` actually places these at 65536.
-pub const PRECOMPILE_TEE_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0];
-pub const PRECOMPILE_ZK_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];
-pub const PRECOMPILE_MODEL_INFERENCE: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2];
-pub const PRECOMPILE_SETTLEMENT: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3];
+pub const PRECOMPILE_TEE_VERIFY: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0];
+pub const PRECOMPILE_ZK_VERIFY: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];
+pub const PRECOMPILE_MODEL_INFERENCE: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2];
+pub const PRECOMPILE_SETTLEMENT: &[u8] =
+    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3];
 
 /// Token system precompile addresses (starting at 0x1001)
-pub const PRECOMPILE_TNZO_BRIDGE: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x01, 0];
-pub const PRECOMPILE_TOKEN_FACTORY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x02, 0];
-pub const PRECOMPILE_CROSS_VM_BRIDGE: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x03, 0];
-pub const PRECOMPILE_STAKING: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x04, 0];
-pub const PRECOMPILE_GOVERNANCE: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x05, 0];
+pub const PRECOMPILE_TNZO_BRIDGE: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x01, 0,
+];
+pub const PRECOMPILE_TOKEN_FACTORY: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x02, 0,
+];
+pub const PRECOMPILE_CROSS_VM_BRIDGE: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x03, 0,
+];
+pub const PRECOMPILE_STAKING: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x04, 0,
+];
+pub const PRECOMPILE_GOVERNANCE: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x05, 0,
+];
 /// NFT Factory precompile for creating/managing NFT collections across VMs (ERC-721/1155)
-pub const PRECOMPILE_NFT_FACTORY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x06, 0];
+pub const PRECOMPILE_NFT_FACTORY: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x06, 0,
+];
 /// VRF precompile — ECVRF-EDWARDS25519-SHA512-TAI proof verification (RFC 9381)
-pub const PRECOMPILE_VRF_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x07, 0];
+pub const PRECOMPILE_VRF_VERIFY: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x07, 0,
+];
 /// Tenzro Train precompile — verify a [`TrainingReceipt`] commitment chain.
 /// Phase 1: shell — accepts a serialized receipt, recomputes `run_root` from
 /// `round_state_roots`, and returns 1 iff it matches the receipt's `run_root`.
 /// Phase 2: extends to verifying syncer signature + attestation chain.
-pub const PRECOMPILE_TRAINING_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x08, 0];
+pub const PRECOMPILE_TRAINING_VERIFY: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x08, 0,
+];
 
 /// IBC-Eureka light-client commitment lookup precompile (0x1020). O(1)
 /// match against the on-chain commitment registry maintained by validators
 /// who run the SP1 verifier off-EVM.
-pub const PRECOMPILE_IBC_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x20, 0];
+pub const PRECOMPILE_IBC_VERIFY: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x20, 0,
+];
 /// Global supply accounting precompile (0x1021). Records cross-rail
 /// mint/burn deltas and enforces the per-asset invariant
 /// `Σ mints − Σ burns ≤ max_supply`.
-pub const PRECOMPILE_GLOBAL_SUPPLY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x21, 0];
+pub const PRECOMPILE_GLOBAL_SUPPLY: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x21, 0,
+];
 /// ERC-7579 on-chain module registry precompile (0x1022). Tenzro mirror
 /// of Rhinestone's module registry — install / uninstall / lookup of
 /// validator modules with attestation records.
-pub const PRECOMPILE_MODULE_REGISTRY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x22, 0];
+pub const PRECOMPILE_MODULE_REGISTRY: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x22, 0,
+];
 
 // ERC-7579 modular validator precompiles. Re-exported from `crate::erc7579`
 // so that the registry-side wiring can reach them without an extra import.
@@ -339,8 +384,12 @@ impl PrecompileRegistry {
         input: &[u8],
         gas_limit: u64,
     ) -> Result<PrecompileResult> {
-        let precompile = self.precompiles.get(address)
-            .ok_or_else(|| VmError::PrecompileFailed(format!("Precompile not found at address: {}", hex::encode(address))))?;
+        let precompile = self.precompiles.get(address).ok_or_else(|| {
+            VmError::PrecompileFailed(format!(
+                "Precompile not found at address: {}",
+                hex::encode(address)
+            ))
+        })?;
 
         if self.requires_trusted_caller.contains(address) {
             if input.len() < 4 {
@@ -361,13 +410,19 @@ impl PrecompileRegistry {
     /// Register standard EVM precompiles
     fn register_standard_precompiles(&self) {
         // ecRecover
-        self.register(PRECOMPILE_ECRECOVER.to_vec(), Arc::new(precompile_ecrecover));
+        self.register(
+            PRECOMPILE_ECRECOVER.to_vec(),
+            Arc::new(precompile_ecrecover),
+        );
 
         // SHA-256
         self.register(PRECOMPILE_SHA256.to_vec(), Arc::new(precompile_sha256));
 
         // RIPEMD-160
-        self.register(PRECOMPILE_RIPEMD160.to_vec(), Arc::new(precompile_ripemd160));
+        self.register(
+            PRECOMPILE_RIPEMD160.to_vec(),
+            Arc::new(precompile_ripemd160),
+        );
 
         // Identity (copy)
         self.register(PRECOMPILE_IDENTITY.to_vec(), Arc::new(precompile_identity));
@@ -378,28 +433,61 @@ impl PrecompileRegistry {
         // BN254 (alt_bn128) EC operations
         self.register(PRECOMPILE_ECADD.to_vec(), Arc::new(precompile_ecadd));
         self.register(PRECOMPILE_ECMUL.to_vec(), Arc::new(precompile_ecmul));
-        self.register(PRECOMPILE_ECPAIRING.to_vec(), Arc::new(precompile_ecpairing));
+        self.register(
+            PRECOMPILE_ECPAIRING.to_vec(),
+            Arc::new(precompile_ecpairing),
+        );
 
         // BLAKE2f
         self.register(PRECOMPILE_BLAKE2F.to_vec(), Arc::new(precompile_blake2f));
 
         // EIP-7951 P256VERIFY (Fusaka/Osaka, Dec 2025) — secp256r1 ECDSA verification
-        self.register(PRECOMPILE_P256VERIFY.to_vec(), Arc::new(precompile_p256verify));
+        self.register(
+            PRECOMPILE_P256VERIFY.to_vec(),
+            Arc::new(precompile_p256verify),
+        );
 
         // EIP-2537 BLS12-381 precompiles (Pectra upgrade)
-        self.register(PRECOMPILE_BLS12_G1ADD.to_vec(), Arc::new(precompile_bls12_g1add));
-        self.register(PRECOMPILE_BLS12_G1MSM.to_vec(), Arc::new(precompile_bls12_g1msm));
-        self.register(PRECOMPILE_BLS12_G2ADD.to_vec(), Arc::new(precompile_bls12_g2add));
-        self.register(PRECOMPILE_BLS12_G2MSM.to_vec(), Arc::new(precompile_bls12_g2msm));
-        self.register(PRECOMPILE_BLS12_PAIRING_CHECK.to_vec(), Arc::new(precompile_bls12_pairing_check));
-        self.register(PRECOMPILE_BLS12_MAP_FP_TO_G1.to_vec(), Arc::new(precompile_bls12_map_fp_to_g1));
-        self.register(PRECOMPILE_BLS12_MAP_FP2_TO_G2.to_vec(), Arc::new(precompile_bls12_map_fp2_to_g2));
+        self.register(
+            PRECOMPILE_BLS12_G1ADD.to_vec(),
+            Arc::new(precompile_bls12_g1add),
+        );
+        self.register(
+            PRECOMPILE_BLS12_G1MSM.to_vec(),
+            Arc::new(precompile_bls12_g1msm),
+        );
+        self.register(
+            PRECOMPILE_BLS12_G2ADD.to_vec(),
+            Arc::new(precompile_bls12_g2add),
+        );
+        self.register(
+            PRECOMPILE_BLS12_G2MSM.to_vec(),
+            Arc::new(precompile_bls12_g2msm),
+        );
+        self.register(
+            PRECOMPILE_BLS12_PAIRING_CHECK.to_vec(),
+            Arc::new(precompile_bls12_pairing_check),
+        );
+        self.register(
+            PRECOMPILE_BLS12_MAP_FP_TO_G1.to_vec(),
+            Arc::new(precompile_bls12_map_fp_to_g1),
+        );
+        self.register(
+            PRECOMPILE_BLS12_MAP_FP2_TO_G2.to_vec(),
+            Arc::new(precompile_bls12_map_fp2_to_g2),
+        );
 
         // Tenzro VRF (0x1007) — ECVRF-EDWARDS25519-SHA512-TAI proof verification (RFC 9381)
-        self.register(PRECOMPILE_VRF_VERIFY.to_vec(), Arc::new(precompile_vrf_verify));
+        self.register(
+            PRECOMPILE_VRF_VERIFY.to_vec(),
+            Arc::new(precompile_vrf_verify),
+        );
 
         // Tenzro Train (0x1008) — TrainingReceipt commitment-chain verification
-        self.register(PRECOMPILE_TRAINING_VERIFY.to_vec(), Arc::new(precompile_training_verify));
+        self.register(
+            PRECOMPILE_TRAINING_VERIFY.to_vec(),
+            Arc::new(precompile_training_verify),
+        );
     }
 
     /// Register Tenzro-specific precompiles with optional service injection
@@ -411,7 +499,10 @@ impl PrecompileRegistry {
         nft_storage: Option<Arc<dyn KvStore>>,
     ) {
         // TEE attestation verification — has no service dependency, always registered.
-        self.register(PRECOMPILE_TEE_VERIFY.to_vec(), Arc::new(precompile_tee_verify));
+        self.register(
+            PRECOMPILE_TEE_VERIFY.to_vec(),
+            Arc::new(precompile_tee_verify),
+        );
 
         // NFT factory (0x1006) — ERC-721/1155 collection creation, mint, transfer,
         // mintRandom. Always registered. When `nft_storage` is provided, mutations
@@ -419,7 +510,7 @@ impl PrecompileRegistry {
         // without a store, the registry is in-memory-only and state is lost on
         // restart. The store can be upgraded later via `upgrade_nft_factory`.
         {
-            use crate::evm::nft_factory::{create_nft_factory_precompile, NftRegistry};
+            use crate::evm::nft_factory::{NftRegistry, create_nft_factory_precompile};
             let nft_registry = match nft_storage {
                 Some(store) => Arc::new(NftRegistry::with_storage(store)),
                 None => Arc::new(NftRegistry::new()),
@@ -472,7 +563,7 @@ impl PrecompileRegistry {
     /// available. Idempotent: calling repeatedly with the same store rebuilds
     /// the registry from disk.
     pub fn upgrade_nft_factory(&self, store: Arc<dyn KvStore>) {
-        use crate::evm::nft_factory::{create_nft_factory_precompile, NftRegistry};
+        use crate::evm::nft_factory::{NftRegistry, create_nft_factory_precompile};
         tracing::info!("Wiring NFT_FACTORY precompile (0x1006) to persistent NftRegistry");
         let nft_registry = Arc::new(NftRegistry::with_storage(store));
         self.register(
@@ -544,9 +635,9 @@ impl PrecompileRegistry {
         token: Arc<tenzro_token::TnzoToken>,
         registry: Arc<tenzro_token::TokenRegistry>,
     ) {
+        use crate::cross_vm_bridge::create_cross_vm_bridge_precompile;
         use crate::evm::tnzo_bridge::create_tnzo_bridge_precompile;
         use crate::evm::token_factory::create_token_factory_precompile;
-        use crate::cross_vm_bridge::create_cross_vm_bridge_precompile;
 
         // TNZO Bridge (0x1001) — wTNZO ERC-20 pointer. Authorization
         // for transfer / approve / transferFrom / crosschainMint /
@@ -556,7 +647,8 @@ impl PrecompileRegistry {
             PRECOMPILE_TNZO_BRIDGE.to_vec(),
             create_tnzo_bridge_precompile(token.clone(), registry.clone()),
         );
-        self.requires_trusted_caller.insert(PRECOMPILE_TNZO_BRIDGE.to_vec());
+        self.requires_trusted_caller
+            .insert(PRECOMPILE_TNZO_BRIDGE.to_vec());
 
         // Token Factory (0x1002) — ERC-20 creation. Creator is bound
         // to the trusted `msg.sender`, not caller-supplied bytes, so
@@ -566,7 +658,8 @@ impl PrecompileRegistry {
             PRECOMPILE_TOKEN_FACTORY.to_vec(),
             create_token_factory_precompile(registry.clone()),
         );
-        self.requires_trusted_caller.insert(PRECOMPILE_TOKEN_FACTORY.to_vec());
+        self.requires_trusted_caller
+            .insert(PRECOMPILE_TOKEN_FACTORY.to_vec());
 
         // Cross-VM Bridge (0x1003) — cross-VM transfers. From-address
         // for the source-VM debit MUST be the trusted msg.sender.
@@ -574,7 +667,8 @@ impl PrecompileRegistry {
             PRECOMPILE_CROSS_VM_BRIDGE.to_vec(),
             create_cross_vm_bridge_precompile(token, registry),
         );
-        self.requires_trusted_caller.insert(PRECOMPILE_CROSS_VM_BRIDGE.to_vec());
+        self.requires_trusted_caller
+            .insert(PRECOMPILE_CROSS_VM_BRIDGE.to_vec());
 
         // NFT Factory (0x1006) — ERC-721/1155 collection creation and management
         {
@@ -614,10 +708,9 @@ impl PrecompileRegistry {
         Arc<crate::erc7579::SpendingLimitValidator>,
     ) {
         use crate::erc7579::{
-            create_session_key_validator_precompile,
-            create_social_recovery_validator_precompile,
-            create_spending_limit_validator_precompile, SessionKeyValidator,
-            SocialRecoveryValidator, SpendingLimitValidator,
+            SessionKeyValidator, SocialRecoveryValidator, SpendingLimitValidator,
+            create_session_key_validator_precompile, create_social_recovery_validator_precompile,
+            create_spending_limit_validator_precompile,
         };
 
         let mut social_recovery_addr = [0u8; 20];
@@ -734,7 +827,7 @@ fn precompile_sha256(input: &[u8], _gas_limit: u64) -> Result<PrecompileResult> 
 }
 
 fn precompile_ripemd160(input: &[u8], _gas_limit: u64) -> Result<PrecompileResult> {
-    use ripemd::{Ripemd160, Digest};
+    use ripemd::{Digest, Ripemd160};
 
     let mut hasher = Ripemd160::new();
     hasher.update(input);
@@ -789,7 +882,9 @@ fn precompile_modexp(input: &[u8], _gas_limit: u64) -> Result<PrecompileResult> 
     // Cap lengths to prevent excessive memory allocation (8192 bytes each)
     let max_len = BigUint::from(8192u32);
     if base_len > max_len || exp_len > max_len || mod_len > max_len {
-        return Err(VmError::PrecompileFailed("ModExp input too large".to_string()));
+        return Err(VmError::PrecompileFailed(
+            "ModExp input too large".to_string(),
+        ));
     }
 
     let base_len = base_len.to_u64_digits().first().copied().unwrap_or(0) as usize;
@@ -798,7 +893,12 @@ fn precompile_modexp(input: &[u8], _gas_limit: u64) -> Result<PrecompileResult> 
 
     // If modulus length is 0, return empty result
     if mod_len == 0 {
-        let gas_used = modexp_gas(base_len, exp_len, mod_len, &read_input(96 + base_len, exp_len));
+        let gas_used = modexp_gas(
+            base_len,
+            exp_len,
+            mod_len,
+            &read_input(96 + base_len, exp_len),
+        );
         return Ok(PrecompileResult::success(vec![], gas_used));
     }
 
@@ -920,7 +1020,7 @@ fn precompile_ecadd(input: &[u8], _gas_limit: u64) -> Result<PrecompileResult> {
 /// Output: s*P(x, y) [64 bytes]
 /// Gas: 6000 (EIP-1108)
 fn precompile_ecmul(input: &[u8], _gas_limit: u64) -> Result<PrecompileResult> {
-    use ark_bn254::{G1Affine, G1Projective, Fr};
+    use ark_bn254::{Fr, G1Affine, G1Projective};
     use ark_ff::PrimeField;
 
     tracing::debug!("EC_MUL precompile called with {} bytes", input.len());
@@ -1216,19 +1316,13 @@ fn fq_to_be_bytes(fq: &ark_bn254::Fq) -> Vec<u8> {
 /// For k > 128, use discount[128].
 const BLS12_MSM_DISCOUNT_TABLE: [u64; 129] = [
     0, // index 0 unused
-    1200, 888, 764, 641, 594, 547, 500, 453, 438, 423,
-    408, 394, 379, 364, 349, 334, 330, 326, 322, 318,
-    314, 310, 306, 302, 298, 294, 289, 285, 281, 277,
-    273, 269, 268, 266, 265, 263, 262, 260, 259, 257,
-    256, 254, 253, 251, 250, 248, 247, 245, 244, 242,
-    241, 239, 238, 236, 235, 233, 232, 231, 229, 228,
-    226, 225, 223, 222, 221, 220, 219, 219, 218, 217,
-    216, 216, 215, 214, 213, 213, 212, 211, 211, 210,
-    209, 208, 208, 207, 206, 205, 205, 204, 203, 202,
-    202, 201, 200, 199, 199, 198, 197, 196, 196, 195,
-    194, 193, 193, 192, 191, 191, 190, 189, 189, 188,
-    187, 187, 186, 185, 185, 184, 183, 183, 182, 181,
-    181, 180, 179, 179, 178, 177, 177, 176,
+    1200, 888, 764, 641, 594, 547, 500, 453, 438, 423, 408, 394, 379, 364, 349, 334, 330, 326, 322,
+    318, 314, 310, 306, 302, 298, 294, 289, 285, 281, 277, 273, 269, 268, 266, 265, 263, 262, 260,
+    259, 257, 256, 254, 253, 251, 250, 248, 247, 245, 244, 242, 241, 239, 238, 236, 235, 233, 232,
+    231, 229, 228, 226, 225, 223, 222, 221, 220, 219, 219, 218, 217, 216, 216, 215, 214, 213, 213,
+    212, 211, 211, 210, 209, 208, 208, 207, 206, 205, 205, 204, 203, 202, 202, 201, 200, 199, 199,
+    198, 197, 196, 196, 195, 194, 193, 193, 192, 191, 191, 190, 189, 189, 188, 187, 187, 186, 185,
+    185, 184, 183, 183, 182, 181, 181, 180, 179, 179, 178, 177, 177, 176,
 ];
 
 /// Get MSM discount for k pairs
@@ -1419,7 +1513,7 @@ fn validate_fp_canonical(input: &[u8]) -> bool {
 ///
 /// **Gas cost:** flat 6900, input-independent.
 fn precompile_p256verify(input: &[u8], gas_limit: u64) -> Result<PrecompileResult> {
-    use p256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
+    use p256::ecdsa::{Signature, VerifyingKey, signature::hazmat::PrehashVerifier};
 
     const GAS_COST: u64 = 6900;
     if gas_limit < GAS_COST {
@@ -1482,7 +1576,8 @@ fn precompile_bls12_g1add(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
     if input.len() != 256 {
         return Err(VmError::PrecompileFailed(format!(
-            "BLS12_G1ADD: expected 256 bytes input, got {}", input.len()
+            "BLS12_G1ADD: expected 256 bytes input, got {}",
+            input.len()
         )));
     }
 
@@ -1499,16 +1594,20 @@ fn precompile_bls12_g1add(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
     let p1 = match decode_g1_point(&input[0..128]) {
         Some(p) => p,
-        None => return Err(VmError::PrecompileFailed(
-            "BLS12_G1ADD: invalid G1 point (first operand)".to_string(),
-        )),
+        None => {
+            return Err(VmError::PrecompileFailed(
+                "BLS12_G1ADD: invalid G1 point (first operand)".to_string(),
+            ));
+        }
     };
 
     let p2 = match decode_g1_point(&input[128..256]) {
         Some(p) => p,
-        None => return Err(VmError::PrecompileFailed(
-            "BLS12_G1ADD: invalid G1 point (second operand)".to_string(),
-        )),
+        None => {
+            return Err(VmError::PrecompileFailed(
+                "BLS12_G1ADD: invalid G1 point (second operand)".to_string(),
+            ));
+        }
     };
 
     // Perform addition via projective coordinates
@@ -1523,7 +1622,10 @@ fn precompile_bls12_g1add(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
         blst::blst_p1_to_affine(&mut result_affine, &result_proj);
     }
 
-    Ok(PrecompileResult::success(encode_g1_point(&result_affine), GAS_COST))
+    Ok(PrecompileResult::success(
+        encode_g1_point(&result_affine),
+        GAS_COST,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1542,7 +1644,9 @@ fn precompile_bls12_g1msm(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
     if input.is_empty() || !input.len().is_multiple_of(PAIR_SIZE) {
         return Err(VmError::PrecompileFailed(format!(
-            "BLS12_G1MSM: input length {} is not a multiple of {}", input.len(), PAIR_SIZE
+            "BLS12_G1MSM: input length {} is not a multiple of {}",
+            input.len(),
+            PAIR_SIZE
         )));
     }
 
@@ -1575,9 +1679,12 @@ fn precompile_bls12_g1msm(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
         let p = match decode_g1_point(point_bytes) {
             Some(p) => p,
-            None => return Err(VmError::PrecompileFailed(format!(
-                "BLS12_G1MSM: invalid G1 point at index {}", i
-            ))),
+            None => {
+                return Err(VmError::PrecompileFailed(format!(
+                    "BLS12_G1MSM: invalid G1 point at index {}",
+                    i
+                )));
+            }
         };
 
         // Convert scalar from big-endian to little-endian for blst
@@ -1601,7 +1708,10 @@ fn precompile_bls12_g1msm(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
         blst::blst_p1_to_affine(&mut result_affine, &acc);
     }
 
-    Ok(PrecompileResult::success(encode_g1_point(&result_affine), gas_cost))
+    Ok(PrecompileResult::success(
+        encode_g1_point(&result_affine),
+        gas_cost,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,7 +1729,8 @@ fn precompile_bls12_g2add(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
     if input.len() != 512 {
         return Err(VmError::PrecompileFailed(format!(
-            "BLS12_G2ADD: expected 512 bytes input, got {}", input.len()
+            "BLS12_G2ADD: expected 512 bytes input, got {}",
+            input.len()
         )));
     }
 
@@ -1634,16 +1745,20 @@ fn precompile_bls12_g2add(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
     let p1 = match decode_g2_point(&input[0..256]) {
         Some(p) => p,
-        None => return Err(VmError::PrecompileFailed(
-            "BLS12_G2ADD: invalid G2 point (first operand)".to_string(),
-        )),
+        None => {
+            return Err(VmError::PrecompileFailed(
+                "BLS12_G2ADD: invalid G2 point (first operand)".to_string(),
+            ));
+        }
     };
 
     let p2 = match decode_g2_point(&input[256..512]) {
         Some(p) => p,
-        None => return Err(VmError::PrecompileFailed(
-            "BLS12_G2ADD: invalid G2 point (second operand)".to_string(),
-        )),
+        None => {
+            return Err(VmError::PrecompileFailed(
+                "BLS12_G2ADD: invalid G2 point (second operand)".to_string(),
+            ));
+        }
     };
 
     let mut result_proj = blst::blst_p2::default();
@@ -1657,7 +1772,10 @@ fn precompile_bls12_g2add(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
         blst::blst_p2_to_affine(&mut result_affine, &result_proj);
     }
 
-    Ok(PrecompileResult::success(encode_g2_point(&result_affine), GAS_COST))
+    Ok(PrecompileResult::success(
+        encode_g2_point(&result_affine),
+        GAS_COST,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,7 +1794,9 @@ fn precompile_bls12_g2msm(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
     if input.is_empty() || !input.len().is_multiple_of(PAIR_SIZE) {
         return Err(VmError::PrecompileFailed(format!(
-            "BLS12_G2MSM: input length {} is not a multiple of {}", input.len(), PAIR_SIZE
+            "BLS12_G2MSM: input length {} is not a multiple of {}",
+            input.len(),
+            PAIR_SIZE
         )));
     }
 
@@ -1705,9 +1825,12 @@ fn precompile_bls12_g2msm(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
 
         let p = match decode_g2_point(point_bytes) {
             Some(p) => p,
-            None => return Err(VmError::PrecompileFailed(format!(
-                "BLS12_G2MSM: invalid G2 point at index {}", i
-            ))),
+            None => {
+                return Err(VmError::PrecompileFailed(format!(
+                    "BLS12_G2MSM: invalid G2 point at index {}",
+                    i
+                )));
+            }
         };
 
         let mut scalar_le = [0u8; 32];
@@ -1728,7 +1851,10 @@ fn precompile_bls12_g2msm(input: &[u8], _gas_limit: u64) -> Result<PrecompileRes
         blst::blst_p2_to_affine(&mut result_affine, &acc);
     }
 
-    Ok(PrecompileResult::success(encode_g2_point(&result_affine), gas_cost))
+    Ok(PrecompileResult::success(
+        encode_g2_point(&result_affine),
+        gas_cost,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1752,7 +1878,9 @@ fn precompile_bls12_pairing_check(input: &[u8], _gas_limit: u64) -> Result<Preco
 
     if !input.len().is_multiple_of(PAIR_SIZE) {
         return Err(VmError::PrecompileFailed(format!(
-            "BLS12_PAIRING_CHECK: input length {} is not a multiple of {}", input.len(), PAIR_SIZE
+            "BLS12_PAIRING_CHECK: input length {} is not a multiple of {}",
+            input.len(),
+            PAIR_SIZE
         )));
     }
 
@@ -1787,16 +1915,22 @@ fn precompile_bls12_pairing_check(input: &[u8], _gas_limit: u64) -> Result<Preco
 
         let g1 = match decode_g1_point(&input[offset..offset + 128]) {
             Some(p) => p,
-            None => return Err(VmError::PrecompileFailed(format!(
-                "BLS12_PAIRING_CHECK: invalid G1 point at pair {}", i
-            ))),
+            None => {
+                return Err(VmError::PrecompileFailed(format!(
+                    "BLS12_PAIRING_CHECK: invalid G1 point at pair {}",
+                    i
+                )));
+            }
         };
 
         let g2 = match decode_g2_point(&input[offset + 128..offset + 384]) {
             Some(p) => p,
-            None => return Err(VmError::PrecompileFailed(format!(
-                "BLS12_PAIRING_CHECK: invalid G2 point at pair {}", i
-            ))),
+            None => {
+                return Err(VmError::PrecompileFailed(format!(
+                    "BLS12_PAIRING_CHECK: invalid G2 point at pair {}",
+                    i
+                )));
+            }
         };
 
         g1_points.push(g1);
@@ -1866,7 +2000,8 @@ fn precompile_bls12_map_fp_to_g1(input: &[u8], _gas_limit: u64) -> Result<Precom
 
     if input.len() != 64 {
         return Err(VmError::PrecompileFailed(format!(
-            "BLS12_MAP_FP_TO_G1: expected 64 bytes input, got {}", input.len()
+            "BLS12_MAP_FP_TO_G1: expected 64 bytes input, got {}",
+            input.len()
         )));
     }
 
@@ -1892,7 +2027,10 @@ fn precompile_bls12_map_fp_to_g1(input: &[u8], _gas_limit: u64) -> Result<Precom
         blst::blst_p1_to_affine(&mut result_affine, &result_proj);
     }
 
-    Ok(PrecompileResult::success(encode_g1_point(&result_affine), GAS_COST))
+    Ok(PrecompileResult::success(
+        encode_g1_point(&result_affine),
+        GAS_COST,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1910,7 +2048,8 @@ fn precompile_bls12_map_fp2_to_g2(input: &[u8], _gas_limit: u64) -> Result<Preco
 
     if input.len() != 128 {
         return Err(VmError::PrecompileFailed(format!(
-            "BLS12_MAP_FP2_TO_G2: expected 128 bytes input, got {}", input.len()
+            "BLS12_MAP_FP2_TO_G2: expected 128 bytes input, got {}",
+            input.len()
         )));
     }
 
@@ -1939,7 +2078,10 @@ fn precompile_bls12_map_fp2_to_g2(input: &[u8], _gas_limit: u64) -> Result<Preco
         blst::blst_p2_to_affine(&mut result_affine, &result_proj);
     }
 
-    Ok(PrecompileResult::success(encode_g2_point(&result_affine), GAS_COST))
+    Ok(PrecompileResult::success(
+        encode_g2_point(&result_affine),
+        GAS_COST,
+    ))
 }
 
 // ============================================================================
@@ -1948,10 +2090,14 @@ fn precompile_bls12_map_fp2_to_g2(input: &[u8], _gas_limit: u64) -> Result<Preco
 
 /// BLAKE2b initialization vectors
 const BLAKE2B_IV: [u64; 8] = [
-    0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
-    0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-    0x510e527fade682d1, 0x9b05688c2b3e6c1f,
-    0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+    0x6a09e667f3bcc908,
+    0xbb67ae8584caa73b,
+    0x3c6ef372fe94f82b,
+    0xa54ff53a5f1d36f1,
+    0x510e527fade682d1,
+    0x9b05688c2b3e6c1f,
+    0x1f83d9abfb41bd6b,
+    0x5be0cd19137e2179,
 ];
 
 /// BLAKE2b sigma permutations
@@ -2000,14 +2146,14 @@ fn blake2b_f(h: &mut [u64; 8], m: &[u64; 16], t: [u64; 2], final_block: bool, ro
     for i in 0..rounds {
         let s = &BLAKE2B_SIGMA[i % 10];
 
-        blake2b_g(&mut v, 0, 4, 8,  12, m[s[0]],  m[s[1]]);
-        blake2b_g(&mut v, 1, 5, 9,  13, m[s[2]],  m[s[3]]);
-        blake2b_g(&mut v, 2, 6, 10, 14, m[s[4]],  m[s[5]]);
-        blake2b_g(&mut v, 3, 7, 11, 15, m[s[6]],  m[s[7]]);
-        blake2b_g(&mut v, 0, 5, 10, 15, m[s[8]],  m[s[9]]);
+        blake2b_g(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
+        blake2b_g(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
+        blake2b_g(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
+        blake2b_g(&mut v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
+        blake2b_g(&mut v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
         blake2b_g(&mut v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
-        blake2b_g(&mut v, 2, 7, 8,  13, m[s[12]], m[s[13]]);
-        blake2b_g(&mut v, 3, 4, 9,  14, m[s[14]], m[s[15]]);
+        blake2b_g(&mut v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
+        blake2b_g(&mut v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
     }
 
     // Finalize: h' = h XOR upper XOR lower
@@ -2054,7 +2200,10 @@ fn precompile_vrf_verify(input: &[u8], gas_limit: u64) -> Result<PrecompileResul
 
     // Reject oversized inputs cheaply.
     if input.len() < HEADER_LEN {
-        return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+        return Ok(PrecompileResult::success(
+            INVALID.to_vec(),
+            BASE_GAS.min(gas_limit),
+        ));
     }
 
     // Parse pubkey
@@ -2075,15 +2224,14 @@ fn precompile_vrf_verify(input: &[u8], gas_limit: u64) -> Result<PrecompileResul
             ));
         }
     }
-    let alpha_len = u32::from_be_bytes([
-        len_bytes[28],
-        len_bytes[29],
-        len_bytes[30],
-        len_bytes[31],
-    ]) as usize;
+    let alpha_len =
+        u32::from_be_bytes([len_bytes[28], len_bytes[29], len_bytes[30], len_bytes[31]]) as usize;
 
     if input.len() < HEADER_LEN + alpha_len {
-        return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+        return Ok(PrecompileResult::success(
+            INVALID.to_vec(),
+            BASE_GAS.min(gas_limit),
+        ));
     }
     let alpha = &input[HEADER_LEN..HEADER_LEN + alpha_len];
 
@@ -2101,10 +2249,7 @@ fn precompile_vrf_verify(input: &[u8], gas_limit: u64) -> Result<PrecompileResul
             let mut out = Vec::with_capacity(32 + vrf::OUTPUT_LEN);
             out.extend_from_slice(&VALID_STATUS);
             out.extend_from_slice(&output.0);
-            tracing::debug!(
-                alpha_len = alpha_len,
-                "VRF precompile: proof verified"
-            );
+            tracing::debug!(alpha_len = alpha_len, "VRF precompile: proof verified");
             Ok(PrecompileResult::success(out, gas_used))
         }
         Err(e) => {
@@ -2137,7 +2282,10 @@ fn precompile_training_verify(input: &[u8], gas_limit: u64) -> Result<Precompile
     const VALID: [u8; 1] = [1u8];
 
     if input.is_empty() {
-        return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+        return Ok(PrecompileResult::success(
+            INVALID.to_vec(),
+            BASE_GAS.min(gas_limit),
+        ));
     }
 
     // Parse the receipt as a JSON object with the fields we care about.
@@ -2145,27 +2293,39 @@ fn precompile_training_verify(input: &[u8], gas_limit: u64) -> Result<Precompile
     let receipt: serde_json::Value = match serde_json::from_slice(input) {
         Ok(v) => v,
         Err(_) => {
-            return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+            return Ok(PrecompileResult::success(
+                INVALID.to_vec(),
+                BASE_GAS.min(gas_limit),
+            ));
         }
     };
 
     let roots_value = match receipt.get("round_state_roots") {
         Some(v) => v,
         None => {
-            return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+            return Ok(PrecompileResult::success(
+                INVALID.to_vec(),
+                BASE_GAS.min(gas_limit),
+            ));
         }
     };
     let claimed_root_value = match receipt.get("run_root") {
         Some(v) => v,
         None => {
-            return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+            return Ok(PrecompileResult::success(
+                INVALID.to_vec(),
+                BASE_GAS.min(gas_limit),
+            ));
         }
     };
 
     let roots_arr = match roots_value.as_array() {
         Some(a) => a,
         None => {
-            return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+            return Ok(PrecompileResult::success(
+                INVALID.to_vec(),
+                BASE_GAS.min(gas_limit),
+            ));
         }
     };
 
@@ -2194,7 +2354,10 @@ fn precompile_training_verify(input: &[u8], gas_limit: u64) -> Result<Precompile
         match extract_32(r) {
             Some(b) => layer.push(b),
             None => {
-                return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+                return Ok(PrecompileResult::success(
+                    INVALID.to_vec(),
+                    BASE_GAS.min(gas_limit),
+                ));
             }
         }
     }
@@ -2202,7 +2365,10 @@ fn precompile_training_verify(input: &[u8], gas_limit: u64) -> Result<Precompile
     let claimed = match extract_32(claimed_root_value) {
         Some(b) => b,
         None => {
-            return Ok(PrecompileResult::success(INVALID.to_vec(), BASE_GAS.min(gas_limit)));
+            return Ok(PrecompileResult::success(
+                INVALID.to_vec(),
+                BASE_GAS.min(gas_limit),
+            ));
         }
     };
 
@@ -2253,7 +2419,10 @@ fn precompile_training_verify(input: &[u8], gas_limit: u64) -> Result<Precompile
 /// Input format: JSON-serialized AttestationReport
 /// Output: [1] for valid, [0] for invalid
 fn precompile_tee_verify(input: &[u8], _gas_limit: u64) -> Result<PrecompileResult> {
-    tracing::info!("TEE verification precompile called with {} bytes", input.len());
+    tracing::info!(
+        "TEE verification precompile called with {} bytes",
+        input.len()
+    );
 
     if input.is_empty() {
         return Ok(PrecompileResult::success(vec![0u8], 100_000));
@@ -2273,8 +2442,11 @@ fn precompile_tee_verify(input: &[u8], _gas_limit: u64) -> Result<PrecompileResu
     match verifier.verify_report(&report) {
         Ok(result) => {
             let output = if result.valid { vec![1u8] } else { vec![0u8] };
-            tracing::info!("TEE precompile: attestation valid={}, vendor={:?}",
-                result.valid, result.vendor);
+            tracing::info!(
+                "TEE precompile: attestation valid={}, vendor={:?}",
+                result.valid,
+                result.vendor
+            );
             Ok(PrecompileResult::success(output, 100_000))
         }
         Err(e) => {
@@ -2467,8 +2639,7 @@ fn precompile_settlement_real(
 
     let engine = engine.clone();
     let result = tokio::task::block_in_place(move || {
-        tokio::runtime::Handle::current()
-            .block_on(async move { engine.settle(request).await })
+        tokio::runtime::Handle::current().block_on(async move { engine.settle(request).await })
     });
 
     match result {
@@ -2481,10 +2652,7 @@ fn precompile_settlement_real(
                 Ok(PrecompileResult::success(bytes, 150_000))
             }
             Err(e) => {
-                tracing::warn!(
-                    "Settlement precompile: failed to serialize receipt: {}",
-                    e
-                );
+                tracing::warn!("Settlement precompile: failed to serialize receipt: {}", e);
                 Ok(PrecompileResult::success(Vec::new(), 150_000))
             }
         },
@@ -2628,8 +2796,10 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output.len(), 32);
         // SHA-256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
-        assert_eq!(hex::encode(&result.output),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hex::encode(&result.output),
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
     }
 
     #[test]
@@ -2637,8 +2807,10 @@ mod tests {
         let result = precompile_sha256(b"", 1000).unwrap();
         assert!(result.success);
         // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        assert_eq!(hex::encode(&result.output),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hex::encode(&result.output),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -2661,8 +2833,10 @@ mod tests {
         assert_eq!(result.output.len(), 32);
         // RIPEMD-160("hello world") = 98c615784ccb5fe5936fbc0cbe9dfdb408d92f0f
         // Right-aligned in 32 bytes
-        assert_eq!(hex::encode(&result.output),
-            "00000000000000000000000098c615784ccb5fe5936fbc0cbe9dfdb408d92f0f");
+        assert_eq!(
+            hex::encode(&result.output),
+            "00000000000000000000000098c615784ccb5fe5936fbc0cbe9dfdb408d92f0f"
+        );
     }
 
     #[test]
@@ -2670,8 +2844,10 @@ mod tests {
         let result = precompile_ripemd160(b"", 1000).unwrap();
         assert!(result.success);
         // RIPEMD-160("") = 9c1185a5c5e9fc54612808977ee8f548b2258d31
-        assert_eq!(hex::encode(&result.output),
-            "0000000000000000000000009c1185a5c5e9fc54612808977ee8f548b2258d31");
+        assert_eq!(
+            hex::encode(&result.output),
+            "0000000000000000000000009c1185a5c5e9fc54612808977ee8f548b2258d31"
+        );
     }
 
     // ========================================================================
@@ -2708,13 +2884,14 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000020\
              03\
              fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2e\
-             fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"
-        ).unwrap();
+             fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+        )
+        .unwrap();
         let result = precompile_modexp(&input, 10_000_000).unwrap();
         assert!(result.success);
-        let expected = hex::decode(
-            "0000000000000000000000000000000000000000000000000000000000000001"
-        ).unwrap();
+        let expected =
+            hex::decode("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
         assert_eq!(result.output, expected);
     }
 
@@ -2726,13 +2903,14 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000020\
              0000000000000000000000000000000000000000000000000000000000000020\
              fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2e\
-             fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"
-        ).unwrap();
+             fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+        )
+        .unwrap();
         let result = precompile_modexp(&input, 10_000_000).unwrap();
         assert!(result.success);
-        let expected = hex::decode(
-            "0000000000000000000000000000000000000000000000000000000000000000"
-        ).unwrap();
+        let expected =
+            hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
+                .unwrap();
         assert_eq!(result.output, expected);
     }
 
@@ -2745,8 +2923,9 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000001\
              02\
              0a\
-             11"
-        ).unwrap();
+             11",
+        )
+        .unwrap();
         let result = precompile_modexp(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(result.output, vec![4u8]);
@@ -2760,8 +2939,9 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000001\
              0000000000000000000000000000000000000000000000000000000000000000\
              02\
-             0a"
-        ).unwrap();
+             0a",
+        )
+        .unwrap();
         let result = precompile_modexp(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert!(result.output.is_empty());
@@ -2776,11 +2956,16 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000001\
              02\
              01\
-             03"
-        ).unwrap();
+             03",
+        )
+        .unwrap();
         let result = precompile_modexp(&input, 10_000_000).unwrap();
         assert!(result.success);
-        assert!(result.gas_used >= 200, "ModExp gas must be >= 200, got {}", result.gas_used);
+        assert!(
+            result.gas_used >= 200,
+            "ModExp gas must be >= 200, got {}",
+            result.gas_used
+        );
     }
 
     // ========================================================================
@@ -2804,12 +2989,14 @@ mod tests {
             "18b18acfb4c2c30276db5411368e7185b311dd124691610c5d3b74034e093dc9\
              063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f37266\
              07c2b7f58a84bd6145f00c9c2bc0bb1a187f20ff2c92963a88019e7c6a014eed\
-             06614e20c147e940f2d70da3f74c9a17df361706a4485c742bd6788478fa17d7"
-        ).unwrap();
+             06614e20c147e940f2d70da3f74c9a17df361706a4485c742bd6788478fa17d7",
+        )
+        .unwrap();
         let expected = hex::decode(
             "2243525c5efd4b9c3d3c45ac0ca3fe4dd85e830a4ce6b65fa1eeaee202839703\
-             301d1d33be6da8e509df21cc35964723180eed7532537db9ae5e7d48f195c915"
-        ).unwrap();
+             301d1d33be6da8e509df21cc35964723180eed7532537db9ae5e7d48f195c915",
+        )
+        .unwrap();
         let result = precompile_ecadd(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -2822,12 +3009,14 @@ mod tests {
             "2243525c5efd4b9c3d3c45ac0ca3fe4dd85e830a4ce6b65fa1eeaee202839703\
              301d1d33be6da8e509df21cc35964723180eed7532537db9ae5e7d48f195c915\
              18b18acfb4c2c30276db5411368e7185b311dd124691610c5d3b74034e093dc9\
-             063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f37266"
-        ).unwrap();
+             063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f37266",
+        )
+        .unwrap();
         let expected = hex::decode(
             "2bd3e6d0f3b142924f5ca7b49ce5b9d54c4703d7ae5648e61d02268b1a0a9fb7\
-             21611ce0a6af85915e2f1d70300909ce2e49dfad4a4619c8390cae66cefdb204"
-        ).unwrap();
+             21611ce0a6af85915e2f1d70300909ce2e49dfad4a4619c8390cae66cefdb204",
+        )
+        .unwrap();
         let result = precompile_ecadd(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -2851,8 +3040,9 @@ mod tests {
         // P * 0 = point at infinity = (0, 0)
         let mut input = hex::decode(
             "18b18acfb4c2c30276db5411368e7185b311dd124691610c5d3b74034e093dc9\
-             063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f37266"
-        ).unwrap();
+             063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f37266",
+        )
+        .unwrap();
         input.extend_from_slice(&[0u8; 32]); // scalar = 0
         let result = precompile_ecmul(&input, 10_000_000).unwrap();
         assert!(result.success);
@@ -2866,12 +3056,14 @@ mod tests {
         let input = hex::decode(
             "2bd3e6d0f3b142924f5ca7b49ce5b9d54c4703d7ae5648e61d02268b1a0a9fb7\
              21611ce0a6af85915e2f1d70300909ce2e49dfad4a4619c8390cae66cefdb204\
-             00000000000000000000000000000000000000000000000011138ce750fa15c2"
-        ).unwrap();
+             00000000000000000000000000000000000000000000000011138ce750fa15c2",
+        )
+        .unwrap();
         let expected = hex::decode(
             "070a8d6a982153cae4be29d434e8faef8a47b274a053f5a4ee2a6c9c13c31e5c\
-             031b8ce914eba3a9ffb989f9cdd5b0f01943074bf4f0f315690ec3cec6981afc"
-        ).unwrap();
+             031b8ce914eba3a9ffb989f9cdd5b0f01943074bf4f0f315690ec3cec6981afc",
+        )
+        .unwrap();
         let result = precompile_ecmul(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -2883,12 +3075,14 @@ mod tests {
         let input = hex::decode(
             "070a8d6a982153cae4be29d434e8faef8a47b274a053f5a4ee2a6c9c13c31e5c\
              031b8ce914eba3a9ffb989f9cdd5b0f01943074bf4f0f315690ec3cec6981afc\
-             30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd46"
-        ).unwrap();
+             30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd46",
+        )
+        .unwrap();
         let expected = hex::decode(
             "025a6f4181d2b4ea8b724290ffb40156eb0adb514c688556eb79cdea0752c2bb\
-             2eff3f31dea215f1eb86023a133a996eb6300b44da664d64251d05381bb8a02e"
-        ).unwrap();
+             2eff3f31dea215f1eb86023a133a996eb6300b44da664d64251d05381bb8a02e",
+        )
+        .unwrap();
         let result = precompile_ecmul(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -2899,8 +3093,9 @@ mod tests {
         // G1 * 1 = G1 (generator point)
         let mut input = hex::decode(
             "0000000000000000000000000000000000000000000000000000000000000001\
-             0000000000000000000000000000000000000000000000000000000000000002"
-        ).unwrap();
+             0000000000000000000000000000000000000000000000000000000000000002",
+        )
+        .unwrap();
         input.extend_from_slice(&{
             let mut s = vec![0u8; 32];
             s[31] = 1; // scalar = 1
@@ -2911,8 +3106,9 @@ mod tests {
         // Result should be the generator point (1, 2)
         let expected = hex::decode(
             "0000000000000000000000000000000000000000000000000000000000000001\
-             0000000000000000000000000000000000000000000000000000000000000002"
-        ).unwrap();
+             0000000000000000000000000000000000000000000000000000000000000002",
+        )
+        .unwrap();
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
     }
 
@@ -2925,9 +3121,9 @@ mod tests {
         // Empty input should return 1 (identity pairing check passes)
         let result = precompile_ecpairing(b"", 10_000_000).unwrap();
         assert!(result.success);
-        let expected = hex::decode(
-            "0000000000000000000000000000000000000000000000000000000000000001"
-        ).unwrap();
+        let expected =
+            hex::decode("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
         assert_eq!(result.output, expected);
         assert_eq!(result.gas_used, 45_000);
     }
@@ -2955,11 +3151,12 @@ mod tests {
              198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2\
              1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed\
              090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b\
-             12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa"
-        ).unwrap();
-        let expected = hex::decode(
-            "0000000000000000000000000000000000000000000000000000000000000001"
-        ).unwrap();
+             12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
+        )
+        .unwrap();
+        let expected =
+            hex::decode("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
         let result = precompile_ecpairing(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -2975,11 +3172,12 @@ mod tests {
              198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2\
              1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed\
              090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b\
-             12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa"
-        ).unwrap();
-        let expected = hex::decode(
-            "0000000000000000000000000000000000000000000000000000000000000000"
-        ).unwrap();
+             12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
+        )
+        .unwrap();
+        let expected =
+            hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
+                .unwrap();
         let result = precompile_ecpairing(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -3010,12 +3208,14 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000000\
              0000000000000000000000000000000000000000000000000000000000000000\
              0000000000000000000000000000000000000000000000000000000000000000\
-             0300000000000000000000000000000001"
-        ).unwrap();
+             0300000000000000000000000000000001",
+        )
+        .unwrap();
         let expected = hex::decode(
             "08c9bcf367e6096a3ba7ca8485ae67bb2bf894fe72f36e3cf1361d5f3af54fa5\
-             d282e6ad7f520e511f6c3e2b8c68059b9442be0454267ce079217e1319cde05b"
-        ).unwrap();
+             d282e6ad7f520e511f6c3e2b8c68059b9442be0454267ce079217e1319cde05b",
+        )
+        .unwrap();
         let result = precompile_blake2f(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -3033,12 +3233,14 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000000\
              0000000000000000000000000000000000000000000000000000000000000000\
              0000000000000000000000000000000000000000000000000000000000000000\
-             0300000000000000000000000000000001"
-        ).unwrap();
+             0300000000000000000000000000000001",
+        )
+        .unwrap();
         let expected = hex::decode(
             "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1\
-             7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
-        ).unwrap();
+             7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
+        )
+        .unwrap();
         let result = precompile_blake2f(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -3056,12 +3258,14 @@ mod tests {
              0000000000000000000000000000000000000000000000000000000000000000\
              0000000000000000000000000000000000000000000000000000000000000000\
              0000000000000000000000000000000000000000000000000000000000000000\
-             0300000000000000000000000000000000"
-        ).unwrap();
+             0300000000000000000000000000000000",
+        )
+        .unwrap();
         let expected = hex::decode(
             "75ab69d3190a562c51aef8d88f1c2775876944407270c42c9844252c26d28752\
-             98743e7f6d5ea2f2d3e8d226039cd31b4e426ac4f2d3d666a610c2116fde4735"
-        ).unwrap();
+             98743e7f6d5ea2f2d3e8d226039cd31b4e426ac4f2d3d666a610c2116fde4735",
+        )
+        .unwrap();
         let result = precompile_blake2f(&input, 10_000_000).unwrap();
         assert!(result.success);
         assert_eq!(hex::encode(&result.output), hex::encode(&expected));
@@ -3244,7 +3448,10 @@ mod tests {
 
         // execute() on an unregistered address returns an error.
         let result = registry.execute(&[0u8; 20], PRECOMPILE_MODEL_INFERENCE, &[1, 2, 3], 100_000);
-        assert!(result.is_err(), "execute on unregistered address must error");
+        assert!(
+            result.is_err(),
+            "execute on unregistered address must error"
+        );
     }
 
     #[test]
@@ -3339,16 +3546,8 @@ mod tests {
 
         // Public-input length-prefix prevents ambiguity:
         // [[1,2],[3]] must hash differently from [[1],[2,3]]
-        let p5 = Proof::new(
-            vec![0],
-            vec![vec![1, 2], vec![3]],
-            "c".to_string(),
-        );
-        let p6 = Proof::new(
-            vec![0],
-            vec![vec![1], vec![2, 3]],
-            "c".to_string(),
-        );
+        let p5 = Proof::new(vec![0], vec![vec![1, 2], vec![3]], "c".to_string());
+        let p6 = Proof::new(vec![0], vec![vec![1], vec![2, 3]], "c".to_string());
         assert_ne!(compute_zk_commitment(&p5), compute_zk_commitment(&p6));
     }
 
@@ -3357,7 +3556,8 @@ mod tests {
         use tenzro_zk::Proof;
 
         let zk_registry = Arc::new(ZkCommitmentRegistry::new());
-        let registry = PrecompileRegistry::new_with_services(None, None, Some(zk_registry.clone()), None);
+        let registry =
+            PrecompileRegistry::new_with_services(None, None, Some(zk_registry.clone()), None);
 
         let proof = Proof::new(
             vec![0xab, 0xcd, 0xef],
@@ -3367,7 +3567,9 @@ mod tests {
         let input = serde_json::to_vec(&proof).unwrap();
 
         // Not yet attested → returns [0]
-        let r = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &input, 500_000).unwrap();
+        let r = registry
+            .execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &input, 500_000)
+            .unwrap();
         assert!(r.success);
         assert_eq!(r.output, vec![0u8]);
 
@@ -3375,7 +3577,9 @@ mod tests {
         let commitment = compute_zk_commitment(&proof);
         zk_registry.attest(commitment);
 
-        let r2 = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &input, 500_000).unwrap();
+        let r2 = registry
+            .execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &input, 500_000)
+            .unwrap();
         assert!(r2.success);
         assert_eq!(r2.output, vec![1u8]);
     }
@@ -3386,12 +3590,16 @@ mod tests {
         let registry = PrecompileRegistry::new_with_services(None, None, Some(zk_registry), None);
 
         // Garbage bytes → [0]
-        let r = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &[0xff; 16], 500_000).unwrap();
+        let r = registry
+            .execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &[0xff; 16], 500_000)
+            .unwrap();
         assert!(r.success);
         assert_eq!(r.output, vec![0u8]);
 
         // Empty input → [0]
-        let r = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &[], 500_000).unwrap();
+        let r = registry
+            .execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &[], 500_000)
+            .unwrap();
         assert!(r.success);
         assert_eq!(r.output, vec![0u8]);
     }
@@ -3428,7 +3636,7 @@ mod tests {
     fn test_p256verify_round_trip_valid_signature() {
         use ::p256::elliptic_curve::Generate;
         use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
-        use p256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+        use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
         use sha2::{Digest, Sha256};
 
         let signing_key = SigningKey::generate_from_rng(&mut UnwrapErr(SysRng));
@@ -3724,7 +3932,9 @@ mod tests {
             blst::blst_p1_cneg(&mut neg_proj, true);
         }
         let mut neg_affine = blst::blst_p1_affine::default();
-        unsafe { blst::blst_p1_to_affine(&mut neg_affine, &neg_proj); }
+        unsafe {
+            blst::blst_p1_to_affine(&mut neg_affine, &neg_proj);
+        }
         let neg_g1 = encode_g1_point(&neg_affine);
 
         // Input: (-G1, G2), (G1, G2)
@@ -3764,7 +3974,10 @@ mod tests {
         // The result should be a valid non-infinity point (map_to_g1(0) is defined)
         // Verify it can be decoded back
         let decoded = decode_g1_point(&result.output);
-        assert!(decoded.is_some(), "map_fp_to_g1(0) should produce a valid G1 point");
+        assert!(
+            decoded.is_some(),
+            "map_fp_to_g1(0) should produce a valid G1 point"
+        );
     }
 
     #[test]
@@ -3806,7 +4019,10 @@ mod tests {
         assert_eq!(result.gas_used, 23800);
         assert_eq!(result.output.len(), 256);
         let decoded = decode_g2_point(&result.output);
-        assert!(decoded.is_some(), "map_fp2_to_g2(0,0) should produce a valid G2 point");
+        assert!(
+            decoded.is_some(),
+            "map_fp2_to_g2(0,0) should produce a valid G2 point"
+        );
     }
 
     #[test]
@@ -3918,7 +4134,7 @@ mod tests {
 
     #[test]
     fn test_vrf_precompile_valid_proof_returns_output() {
-        use tenzro_crypto::vrf::{prove, VrfSecretKey};
+        use tenzro_crypto::vrf::{VrfSecretKey, prove};
 
         let sk = VrfSecretKey([7u8; 32]);
         let pk = sk.public_key();
@@ -3940,7 +4156,7 @@ mod tests {
 
     #[test]
     fn test_vrf_precompile_tampered_proof_rejected() {
-        use tenzro_crypto::vrf::{prove, VrfSecretKey};
+        use tenzro_crypto::vrf::{VrfSecretKey, prove};
 
         let sk = VrfSecretKey([7u8; 32]);
         let pk = sk.public_key();
@@ -3956,7 +4172,7 @@ mod tests {
 
     #[test]
     fn test_vrf_precompile_wrong_alpha_rejected() {
-        use tenzro_crypto::vrf::{prove, VrfSecretKey};
+        use tenzro_crypto::vrf::{VrfSecretKey, prove};
 
         let sk = VrfSecretKey([9u8; 32]);
         let pk = sk.public_key();
@@ -3976,7 +4192,7 @@ mod tests {
 
     #[test]
     fn test_vrf_precompile_insufficient_gas() {
-        use tenzro_crypto::vrf::{prove, VrfSecretKey};
+        use tenzro_crypto::vrf::{VrfSecretKey, prove};
         let sk = VrfSecretKey([3u8; 32]);
         let pk = sk.public_key();
         let alpha = b"abc";
@@ -3998,7 +4214,7 @@ mod tests {
 
     #[test]
     fn test_vrf_precompile_registered_at_correct_address() {
-        use tenzro_crypto::vrf::{prove, VrfSecretKey};
+        use tenzro_crypto::vrf::{VrfSecretKey, prove};
         let reg = PrecompileRegistry::new();
         // Exercise via execute() to confirm registration
         let sk = VrfSecretKey([11u8; 32]);

@@ -22,13 +22,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{Mutex, broadcast, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use crate::RpcServer;
 use crate::event_loop::NodeEvent;
 use crate::node::{NodeStatus, TenzroNode};
-use crate::RpcServer;
 use crate::{NodeConfig, Result};
 
 /// How often the background status poller refreshes the watch channel.
@@ -117,9 +117,10 @@ impl NodeHandle {
         let _ = self.inner.shutdown_tx.send(true);
         let join = self.inner.join.lock().await.take();
         if let Some(join) = join
-            && let Err(e) = join.await {
-                warn!("NodeHandle background task panicked: {}", e);
-            }
+            && let Err(e) = join.await
+        {
+            warn!("NodeHandle background task panicked: {}", e);
+        }
         Ok(())
     }
 }
@@ -375,6 +376,9 @@ mod tests {
         handle.shutdown_and_wait().await.expect("shutdown");
 
         // Second call is a no-op.
-        handle.shutdown_and_wait().await.expect("idempotent shutdown");
+        handle
+            .shutdown_and_wait()
+            .await
+            .expect("idempotent shutdown");
     }
 }

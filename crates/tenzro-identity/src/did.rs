@@ -71,7 +71,7 @@ pub fn validate_lei(lei: &str) -> Result<()> {
                 return Err(IdentityError::InvalidDid(format!(
                     "LEI contains illegal character: {}",
                     c
-                )))
+                )));
             }
         };
         if value < 10 {
@@ -86,6 +86,34 @@ pub fn validate_lei(lei: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Domain separation tag for machine identifiers derived from a hardware root.
+const MACHINE_DID_DOMAIN: &[u8] = b"tenzro/machine-did";
+
+/// Derives the identifier portion of an autonomous machine DID from a
+/// machine-identity root.
+///
+/// The output is shaped as a UUIDv8 (RFC 9562 §5.8 — custom layout, the
+/// variant reserved for application-defined derivations) so it reads the
+/// same as the random identifiers the other constructors mint and parses
+/// through the same path. Truncating the digest to 16 bytes is what a UUID
+/// can hold; the full 32-byte root remains the thing an attestation commits
+/// to, and the derivation is one-way, so publishing the DID does not
+/// disclose the root.
+fn machine_id_from_hardware_root(hardware_root: &[u8; 32]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(MACHINE_DID_DOMAIN);
+    hasher.update(hardware_root);
+    let digest = hasher.finalize();
+
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 /// A parsed Tenzro DID
@@ -129,6 +157,42 @@ impl TenzroDid {
             id: uuid::Uuid::new_v4().to_string(),
             controller_id: None,
         }
+    }
+
+    /// Creates an autonomous machine DID whose identifier is derived from a
+    /// machine-identity root rather than drawn at random.
+    ///
+    /// The root comes from `tenzro_tee::HardwareIdentity::root()` — a fold
+    /// over per-unit identifiers (SMBIOS system UUID, baseboard serial, GPU
+    /// UUIDs) that survives a reboot, an OS reinstall, and a software
+    /// upgrade. Deriving the identifier from it means the same physical box
+    /// re-registers under the same DID instead of accumulating a new
+    /// identity every time the process restarts, and it lets a verifier
+    /// holding an attestation over the root confirm that the DID being
+    /// presented is the one that root produces.
+    ///
+    /// Only machines whose root is real should use this. A host where
+    /// `HardwareIdentity::is_rooted()` is false folds to the same value as
+    /// every other unrooted host, so every such machine would collide on one
+    /// DID; those callers want [`new_autonomous_machine`](Self::new_autonomous_machine).
+    pub fn from_hardware_root(hardware_root: &[u8; 32]) -> Self {
+        Self {
+            did_type: DidType::Machine,
+            id: machine_id_from_hardware_root(hardware_root),
+            controller_id: None,
+        }
+    }
+
+    /// Whether this DID is the one [`from_hardware_root`](Self::from_hardware_root)
+    /// produces for `hardware_root`.
+    ///
+    /// The check a relying party runs after verifying an attestation: the
+    /// report proves the enclave signed over some root, this proves the DID
+    /// in front of it is the one that root derives.
+    pub fn matches_hardware_root(&self, hardware_root: &[u8; 32]) -> bool {
+        self.did_type == DidType::Machine
+            && self.controller_id.is_none()
+            && self.id == machine_id_from_hardware_root(hardware_root)
     }
 
     /// Creates a new institution DID anchored to a GLEIF Legal Entity
@@ -293,6 +357,45 @@ mod tests {
         assert!(!did.is_machine());
         assert!(!did.has_controller());
         assert!(did.to_string().starts_with("did:tenzro:human:"));
+    }
+
+    #[test]
+    fn hardware_rooted_did_is_reproducible() {
+        // The premise of a machine identity: the same box comes back as the
+        // same DID rather than accumulating one per restart.
+        let root = [0x5Au8; 32];
+        let a = TenzroDid::from_hardware_root(&root);
+        let b = TenzroDid::from_hardware_root(&root);
+        assert_eq!(a, b);
+        assert!(a.is_machine());
+        assert!(!a.has_controller());
+        assert!(a.matches_hardware_root(&root));
+    }
+
+    #[test]
+    fn hardware_rooted_did_separates_machines() {
+        let a = TenzroDid::from_hardware_root(&[0x11u8; 32]);
+        let b = TenzroDid::from_hardware_root(&[0x22u8; 32]);
+        assert_ne!(a, b);
+        assert!(!a.matches_hardware_root(&[0x22u8; 32]));
+    }
+
+    #[test]
+    fn hardware_rooted_did_round_trips_through_parse() {
+        let root = [0x7Cu8; 32];
+        let did = TenzroDid::from_hardware_root(&root);
+        let parsed = TenzroDid::parse(&did.to_string()).unwrap();
+        assert_eq!(parsed, did);
+        assert!(parsed.matches_hardware_root(&root));
+    }
+
+    #[test]
+    fn hardware_rooted_id_is_uuid_shaped() {
+        let did = TenzroDid::from_hardware_root(&[0x01u8; 32]);
+        let parsed = uuid::Uuid::parse_str(&did.id).unwrap();
+        // RFC 9562 §5.8 custom layout, RFC 4122 variant.
+        assert_eq!(parsed.get_version_num(), 8);
+        assert_eq!(parsed.as_bytes()[8] & 0xc0, 0x80);
     }
 
     #[test]

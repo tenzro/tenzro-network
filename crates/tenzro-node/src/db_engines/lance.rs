@@ -25,8 +25,8 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{Connection, Table};
 use serde::Deserialize;
 use tenzro_database::{
-    catalog::engine_ids, DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth,
-    QueryRequest, QueryResponse, Result,
+    DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
+    Result, catalog::engine_ids,
 };
 use tokio::sync::Mutex;
 
@@ -43,7 +43,10 @@ impl LanceEngine {
     /// Roots the store at `root` (`{data_dir}/databases/lance`). Partitions land
     /// in subdirectories under it.
     pub fn new(root: PathBuf) -> Self {
-        Self { root, connections: Mutex::new(HashMap::new()) }
+        Self {
+            root,
+            connections: Mutex::new(HashMap::new()),
+        }
     }
 
     fn partition_key(database_id: &str, partition_index: usize) -> String {
@@ -75,7 +78,10 @@ impl LanceEngine {
             .await
             .map_err(|e| DatabaseError::Backend(format!("lance connect: {e}")))?;
         let conn = Arc::new(conn);
-        self.connections.lock().await.insert(key.to_string(), conn.clone());
+        self.connections
+            .lock()
+            .await
+            .insert(key.to_string(), conn.clone());
         Ok(conn)
     }
 
@@ -85,7 +91,10 @@ impl LanceEngine {
             Field::new("payload", DataType::Utf8, true),
             Field::new(
                 "embedding",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim as i32),
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, true)),
+                    dim as i32,
+                ),
                 false,
             ),
         ]))
@@ -138,9 +147,12 @@ impl LanceEngine {
 
     fn batch_to_json(batch: &RecordBatch) -> Vec<serde_json::Value> {
         let n = batch.num_rows();
-        let id_col = batch.column_by_name("id").and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let payload_col =
-            batch.column_by_name("payload").and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let id_col = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let payload_col = batch
+            .column_by_name("payload")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let id = id_col.map(|c| c.value(i).to_string()).unwrap_or_default();
@@ -191,7 +203,9 @@ impl DatabaseEngine for LanceEngine {
                 }
                 let dim = rows[0].vector.len();
                 if dim == 0 {
-                    return Err(DatabaseError::InvalidRequest("lance add: empty vector".into()));
+                    return Err(DatabaseError::InvalidRequest(
+                        "lance add: empty vector".into(),
+                    ));
                 }
                 let batch = Self::rows_to_batch(&rows, dim)?;
                 match self.open_table(&conn).await? {
@@ -205,14 +219,20 @@ impl DatabaseEngine for LanceEngine {
                         conn.create_table(TABLE_NAME, vec![batch])
                             .execute()
                             .await
-                            .map_err(|e| DatabaseError::Query(format!("lance create_table: {e}")))?;
+                            .map_err(|e| {
+                                DatabaseError::Query(format!("lance create_table: {e}"))
+                            })?;
                     }
                 }
-                Ok(QueryResponse { body: serde_json::json!({ "added": rows.len() }) })
+                Ok(QueryResponse {
+                    body: serde_json::json!({ "added": rows.len() }),
+                })
             }
             LanceOp::Search { vector, limit } => {
                 let Some(tbl) = self.open_table(&conn).await? else {
-                    return Ok(QueryResponse { body: serde_json::json!({ "rows": [] }) });
+                    return Ok(QueryResponse {
+                        body: serde_json::json!({ "rows": [] }),
+                    });
                 };
                 let stream = tbl
                     .query()
@@ -230,17 +250,23 @@ impl DatabaseEngine for LanceEngine {
                 for b in &batches {
                     rows.extend(Self::batch_to_json(b));
                 }
-                Ok(QueryResponse { body: serde_json::json!({ "rows": rows }) })
+                Ok(QueryResponse {
+                    body: serde_json::json!({ "rows": rows }),
+                })
             }
             LanceOp::Count => {
                 let Some(tbl) = self.open_table(&conn).await? else {
-                    return Ok(QueryResponse { body: serde_json::json!({ "count": 0 }) });
+                    return Ok(QueryResponse {
+                        body: serde_json::json!({ "count": 0 }),
+                    });
                 };
                 let count = tbl
                     .count_rows(None)
                     .await
                     .map_err(|e| DatabaseError::Query(format!("lance count: {e}")))?;
-                Ok(QueryResponse { body: serde_json::json!({ "count": count }) })
+                Ok(QueryResponse {
+                    body: serde_json::json!({ "count": count }),
+                })
             }
         }
     }

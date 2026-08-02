@@ -48,4 +48,6 @@ pub mod transport;
 pub use pkr_scheduler::{
     PkrCadence, PkrScheduler, PkrSchedulerSnapshot, RotationReason, RotationTrigger,
 };
-pub use presign::{PresignPool, PresignPoolConfig, PresignPoolStats, PresignTuple, SharedPresignPool};
+pub use presign::{
+    PresignPool, PresignPoolConfig, PresignPoolStats, PresignTuple, SharedPresignPool,
+};

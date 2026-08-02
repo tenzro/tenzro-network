@@ -58,7 +58,9 @@ impl RemoteDidResolutionBackend {
             .json(&body)
             .send()
             .await
-            .map_err(|e| IdentityError::ResolutionError(format!("request to {}: {}", endpoint, e)))?;
+            .map_err(|e| {
+                IdentityError::ResolutionError(format!("request to {}: {}", endpoint, e))
+            })?;
 
         let status = response.status();
         if !status.is_success() {

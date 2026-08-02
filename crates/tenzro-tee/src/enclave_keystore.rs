@@ -26,8 +26,8 @@
 use std::collections::HashMap;
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng as AesOsRng},
     Aes256Gcm, Key as AesKey, Nonce as AesNonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng as AesOsRng},
 };
 use ed25519_dalek::{
     Signer as Ed25519SignerTrait, SigningKey as Ed25519SigningKey,
@@ -35,12 +35,12 @@ use ed25519_dalek::{
 };
 use hkdf::Hkdf;
 use k256::{
+    PublicKey as Secp256k1Pub,
     ecdsa::{
-        signature::hazmat::PrehashSigner, RecoveryId, Signature as K256Sig,
-        SigningKey as Secp256k1SigningKey,
+        RecoveryId, Signature as K256Sig, SigningKey as Secp256k1SigningKey,
+        signature::hazmat::PrehashSigner,
     },
     elliptic_curve::sec1::ToSec1Point,
-    PublicKey as Secp256k1Pub,
 };
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
@@ -54,7 +54,7 @@ use crate::error::{Result, TeeError};
 
 /// HKDF info string for enclave-key derivation. Bumped if the
 /// derivation chain ever changes — old keys would no longer reproduce.
-const HKDF_INFO: &[u8] = b"tenzro/enclave-key/v1";
+const HKDF_INFO: &[u8] = b"tenzro/enclave-key";
 
 /// Private key material kept inside the enclave keystore. Variants are
 /// hand-picked to match [`KeyAlgorithm`].
@@ -101,8 +101,7 @@ impl EnclaveKeystore {
     pub async fn keygen(&self, params: KeyGenParams, ikm: &[u8]) -> Result<EnclaveKeyHandle> {
         if ikm.is_empty() {
             return Err(TeeError::CryptoError(
-                "enclave_keygen requires non-empty hardware-rooted IKM"
-                    .to_string(),
+                "enclave_keygen requires non-empty hardware-rooted IKM".to_string(),
             ));
         }
         let key_id = Uuid::new_v4();
@@ -206,10 +205,9 @@ impl EnclaveKeystore {
                 let mut h = Sha256::new();
                 h.update(data);
                 let digest = h.finalize();
-                let (sig, rec): (K256Sig, RecoveryId) =
-                    sk.sign_prehash(digest.as_slice()).map_err(|e| {
-                        TeeError::CryptoError(format!("secp256k1 sign failed: {e}"))
-                    })?;
+                let (sig, rec): (K256Sig, RecoveryId) = sk
+                    .sign_prehash(digest.as_slice())
+                    .map_err(|e| TeeError::CryptoError(format!("secp256k1 sign failed: {e}")))?;
                 let mut out = Vec::with_capacity(65);
                 out.extend_from_slice(&sig.to_bytes());
                 out.push(rec.to_byte());
@@ -226,11 +224,7 @@ impl EnclaveKeystore {
     /// ciphertext on the wire: `[nonce(12) || ciphertext || tag(16)]`.
     ///
     /// Asymmetric (Ed25519 / Secp256k1) keys are rejected.
-    pub async fn encrypt(
-        &self,
-        handle: &EnclaveKeyHandle,
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>> {
+    pub async fn encrypt(&self, handle: &EnclaveKeyHandle, plaintext: &[u8]) -> Result<Vec<u8>> {
         let guard = self.inner.read().await;
         let record = guard
             .get(&handle.id)
@@ -257,11 +251,7 @@ impl EnclaveKeystore {
 
     /// Decrypt `ciphertext` produced by [`Self::encrypt`]. The wire
     /// shape is `[nonce(12) || ciphertext || tag(16)]`.
-    pub async fn decrypt(
-        &self,
-        handle: &EnclaveKeyHandle,
-        ciphertext: &[u8],
-    ) -> Result<Vec<u8>> {
+    pub async fn decrypt(&self, handle: &EnclaveKeyHandle, ciphertext: &[u8]) -> Result<Vec<u8>> {
         if ciphertext.len() < 12 + 16 {
             return Err(TeeError::CryptoError(
                 "AES-GCM ciphertext too short (need nonce(12) + tag(16) minimum)".to_string(),
@@ -302,7 +292,7 @@ impl EnclaveKeystore {
 
     fn derive_salt(&self, key_id: Uuid, algo: KeyAlgorithm) -> [u8; 32] {
         let mut h = Sha256::new();
-        h.update(b"tenzro/enclave-keystore/salt/v1");
+        h.update(b"tenzro/enclave-keystore/salt");
         h.update(self.vendor_tag.as_bytes());
         h.update(key_id.as_bytes());
         let algo_tag: u8 = match algo {
@@ -380,13 +370,13 @@ mod tests {
         let sig = ks.sign(&handle, msg).await.unwrap();
         assert_eq!(sig.len(), 64);
 
-        let vk = Ed25519VerifyingKey::from_bytes(
-            <&[u8; 32]>::try_from(pk_bytes.as_slice()).unwrap(),
-        )
-        .unwrap();
+        let vk =
+            Ed25519VerifyingKey::from_bytes(<&[u8; 32]>::try_from(pk_bytes.as_slice()).unwrap())
+                .unwrap();
         let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
         let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
-        vk.verify(msg, &signature).expect("real signature must verify");
+        vk.verify(msg, &signature)
+            .expect("real signature must verify");
     }
 
     #[tokio::test]
@@ -410,7 +400,10 @@ mod tests {
         let recovered = Secp256k1Verifying::recover_from_prehash(&digest, &parsed, rec)
             .expect("real signature must be recoverable");
         let recovered_uncompressed = Secp256k1Pub::from(&recovered).to_sec1_point(false);
-        assert_eq!(recovered_uncompressed.as_bytes(), pk_uncompressed.as_slice());
+        assert_eq!(
+            recovered_uncompressed.as_bytes(),
+            pk_uncompressed.as_slice()
+        );
     }
 
     #[tokio::test]

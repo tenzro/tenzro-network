@@ -19,7 +19,7 @@
 //! modality registers an ONNX file that is already on the node's filesystem, so
 //! those arms take `--path` and resolve it node-side.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -120,7 +120,9 @@ pub struct EmbedTextCatalogCmd {
 impl EmbedTextCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
-        let res: serde_json::Value = rpc.call("tenzro_listTextEmbeddingCatalog", json!({})).await?;
+        let res: serde_json::Value = rpc
+            .call("tenzro_listTextEmbeddingCatalog", json!({}))
+            .await?;
         output::print_json(&res)?;
         Ok(())
     }
@@ -135,7 +137,9 @@ pub struct EmbedTextListCmd {
 impl EmbedTextListCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
-        let res: serde_json::Value = rpc.call("tenzro_listTextEmbeddingModels", json!({})).await?;
+        let res: serde_json::Value = rpc
+            .call("tenzro_listTextEmbeddingModels", json!({}))
+            .await?;
         output::print_json(&res)?;
         Ok(())
     }
@@ -220,7 +224,9 @@ pub struct SegmentCatalogCmd {
 impl SegmentCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
-        let res: serde_json::Value = rpc.call("tenzro_listSegmentationCatalog", json!({})).await?;
+        let res: serde_json::Value = rpc
+            .call("tenzro_listSegmentationCatalog", json!({}))
+            .await?;
         output::print_json(&res)?;
         Ok(())
     }
@@ -339,8 +345,8 @@ impl SegmentRunCmd {
     pub async fn execute(&self) -> Result<()> {
         let prompts_str = std::fs::read_to_string(&self.prompts)
             .with_context(|| format!("failed to read prompts file {}", self.prompts))?;
-        let prompts: serde_json::Value = serde_json::from_str(&prompts_str)
-            .with_context(|| "prompts file is not valid JSON")?;
+        let prompts: serde_json::Value =
+            serde_json::from_str(&prompts_str).with_context(|| "prompts file is not valid JSON")?;
         let image_b64 = read_b64(&self.image)?;
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc
@@ -397,8 +403,9 @@ pub struct TextSegmentCatalogCmd {
 impl TextSegmentCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
-        let res: serde_json::Value =
-            rpc.call("tenzro_listTextSegmentationCatalog", json!({})).await?;
+        let res: serde_json::Value = rpc
+            .call("tenzro_listTextSegmentationCatalog", json!({}))
+            .await?;
         output::print_json(&res)?;
         Ok(())
     }
@@ -413,8 +420,9 @@ pub struct TextSegmentListCmd {
 impl TextSegmentListCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
-        let res: serde_json::Value =
-            rpc.call("tenzro_listTextSegmentationModels", json!({})).await?;
+        let res: serde_json::Value = rpc
+            .call("tenzro_listTextSegmentationModels", json!({}))
+            .await?;
         output::print_json(&res)?;
         Ok(())
     }
@@ -1162,7 +1170,8 @@ pub struct ForecastLoadCmd {
 
 impl ForecastLoadCmd {
     pub async fn execute(&self) -> Result<()> {
-        if self.catalog_id.is_none() && (self.context_length.is_none() || self.max_horizon.is_none())
+        if self.catalog_id.is_none()
+            && (self.context_length.is_none() || self.max_horizon.is_none())
         {
             return Err(anyhow!(
                 "pass --catalog-id, or both --context-length and --max-horizon"
@@ -1361,7 +1370,8 @@ pub struct EmbedImageLoadCmd {
 
 impl EmbedImageLoadCmd {
     pub async fn execute(&self) -> Result<()> {
-        if self.catalog_id.is_none() && (self.input_size.is_none() || self.embedding_dim.is_none()) {
+        if self.catalog_id.is_none() && (self.input_size.is_none() || self.embedding_dim.is_none())
+        {
             return Err(anyhow!(
                 "pass --catalog-id, or both --input-size and --embedding-dim"
             ));
@@ -1401,7 +1411,10 @@ impl EmbedImageUnloadCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc
-            .call("tenzro_unloadVisionModel", json!({ "model_id": self.model }))
+            .call(
+                "tenzro_unloadVisionModel",
+                json!({ "model_id": self.model }),
+            )
             .await?;
         output::print_json(&res)?;
         Ok(())

@@ -48,9 +48,9 @@ impl ConversionHook for OracleConversionHook {
             .quote(from_asset, to_asset, amount)
             .await
             .map_err(|e| match e {
-                StableRateError::NoRate { asset, unit } => PaymentError::SettlementError(
-                    format!("no conversion rate for {asset} -> {unit}"),
-                ),
+                StableRateError::NoRate { asset, unit } => PaymentError::SettlementError(format!(
+                    "no conversion rate for {asset} -> {unit}"
+                )),
                 StableRateError::Overflow { .. } => {
                     PaymentError::SettlementError(format!("conversion overflow: {e}"))
                 }

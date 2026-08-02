@@ -30,6 +30,7 @@ from typing import Any
 
 import numpy as np
 
+from tenzro_trainer.distributed import DistContext
 from tenzro_trainer.gradient import (
     ErrorFeedback,
     FragmentBlob,
@@ -52,7 +53,6 @@ from tenzro_trainer.inner_loop import (
     load_partial_state,
     run_inner_loop,
 )
-from tenzro_trainer.distributed import DistContext
 from tenzro_trainer.rpc_bridge import RpcClient, RpcError, pretty
 from tenzro_trainer.types import (
     OuterGradient,
@@ -350,7 +350,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         # local sync step below can decode the identical dropped-out delta the
         # syncer and peers see.
         blobs: list[FragmentBlob] = []
-        sparse_transmit: dict[int, "np.ndarray"] = {}
+        sparse_transmit: dict[int, np.ndarray] = {}
         for f in active:
             if sparse_kind is None:
                 blobs.append(

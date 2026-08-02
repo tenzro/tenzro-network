@@ -297,11 +297,7 @@ impl CorporateActionEngine {
         if let Some(ref storage) = self.storage
             && let Ok(bytes) = serde_json::to_vec(profile)
         {
-            let _ = storage.put(
-                tenzro_storage::CF_TOKENS,
-                &Self::profile_key(token),
-                &bytes,
-            );
+            let _ = storage.put(tenzro_storage::CF_TOKENS, &Self::profile_key(token), &bytes);
         }
     }
 
@@ -501,7 +497,13 @@ mod tests {
     fn schedule_without_policy_fails_closed() {
         let engine = CorporateActionEngine::new(Arc::new(SecureMintRegistry::new()));
         let err = engine
-            .schedule([1u8; 20], CorporateAction::SymbolChange { new_symbol: "X".into() }, T0)
+            .schedule(
+                [1u8; 20],
+                CorporateAction::SymbolChange {
+                    new_symbol: "X".into(),
+                },
+                T0,
+            )
             .unwrap_err();
         assert!(matches!(err, CorporateActionError::NoPolicy(_)));
     }
@@ -578,10 +580,14 @@ mod tests {
         let (registry, token) = setup(1_000, 100);
         let engine = CorporateActionEngine::new(registry);
         engine
-            .schedule(token, CorporateAction::CashDividend {
-                amount_per_share: 5,
-                payment_asset: "USDC".into(),
-            }, T0)
+            .schedule(
+                token,
+                CorporateAction::CashDividend {
+                    amount_per_share: 5,
+                    payment_asset: "USDC".into(),
+                },
+                T0,
+            )
             .unwrap();
         assert!(matches!(
             engine.apply_due(&token, T0).unwrap_err(),
@@ -595,10 +601,22 @@ mod tests {
         let engine = CorporateActionEngine::new(registry);
         engine.set_profile(token, profile());
         engine
-            .schedule(token, CorporateAction::SymbolChange { new_symbol: "NEWQ".into() }, T0)
+            .schedule(
+                token,
+                CorporateAction::SymbolChange {
+                    new_symbol: "NEWQ".into(),
+                },
+                T0,
+            )
             .unwrap();
         engine
-            .schedule(token, CorporateAction::IsinChange { new_isin: "US0000000002".into() }, T0)
+            .schedule(
+                token,
+                CorporateAction::IsinChange {
+                    new_isin: "US0000000002".into(),
+                },
+                T0,
+            )
             .unwrap();
         let applied = engine.apply_due(&token, T0).unwrap();
         assert_eq!(applied.len(), 2);
@@ -617,10 +635,14 @@ mod tests {
             .schedule(token, CorporateAction::ForwardSplit { num: 3, den: 1 }, T0)
             .unwrap();
         let r1 = engine
-            .schedule(token, CorporateAction::CashDividend {
-                amount_per_share: 1,
-                payment_asset: "USDC".into(),
-            }, T0 + 10)
+            .schedule(
+                token,
+                CorporateAction::CashDividend {
+                    amount_per_share: 1,
+                    payment_asset: "USDC".into(),
+                },
+                T0 + 10,
+            )
             .unwrap();
         assert_eq!(r0.seq, 0);
         assert_eq!(r0.prev_event_hash, Hash::zero());
@@ -639,10 +661,22 @@ mod tests {
         engine.set_profile(token, profile());
         // seq 0 due later than seq 1.
         engine
-            .schedule(token, CorporateAction::SymbolChange { new_symbol: "A".into() }, T0 + 100)
+            .schedule(
+                token,
+                CorporateAction::SymbolChange {
+                    new_symbol: "A".into(),
+                },
+                T0 + 100,
+            )
             .unwrap();
         engine
-            .schedule(token, CorporateAction::SymbolChange { new_symbol: "B".into() }, T0)
+            .schedule(
+                token,
+                CorporateAction::SymbolChange {
+                    new_symbol: "B".into(),
+                },
+                T0,
+            )
             .unwrap();
         // At T0, seq 0 is not yet due — seq 1 must not jump it.
         assert!(engine.apply_due(&token, T0).unwrap().is_empty());
@@ -658,10 +692,14 @@ mod tests {
         let engine = CorporateActionEngine::new(registry.clone());
         engine.set_profile(token, profile());
         engine
-            .schedule(token, CorporateAction::CashDividend {
-                amount_per_share: 7,
-                payment_asset: "USDC".into(),
-            }, T0)
+            .schedule(
+                token,
+                CorporateAction::CashDividend {
+                    amount_per_share: 7,
+                    payment_asset: "USDC".into(),
+                },
+                T0,
+            )
             .unwrap();
         let applied = engine.apply_due(&token, T0).unwrap();
         assert_eq!(applied.len(), 1);

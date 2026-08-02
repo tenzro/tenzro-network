@@ -35,7 +35,9 @@ use p3_dft::Radix2DitParallel;
 use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
 use p3_fri::{FriParameters, TwoAdicFriPcs};
-use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear, default_koalabear_poseidon2_16, default_koalabear_poseidon2_24};
+use p3_koala_bear::{
+    KoalaBear, Poseidon2KoalaBear, default_koalabear_poseidon2_16, default_koalabear_poseidon2_24,
+};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::StarkConfig;
@@ -59,14 +61,8 @@ pub type ValHash = PaddingFreeSponge<Perm16, 16, 8, 8>;
 pub type ValCompress = TruncatedPermutation<Perm16, 2, 8, 16>;
 
 /// Mixed Matrix Commitment Scheme over the base field.
-pub type ValMmcs = MerkleTreeMmcs<
-    <Val as Field>::Packing,
-    <Val as Field>::Packing,
-    ValHash,
-    ValCompress,
-    2,
-    8,
->;
+pub type ValMmcs =
+    MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, ValHash, ValCompress, 2, 8>;
 
 /// MMCS over the extension field (FRI commits to extension-field polynomials).
 pub type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;

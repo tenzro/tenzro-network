@@ -273,7 +273,11 @@ pub const MAX_SERVICE_ENDPOINT_URL_LEN: usize = 2048;
 ///
 /// Returns `Ok(())` if the string's byte length is `<= max_len`,
 /// otherwise returns an `Err` with a descriptive message.
-pub fn validate_string_len(value: &str, field_name: &str, max_len: usize) -> Result<(), crate::error::TenzroError> {
+pub fn validate_string_len(
+    value: &str,
+    field_name: &str,
+    max_len: usize,
+) -> Result<(), crate::error::TenzroError> {
     if value.len() > max_len {
         Err(crate::error::TenzroError::InvalidConfig(format!(
             "{} too long: {} bytes (max {})",
@@ -303,7 +307,11 @@ pub fn validate_numeric_bound<T: std::fmt::Display + PartialOrd>(
 }
 
 /// Validates that a vector does not exceed a maximum number of items.
-pub fn validate_vec_len<T>(vec: &[T], field_name: &str, max_items: usize) -> Result<(), crate::error::TenzroError> {
+pub fn validate_vec_len<T>(
+    vec: &[T],
+    field_name: &str,
+    max_items: usize,
+) -> Result<(), crate::error::TenzroError> {
     if vec.len() > max_items {
         Err(crate::error::TenzroError::InvalidConfig(format!(
             "{} too many items: {} (max {})",
@@ -328,7 +336,9 @@ pub fn validate_hex_string(
     max_bytes: usize,
 ) -> Result<Vec<u8>, crate::error::TenzroError> {
     let cleaned = value.strip_prefix("0x").unwrap_or(value);
-    let bytes = hex::decode(cleaned).map_err(|e| crate::error::TenzroError::InvalidConfig(format!("{} invalid hex: {}", field_name, e)))?;
+    let bytes = hex::decode(cleaned).map_err(|e| {
+        crate::error::TenzroError::InvalidConfig(format!("{} invalid hex: {}", field_name, e))
+    })?;
     if bytes.len() < min_bytes {
         return Err(crate::error::TenzroError::InvalidConfig(format!(
             "{} too short: {} bytes (min {})",
@@ -382,12 +392,16 @@ pub fn validate_service_endpoint_url(url: &str) -> Result<(), crate::error::Tenz
     }
 
     if url.is_empty() {
-        return Err(crate::error::TenzroError::InvalidConfig("service endpoint URL must not be empty".to_string()));
+        return Err(crate::error::TenzroError::InvalidConfig(
+            "service endpoint URL must not be empty".to_string(),
+        ));
     }
 
     // Check for control characters (could be used for header injection)
     if url.bytes().any(|b| b < 0x20 && b != b'\t') {
-        return Err(crate::error::TenzroError::InvalidConfig("service endpoint URL contains control characters".to_string()));
+        return Err(crate::error::TenzroError::InvalidConfig(
+            "service endpoint URL contains control characters".to_string(),
+        ));
     }
 
     // Check scheme
@@ -409,11 +423,15 @@ pub fn validate_service_endpoint_url(url: &str) -> Result<(), crate::error::Tenz
     } else if let Some(rest) = url.strip_prefix("ws://") {
         rest
     } else {
-        return Err(crate::error::TenzroError::InvalidConfig("invalid URL scheme".to_string()));
+        return Err(crate::error::TenzroError::InvalidConfig(
+            "invalid URL scheme".to_string(),
+        ));
     };
 
     if after_scheme.is_empty() {
-        return Err(crate::error::TenzroError::InvalidConfig("service endpoint URL must contain a host".to_string()));
+        return Err(crate::error::TenzroError::InvalidConfig(
+            "service endpoint URL must contain a host".to_string(),
+        ));
     }
 
     Ok(())
@@ -458,9 +476,7 @@ mod tests {
 
     #[test]
     fn test_bounded_signature_bytes_ok() {
-        let v = WithBoundedBytes {
-            sig: vec![0u8; 64],
-        };
+        let v = WithBoundedBytes { sig: vec![0u8; 64] };
         let json = serde_json::to_string(&v).unwrap();
         let parsed: WithBoundedBytes = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.sig.len(), 64);
@@ -612,7 +628,10 @@ mod tests {
 
     #[test]
     fn test_validate_url_too_long() {
-        let long = format!("https://example.com/{}", "a".repeat(MAX_SERVICE_ENDPOINT_URL_LEN));
+        let long = format!(
+            "https://example.com/{}",
+            "a".repeat(MAX_SERVICE_ENDPOINT_URL_LEN)
+        );
         assert!(validate_service_endpoint_url(&long).is_err());
     }
 

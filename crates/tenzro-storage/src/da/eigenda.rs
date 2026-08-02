@@ -128,15 +128,13 @@ fn decode_commitment_hex(body: &str) -> Result<Vec<u8>> {
 /// Decode the `DaPointer::locator` produced by [`EigenDaBackend::submit`] back
 /// to a lowercase commitment-hex string suitable for the GET path.
 fn locator_to_hex(locator: &[u8]) -> Result<String> {
-    let s = std::str::from_utf8(locator).map_err(|e| {
-        StorageError::InvalidValue(format!("EigenDA locator not valid UTF-8: {e}"))
-    })?;
+    let s = std::str::from_utf8(locator)
+        .map_err(|e| StorageError::InvalidValue(format!("EigenDA locator not valid UTF-8: {e}")))?;
     let stripped = s.strip_prefix("0x").unwrap_or(s);
     // Validate it's actual hex up front so we surface a clean error rather
     // than letting the proxy 404 on a malformed path.
-    let bytes = hex::decode(stripped).map_err(|e| {
-        StorageError::InvalidValue(format!("EigenDA locator hex invalid: {e}"))
-    })?;
+    let bytes = hex::decode(stripped)
+        .map_err(|e| StorageError::InvalidValue(format!("EigenDA locator hex invalid: {e}")))?;
     Ok(hex::encode(bytes))
 }
 
@@ -259,7 +257,10 @@ mod tests {
         let b = EigenDaBackend::connect("http://localhost:3100/").unwrap();
         assert_eq!(b.base_url, "http://localhost:3100");
         assert_eq!(b.put_url(), "http://localhost:3100/put/");
-        assert_eq!(b.get_url("deadbeef"), "http://localhost:3100/get/0xdeadbeef");
+        assert_eq!(
+            b.get_url("deadbeef"),
+            "http://localhost:3100/get/0xdeadbeef"
+        );
     }
 
     #[test]
@@ -308,7 +309,10 @@ mod tests {
         let backend = EigenDaBackend::connect(url).expect("connect");
         let payload = b"tenzro eigenda DA round-trip smoke test".to_vec();
         let sha = compute_commitment(&payload);
-        let pointer = backend.submit(b"tenzro/inference", &payload).await.expect("submit");
+        let pointer = backend
+            .submit(b"tenzro/inference", &payload)
+            .await
+            .expect("submit");
         assert_eq!(pointer.backend, DaBackendId::EigenDA);
         assert!(pointer.commitment_kzg.is_some());
         // EigenDA commitment ≠ our SHA-256 by design.

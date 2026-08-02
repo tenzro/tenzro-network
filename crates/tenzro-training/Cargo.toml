@@ -31,3 +31,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "training_benchmarks"
 harness = false
+
+[lints]
+workspace = true

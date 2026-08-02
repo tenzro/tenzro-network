@@ -64,7 +64,10 @@ impl ApprovalListCmd {
             .context("calling tenzro_listPendingApprovals")?;
         output::print_field(
             "Approver",
-            result.get("approver_did").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("approver_did")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         output::print_field(
             "Count",

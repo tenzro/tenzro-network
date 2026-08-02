@@ -3,9 +3,9 @@
 //! Provides SHA-256 for general use and Keccak-256 for EVM compatibility.
 
 use crate::error::{CryptoError, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256 as Sha2_256};
 use sha3::Keccak256 as Keccak256_;
-use serde::{Deserialize, Serialize};
 
 /// Hash output size (32 bytes for both SHA-256 and Keccak-256)
 pub const HASH_SIZE: usize = 32;

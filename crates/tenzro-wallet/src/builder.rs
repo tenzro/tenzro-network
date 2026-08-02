@@ -391,7 +391,10 @@ mod tests {
 
         assert_eq!(tx.chain_id, ChainId(1337));
         assert_eq!(tx.gas_limit, DEFAULT_TRANSFER_GAS);
-        assert!(matches!(tx.tx_type, TransactionType::Transfer { amount: 1000 }));
+        assert!(matches!(
+            tx.tx_type,
+            TransactionType::Transfer { amount: 1000 }
+        ));
     }
 
     #[test]
@@ -504,10 +507,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(matches!(
-            tx.tx_type,
-            TransactionType::GovernanceVote { .. }
-        ));
+        assert!(matches!(tx.tx_type, TransactionType::GovernanceVote { .. }));
     }
 
     #[test]
@@ -525,10 +525,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(matches!(
-            tx.tx_type,
-            TransactionType::BridgeTransfer { .. }
-        ));
+        assert!(matches!(tx.tx_type, TransactionType::BridgeTransfer { .. }));
         assert_eq!(tx.gas_limit, DEFAULT_BRIDGE_GAS);
     }
 

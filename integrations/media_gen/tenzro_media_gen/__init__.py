@@ -54,7 +54,6 @@ from tenzro_media_gen.types import (
 __version__ = "0.1.0"
 
 __all__ = [
-    "__version__",
     # wire types
     "MediaGenAssignment",
     "MediaGenExpertHolding",
@@ -69,9 +68,15 @@ __all__ = [
     "MediaGenStatus",
     "MediaGenTaskSpec",
     "MediaGenWorkerCapability",
+    # transport
+    "PublishedOutput",
+    "Quote",
+    "RpcClient",
+    "RpcError",
     "Signature",
     # commitments
     "WorkerKey",
+    "__version__",
     "compute_job_id",
     "encode_params",
     "encode_task_spec",
@@ -84,9 +89,4 @@ __all__ = [
     "sign_receipt",
     "verify_handoff",
     "verify_receipt",
-    # transport
-    "PublishedOutput",
-    "Quote",
-    "RpcClient",
-    "RpcError",
 ]

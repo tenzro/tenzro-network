@@ -7,8 +7,8 @@ use crate::error::{Result, WalletError};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tenzro_types::primitives::Address;
 use tenzro_types::AssetId;
+use tenzro_types::primitives::Address;
 
 /// Trait for balance providers in Tenzro Network.
 ///
@@ -29,12 +29,7 @@ pub trait BalanceProvider: Send + Sync {
     fn add_balance(&self, address: &Address, asset_id: &AssetId, amount: u128);
 
     /// Subtract from balance
-    fn subtract_balance(
-        &self,
-        address: &Address,
-        asset_id: &AssetId,
-        amount: u128,
-    ) -> Result<()>;
+    fn subtract_balance(&self, address: &Address, asset_id: &AssetId, amount: u128) -> Result<()>;
 
     /// Lock an amount
     fn lock_balance(&self, address: &Address, asset_id: &AssetId, amount: u128) -> Result<()>;
@@ -232,12 +227,7 @@ impl BalanceTracker {
     }
 
     /// Lock an amount
-    pub fn lock_balance(
-        &self,
-        address: &Address,
-        asset_id: &AssetId,
-        amount: u128,
-    ) -> Result<()> {
+    pub fn lock_balance(&self, address: &Address, asset_id: &AssetId, amount: u128) -> Result<()> {
         let mut entry = self
             .balances
             .entry((*address, asset_id.clone()))
@@ -353,12 +343,7 @@ impl BalanceProvider for BalanceTracker {
         self.add_balance(address, asset_id, amount)
     }
 
-    fn subtract_balance(
-        &self,
-        address: &Address,
-        asset_id: &AssetId,
-        amount: u128,
-    ) -> Result<()> {
+    fn subtract_balance(&self, address: &Address, asset_id: &AssetId, amount: u128) -> Result<()> {
         self.subtract_balance(address, asset_id, amount)
     }
 

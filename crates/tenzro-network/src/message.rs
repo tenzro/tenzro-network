@@ -3,10 +3,9 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tenzro_types::{
-    Block, SignedTransaction, Hash,
-    ModelClass, ArtifactCompleteness, ArtifactMetadata, ModelTopology, ExecutionSupport,
-    RuntimeSupport, NodeNetworkProfile, TrustProfile, WorkerRole,
-    HardwareCapabilities,
+    ArtifactCompleteness, ArtifactMetadata, Block, ExecutionSupport, HardwareCapabilities, Hash,
+    ModelClass, ModelTopology, NodeNetworkProfile, RuntimeSupport, SignedTransaction, TrustProfile,
+    WorkerRole,
 };
 
 /// Network message envelope
@@ -492,7 +491,7 @@ fn verify_announce_signature<T: Serialize>(
 ) -> Result<(), String> {
     use tenzro_crypto::{
         keys::{KeyType, PublicKey},
-        signatures::{verify, Signature},
+        signatures::{Signature, verify},
     };
     let preimage = announce_preimage(domain, unsigned)?;
     let pk = PublicKey::new(KeyType::Ed25519, pubkey.to_vec());
@@ -503,10 +502,7 @@ fn verify_announce_signature<T: Serialize>(
 impl ModelRegistrationMessage {
     /// Sign this announcement with the provider's Ed25519 key, populating
     /// `pubkey` + `signature`. Call after all fields are set.
-    pub fn sign(
-        &mut self,
-        signer: &dyn tenzro_crypto::signatures::Signer,
-    ) -> Result<(), String> {
+    pub fn sign(&mut self, signer: &dyn tenzro_crypto::signatures::Signer) -> Result<(), String> {
         self.pubkey = signer.public_key().as_bytes().to_vec();
         self.signature = Vec::new();
         let preimage = announce_preimage(MODEL_ANNOUNCE_DOMAIN, self)?;
@@ -1054,27 +1050,37 @@ pub fn validate_message(msg: &NetworkMessage) -> crate::error::Result<()> {
     // Check timestamp is not too far in the future (allow 5 minute clock skew)
     let now = chrono::Utc::now().timestamp_millis();
     if msg.timestamp > now + 300_000 {
-        return Err(crate::error::NetworkError::InvalidMessage("Message timestamp is too far in the future".to_string()));
+        return Err(crate::error::NetworkError::InvalidMessage(
+            "Message timestamp is too far in the future".to_string(),
+        ));
     }
 
     // Check message is not too old (reject messages older than 1 hour)
     if now - msg.timestamp > 3_600_000 {
-        return Err(crate::error::NetworkError::InvalidMessage("Message is too old".to_string()));
+        return Err(crate::error::NetworkError::InvalidMessage(
+            "Message is too old".to_string(),
+        ));
     }
 
     // Additional payload-specific validation
     match &msg.payload {
         MessagePayload::Block(block) => {
             if block.header.height.0 == 0 && block.header.prev_hash != Hash::zero() {
-                return Err(crate::error::NetworkError::InvalidMessage("Genesis block must have zero prev_hash".to_string()));
+                return Err(crate::error::NetworkError::InvalidMessage(
+                    "Genesis block must have zero prev_hash".to_string(),
+                ));
             }
         }
         MessagePayload::InferenceRequest(req) => {
             if req.request_id.is_empty() {
-                return Err(crate::error::NetworkError::InvalidMessage("Inference request must have a request ID".to_string()));
+                return Err(crate::error::NetworkError::InvalidMessage(
+                    "Inference request must have a request ID".to_string(),
+                ));
             }
             if req.model_id.is_empty() {
-                return Err(crate::error::NetworkError::InvalidMessage("Inference request must specify a model ID".to_string()));
+                return Err(crate::error::NetworkError::InvalidMessage(
+                    "Inference request must specify a model ID".to_string(),
+                ));
             }
         }
         _ => {}

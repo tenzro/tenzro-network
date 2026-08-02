@@ -30,7 +30,7 @@ use crate::state_sync::ChainStateProvider;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tenzro_types::primitives::{Address, Hash, Signature};
@@ -163,11 +163,7 @@ struct JsonRpcErrorBody {
 
 #[async_trait]
 impl ChainStateProvider for TenzroRpcChainProvider {
-    async fn get_on_chain_balance(
-        &self,
-        address: &Address,
-        asset_id: &AssetId,
-    ) -> Result<u128> {
+    async fn get_on_chain_balance(&self, address: &Address, asset_id: &AssetId) -> Result<u128> {
         let addr_hex = Self::addr_hex(address);
         if asset_id.as_str() == "TNZO" {
             // Native TNZO via eth_getBalance.
@@ -196,10 +192,7 @@ impl ChainStateProvider for TenzroRpcChainProvider {
         }
     }
 
-    async fn get_on_chain_balances(
-        &self,
-        address: &Address,
-    ) -> Result<Vec<(AssetId, u128)>> {
+    async fn get_on_chain_balances(&self, address: &Address) -> Result<Vec<(AssetId, u128)>> {
         // Best-effort: fetch native TNZO; non-native enumeration would
         // require a paginated `tenzro_listTokens` walk per address. That's
         // out of scope for the kernel — callers that need a multi-asset
@@ -289,12 +282,10 @@ impl ChainStateProvider for TenzroRpcChainProvider {
             "pq_public_key": format!("0x{}", hex::encode(&tx.pq_public_key)),
         });
 
-        let result = self
-            .call("eth_sendRawTransaction", params)
-            .await?;
-        let hash_str = result
-            .as_str()
-            .ok_or_else(|| WalletError::Other("eth_sendRawTransaction: expected hash string".into()))?;
+        let result = self.call("eth_sendRawTransaction", params).await?;
+        let hash_str = result.as_str().ok_or_else(|| {
+            WalletError::Other("eth_sendRawTransaction: expected hash string".into())
+        })?;
         let trimmed = hash_str.strip_prefix("0x").unwrap_or(hash_str);
         let bytes = hex::decode(trimmed)
             .map_err(|e| WalletError::Other(format!("invalid tx hash hex: {}", e)))?;
@@ -440,11 +431,7 @@ pub fn cross_vm_transfer_calldata(
 }
 
 /// Build calldata for `GET_VM_BALANCE(uint8 vmType, bytes32 address, bytes32 tokenId)`.
-pub fn get_vm_balance_calldata(
-    vm_type: DestVm,
-    address: [u8; 32],
-    token_id: [u8; 32],
-) -> Vec<u8> {
+pub fn get_vm_balance_calldata(vm_type: DestVm, address: [u8; 32], token_id: [u8; 32]) -> Vec<u8> {
     let mut calldata = Vec::with_capacity(4 + 3 * 32);
     calldata.extend_from_slice(&GET_VM_BALANCE_SELECTOR);
 
@@ -631,8 +618,10 @@ mod tests {
         assert!(abi[..16].iter().all(|&b| b == 0));
         assert_eq!(
             &abi[16..],
-            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-              0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10],
+            &[
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+                0x0f, 0x10
+            ],
         );
     }
 

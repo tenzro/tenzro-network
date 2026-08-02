@@ -222,7 +222,10 @@ impl ExternalEngine {
             .unwrap_or("")
             .to_string();
         let input_tokens = v["usage"]["prompt_tokens"].as_u64().unwrap_or_else(|| {
-            messages.iter().map(|m| m.content.split_whitespace().count() as u64).sum()
+            messages
+                .iter()
+                .map(|m| m.content.split_whitespace().count() as u64)
+                .sum()
         }) as u32;
         let output_tokens = v["usage"]["completion_tokens"]
             .as_u64()

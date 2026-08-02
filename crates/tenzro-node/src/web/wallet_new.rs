@@ -53,22 +53,22 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::error::WalletApiError;
 use super::handlers::WebState;
-use super::wallet_frost::{provision_split, ProvisionScheme};
+use super::wallet_frost::{ProvisionScheme, provision_split};
 use super::wallet_share::{provisioning_salt, wrap_share_bytes};
 
-use tenzro_storage::{KvStore, CF_VALIDATOR_MODULES};
+use tenzro_storage::{CF_VALIDATOR_MODULES, KvStore};
 
 /// Sessions expire this long after `start`. The wallet re-runs `start`
 /// if the user overruns the passkey UI.
@@ -221,9 +221,8 @@ impl SessionStore {
     }
 
     fn put(&self, rec: &SessionRecord) -> Result<(), WalletApiError> {
-        let bytes = serde_json::to_vec(rec).map_err(|e| {
-            internal("session_serialize", format!("serialize session: {e}"))
-        })?;
+        let bytes = serde_json::to_vec(rec)
+            .map_err(|e| internal("session_serialize", format!("serialize session: {e}")))?;
         let tagged = mac_wrap(&bytes);
         self.storage
             .put(CF_VALIDATOR_MODULES, &Self::key(&rec.session_id), &tagged)
@@ -264,14 +263,13 @@ fn local_mac_key() -> &'static [u8; 32] {
     use std::sync::OnceLock;
     static KEY: OnceLock<[u8; 32]> = OnceLock::new();
     KEY.get_or_init(|| {
-        let home = match std::env::var("HOME").ok().map(std::path::PathBuf::from) {
-            Some(p) => p,
-            None => {
-                tracing::warn!("wallet_new local_mac_key: no $HOME — using zero key (tests only)");
+        let path = match tenzro_types::paths::try_tenzro_home() {
+            Ok(_) => tenzro_types::paths::local_state_mac_key_path(),
+            Err(e) => {
+                tracing::warn!(%e, "wallet_new local_mac_key: using zero key (tests only)");
                 return [0u8; 32];
             }
         };
-        let path = home.join(".tenzro").join("local_state_mac.key");
         if let Ok(bytes) = std::fs::read(&path)
             && bytes.len() == 32
         {
@@ -438,12 +436,18 @@ fn extract_p256_xy_from_attestation(
     // Skip AAGUID(16) + credIdLen(2) + credId(credIdLen), then parse COSE_Key.
     let mut off = 37 + 16;
     if auth_data.len() < off + 2 {
-        return Err(bad_request("bad_attestation", "authData truncated at credIdLen"));
+        return Err(bad_request(
+            "bad_attestation",
+            "authData truncated at credIdLen",
+        ));
     }
     let cred_id_len = u16::from_be_bytes([auth_data[off], auth_data[off + 1]]) as usize;
     off += 2 + cred_id_len;
     if auth_data.len() < off {
-        return Err(bad_request("bad_attestation", "authData truncated at credId"));
+        return Err(bad_request(
+            "bad_attestation",
+            "authData truncated at credId",
+        ));
     }
     let cose_bytes = &auth_data[off..];
 
@@ -456,16 +460,14 @@ fn extract_p256_xy_from_attestation(
     // COSE_Key integer labels: -2 = x coordinate, -3 = y coordinate.
     let coord = |label: i128| -> Option<Vec<u8>> {
         cose_map.iter().find_map(|(k, v)| match k {
-            ciborium::value::Value::Integer(i) if i128::from(*i) == label => {
-                v.as_bytes().cloned()
-            }
+            ciborium::value::Value::Integer(i) if i128::from(*i) == label => v.as_bytes().cloned(),
             _ => None,
         })
     };
-    let x_bytes = coord(-2)
-        .ok_or_else(|| bad_request("bad_attestation", "COSE_Key missing x coordinate"))?;
-    let y_bytes = coord(-3)
-        .ok_or_else(|| bad_request("bad_attestation", "COSE_Key missing y coordinate"))?;
+    let x_bytes =
+        coord(-2).ok_or_else(|| bad_request("bad_attestation", "COSE_Key missing x coordinate"))?;
+    let y_bytes =
+        coord(-3).ok_or_else(|| bad_request("bad_attestation", "COSE_Key missing y coordinate"))?;
     if x_bytes.len() != 32 || y_bytes.len() != 32 {
         return Err(bad_request(
             "bad_attestation",
@@ -668,8 +670,7 @@ pub(crate) async fn finalize_handler(
         .ok_or_else(|| internal("no_registry", "IdentityRegistry not initialized"))?;
 
     let p256_xy = account_key.p256_public_key_xy();
-    let mut owner_seed =
-        Vec::with_capacity(p256_xy.len() + credential_id.len() + did_string.len());
+    let mut owner_seed = Vec::with_capacity(p256_xy.len() + credential_id.len() + did_string.len());
     owner_seed.extend_from_slice(&p256_xy);
     owner_seed.extend_from_slice(&credential_id);
     owner_seed.extend_from_slice(did_string.as_bytes());

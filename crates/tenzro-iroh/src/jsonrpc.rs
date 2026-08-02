@@ -55,9 +55,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use iroh::{
+    Endpoint, EndpointAddr,
     endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, EndpointAddr,
 };
 use parking_lot::RwLock;
 use tracing::{debug, trace, warn};
@@ -353,11 +353,7 @@ pub trait McpStreamHandler: Send + Sync + std::fmt::Debug + 'static {
     /// notifications, and finally closes both stream halves when the
     /// session terminates. Returning `Err` aborts the session with a
     /// QUIC-level reset; clean session termination should return `Ok(())`.
-    async fn serve_stream(
-        self: Arc<Self>,
-        send: SendStream,
-        recv: RecvStream,
-    ) -> IrohResult<()>;
+    async fn serve_stream(self: Arc<Self>, send: SendStream, recv: RecvStream) -> IrohResult<()>;
 }
 
 /// `iroh::ProtocolHandler` adapter for MCP-over-iroh.
@@ -524,11 +520,7 @@ pub trait HttpForwardHandler: Send + Sync + std::fmt::Debug + 'static {
     /// runtime, and writes the raw HTTP/1.1 response to `send`, finishing
     /// the send half when the response body is complete. Returning `Err`
     /// resets the stream; a clean exchange returns `Ok(())`.
-    async fn serve_request(
-        self: Arc<Self>,
-        send: SendStream,
-        recv: RecvStream,
-    ) -> IrohResult<()>;
+    async fn serve_request(self: Arc<Self>, send: SendStream, recv: RecvStream) -> IrohResult<()>;
 }
 
 /// `iroh::ProtocolHandler` adapter for HTTP forwarding over iroh.
@@ -713,8 +705,8 @@ pub async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::{endpoint::presets, Endpoint};
     use iroh::protocol::Router;
+    use iroh::{Endpoint, endpoint::presets};
 
     #[derive(Debug)]
     struct EchoDispatcher;

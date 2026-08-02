@@ -23,7 +23,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tenzro_storage::kv::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::kv::{CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::primitives::Hash;
 
 use crate::error::{Result, WorkflowError};
@@ -76,9 +76,7 @@ impl FeeRoute {
     /// has a non-empty recipient.
     pub fn validate(&self) -> Result<()> {
         if self.splits.is_empty() {
-            return Err(WorkflowError::Invalid(
-                "fee route has no splits".into(),
-            ));
+            return Err(WorkflowError::Invalid("fee route has no splits".into()));
         }
         let total: u32 = self.splits.iter().map(|s| s.share_bps).sum();
         if total != 10_000 {
@@ -107,10 +105,7 @@ impl FeeRoute {
     /// returns `WorkflowError::Invalid`. Rounding is **truncation**;
     /// any remainder accrues to the LAST split (typically the network
     /// fee or treasury) so the sum equals `gross_wei` exactly.
-    pub fn compute_payouts(
-        &self,
-        gross_wei: u128,
-    ) -> Result<Vec<(String, String, u128)>> {
+    pub fn compute_payouts(&self, gross_wei: u128) -> Result<Vec<(String, String, u128)>> {
         self.validate()?;
         let mut out = Vec::with_capacity(self.splits.len());
         let mut allocated: u128 = 0;
@@ -118,24 +113,17 @@ impl FeeRoute {
         for (i, s) in self.splits.iter().enumerate() {
             let amount = if i == last_idx {
                 // Drain the remainder into the last split.
-                gross_wei
-                    .checked_sub(allocated)
-                    .ok_or_else(|| WorkflowError::Invalid(
-                        "fee route arithmetic underflow".into(),
-                    ))?
+                gross_wei.checked_sub(allocated).ok_or_else(|| {
+                    WorkflowError::Invalid("fee route arithmetic underflow".into())
+                })?
             } else {
                 let bps = s.share_bps as u128;
-                let amt = gross_wei
-                    .checked_mul(bps)
-                    .ok_or_else(|| WorkflowError::Invalid(
-                        "fee route arithmetic overflow".into(),
-                    ))?
-                    / 10_000u128;
-                allocated = allocated.checked_add(amt).ok_or_else(|| {
-                    WorkflowError::Invalid(
-                        "fee route allocated overflow".into(),
-                    )
-                })?;
+                let amt = gross_wei.checked_mul(bps).ok_or_else(|| {
+                    WorkflowError::Invalid("fee route arithmetic overflow".into())
+                })? / 10_000u128;
+                allocated = allocated
+                    .checked_add(amt)
+                    .ok_or_else(|| WorkflowError::Invalid("fee route allocated overflow".into()))?;
                 amt
             };
             out.push((s.recipient_did.clone(), s.label.clone(), amount));
@@ -211,7 +199,9 @@ impl FeeRouteRegistry {
 
     pub fn remove(&self, id: &FeeRouteId) -> Result<Option<FeeRoute>> {
         let prev = self.routes.remove(id).map(|(_, v)| v);
-        if prev.is_some() && let Some(s) = &self.storage {
+        if prev.is_some()
+            && let Some(s) = &self.storage
+        {
             s.write_batch_sync(vec![WriteOp::Delete {
                 cf: CF_SETTLEMENTS.to_string(),
                 key: key_for(id),
@@ -246,11 +236,22 @@ mod tests {
         let r = mk_route(
             "bad",
             vec![
-                FeeSplit { recipient_did: "did:a".into(), share_bps: 4000, label: "x".into() },
-                FeeSplit { recipient_did: "did:b".into(), share_bps: 5000, label: "y".into() },
+                FeeSplit {
+                    recipient_did: "did:a".into(),
+                    share_bps: 4000,
+                    label: "x".into(),
+                },
+                FeeSplit {
+                    recipient_did: "did:b".into(),
+                    share_bps: 5000,
+                    label: "y".into(),
+                },
             ],
         );
-        assert!(matches!(r.validate(), Err(WorkflowError::FeeSplitOverflow(9000))));
+        assert!(matches!(
+            r.validate(),
+            Err(WorkflowError::FeeSplitOverflow(9000))
+        ));
     }
 
     #[test]
@@ -264,8 +265,16 @@ mod tests {
         let r = mk_route(
             "zero",
             vec![
-                FeeSplit { recipient_did: "did:a".into(), share_bps: 10_000, label: "x".into() },
-                FeeSplit { recipient_did: "did:b".into(), share_bps: 0, label: "y".into() },
+                FeeSplit {
+                    recipient_did: "did:a".into(),
+                    share_bps: 10_000,
+                    label: "x".into(),
+                },
+                FeeSplit {
+                    recipient_did: "did:b".into(),
+                    share_bps: 0,
+                    label: "y".into(),
+                },
             ],
         );
         // Total is 10_000 but one split is zero — rejected.
@@ -276,7 +285,11 @@ mod tests {
     fn validate_rejects_empty_recipient() {
         let r = mk_route(
             "noempty",
-            vec![FeeSplit { recipient_did: "".into(), share_bps: 10_000, label: "x".into() }],
+            vec![FeeSplit {
+                recipient_did: "".into(),
+                share_bps: 10_000,
+                label: "x".into(),
+            }],
         );
         assert!(r.validate().is_err());
     }
@@ -286,9 +299,21 @@ mod tests {
         let r = mk_route(
             "split",
             vec![
-                FeeSplit { recipient_did: "did:a".into(), share_bps: 8000, label: "seller".into() },
-                FeeSplit { recipient_did: "did:b".into(), share_bps: 1500, label: "treasury".into() },
-                FeeSplit { recipient_did: "did:c".into(), share_bps: 500, label: "network".into() },
+                FeeSplit {
+                    recipient_did: "did:a".into(),
+                    share_bps: 8000,
+                    label: "seller".into(),
+                },
+                FeeSplit {
+                    recipient_did: "did:b".into(),
+                    share_bps: 1500,
+                    label: "treasury".into(),
+                },
+                FeeSplit {
+                    recipient_did: "did:c".into(),
+                    share_bps: 500,
+                    label: "network".into(),
+                },
             ],
         );
         // 1001 wei: 800.8 → 800; 150.15 → 150; remainder = 51 to last
@@ -305,8 +330,16 @@ mod tests {
         let r = mk_route(
             "round",
             vec![
-                FeeSplit { recipient_did: "did:a".into(), share_bps: 8000, label: "seller".into() },
-                FeeSplit { recipient_did: "did:b".into(), share_bps: 2000, label: "buyer".into() },
+                FeeSplit {
+                    recipient_did: "did:a".into(),
+                    share_bps: 8000,
+                    label: "seller".into(),
+                },
+                FeeSplit {
+                    recipient_did: "did:b".into(),
+                    share_bps: 2000,
+                    label: "buyer".into(),
+                },
             ],
         );
         let p = r.compute_payouts(1_000_000).unwrap();
@@ -319,7 +352,11 @@ mod tests {
         let reg = FeeRouteRegistry::new();
         let r = mk_route(
             "memreg",
-            vec![FeeSplit { recipient_did: "did:a".into(), share_bps: 10_000, label: "all".into() }],
+            vec![FeeSplit {
+                recipient_did: "did:a".into(),
+                share_bps: 10_000,
+                label: "all".into(),
+            }],
         );
         let id = reg.register(r.clone()).unwrap();
         assert_eq!(reg.get(&id).unwrap(), r);
@@ -328,9 +365,11 @@ mod tests {
 
     #[test]
     fn derive_id_deterministic() {
-        let splits = vec![
-            FeeSplit { recipient_did: "did:a".into(), share_bps: 10_000, label: "x".into() },
-        ];
+        let splits = vec![FeeSplit {
+            recipient_did: "did:a".into(),
+            share_bps: 10_000,
+            label: "x".into(),
+        }];
         let a = FeeRoute::derive_id("lbl", &splits);
         let b = FeeRoute::derive_id("lbl", &splits);
         assert_eq!(a, b);

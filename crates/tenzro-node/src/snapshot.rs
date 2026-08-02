@@ -8,11 +8,19 @@
 //!   * [`SnapshotStore::list_snapshots`] — enumerate locally available snapshots
 //!   * [`SnapshotStore::get_chunk`]     — serve one chunk to a fetching peer
 //!   * [`SnapshotStore::offer`]         — accept an inbound snapshot manifest
+//!     (in-process only — see below)
 //!   * [`SnapshotStore::apply_chunk`]   — write one inbound chunk; on the last
 //!     chunk verify the merkle root and atomically commit to the live store
+//!     (in-process only — see below)
 //!
-//! These are wired to JSON-RPC as `tenzro_listSnapshots`,
-//! `tenzro_getSnapshotChunk`, `tenzro_offerSnapshot`, `tenzro_applySnapshotChunk`.
+//! The read half — `list_snapshots`, `get_chunk` — is wired to JSON-RPC as
+//! `tenzro_listSnapshots` / `tenzro_getSnapshotManifest` /
+//! `tenzro_getSnapshotChunk`, which is what a syncing node calls on a serving
+//! one. The write half — `offer`, `apply_chunk` — is **not** exposed: it is
+//! driven in-process by [`state_sync_from_peer`], and every check it performs
+//! is internal to the manifest, so reachable over RPC it was arbitrary state
+//! replacement by an unauthenticated caller. The binding to the chain is the
+//! weak-subjectivity anchor in the bootstrap driver, not anything in here.
 //!
 //! The producer subscribes to the consensus finality channel and
 //! snapshots every `SnapshotConfig::interval_blocks` finalized heights
@@ -47,18 +55,18 @@
 //! malicious RPC that would serve a forged state root.
 
 use crate::error::{NodeError, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tenzro_storage::{
-    KvStore, CF_ACCOUNTS, CF_AGENTS, CF_AGENT_TEMPLATES, CF_APPROVALS, CF_AUDIT, CF_BLOCKS,
-    CF_CHANNELS, CF_COMPLIANCE, CF_CREDENTIALS, CF_DELEGATIONS, CF_EVENTS, CF_IDENTITIES,
-    CF_METADATA, CF_MODELS, CF_MODEL_SERVICES, CF_NFTS, CF_PROVIDERS, CF_SETTLEMENTS,
-    CF_SKILLS, CF_STATE, CF_TASKS, CF_TOKENS, CF_TOOLS, CF_TRAINING_RECEIPTS,
-    CF_TRAINING_RUNS, CF_TRANSACTIONS, CF_WEBHOOKS,
+    CF_ACCOUNTS, CF_AGENT_TEMPLATES, CF_AGENTS, CF_APPROVALS, CF_AUDIT, CF_BLOCKS, CF_CHANNELS,
+    CF_COMPLIANCE, CF_CREDENTIALS, CF_DELEGATIONS, CF_EVENTS, CF_IDENTITIES, CF_METADATA,
+    CF_MODEL_SERVICES, CF_MODELS, CF_NFTS, CF_PROVIDERS, CF_SETTLEMENTS, CF_SKILLS, CF_STATE,
+    CF_TASKS, CF_TOKENS, CF_TOOLS, CF_TRAINING_RECEIPTS, CF_TRAINING_RUNS, CF_TRANSACTIONS,
+    CF_WEBHOOKS, KvStore,
 };
 use tokio::sync::RwLock;
 
@@ -315,12 +323,15 @@ impl SnapshotStore {
 
     /// Returns the full manifest for `height`, if present.
     pub fn get_manifest(&self, height: u64) -> Result<Option<SnapshotManifest>> {
-        let path = self.snapshots_dir.join(height.to_string()).join("manifest.json");
+        let path = self
+            .snapshots_dir
+            .join(height.to_string())
+            .join("manifest.json");
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = std::fs::read(&path)
-            .map_err(|e| NodeError::Other(format!("read manifest: {}", e)))?;
+        let bytes =
+            std::fs::read(&path).map_err(|e| NodeError::Other(format!("read manifest: {}", e)))?;
         let m = serde_json::from_slice(&bytes)
             .map_err(|e| NodeError::Other(format!("parse manifest: {}", e)))?;
         Ok(Some(m))
@@ -332,8 +343,7 @@ impl SnapshotStore {
             .snapshots_dir
             .join(height.to_string())
             .join(format!("chunk_{:08}.bin", chunk_index));
-        std::fs::read(&path)
-            .map_err(|e| NodeError::Other(format!("read chunk: {}", e)))
+        std::fs::read(&path).map_err(|e| NodeError::Other(format!("read chunk: {}", e)))
     }
 
     /// Accept an inbound snapshot manifest from a peer. If accepted,
@@ -345,7 +355,8 @@ impl SnapshotStore {
     pub async fn offer(&self, manifest: SnapshotManifest) -> Result<()> {
         if manifest.format != SnapshotManifest::FORMAT_V1 {
             return Err(NodeError::Other(format!(
-                "unsupported snapshot format {}", manifest.format
+                "unsupported snapshot format {}",
+                manifest.format
             )));
         }
         if manifest.chunk_hashes_hex.len() != manifest.num_chunks as usize {
@@ -371,7 +382,9 @@ impl SnapshotStore {
             }
         }
 
-        let spool_dir = self.snapshots_dir.join(format!("inbound_{}", manifest.height));
+        let spool_dir = self
+            .snapshots_dir
+            .join(format!("inbound_{}", manifest.height));
         std::fs::create_dir_all(&spool_dir)
             .map_err(|e| NodeError::Other(format!("create spool dir: {}", e)))?;
 
@@ -651,17 +664,13 @@ fn encode_record(cf: &str, key: &[u8], value: &[u8], out: &mut Vec<u8>) {
 
 /// Inverse of [`encode_record`]. Appends decoded `WriteOp::Put`s to
 /// `ops`.
-fn decode_chunk_into(
-    bytes: &[u8],
-    ops: &mut Vec<tenzro_storage::WriteOp>,
-) -> Result<()> {
+fn decode_chunk_into(bytes: &[u8], ops: &mut Vec<tenzro_storage::WriteOp>) -> Result<()> {
     let mut pos = 0;
     while pos < bytes.len() {
         if pos + 2 > bytes.len() {
             return Err(NodeError::Other("truncated cf_len".into()));
         }
-        let cf_len =
-            u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        let cf_len = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as usize;
         pos += 2;
         if pos + cf_len > bytes.len() {
             return Err(NodeError::Other("truncated cf".into()));
@@ -674,9 +683,9 @@ fn decode_chunk_into(
         if pos + 4 > bytes.len() {
             return Err(NodeError::Other("truncated key_len".into()));
         }
-        let key_len = u32::from_le_bytes([
-            bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3],
-        ]) as usize;
+        let key_len =
+            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                as usize;
         pos += 4;
         if pos + key_len > bytes.len() {
             return Err(NodeError::Other("truncated key".into()));
@@ -687,9 +696,9 @@ fn decode_chunk_into(
         if pos + 4 > bytes.len() {
             return Err(NodeError::Other("truncated value_len".into()));
         }
-        let value_len = u32::from_le_bytes([
-            bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3],
-        ]) as usize;
+        let value_len =
+            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                as usize;
         pos += 4;
         if pos + value_len > bytes.len() {
             return Err(NodeError::Other("truncated value".into()));
@@ -730,15 +739,17 @@ pub async fn bootstrap_from_peer(
     // any state and the syncing node would commit it as canonical
     // state. Refuse the bootstrap entirely until QC-verification
     // against a known-good finalized header is wired.
-    let anchor = expected_state_root.ok_or_else(|| NodeError::Other(
-        "state-sync refused: no trust anchor supplied. Operator MUST \
+    let anchor = expected_state_root.ok_or_else(|| {
+        NodeError::Other(
+            "state-sync refused: no trust anchor supplied. Operator MUST \
          provide an out-of-band-verified state_root (e.g. a weak-\
          subjectivity checkpoint or a known-good QC at the snapshot \
          height) so the manifest's declared root can be cross-checked. \
          Without an anchor the peer's RPC is untrusted authority and \
          must not be allowed to seed local state."
-            .to_string(),
-    ))?;
+                .to_string(),
+        )
+    })?;
 
     let client = crate::http_client::shared();
 
@@ -822,9 +833,8 @@ pub async fn bootstrap_from_peer(
     //     manifest from a malicious peer would otherwise be applied to
     //     the local KV store.
     let declared_hex = manifest.state_root_hex.trim_start_matches("0x");
-    let declared_bytes = hex::decode(declared_hex).map_err(|e| NodeError::Other(format!(
-        "manifest state_root_hex is not valid hex: {e}"
-    )))?;
+    let declared_bytes = hex::decode(declared_hex)
+        .map_err(|e| NodeError::Other(format!("manifest state_root_hex is not valid hex: {e}")))?;
     if declared_bytes.len() != 32 {
         return Err(NodeError::Other(format!(
             "manifest state_root has wrong length {} (expected 32)",
@@ -867,9 +877,7 @@ pub async fn bootstrap_from_peer(
             .get("result")
             .and_then(|r| r.get("data_b64"))
             .and_then(|s| s.as_str())
-            .ok_or_else(|| {
-                NodeError::Other(format!("chunk {} missing data_b64", idx))
-            })?;
+            .ok_or_else(|| NodeError::Other(format!("chunk {} missing data_b64", idx)))?;
         let bytes = b64_decode(data_b64)?;
         store.apply_chunk(manifest.height, idx, bytes).await?;
     }
@@ -917,17 +925,23 @@ mod tests {
         let producer_dir = tempfile::tempdir().unwrap();
         let consumer_dir = tempfile::tempdir().unwrap();
         let producer_store = make_store_with_data();
-        let producer =
-            SnapshotStore::new(producer_dir.path(), producer_store, SnapshotConfig::producer_default())
-                .unwrap();
+        let producer = SnapshotStore::new(
+            producer_dir.path(),
+            producer_store,
+            SnapshotConfig::producer_default(),
+        )
+        .unwrap();
 
         let manifest = producer.produce_at(42, [7u8; 32]).unwrap();
         assert!(manifest.num_chunks >= 1);
 
         let consumer_store = Arc::new(MemoryStore::new()) as Arc<dyn KvStore>;
-        let consumer =
-            SnapshotStore::new(consumer_dir.path(), consumer_store.clone(), SnapshotConfig::default())
-                .unwrap();
+        let consumer = SnapshotStore::new(
+            consumer_dir.path(),
+            consumer_store.clone(),
+            SnapshotConfig::default(),
+        )
+        .unwrap();
         consumer.offer(manifest.clone()).await.unwrap();
 
         for i in 0..manifest.num_chunks {
@@ -940,9 +954,7 @@ mod tests {
         // Verify a known key landed.
         let v = consumer_store.get(CF_METADATA, b"genesis").unwrap();
         assert_eq!(v, Some(b"hello".to_vec()));
-        let v = consumer_store
-            .get(CF_ACCOUNTS, b"addr_42")
-            .unwrap();
+        let v = consumer_store.get(CF_ACCOUNTS, b"addr_42").unwrap();
         assert_eq!(v, Some(vec![42u8; 32]));
     }
 
@@ -956,9 +968,12 @@ mod tests {
 
         let consumer_store = Arc::new(MemoryStore::new()) as Arc<dyn KvStore>;
         let consumer_dir = tempfile::tempdir().unwrap();
-        let consumer =
-            SnapshotStore::new(consumer_dir.path(), consumer_store, SnapshotConfig::default())
-                .unwrap();
+        let consumer = SnapshotStore::new(
+            consumer_dir.path(),
+            consumer_store,
+            SnapshotConfig::default(),
+        )
+        .unwrap();
         consumer.offer(manifest.clone()).await.unwrap();
 
         let mut chunk = producer.get_chunk(1, 0).unwrap();

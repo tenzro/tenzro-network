@@ -151,9 +151,7 @@ def test_receipt_commitment_binds_the_executed_spec(receipt):
     """The parameters the worker ran cannot be swapped after signing."""
     tampered = replace(
         receipt,
-        task_spec=replace(
-            receipt.task_spec, params=replace(receipt.task_spec.params, steps=4)
-        ),
+        task_spec=replace(receipt.task_spec, params=replace(receipt.task_spec.params, steps=4)),
     )
     assert receipt_commitment(tampered) != receipt_commitment(receipt)
 
@@ -168,9 +166,7 @@ def test_receipt_commitment_ignores_the_signature(receipt):
 
 def test_receipt_preimage_carries_the_domain_tag(receipt):
     assert receipt_signing_bytes(receipt).startswith(RECEIPT_TAG)
-    assert receipt_commitment(receipt) == hashlib.sha256(
-        receipt_signing_bytes(receipt)
-    ).digest()
+    assert receipt_commitment(receipt) == hashlib.sha256(receipt_signing_bytes(receipt)).digest()
 
 
 def test_handoff_commitment_binds_the_latent_and_the_step_count(handoff):
@@ -191,9 +187,7 @@ def test_handoff_commitment_ignores_the_signature(handoff):
 
 def test_handoff_preimage_carries_the_domain_tag(handoff):
     assert handoff_signing_bytes(handoff).startswith(HANDOFF_TAG)
-    assert handoff_commitment(handoff) == hashlib.sha256(
-        handoff_signing_bytes(handoff)
-    ).digest()
+    assert handoff_commitment(handoff) == hashlib.sha256(handoff_signing_bytes(handoff)).digest()
 
 
 def test_handoff_and_receipt_digests_do_not_collide(handoff, receipt):

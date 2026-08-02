@@ -60,11 +60,12 @@ pub(crate) async fn execute_bundle(
         message: "iroh transport not bound on this node — bundle bytes are unreachable".to_string(),
         data: None,
     })?;
-    let uri = tenzro_types::tenzro_uri::TenzroUri::parse(&bundle.uri).map_err(|e| JsonRpcError {
-        code: -32006,
-        message: format!("Bundle URI '{}' does not parse: {e}", bundle.uri),
-        data: None,
-    })?;
+    let uri =
+        tenzro_types::tenzro_uri::TenzroUri::parse(&bundle.uri).map_err(|e| JsonRpcError {
+            code: -32006,
+            message: format!("Bundle URI '{}' does not parse: {e}", bundle.uri),
+            data: None,
+        })?;
     let bundle_bytes = resolver.fetch_bytes(&uri).await.map_err(|e| JsonRpcError {
         code: -32000,
         message: format!("Fetching bundle {}: {e}", bundle.uri),
@@ -114,11 +115,13 @@ pub(crate) async fn execute_bundle(
     })?);
 
     let sandbox = node.sandboxed_tools();
-    sandbox.register(manifest, bundle_bytes).map_err(|e| JsonRpcError {
-        code: -32006,
-        message: format!("Bundle rejected by the sandbox: {e}"),
-        data: None,
-    })?;
+    sandbox
+        .register(manifest, bundle_bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32006,
+            message: format!("Bundle rejected by the sandbox: {e}"),
+            data: None,
+        })?;
     let outcome = sandbox
         .invoke(&component_id, SKILL_EXPORT, input_bytes, caller_did)
         .await;

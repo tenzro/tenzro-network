@@ -6,14 +6,14 @@
 //! (via the crate's `rfc9421` signer) plus the issuer API key, so the issuer
 //! can attribute the call to a registered agent key.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::error::{PaymentError, Result};
 use crate::rfc9421::{
-    create_http_signature, RequestParts, SignatureAlgorithm, SignatureInput, SignatureParams,
+    RequestParts, SignatureAlgorithm, SignatureInput, SignatureParams, create_http_signature,
 };
 use crate::visa_tap::types::{AgentTag, ConsumerRecognition, PaymentContainer};
 
@@ -230,7 +230,8 @@ impl VisaTapIssuerClient {
             "Provisioning TAP agent token for {} (credential {})",
             request.agent_did, request.credential_id
         );
-        self.post_signed("/agent-tokens", request, request.tag).await
+        self.post_signed("/agent-tokens", request, request.tag)
+            .await
     }
 
     /// Verifies a TAP payment credential against the issuer.
@@ -348,8 +349,7 @@ impl VisaTapIssuerClient {
             self.algorithm.as_str(),
             tag.as_str(),
         );
-        let signature_header =
-            format!("{}=:{}:", SIGNATURE_LABEL, BASE64.encode(&signature_bytes));
+        let signature_header = format!("{}=:{}:", SIGNATURE_LABEL, BASE64.encode(&signature_bytes));
 
         Ok((signature_input_header, signature_header))
     }
@@ -376,18 +376,17 @@ impl VisaTapIssuerClient {
             )));
         }
 
-        serde_json::from_str(&body).map_err(|e| {
-            PaymentError::SerializationError(format!("Issuer response parse: {}", e))
-        })
+        serde_json::from_str(&body)
+            .map_err(|e| PaymentError::SerializationError(format!("Issuer response parse: {}", e)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rfc9421::SignedHeaders;
     use crate::rfc9421::signature::parse_signature_input;
     use crate::rfc9421::verify_http_signature;
-    use crate::rfc9421::SignedHeaders;
     use crate::visa_tap::types::PaymentMethod;
     use tenzro_crypto::keys::{KeyPair, KeyType};
 
@@ -440,8 +439,7 @@ mod tests {
         };
         let parts = RequestParts::for_request("POST", "api.visa.com", "/tap/payment-instructions")
             .with_header("content-type", "application/json");
-        verify_http_signature(&parts, &signed, &public_key, &SignatureAlgorithm::Ed25519)
-            .unwrap();
+        verify_http_signature(&parts, &signed, &public_key, &SignatureAlgorithm::Ed25519).unwrap();
     }
 
     #[test]
@@ -506,10 +504,8 @@ mod tests {
 
     #[test]
     fn credential_verification_deserializes() {
-        let verification: CredentialVerification = serde_json::from_str(
-            r#"{"valid": false, "reason": "token_revoked"}"#,
-        )
-        .unwrap();
+        let verification: CredentialVerification =
+            serde_json::from_str(r#"{"valid": false, "reason": "token_revoked"}"#).unwrap();
         assert!(!verification.valid);
         assert_eq!(verification.reason.as_deref(), Some("token_revoked"));
 

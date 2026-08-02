@@ -7,7 +7,7 @@
 //! - `IdentityRegistry::enforce_operation` — runs on every binder-mediated
 //!   payment.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use tenzro_identity::{IdentityRegistry, TenzroDid};
 

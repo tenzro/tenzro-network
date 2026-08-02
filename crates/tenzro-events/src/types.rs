@@ -160,7 +160,6 @@ pub fn event_type_name(event: &TenzroEvent) -> &'static str {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TenzroEvent {
     // -- Block lifecycle -----------------------------------------------------
-
     /// A new block has been produced but not yet finalized.
     NewBlock {
         block_hash: [u8; 32],
@@ -171,10 +170,7 @@ pub enum TenzroEvent {
     },
 
     /// A block has reached finality.
-    BlockFinalized {
-        block_hash: [u8; 32],
-        height: u64,
-    },
+    BlockFinalized { block_hash: [u8; 32], height: u64 },
 
     /// A previously-included block was removed during a chain reorganization.
     BlockReorged {
@@ -185,7 +181,6 @@ pub enum TenzroEvent {
     },
 
     // -- Transaction lifecycle -----------------------------------------------
-
     /// A transaction entered the mempool.
     NewPendingTransaction {
         tx_hash: [u8; 32],
@@ -214,7 +209,6 @@ pub enum TenzroEvent {
     },
 
     // -- EVM Logs (EIP-7708 compliant) ---------------------------------------
-
     /// An EVM log entry emitted by a smart contract.
     Log {
         address: [u8; 20],
@@ -228,7 +222,6 @@ pub enum TenzroEvent {
     },
 
     // -- Token events --------------------------------------------------------
-
     /// A fungible token transfer (native TNZO or ERC-20 / SPL / CIP-56).
     Transfer {
         from: [u8; 20],
@@ -270,7 +263,6 @@ pub enum TenzroEvent {
     },
 
     // -- Identity ------------------------------------------------------------
-
     /// A new identity (human or machine) was registered via TDIP.
     IdentityRegistered {
         did: String,
@@ -294,7 +286,6 @@ pub enum TenzroEvent {
     },
 
     // -- AI ------------------------------------------------------------------
-
     /// A new AI model was registered in the model registry.
     ModelRegistered {
         model_id: String,
@@ -374,7 +365,6 @@ pub enum TenzroEvent {
     },
 
     // -- Settlement ----------------------------------------------------------
-
     /// A settlement was completed on-chain.
     SettlementCompleted {
         settlement_id: String,
@@ -396,7 +386,6 @@ pub enum TenzroEvent {
     },
 
     // -- Staking -------------------------------------------------------------
-
     /// TNZO tokens were staked by a validator or provider.
     StakeDeposited {
         staker: [u8; 20],
@@ -424,7 +413,6 @@ pub enum TenzroEvent {
     },
 
     // -- Governance ----------------------------------------------------------
-
     /// A governance proposal was created.
     ProposalCreated {
         proposal_id: String,
@@ -443,7 +431,6 @@ pub enum TenzroEvent {
     },
 
     // -- Bridge --------------------------------------------------------------
-
     /// A cross-chain bridge transfer was initiated from Tenzro.
     BridgeTransferInitiated {
         bridge_adapter: String,
@@ -467,7 +454,6 @@ pub enum TenzroEvent {
     },
 
     // -- Sync ----------------------------------------------------------------
-
     /// Periodic progress report during node synchronization.
     SyncProgress {
         current_block: u64,
@@ -484,7 +470,6 @@ pub enum TenzroEvent {
     // `Allow` → deliver, `Deny` → drop silently (no existence leak), `Plaintext`
     // → deliver as-is. The event itself never carries the encrypted body —
     // that lives in the corresponding `EncryptedReceipt` in `CF_SETTLEMENTS`.
-
     /// A new workflow was created (Draft).
     WorkflowCreated {
         workflow_id: [u8; 32],
@@ -569,7 +554,9 @@ impl TenzroEvent {
             TenzroEvent::BridgeTransferCompleted { .. } => EventType::BridgeTransferCompleted,
             TenzroEvent::SyncProgress { .. } => EventType::SyncProgress,
             TenzroEvent::WorkflowCreated { .. } => EventType::WorkflowCreated,
-            TenzroEvent::WorkflowLifecycleTransitioned { .. } => EventType::WorkflowLifecycleTransitioned,
+            TenzroEvent::WorkflowLifecycleTransitioned { .. } => {
+                EventType::WorkflowLifecycleTransitioned
+            }
             TenzroEvent::WorkflowReceiptEmitted { .. } => EventType::WorkflowReceiptEmitted,
             TenzroEvent::ApprovalRequested { .. } => EventType::ApprovalRequested,
             TenzroEvent::ApprovalFinalized { .. } => EventType::ApprovalFinalized,
@@ -594,7 +581,9 @@ impl TenzroEvent {
 impl fmt::Display for TenzroEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TenzroEvent::NewBlock { height, tx_count, .. } => {
+            TenzroEvent::NewBlock {
+                height, tx_count, ..
+            } => {
                 write!(f, "NewBlock height={} txs={}", height, tx_count)
             }
             TenzroEvent::BlockFinalized { height, .. } => {
@@ -606,7 +595,12 @@ impl fmt::Display for TenzroEvent {
             TenzroEvent::NewPendingTransaction { nonce, value, .. } => {
                 write!(f, "NewPendingTx nonce={} value={}", nonce, value)
             }
-            TenzroEvent::TransactionIncluded { block_height, index, success, .. } => {
+            TenzroEvent::TransactionIncluded {
+                block_height,
+                index,
+                success,
+                ..
+            } => {
                 write!(
                     f,
                     "TxIncluded block={} idx={} ok={}",
@@ -616,7 +610,12 @@ impl fmt::Display for TenzroEvent {
             TenzroEvent::TransactionFinalized { block_height, .. } => {
                 write!(f, "TxFinalized block={}", block_height)
             }
-            TenzroEvent::Log { address, log_index, removed, .. } => {
+            TenzroEvent::Log {
+                address,
+                log_index,
+                removed,
+                ..
+            } => {
                 write!(
                     f,
                     "Log addr=0x{} idx={} removed={}",
@@ -625,84 +624,157 @@ impl fmt::Display for TenzroEvent {
                     removed
                 )
             }
-            TenzroEvent::Transfer { amount, token_id, .. } => {
+            TenzroEvent::Transfer {
+                amount, token_id, ..
+            } => {
                 write!(f, "Transfer amount={} token={}", amount, token_id)
             }
-            TenzroEvent::NftTransfer { token_id, nft_id, .. } => {
+            TenzroEvent::NftTransfer {
+                token_id, nft_id, ..
+            } => {
                 write!(f, "NftTransfer token={} nft={}", token_id, nft_id)
             }
-            TenzroEvent::CrosschainMint { amount, source_chain, .. } => {
+            TenzroEvent::CrosschainMint {
+                amount,
+                source_chain,
+                ..
+            } => {
                 write!(f, "CrosschainMint amount={} from={}", amount, source_chain)
             }
-            TenzroEvent::CrosschainBurn { amount, destination_chain, .. } => {
-                write!(f, "CrosschainBurn amount={} to={}", amount, destination_chain)
+            TenzroEvent::CrosschainBurn {
+                amount,
+                destination_chain,
+                ..
+            } => {
+                write!(
+                    f,
+                    "CrosschainBurn amount={} to={}",
+                    amount, destination_chain
+                )
             }
-            TenzroEvent::IdentityRegistered { did, identity_type, .. } => {
+            TenzroEvent::IdentityRegistered {
+                did, identity_type, ..
+            } => {
                 write!(f, "IdentityRegistered did={} type={}", did, identity_type)
             }
-            TenzroEvent::CredentialIssued { credential_type, subject_did, .. } => {
-                write!(f, "CredentialIssued type={} subject={}", credential_type, subject_did)
+            TenzroEvent::CredentialIssued {
+                credential_type,
+                subject_did,
+                ..
+            } => {
+                write!(
+                    f,
+                    "CredentialIssued type={} subject={}",
+                    credential_type, subject_did
+                )
             }
-            TenzroEvent::ComplianceViolation { did, violation_type, .. } => {
+            TenzroEvent::ComplianceViolation {
+                did,
+                violation_type,
+                ..
+            } => {
                 write!(f, "ComplianceViolation did={} type={}", did, violation_type)
             }
             TenzroEvent::ModelRegistered { model_id, name, .. } => {
                 write!(f, "ModelRegistered id={} name={}", model_id, name)
             }
-            TenzroEvent::InferenceCompleted { model_id, latency_ms, tokens_used, .. } => {
+            TenzroEvent::InferenceCompleted {
+                model_id,
+                latency_ms,
+                tokens_used,
+                ..
+            } => {
                 write!(
                     f,
                     "InferenceCompleted model={} latency={}ms tokens={}",
                     model_id, latency_ms, tokens_used
                 )
             }
-            TenzroEvent::InferenceStreamStarted { request_id, model_id, provider_label } => {
+            TenzroEvent::InferenceStreamStarted {
+                request_id,
+                model_id,
+                provider_label,
+            } => {
                 write!(
                     f,
                     "InferenceStreamStarted req={} model={} provider={}",
                     request_id, model_id, provider_label
                 )
             }
-            TenzroEvent::InferenceStreamFirstToken { request_id, model_id, ttft_ms, .. } => {
+            TenzroEvent::InferenceStreamFirstToken {
+                request_id,
+                model_id,
+                ttft_ms,
+                ..
+            } => {
                 write!(
                     f,
                     "InferenceStreamFirstToken req={} model={} ttft={}ms",
                     request_id, model_id, ttft_ms
                 )
             }
-            TenzroEvent::InferenceStreamDropped { request_id, model_id, reason, silent_for_ms, .. } => {
-                match silent_for_ms {
-                    Some(ms) => write!(
-                        f,
-                        "InferenceStreamDropped req={} model={} reason={} silent={}ms",
-                        request_id, model_id, reason, ms
-                    ),
-                    None => write!(
-                        f,
-                        "InferenceStreamDropped req={} model={} reason={}",
-                        request_id, model_id, reason
-                    ),
-                }
-            }
-            TenzroEvent::InferenceStreamCompleted { request_id, model_id, latency_ms, success, .. } => {
+            TenzroEvent::InferenceStreamDropped {
+                request_id,
+                model_id,
+                reason,
+                silent_for_ms,
+                ..
+            } => match silent_for_ms {
+                Some(ms) => write!(
+                    f,
+                    "InferenceStreamDropped req={} model={} reason={} silent={}ms",
+                    request_id, model_id, reason, ms
+                ),
+                None => write!(
+                    f,
+                    "InferenceStreamDropped req={} model={} reason={}",
+                    request_id, model_id, reason
+                ),
+            },
+            TenzroEvent::InferenceStreamCompleted {
+                request_id,
+                model_id,
+                latency_ms,
+                success,
+                ..
+            } => {
                 write!(
                     f,
                     "InferenceStreamCompleted req={} model={} latency={}ms success={}",
                     request_id, model_id, latency_ms, success
                 )
             }
-            TenzroEvent::AgentMessage { from_agent, to_agent, message_type, .. } => {
+            TenzroEvent::AgentMessage {
+                from_agent,
+                to_agent,
+                message_type,
+                ..
+            } => {
                 write!(
                     f,
                     "AgentMessage from={} to={} type={}",
                     from_agent, to_agent, message_type
                 )
             }
-            TenzroEvent::SettlementCompleted { settlement_id, amount, .. } => {
-                write!(f, "SettlementCompleted id={} amount={}", settlement_id, amount)
+            TenzroEvent::SettlementCompleted {
+                settlement_id,
+                amount,
+                ..
+            } => {
+                write!(
+                    f,
+                    "SettlementCompleted id={} amount={}",
+                    settlement_id, amount
+                )
             }
-            TenzroEvent::PaymentChannelUpdate { channel_id, status, .. } => {
-                write!(f, "PaymentChannelUpdate id={} status={}", channel_id, status)
+            TenzroEvent::PaymentChannelUpdate {
+                channel_id, status, ..
+            } => {
+                write!(
+                    f,
+                    "PaymentChannelUpdate id={} status={}",
+                    channel_id, status
+                )
             }
             TenzroEvent::StakeDeposited { amount, role, .. } => {
                 write!(f, "StakeDeposited amount={} role={}", amount, role)
@@ -713,42 +785,73 @@ impl fmt::Display for TenzroEvent {
             TenzroEvent::ValidatorSlashed { amount, reason, .. } => {
                 write!(f, "ValidatorSlashed amount={} reason={}", amount, reason)
             }
-            TenzroEvent::ProposalCreated { proposal_id, title, .. } => {
+            TenzroEvent::ProposalCreated {
+                proposal_id, title, ..
+            } => {
                 write!(f, "ProposalCreated id={} title={}", proposal_id, title)
             }
-            TenzroEvent::VoteCast { proposal_id, support, weight, .. } => {
+            TenzroEvent::VoteCast {
+                proposal_id,
+                support,
+                weight,
+                ..
+            } => {
                 write!(
                     f,
                     "VoteCast proposal={} support={} weight={}",
                     proposal_id, support, weight
                 )
             }
-            TenzroEvent::BridgeTransferInitiated { bridge_adapter, destination_chain, amount, .. } => {
+            TenzroEvent::BridgeTransferInitiated {
+                bridge_adapter,
+                destination_chain,
+                amount,
+                ..
+            } => {
                 write!(
                     f,
                     "BridgeTransferInitiated adapter={} dest={} amount={}",
                     bridge_adapter, destination_chain, amount
                 )
             }
-            TenzroEvent::BridgeTransferCompleted { bridge_adapter, source_chain, amount, .. } => {
+            TenzroEvent::BridgeTransferCompleted {
+                bridge_adapter,
+                source_chain,
+                amount,
+                ..
+            } => {
                 write!(
                     f,
                     "BridgeTransferCompleted adapter={} src={} amount={}",
                     bridge_adapter, source_chain, amount
                 )
             }
-            TenzroEvent::SyncProgress { current_block, highest_block, percent } => {
+            TenzroEvent::SyncProgress {
+                current_block,
+                highest_block,
+                percent,
+            } => {
                 write!(
                     f,
                     "SyncProgress {}/{} ({}%)",
                     current_block, highest_block, percent
                 )
             }
-            TenzroEvent::WorkflowCreated { workflow_id, title, .. } => {
-                write!(f, "WorkflowCreated id={} title={}", hex::encode(workflow_id), title)
+            TenzroEvent::WorkflowCreated {
+                workflow_id, title, ..
+            } => {
+                write!(
+                    f,
+                    "WorkflowCreated id={} title={}",
+                    hex::encode(workflow_id),
+                    title
+                )
             }
             TenzroEvent::WorkflowLifecycleTransitioned {
-                workflow_id, from_status, to_status, ..
+                workflow_id,
+                from_status,
+                to_status,
+                ..
             } => {
                 write!(
                     f,
@@ -758,7 +861,11 @@ impl fmt::Display for TenzroEvent {
                     to_status
                 )
             }
-            TenzroEvent::WorkflowReceiptEmitted { workflow_id, event_kind, .. } => {
+            TenzroEvent::WorkflowReceiptEmitted {
+                workflow_id,
+                event_kind,
+                ..
+            } => {
                 write!(
                     f,
                     "WorkflowReceipt wf={} kind={}",
@@ -766,7 +873,11 @@ impl fmt::Display for TenzroEvent {
                     event_kind
                 )
             }
-            TenzroEvent::ApprovalRequested { workflow_id, gate_id, .. } => {
+            TenzroEvent::ApprovalRequested {
+                workflow_id,
+                gate_id,
+                ..
+            } => {
                 write!(
                     f,
                     "ApprovalRequested wf={} gate={}",
@@ -774,8 +885,17 @@ impl fmt::Display for TenzroEvent {
                     hex::encode(gate_id)
                 )
             }
-            TenzroEvent::ApprovalFinalized { workflow_id, outcome, .. } => {
-                write!(f, "ApprovalFinalized wf={} outcome={}", hex::encode(workflow_id), outcome)
+            TenzroEvent::ApprovalFinalized {
+                workflow_id,
+                outcome,
+                ..
+            } => {
+                write!(
+                    f,
+                    "ApprovalFinalized wf={} outcome={}",
+                    hex::encode(workflow_id),
+                    outcome
+                )
             }
         }
     }
@@ -812,7 +932,11 @@ impl EventEnvelope {
 
 impl fmt::Display for EventEnvelope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[seq={} t={}] {}", self.sequence, self.timestamp, self.event)
+        write!(
+            f,
+            "[seq={} t={}] {}",
+            self.sequence, self.timestamp, self.event
+        )
     }
 }
 
@@ -904,9 +1028,7 @@ impl EventFilter {
         }
 
         // Event type filter
-        if !self.event_types.is_empty()
-            && !self.event_types.contains(&envelope.event_type())
-        {
+        if !self.event_types.is_empty() && !self.event_types.contains(&envelope.event_type()) {
             return false;
         }
 
@@ -927,7 +1049,10 @@ impl EventFilter {
 
         // Topic filter (only applies to Log events)
         if !self.topics.is_empty() {
-            if let TenzroEvent::Log { topics, removed, .. } = &envelope.event {
+            if let TenzroEvent::Log {
+                topics, removed, ..
+            } = &envelope.event
+            {
                 // Exclude removed logs unless include_removed is set
                 if *removed && !self.include_removed {
                     return false;
@@ -977,7 +1102,9 @@ impl EventFilter {
             TenzroEvent::ModelRegistered { provider, .. } => vec![*provider],
             TenzroEvent::InferenceCompleted { provider, .. } => vec![*provider],
             TenzroEvent::SettlementCompleted { payer, payee, .. } => vec![*payer, *payee],
-            TenzroEvent::PaymentChannelUpdate { sender, receiver, .. } => {
+            TenzroEvent::PaymentChannelUpdate {
+                sender, receiver, ..
+            } => {
                 vec![*sender, *receiver]
             }
             TenzroEvent::StakeDeposited { staker, .. } => vec![*staker],

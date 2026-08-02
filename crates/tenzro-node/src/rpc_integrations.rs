@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::node::TenzroNode;
 use crate::rpc::JsonRpcError;
@@ -114,11 +114,9 @@ pub(crate) async fn handle_ap2_validate_mandate_pair(
     let validator = tenzro_payments::ap2::MandateValidator::new();
 
     let outcome: std::result::Result<(), tenzro_payments::PaymentError> = if enforce_delegation {
-        let registry = node
-            .identity_registry()
-            .ok_or_else(|| invalid_params(
-                "enforce_delegation=true but node has no IdentityRegistry wired",
-            ))?;
+        let registry = node.identity_registry().ok_or_else(|| {
+            invalid_params("enforce_delegation=true but node has no IdentityRegistry wired")
+        })?;
         // When an `AgentRuntime` is wired, also consult its per-machine
         // SpendingPolicy registry so AP2 cart validation enforces all
         // three nested AP2 v0.2 ceilings — CheckoutMandate, TDIP
@@ -502,10 +500,7 @@ pub(crate) async fn handle_x402_register_resource(
         .get("maxAmountRequired")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_params("maxAmountRequired required"))?;
-    let description = p
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let description = p.get("description").and_then(Value::as_str).unwrap_or("");
     let mime_type = p
         .get("mimeType")
         .and_then(Value::as_str)
@@ -517,7 +512,11 @@ pub(crate) async fn handle_x402_register_resource(
     let tags: Vec<String> = p
         .get("tags")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut requirement = tenzro_payments::x402::X402PaymentRequirement::new(
@@ -536,12 +535,8 @@ pub(crate) async fn handle_x402_register_resource(
     }
 
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let listing = tenzro_payments::x402::X402ResourceListing::new(
-        seller_did,
-        requirement,
-        tags,
-        now_ms,
-    );
+    let listing =
+        tenzro_payments::x402::X402ResourceListing::new(seller_did, requirement, tags, now_ms);
     let listing_id = catalog.register(listing).map_err(|e| JsonRpcError {
         code: -32602,
         message: format!("bazaar register: {e}"),
@@ -578,7 +573,11 @@ pub(crate) async fn handle_x402_discover_resources(
         tags: p
             .get("tags")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
         min_reputation: p.get("minReputation").and_then(Value::as_u64),
         limit: p.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize,
@@ -1496,7 +1495,7 @@ pub(crate) async fn handle_process_tap_payer_auth_outcome(
 ) -> std::result::Result<Value, JsonRpcError> {
     use tenzro_payments::visa_tap::{AgentTag, VerificationResult};
 
-    use crate::tap_reputation_dispatcher::{dispatch_payer_auth_outcome, TapOutcome};
+    use crate::tap_reputation_dispatcher::{TapOutcome, dispatch_payer_auth_outcome};
 
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
@@ -1645,14 +1644,9 @@ pub(crate) async fn handle_ap2_report_mandate_violation(
     let checkout_mandate = checkout
         .as_checkout()
         .ok_or_else(|| invalid_params("checkout_vdc is not a CheckoutMandate"))?;
-    let bond_id = checkout_mandate
-        .agent_bond_id
-        .as_deref()
-        .ok_or_else(|| {
-            invalid_params(
-                "CheckoutMandate carries no agent_bond_id — nothing to slash",
-            )
-        })?;
+    let bond_id = checkout_mandate.agent_bond_id.as_deref().ok_or_else(|| {
+        invalid_params("CheckoutMandate carries no agent_bond_id — nothing to slash")
+    })?;
 
     // Optional child PaymentMandate evidence — verified if supplied so
     // governance can rely on the receipt_refs and amounts. Signature
@@ -1780,16 +1774,16 @@ pub(crate) async fn handle_ap2_report_mandate_violation(
     // a bond (a violation against a bondless agent has no slashable
     // collateral and would just accumulate as a permanent unsatisfiable
     // open record).
-    let _bond_state = bond_manager.get(&checkout_mandate.agent_did).ok_or_else(|| {
-        JsonRpcError {
+    let _bond_state = bond_manager
+        .get(&checkout_mandate.agent_did)
+        .ok_or_else(|| JsonRpcError {
             code: -32000,
             message: format!(
                 "no AgentBond posted for agent {} (mandate carries agent_bond_id={})",
                 checkout_mandate.agent_did, bond_id
             ),
             data: None,
-        }
-    })?;
+        })?;
 
     let record = bond_manager
         .file_claim(
@@ -1851,14 +1845,16 @@ pub(crate) async fn handle_erc8004_derive_agent_id(
         data: None,
     })?;
 
-    let agent_id = registry.lookup_agent_id_by_did(&did).ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: format!(
-            "DID {} has no allocated ERC-8004 agentId. Register the machine identity first.",
-            did
-        ),
-        data: None,
-    })?;
+    let agent_id = registry
+        .lookup_agent_id_by_did(&did)
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: format!(
+                "DID {} has no allocated ERC-8004 agentId. Register the machine identity first.",
+                did
+            ),
+            data: None,
+        })?;
 
     Ok(json!({
         "did": did,
@@ -2599,7 +2595,9 @@ pub(crate) async fn handle_wormhole_parse_vaa_id(
 
     let parts: Vec<&str> = id.split('/').collect();
     if parts.len() != 3 {
-        return Err(invalid_params("VAA id must be {chain}/{emitter}/{sequence}"));
+        return Err(invalid_params(
+            "VAA id must be {chain}/{emitter}/{sequence}",
+        ));
     }
     let chain: u16 = parts[0]
         .parse()
@@ -2877,8 +2875,8 @@ fn ccip_build_calldata(
     fee_token: &str,
     gas_limit: u64,
 ) -> std::result::Result<Vec<u8>, JsonRpcError> {
-    let selector = hex::decode(selector_hex)
-        .map_err(|e| invalid_params(format!("bad selector: {e}")))?;
+    let selector =
+        hex::decode(selector_hex).map_err(|e| invalid_params(format!("bad selector: {e}")))?;
     let mut calldata = Vec::with_capacity(4 + 64 + 256);
     calldata.extend_from_slice(&selector);
     calldata.extend_from_slice(&pad32_left(&dst_selector.to_be_bytes()));
@@ -2944,7 +2942,9 @@ async fn ccip_eth_call(
     })
 }
 
-fn ccip_extract_token_amounts(params: &Value) -> std::result::Result<Vec<(String, String)>, JsonRpcError> {
+fn ccip_extract_token_amounts(
+    params: &Value,
+) -> std::result::Result<Vec<(String, String)>, JsonRpcError> {
     let Some(arr) = params.get("token_amounts").and_then(|v| v.as_array()) else {
         return Ok(Vec::new());
     };
@@ -2958,7 +2958,9 @@ fn ccip_extract_token_amounts(params: &Value) -> std::result::Result<Vec<(String
             let amount = item
                 .get("amount")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("token_amounts[*].amount missing (use decimal string)"))?
+                .ok_or_else(|| {
+                    invalid_params("token_amounts[*].amount missing (use decimal string)")
+                })?
                 .to_string();
             Ok((token, amount))
         })
@@ -2986,7 +2988,10 @@ pub(crate) async fn handle_ccip_get_fee(
         .get("receiver")
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing("Missing receiver"))?;
-    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).unwrap_or("");
+    let data_hex = params
+        .get("data_hex")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let fee_token = params
         .get("fee_token")
         .and_then(|v| v.as_str())
@@ -3009,7 +3014,10 @@ pub(crate) async fn handle_ccip_get_fee(
         data_hex,
         &token_amounts,
         fee_token,
-        params.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(200_000),
+        params
+            .get("gas_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200_000),
     )?;
 
     let http = crate::http_client::shared();
@@ -3057,12 +3065,18 @@ pub(crate) async fn handle_ccip_send(
         .get("receiver")
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing("Missing receiver"))?;
-    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).unwrap_or("");
+    let data_hex = params
+        .get("data_hex")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let fee_token = params
         .get("fee_token")
         .and_then(|v| v.as_str())
         .unwrap_or("0x0000000000000000000000000000000000000000");
-    let gas_limit = params.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(200_000);
+    let gas_limit = params
+        .get("gas_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(200_000);
     let token_amounts = ccip_extract_token_amounts(&params)?;
 
     let (chain_name, rpc_url, _src_selector, router) =
@@ -3148,8 +3162,7 @@ pub(crate) async fn handle_ccip_track(
     let (chain_name, rpc_url, _, _) =
         ccip_chain_descriptor(dst).ok_or_else(|| invalid_params("Unsupported dest_chain"))?;
 
-    let mut calldata =
-        hex::decode(CCIP_GET_EXECUTION_STATE_SELECTOR).expect("static selector hex");
+    let mut calldata = hex::decode(CCIP_GET_EXECUTION_STATE_SELECTOR).expect("static selector hex");
     calldata.extend_from_slice(&pad32_left(&message_id_bytes));
 
     let http = crate::http_client::shared();
@@ -3283,7 +3296,10 @@ pub(crate) async fn handle_ccip_supported_chains(
     let env = params
         .as_ref()
         .map(|p| unwrap_arr(p.clone()))
-        .and_then(|p| p.get("environment").and_then(|v| v.as_str().map(String::from)))
+        .and_then(|p| {
+            p.get("environment")
+                .and_then(|v| v.as_str().map(String::from))
+        })
         .unwrap_or_else(|| "mainnet".to_string());
     let body = ccip_api_get("/chains", &[("environment", &env)]).await?;
     Ok(json!({ "environment": env, "chains": body }))
@@ -3297,7 +3313,10 @@ pub(crate) async fn handle_ccip_supported_tokens(
     let env = params
         .as_ref()
         .map(|p| unwrap_arr(p.clone()))
-        .and_then(|p| p.get("environment").and_then(|v| v.as_str().map(String::from)))
+        .and_then(|p| {
+            p.get("environment")
+                .and_then(|v| v.as_str().map(String::from))
+        })
         .unwrap_or_else(|| "mainnet".to_string());
     let body = ccip_api_get("/tokens", &[("environment", &env)]).await?;
     Ok(json!({ "environment": env, "tokens": body }))
@@ -3394,8 +3413,8 @@ pub(crate) async fn handle_ccip_rate_limits(
         .get("remote_chain")
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing("Missing remote_chain"))?;
-    let remote = ccip_chain_selector(remote_raw)
-        .ok_or_else(|| invalid_params("Invalid remote_chain"))?;
+    let remote =
+        ccip_chain_selector(remote_raw).ok_or_else(|| invalid_params("Invalid remote_chain"))?;
 
     let (chain_name, rpc_url, _, _) =
         ccip_chain_descriptor(chain).ok_or_else(|| invalid_params("Unsupported chain"))?;
@@ -3466,7 +3485,10 @@ pub(crate) async fn handle_ccip_bridge(
         .get("dest_chain")
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing("Missing dest_chain"))?;
-    let asset = params.get("asset").and_then(|v| v.as_str()).unwrap_or("TNZO");
+    let asset = params
+        .get("asset")
+        .and_then(|v| v.as_str())
+        .unwrap_or("TNZO");
     let amount: u128 = parse_u128(params.get("amount"))
         .ok_or_else(|| invalid_params("Missing or invalid amount"))?;
     let sender = params
@@ -3554,7 +3576,12 @@ pub(crate) async fn handle_cct_list_pools(
     _params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let pools: Vec<Value> = if let Some(bridge) = node.cct_bridge() {
-        bridge.registry().all().into_iter().map(pool_to_json).collect()
+        bridge
+            .registry()
+            .all()
+            .into_iter()
+            .map(pool_to_json)
+            .collect()
     } else {
         tenzro_bridge::TnzoCctRegistry::tenzro_mainnet()
             .all()
@@ -3609,7 +3636,8 @@ pub(crate) async fn handle_cct_build_message(
 
     let bridge = node.cct_bridge().ok_or_else(|| JsonRpcError {
         code: -32603,
-        message: "TNZO CCT bridge not initialized — enable [bridge.ccip] in node config".to_string(),
+        message: "TNZO CCT bridge not initialized — enable [bridge.ccip] in node config"
+            .to_string(),
         data: None,
     })?;
 
@@ -3629,7 +3657,12 @@ pub(crate) async fn handle_cct_build_message(
         .get("amount")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
-        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .or_else(|| {
+            params
+                .get("amount")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u128)
+        })
         .ok_or_else(|| missing("Missing or invalid amount"))?;
 
     let fee_token = match params
@@ -3680,19 +3713,18 @@ pub(crate) async fn handle_hyperlane_list_chains(
     _params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let adapter = node.hyperlane_adapter();
-    let chains: Vec<Value> =
-        tenzro_bridge::BridgeAdapter::supported_chains(adapter.as_ref())
-            .into_iter()
-            .map(|c| {
-                json!({
-                    "chain": c.chain_id,
-                    "name": c.name,
-                    "native_token": c.native_token,
-                    "finality_time_secs": c.finality_time_secs,
-                    "domain": adapter.config().chain_id(&c.chain_id),
-                })
+    let chains: Vec<Value> = tenzro_bridge::BridgeAdapter::supported_chains(adapter.as_ref())
+        .into_iter()
+        .map(|c| {
+            json!({
+                "chain": c.chain_id,
+                "name": c.name,
+                "native_token": c.native_token,
+                "finality_time_secs": c.finality_time_secs,
+                "domain": adapter.config().chain_id(&c.chain_id),
             })
-            .collect();
+        })
+        .collect();
     Ok(json!({
         "source_domain": adapter.config().source_domain,
         "chains": chains.clone(),
@@ -3782,9 +3814,7 @@ pub(crate) async fn handle_hyperlane_dispatch(
         .dispatch_message(destination_domain, sender, recipient, body)
         .map_err(|e| invalid_params(format!("{e}")))?;
     let id_hex = format!("0x{}", hex::encode(id.as_bytes()));
-    let nonce = adapter
-        .lookup_message(&id_hex)
-        .map(|(m, _)| m.nonce);
+    let nonce = adapter.lookup_message(&id_hex).map(|(m, _)| m.nonce);
     Ok(json!({
         "message_id": id_hex,
         "origin_domain": adapter.config().source_domain,
@@ -3974,10 +4004,7 @@ fn parse_babylon_validator(
         .map_err(|e| invalid_params(format!("invalid validator address: {e}")))
 }
 
-fn parse_hex_32(
-    params: &Value,
-    key: &str,
-) -> std::result::Result<[u8; 32], JsonRpcError> {
+fn parse_hex_32(params: &Value, key: &str) -> std::result::Result<[u8; 32], JsonRpcError> {
     let raw = params
         .get(key)
         .and_then(|v| v.as_str())
@@ -4059,9 +4086,9 @@ pub(crate) async fn handle_babylon_total_stake_for_provider(
     let validator = parse_babylon_validator(&params)?;
 
     let adapter = node.babylon_adapter();
-    let provider = adapter.finality_provider(&validator).ok_or_else(|| {
-        invalid_params("finality provider not registered for validator")
-    })?;
+    let provider = adapter
+        .finality_provider(&validator)
+        .ok_or_else(|| invalid_params("finality provider not registered for validator"))?;
     let total = adapter.total_stake_for_provider(&provider.btc_pk);
     Ok(json!({
         "validator": format!("0x{}", hex::encode(validator.as_bytes())),
@@ -4081,9 +4108,9 @@ pub(crate) async fn handle_babylon_list_delegations(
     let validator = parse_babylon_validator(&params)?;
 
     let adapter = node.babylon_adapter();
-    let provider = adapter.finality_provider(&validator).ok_or_else(|| {
-        invalid_params("finality provider not registered for validator")
-    })?;
+    let provider = adapter
+        .finality_provider(&validator)
+        .ok_or_else(|| invalid_params("finality provider not registered for validator"))?;
     let delegations: Vec<Value> = adapter
         .delegations_for_provider(&provider.btc_pk)
         .into_iter()
@@ -4485,8 +4512,8 @@ fn parse_uint256_param(params: &Value, key: &str) -> std::result::Result<[u8; 32
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing(&format!("Missing {key}")))?;
     let stripped = raw.trim_start_matches("0x");
-    let decoded = hex::decode(stripped)
-        .map_err(|e| invalid_params(format!("{key}: invalid hex: {e}")))?;
+    let decoded =
+        hex::decode(stripped).map_err(|e| invalid_params(format!("{key}: invalid hex: {e}")))?;
     if decoded.len() != 32 {
         return Err(invalid_params(format!("{key} must be 32 bytes")));
     }
@@ -4789,8 +4816,8 @@ fn parse_u128(v: Option<&Value>) -> Option<u128> {
 
 fn parse_eth_addr(s: &str) -> std::result::Result<[u8; 20], JsonRpcError> {
     let hex_str = s.trim_start_matches("0x");
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| invalid_params(format!("invalid address hex: {e}")))?;
+    let bytes =
+        hex::decode(hex_str).map_err(|e| invalid_params(format!("invalid address hex: {e}")))?;
     if bytes.len() != 20 {
         return Err(invalid_params(format!(
             "address must be 20 bytes, got {}",
@@ -4804,8 +4831,8 @@ fn parse_eth_addr(s: &str) -> std::result::Result<[u8; 20], JsonRpcError> {
 
 fn parse_bytes32(s: &str) -> std::result::Result<[u8; 32], JsonRpcError> {
     let hex_str = s.trim_start_matches("0x");
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| invalid_params(format!("invalid bytes32 hex: {e}")))?;
+    let bytes =
+        hex::decode(hex_str).map_err(|e| invalid_params(format!("invalid bytes32 hex: {e}")))?;
     if bytes.len() != 32 {
         return Err(invalid_params(format!(
             "bytes32 must be 32 bytes, got {}",
@@ -4860,9 +4887,8 @@ fn parse_agent_id_u64(value: &Value) -> std::result::Result<u64, JsonRpcError> {
         return Ok(u64::from_be_bytes(word[24..32].try_into().unwrap()));
     }
 
-    s.parse::<u64>().map_err(|e| {
-        invalid_params(format!("agent_id decimal string did not parse as u64: {e}"))
-    })
+    s.parse::<u64>()
+        .map_err(|e| invalid_params(format!("agent_id decimal string did not parse as u64: {e}")))
 }
 
 // ============================================================
@@ -4880,8 +4906,8 @@ fn parse_u128_param(params: &Value, key: &str) -> std::result::Result<u128, Json
     if let Some(s) = val.as_str() {
         let stripped = s.trim_start_matches("0x");
         if s.starts_with("0x") {
-            let bytes = hex::decode(stripped)
-                .map_err(|e| invalid_params(format!("{key} hex: {e}")))?;
+            let bytes =
+                hex::decode(stripped).map_err(|e| invalid_params(format!("{key} hex: {e}")))?;
             if bytes.len() > 16 {
                 return Err(invalid_params(format!("{key} overflows u128")));
             }
@@ -4889,11 +4915,13 @@ fn parse_u128_param(params: &Value, key: &str) -> std::result::Result<u128, Json
             buf[16 - bytes.len()..].copy_from_slice(&bytes);
             return Ok(u128::from_be_bytes(buf));
         }
-        return s.parse::<u128>().map_err(|e| {
-            invalid_params(format!("{key} decimal string: {e}"))
-        });
+        return s
+            .parse::<u128>()
+            .map_err(|e| invalid_params(format!("{key} decimal string: {e}")));
     }
-    Err(invalid_params(format!("{key} must be u64, hex, or decimal string")))
+    Err(invalid_params(format!(
+        "{key} must be u64, hex, or decimal string"
+    )))
 }
 
 fn parse_token_20(params: &Value, key: &str) -> std::result::Result<[u8; 20], JsonRpcError> {
@@ -5011,7 +5039,9 @@ pub(crate) async fn handle_set_secure_mint_policy(
         window_started_at: attested_at,
         paused,
     };
-    let prior = node.secure_mint_registry().set_policy(token, policy.clone());
+    let prior = node
+        .secure_mint_registry()
+        .set_policy(token, policy.clone());
     Ok(json!({
         "installed": true,
         "token": format!("0x{}", hex::encode(token)),
@@ -5071,7 +5101,10 @@ pub(crate) async fn handle_secure_mint_check(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    match node.secure_mint_registry().would_mint_succeed(&token, amount, now) {
+    match node
+        .secure_mint_registry()
+        .would_mint_succeed(&token, amount, now)
+    {
         Ok(()) => Ok(json!({
             "allowed": true,
             "token": format!("0x{}", hex::encode(token)),
@@ -5104,7 +5137,10 @@ pub(crate) async fn handle_secure_mint_apply(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    match node.secure_mint_registry().check_and_mint(&token, amount, now) {
+    match node
+        .secure_mint_registry()
+        .check_and_mint(&token, amount, now)
+    {
         Ok(policy) => Ok(json!({
             "applied": true,
             "token": format!("0x{}", hex::encode(token)),
@@ -5192,7 +5228,10 @@ fn stable_asset_policy_to_json(
             "attester_did": attester_did,
             "asset_caip19": asset_caip19,
         }),
-        ReserveSource::OnChainVault { vault, asset_caip19 } => json!({
+        ReserveSource::OnChainVault {
+            vault,
+            asset_caip19,
+        } => json!({
             "kind": "on_chain_vault",
             "vault": format!("0x{}", hex::encode(vault.0)),
             "asset_caip19": asset_caip19,
@@ -5235,9 +5274,7 @@ pub(crate) async fn handle_register_stable_asset(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    use tenzro_vm::stable_asset_registry::{
-        PaymentRail, ReserveSource, StableAssetPolicy,
-    };
+    use tenzro_vm::stable_asset_registry::{PaymentRail, ReserveSource, StableAssetPolicy};
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
@@ -5281,7 +5318,7 @@ pub(crate) async fn handle_register_stable_asset(
         _ => {
             return Err(invalid_params(
                 "reserve_source.kind must be \"custodial\" or \"on_chain_vault\"",
-            ))
+            ));
         }
     };
 
@@ -5294,9 +5331,7 @@ pub(crate) async fn handle_register_stable_asset(
         let tag = v
             .as_str()
             .ok_or_else(|| invalid_params("allowed_rails entries must be strings"))?;
-        allowed_rails.push(
-            PaymentRail::parse(tag).map_err(|e| invalid_params(e.to_string()))?,
-        );
+        allowed_rails.push(PaymentRail::parse(tag).map_err(|e| invalid_params(e.to_string()))?);
     }
 
     let settlement_dst =
@@ -5393,7 +5428,9 @@ pub(crate) async fn handle_mint_stable_asset(
             "circulating": policy.circulating.to_string(),
             "reserve": policy.reserve.to_string(),
         })),
-        Err(err) => Err(invalid_params(format!("mint rejected by reserve floor: {err}"))),
+        Err(err) => Err(invalid_params(format!(
+            "mint rejected by reserve floor: {err}"
+        ))),
     }
 }
 
@@ -5506,16 +5543,18 @@ pub(crate) async fn handle_urwa_set_frozen_tokens(
         message: format!("invalid params: {}", e),
         data: None,
     })?;
-    let tid_raw = hex::decode(req.token_id_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError {
-        code: -32602,
-        message: format!("token_id_hex not hex: {}", e),
-        data: None,
-    })?;
-    let acct_raw = hex::decode(req.account_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError {
-        code: -32602,
-        message: format!("account_hex not hex: {}", e),
-        data: None,
-    })?;
+    let tid_raw =
+        hex::decode(req.token_id_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("token_id_hex not hex: {}", e),
+            data: None,
+        })?;
+    let acct_raw =
+        hex::decode(req.account_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("account_hex not hex: {}", e),
+            data: None,
+        })?;
     if tid_raw.len() != 32 || acct_raw.len() != 20 {
         return Err(JsonRpcError {
             code: -32602,
@@ -5583,8 +5622,12 @@ pub(crate) async fn handle_urwa_trigger_kill_switch(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    node.urwa_registry()
-        .trigger_kill_switch(token_id, req.triggered_by_did.clone(), req.reason.clone(), now_ms);
+    node.urwa_registry().trigger_kill_switch(
+        token_id,
+        req.triggered_by_did.clone(),
+        req.reason.clone(),
+        now_ms,
+    );
     Ok(json!({
         "token_id_hex": format!("0x{}", hex::encode(token_id)),
         "active": true,
@@ -5647,20 +5690,18 @@ pub(crate) async fn handle_urwa_get_frozen_tokens(
         message: format!("invalid params: {}", e),
         data: None,
     })?;
-    let token_raw = hex::decode(req.token_id_hex.trim_start_matches("0x")).map_err(|e| {
-        JsonRpcError {
+    let token_raw =
+        hex::decode(req.token_id_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError {
             code: -32602,
             message: format!("token_id_hex not hex: {}", e),
             data: None,
-        }
-    })?;
-    let acct_raw = hex::decode(req.account_hex.trim_start_matches("0x")).map_err(|e| {
-        JsonRpcError {
+        })?;
+    let acct_raw =
+        hex::decode(req.account_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError {
             code: -32602,
             message: format!("account_hex not hex: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     if token_raw.len() != 32 || acct_raw.len() != 20 {
         return Err(JsonRpcError {
             code: -32602,
@@ -5787,11 +5828,14 @@ pub(crate) async fn handle_quote_bridge_fee_in_tnzo(
                 data: None,
             }
         })?;
-    let native_fee: u128 = req.native_fee_smallest_unit.parse().map_err(|e| JsonRpcError {
-        code: -32602,
-        message: format!("native_fee_smallest_unit not a valid u128: {}", e),
-        data: None,
-    })?;
+    let native_fee: u128 = req
+        .native_fee_smallest_unit
+        .parse()
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("native_fee_smallest_unit not a valid u128: {}", e),
+            data: None,
+        })?;
 
     // Consult the router's wired oracle if available.
     if let Some(router) = node.bridge_router()
@@ -6009,11 +6053,13 @@ pub(crate) async fn handle_sponsor_bridge_fee(
             }
         })?;
     let native_fee_smallest_unit: u128 =
-        req.native_fee_smallest_unit.parse().map_err(|e| JsonRpcError {
-            code: -32602,
-            message: format!("native_fee_smallest_unit not a valid u128: {}", e),
-            data: None,
-        })?;
+        req.native_fee_smallest_unit
+            .parse()
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("native_fee_smallest_unit not a valid u128: {}", e),
+                data: None,
+            })?;
     let tnzo_amount_wei: u128 = req.tnzo_amount_wei.parse().map_err(|e| JsonRpcError {
         code: -32602,
         message: format!("tnzo_amount_wei not a valid u128: {}", e),
@@ -6178,8 +6224,7 @@ pub(crate) async fn handle_near_chain_sig_epsilon(
             message: "missing path".to_string(),
             data: None,
         })?;
-    let epsilon =
-        tenzro_bridge::near_chain_sig::NearChainSigAdapter::epsilon(predecessor, path);
+    let epsilon = tenzro_bridge::near_chain_sig::NearChainSigAdapter::epsilon(predecessor, path);
     Ok(json!({
         "predecessor": predecessor,
         "path": path,
@@ -6200,8 +6245,8 @@ pub(crate) async fn handle_bitvm2_verifier_kinds() -> std::result::Result<Value,
 
 /// `tenzro_hyperbridgeMintControlsDefault` — default mint-control policy
 /// applied after the 2026-04-13 Hyperbridge exploit hardening.
-pub(crate) async fn handle_hyperbridge_mint_controls_default(
-) -> std::result::Result<Value, JsonRpcError> {
+pub(crate) async fn handle_hyperbridge_mint_controls_default()
+-> std::result::Result<Value, JsonRpcError> {
     let p = tenzro_bridge::hyperbridge::MintControlPolicy::default();
     Ok(json!({
         "forbid_admin_transitions": p.forbid_admin_transitions,
@@ -6215,8 +6260,7 @@ pub(crate) async fn handle_hyperbridge_mint_controls_default(
 }
 
 /// `tenzro_stargateV2KnownPools` — verified Stargate V2 Hydra pools.
-pub(crate) async fn handle_stargate_v2_known_pools(
-) -> std::result::Result<Value, JsonRpcError> {
+pub(crate) async fn handle_stargate_v2_known_pools() -> std::result::Result<Value, JsonRpcError> {
     let usdc = tenzro_bridge::stargate_v2::known::ethereum_usdc();
     let usdt = tenzro_bridge::stargate_v2::known::arbitrum_usdt();
     Ok(json!({
@@ -6228,7 +6272,8 @@ pub(crate) async fn handle_stargate_v2_known_pools(
 }
 
 /// `tenzro_universalResolverMethods` — methods this node can resolve.
-pub(crate) async fn handle_universal_resolver_methods() -> std::result::Result<Value, JsonRpcError> {
+pub(crate) async fn handle_universal_resolver_methods() -> std::result::Result<Value, JsonRpcError>
+{
     Ok(json!({ "methods": ["tenzro", "pdis"] }))
 }
 
@@ -6252,13 +6297,14 @@ pub(crate) async fn handle_siwt_parse_message(
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.unwrap_or(json!({}));
-    let raw = p.get("message").and_then(|v| v.as_str()).ok_or_else(|| {
-        JsonRpcError {
+    let raw = p
+        .get("message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
             code: -32602,
             message: "missing message".to_string(),
             data: None,
-        }
-    })?;
+        })?;
     let parsed = crate::web::siwt::SiwtMessage::parse(raw).map_err(|e| JsonRpcError {
         code: -32602,
         message: format!("siwt parse: {}", e),
@@ -6515,14 +6561,14 @@ pub(crate) async fn handle_moe_plan_dispatch(
                 message: "routing missing token_index".into(),
                 data: None,
             })? as u32;
-        let experts_arr = r
-            .get("experts")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| JsonRpcError {
-                code: -32602,
-                message: "routing missing experts array".into(),
-                data: None,
-            })?;
+        let experts_arr =
+            r.get("experts")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "routing missing experts array".into(),
+                    data: None,
+                })?;
         let mut experts: Vec<tenzro_model::ExpertId> = Vec::with_capacity(experts_arr.len());
         for e in experts_arr {
             let layer = e
@@ -6556,13 +6602,12 @@ pub(crate) async fn handle_moe_plan_dispatch(
     })?;
     let providers = manager.list_providers();
     let view = tenzro_model::MoeShardView::build(model_id, providers.iter());
-    let plan = tenzro_model::plan_dispatch(&view, &routings, allow_cold).map_err(|e| {
-        JsonRpcError {
+    let plan =
+        tenzro_model::plan_dispatch(&view, &routings, allow_cold).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("moe dispatch planner: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     Ok(json!({
         "model_id": plan.model_id,
         "batch_count": plan.batches.len(),
@@ -6679,6 +6724,7 @@ pub(crate) async fn handle_model_metadata(
             "top_p": entry.serving.top_p,
             "top_k": entry.serving.top_k,
             "min_p": entry.serving.min_p,
+            "presence_penalty": entry.serving.presence_penalty,
             "jinja_required": entry.serving.jinja_required,
             "reasoning_default": entry.serving.reasoning_default,
         },

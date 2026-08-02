@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tenzro_storage::{KvStore, CF_BRIDGE_ANALYTICS};
+use tenzro_storage::{CF_BRIDGE_ANALYTICS, KvStore};
 
 use crate::error::{NodeError, Result};
 
@@ -75,9 +75,9 @@ impl BridgeKeyAnalytics {
 /// read-only RPC weight).
 pub fn method_cu_cost(method: &str) -> u64 {
     match method {
-        "tenzro_quoteBridgeFeeInTnzo" => 26,        // 1 × eth_call to AggregatorV3
-        "tenzro_sponsorBridgeFee" => 5,             // pure in-memory write
-        "tenzro_listBridgeSponsorshipPools" => 5,   // in-memory snapshot
+        "tenzro_quoteBridgeFeeInTnzo" => 26, // 1 × eth_call to AggregatorV3
+        "tenzro_sponsorBridgeFee" => 5,      // pure in-memory write
+        "tenzro_listBridgeSponsorshipPools" => 5, // in-memory snapshot
         "tenzro_listBridgeFeeFeeds" => 5,
         "tenzro_getBridgeFeeFeed" => 5,
         "tenzro_getBridgeAnalytics" => 5,
@@ -155,7 +155,10 @@ impl BridgeAnalyticsManager {
                 *entry.calls_by_method.entry(method.to_string()).or_insert(0) += 1;
             } else {
                 entry.errors_total = entry.errors_total.saturating_add(1);
-                *entry.errors_by_method.entry(method.to_string()).or_insert(0) += 1;
+                *entry
+                    .errors_by_method
+                    .entry(method.to_string())
+                    .or_insert(0) += 1;
             }
             entry.clone()
         };
@@ -344,17 +347,18 @@ mod tests {
     fn analytics_round_trip_through_storage() {
         let storage = mem_store();
         let mgr = BridgeAnalyticsManager::new(storage.clone()).unwrap();
-        mgr.record_call("k1", "tenzro_quoteBridgeFeeInTnzo", true).unwrap();
-        mgr.record_call("k1", "tenzro_quoteBridgeFeeInTnzo", true).unwrap();
-        mgr.record_call("k1", "tenzro_sponsorBridgeFee", false).unwrap();
+        mgr.record_call("k1", "tenzro_quoteBridgeFeeInTnzo", true)
+            .unwrap();
+        mgr.record_call("k1", "tenzro_quoteBridgeFeeInTnzo", true)
+            .unwrap();
+        mgr.record_call("k1", "tenzro_sponsorBridgeFee", false)
+            .unwrap();
         let r = mgr.get("k1").unwrap();
         assert_eq!(r.calls_total, 2);
         assert_eq!(r.errors_total, 1);
         // 2 × 26 CU for the quote calls; errors don't count CUs.
         assert_eq!(r.cu_consumed_total, 52);
-        assert_eq!(
-            r.calls_by_method["tenzro_quoteBridgeFeeInTnzo"], 2
-        );
+        assert_eq!(r.calls_by_method["tenzro_quoteBridgeFeeInTnzo"], 2);
     }
 
     #[test]
@@ -362,7 +366,8 @@ mod tests {
         let storage = mem_store();
         {
             let mgr = BridgeAnalyticsManager::new(storage.clone()).unwrap();
-            mgr.record_call("k2", "tenzro_quoteBridgeFeeInTnzo", true).unwrap();
+            mgr.record_call("k2", "tenzro_quoteBridgeFeeInTnzo", true)
+                .unwrap();
         }
         let mgr2 = BridgeAnalyticsManager::new(storage).unwrap();
         let r = mgr2.get("k2").unwrap();

@@ -156,7 +156,7 @@ impl VmTransaction {
     /// This hashes only the transaction fields that are covered by the signature
     /// (excludes `signature` and `public_key` to avoid circular dependency).
     pub fn signing_hash(&self) -> Vec<u8> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(&self.from);
         if let Some(ref to) = self.to {
@@ -174,11 +174,10 @@ impl VmTransaction {
 
     /// Get the full transaction hash (includes all fields for indexing/lookup).
     pub fn hash(&self) -> Vec<u8> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let data = serde_json::to_vec(self).unwrap_or_default();
         Sha256::digest(&data).to_vec()
     }
-
 }
 
 /// Result of executing a transaction
@@ -214,7 +213,12 @@ pub struct ExecutionResult {
 
 impl ExecutionResult {
     /// Create a successful execution result
-    pub fn success(gas_used: u64, output: Vec<u8>, logs: Vec<Log>, state_changes: Vec<StateChange>) -> Self {
+    pub fn success(
+        gas_used: u64,
+        output: Vec<u8>,
+        logs: Vec<Log>,
+        state_changes: Vec<StateChange>,
+    ) -> Self {
         Self {
             success: true,
             gas_used,
@@ -244,7 +248,12 @@ impl ExecutionResult {
     }
 
     /// Create a deployment result
-    pub fn deployment(gas_used: u64, contract_address: Vec<u8>, logs: Vec<Log>, state_changes: Vec<StateChange>) -> Self {
+    pub fn deployment(
+        gas_used: u64,
+        contract_address: Vec<u8>,
+        logs: Vec<Log>,
+        state_changes: Vec<StateChange>,
+    ) -> Self {
         Self {
             success: true,
             gas_used,

@@ -5,7 +5,7 @@
 //! through [`KeyshareStore`](crate::mpc::store::KeyshareStore). The sealer is
 //! injectable so the keygen driver itself stays free of `tenzro_tee` Cargo
 //! features (TDX / SEV-SNP / Nitro / NVIDIA GPU) — production node startup
-//! picks the right backend via [`KeyshareSealer::derive_auto`] and tests
+//! picks the right backend via [`TeeKeyshareSealer::derive_auto`] and tests
 //! inject a deterministic in-memory backend.
 //!
 //! ## Wire format
@@ -31,7 +31,7 @@
 //! ## No simulation
 //!
 //! Per Tenzro's no-simulation-on-testnet policy,
-//! [`KeyshareSealer::derive_auto`] returns
+//! [`TeeKeyshareSealer::derive_auto`] returns
 //! `KeyshareSealerError::TeeNotAvailable` on dev machines instead of
 //! fabricating a deterministic in-memory key. Tests opt into
 //! [`InMemoryKeyshareSealer`] explicitly.
@@ -213,21 +213,18 @@ impl KeyshareSealer for InMemoryKeyshareSealer {
 
 /// TEE-rooted sealer for production node startup.
 ///
-/// Derives its IKM at construction from the available TEE provider via
-/// `tenzro_tee::SealedSecp256k1Key`-style HKDF chains:
+/// Derives its root IKM at construction from `tenzro_tee::platform_root`:
 ///
 /// - **AMD SEV-SNP** — `SNP_GET_DERIVED_KEY(MEASUREMENT | IMAGE_ID | GUEST_SVN)`
 /// - **Intel TDX** — MRTD as IKM
 ///
-/// Per-share AES keys are then derived from this IKM via a second HKDF
+/// Per-share AES keys are then derived from that root via a second HKDF
 /// pass salted by `(group_id, party_index)` (see [`InMemoryKeyshareSealer`]
 /// for the salt format — both backends share the same per-share derivation
 /// path so the only difference is the source of the 32-byte root IKM).
 ///
-/// Concrete platform bindings land alongside the `tenzro-tee`
-/// `intel-tdx` / `amd-sev-snp` features. Until those features are turned
-/// on at the bridge layer, [`derive_auto`](Self::derive_auto) returns
-/// `KeyshareSealerError::TeeNotAvailable`.
+/// A node with no SEV-SNP or TDX device gets
+/// `KeyshareSealerError::TeeNotAvailable` and cannot hold share material.
 #[derive(Debug)]
 pub struct TeeKeyshareSealer {
     inner: InMemoryKeyshareSealer,
@@ -241,20 +238,24 @@ impl TeeKeyshareSealer {
     /// Per the no-simulation policy, this is a startup-time failure for
     /// any node that must hold MPC share material.
     pub async fn derive_auto() -> Result<Self, KeyshareSealerError> {
-        // The TEE-rooted IKM extraction is gated behind the same Cargo
-        // features that `tenzro-tee::SealedSecp256k1Key` uses. When those
-        // features are off, fail closed.
-        #[cfg(any(feature = "intel-tdx", feature = "amd-sev-snp"))]
-        {
-            // Future wiring: pull a 32-byte IKM via
-            // `tenzro_tee::SealedSecp256k1Key::derive_auto(b"tenzro/mpc/keyshare")`
-            // and feed it into `InMemoryKeyshareSealer::new(ikm)`. The
-            // public API surface defined here does not change.
-            return Err(KeyshareSealerError::TeeNotAvailable);
-        }
+        // Root IKM comes from the platform, salted by KEYSHARE_LABEL so a
+        // node's keyshare root stays unrelated to its bridge signer key
+        // even though both derive from the same hardware material.
+        //
+        // Reproducibility is the requirement here, not freshness: a share
+        // sealed before a restart has to unseal after it, which means the
+        // same measured image must land on the same IKM. `platform_root_ikm`
+        // is a function of the measured state only, so it does.
+        let ikm = tenzro_tee::derive_platform_key(KEYSHARE_LABEL)
+            .await
+            .map_err(|e| match e {
+                tenzro_tee::TeeError::NotAvailable(_) => KeyshareSealerError::TeeNotAvailable,
+                other => KeyshareSealerError::Backend(other.to_string()),
+            })?;
 
-        #[cfg(not(any(feature = "intel-tdx", feature = "amd-sev-snp")))]
-        Err(KeyshareSealerError::TeeNotAvailable)
+        Ok(Self {
+            inner: InMemoryKeyshareSealer::new(*ikm),
+        })
     }
 
     /// Test-only constructor that pretends to be TEE-rooted. **Never call
@@ -355,6 +356,18 @@ mod tests {
     async fn tee_derive_auto_off_hardware_fails() {
         // No simulation on testnet — derive_auto must NEVER silently
         // fabricate a key from thin air on a non-TEE host.
+        if tenzro_tee::platform_root_available() {
+            // Inside a real CVM the assertion inverts: a sealer must be
+            // constructible, and it must seal reproducibly across two
+            // independent derivations or a restart loses the shares.
+            let a = TeeKeyshareSealer::derive_auto().await.unwrap();
+            let b = TeeKeyshareSealer::derive_auto().await.unwrap();
+            let g = GroupId([9u8; 32]);
+            let sealed = a.seal(&g, 0, b"share").await.unwrap();
+            assert_eq!(b.unseal(&g, 0, &sealed).await.unwrap(), b"share");
+            return;
+        }
+
         let err = TeeKeyshareSealer::derive_auto().await.unwrap_err();
         assert!(matches!(err, KeyshareSealerError::TeeNotAvailable));
     }

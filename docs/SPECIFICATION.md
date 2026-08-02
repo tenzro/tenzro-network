@@ -1317,8 +1317,8 @@ SealedModelManifest {
     total_bytes:    u64,
     shard_bytes:    u64,                     // plaintext shard size (256 MiB default)
     shards:         Vec<SealedModelShard>,   // index, sizes, ciphertext hash, tenzro://blob URI
-    recipients:     Vec<SealedRecipient>,    // did, x25519_pubkey, wrapped key, optional attestation hash
-    wrap_alg:       "x25519-envelope-aes-256-gcm",
+    recipients:     Vec<SealedRecipient>,    // did, x25519_pubkey, wrapped key, optional enclave measurement
+    wrap_alg:       "x25519-hkdf-sha256-envelope-aes-256-gcm",
     manifest_hash:  Hash,                    // domain-separated SHA-256 over the above
     signature:      Vec<u8>,                 // Ed25519 by the sealing node's announce key
     signer_pubkey:  Vec<u8>,
@@ -1326,9 +1326,11 @@ SealedModelManifest {
 }
 ```
 
-The artifact is split into fixed-size shards, each encrypted with a nonce-prefixed AES-256-GCM content key generated for the seal. Ciphertext shards publish to the content-addressed blob store and are referenced by `tenzro://blob/<hash>` URI; each shard's ciphertext hash is domain-separated (`tenzro/model/sealed-shard ‖ model_id ‖ index`). The content key is wrapped once per recipient using X25519 ephemeral-static envelope encryption — the only wrap scheme the module produces or accepts. A recipient is a DID plus an X25519 public key and may carry an attestation report hash, binding the wrap target to a TEE identity the owner verified out-of-band (the same binding model as Confidential-tier training enrollment).
+The artifact is split into fixed-size shards, each encrypted with a nonce-prefixed AES-256-GCM content key generated for the seal. Ciphertext shards publish to the content-addressed blob store and are referenced by `tenzro://blob/<hash>` URI; each shard's ciphertext hash is domain-separated (`tenzro/model/sealed-shard ‖ model_id ‖ index`). The content key is wrapped once per recipient using X25519 ephemeral-static envelope encryption — the only wrap scheme the module produces or accepts. A recipient is a DID plus an X25519 public key, and may carry `enclave_measurement_hex` — the measurement of the enclave the owner is willing to release the key to (the same binding model as Confidential-tier training enrollment).
 
-Unsealing verifies in this order: manifest signature, wrap algorithm, recipient match (DID and public key), per-shard ciphertext hashes as shards arrive, and finally the plaintext `model_hash` after reassembly — the decrypted artifact reaches model storage only when every check passes. Manifests persist in `CF_MODELS` and hydrate on restart; they carry no key material beyond wrapped ciphertexts and are safe to distribute over any channel.
+Unsealing verifies in this order: manifest signature, wrap algorithm, recipient match (DID and public key), the pinned enclave measurement when the recipient carries one, per-shard ciphertext hashes as shards arrive, and finally the plaintext `model_hash` after reassembly — the decrypted artifact reaches model storage only when every check passes.
+
+The measurement check is a gate, not a record. The installing node *is* the recipient — it holds the X25519 secret key the manifest names — so it proves its own enclave: it generates a fresh report whose user data commits to `SHA-256("tenzro/model/sealed-recipient" ‖ did ‖ x25519_pubkey)`, verifies that report against a pinned vendor root (simulated reports are refused), confirms the returned report actually commits to that binding, and only then compares the measurement against the pinned one. No evidence comes from a caller, so there is nothing to replay. A node with no TEE provider produces no evidence and the install is refused rather than allowed through. Manifests persist in `CF_MODELS` and hydrate on restart; they carry no key material beyond wrapped ciphertexts and are safe to distribute over any channel.
 
 Sealing and installing are operator actions gated by the node admin token (`tenzro_sealModel`, `tenzro_installSealedModel`). Discovery is open: `tenzro_getSealedModel`, `tenzro_listSealedModels`, and `tenzro_modelRecipientKey` (the node's X25519 recipient public key, generated at first start).
 

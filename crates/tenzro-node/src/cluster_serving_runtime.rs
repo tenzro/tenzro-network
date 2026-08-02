@@ -60,8 +60,8 @@ use tracing::{debug, info, warn};
 
 use tenzro_model::cluster::{LaunchPlan, LaunchStage};
 use tenzro_network::cluster_tunnel_proto::{
-    ClusterTunnelError, ClusterTunnelRequest, ClusterTunnelResponse, TunnelFrame, TunnelFrameKind,
-    MAX_FRAME_PAYLOAD,
+    ClusterTunnelError, ClusterTunnelRequest, ClusterTunnelResponse, MAX_FRAME_PAYLOAD,
+    TunnelFrame, TunnelFrameKind,
 };
 use tenzro_network::{InboundClusterTunnel, NetworkService, OutboundClusterTunnelResult};
 
@@ -147,7 +147,8 @@ impl Drop for HeadSession {
 
 impl std::fmt::Debug for ClusterServingRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClusterServingRuntime").finish_non_exhaustive()
+        f.debug_struct("ClusterServingRuntime")
+            .finish_non_exhaustive()
     }
 }
 
@@ -362,32 +363,26 @@ async fn member_splice_loop(
         let session_id = frame.session;
 
         let response = match frame.kind {
-            TunnelFrameKind::Open => {
-                match MemberSession::open(&rpc_bin, session_id).await {
-                    Ok(session) => {
-                        sessions.insert(session_id, session);
-                        debug!(%peer, session_id, "cluster-serving: member opened session");
-                        ClusterTunnelResponse::Ack {
-                            return_frames: Vec::new(),
-                        }
-                    }
-                    Err(e) => {
-                        warn!(%peer, session_id, error = %e, "cluster-serving: member open failed");
-                        ClusterTunnelResponse::Error(ClusterTunnelError::SocketError(
-                            e.to_string(),
-                        ))
+            TunnelFrameKind::Open => match MemberSession::open(&rpc_bin, session_id).await {
+                Ok(session) => {
+                    sessions.insert(session_id, session);
+                    debug!(%peer, session_id, "cluster-serving: member opened session");
+                    ClusterTunnelResponse::Ack {
+                        return_frames: Vec::new(),
                     }
                 }
-            }
+                Err(e) => {
+                    warn!(%peer, session_id, error = %e, "cluster-serving: member open failed");
+                    ClusterTunnelResponse::Error(ClusterTunnelError::SocketError(e.to_string()))
+                }
+            },
             TunnelFrameKind::Data => match sessions.get_mut(&session_id) {
                 Some(session) => match session.exchange(&frame.payload).await {
                     Ok(return_frames) => ClusterTunnelResponse::Ack { return_frames },
                     Err(e) => {
                         warn!(%peer, session_id, error = %e, "cluster-serving: member splice failed");
                         sessions.remove(&session_id);
-                        ClusterTunnelResponse::Error(ClusterTunnelError::SocketError(
-                            e.to_string(),
-                        ))
+                        ClusterTunnelResponse::Error(ClusterTunnelError::SocketError(e.to_string()))
                     }
                 },
                 None => ClusterTunnelResponse::Error(ClusterTunnelError::SocketError(
@@ -618,9 +613,7 @@ async fn send_and_await(
                 }
                 Ok(())
             }
-            Ok(ClusterTunnelResponse::Error(e)) => {
-                Err(ClusterServingError::Network(e.to_string()))
-            }
+            Ok(ClusterTunnelResponse::Error(e)) => Err(ClusterServingError::Network(e.to_string())),
             Err(transport) => Err(ClusterServingError::Network(transport.to_string())),
         };
     }

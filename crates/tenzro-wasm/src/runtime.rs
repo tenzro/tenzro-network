@@ -130,8 +130,9 @@ impl SkillRuntime {
         // Step 2 — hand to Wasmtime for syntactic validation. We
         // discard the compiled Component handle here — the per-
         // invocation `Store<T>` is built lazily inside `invoke`.
-        wasmtime::component::Component::new(self.engine.inner(), bytes.as_ref())
-            .map_err(|e| WasmError::InvalidComponent(format!("wasmtime rejected component: {e:#}")))?;
+        wasmtime::component::Component::new(self.engine.inner(), bytes.as_ref()).map_err(|e| {
+            WasmError::InvalidComponent(format!("wasmtime rejected component: {e:#}"))
+        })?;
 
         let deadline = manifest
             .deadline_ms
@@ -348,9 +349,11 @@ impl SkillRuntime {
         // `call_async` runs the component's post-return automatically,
         // so no manual cleanup step is needed here.
         match call_result {
-            Ok((Ok(json),)) => {
-                Ok((InvocationOutcome::Success, Bytes::from(json.into_bytes()), consumed))
-            }
+            Ok((Ok(json),)) => Ok((
+                InvocationOutcome::Success,
+                Bytes::from(json.into_bytes()),
+                consumed,
+            )),
             Ok((Err(guest_err),)) => Err(WasmError::HostContractViolation(format!(
                 "skill returned error: {guest_err}"
             ))),
@@ -411,12 +414,7 @@ mod tests {
     fn manifest_content_hash_mismatch_is_rejected() {
         let engine = Arc::new(WasmEngine::new().unwrap());
         let host: SharedHost = Arc::new(DenyAllHost);
-        let runtime = SkillRuntime::new(
-            engine,
-            host,
-            Duration::from_secs(5),
-            1_000_000,
-        );
+        let runtime = SkillRuntime::new(engine, host, Duration::from_secs(5), 1_000_000);
 
         let bytes = Bytes::from_static(b"not actually a wasm component");
         // Build a manifest with a deliberately-wrong content hash.

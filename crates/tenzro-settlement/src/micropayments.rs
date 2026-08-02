@@ -71,8 +71,7 @@ impl ChannelStorage for InMemoryChannelStorage {
             SettlementError::StorageError(format!("Failed to serialize channel: {}", e))
         })?;
 
-        self.channels
-            .insert(channel.channel_id.clone(), serialized);
+        self.channels.insert(channel.channel_id.clone(), serialized);
         Ok(())
     }
 
@@ -107,8 +106,7 @@ impl ChannelStorage for InMemoryChannelStorage {
         let serialized = serde_json::to_vec(dispute).map_err(|e| {
             SettlementError::StorageError(format!("Failed to serialize dispute: {}", e))
         })?;
-        self.disputes
-            .insert(dispute.dispute_id.clone(), serialized);
+        self.disputes.insert(dispute.dispute_id.clone(), serialized);
         Ok(())
     }
 
@@ -167,12 +165,27 @@ impl RocksDbChannelStorage {
     /// DA namespace under which channel-update payloads are submitted.
     const CHANNEL_DA_NAMESPACE: &'static [u8] = b"tenzro/settlement_channel";
 
-    /// Creates a new RocksDB-backed channel storage adapter with a default
-    /// in-process [`InlineFallbackBackend`] for DA submission.
+    /// Creates a new RocksDB-backed channel storage adapter with an
+    /// [`InlineFallbackBackend`] sharing the same `KvStore`.
+    ///
+    /// The DA backend **must** be given the store. `ReceiptKind::
+    /// SettlementChannel` defaults to `OffloadedDA`, so a persisted channel is
+    /// an envelope plus a pointer, and the payload itself lives in the DA
+    /// backend. Constructed with `InlineFallbackBackend::new()` alone, that
+    /// payload is held only in the backend's in-process map: the envelope
+    /// survives a restart, the payload does not, and `load_channel` then fails
+    /// to resolve the pointer — the channel comes back as `ChannelNotFound`
+    /// even though its row is still in RocksDB.
+    ///
+    /// With the store attached the payload is durable under
+    /// `CF_METADATA / da_fallback:<locator>`, which is the same wiring
+    /// `UsageTracker::with_storage` uses for inference receipts.
     pub fn new(storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
+        let da_backend =
+            Arc::new(tenzro_storage::InlineFallbackBackend::new().with_storage(storage.clone()));
         Self {
             storage,
-            da_backend: Arc::new(tenzro_storage::InlineFallbackBackend::new()),
+            da_backend,
         }
     }
 
@@ -183,7 +196,10 @@ impl RocksDbChannelStorage {
         storage: Arc<dyn tenzro_storage::KvStore>,
         da_backend: Arc<tenzro_storage::InlineFallbackBackend>,
     ) -> Self {
-        Self { storage, da_backend }
+        Self {
+            storage,
+            da_backend,
+        }
     }
 
     /// Returns a clone of the DA backend handle so other components (e.g. a
@@ -292,10 +308,7 @@ impl ChannelStorage for RocksDbChannelStorage {
             Some(bytes) => {
                 let envelope: tenzro_storage::ReceiptEnvelope = serde_json::from_slice(&bytes)
                     .map_err(|e| {
-                        SettlementError::StorageError(format!(
-                            "decode channel envelope: {}",
-                            e
-                        ))
+                        SettlementError::StorageError(format!("decode channel envelope: {}", e))
                     })?;
                 self.unwrap_envelope(&envelope).map(Some)
             }
@@ -635,11 +648,17 @@ impl std::fmt::Debug for ChannelManager {
             .field("channels_by_payer", &self.channels_by_payer)
             .field("channels_by_payee", &self.channels_by_payee)
             .field("balances", &self.balances)
-            .field("default_challenge_period_ms", &self.default_challenge_period_ms)
+            .field(
+                "default_challenge_period_ms",
+                &self.default_challenge_period_ms,
+            )
             .field("storage", &"<dyn ChannelStorage>")
             .field("disputes", &self.disputes)
             .field("disputes_by_channel", &self.disputes_by_channel)
-            .field("default_dispute_timeout_ms", &self.default_dispute_timeout_ms)
+            .field(
+                "default_dispute_timeout_ms",
+                &self.default_dispute_timeout_ms,
+            )
             .finish()
     }
 }
@@ -896,8 +915,7 @@ impl ChannelManager {
         // balance, which is the channel-update invariant.
         if !new_state.verify_signature_with_key(&channel.payer) {
             return Err(SettlementError::InvalidSignature(
-                "channel update signature failed verification against payer key"
-                    .to_string(),
+                "channel update signature failed verification against payer key".to_string(),
             ));
         }
 
@@ -987,7 +1005,9 @@ impl ChannelManager {
             })?;
         }
 
-        if margin > 0 && let Some(app_wallet) = channel.app_wallet {
+        if margin > 0
+            && let Some(app_wallet) = channel.app_wallet
+        {
             let app_key = (app_wallet, channel.asset_id.clone());
             let mut app_entry = self.balances.entry(app_key).or_insert(0);
             *app_entry = app_entry.checked_add(margin).ok_or_else(|| {
@@ -1117,9 +1137,7 @@ impl ChannelManager {
 
         let channel = channel_entry.value_mut();
 
-        if channel.status == ChannelStatus::Closed
-            || channel.status == ChannelStatus::ForceClosed
-        {
+        if channel.status == ChannelStatus::Closed || channel.status == ChannelStatus::ForceClosed {
             return Err(SettlementError::ChannelClosed(
                 "Channel already closed".to_string(),
             ));
@@ -1231,9 +1249,8 @@ impl ChannelManager {
         }
 
         // Create dispute
-        let timeout_at = Timestamp::new(
-            Timestamp::now().as_millis() + self.default_dispute_timeout_ms,
-        );
+        let timeout_at =
+            Timestamp::new(Timestamp::now().as_millis() + self.default_dispute_timeout_ms);
 
         let dispute = ChannelDispute {
             dispute_id: uuid::Uuid::new_v4().to_string(),
@@ -1316,10 +1333,7 @@ impl ChannelManager {
         drop(dispute_entry);
         self.storage.persist_dispute(&snapshot)?;
 
-        info!(
-            "Dispute {} responded to by {}",
-            dispute_id, responder
-        );
+        info!("Dispute {} responded to by {}", dispute_id, responder);
 
         Ok(())
     }
@@ -1329,11 +1343,7 @@ impl ChannelManager {
     /// This can be called by either party to request resolution, or automatically
     /// after the timeout period. The resolution logic should be implemented based
     /// on the evidence provided by both parties.
-    pub fn resolve_dispute(
-        &self,
-        dispute_id: &str,
-        resolution: String,
-    ) -> Result<()> {
+    pub fn resolve_dispute(&self, dispute_id: &str, resolution: String) -> Result<()> {
         let mut dispute_entry = self
             .disputes
             .get_mut(dispute_id)
@@ -1342,9 +1352,7 @@ impl ChannelManager {
         let dispute = dispute_entry.value_mut();
 
         // Check dispute status
-        if dispute.status == DisputeStatus::Resolved
-            || dispute.status == DisputeStatus::TimedOut
-        {
+        if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::TimedOut {
             return Err(SettlementError::InvalidChannelState(
                 "Dispute already resolved".to_string(),
             ));
@@ -1360,10 +1368,7 @@ impl ChannelManager {
         drop(dispute_entry);
         self.storage.persist_dispute(&snapshot)?;
 
-        info!(
-            "Dispute {} resolved: {}",
-            dispute_id, resolution
-        );
+        info!("Dispute {} resolved: {}", dispute_id, resolution);
 
         Ok(())
     }
@@ -1411,10 +1416,7 @@ impl ChannelManager {
         }
 
         if resolved_count > 0 {
-            info!(
-                "Auto-resolved {} timed out disputes",
-                resolved_count
-            );
+            info!("Auto-resolved {} timed out disputes", resolved_count);
         }
 
         resolved_count
@@ -1698,7 +1700,10 @@ impl NanopaymentBatcher {
             // If equal, they cancel out completely — no settlement needed
         }
 
-        netted.into_iter().map(|((a, b), amt)| (a, b, amt)).collect()
+        netted
+            .into_iter()
+            .map(|((a, b), amt)| (a, b, amt))
+            .collect()
     }
 
     /// Number of pending (unflushed) entries.
@@ -1752,7 +1757,15 @@ mod tests {
 
         let expires_at = Timestamp::now().as_millis() + 86400000; // 24 hours
         let channel = manager
-            .open_channel(payer, payee, 5000, asset_id.clone(), Timestamp::new(expires_at), None, 0)
+            .open_channel(
+                payer,
+                payee,
+                5000,
+                asset_id.clone(),
+                Timestamp::new(expires_at),
+                None,
+                0,
+            )
             .unwrap();
 
         assert_eq!(channel.deposit, 5000);
@@ -1780,7 +1793,15 @@ mod tests {
 
         let expires_at = Timestamp::now().as_millis() + 86400000;
         let channel = manager
-            .open_channel(payer, payee, 5000, asset_id, Timestamp::new(expires_at), None, 0)
+            .open_channel(
+                payer,
+                payee,
+                5000,
+                asset_id,
+                Timestamp::new(expires_at),
+                None,
+                0,
+            )
             .unwrap();
 
         // Build the canonical message for the *next* state (matches the
@@ -1838,8 +1859,16 @@ mod tests {
         // carve — force close is not a margin-evasion path.
         manager.force_close(&channel.channel_id).unwrap();
 
-        assert_eq!(manager.get_balance(&payee, &asset_id), 1000, "payee net of margin");
-        assert_eq!(manager.get_balance(&app_wallet, &asset_id), 100, "app wallet margin");
+        assert_eq!(
+            manager.get_balance(&payee, &asset_id),
+            1000,
+            "payee net of margin"
+        );
+        assert_eq!(
+            manager.get_balance(&app_wallet, &asset_id),
+            100,
+            "app wallet margin"
+        );
         // Payer had 10000, locked 5000, got 3900 back → 8900.
         assert_eq!(manager.get_balance(&payer, &asset_id), 8900, "payer refund");
     }
@@ -1889,7 +1918,15 @@ mod tests {
 
         let expires_at = Timestamp::now().as_millis() + 86400000;
         let channel = manager
-            .open_channel(payer, payee, 5000, asset_id, Timestamp::new(expires_at), None, 0)
+            .open_channel(
+                payer,
+                payee,
+                5000,
+                asset_id,
+                Timestamp::new(expires_at),
+                None,
+                0,
+            )
             .unwrap();
 
         let bogus = vec![0xAA; 64]; // 64 bytes = Ed25519 sig length, but garbage
@@ -1934,8 +1971,14 @@ mod tests {
         let state = ChannelState::new(5000, 0);
         let payer = Address::new([1u8; 32]);
 
-        assert!(!state.verify_signature(), "Empty signature should fail basic check");
-        assert!(!state.verify_signature_with_key(&payer), "Empty signature should fail crypto check");
+        assert!(
+            !state.verify_signature(),
+            "Empty signature should fail basic check"
+        );
+        assert!(
+            !state.verify_signature_with_key(&payer),
+            "Empty signature should fail crypto check"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1948,8 +1991,20 @@ mod tests {
         let b = Address::new([2u8; 32]);
 
         let entries = vec![
-            NanopaymentEntry { from: a, to: b, amount: 100, memo: None, timestamp: 1 },
-            NanopaymentEntry { from: b, to: a, amount: 40, memo: None, timestamp: 2 },
+            NanopaymentEntry {
+                from: a,
+                to: b,
+                amount: 100,
+                memo: None,
+                timestamp: 1,
+            },
+            NanopaymentEntry {
+                from: b,
+                to: a,
+                amount: 40,
+                memo: None,
+                timestamp: 2,
+            },
         ];
 
         let net = NanopaymentBatcher::netting(&entries);
@@ -1966,8 +2021,20 @@ mod tests {
         let b = Address::new([2u8; 32]);
 
         let entries = vec![
-            NanopaymentEntry { from: a, to: b, amount: 50, memo: None, timestamp: 1 },
-            NanopaymentEntry { from: b, to: a, amount: 50, memo: None, timestamp: 2 },
+            NanopaymentEntry {
+                from: a,
+                to: b,
+                amount: 50,
+                memo: None,
+                timestamp: 1,
+            },
+            NanopaymentEntry {
+                from: b,
+                to: a,
+                amount: 50,
+                memo: None,
+                timestamp: 2,
+            },
         ];
 
         let net = NanopaymentBatcher::netting(&entries);
@@ -1981,9 +2048,27 @@ mod tests {
         let c = Address::new([3u8; 32]);
 
         let entries = vec![
-            NanopaymentEntry { from: a, to: b, amount: 100, memo: None, timestamp: 1 },
-            NanopaymentEntry { from: a, to: c, amount: 200, memo: None, timestamp: 2 },
-            NanopaymentEntry { from: b, to: a, amount: 30, memo: None, timestamp: 3 },
+            NanopaymentEntry {
+                from: a,
+                to: b,
+                amount: 100,
+                memo: None,
+                timestamp: 1,
+            },
+            NanopaymentEntry {
+                from: a,
+                to: c,
+                amount: 200,
+                memo: None,
+                timestamp: 2,
+            },
+            NanopaymentEntry {
+                from: b,
+                to: a,
+                amount: 30,
+                memo: None,
+                timestamp: 3,
+            },
         ];
 
         let net = NanopaymentBatcher::netting(&entries);

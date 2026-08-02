@@ -2,9 +2,9 @@
 //!
 //! Deploy and manage smart contracts across EVM, SVM, and DAML VMs.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Contract management commands
 #[derive(Debug, Subcommand)]
@@ -74,10 +74,29 @@ impl ContractDeployCmd {
         spinner.finish_and_clear();
 
         output::print_success("Contract deployed successfully!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or("unknown"));
-        output::print_field("Gas Used", &result.get("gas_used").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("VM", result.get("vm_type").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Address",
+            result
+                .get("address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
+        output::print_field(
+            "Gas Used",
+            &result
+                .get("gas_used")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "VM",
+            result.get("vm_type").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Status",
+            result.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -103,12 +122,20 @@ impl ContractEncodeCmd {
         output::print_header("Encode Function Call");
         let rpc = RpcClient::new(&self.rpc);
         let args: serde_json::Value = serde_json::from_str(&self.args)?;
-        let result: serde_json::Value = rpc.call("tenzro_encodeFunction", serde_json::json!({
-            "function": self.function,
-            "args": args,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_encodeFunction",
+                serde_json::json!({
+                    "function": self.function,
+                    "args": args,
+                }),
+            )
+            .await?;
         output::print_field("Function", &self.function);
-        output::print_field("Encoded", result.get("encoded").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Encoded",
+            result.get("encoded").and_then(|v| v.as_str()).unwrap_or(""),
+        );
         Ok(())
     }
 }
@@ -132,10 +159,15 @@ impl ContractDecodeCmd {
         use crate::rpc::RpcClient;
         output::print_header("Decode Function Result");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_decodeResult", serde_json::json!({
-            "function": self.function,
-            "data": self.data,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_decodeResult",
+                serde_json::json!({
+                    "function": self.function,
+                    "data": self.data,
+                }),
+            )
+            .await?;
         output::print_field("Function", &self.function);
         if let Some(values) = result.get("values").and_then(|v| v.as_array()) {
             for (i, val) in values.iter().enumerate() {

@@ -43,7 +43,8 @@ fn ser_u128_str<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
 fn de_u128_str<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
     use serde::de::Error;
     let s: String = Deserialize::deserialize(d)?;
-    s.parse::<u128>().map_err(|e| Error::custom(format!("invalid u128: {}", e)))
+    s.parse::<u128>()
+        .map_err(|e| Error::custom(format!("invalid u128: {}", e)))
 }
 
 fn ser_opt_u128_str<S: Serializer>(v: &Option<u128>, s: S) -> Result<S::Ok, S::Error> {
@@ -83,7 +84,9 @@ impl AuthorizationDetails {
 
     /// Construct from a single grant.
     pub fn single(detail: AuthorizationDetail) -> Self {
-        Self { details: vec![detail] }
+        Self {
+            details: vec![detail],
+        }
     }
 
     /// Append a grant to the envelope and return self for chaining.

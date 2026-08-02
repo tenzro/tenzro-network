@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 
 torch = pytest.importorskip("torch")
-from torch import nn  # noqa: E402
+from torch import nn
 
-from tenzro_trainer.gradient import compute_outer_delta  # noqa: E402
-from tenzro_trainer.rl import (  # noqa: E402
+from tenzro_trainer.gradient import compute_outer_delta
+from tenzro_trainer.rl import (
     Rollout,
     RolloutAdapter,
     group_advantages,
@@ -16,7 +16,7 @@ from tenzro_trainer.rl import (  # noqa: E402
     load_reward,
     run_rl_inner_loop,
 )
-from tenzro_trainer.types import RlConfig  # noqa: E402
+from tenzro_trainer.types import RlConfig
 
 VOCAB = 5
 
@@ -107,7 +107,9 @@ def test_load_reward_resolves_and_rejects():
     ):
         with pytest.raises(ValueError):
             load_reward(bad)
-    with pytest.raises(ValueError):
+    # Distinct from the malformed references above: this one parses and
+    # resolves, and the thing it resolves to is the wrong *type*.
+    with pytest.raises(TypeError):
         load_reward("py:math:pi")  # resolves but not callable
 
 

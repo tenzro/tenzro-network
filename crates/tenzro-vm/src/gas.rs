@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::{error::Result, VmError};
+use crate::{VmError, error::Result};
 
 /// Gas price information
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -43,9 +43,9 @@ impl GasPrice {
 impl Default for GasPrice {
     fn default() -> Self {
         Self {
-            base_fee: 1_000_000_000,      // 1 Gwei
-            priority_fee: 1_000_000_000,  // 1 Gwei
-            max_fee: 2_000_000_000,       // 2 Gwei
+            base_fee: 1_000_000_000,     // 1 Gwei
+            priority_fee: 1_000_000_000, // 1 Gwei
+            max_fee: 2_000_000_000,      // 2 Gwei
         }
     }
 }
@@ -115,10 +115,7 @@ impl GasOracle {
     ///
     /// Multi-account writes use the **max** surcharge (Solana convention),
     /// not the sum. An empty write set returns the unmodified base fee.
-    pub async fn effective_base_fee(
-        &self,
-        write_set: &[&[u8]],
-    ) -> (u128, u128) {
+    pub async fn effective_base_fee(&self, write_set: &[&[u8]]) -> (u128, u128) {
         let base = self
             .fee_market
             .read()
@@ -264,9 +261,9 @@ impl GasOracle {
 
         // Apply multiplier based on urgency
         let multiplier = match target_blocks {
-            1 => 2.0,      // Next block - high priority
-            2..=5 => 1.5,  // Within 5 blocks - medium priority
-            _ => 1.0,      // No rush - normal priority
+            1 => 2.0,     // Next block - high priority
+            2..=5 => 1.5, // Within 5 blocks - medium priority
+            _ => 1.0,     // No rush - normal priority
         };
 
         GasPrice::new(
@@ -366,7 +363,9 @@ impl GasMeter {
 
     /// Consume gas
     pub fn consume(&mut self, amount: u64) -> Result<()> {
-        let new_used = self.used.checked_add(amount)
+        let new_used = self
+            .used
+            .checked_add(amount)
             .ok_or_else(|| VmError::Internal("Gas overflow".to_string()))?;
 
         if new_used > self.limit {
@@ -621,8 +620,8 @@ mod tests {
 
     #[test]
     fn test_gas_normalizer_evm_identity() {
-        use gas_normalizer::*;
         use crate::VmType;
+        use gas_normalizer::*;
 
         // EVM gas should pass through unchanged
         assert_eq!(to_tenzro_gas(21_000, VmType::Evm), 21_000);
@@ -631,8 +630,8 @@ mod tests {
 
     #[test]
     fn test_gas_normalizer_svm_conversion() {
-        use gas_normalizer::*;
         use crate::VmType;
+        use gas_normalizer::*;
 
         // SVM compute units → EVM gas should scale up by ~21.4x
         let svm_units = 100_000u64;
@@ -648,8 +647,8 @@ mod tests {
 
     #[test]
     fn test_gas_normalizer_svm_max() {
-        use gas_normalizer::*;
         use crate::VmType;
+        use gas_normalizer::*;
 
         // SVM max (1.4M compute units) should map to EVM max (30M gas)
         let svm_max = to_tenzro_gas(svm_gas_costs::MAX_COMPUTE_UNITS, VmType::Svm);
@@ -659,8 +658,8 @@ mod tests {
 
     #[test]
     fn test_gas_normalizer_daml_identity() {
-        use gas_normalizer::*;
         use crate::VmType;
+        use gas_normalizer::*;
 
         // DAML uses 1:1 mapping
         assert_eq!(to_tenzro_gas(100_000, VmType::Daml), 100_000);
@@ -669,8 +668,8 @@ mod tests {
 
     #[test]
     fn test_gas_normalizer_unit_names() {
-        use gas_normalizer::*;
         use crate::VmType;
+        use gas_normalizer::*;
 
         assert_eq!(unit_name(VmType::Evm), "gas");
         assert_eq!(unit_name(VmType::Svm), "compute units");
@@ -680,8 +679,8 @@ mod tests {
 
     #[test]
     fn test_gas_normalizer_max_gas() {
-        use gas_normalizer::*;
         use crate::VmType;
+        use gas_normalizer::*;
 
         assert_eq!(max_gas(VmType::Evm), 30_000_000);
         assert_eq!(max_gas(VmType::Daml), 200_000);

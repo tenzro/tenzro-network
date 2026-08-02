@@ -50,3 +50,6 @@ cuda-no-vmm = ["tenzro-model/cuda-no-vmm"]
 rocm = ["tenzro-model/rocm"]
 vulkan = ["tenzro-model/vulkan"]
 metal = ["tenzro-model/metal"]
+
+[lints]
+workspace = true

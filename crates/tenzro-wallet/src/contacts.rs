@@ -177,7 +177,10 @@ impl AddressBook {
                         .as_ref()
                         .map(|n| n.to_lowercase().contains(&query_lower))
                         .unwrap_or(false)
-                    || contact.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                    || contact
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
             })
             .map(|entry| entry.value().clone())
             .collect()
@@ -307,7 +310,10 @@ mod tests {
 
         let retrieved = book.get_by_address(&addr).unwrap();
         assert_eq!(retrieved.name, "Alice");
-        assert_eq!(retrieved.did, Some("did:tenzro:human:alice-123".to_string()));
+        assert_eq!(
+            retrieved.did,
+            Some("did:tenzro:human:alice-123".to_string())
+        );
     }
 
     #[test]
@@ -315,7 +321,8 @@ mod tests {
         let book = AddressBook::new();
         let addr = Address::new([1u8; 32]);
 
-        book.add_contact(Contact::new("Bob".to_string(), addr)).unwrap();
+        book.add_contact(Contact::new("Bob".to_string(), addr))
+            .unwrap();
 
         let resolved = book.resolve_name("Bob").unwrap();
         assert_eq!(resolved, addr);
@@ -328,16 +335,10 @@ mod tests {
     fn test_duplicate_name_different_address() {
         let book = AddressBook::new();
 
-        book.add_contact(Contact::new(
-            "Alice".to_string(),
-            Address::new([1u8; 32]),
-        ))
-        .unwrap();
+        book.add_contact(Contact::new("Alice".to_string(), Address::new([1u8; 32])))
+            .unwrap();
 
-        let result = book.add_contact(Contact::new(
-            "Alice".to_string(),
-            Address::new([2u8; 32]),
-        ));
+        let result = book.add_contact(Contact::new("Alice".to_string(), Address::new([2u8; 32])));
 
         assert!(result.is_err());
     }
@@ -394,7 +395,8 @@ mod tests {
         let book = AddressBook::new();
         let addr = Address::new([1u8; 32]);
 
-        book.add_contact(Contact::new("Alice".to_string(), addr)).unwrap();
+        book.add_contact(Contact::new("Alice".to_string(), addr))
+            .unwrap();
         assert_eq!(book.count(), 1);
 
         let removed = book.remove_contact(&addr).unwrap();
@@ -408,7 +410,8 @@ mod tests {
         let book = AddressBook::new();
         let addr = Address::new([1u8; 32]);
 
-        book.add_contact(Contact::new("Alice".to_string(), addr)).unwrap();
+        book.add_contact(Contact::new("Alice".to_string(), addr))
+            .unwrap();
 
         book.update_contact(&addr, |c| {
             c.notes = Some("Trusted validator".to_string());
@@ -429,16 +432,10 @@ mod tests {
         // Create and save
         {
             let book = AddressBook::with_storage(&path).unwrap();
-            book.add_contact(Contact::new(
-                "Alice".to_string(),
-                Address::new([1u8; 32]),
-            ))
-            .unwrap();
-            book.add_contact(Contact::new(
-                "Bob".to_string(),
-                Address::new([2u8; 32]),
-            ))
-            .unwrap();
+            book.add_contact(Contact::new("Alice".to_string(), Address::new([1u8; 32])))
+                .unwrap();
+            book.add_contact(Contact::new("Bob".to_string(), Address::new([2u8; 32])))
+                .unwrap();
         }
 
         // Load and verify

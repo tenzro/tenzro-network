@@ -138,9 +138,7 @@ impl DelegationScope {
         if self.allowed_payment_protocols.is_empty() {
             return true;
         }
-        self.allowed_payment_protocols
-            .iter()
-            .any(|p| p == protocol)
+        self.allowed_payment_protocols.iter().any(|p| p == protocol)
     }
 
     /// Checks if a chain is allowed
@@ -358,8 +356,7 @@ mod tests {
 
     #[test]
     fn test_delegation_entry() {
-        let scope = DelegationScope::unrestricted()
-            .with_max_transaction_value(5_000);
+        let scope = DelegationScope::unrestricted().with_max_transaction_value(5_000);
         let entry = DelegationEntry::new(
             "did:tenzro:human:alice".to_string(),
             "did:tenzro:machine:alice:bot1".to_string(),
@@ -397,15 +394,20 @@ mod tests {
 
         let both_unlimited = DelegationScope::unrestricted();
         assert_eq!(
-            both_unlimited.attenuate(&both_unlimited).max_transaction_value,
+            both_unlimited
+                .attenuate(&both_unlimited)
+                .max_transaction_value,
             None
         );
     }
 
     #[test]
     fn test_attenuate_allowlist_intersection() {
-        let parent = DelegationScope::unrestricted()
-            .with_allowed_operations(vec!["inference".into(), "trade".into(), "transfer".into()]);
+        let parent = DelegationScope::unrestricted().with_allowed_operations(vec![
+            "inference".into(),
+            "trade".into(),
+            "transfer".into(),
+        ]);
         let child = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["trade".into(), "borrow".into()]);
 
@@ -415,8 +417,8 @@ mod tests {
 
     #[test]
     fn test_attenuate_empty_allowlist_means_unrestricted_on_that_side() {
-        let parent = DelegationScope::unrestricted()
-            .with_allowed_operations(vec!["inference".into()]);
+        let parent =
+            DelegationScope::unrestricted().with_allowed_operations(vec!["inference".into()]);
         let child = DelegationScope::unrestricted(); // empty = unrestricted
 
         let merged = parent.attenuate(&child);
@@ -425,18 +427,19 @@ mod tests {
 
         // Both empty → still empty (unrestricted).
         let both_empty = DelegationScope::unrestricted();
-        assert!(both_empty
-            .attenuate(&both_empty)
-            .allowed_operations
-            .is_empty());
+        assert!(
+            both_empty
+                .attenuate(&both_empty)
+                .allowed_operations
+                .is_empty()
+        );
     }
 
     #[test]
     fn test_attenuate_disjoint_allowlists_yield_empty_intersection() {
-        let parent = DelegationScope::unrestricted()
-            .with_allowed_operations(vec!["inference".into()]);
-        let child = DelegationScope::unrestricted()
-            .with_allowed_operations(vec!["admin".into()]);
+        let parent =
+            DelegationScope::unrestricted().with_allowed_operations(vec!["inference".into()]);
+        let child = DelegationScope::unrestricted().with_allowed_operations(vec!["admin".into()]);
 
         let merged = parent.attenuate(&child);
         assert!(merged.allowed_operations.is_empty());
@@ -473,10 +476,8 @@ mod tests {
     fn test_attenuate_one_sided_time_bound_propagates() {
         let now = Utc::now();
         let parent = DelegationScope::unrestricted();
-        let child = DelegationScope::unrestricted().with_time_bound(TimeBound::new(
-            now,
-            now + chrono::Duration::hours(1),
-        ));
+        let child = DelegationScope::unrestricted()
+            .with_time_bound(TimeBound::new(now, now + chrono::Duration::hours(1)));
 
         let merged = parent.attenuate(&child);
         assert!(merged.time_bound.is_some());

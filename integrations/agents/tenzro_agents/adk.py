@@ -22,7 +22,8 @@ Plugins are registered on the Runner: ``Runner(..., plugins=[plugin])``.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from .core import ReputationHook, TenzroClient, TenzroDidEnvelope
 
@@ -44,8 +45,8 @@ def tenzro_adk_plugin(
     *,
     name: str = "tenzro",
     signing_key: Any = None,
-    subject_agent_id: Optional[int] = None,
-    mandate_factory: Optional[Callable[[Any, Mapping[str, Any]], Tuple[Mapping[str, Any], Mapping[str, Any]]]] = None,
+    subject_agent_id: int | None = None,
+    mandate_factory: Callable[[Any, Mapping[str, Any]], tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
 ) -> Any:
     """Construct a Tenzro ADK plugin to register on a ``Runner``.
 
@@ -64,8 +65,8 @@ def tenzro_adk_plugin(
             self.mandate_factory = mandate_factory
 
         async def before_tool_callback(
-            self, *, tool: Any, tool_args: Dict[str, Any], tool_context: Any
-        ) -> Optional[dict]:
+            self, *, tool: Any, tool_args: dict[str, Any], tool_context: Any
+        ) -> dict | None:
             tool_name = getattr(tool, "name", str(tool))
             params = {"tool": tool_name, "args": tool_args}
             if self.signing_key is not None:
@@ -81,10 +82,10 @@ def tenzro_adk_plugin(
             self,
             *,
             tool: Any,
-            tool_args: Dict[str, Any],
+            tool_args: dict[str, Any],
             tool_context: Any,
             result: dict,
-        ) -> Optional[dict]:
+        ) -> dict | None:
             return None
 
         async def after_run_callback(self, *, invocation_context: Any) -> None:

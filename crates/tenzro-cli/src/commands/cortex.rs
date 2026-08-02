@@ -100,7 +100,10 @@ impl CortexRegisterCmd {
         output::print_success("Cortex worker registered");
         output::print_field(
             "Model ID",
-            result.get("model_id").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("model_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         output::print_field(
             "Worker DID",
@@ -136,8 +139,9 @@ impl CortexListCmd {
         use crate::rpc::RpcClient;
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value =
-            rpc.call("tenzro_listCortexWorkers", serde_json::json!({})).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_listCortexWorkers", serde_json::json!({}))
+            .await?;
 
         if self.json {
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -270,9 +274,10 @@ impl CortexReasonCmd {
             output::print_field("Settled on-chain", if settled { "yes" } else { "no" });
         }
         if let Some(receipt) = result.get("receipt")
-            && let Some(sig) = receipt.get("signature") {
-                output::print_field("Receipt sig", &sig.to_string());
-            }
+            && let Some(sig) = receipt.get("signature")
+        {
+            output::print_field("Receipt sig", &sig.to_string());
+        }
         Ok(())
     }
 }

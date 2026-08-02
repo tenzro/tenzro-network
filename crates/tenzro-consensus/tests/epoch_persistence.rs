@@ -113,15 +113,13 @@ fn transition_persists_each_new_epoch() {
     let validators = vec![test_validator(1000)];
 
     let mgr = EpochManager::with_store(validators, 100, store.clone()).unwrap();
-    mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
-    mgr.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
+    mgr.transition_epoch(BlockHeight::from(100), |_| None)
+        .unwrap();
+    mgr.transition_epoch(BlockHeight::from(200), |_| None)
+        .unwrap();
 
     let persisted = store.load_all_epochs().unwrap();
-    assert_eq!(
-        persisted.len(),
-        3,
-        "epochs 0, 1, 2 must all be persisted"
-    );
+    assert_eq!(persisted.len(), 3, "epochs 0, 1, 2 must all be persisted");
 }
 
 /// Simulating a restart: drop the manager and reconstruct over the same
@@ -134,10 +132,11 @@ fn restart_hydrates_to_latest_persisted_epoch() {
 
     // Boot 1: advance to epoch 2.
     {
-        let mgr =
-            EpochManager::with_store(validators.clone(), 100, store.clone()).unwrap();
-        mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
-        mgr.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
+        let mgr = EpochManager::with_store(validators.clone(), 100, store.clone()).unwrap();
+        mgr.transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap();
+        mgr.transition_epoch(BlockHeight::from(200), |_| None)
+            .unwrap();
         assert_eq!(mgr.current_epoch().number, 2);
     }
 
@@ -164,28 +163,25 @@ fn cross_epoch_validator_set_lookup_survives_restart() {
     // Use distinct validator sets per epoch so we can verify the right
     // set comes back. Initial set for epoch 0:
     let epoch_0_validators = vec![test_validator(1000), test_validator(2000)];
-    let epoch_0_addrs: Vec<Address> =
-        epoch_0_validators.iter().map(|v| v.address).collect();
+    let epoch_0_addrs: Vec<Address> = epoch_0_validators.iter().map(|v| v.address).collect();
 
     // Boot 1: run through 3 transitions (epoch 0 → 3), each adding one new
     // validator so the set grows.
     let final_size;
     {
-        let mgr = EpochManager::with_store(
-            epoch_0_validators.clone(),
-            100,
-            store.clone(),
-        )
-        .unwrap();
+        let mgr = EpochManager::with_store(epoch_0_validators.clone(), 100, store.clone()).unwrap();
 
         mgr.add_pending_validator(test_validator(3000));
-        mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+        mgr.transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap();
 
         mgr.add_pending_validator(test_validator(4000));
-        mgr.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
+        mgr.transition_epoch(BlockHeight::from(200), |_| None)
+            .unwrap();
 
         mgr.add_pending_validator(test_validator(5000));
-        mgr.transition_epoch(BlockHeight::from(300), |_| None).unwrap();
+        mgr.transition_epoch(BlockHeight::from(300), |_| None)
+            .unwrap();
 
         final_size = mgr.current_validator_set().len();
         assert_eq!(final_size, 5, "set grew by 1 per epoch (2 → 3 → 4 → 5)");
@@ -231,7 +227,8 @@ fn cross_epoch_validator_set_lookup_survives_restart() {
 #[test]
 fn ephemeral_new_works_without_store() {
     let mgr = EpochManager::new(vec![test_validator(1000)], 100).unwrap();
-    mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+    mgr.transition_epoch(BlockHeight::from(100), |_| None)
+        .unwrap();
     assert_eq!(mgr.current_epoch().number, 1);
 }
 
@@ -245,14 +242,11 @@ fn failing_store_does_not_abort_transition() {
     let store = Arc::new(FailingEpochStore);
     // `with_store` will try to persist bootstrap epoch 0; that fails but
     // is logged-and-continued. Manager construction itself succeeds.
-    let mgr = EpochManager::with_store(
-        vec![test_validator(1000)],
-        100,
-        store,
-    )
-    .unwrap();
+    let mgr = EpochManager::with_store(vec![test_validator(1000)], 100, store).unwrap();
 
     // Transition should also succeed in-memory despite the store failing.
-    let _ = mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+    let _ = mgr
+        .transition_epoch(BlockHeight::from(100), |_| None)
+        .unwrap();
     assert_eq!(mgr.current_epoch().number, 1);
 }

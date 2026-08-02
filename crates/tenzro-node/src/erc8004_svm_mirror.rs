@@ -39,11 +39,9 @@
 
 use std::sync::Arc;
 
-use tenzro_identity::erc8004_svm::{
-    addresses, borsh_ix, OnChainAgentSvmRegistry, SolPubkey,
-};
+use tenzro_identity::erc8004_svm::{OnChainAgentSvmRegistry, SolPubkey, addresses, borsh_ix};
 use tenzro_identity::error::{IdentityError, Result as IdentityResult};
-use tenzro_storage::{KvStore, CF_IDENTITIES};
+use tenzro_storage::{CF_IDENTITIES, KvStore};
 
 /// Off-chain RocksDB keyspace prefix for the `did → asset Pubkey` index.
 ///
@@ -118,7 +116,10 @@ impl NativeErc8004SvmMirror {
     /// Construct a mirror with a live Solana transport. Dispatches are
     /// `tokio::spawn`ed as signed Anchor `register(string)` txs against
     /// [`addresses::AGENT_REGISTRY_PROGRAM_ID_MAINNET_BETA`].
-    pub fn with_transport(storage: Arc<dyn KvStore>, transport: Arc<dyn SvmMirrorTransport>) -> Self {
+    pub fn with_transport(
+        storage: Arc<dyn KvStore>,
+        transport: Arc<dyn SvmMirrorTransport>,
+    ) -> Self {
         Self {
             transport: Some(transport),
             storage,
@@ -224,7 +225,10 @@ impl OnChainAgentSvmRegistry for NativeErc8004SvmMirror {
 /// [`IdentityError::VerificationFailed`] shape — used by RPC handlers
 /// that want a typed error for the "not yet mirrored" case rather than
 /// `Option`.
-pub fn require_asset(did: &str, registry: &dyn OnChainAgentSvmRegistry) -> IdentityResult<SolPubkey> {
+pub fn require_asset(
+    did: &str,
+    registry: &dyn OnChainAgentSvmRegistry,
+) -> IdentityResult<SolPubkey> {
     registry.lookup_asset_by_did(did).ok_or_else(|| {
         IdentityError::VerificationFailed(format!(
             "no ERC-8004 SVM asset mirrored for DID '{}' yet \
@@ -263,10 +267,7 @@ mod tests {
     fn lookup_returns_none_when_index_empty() {
         let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
         let mirror = NativeErc8004SvmMirror::new(storage);
-        assert_eq!(
-            mirror.lookup_asset_by_did("did:tenzro:machine:nope"),
-            None
-        );
+        assert_eq!(mirror.lookup_asset_by_did("did:tenzro:machine:nope"), None);
     }
 
     #[test]

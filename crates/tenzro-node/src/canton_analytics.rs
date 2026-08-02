@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tenzro_storage::{KvStore, CF_CANTON_ANALYTICS};
+use tenzro_storage::{CF_CANTON_ANALYTICS, KvStore};
 
 use crate::error::{NodeError, Result};
 
@@ -139,10 +139,7 @@ impl CantonAnalyticsManager {
         let record = {
             let mut cache = self.cache.write();
             let entry = cache.entry(key_id.to_string()).or_insert_with(|| {
-                CantonKeyAnalytics::empty(
-                    key_id.to_string(),
-                    canton_user_id.map(|s| s.to_string()),
-                )
+                CantonKeyAnalytics::empty(key_id.to_string(), canton_user_id.map(|s| s.to_string()))
             });
 
             if entry.canton_user_id.is_none()
@@ -158,10 +155,7 @@ impl CantonAnalyticsManager {
 
             if success {
                 entry.calls_total = entry.calls_total.saturating_add(1);
-                *entry
-                    .calls_by_method
-                    .entry(method.to_string())
-                    .or_insert(0) += 1;
+                *entry.calls_by_method.entry(method.to_string()).or_insert(0) += 1;
             } else {
                 entry.errors_total = entry.errors_total.saturating_add(1);
                 *entry
@@ -210,12 +204,27 @@ mod tests {
         let store = mem_store();
         let mgr = CantonAnalyticsManager::new(store).unwrap();
 
-        mgr.record_call("k1", Some("tenzro-labs@clients"), "tenzro_canton_listContracts", true)
-            .unwrap();
-        mgr.record_call("k1", Some("tenzro-labs@clients"), "tenzro_canton_listContracts", true)
-            .unwrap();
-        mgr.record_call("k1", Some("tenzro-labs@clients"), "tenzro_canton_submitCommand", false)
-            .unwrap();
+        mgr.record_call(
+            "k1",
+            Some("tenzro-labs@clients"),
+            "tenzro_canton_listContracts",
+            true,
+        )
+        .unwrap();
+        mgr.record_call(
+            "k1",
+            Some("tenzro-labs@clients"),
+            "tenzro_canton_listContracts",
+            true,
+        )
+        .unwrap();
+        mgr.record_call(
+            "k1",
+            Some("tenzro-labs@clients"),
+            "tenzro_canton_submitCommand",
+            false,
+        )
+        .unwrap();
 
         let agg = mgr.get("k1").unwrap();
         assert_eq!(agg.calls_total, 2);
@@ -237,10 +246,20 @@ mod tests {
     fn hydrate_restores_counters() {
         let store = mem_store();
         let mgr = CantonAnalyticsManager::new(store.clone()).unwrap();
-        mgr.record_call("k1", Some("tenzro-labs@clients"), "tenzro_canton_listContracts", true)
-            .unwrap();
-        mgr.record_call("k2", Some("acme@clients"), "tenzro_canton_listContracts", true)
-            .unwrap();
+        mgr.record_call(
+            "k1",
+            Some("tenzro-labs@clients"),
+            "tenzro_canton_listContracts",
+            true,
+        )
+        .unwrap();
+        mgr.record_call(
+            "k2",
+            Some("acme@clients"),
+            "tenzro_canton_listContracts",
+            true,
+        )
+        .unwrap();
         drop(mgr);
 
         let mgr2 = CantonAnalyticsManager::new(store).unwrap();
@@ -257,8 +276,13 @@ mod tests {
         mgr.record_call("k1", None, "tenzro_canton_listContracts", true)
             .unwrap();
         assert!(mgr.get("k1").unwrap().canton_user_id.is_none());
-        mgr.record_call("k1", Some("tenzro-labs@clients"), "tenzro_canton_listContracts", true)
-            .unwrap();
+        mgr.record_call(
+            "k1",
+            Some("tenzro-labs@clients"),
+            "tenzro_canton_listContracts",
+            true,
+        )
+        .unwrap();
         assert_eq!(
             mgr.get("k1").unwrap().canton_user_id.as_deref(),
             Some("tenzro-labs@clients")

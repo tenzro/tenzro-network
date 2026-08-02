@@ -206,8 +206,7 @@ pub mod discriminators {
     /// `register_with_options(agent_uri: string, atom_enabled: bool)` —
     /// same as `register` plus a flag controlling ATOM reputation
     /// engine enrolment.
-    pub const REGISTER_WITH_OPTIONS: [u8; 8] =
-        [0xb1, 0xaf, 0x60, 0x29, 0x3b, 0xa6, 0x0d, 0x06];
+    pub const REGISTER_WITH_OPTIONS: [u8; 8] = [0xb1, 0xaf, 0x60, 0x29, 0x3b, 0xa6, 0x0d, 0x06];
 
     /// `set_agent_uri(new_uri: string)` — update an agent's metadata URI
     /// in place. Mirrors EVM `setAgentURI(uint256, string)`.
@@ -568,8 +567,7 @@ pub fn pubkey_to_base58(pk: &SolPubkey) -> String {
 // standard "divide by 58" approach; this is on the slow path (only
 // used for config parsing + log formatting), correctness over speed.
 
-const B58_ALPHABET: &[u8; 58] =
-    b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const B58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 fn bs58_encode(bytes: &[u8]) -> String {
     let mut leading_zeros = 0;
@@ -709,8 +707,7 @@ mod tests {
             base58_to_pubkey("AToMufS4QD6hEXvcvBDg9m1AHeCLpmZQsyfYa5h9MwAF").expect("decode");
         assert_eq!(atom, addresses::ATOM_ENGINE_PROGRAM_ID);
 
-        let mpl = base58_to_pubkey("CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d")
-            .expect("decode");
+        let mpl = base58_to_pubkey("CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d").expect("decode");
         assert_eq!(mpl, addresses::MPL_CORE_PROGRAM_ID);
     }
 

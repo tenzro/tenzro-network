@@ -59,7 +59,10 @@ impl ReputationGetCmd {
 
         output::print_field(
             "Provider",
-            result.get("provider").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         let score = result
             .get("reputation")

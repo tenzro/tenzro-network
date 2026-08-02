@@ -1,9 +1,9 @@
 //! Health monitoring for node subsystems
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::Instant;
 use tenzro_types::primitives::BlockHeight;
 
@@ -45,14 +45,12 @@ impl HealthMonitor {
         // a single write lock so concurrent updaters can't interleave.
         let (prev_status, new_status) = {
             let mut inner = self.inner.write();
-            let prev_status = inner
-                .subsystem_status
-                .get(&name)
-                .map(|h| h.status.clone());
+            let prev_status = inner.subsystem_status.get(&name).map(|h| h.status.clone());
 
             let status_clone = status.clone();
             let entry_name = name.clone();
-            inner.subsystem_status
+            inner
+                .subsystem_status
                 .entry(name.clone())
                 .and_modify(|h| {
                     h.status = status_clone;
@@ -63,10 +61,7 @@ impl HealthMonitor {
                     status,
                     last_updated: Instant::now(),
                 });
-            let new_status = inner
-                .subsystem_status
-                .get(&name)
-                .map(|h| h.status.clone());
+            let new_status = inner.subsystem_status.get(&name).map(|h| h.status.clone());
             (prev_status, new_status)
         };
 
@@ -93,8 +88,10 @@ impl HealthMonitor {
                     "subsystem unhealthy"
                 );
             }
-            (Some(SubsystemStatus::Degraded { .. }) | Some(SubsystemStatus::Unhealthy { .. }),
-                SubsystemStatus::Healthy) => {
+            (
+                Some(SubsystemStatus::Degraded { .. }) | Some(SubsystemStatus::Unhealthy { .. }),
+                SubsystemStatus::Healthy,
+            ) => {
                 tracing::info!(
                     target: "tenzro_node::health",
                     subsystem = %name,

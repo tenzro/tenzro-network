@@ -3,8 +3,8 @@
 //! This module provides a bridge between our StateAdapter and revm's Database trait,
 //! allowing revm to read and write state through our storage layer.
 
-use revm::primitives::{AccountInfo, Bytecode, B256, U256, Address as RevmAddress};
 use revm::Database;
+use revm::primitives::{AccountInfo, Address as RevmAddress, B256, Bytecode, U256};
 use sha3::{Digest, Keccak256};
 use tenzro_storage::CF_BLOCKS;
 use tenzro_types::{BlockHeight, Hash};
@@ -46,7 +46,9 @@ impl<'a> Database for RevmStateAdapter<'a> {
         };
 
         // Convert code to Bytecode if present
-        let bytecode = code.map(|c| Bytecode::new_raw(c.into())).unwrap_or_default();
+        let bytecode = code
+            .map(|c| Bytecode::new_raw(c.into()))
+            .unwrap_or_default();
 
         Ok(Some(AccountInfo {
             balance: U256::from(balance),

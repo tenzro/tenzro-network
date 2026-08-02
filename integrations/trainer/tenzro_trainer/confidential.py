@@ -13,13 +13,17 @@ inside a :class:`SealedDatasetManifest` and installs the manifest via
 * ``wrap_alg`` — algorithm identifier; this module accepts
   ``"hpke-x25519-hkdf-sha256-aes-256-gcm"``.
 * ``enclave_pubkey`` — the X25519 public key the AES key was wrapped to.
-* ``enclave_measurements_hex`` — measurements the trainer's TEE must match.
+* ``enclave_measurement_hex`` — the enclave measurement the trainer's
+  attestation report must carry.
 
 This module runs **inside the trainer's enclave**: the Rust protocol layer
-never sees the cleartext data key or the cleartext shard. The Rust
-``validate_confidential_enrollment`` enforces that the trainer's
-attestation matches ``enclave_pubkey`` and ``enclave_measurements_hex``;
-once enrollment succeeds, the trainer calls :func:`unwrap_shard` with the
+never sees the cleartext data key or the cleartext shard. At enroll time the
+Rust ``validate_confidential_enrollment`` verifies the trainer's attestation
+report against a pinned vendor root, refuses simulated reports, requires the
+report to commit to ``enclave_pubkey`` in its user data, and requires the
+report's measurement to equal ``enclave_measurement_hex``. Both expected
+values are read from the sealed manifest, not from the enrolling trainer.
+Once enrollment succeeds, the trainer calls :func:`unwrap_shard` with the
 matching X25519 secret key (which itself never leaves the enclave) to
 recover the shard plaintext.
 
@@ -35,7 +39,6 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from typing import Any
-
 
 HPKE_SUITE_ID = "hpke-x25519-hkdf-sha256-aes-256-gcm"
 
@@ -70,11 +73,11 @@ class SealedShardEnvelope:
     wrapped_data_key: bytes
     wrap_alg: str
     enclave_pubkey: bytes
-    enclave_measurements_hex: str
+    enclave_measurement_hex: str
     created_at: int  # Unix ms (matches Rust Timestamp)
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "SealedShardEnvelope":
+    def from_json(cls, j: dict[str, Any]) -> SealedShardEnvelope:
         return cls(
             trainer_did=j["trainer_did"],
             shard_index=int(j["shard_index"]),
@@ -83,7 +86,7 @@ class SealedShardEnvelope:
             wrapped_data_key=_decode_bytes_field(j["wrapped_data_key"]),
             wrap_alg=j["wrap_alg"],
             enclave_pubkey=_decode_bytes_field(j["enclave_pubkey"]),
-            enclave_measurements_hex=j["enclave_measurements_hex"],
+            enclave_measurement_hex=j["enclave_measurement_hex"],
             created_at=int(j["created_at"]),
         )
 
@@ -213,8 +216,8 @@ def _x25519_secret_to_pem(sk: bytes) -> bytes:
 
 
 __all__ = [
-    "HPKE_SUITE_ID",
     "HPKE_INFO",
+    "HPKE_SUITE_ID",
     "SealedShardEnvelope",
     "unwrap_shard",
 ]

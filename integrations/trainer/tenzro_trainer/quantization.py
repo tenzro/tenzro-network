@@ -28,7 +28,7 @@ import numpy as np
 from tenzro_trainer.types import GradientQuantization
 
 
-def _round_half_away_from_zero(q: "np.ndarray") -> "np.ndarray":
+def _round_half_away_from_zero(q: np.ndarray) -> np.ndarray:
     """Rust ``f32::round`` semantics (half away from zero), exact for f32 input."""
     q64 = q.astype(np.float64)
     return np.sign(q64) * np.floor(np.abs(q64) + 0.5)
@@ -39,7 +39,7 @@ def _iter_blocks(n: int, block_size: int) -> list[tuple[int, int]]:
     return [(start, min(start + block, n)) for start in range(0, n, block)]
 
 
-def quantize(values: "np.ndarray", spec: GradientQuantization) -> bytes:
+def quantize(values: np.ndarray, spec: GradientQuantization) -> bytes:
     """Encode float32 values under ``spec``. Matches Rust ``quantize`` byte-for-byte."""
     vals = np.ascontiguousarray(np.asarray(values, dtype=np.float32).reshape(-1))
 
@@ -81,7 +81,7 @@ def quantize(values: "np.ndarray", spec: GradientQuantization) -> bytes:
 
 def dequantize(
     data: bytes, spec: GradientQuantization, expected_len: int
-) -> "np.ndarray":
+) -> np.ndarray:
     """Decode ``data`` into ``expected_len`` float32 values.
 
     Strict length validation mirrors the Rust ``dequantize`` — any byte-count
@@ -163,4 +163,4 @@ def encoded_len(length: int, spec: GradientQuantization) -> int:
     raise ValueError(f"unrecognized quantization kind: {spec.kind!r}")
 
 
-__all__ = ["quantize", "dequantize", "encoded_len"]
+__all__ = ["dequantize", "encoded_len", "quantize"]

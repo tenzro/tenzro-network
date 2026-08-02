@@ -102,7 +102,11 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
             // Allow either a bare host ("https://a2a.tenzro.xyz") or a full
             // path ("https://a2a.tenzro.xyz/a2a"). Append /a2a only if the
             // caller didn't already supply a path component beyond `://`.
-            if trimmed.split_once("://").map(|(_, rest)| rest.contains('/')).unwrap_or(false) {
+            if trimmed
+                .split_once("://")
+                .map(|(_, rest)| rest.contains('/'))
+                .unwrap_or(false)
+            {
                 trimmed.to_string()
             } else {
                 format!("{}/a2a", trimmed)
@@ -1240,7 +1244,9 @@ mod tests {
     fn test_agent_card_serialization() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Ensure the env-var path doesn't bleed in from another test.
-        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        unsafe {
+            std::env::remove_var("TENZRO_A2A_PUBLIC_URL");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         let json = serde_json::to_string_pretty(&card).unwrap();
 
@@ -1264,26 +1270,36 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
         // Bare host: should append /a2a
-        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz"); }
+        unsafe {
+            std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         assert_eq!(card.url, "https://a2a.tenzro.xyz/a2a");
 
         // Trailing slash: should still work
-        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz/"); }
+        unsafe {
+            std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz/");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         assert_eq!(card.url, "https://a2a.tenzro.xyz/a2a");
 
         // Full path: should NOT double-append
-        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz/a2a"); }
+        unsafe {
+            std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz/a2a");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         assert_eq!(card.url, "https://a2a.tenzro.xyz/a2a");
 
         // Empty / unset: falls back to listen address
-        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", ""); }
+        unsafe {
+            std::env::set_var("TENZRO_A2A_PUBLIC_URL", "");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         assert_eq!(card.url, "http://0.0.0.0:3002/a2a");
 
-        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        unsafe {
+            std::env::remove_var("TENZRO_A2A_PUBLIC_URL");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         assert_eq!(card.url, "http://0.0.0.0:3002/a2a");
     }
@@ -1336,7 +1352,9 @@ mod tests {
     #[test]
     fn test_agent_card_roundtrip() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        unsafe {
+            std::env::remove_var("TENZRO_A2A_PUBLIC_URL");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         let json = serde_json::to_string(&card).unwrap();
         let parsed: AgentCard = serde_json::from_str(&json).unwrap();
@@ -1348,7 +1366,9 @@ mod tests {
     #[test]
     fn canonical_card_hash_is_deterministic() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        unsafe {
+            std::env::remove_var("TENZRO_A2A_PUBLIC_URL");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         let h1 = SignedAgentCard::canonical_card_hash(&card);
         let h2 = SignedAgentCard::canonical_card_hash(&card);
@@ -1358,7 +1378,9 @@ mod tests {
     #[test]
     fn canonical_card_hash_changes_with_url() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        unsafe {
+            std::env::remove_var("TENZRO_A2A_PUBLIC_URL");
+        }
         let card_a = build_agent_card("0.0.0.0:3002", "Validator");
         let mut card_b = card_a.clone();
         card_b.url = "https://attacker.example/a2a".to_string();
@@ -1372,7 +1394,9 @@ mod tests {
     #[test]
     fn signed_agent_card_wraps_and_roundtrips() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        unsafe {
+            std::env::remove_var("TENZRO_A2A_PUBLIC_URL");
+        }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
         let signed = SignedAgentCard::wrap(
             card.clone(),

@@ -26,10 +26,10 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tenzro_identity::{params_hash, verify_envelope, IdentityRegistry, TenzroDidEnvelope};
-use tenzro_storage::{KvStore, CF_SETTLEMENTS};
-use tenzro_types::primitives::Address;
+use tenzro_identity::{IdentityRegistry, TenzroDidEnvelope, params_hash, verify_envelope};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_types::MAX_DEVELOPER_MARGIN_BPS;
+use tenzro_types::primitives::Address;
 
 use crate::error::{NodeError, Result};
 
@@ -335,7 +335,9 @@ impl AppRegistry {
 
         record.active = active;
         self.persist(&record)?;
-        self.cache.write().insert(app_id.to_string(), record.clone());
+        self.cache
+            .write()
+            .insert(app_id.to_string(), record.clone());
         Ok(record)
     }
 
@@ -423,7 +425,12 @@ mod tests {
         let (did, signer) = did_key_signer();
         let record = sample_record(&did, vec![1u8; 32]);
 
-        let env = signed_envelope(&did, &signer, METHOD_REGISTER_APP, &record.canonical_params());
+        let env = signed_envelope(
+            &did,
+            &signer,
+            METHOD_REGISTER_APP,
+            &record.canonical_params(),
+        );
         let stored = registry
             .register_signed(record.clone(), &env, &identities)
             .unwrap();
@@ -444,7 +451,12 @@ mod tests {
         let mut record = sample_record(&did, vec![1u8; 32]);
         record.margin_bps = MAX_DEVELOPER_MARGIN_BPS + 1;
 
-        let env = signed_envelope(&did, &signer, METHOD_REGISTER_APP, &record.canonical_params());
+        let env = signed_envelope(
+            &did,
+            &signer,
+            METHOD_REGISTER_APP,
+            &record.canonical_params(),
+        );
         assert!(registry.register_signed(record, &env, &identities).is_err());
     }
 
@@ -460,7 +472,9 @@ mod tests {
             METHOD_REGISTER_APP,
             &record_a.canonical_params(),
         );
-        registry.register_signed(record_a, &env_a, &identities).unwrap();
+        registry
+            .register_signed(record_a, &env_a, &identities)
+            .unwrap();
 
         let (did_b, signer_b) = did_key_signer();
         let record_b = sample_record(&did_b, vec![2u8; 32]);
@@ -494,7 +508,12 @@ mod tests {
         let identities = IdentityRegistry::new();
         let (did, signer) = did_key_signer();
         let record = sample_record(&did, vec![1u8; 32]);
-        let env = signed_envelope(&did, &signer, METHOD_REGISTER_APP, &record.canonical_params());
+        let env = signed_envelope(
+            &did,
+            &signer,
+            METHOD_REGISTER_APP,
+            &record.canonical_params(),
+        );
         registry.register_signed(record, &env, &identities).unwrap();
 
         // Developer deactivates their app.
@@ -517,8 +536,10 @@ mod tests {
             METHOD_SET_APP_STATUS,
             &canonical_status_params("demo-app", true),
         );
-        assert!(registry
-            .set_active_signed("demo-app", true, &forged, &identities)
-            .is_err());
+        assert!(
+            registry
+                .set_active_signed("demo-app", true, &forged, &identities)
+                .is_err()
+        );
     }
 }

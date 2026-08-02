@@ -3,7 +3,7 @@
 //! Handles automatic model provisioning for providers based on hardware
 //! capabilities, and discovery of models from network peers.
 
-use crate::catalog::{get_model_catalog, HfModelEntry, ModelArchitecture};
+use crate::catalog::{HfModelEntry, ModelArchitecture, get_model_catalog};
 use crate::error::{ModelError, Result};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -182,7 +182,10 @@ impl ModelProvisioner {
     /// Returns `Err(ModelError::Other)` if the model catalog is empty or inaccessible.
     pub fn recommend_models(&self) -> Vec<ProvisioningRecommendation> {
         let all_models: Vec<HfModelEntry> = get_model_catalog();
-        let available_ram = self.hardware.ram_gb.saturating_sub(self.config.min_free_ram_gb);
+        let available_ram = self
+            .hardware
+            .ram_gb
+            .saturating_sub(self.config.min_free_ram_gb);
 
         debug!(
             catalog_size = all_models.len(),
@@ -215,7 +218,9 @@ impl ModelProvisioner {
             }
 
             // Skip if model exceeds max size limit
-            if self.config.max_model_size_bytes > 0 && model.size_bytes > self.config.max_model_size_bytes {
+            if self.config.max_model_size_bytes > 0
+                && model.size_bytes > self.config.max_model_size_bytes
+            {
                 debug!(
                     model_id = %model.id,
                     size_bytes = model.size_bytes,
@@ -231,17 +236,26 @@ impl ModelProvisioner {
 
             // Boost priority for preferred families
             if !self.config.preferred_families.is_empty()
-                && self.config.preferred_families.iter().any(|f| f.eq_ignore_ascii_case(&model.family)) {
-                    priority += 20;
-                    reasons.push("preferred family".to_string());
-                }
+                && self
+                    .config
+                    .preferred_families
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case(&model.family))
+            {
+                priority += 20;
+                reasons.push("preferred family".to_string());
+            }
 
             // Boost priority for preferred architectures
             if !self.config.preferred_architectures.is_empty()
-                && self.config.preferred_architectures.contains(&model.architecture) {
-                    priority += 15;
-                    reasons.push("preferred architecture".to_string());
-                }
+                && self
+                    .config
+                    .preferred_architectures
+                    .contains(&model.architecture)
+            {
+                priority += 15;
+                reasons.push("preferred architecture".to_string());
+            }
 
             // Boost smaller models (faster to load, less resource usage)
             if model.min_ram_gb <= available_ram / 2 {
@@ -310,7 +324,9 @@ impl ModelProvisioner {
     ///
     /// Logs the status transition for observability.
     pub fn set_status(&self, model_id: &str, status: ProvisioningStatus) {
-        let prev = self.provisioned.insert(model_id.to_string(), status.clone());
+        let prev = self
+            .provisioned
+            .insert(model_id.to_string(), status.clone());
         match &status {
             ProvisioningStatus::Failed { error } => {
                 warn!(
@@ -351,7 +367,10 @@ impl ModelProvisioner {
     /// Returns `Ok(entry)` if the model fits, or `Err` with the reason it does not.
     pub fn validate_model_for_hardware(&self, model_id: &str) -> Result<HfModelEntry> {
         let entry = self.lookup_catalog_entry(model_id)?;
-        let available_ram = self.hardware.ram_gb.saturating_sub(self.config.min_free_ram_gb);
+        let available_ram = self
+            .hardware
+            .ram_gb
+            .saturating_sub(self.config.min_free_ram_gb);
 
         if entry.min_ram_gb > available_ram {
             warn!(
@@ -366,7 +385,9 @@ impl ModelProvisioner {
             )));
         }
 
-        if self.config.max_model_size_bytes > 0 && entry.size_bytes > self.config.max_model_size_bytes {
+        if self.config.max_model_size_bytes > 0
+            && entry.size_bytes > self.config.max_model_size_bytes
+        {
             warn!(
                 model_id = %model_id,
                 size_bytes = entry.size_bytes,
@@ -531,7 +552,8 @@ impl NetworkModelDiscovery {
         });
 
         // Remove model entries with no remaining endpoints
-        self.discovered_models.retain(|_, endpoints| !endpoints.is_empty());
+        self.discovered_models
+            .retain(|_, endpoints| !endpoints.is_empty());
     }
 
     /// Get all discovered models
@@ -609,8 +631,8 @@ mod tests {
 
     #[test]
     fn test_recommend_models() {
-        let provisioner = ModelProvisioner::new(PathBuf::from("/tmp/test_models"))
-            .with_hardware(HardwareCapabilities {
+        let provisioner = ModelProvisioner::new(PathBuf::from("/tmp/test_models")).with_hardware(
+            HardwareCapabilities {
                 ram_gb: 16,
                 vram_gb: 0,
                 disk_gb: 100,
@@ -619,13 +641,19 @@ mod tests {
                 cpu_cores: 8,
                 detected: true,
                 ..Default::default()
-            });
+            },
+        );
 
         let recommendations = provisioner.recommend_models();
         // Should have some recommendations for 16GB RAM
         // All should require <= 12GB RAM (16 - 4 min_free)
         for rec in &recommendations {
-            assert!(rec.min_ram_gb <= 12, "Model {} requires {}GB but only 12GB available", rec.model_id, rec.min_ram_gb);
+            assert!(
+                rec.min_ram_gb <= 12,
+                "Model {} requires {}GB but only 12GB available",
+                rec.model_id,
+                rec.min_ram_gb
+            );
         }
     }
 
@@ -742,7 +770,12 @@ mod tests {
 
         provisioner.set_status("model-a", ProvisioningStatus::Downloaded);
         provisioner.set_status("model-b", ProvisioningStatus::Serving);
-        provisioner.set_status("model-c", ProvisioningStatus::Failed { error: "OOM".to_string() });
+        provisioner.set_status(
+            "model-c",
+            ProvisioningStatus::Failed {
+                error: "OOM".to_string(),
+            },
+        );
 
         let summary = provisioner.summary();
         assert_eq!(summary.downloaded, 1);

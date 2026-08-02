@@ -81,8 +81,7 @@ mod tests {
 
     #[test]
     fn public_inputs_roundtrip() {
-        let pis: Vec<KoalaBear> =
-            (0..8).map(|i| KoalaBear::from_u64(i * 7 + 11)).collect();
+        let pis: Vec<KoalaBear> = (0..8).map(|i| KoalaBear::from_u64(i * 7 + 11)).collect();
         let blobs = encode_public_inputs(&pis);
         assert_eq!(blobs.len(), pis.len());
         assert!(blobs.iter().all(|b| b.len() == 4));

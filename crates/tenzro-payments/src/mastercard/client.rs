@@ -234,10 +234,7 @@ mod tests {
 
     #[test]
     fn test_client_creation() {
-        let client = MastercardAgentPayClient::new(
-            "did:tenzro:machine:test_agent",
-            "key-1",
-        );
+        let client = MastercardAgentPayClient::new("did:tenzro:machine:test_agent", "key-1");
 
         assert_eq!(client.agent_did(), "did:tenzro:machine:test_agent");
         assert_eq!(client.key_id(), "key-1");
@@ -247,11 +244,8 @@ mod tests {
 
     #[test]
     fn test_client_with_signing_key() {
-        let client = MastercardAgentPayClient::new(
-            "did:tenzro:machine:test_agent",
-            "key-1",
-        )
-        .with_signing_key(b"my-secret-api-key".to_vec());
+        let client = MastercardAgentPayClient::new("did:tenzro:machine:test_agent", "key-1")
+            .with_signing_key(b"my-secret-api-key".to_vec());
 
         assert!(client.has_signing_key());
     }
@@ -270,11 +264,8 @@ mod tests {
             audit_trail: vec![],
         };
 
-        let client = MastercardAgentPayClient::new(
-            "did:tenzro:machine:test_agent",
-            "key-1",
-        )
-        .with_kya(kya.clone());
+        let client = MastercardAgentPayClient::new("did:tenzro:machine:test_agent", "key-1")
+            .with_kya(kya.clone());
 
         let cached = client.kya_verification().unwrap();
         assert_eq!(cached.agent_did, "did:tenzro:machine:test_agent");
@@ -334,7 +325,9 @@ mod tests {
         let client = MastercardAgentPayClient::new("did:tenzro:machine:agent", "key-42")
             .with_signing_key(b"test-secret".to_vec());
 
-        let header = client.compute_authorization_header(b"request body").unwrap();
+        let header = client
+            .compute_authorization_header(b"request body")
+            .unwrap();
 
         // Header format: "HMAC-SHA256 Credential=<key_id>,Signature=<hex>"
         assert!(header.starts_with("HMAC-SHA256 Credential=key-42,Signature="));

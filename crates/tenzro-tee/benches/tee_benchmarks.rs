@@ -1,7 +1,7 @@
 //! Criterion benches for the TEE keystore hot paths. Bounds are pinned in
 //! `tools/bench-gate/thresholds.toml`.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use sha2::Sha256;

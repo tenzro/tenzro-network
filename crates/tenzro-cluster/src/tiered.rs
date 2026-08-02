@@ -48,12 +48,18 @@ pub struct TieredCandidate {
 impl TieredCandidate {
     /// A local-segment candidate ([`MemberReachability::LocalDirect`]).
     pub fn local(endpoint_id: impl Into<String>) -> Self {
-        Self { endpoint_id: endpoint_id.into(), reachability: MemberReachability::LocalDirect }
+        Self {
+            endpoint_id: endpoint_id.into(),
+            reachability: MemberReachability::LocalDirect,
+        }
     }
 
     /// A directly-dialable network-tier candidate ([`MemberReachability::Direct`]).
     pub fn direct(endpoint_id: impl Into<String>) -> Self {
-        Self { endpoint_id: endpoint_id.into(), reachability: MemberReachability::Direct }
+        Self {
+            endpoint_id: endpoint_id.into(),
+            reachability: MemberReachability::Direct,
+        }
     }
 }
 
@@ -71,7 +77,11 @@ pub struct TieredHolders {
 impl TieredHolders {
     /// All selected holders, local tier first then network tier.
     pub fn all(&self) -> Vec<String> {
-        self.local.iter().chain(self.network.iter()).cloned().collect()
+        self.local
+            .iter()
+            .chain(self.network.iter())
+            .cloned()
+            .collect()
     }
 
     /// Total number of selected holders across both tiers.
@@ -104,7 +114,10 @@ pub fn select_tiered_holders(
     replicas: usize,
 ) -> TieredHolders {
     if replicas == 0 {
-        return TieredHolders { local: Vec::new(), network: Vec::new() };
+        return TieredHolders {
+            local: Vec::new(),
+            network: Vec::new(),
+        };
     }
 
     let local_ids: Vec<String> = candidates
@@ -172,11 +185,15 @@ mod tests {
     const D: &[u8] = b"tenzro/test/tiered";
 
     fn locals(n: usize) -> Vec<TieredCandidate> {
-        (0..n).map(|i| TieredCandidate::local(format!("local-{i}"))).collect()
+        (0..n)
+            .map(|i| TieredCandidate::local(format!("local-{i}")))
+            .collect()
     }
 
     fn directs(n: usize) -> Vec<TieredCandidate> {
-        (0..n).map(|i| TieredCandidate::direct(format!("net-{i}"))).collect()
+        (0..n)
+            .map(|i| TieredCandidate::direct(format!("net-{i}")))
+            .collect()
     }
 
     #[test]
@@ -211,8 +228,14 @@ mod tests {
     #[test]
     fn relay_and_symmetric_nat_never_selected() {
         let cands = vec![
-            TieredCandidate { endpoint_id: "relay".into(), reachability: MemberReachability::RelayOnly },
-            TieredCandidate { endpoint_id: "nat".into(), reachability: MemberReachability::SymmetricNat },
+            TieredCandidate {
+                endpoint_id: "relay".into(),
+                reachability: MemberReachability::RelayOnly,
+            },
+            TieredCandidate {
+                endpoint_id: "nat".into(),
+                reachability: MemberReachability::SymmetricNat,
+            },
             TieredCandidate::direct("ok"),
         ];
         let out = select_tiered_holders(D, "shard-d", &cands, 3);
@@ -263,8 +286,14 @@ mod tests {
         cands.push(TieredCandidate::local("me"));
         for i in 0..30 {
             let key = format!("k-{i}");
-            let expected = select_tiered_holders(D, &key, &cands, 3).all().iter().any(|h| h == "me");
-            assert_eq!(should_replicate_tiered(D, &key, "me", true, &cands, 3), expected);
+            let expected = select_tiered_holders(D, &key, &cands, 3)
+                .all()
+                .iter()
+                .any(|h| h == "me");
+            assert_eq!(
+                should_replicate_tiered(D, &key, "me", true, &cands, 3),
+                expected
+            );
         }
     }
 

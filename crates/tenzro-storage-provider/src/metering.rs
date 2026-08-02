@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_settlement::obligations::{ObligationSource, ProviderObligations};
 use tenzro_settlement::rental::StakeLedger;
-use tenzro_storage::{KvStore, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::settlement::ServiceType;
@@ -39,13 +39,14 @@ pub struct StoragePricing {
 impl StoragePricing {
     /// Creates a pricing schedule.
     pub fn new(rate_per_byte_epoch: u128) -> Self {
-        Self { rate_per_byte_epoch }
+        Self {
+            rate_per_byte_epoch,
+        }
     }
 
     /// Price of one storage epoch for an object of `size_bytes`.
     pub fn epoch_price(&self, size_bytes: u64) -> u128 {
-        self.rate_per_byte_epoch
-            .saturating_mul(size_bytes as u128)
+        self.rate_per_byte_epoch.saturating_mul(size_bytes as u128)
     }
 
     /// Builds the canonical `ServiceType::Storage` settlement descriptor for an
@@ -274,7 +275,11 @@ impl StorageMeter {
     /// tracker, if one is attached.
     fn publish_exposure(&self, provider: &Address) {
         if let Some(obs) = &self.obligations {
-            obs.set(provider, ObligationSource::Storage, self.active_exposure(provider));
+            obs.set(
+                provider,
+                ObligationSource::Storage,
+                self.active_exposure(provider),
+            );
         }
     }
 
@@ -310,7 +315,12 @@ impl StorageMeter {
                 .active_exposure(&provider)
                 .saturating_add(price_per_epoch);
             let stake = ledger.available_stake(&provider);
-            if !obs.can_admit(&provider, ObligationSource::Storage, new_storage_total, stake) {
+            if !obs.can_admit(
+                &provider,
+                ObligationSource::Storage,
+                new_storage_total,
+                stake,
+            ) {
                 let other = obs.exposure_excluding(&provider, ObligationSource::Storage);
                 return Err(StorageProviderError::Settlement(format!(
                     "insufficient provider stake to cover storage: need {} (storage {} + other {}), stake {}",
@@ -426,7 +436,10 @@ impl StorageMeter {
                         *bal = bal.saturating_add(unearned);
                     }
                     deal.status = StorageDealStatus::Terminated;
-                    info!("Storage deal {} terminated after {} misses", deal_id, deal.consecutive_misses);
+                    info!(
+                        "Storage deal {} terminated after {} misses",
+                        deal_id, deal.consecutive_misses
+                    );
                 } else if deal.is_complete() {
                     deal.status = StorageDealStatus::Completed;
                 }
@@ -462,7 +475,14 @@ impl StorageMeter {
 mod tests {
     use super::*;
 
-    fn setup(deposit: u128) -> (Arc<DashMap<(Address, AssetId), u128>>, StorageMeter, Address, Address) {
+    fn setup(
+        deposit: u128,
+    ) -> (
+        Arc<DashMap<(Address, AssetId), u128>>,
+        StorageMeter,
+        Address,
+        Address,
+    ) {
         let renter = Address::new([1u8; 32]);
         let provider = Address::new([2u8; 32]);
         let balances = Arc::new(DashMap::new());
@@ -477,7 +497,10 @@ mod tests {
         assert_eq!(p.epoch_price(100), 500);
         assert!(matches!(
             p.service_type(100, 3600),
-            ServiceType::Storage { data_size: 100, duration: 3600 }
+            ServiceType::Storage {
+                data_size: 100,
+                duration: 3600
+            }
         ));
     }
 
@@ -601,7 +624,10 @@ mod tests {
 
         let ok = meter.open_deal("ok", renter, provider, AssetId::tnzo(), 100, 5);
         assert!(ok.is_ok());
-        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Storage), 200);
+        assert_eq!(
+            obligations.exposure_for(&provider, ObligationSource::Storage),
+            200
+        );
         assert_eq!(obligations.total_exposure(&provider), 1_200);
     }
 
@@ -620,8 +646,14 @@ mod tests {
         let deal = meter
             .open_deal("obj", renter, provider, AssetId::tnzo(), 100, 1)
             .unwrap();
-        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Storage), 200);
+        assert_eq!(
+            obligations.exposure_for(&provider, ObligationSource::Storage),
+            200
+        );
         meter.charge_epoch(&deal.deal_id, true).unwrap(); // completes term
-        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Storage), 0);
+        assert_eq!(
+            obligations.exposure_for(&provider, ObligationSource::Storage),
+            0
+        );
     }
 }

@@ -44,3 +44,6 @@ harness = false
 [[test]]
 name = "tail_fork_regression"
 path = "tests/tail_fork_regression.rs"
+
+[lints]
+workspace = true

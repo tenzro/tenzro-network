@@ -44,12 +44,12 @@ use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::{LlamaModelParams, LlamaSplitMode};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 #[cfg(feature = "mtmd")]
 use llama_cpp_2::mtmd::{
     MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker,
 };
-use llama_cpp_2::model::params::{LlamaModelParams, LlamaSplitMode};
-use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::speculative::{MtpSpeculative, MtpSpeculativeParams};
 use llama_cpp_2::token::LlamaToken;
@@ -500,13 +500,7 @@ const MAX_CONTEXT_LENGTH: u32 = 131_072;
 /// Default context length used when no catalog entry is available.
 const DEFAULT_CONTEXT_LENGTH: u32 = 8192;
 
-/// Headroom multiplier applied to the GGUF file size when estimating the
-/// memory a model needs at load. Covers the KV cache, activation buffers, and
-/// llama.cpp bookkeeping on top of the resident weights. 1.35× is deliberately
-/// conservative for consumer hardware; larger contexts push the real KV cost
-/// higher but the check is a floor, not an exact accounting.
-const MODEL_LOAD_HEADROOM_NUM: u64 = 135;
-const MODEL_LOAD_HEADROOM_DEN: u64 = 100;
+use crate::memory_budget::{LOAD_HEADROOM_DEN, LOAD_HEADROOM_NUM};
 
 /// Maximum number of concurrent requests (in flight + waiting) permitted per
 /// loaded model. llama.cpp serializes decode on a single model context, so
@@ -659,11 +653,12 @@ impl Default for ModelRuntime {
 
 impl ModelRuntime {
     pub fn new() -> Self {
-        let backend = LLAMA_BACKEND.get_or_init(|| {
-            let b = LlamaBackend::init()
-                .expect("Failed to initialize llama.cpp backend");
-            Arc::new(b)
-        }).clone();
+        let backend = LLAMA_BACKEND
+            .get_or_init(|| {
+                let b = LlamaBackend::init().expect("Failed to initialize llama.cpp backend");
+                Arc::new(b)
+            })
+            .clone();
 
         let has_gpu = backend.supports_gpu_offload();
         let hardware = HardwareInfo::detect(has_gpu);
@@ -695,10 +690,7 @@ impl ModelRuntime {
     /// tree reaches the bound it is reset to just this prompt's path, so the
     /// summary tracks recent traffic rather than growing without limit.
     pub fn record_warm_prompt(&self, model_id: &str, prompt: &[u8]) {
-        let mut entry = self
-            .warm_prefixes
-            .entry(model_id.to_string())
-            .or_default();
+        let mut entry = self.warm_prefixes.entry(model_id.to_string()).or_default();
         if entry.nodes.len() >= MAX_WARM_PREFIX_NODES {
             *entry.value_mut() = tenzro_types::PrefixCacheSummary::from_warm_prompt(prompt);
         } else {
@@ -778,36 +770,44 @@ impl ModelRuntime {
         &self.hardware
     }
 
+    /// Budget key for the speculative drafter paired with `target_model_id`.
+    ///
+    /// A drafter is a second GGUF resident alongside its target, so it needs
+    /// its own commitment. Sharing the target's key would make each load
+    /// overwrite the other's claim.
+    fn drafter_budget_key(target_model_id: &str) -> String {
+        format!("drafter:{target_model_id}")
+    }
+
     /// Load-time memory admission check.
     ///
-    /// Estimates the resident footprint as `file_len × headroom` and rejects
-    /// the load if available system memory can't cover it. On unified-memory
-    /// (Apple Metal) and GPU-offload builds, weights land in shared or device
-    /// memory backed by system RAM, so available RAM is the safe proxy — the
-    /// check is a floor that prevents a mid-load OOM kill, not exact VRAM
-    /// accounting. `TENZRO_SKIP_MODEL_ADMISSION=1` bypasses it for operators who
+    /// Claims `file_len × headroom` in the [`Tier::Resident`] pool of the
+    /// process-wide [`memory_budget`](crate::memory_budget). Language models
+    /// stay loaded to answer requests, so they are resident by definition.
+    ///
+    /// This charges against a declared ledger rather than against free system
+    /// memory. Reading free memory is unsafe here for two reasons: it counts
+    /// the space RocksDB's block cache will grow into as available, and two
+    /// concurrent loads both observe the same free bytes and both admit
+    /// themselves. The budget's admission is an atomic check-and-commit, so
+    /// neither happens.
+    ///
+    /// The commitment is released by [`unload_model`](Self::unload_model).
+    /// `TENZRO_SKIP_MODEL_ADMISSION=1` bypasses the check for operators who
     /// pin memory out-of-band.
     fn check_memory_admission(model_id: &str, file_len: u64) -> Result<()> {
         if std::env::var("TENZRO_SKIP_MODEL_ADMISSION").as_deref() == Ok("1") {
             return Ok(());
         }
 
-        let required = file_len
-            .saturating_mul(MODEL_LOAD_HEADROOM_NUM)
-            / MODEL_LOAD_HEADROOM_DEN;
-
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        let available = sys.available_memory(); // bytes
-
-        if available < required {
-            return Err(ModelError::InsufficientMemory {
+        let required = crate::memory_budget::MemoryBudget::with_headroom(file_len);
+        crate::memory_budget::global()
+            .admit(model_id, crate::memory_budget::Tier::Resident, required)
+            .map_err(|denied| ModelError::InsufficientMemory {
                 model_id: model_id.to_string(),
-                required_mb: required / 1_048_576,
-                available_mb: available / 1_048_576,
-            });
-        }
-        Ok(())
+                required_mb: denied.requested_bytes / 1_048_576,
+                available_mb: denied.tier_available_bytes / 1_048_576,
+            })
     }
 
     /// Detected local hardware, probed once per process. Detection shells
@@ -843,15 +843,14 @@ impl ModelRuntime {
             return 0;
         }
         let need_gb = (file_len as f32 / 1_073_741_824.0)
-            * (MODEL_LOAD_HEADROOM_NUM as f32 / MODEL_LOAD_HEADROOM_DEN as f32);
+            * (LOAD_HEADROOM_NUM as f32 / LOAD_HEADROOM_DEN as f32);
         let vram_gb = hw.vram_gb as f32;
         if need_gb <= vram_gb {
             return 1000;
         }
         match crate::gguf_shape::read_model_shape(gguf_path) {
             Ok(shape) if shape.layers > 0 => {
-                let layers =
-                    ((shape.layers as f32 * vram_gb / need_gb) as u32).min(shape.layers);
+                let layers = ((shape.layers as f32 * vram_gb / need_gb) as u32).min(shape.layers);
                 warn!(
                     "Partial GPU offload for {}: {:.1} GiB needed vs {} GiB VRAM — {}/{} layers on GPU",
                     gguf_path.display(),
@@ -880,11 +879,7 @@ impl ModelRuntime {
     /// Convenience overload: uses the model's trained context length capped
     /// at [`DEFAULT_CONTEXT_LENGTH`]. To use the full catalog context length,
     /// call [`load_model_with_context`] instead.
-    pub async fn load_model(
-        &self,
-        model_id: &str,
-        gguf_path: &Path,
-    ) -> Result<()> {
+    pub async fn load_model(&self, model_id: &str, gguf_path: &Path) -> Result<()> {
         self.load_model_with_context(model_id, gguf_path, None)
             .await
     }
@@ -915,6 +910,10 @@ impl ModelRuntime {
         // for the KV cache and activation buffers.
         let file_len = std::fs::metadata(gguf_path)?.len();
         Self::check_memory_admission(model_id, file_len)?;
+        // Everything from here to the registration below can fail through `?`.
+        // The guard hands the commitment back on any such path, so a failed
+        // load does not permanently shrink the resident tier.
+        let admission = crate::memory_budget::AdmissionGuard::new(model_id);
 
         info!("Loading model {} from {}", model_id, gguf_path.display());
         let start = Instant::now();
@@ -930,15 +929,13 @@ impl ModelRuntime {
             let n_gpu_layers = Self::gpu_layer_budget(&gguf_path_owned, file_len);
             let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
 
-            let model =
-                LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params).map_err(
-                    |e| {
-                        ModelError::Other(format!(
-                            "Failed to load GGUF model '{}': {}",
-                            model_id_owned, e
-                        ))
-                    },
-                )?;
+            let model = LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params)
+                .map_err(|e| {
+                    ModelError::Other(format!(
+                        "Failed to load GGUF model '{}': {}",
+                        model_id_owned, e
+                    ))
+                })?;
 
             // Determine context length:
             // - If caller provides a context_length, use it (capped at MAX_CONTEXT_LENGTH
@@ -946,9 +943,7 @@ impl ModelRuntime {
             // - Otherwise default to DEFAULT_CONTEXT_LENGTH (safe default)
             let trained_ctx = model.n_ctx_train();
             let effective_ctx = match context_length {
-                Some(requested) => trained_ctx
-                    .min(requested)
-                    .min(MAX_CONTEXT_LENGTH),
+                Some(requested) => trained_ctx.min(requested).min(MAX_CONTEXT_LENGTH),
                 None => trained_ctx.min(DEFAULT_CONTEXT_LENGTH),
             };
 
@@ -976,11 +971,7 @@ impl ModelRuntime {
         .map_err(|e| ModelError::Other(format!("Task join error: {}", e)))??;
 
         let elapsed = start.elapsed();
-        info!(
-            "Model {} loaded in {:.2}s",
-            model_id,
-            elapsed.as_secs_f64(),
-        );
+        info!("Model {} loaded in {:.2}s", model_id, elapsed.as_secs_f64(),);
 
         // A model paired with a Multi-Token-Prediction drafter is served on the
         // serial single-context path: speculative decoding runs the target and
@@ -1007,12 +998,7 @@ impl ModelRuntime {
                 context_length,
                 ..
             } = loaded;
-            let engine = BatchEngine::spawn(
-                model_id.to_string(),
-                model,
-                backend,
-                context_length,
-            )?;
+            let engine = BatchEngine::spawn(model_id.to_string(), model, backend, context_length)?;
             LoadedEntry::Batched(engine)
         };
 
@@ -1021,6 +1007,8 @@ impl ModelRuntime {
         }
         self.loaded_models
             .insert(model_id.to_string(), Arc::new(entry));
+        // Registered: `unload_model` now owns releasing this commitment.
+        admission.commit();
 
         Ok(())
     }
@@ -1079,15 +1067,13 @@ impl ModelRuntime {
                 })?
                 .with_tensor_split(&tensor_split);
 
-            let model =
-                LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params).map_err(
-                    |e| {
-                        ModelError::Other(format!(
-                            "Failed to load clustered GGUF model '{}': {}",
-                            model_id_owned, e
-                        ))
-                    },
-                )?;
+            let model = LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params)
+                .map_err(|e| {
+                    ModelError::Other(format!(
+                        "Failed to load clustered GGUF model '{}': {}",
+                        model_id_owned, e
+                    ))
+                })?;
 
             let trained_ctx = model.n_ctx_train();
             let effective_ctx = match context_length {
@@ -1136,7 +1122,9 @@ impl ModelRuntime {
         }
         self.loaded_models.insert(
             model_id.to_string(),
-            Arc::new(LoadedEntry::Serial(Arc::new(tokio::sync::Mutex::new(loaded)))),
+            Arc::new(LoadedEntry::Serial(Arc::new(tokio::sync::Mutex::new(
+                loaded,
+            )))),
         );
 
         Ok(())
@@ -1150,9 +1138,7 @@ impl ModelRuntime {
     /// returns `None` and the model serves text-only.
     #[cfg(feature = "mtmd")]
     fn load_projector(model_id: &str, gguf_path: &Path, model: &LlamaModel) -> Option<MtmdContext> {
-        if get_model_by_id(model_id)?.mmproj.is_none() {
-            return None;
-        }
+        get_model_by_id(model_id)?.mmproj.as_ref()?;
 
         let path = Self::projector_path(model_id, gguf_path)?;
         let path_str = path.to_str()?;
@@ -1244,6 +1230,10 @@ impl ModelRuntime {
                 }
             }
             drop(entry);
+            // Return the claim to the resident tier only after the context is
+            // actually gone. Releasing earlier would let a concurrent load be
+            // admitted against space this model has not yet freed.
+            crate::memory_budget::global().release(model_id);
             info!("Unloaded model: {} (llama.cpp context freed)", model_id);
         } else {
             warn!("Model {} was not loaded", model_id);
@@ -1254,8 +1244,7 @@ impl ModelRuntime {
     /// Check if a model is currently served — either loaded into a local
     /// llama.cpp context or routed to a registered external engine.
     pub fn is_loaded(&self, model_id: &str) -> bool {
-        self.loaded_models.contains_key(model_id)
-            || self.external_engines.contains_key(model_id)
+        self.loaded_models.contains_key(model_id) || self.external_engines.contains_key(model_id)
     }
 
     /// List all currently served model IDs (local + external).
@@ -1357,7 +1346,12 @@ impl ModelRuntime {
         }
 
         let file_len = std::fs::metadata(drafter_gguf_path)?.len();
-        Self::check_memory_admission(target_model_id, file_len)?;
+        // Keyed separately from the target. Admitting under `target_model_id`
+        // would *replace* the target's own commitment with the drafter's much
+        // smaller one, silently handing back memory the target still holds.
+        Self::check_memory_admission(&Self::drafter_budget_key(target_model_id), file_len)?;
+        let admission =
+            crate::memory_budget::AdmissionGuard::new(Self::drafter_budget_key(target_model_id));
 
         info!(
             "Loading MTP drafter for {} from {}",
@@ -1373,15 +1367,13 @@ impl ModelRuntime {
         let loaded = tokio::task::spawn_blocking(move || {
             let n_gpu_layers = Self::gpu_layer_budget(&gguf_path_owned, file_len);
             let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
-            let model =
-                LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params).map_err(
-                    |e| {
-                        ModelError::Other(format!(
-                            "Failed to load MTP drafter for target '{}': {}",
-                            target_id_owned, e
-                        ))
-                    },
-                )?;
+            let model = LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params)
+                .map_err(|e| {
+                    ModelError::Other(format!(
+                        "Failed to load MTP drafter for target '{}': {}",
+                        target_id_owned, e
+                    ))
+                })?;
             let trained_ctx = model.n_ctx_train();
             let effective_ctx = match context_length {
                 Some(requested) => trained_ctx.min(requested).min(MAX_CONTEXT_LENGTH),
@@ -1407,6 +1399,8 @@ impl ModelRuntime {
             target_model_id.to_string(),
             Arc::new(tokio::sync::Mutex::new(loaded)),
         );
+        // Registered: `unload_drafter` now owns releasing this commitment.
+        admission.commit();
         Ok(())
     }
 
@@ -1416,6 +1410,7 @@ impl ModelRuntime {
             let _lock = drafter_arc.lock().await;
             drop(_lock);
             drop(drafter_arc);
+            crate::memory_budget::global().release(&Self::drafter_budget_key(target_model_id));
             info!("Unloaded MTP drafter for {}", target_model_id);
         }
         Ok(())
@@ -1583,7 +1578,10 @@ impl ModelRuntime {
         // External engine takes priority: the model is served off-box, so
         // there is no local context. A raw prompt maps to a single user turn.
         // Clone the engine and drop the DashMap guard before any `.await`.
-        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        let external = self
+            .external_engines
+            .get(model_id)
+            .map(|e| e.value().clone());
         if let Some(engine) = external {
             let _guard = self.acquire_inflight(model_id)?;
             let messages = [ChatMessage {
@@ -1604,8 +1602,7 @@ impl ModelRuntime {
 
         match entry.as_ref() {
             LoadedEntry::Batched(engine) => {
-                Self::run_batched(engine, BatchPrompt::Raw(prompt.to_string()), config, None)
-                    .await
+                Self::run_batched(engine, BatchPrompt::Raw(prompt.to_string()), config, None).await
             }
             LoadedEntry::Serial(model_mutex) => {
                 let model_mutex = model_mutex.clone();
@@ -1633,7 +1630,10 @@ impl ModelRuntime {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> Result<InferenceResult> {
-        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        let external = self
+            .external_engines
+            .get(model_id)
+            .map(|e| e.value().clone());
         if let Some(engine) = external {
             let _guard = self.acquire_inflight(model_id)?;
             return engine.chat(messages, config).await;
@@ -1656,13 +1656,7 @@ impl ModelRuntime {
 
         match entry.as_ref() {
             LoadedEntry::Batched(engine) => {
-                Self::run_batched(
-                    engine,
-                    BatchPrompt::Chat(messages.to_vec()),
-                    config,
-                    None,
-                )
-                .await
+                Self::run_batched(engine, BatchPrompt::Chat(messages.to_vec()), config, None).await
             }
             LoadedEntry::Serial(model_mutex) => {
                 let model_mutex = model_mutex.clone();
@@ -1703,7 +1697,10 @@ impl ModelRuntime {
         config: &GenerationConfig,
     ) -> Result<ChatWithToolsResult> {
         // Resolve the backend: external engine, or a local `LoadedEntry`.
-        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        let external = self
+            .external_engines
+            .get(model_id)
+            .map(|e| e.value().clone());
         let entry = if external.is_some() {
             None
         } else {
@@ -1726,7 +1723,11 @@ impl ModelRuntime {
         let inner = if let Some(engine) = external {
             engine.chat(&messages, &config).await?
         } else {
-            match entry.as_ref().expect("local entry present when not external").as_ref() {
+            match entry
+                .as_ref()
+                .expect("local entry present when not external")
+                .as_ref()
+            {
                 LoadedEntry::Batched(engine) => {
                     Self::run_batched(engine, BatchPrompt::Chat(messages), &config, None).await?
                 }
@@ -1783,7 +1784,10 @@ impl ModelRuntime {
         config: &GenerationConfig,
         token_tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<InferenceResult> {
-        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        let external = self
+            .external_engines
+            .get(model_id)
+            .map(|e| e.value().clone());
         if let Some(engine) = external {
             let _guard = self.acquire_inflight(model_id)?;
             return engine.chat_stream(messages, config, token_tx).await;
@@ -1817,7 +1821,9 @@ impl ModelRuntime {
                 // Look up the drafter only when the caller asked for speculative
                 // decoding. Avoids holding an extra lock on the happy path.
                 let drafter_mutex = if config.draft_n.is_some() {
-                    self.loaded_drafters.get(model_id).map(|d| d.value().clone())
+                    self.loaded_drafters
+                        .get(model_id)
+                        .map(|d| d.value().clone())
                 } else {
                     None
                 };
@@ -1962,7 +1968,10 @@ impl ModelRuntime {
         config: &GenerationConfig,
         token_tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<InferenceResult> {
-        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        let external = self
+            .external_engines
+            .get(model_id)
+            .map(|e| e.value().clone());
         if let Some(engine) = external {
             let _guard = self.acquire_inflight(model_id)?;
             let messages = [ChatMessage {
@@ -1994,7 +2003,9 @@ impl ModelRuntime {
             LoadedEntry::Serial(model_mutex) => {
                 let model_mutex = model_mutex.clone();
                 let drafter_mutex = if config.draft_n.is_some() {
-                    self.loaded_drafters.get(model_id).map(|d| d.value().clone())
+                    self.loaded_drafters
+                        .get(model_id)
+                        .map(|d| d.value().clone())
                 } else {
                     None
                 };
@@ -2104,9 +2115,9 @@ impl ModelRuntime {
         let last_index = (tokens_list.len() - 1) as i32;
         for (i, token) in tokens_list.iter().enumerate() {
             let is_last = i as i32 == last_index;
-            batch.add(*token, i as i32, &[0], is_last).map_err(|e| {
-                ModelError::Other(format!("Batch add failed: {}", e))
-            })?;
+            batch
+                .add(*token, i as i32, &[0], is_last)
+                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
         }
 
         // Decode prompt (prefill)
@@ -2190,9 +2201,9 @@ impl ModelRuntime {
         let max_pos = n_ctx_val.min(n_past + config.max_tokens as i32);
 
         while n_cur < max_pos {
-            let step_top_k = commitment_k.zip(logits_row).map(|(k, row)| {
-                crate::toploc::top_k_from_logits(ctx.get_logits_ith(row), k)
-            });
+            let step_top_k = commitment_k
+                .zip(logits_row)
+                .map(|(k, row)| crate::toploc::top_k_from_logits(ctx.get_logits_ith(row), k));
 
             // Sample next token. `-1` is llama.cpp's "last logits row", the only
             // way to reach the row a multimodal prefill left behind.
@@ -2212,10 +2223,7 @@ impl ModelRuntime {
             }
 
             // Decode token to text
-            match loaded
-                .model
-                .token_to_piece(token, &mut decoder, true, None)
-            {
+            match loaded.model.token_to_piece(token, &mut decoder, true, None) {
                 Ok(piece) => {
                     // If the receiver is dropped, stop generating
                     if !stream.push(&piece, token_tx) {
@@ -2236,9 +2244,9 @@ impl ModelRuntime {
 
             // Prepare next batch with the sampled token
             batch.clear();
-            batch.add(token, n_cur, &[0], true).map_err(|e| {
-                ModelError::Other(format!("Batch add failed: {}", e))
-            })?;
+            batch
+                .add(token, n_cur, &[0], true)
+                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
 
             // Decode the new token
             ctx.decode(&mut batch)
@@ -2252,7 +2260,8 @@ impl ModelRuntime {
 
         // Read before `finish` consumes the stream — `finish` sets `hit`
         // unconditionally to release held bytes.
-        let stop_reason = StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
+        let stop_reason =
+            StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
         let output_text = stream.finish(token_tx);
 
         let elapsed = start.elapsed();
@@ -2263,13 +2272,13 @@ impl ModelRuntime {
             0.0
         };
 
-        let commitment = commitment_k.filter(|_| !commitment_steps.is_empty()).map(|k| {
-            crate::toploc::InferenceCommitment {
+        let commitment = commitment_k
+            .filter(|_| !commitment_steps.is_empty())
+            .map(|k| crate::toploc::InferenceCommitment {
                 k: k as u8,
                 prompt_tokens: input_tokens,
                 steps: commitment_steps,
-            }
-        });
+            });
 
         Ok(InferenceResult {
             text: output_text,
@@ -2403,7 +2412,16 @@ impl ModelRuntime {
 
         // `first_logits: None` — this prefill ran on the raw context, so no row
         // is recorded as readable and the first sample must use the `-1` index.
-        Self::decode_loop(loaded, &mut ctx, n_past, input_tokens, config, None, None, start)
+        Self::decode_loop(
+            loaded,
+            &mut ctx,
+            n_past,
+            input_tokens,
+            config,
+            None,
+            None,
+            start,
+        )
     }
 
     /// Speculative-decoding generation loop using llama.cpp's MTP
@@ -2526,8 +2544,8 @@ impl ModelRuntime {
         let mut output_tokens: u32 = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut stream = StopStream::new(config.stop.clone());
-        let max_pos = (n_ctx_target.get() as i32)
-            .min(input_tokens as i32 + config.max_tokens as i32);
+        let max_pos =
+            (n_ctx_target.get() as i32).min(input_tokens as i32 + config.max_tokens as i32);
 
         // Seed `id_last` by sampling one token from the target. The
         // drafter conditions its draft on this token.
@@ -2638,16 +2656,15 @@ impl ModelRuntime {
                     .add(*draft_tok, pos, &[0], true)
                     .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
             }
-            spec.target_context_mut()
-                .decode(&mut batch)
-                .map_err(|e| ModelError::Other(format!("Target speculative decode failed: {}", e)))?;
+            spec.target_context_mut().decode(&mut batch).map_err(|e| {
+                ModelError::Other(format!("Target speculative decode failed: {}", e))
+            })?;
 
             // 3. Accept / reject by comparing target samples to drafts.
             let mut n_accepted: u16 = 0;
             for (i, draft_tok) in drafts.iter().enumerate() {
                 let logit_idx = i as i32;
-                let target_sample =
-                    sampler.sample(spec.target_context_mut(), logit_idx);
+                let target_sample = sampler.sample(spec.target_context_mut(), logit_idx);
                 sampler.accept(target_sample);
                 if target_sample == *draft_tok {
                     n_accepted += 1;
@@ -2658,7 +2675,9 @@ impl ModelRuntime {
                     }
                     let mut open = true;
                     if let Ok(piece) =
-                        loaded.model.token_to_piece(target_sample, &mut decoder, true, None)
+                        loaded
+                            .model
+                            .token_to_piece(target_sample, &mut decoder, true, None)
                     {
                         open = stream.push(&piece, token_tx) && !stream.hit_stop();
                     }
@@ -2694,7 +2713,9 @@ impl ModelRuntime {
                     }
                     let mut open = true;
                     if let Ok(piece) =
-                        loaded.model.token_to_piece(target_sample, &mut decoder, true, None)
+                        loaded
+                            .model
+                            .token_to_piece(target_sample, &mut decoder, true, None)
                     {
                         open = stream.push(&piece, token_tx) && !stream.hit_stop();
                     }
@@ -2745,7 +2766,8 @@ impl ModelRuntime {
         } else {
             0.0
         };
-        let stop_reason = StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
+        let stop_reason =
+            StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
         Ok(InferenceResult {
             text: stream.finish(token_tx),
             input_tokens,
@@ -2846,10 +2868,7 @@ fn render_tools_preamble(tools: &[ToolDefinition]) -> String {
             out.push_str(&format!("    <description>{}</description>\n", desc));
         }
         out.push_str("    <input_schema>\n");
-        out.push_str(
-            &serde_json::to_string(&t.input_schema)
-                .unwrap_or_else(|_| "{}".to_string()),
-        );
+        out.push_str(&serde_json::to_string(&t.input_schema).unwrap_or_else(|_| "{}".to_string()));
         out.push_str("\n    </input_schema>\n");
         out.push_str("  </tool>\n");
     }
@@ -2991,7 +3010,8 @@ fn parse_tool_call_value(v: &serde_json::Value) -> Option<ToolCall> {
         .unwrap_or_else(|| serde_json::json!({}));
     // Some models nest arguments as a JSON-encoded string.
     let input = if let Some(s) = input.as_str() {
-        serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::String(s.to_string()))
+        serde_json::from_str::<serde_json::Value>(s)
+            .unwrap_or(serde_json::Value::String(s.to_string()))
     } else {
         input
     };
@@ -3065,8 +3085,14 @@ mod tests {
     #[test]
     fn chatml_fallback_renders_turns_and_open_assistant() {
         let messages = vec![
-            ChatMessage { role: "system".to_string(), content: "be terse".to_string() },
-            ChatMessage { role: "user".to_string(), content: "hi".to_string() },
+            ChatMessage {
+                role: "system".to_string(),
+                content: "be terse".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            },
         ];
         let rendered = render_chatml_prompt(&messages);
         assert_eq!(

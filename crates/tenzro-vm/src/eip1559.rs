@@ -46,7 +46,7 @@ pub struct Eip1559Config {
 impl Default for Eip1559Config {
     fn default() -> Self {
         Self {
-            initial_base_fee: 1_000_000_000, // 1 Gwei
+            initial_base_fee: 1_000_000_000,  // 1 Gwei
             target_gas_per_block: 15_000_000, // 15M gas target (same as Ethereum)
             max_gas_per_block: 30_000_000,    // 30M gas max
             base_fee_change_denominator: 8,   // 12.5% max change per block
@@ -88,7 +88,10 @@ impl FeeMarket {
     /// Create a new EIP-1559 fee market
     pub fn new(config: Eip1559Config) -> Self {
         let initial_fee = config.initial_base_fee;
-        info!("Initializing EIP-1559 fee market (initial base fee: {} wei)", initial_fee);
+        info!(
+            "Initializing EIP-1559 fee market (initial base fee: {} wei)",
+            initial_fee
+        );
 
         Self {
             config,
@@ -200,7 +203,11 @@ impl FeeMarket {
     ///
     /// The effective price is `min(max_fee_per_gas, base_fee + max_priority_fee)`.
     /// The priority fee actually paid is `effective_price - base_fee`.
-    pub fn effective_gas_price(&self, max_fee_per_gas: u128, max_priority_fee_per_gas: u128) -> EffectiveGasPrice {
+    pub fn effective_gas_price(
+        &self,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+    ) -> EffectiveGasPrice {
         let base_fee = self.current_base_fee;
 
         if max_fee_per_gas < base_fee {
@@ -325,10 +332,10 @@ impl FeeMarket {
     pub fn suggest_priority_fee(&self, urgency: FeeUrgency) -> u128 {
         let base = self.current_base_fee;
         match urgency {
-            FeeUrgency::Low => base / 10,        // 10% of base fee
-            FeeUrgency::Medium => base / 5,       // 20% of base fee
-            FeeUrgency::High => base / 2,         // 50% of base fee
-            FeeUrgency::Urgent => base,           // 100% of base fee
+            FeeUrgency::Low => base / 10,   // 10% of base fee
+            FeeUrgency::Medium => base / 5, // 20% of base fee
+            FeeUrgency::High => base / 2,   // 50% of base fee
+            FeeUrgency::Urgent => base,     // 100% of base fee
         }
     }
 }
@@ -410,7 +417,10 @@ mod tests {
 
         // Block at 100% capacity (2x target = max)
         let next_fee = market.calculate_next_base_fee(target * 2);
-        assert!(next_fee > market.base_fee(), "Base fee should increase when block is full");
+        assert!(
+            next_fee > market.base_fee(),
+            "Base fee should increase when block is full"
+        );
 
         // Max increase should be 12.5%
         let max_expected = market.base_fee() + market.base_fee() / 8;
@@ -423,7 +433,10 @@ mod tests {
 
         // Empty block (0 gas used)
         let next_fee = market.calculate_next_base_fee(0);
-        assert!(next_fee < market.base_fee(), "Base fee should decrease on empty block");
+        assert!(
+            next_fee < market.base_fee(),
+            "Base fee should decrease on empty block"
+        );
 
         // Should not go below minimum
         assert!(next_fee >= market.config.min_base_fee);
@@ -589,7 +602,7 @@ mod tests {
     #[test]
     fn test_min_base_fee_floor() {
         let config = Eip1559Config {
-            min_base_fee: 100_000_000, // 0.1 Gwei
+            min_base_fee: 100_000_000,     // 0.1 Gwei
             initial_base_fee: 100_000_000, // Start at minimum
             ..Default::default()
         };

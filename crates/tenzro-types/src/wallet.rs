@@ -92,7 +92,10 @@ impl WalletType {
 
     /// Checks if this wallet type supports multiple accounts
     pub fn supports_multiple_accounts(&self) -> bool {
-        matches!(self, Self::HD | Self::MultiSig | Self::SmartContract | Self::Custodial)
+        matches!(
+            self,
+            Self::HD | Self::MultiSig | Self::SmartContract | Self::Custodial
+        )
     }
 }
 

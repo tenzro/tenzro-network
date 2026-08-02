@@ -638,8 +638,12 @@ pub struct OuterGradient {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainingAttestation {
     /// TEE vendor (`intel-tdx`, `amd-sev-snp`, `aws-nitro`, `nvidia-cc`).
+    /// Must agree with the vendor named inside `report_hex`.
     pub vendor: String,
-    /// Vendor-specific attestation report bytes (hex-encoded for JSON).
+    /// Hex of the JSON serialization of an [`crate::tee::AttestationReport`].
+    /// The vendor-specific quote bytes travel inside that report's
+    /// `attestation_data`, so one wire form carries every vendor. This is the
+    /// same encoding `tenzro_verifyTeeAttestation` accepts.
     pub report_hex: String,
     /// Hash of the trainer program/binary that produced the gradient.
     pub program_hash: Hash,
@@ -842,8 +846,8 @@ pub struct TrainingReceipt {
 /// key (which never leaves the TEE) and decrypts the assigned shard inside
 /// the enclave. The host OS never sees the data key or cleartext.
 ///
-/// `enclave_pubkey` and `enclave_measurements` are bound into the envelope so
-/// the syncer can verify at enrollment that the trainer's TEE attestation
+/// `enclave_pubkey` and `enclave_measurement_hex` are bound into the envelope
+/// so the syncer can check at enrollment that the trainer's TEE attestation
 /// matches the recipient the sponsor sealed to. A mismatch means the trainer
 /// presented a different enclave than the one the sponsor wrapped to —
 /// enrollment is rejected.
@@ -869,15 +873,14 @@ pub struct SealedShardEnvelope {
     pub wrap_alg: String,
     /// The trainer's attested enclave public key the sponsor wrapped to.
     /// Format depends on `wrap_alg`; for HPKE-X25519 this is the 32-byte
-    /// X25519 pubkey. Must match the pubkey carried in the trainer's
-    /// per-round [`TrainingAttestation`] for enrollment to succeed.
+    /// X25519 pubkey. The trainer's per-round [`TrainingAttestation`] must
+    /// commit to this key in its report user data for enrollment to succeed.
     pub enclave_pubkey: Vec<u8>,
-    /// The trainer's attested enclave measurements (program/firmware hashes)
-    /// the sponsor sealed against. Must match the trainer's TEE attestation
-    /// at enrollment. Format is vendor-specific (e.g. TDX MRTD + RTMR0..3,
-    /// SEV-SNP measurement, Nitro PCR set). Stored as a hex string blob so
-    /// the protocol layer stays vendor-agnostic.
-    pub enclave_measurements_hex: String,
+    /// Hex of the enclave measurement the sponsor sealed against — the
+    /// primary measurement register the vendor's report carries (TDX MRTD,
+    /// SEV-SNP launch measurement, Nitro PCR0). Must equal the measurement
+    /// read out of the trainer's verified attestation report at enrollment.
+    pub enclave_measurement_hex: String,
     /// AES-GCM authentication tag is included in `wrapped_data_key` per
     /// HPKE Base mode; no separate field needed.
     pub created_at: Timestamp,
@@ -996,7 +999,10 @@ mod tests {
         for s in ["open", "OPEN", "Open", "garbage"] {
             assert_eq!(TrainingTier::from_str_lossy(s), TrainingTier::Open);
         }
-        assert_eq!(TrainingTier::from_str_lossy("verified"), TrainingTier::Verified);
+        assert_eq!(
+            TrainingTier::from_str_lossy("verified"),
+            TrainingTier::Verified
+        );
         assert_eq!(
             TrainingTier::from_str_lossy("CONFIDENTIAL"),
             TrainingTier::Confidential
@@ -1056,7 +1062,9 @@ mod tests {
         assert!(s.fragment_active(0, 8, 4));
         // Every fragment is active exactly once per num_shards rounds.
         for fragment in 0..8 {
-            let active: Vec<u32> = (0..4).filter(|r| s.fragment_active(fragment, 8, *r)).collect();
+            let active: Vec<u32> = (0..4)
+                .filter(|r| s.fragment_active(fragment, 8, *r))
+                .collect();
             assert_eq!(active.len(), 1, "fragment {fragment} active {active:?}");
         }
     }
@@ -1081,8 +1089,14 @@ mod tests {
     #[test]
     fn quantization_display() {
         assert_eq!(GradientQuantization::None.to_string(), "none");
-        assert_eq!(GradientQuantization::Int8 { block_size: 256 }.to_string(), "int8/256");
-        assert_eq!(GradientQuantization::Int4 { block_size: 128 }.to_string(), "int4/128");
+        assert_eq!(
+            GradientQuantization::Int8 { block_size: 256 }.to_string(),
+            "int8/256"
+        );
+        assert_eq!(
+            GradientQuantization::Int4 { block_size: 128 }.to_string(),
+            "int4/128"
+        );
     }
 
     /// Cross-language golden vector: the Python trainer pins the identical
@@ -1094,8 +1108,14 @@ mod tests {
             k: 2,
             loss_trajectory: vec![1.5, 0.75, 0.5],
             probes: vec![
-                DeltaProbe { index: 7, value: -2.5 },
-                DeltaProbe { index: 3, value: 1.25 },
+                DeltaProbe {
+                    index: 7,
+                    value: -2.5,
+                },
+                DeltaProbe {
+                    index: 3,
+                    value: 1.25,
+                },
             ],
         };
         let bytes = commitment.canonical_bytes();

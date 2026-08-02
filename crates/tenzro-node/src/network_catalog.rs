@@ -178,9 +178,7 @@ pub fn announced_pricing(pricing: &tenzro_network::PricingInfo) -> PricingConfig
 fn parse_modality(s: &str) -> Option<ModelModality> {
     match s.to_lowercase().as_str() {
         "text" | "text-embedding" | "text_embedding" | "embedding" => Some(ModelModality::Text),
-        "image" | "segmentation" | "segment" | "detection" | "detect" => {
-            Some(ModelModality::Image)
-        }
+        "image" | "segmentation" | "segment" | "detection" | "detect" => Some(ModelModality::Image),
         "audio" => Some(ModelModality::Audio),
         "timeseries" | "ts" => Some(ModelModality::Timeseries),
         "video" => Some(ModelModality::Video),
@@ -251,8 +249,16 @@ mod tests {
 
         let offers = catalog(vec![announcement(), cheap]).live_offers(ModelModality::Text);
         assert_eq!(offers.len(), 2);
-        assert!(offers.iter().any(|o| o.model.pricing.price_per_input_token == 12));
-        assert!(offers.iter().any(|o| o.model.pricing.price_per_input_token == 3));
+        assert!(
+            offers
+                .iter()
+                .any(|o| o.model.pricing.price_per_input_token == 12)
+        );
+        assert!(
+            offers
+                .iter()
+                .any(|o| o.model.pricing.price_per_input_token == 3)
+        );
     }
 
     #[test]
@@ -264,7 +270,12 @@ mod tests {
         let mut unparseable_provider = announcement();
         unparseable_provider.provider = "not-an-address".to_string();
 
-        let c = catalog(vec![withdrawn, endpointless, unparseable_provider, announcement()]);
+        let c = catalog(vec![
+            withdrawn,
+            endpointless,
+            unparseable_provider,
+            announcement(),
+        ]);
         assert_eq!(c.live_offers(ModelModality::Text).len(), 1);
         assert!(c.live_offers(ModelModality::Audio).is_empty());
     }

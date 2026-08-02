@@ -23,7 +23,7 @@
 //! criterion — full block production through to `BondManager` reflection is
 //! asynchronous and is exercised by the in-module event-loop tests.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -63,9 +63,8 @@ async fn setup_test_server() -> (
     let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
     let rpc = RpcServer::new(node.clone(), "127.0.0.1:0".to_string());
-    let handle = tokio::spawn(async move {
-        rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await
-    });
+    let handle =
+        tokio::spawn(async move { rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await });
 
     let addr = addr_rx.await.expect("receive bound address");
     let base_url = format!("http://{}", addr);
@@ -94,6 +93,38 @@ async fn rpc_call(client: &reqwest::Client, url: &str, body: Value) -> Value {
         .expect("parse JSON")
 }
 
+/// Gas price the fixtures sign at.
+///
+/// These transactions are sent by freshly-generated, unverified keypairs, so
+/// admission places them in the **Open** lane, whose fee floor is `4×` the
+/// 1 Gwei base (`Lane::Open` in `tenzro-consensus::admission`). Signing at the
+/// bare base rate is rejected before the handler runs, with
+/// `-32012 Fee floor not met for open lane`.
+const OPEN_LANE_GAS_PRICE: u64 = 4_000_000_000;
+
+/// Credit `address` so admission's balance check passes.
+///
+/// Mempool admission requires `gas_limit × gas_price + value` to be covered by
+/// the sender's balance, and these fixtures sign with a freshly-generated
+/// keypair that starts at zero. The economic gates are covered on their own in
+/// `tenzro-consensus::mempool`; what these suites assert is the *wire-format*
+/// contract, so the sender is funded up front to let the transaction reach it.
+///
+/// Writes through the same `StateAdapter` that
+/// `NodeAccountStateReader::account_balance` reads, then commits so the value
+/// is visible to the admission path.
+fn fund_account(node: &TenzroNode, address: &Address, amount: u128) {
+    use tenzro_vm::traits::VmState as _;
+    let storage = node.storage().expect("node storage").clone();
+    let mut state = tenzro_vm::StateAdapter::with_storage(storage);
+    state.set_balance(address.as_bytes(), amount);
+    state.commit().expect("commit funded balance");
+}
+
+/// Comfortably above `gas_limit × OPEN_LANE_GAS_PRICE + value` for every
+/// fixture in this file.
+const FIXTURE_BALANCE: u128 = 1_000_000_000_000_000_000;
+
 /// Build a hybrid-signed JSON payload for `eth_sendRawTransaction`.
 ///
 /// `from` is derived from the generated Ed25519 keypair (20-byte derived
@@ -105,7 +136,7 @@ fn build_signed_eth_send_params(
     tx_type: TransactionType,
     gas_limit: u64,
     gas_price: u64,
-) -> Value {
+) -> (Value, Address) {
     let kp = KeyPair::generate(KeyType::Ed25519).expect("ed25519 keypair");
     let classical_pk = kp.public_key().clone();
     let classical = Ed25519SignerImpl::new(kp).expect("ed25519 signer");
@@ -137,7 +168,7 @@ fn build_signed_eth_send_params(
 
     let tx_type_json = serde_json::to_value(&tx.tx_type).expect("serialize tx_type");
 
-    json!({
+    let params = json!({
         "from": format!("0x{}", hex::encode(tx.from.as_bytes())),
         "to": format!("0x{}", hex::encode(tx.to.as_bytes())),
         "nonce": nonce,
@@ -150,15 +181,17 @@ fn build_signed_eth_send_params(
         "public_key": hex::encode(classical_pk.as_bytes()),
         "pq_public_key": hex::encode(&pq_vk),
         "pq_signature": hex::encode(&pq_sig),
-    })
+    });
+    (params, from)
 }
 
 /// Assert the JSON-RPC response carries a `result` (admission succeeded).
 fn assert_admission_succeeded(resp: &Value, label: &str) {
     if let Some(err) = resp.get("error")
-        && !err.is_null() {
-            panic!("{label}: eth_sendRawTransaction returned error: {err}");
-        }
+        && !err.is_null()
+    {
+        panic!("{label}: eth_sendRawTransaction returned error: {err}");
+    }
     let result = resp.get("result").expect("missing `result` field");
     let s = result
         .as_str()
@@ -195,13 +228,9 @@ async fn eth_send_raw_admits_post_agent_bond_typed_tx() {
         amount: 100_000u128,
     };
 
-    let params = build_signed_eth_send_params(
-        Address::zero(),
-        0,
-        tx_type,
-        90_000,
-        1_000_000_000,
-    );
+    let (params, sender) =
+        build_signed_eth_send_params(Address::zero(), 0, tx_type, 90_000, OPEN_LANE_GAS_PRICE);
+    fund_account(&_node, &sender, FIXTURE_BALANCE);
     let body = rpc_request("eth_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "PostAgentBond");
@@ -224,13 +253,9 @@ async fn eth_send_raw_admits_increase_agent_bond_typed_tx() {
         amount: 50_000u128,
     };
 
-    let params = build_signed_eth_send_params(
-        Address::zero(),
-        1,
-        tx_type,
-        70_000,
-        1_000_000_000,
-    );
+    let (params, sender) =
+        build_signed_eth_send_params(Address::zero(), 1, tx_type, 70_000, OPEN_LANE_GAS_PRICE);
+    fund_account(&_node, &sender, FIXTURE_BALANCE);
     let body = rpc_request("eth_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "IncreaseAgentBond");
@@ -252,13 +277,9 @@ async fn eth_send_raw_admits_withdraw_agent_bond_typed_tx() {
         agent_did: "did:tenzro:machine:0xabc:1".to_string(),
     };
 
-    let params = build_signed_eth_send_params(
-        Address::zero(),
-        2,
-        tx_type,
-        50_000,
-        1_000_000_000,
-    );
+    let (params, sender) =
+        build_signed_eth_send_params(Address::zero(), 2, tx_type, 50_000, OPEN_LANE_GAS_PRICE);
+    fund_account(&_node, &sender, FIXTURE_BALANCE);
     let body = rpc_request("eth_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "WithdrawAgentBond");
@@ -284,13 +305,9 @@ async fn eth_send_raw_admits_pay_insurance_claim_typed_tx() {
         amount: 25_000u128,
     };
 
-    let params = build_signed_eth_send_params(
-        Address::zero(),
-        3,
-        tx_type,
-        90_000,
-        1_000_000_000,
-    );
+    let (params, sender) =
+        build_signed_eth_send_params(Address::zero(), 3, tx_type, 90_000, OPEN_LANE_GAS_PRICE);
+    fund_account(&_node, &sender, FIXTURE_BALANCE);
     let body = rpc_request("eth_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "PayInsuranceClaim");
@@ -321,12 +338,12 @@ async fn eth_send_raw_rejects_post_agent_bond_with_tampered_amount() {
         amount: 100_000u128,
     };
 
-    let mut params = build_signed_eth_send_params(
+    let (mut params, sender) = build_signed_eth_send_params(
         Address::zero(),
         0,
         original_tx_type,
         90_000,
-        1_000_000_000,
+        OPEN_LANE_GAS_PRICE,
     );
 
     // Swap in a different amount post-signing. The signatures bind to the
@@ -338,6 +355,7 @@ async fn eth_send_raw_rejects_post_agent_bond_with_tampered_amount() {
     };
     params["tx_type"] = serde_json::to_value(&forged_tx_type).expect("serialize forged");
 
+    fund_account(&_node, &sender, FIXTURE_BALANCE);
     let body = rpc_request("eth_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
 
@@ -379,12 +397,12 @@ async fn eth_send_raw_rejects_pay_insurance_claim_with_tampered_claimant() {
         amount: 25_000u128,
     };
 
-    let mut params = build_signed_eth_send_params(
+    let (mut params, sender) = build_signed_eth_send_params(
         Address::zero(),
         0,
         original_tx_type,
         90_000,
-        1_000_000_000,
+        OPEN_LANE_GAS_PRICE,
     );
 
     let forged_tx_type = TransactionType::PayInsuranceClaim {
@@ -394,6 +412,7 @@ async fn eth_send_raw_rejects_pay_insurance_claim_with_tampered_claimant() {
     };
     params["tx_type"] = serde_json::to_value(&forged_tx_type).expect("serialize forged");
 
+    fund_account(&_node, &sender, FIXTURE_BALANCE);
     let body = rpc_request("eth_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
 

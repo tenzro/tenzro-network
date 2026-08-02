@@ -22,8 +22,6 @@ backends.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
-
 
 # ---------------------------------------------------------------------------
 # Reserved metadata keys
@@ -83,21 +81,21 @@ class VerifyFailure(Exception):
         return self._message
 
     @classmethod
-    def task_id_mismatch(cls, expected: str, got: str) -> "VerifyFailure":
+    def task_id_mismatch(cls, expected: str, got: str) -> VerifyFailure:
         return cls(
             "task_id_mismatch",
             f"payload task_id {got!r} does not match held task {expected!r}",
         )
 
     @classmethod
-    def scheme_not_offered(cls, scheme: str, network: str) -> "VerifyFailure":
+    def scheme_not_offered(cls, scheme: str, network: str) -> VerifyFailure:
         return cls(
             "scheme_not_offered",
             f"scheme {scheme!r} on network {network!r} is not in payment requirements",
         )
 
     @classmethod
-    def scheme_not_implemented(cls, scheme: str) -> "VerifyFailure":
+    def scheme_not_implemented(cls, scheme: str) -> VerifyFailure:
         return cls(
             "scheme_not_implemented",
             f"scheme {scheme!r} has no backend on this server",
@@ -108,7 +106,7 @@ class VerifyFailure(Exception):
 # Metadata helpers — read
 # ---------------------------------------------------------------------------
 
-def get_payment_required(metadata: dict) -> Optional[dict]:
+def get_payment_required(metadata: dict) -> dict | None:
     """Return the held payment requirements, if any."""
     if not isinstance(metadata, dict):
         return None
@@ -116,7 +114,7 @@ def get_payment_required(metadata: dict) -> Optional[dict]:
     return val if isinstance(val, dict) else None
 
 
-def get_payment_payload(metadata: dict) -> Optional[dict]:
+def get_payment_payload(metadata: dict) -> dict | None:
     """Return the inbound payment payload, if any."""
     if not isinstance(metadata, dict):
         return None
@@ -162,7 +160,7 @@ class _RequirementMatch:
     network: str
 
 
-def _payload_requires_match(requirements: dict, payload: dict) -> Optional[_RequirementMatch]:
+def _payload_requires_match(requirements: dict, payload: dict) -> _RequirementMatch | None:
     """Return the offered (scheme, network) tuple if it appears in ``accepts``."""
     accepts = requirements.get("accepts") or []
     payload_scheme = payload.get("scheme")

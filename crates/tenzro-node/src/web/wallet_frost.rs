@@ -104,18 +104,18 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use rand::{rngs::OsRng, RngCore};
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tenzro_storage::{KvStore, CF_VALIDATOR_MODULES};
+use tenzro_storage::{CF_VALIDATOR_MODULES, KvStore};
 
 use super::error::WalletApiError;
 use super::handlers::WebState;
@@ -309,8 +309,7 @@ impl FrostCoordinator {
         match store.get(session_id) {
             Ok(Some(sess)) if !sess.is_expired(now_ms) => {
                 let arc = Arc::new(Mutex::new(sess));
-                self.sessions
-                    .insert(session_id.to_string(), arc.clone());
+                self.sessions.insert(session_id.to_string(), arc.clone());
                 Some(arc)
             }
             Ok(Some(_)) => {
@@ -357,9 +356,8 @@ impl SessionStore {
     }
 
     fn put(&self, session_id: &str, sess: &FrostSession) -> Result<(), WalletApiError> {
-        let bytes = serde_json::to_vec(sess).map_err(|e| {
-            internal("frost_session_serialize", format!("serialize session: {e}"))
-        })?;
+        let bytes = serde_json::to_vec(sess)
+            .map_err(|e| internal("frost_session_serialize", format!("serialize session: {e}")))?;
         let tagged = mac_wrap(&bytes);
         self.storage
             .put(CF_VALIDATOR_MODULES, &Self::key(session_id), &tagged)
@@ -374,10 +372,16 @@ impl SessionStore {
         match bytes {
             Some(b) => {
                 let payload = mac_verify(&b).map_err(|e| {
-                    internal("frost_session_tampered", format!("tampered session row: {e}"))
+                    internal(
+                        "frost_session_tampered",
+                        format!("tampered session row: {e}"),
+                    )
                 })?;
                 let sess: FrostSession = serde_json::from_slice(payload).map_err(|e| {
-                    internal("frost_session_deserialize", format!("deserialize session: {e}"))
+                    internal(
+                        "frost_session_deserialize",
+                        format!("deserialize session: {e}"),
+                    )
                 })?;
                 Ok(Some(sess))
             }
@@ -428,14 +432,13 @@ fn local_mac_key() -> &'static [u8; 32] {
     use std::sync::OnceLock;
     static KEY: OnceLock<[u8; 32]> = OnceLock::new();
     KEY.get_or_init(|| {
-        let home = match std::env::var("HOME").ok().map(std::path::PathBuf::from) {
-            Some(p) => p,
-            None => {
-                tracing::warn!("wallet_frost local_mac_key: no $HOME — using zero key (tests only)");
+        let path = match tenzro_types::paths::try_tenzro_home() {
+            Ok(_) => tenzro_types::paths::local_state_mac_key_path(),
+            Err(e) => {
+                tracing::warn!(%e, "wallet_frost local_mac_key: using zero key (tests only)");
                 return [0u8; 32];
             }
         };
-        let path = home.join(".tenzro").join("local_state_mac.key");
         if let Ok(bytes) = std::fs::read(&path)
             && bytes.len() == 32
         {
@@ -724,7 +727,11 @@ pub(crate) fn provision_split(
 
 /// Run Round 1 on the node side using the deterministic stub
 /// KeyPackage. Returns wire-ready bytes.
-fn node_round1(scheme: FrostScheme, did: &str, surface_key: &str) -> Result<NodeRound1, WalletApiError> {
+fn node_round1(
+    scheme: FrostScheme,
+    did: &str,
+    surface_key: &str,
+) -> Result<NodeRound1, WalletApiError> {
     match scheme {
         FrostScheme::Ed25519 => ed25519_ops::node_round1(did, surface_key),
         FrostScheme::Secp256k1 => secp256k1_ops::node_round1(did, surface_key),
@@ -804,7 +811,7 @@ mod ed25519_ops {
     use frost_ed25519::keys::{IdentifierList, KeyPackage, PublicKeyPackage, SigningShare};
     use frost_ed25519::round1::{SigningCommitments, SigningNonces};
     use frost_ed25519::round2::SignatureShare;
-    use frost_ed25519::{aggregate, keys, round1, round2, Identifier, SigningKey, SigningPackage};
+    use frost_ed25519::{Identifier, SigningKey, SigningPackage, aggregate, keys, round1, round2};
 
     fn frost_err(stage: &'static str) -> impl Fn(frost_ed25519::Error) -> WalletApiError + 'static {
         move |e| {
@@ -816,7 +823,9 @@ mod ed25519_ops {
         }
     }
 
-    fn internal_err(stage: &'static str) -> impl Fn(frost_ed25519::Error) -> WalletApiError + 'static {
+    fn internal_err(
+        stage: &'static str,
+    ) -> impl Fn(frost_ed25519::Error) -> WalletApiError + 'static {
         move |e| {
             wallet_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -838,7 +847,10 @@ mod ed25519_ops {
     /// and the joint PublicKeyPackage. The wallet, given the same
     /// `(did, surface_key)`, derives the device's KeyPackage by
     /// running the same split locally.
-    fn split_keys(did: &str, surface_key: &str) -> Result<(KeyPackage, PublicKeyPackage), WalletApiError> {
+    fn split_keys(
+        did: &str,
+        surface_key: &str,
+    ) -> Result<(KeyPackage, PublicKeyPackage), WalletApiError> {
         let seed = derive_seed(did, surface_key, FrostScheme::Ed25519);
 
         // Derive both the SigningKey and the polynomial coefficients
@@ -952,8 +964,8 @@ mod ed25519_ops {
         let node_id = node_identifier()?;
         let device_id = device_identifier()?;
 
-        let node_c =
-            SigningCommitments::deserialize(node_commitments).map_err(frost_err("deserialize node commitments"))?;
+        let node_c = SigningCommitments::deserialize(node_commitments)
+            .map_err(frost_err("deserialize node commitments"))?;
         let device_c = SigningCommitments::deserialize(device_commitments)
             .map_err(frost_err("deserialize device commitments"))?;
 
@@ -1007,9 +1019,13 @@ mod secp256k1_ops {
     use frost_secp256k1::keys::{IdentifierList, KeyPackage, PublicKeyPackage, SigningShare};
     use frost_secp256k1::round1::{SigningCommitments, SigningNonces};
     use frost_secp256k1::round2::SignatureShare;
-    use frost_secp256k1::{aggregate, keys, round1, round2, Identifier, SigningKey, SigningPackage};
+    use frost_secp256k1::{
+        Identifier, SigningKey, SigningPackage, aggregate, keys, round1, round2,
+    };
 
-    fn frost_err(stage: &'static str) -> impl Fn(frost_secp256k1::Error) -> WalletApiError + 'static {
+    fn frost_err(
+        stage: &'static str,
+    ) -> impl Fn(frost_secp256k1::Error) -> WalletApiError + 'static {
         move |e| {
             wallet_error(
                 StatusCode::BAD_REQUEST,
@@ -1019,7 +1035,9 @@ mod secp256k1_ops {
         }
     }
 
-    fn internal_err(stage: &'static str) -> impl Fn(frost_secp256k1::Error) -> WalletApiError + 'static {
+    fn internal_err(
+        stage: &'static str,
+    ) -> impl Fn(frost_secp256k1::Error) -> WalletApiError + 'static {
         move |e| {
             wallet_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1037,7 +1055,10 @@ mod secp256k1_ops {
         Identifier::derive(DEVICE_IDENTIFIER_TAG).map_err(internal_err("derive device id"))
     }
 
-    fn split_keys(did: &str, surface_key: &str) -> Result<(KeyPackage, PublicKeyPackage), WalletApiError> {
+    fn split_keys(
+        did: &str,
+        surface_key: &str,
+    ) -> Result<(KeyPackage, PublicKeyPackage), WalletApiError> {
         let seed = derive_seed(did, surface_key, FrostScheme::Secp256k1);
 
         // Same rationale as the ed25519 path: feed the StubRng to
@@ -1286,10 +1307,11 @@ pub async fn start_handler(
     };
     let path = format!("/wallet/frost/{}/start", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
+    let claims =
+        match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
 
     let preimage = match parse_b64("preimage_b64", &body.preimage_b64) {
         Ok(p) => p,
@@ -1383,12 +1405,14 @@ pub async fn commit_handler(
     };
     let path = format!("/wallet/frost/{}/commit", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
+    let claims =
+        match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
 
-    let device_commitments = match parse_b64("device_commitments_b64", &body.device_commitments_b64) {
+    let device_commitments = match parse_b64("device_commitments_b64", &body.device_commitments_b64)
+    {
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
@@ -1418,9 +1442,12 @@ pub async fn commit_handler(
         return e.into_response();
     }
     if sess_scheme != scheme {
-        return wallet_error(StatusCode::BAD_REQUEST,
+        return wallet_error(
+            StatusCode::BAD_REQUEST,
             "scheme_mismatch",
-            "session scheme does not match request path",).into_response();
+            "session scheme does not match request path",
+        )
+        .into_response();
     }
 
     let signing_package =
@@ -1431,12 +1458,12 @@ pub async fn commit_handler(
 
     let mut sess = sess_arc.lock();
     if sess.effective_state(now) != FrostSessionState::Pending {
-        return wallet_error(StatusCode::CONFLICT,
+        return wallet_error(
+            StatusCode::CONFLICT,
             "invalid_state",
-            &format!(
-                "commit requires state=pending, got state={:?}",
-                sess.state
-            ),).into_response();
+            &format!("commit requires state=pending, got state={:?}", sess.state),
+        )
+        .into_response();
     }
     sess.device_commitments = Some(device_commitments);
     sess.signing_package = Some(signing_package);
@@ -1464,10 +1491,11 @@ pub async fn await_challenge_handler(
     };
     let path = format!("/wallet/frost/{}/await-challenge", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
+    let claims =
+        match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
 
     let coord = coordinator(&state);
     let store = frost_store(&state);
@@ -1493,9 +1521,12 @@ pub async fn await_challenge_handler(
             return e.into_response();
         }
         if sess_scheme != scheme {
-            return wallet_error(StatusCode::BAD_REQUEST,
+            return wallet_error(
+                StatusCode::BAD_REQUEST,
                 "scheme_mismatch",
-                "session scheme does not match request path",).into_response();
+                "session scheme does not match request path",
+            )
+            .into_response();
         }
         // A session that lapsed its TTL was just flipped to Aborted
         // in-memory by `effective_state`; drop its durable row so it
@@ -1541,10 +1572,11 @@ pub async fn respond_handler(
     };
     let path = format!("/wallet/frost/{}/respond", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
+    let claims =
+        match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
 
     let device_share = match parse_b64(
         "device_signature_share_b64",
@@ -1569,19 +1601,22 @@ pub async fn respond_handler(
         let mut sess = sess_arc.lock();
         let eff = sess.effective_state(now);
         if eff != FrostSessionState::Committed {
-            return wallet_error(StatusCode::CONFLICT,
+            return wallet_error(
+                StatusCode::CONFLICT,
                 "invalid_state",
-                &format!(
-                    "respond requires state=committed, got state={:?}",
-                    eff
-                ),).into_response();
+                &format!("respond requires state=committed, got state={:?}", eff),
+            )
+            .into_response();
         }
         let pkg = match sess.signing_package.clone() {
             Some(p) => p,
             None => {
-                return wallet_error(StatusCode::INTERNAL_SERVER_ERROR,
+                return wallet_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
                     "missing_signing_package",
-                    "session is committed but signing_package is absent",).into_response();
+                    "session is committed but signing_package is absent",
+                )
+                .into_response();
             }
         };
         (
@@ -1598,9 +1633,12 @@ pub async fn respond_handler(
         return e.into_response();
     }
     if sess_scheme != scheme {
-        return wallet_error(StatusCode::BAD_REQUEST,
+        return wallet_error(
+            StatusCode::BAD_REQUEST,
             "scheme_mismatch",
-            "session scheme does not match request path",).into_response();
+            "session scheme does not match request path",
+        )
+        .into_response();
     }
     let _ = current_state; // already validated above
 
@@ -1619,9 +1657,12 @@ pub async fn respond_handler(
     let mut sess = sess_arc.lock();
     // Re-check state in case of a concurrent abort.
     if sess.effective_state(now) != FrostSessionState::Committed {
-        return wallet_error(StatusCode::CONFLICT,
+        return wallet_error(
+            StatusCode::CONFLICT,
             "invalid_state",
-            "session left committed state during aggregation",).into_response();
+            "session left committed state during aggregation",
+        )
+        .into_response();
     }
     sess.signature = Some(signature);
     sess.state = FrostSessionState::Finalized;
@@ -1648,10 +1689,11 @@ pub async fn finalize_handler(
     };
     let path = format!("/wallet/frost/{}/finalize", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
+    let claims =
+        match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
 
     let coord = coordinator(&state);
     let store = frost_store(&state);
@@ -1677,9 +1719,12 @@ pub async fn finalize_handler(
             return e.into_response();
         }
         if sess_scheme != scheme {
-            return wallet_error(StatusCode::BAD_REQUEST,
+            return wallet_error(
+                StatusCode::BAD_REQUEST,
                 "scheme_mismatch",
-                "session scheme does not match request path",).into_response();
+                "session scheme does not match request path",
+            )
+            .into_response();
         }
         // TTL-lapsed session was flipped to Aborted in-memory; evict
         // its durable row.
@@ -1722,10 +1767,11 @@ pub async fn abort_handler(
     };
     let path = format!("/wallet/frost/{}/abort", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
+    let claims =
+        match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
 
     let coord = coordinator(&state);
     let store = frost_store(&state);
@@ -1742,9 +1788,12 @@ pub async fn abort_handler(
             return e.into_response();
         }
         if sess.scheme != scheme {
-            return wallet_error(StatusCode::BAD_REQUEST,
+            return wallet_error(
+                StatusCode::BAD_REQUEST,
                 "scheme_mismatch",
-                "session scheme does not match request path",).into_response();
+                "session scheme does not match request path",
+            )
+            .into_response();
         }
         // Finalized sessions stay Finalized — we don't undo a successful
         // signature. Everything else collapses to Aborted (idempotent).
@@ -1834,7 +1883,7 @@ mod tests {
     fn ed25519_full_round_produces_valid_signature() {
         use ed25519_dalek::Verifier as _;
         use frost_ed25519::keys::{IdentifierList, KeyPackage};
-        use frost_ed25519::{keys, round1, round2, Identifier, SigningKey, SigningPackage};
+        use frost_ed25519::{Identifier, SigningKey, SigningPackage, keys, round1, round2};
 
         let did = "did:tenzro:human:alice";
         let surface = "vault.0";
@@ -1848,8 +1897,14 @@ mod tests {
         let device_id = Identifier::derive(DEVICE_IDENTIFIER_TAG).unwrap();
         let identifiers = vec![node_id, device_id];
 
-        let (shares, pubkey_package) =
-            keys::split(&signing_key, 2, 2, IdentifierList::Custom(&identifiers), &mut rng).unwrap();
+        let (shares, pubkey_package) = keys::split(
+            &signing_key,
+            2,
+            2,
+            IdentifierList::Custom(&identifiers),
+            &mut rng,
+        )
+        .unwrap();
         let node_kp: KeyPackage = shares.get(&node_id).unwrap().clone().try_into().unwrap();
         let device_kp: KeyPackage = shares.get(&device_id).unwrap().clone().try_into().unwrap();
 
@@ -1873,7 +1928,8 @@ mod tests {
         let mut shares_map = BTreeMap::new();
         shares_map.insert(node_id, node_share);
         shares_map.insert(device_id, device_share);
-        let signature = frost_ed25519::aggregate(&signing_package, &shares_map, &pubkey_package).unwrap();
+        let signature =
+            frost_ed25519::aggregate(&signing_package, &shares_map, &pubkey_package).unwrap();
 
         // Verify against the joint VK using stock ed25519-dalek so
         // we know the signature is wire-compatible with the broader
@@ -1883,8 +1939,7 @@ mod tests {
             ed25519_dalek::VerifyingKey::from_bytes(&vk_bytes.as_slice().try_into().unwrap())
                 .unwrap();
         let sig_bytes = signature.serialize().unwrap();
-        let dalek_sig =
-            ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
+        let dalek_sig = ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
         dalek_vk.verify(preimage, &dalek_sig).unwrap();
     }
 }

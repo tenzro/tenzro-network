@@ -36,7 +36,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_AGENTS};
+use tenzro_storage::{CF_AGENTS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -97,12 +97,31 @@ impl BondLifecycle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BondEvent {
-    Posted { amount: u128, at: Timestamp },
-    Increased { amount: u128, at: Timestamp },
-    WithdrawInitiated { cooldown_until: Timestamp, at: Timestamp },
-    Frozen { reason: String, at: Timestamp },
-    Slashed { amount: u128, recipient_kind: String, claim_id: Option<String>, at: Timestamp },
-    Returned { at: Timestamp },
+    Posted {
+        amount: u128,
+        at: Timestamp,
+    },
+    Increased {
+        amount: u128,
+        at: Timestamp,
+    },
+    WithdrawInitiated {
+        cooldown_until: Timestamp,
+        at: Timestamp,
+    },
+    Frozen {
+        reason: String,
+        at: Timestamp,
+    },
+    Slashed {
+        amount: u128,
+        recipient_kind: String,
+        claim_id: Option<String>,
+        at: Timestamp,
+    },
+    Returned {
+        at: Timestamp,
+    },
 }
 
 /// Persistent state for one agent's bond. RocksDB row under
@@ -372,9 +391,8 @@ impl BondManager {
         if let Some(storage) = &self.storage {
             let mut key = BOND_KEY_PREFIX.to_vec();
             key.extend_from_slice(bond.agent_did.as_bytes());
-            let value = serde_json::to_vec(bond).map_err(|e| {
-                TokenError::StorageError(format!("encode bond: {}", e))
-            })?;
+            let value = serde_json::to_vec(bond)
+                .map_err(|e| TokenError::StorageError(format!("encode bond: {}", e)))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_AGENTS.to_string(),
@@ -390,9 +408,8 @@ impl BondManager {
         if let Some(storage) = &self.storage {
             let mut key = CLAIM_KEY_PREFIX.to_vec();
             key.extend_from_slice(claim.claim_id.as_bytes());
-            let value = serde_json::to_vec(claim).map_err(|e| {
-                TokenError::StorageError(format!("encode claim: {}", e))
-            })?;
+            let value = serde_json::to_vec(claim)
+                .map_err(|e| TokenError::StorageError(format!("encode claim: {}", e)))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_AGENTS.to_string(),
@@ -406,9 +423,8 @@ impl BondManager {
 
     fn persist_pool(&self, pool: &InsurancePoolState) -> Result<()> {
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(pool).map_err(|e| {
-                TokenError::StorageError(format!("encode pool: {}", e))
-            })?;
+            let value = serde_json::to_vec(pool)
+                .map_err(|e| TokenError::StorageError(format!("encode pool: {}", e)))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_AGENTS.to_string(),
@@ -493,9 +509,10 @@ impl BondManager {
                 bond_ref.state.as_str()
             )));
         }
-        bond_ref.amount = bond_ref.amount.checked_add(amount).ok_or_else(|| {
-            TokenError::InvalidParameter("bond amount overflow".to_string())
-        })?;
+        bond_ref.amount = bond_ref
+            .amount
+            .checked_add(amount)
+            .ok_or_else(|| TokenError::InvalidParameter("bond amount overflow".to_string()))?;
         bond_ref.last_modified_block = block_height;
         bond_ref.history.push(BondEvent::Increased {
             amount,
@@ -512,11 +529,7 @@ impl BondManager {
     /// `now + cooldown_ms`. Bond remains slashable for the entire cooldown.
     /// Caller is responsible for kicking off the cooldown-elapsed callback
     /// path (`finalize_withdrawal`) once the timer expires.
-    pub fn withdraw(
-        &self,
-        agent_did: &str,
-        block_height: u64,
-    ) -> Result<AgentBondState> {
+    pub fn withdraw(&self, agent_did: &str, block_height: u64) -> Result<AgentBondState> {
         let mut bond_ref = self
             .bonds
             .get_mut(agent_did)
@@ -573,7 +586,9 @@ impl BondManager {
         bond_ref.state = BondLifecycle::Returned;
         bond_ref.amount = 0;
         bond_ref.last_modified_block = block_height;
-        bond_ref.history.push(BondEvent::Returned { at: Timestamp::now() });
+        bond_ref.history.push(BondEvent::Returned {
+            at: Timestamp::now(),
+        });
         let snapshot = bond_ref.clone();
         drop(bond_ref);
         self.persist_bond(&snapshot)?;
@@ -860,11 +875,7 @@ impl BondManager {
     }
 
     /// Reject a claim (governance vote against).
-    pub fn reject_claim(
-        &self,
-        claim_id_hex: &str,
-        governance_ref: String,
-    ) -> Result<ClaimRecord> {
+    pub fn reject_claim(&self, claim_id_hex: &str, governance_ref: String) -> Result<ClaimRecord> {
         let mut claim_ref = self
             .claims
             .get_mut(claim_id_hex)
@@ -962,20 +973,12 @@ impl BondManager {
 impl tenzro_types::principal_chain::BondLookup for BondManager {
     fn actor_bond(&self, did: &str) -> Option<u128> {
         let amount = self.effective_bond_for_promotion(did);
-        if amount == 0 {
-            None
-        } else {
-            Some(amount)
-        }
+        if amount == 0 { None } else { Some(amount) }
     }
 
     fn controller_aggregate(&self, controller_did: &str) -> Option<u128> {
         let total = self.aggregate_bond(controller_did);
-        if total == 0 {
-            None
-        } else {
-            Some(total)
-        }
+        if total == 0 { None } else { Some(total) }
     }
 }
 
@@ -995,7 +998,10 @@ mod tests {
             .unwrap();
         assert_eq!(bond.state, BondLifecycle::Active);
         assert_eq!(bond.amount, 5_000);
-        assert_eq!(m.effective_bond_for_promotion("did:tenzro:machine:a"), 5_000);
+        assert_eq!(
+            m.effective_bond_for_promotion("did:tenzro:machine:a"),
+            5_000
+        );
     }
 
     #[test]
@@ -1037,7 +1043,8 @@ mod tests {
     #[test]
     fn slash_credits_pool_and_demotes() {
         let m = BondManager::new();
-        m.post("a", "c", 1_000_000_000_000_000_000_000u128, 1).unwrap(); // 1000 TNZO
+        m.post("a", "c", 1_000_000_000_000_000_000_000u128, 1)
+            .unwrap(); // 1000 TNZO
         let (slashed, bond) = m.slash("a", 2500, None, "terminate", 2).unwrap();
         // 25% of 1000 = 250
         assert_eq!(slashed, 250_000_000_000_000_000_000u128);
@@ -1050,7 +1057,8 @@ mod tests {
     fn slash_below_residual_drains_fully() {
         let m = BondManager::new();
         // Bond of 12 TNZO, residual floor is 10 TNZO. A 50% slash leaves 6 → fully drains.
-        m.post("a", "c", 12 * 1_000_000_000_000_000_000u128, 1).unwrap();
+        m.post("a", "c", 12 * 1_000_000_000_000_000_000u128, 1)
+            .unwrap();
         let (slashed, bond) = m.slash("a", 5000, None, "terminate", 2).unwrap();
         assert_eq!(slashed, 12 * 1_000_000_000_000_000_000u128);
         assert_eq!(bond.amount, 0);
@@ -1078,7 +1086,8 @@ mod tests {
     fn claim_full_flow() {
         let m = BondManager::new();
         // Seed pool via slashing.
-        m.post("a", "c", 100_000_000_000_000_000_000_000u128, 1).unwrap(); // 100k
+        m.post("a", "c", 100_000_000_000_000_000_000_000u128, 1)
+            .unwrap(); // 100k
         m.slash("a", 5000, None, "terminate", 2).unwrap();
         let pool_before = m.pool_state().balance_wei;
         assert!(pool_before >= 50_000_000_000_000_000_000_000u128);
@@ -1094,8 +1103,12 @@ mod tests {
                 42,
             )
             .unwrap();
-        m.approve_claim(&claim.claim_id, 5_000_000_000_000_000_000u128, "prop:99".into())
-            .unwrap();
+        m.approve_claim(
+            &claim.claim_id,
+            5_000_000_000_000_000_000u128,
+            "prop:99".into(),
+        )
+        .unwrap();
         let paid = m.pay_claim(&claim.claim_id).unwrap();
         assert_eq!(paid.status, ClaimStatus::Paid);
         assert_eq!(paid.paid_amount, Some(5_000_000_000_000_000_000u128));
@@ -1120,7 +1133,8 @@ mod tests {
                 7,
             )
             .unwrap();
-        m.approve_claim(&claim.claim_id, 100, "prop:1".into()).unwrap();
+        m.approve_claim(&claim.claim_id, 100, "prop:1".into())
+            .unwrap();
         // Pool is empty — pay should fail.
         assert!(m.pay_claim(&claim.claim_id).is_err());
         // Claim stays Approved, eligible for retry once pool refills.

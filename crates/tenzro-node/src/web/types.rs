@@ -10,14 +10,14 @@ use tenzro_types::runtime::{
 pub struct VerificationResponse {
     pub valid: bool,
     pub details: serde_json::Value,
-    pub verified_at: String,    // ISO 8601 timestamp
+    pub verified_at: String, // ISO 8601 timestamp
 }
 
 // === ZK Proof ===
 #[derive(Deserialize)]
 pub struct VerifyZkProofRequest {
     #[serde(alias = "proof")]
-    pub proof_bytes: String,        // hex-encoded — bincode-encoded p3_uni_stark::Proof
+    pub proof_bytes: String, // hex-encoded — bincode-encoded p3_uni_stark::Proof
     #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub public_inputs: Vec<String>, // hex-encoded field elements (4-byte LE KoalaBear chunks)
     /// Names the AIR to dispatch to (e.g. `"inference"`, `"settlement"`, `"identity"`).
@@ -48,7 +48,10 @@ where
             Ok(vec![value])
         }
 
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Vec<String>, A::Error> {
+        fn visit_seq<A: de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Vec<String>, A::Error> {
             let mut vec = Vec::new();
             while let Some(val) = seq.next_element::<String>()? {
                 vec.push(val);
@@ -64,9 +67,9 @@ where
 #[derive(Deserialize)]
 pub struct VerifyTeeAttestationRequest {
     #[serde(alias = "provider")]
-    pub vendor: String,             // "intel_tdx", "amd_sev_snp", "aws_nitro"
+    pub vendor: String, // "intel_tdx", "amd_sev_snp", "aws_nitro"
     #[serde(alias = "attestation")]
-    pub report_data: String,        // hex-encoded raw report
+    pub report_data: String, // hex-encoded raw report
     pub measurement: Option<String>, // expected measurement hash
     pub certificate_chain: Option<Vec<String>>, // PEM certs
 }
@@ -74,10 +77,10 @@ pub struct VerifyTeeAttestationRequest {
 // === Transaction ===
 #[derive(Deserialize)]
 pub struct VerifyTransactionRequest {
-    pub tx_hash: String,           // hex-encoded
-    pub signature: String,         // hex-encoded classical (Ed25519/Secp256k1) signature
-    pub sender: String,            // hex-encoded classical public key
-    pub data: Option<String>,      // hex-encoded tx data
+    pub tx_hash: String,      // hex-encoded
+    pub signature: String,    // hex-encoded classical (Ed25519/Secp256k1) signature
+    pub sender: String,       // hex-encoded classical public key
+    pub data: Option<String>, // hex-encoded tx data
     /// Hex-encoded ML-DSA-65 (FIPS 204) signature, 3309 bytes. Mandatory in
     /// the post-quantum hybrid window — every signed Tenzro transaction
     /// carries one (see `tenzro-types::transaction::SignedTransaction`).
@@ -93,7 +96,7 @@ pub struct VerifySettlementRequest {
     pub receipt_id: String,
     pub payer: String,
     pub payee: String,
-    pub amount: String,            // decimal string
+    pub amount: String, // decimal string
     pub asset: String,
     pub proof_of_service: Option<String>, // hex-encoded proof
 }
@@ -102,11 +105,11 @@ pub struct VerifySettlementRequest {
 #[derive(Deserialize)]
 pub struct VerifyInferenceRequest {
     pub model_id: String,
-    pub input_hash: String,        // hex-encoded
-    pub output_hash: String,       // hex-encoded
-    pub provider: String,          // provider address
+    pub input_hash: String,              // hex-encoded
+    pub output_hash: String,             // hex-encoded
+    pub provider: String,                // provider address
     pub tee_attestation: Option<String>, // hex-encoded attestation
-    pub zk_proof: Option<String>,  // hex-encoded proof
+    pub zk_proof: Option<String>,        // hex-encoded proof
 }
 
 // === Status ===
@@ -161,23 +164,23 @@ pub struct ReadyResponse {
 // === Faucet ===
 #[derive(Deserialize)]
 pub struct FaucetRequest {
-    pub address: String,   // hex-encoded recipient address (with or without 0x prefix)
+    pub address: String, // hex-encoded recipient address (with or without 0x prefix)
 }
 
 #[derive(Serialize)]
 pub struct FaucetResponse {
     pub success: bool,
     pub tx_hash: Option<String>,
-    pub amount: String,       // TNZO amount dispensed
+    pub amount: String, // TNZO amount dispensed
     pub message: String,
 }
 
 // === Chat ===
 #[derive(Deserialize)]
 pub struct ChatRequest {
-    pub model: String,           // model ID or name
+    pub model: String, // model ID or name
     pub messages: Vec<ChatMessage>,
-    pub stream: Option<bool>,    // default true
+    pub stream: Option<bool>, // default true
     pub max_tokens: Option<u64>,
     pub temperature: Option<f64>,
     pub require_signed: Option<bool>, // default false — opt-in verified response
@@ -185,14 +188,14 @@ pub struct ChatRequest {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct ChatMessage {
-    pub role: String,      // "system", "user", "assistant"
+    pub role: String, // "system", "user", "assistant"
     pub content: String,
 }
 
 #[derive(Serialize)]
 pub struct ChatCompletionChunk {
     pub id: String,
-    pub object: String,           // "chat.completion.chunk"
+    pub object: String, // "chat.completion.chunk"
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatChoice>,
@@ -216,7 +219,7 @@ pub struct ChatDelta {
 #[derive(Serialize)]
 pub struct ChatCompletionResponse {
     pub id: String,
-    pub object: String,           // "chat.completion"
+    pub object: String, // "chat.completion"
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,

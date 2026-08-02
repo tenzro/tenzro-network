@@ -44,10 +44,22 @@ impl ApprovalGate {
 /// `Delegated` lets a controller authorize a machine to approve on its behalf.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApproverSet {
-    Single { did: String },
-    Threshold { dids: Vec<String>, m: u8, n: u8 },
-    Role { role: String, m: u8 },
-    Delegated { from: String, scope: DelegationScopeShim },
+    Single {
+        did: String,
+    },
+    Threshold {
+        dids: Vec<String>,
+        m: u8,
+        n: u8,
+    },
+    Role {
+        role: String,
+        m: u8,
+    },
+    Delegated {
+        from: String,
+        scope: DelegationScopeShim,
+    },
 }
 
 /// Local mirror of `tenzro-identity::DelegationScope` so we can keep the type
@@ -64,7 +76,9 @@ impl DelegationScopeShim {
     pub fn from_scope(s: &DelegationScope) -> Self {
         let bytes = serde_json::to_vec(s).unwrap_or_default();
         let h: [u8; 32] = Sha256::digest(&bytes).into();
-        Self { scope_hash: Hash::from(h) }
+        Self {
+            scope_hash: Hash::from(h),
+        }
     }
 }
 
@@ -111,7 +125,10 @@ pub enum Decision {
 
 impl Decision {
     pub fn as_byte(self) -> u8 {
-        match self { Decision::Approve => 1, Decision::Reject => 0 }
+        match self {
+            Decision::Approve => 1,
+            Decision::Reject => 0,
+        }
     }
 }
 
@@ -158,8 +175,11 @@ mod tests {
         assert!(ApprovalStatus::Approved { at: 1 }.is_finalized());
         assert!(ApprovalStatus::Rejected { at: 1 }.is_finalized());
         assert!(
-            ApprovalStatus::TimedOut { at: 1, behavior: TimeoutBehavior::AutoReject }
-                .is_finalized()
+            ApprovalStatus::TimedOut {
+                at: 1,
+                behavior: TimeoutBehavior::AutoReject
+            }
+            .is_finalized()
         );
     }
 

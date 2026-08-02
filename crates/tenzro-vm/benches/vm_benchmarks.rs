@@ -2,13 +2,13 @@
 //!
 //! Run with: cargo bench -p tenzro-vm
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_evm_transfer(c: &mut Criterion) {
-    use tenzro_vm::{VmConfig, MultiVmRuntime, VmState};
+    use tenzro_vm::VmType;
     use tenzro_vm::state_adapter::StateAdapter;
     use tenzro_vm::types::VmTransaction;
-    use tenzro_vm::VmType;
+    use tenzro_vm::{MultiVmRuntime, VmConfig, VmState};
 
     let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -135,11 +135,18 @@ fn bench_gas_estimation(c: &mut Criterion) {
     });
 
     for &size in &[32, 256, 1024, 4096] {
-        group.bench_with_input(BenchmarkId::new("estimate_call", size), &size, |b, &size| {
-            b.iter(|| {
-                black_box(GasEstimator::estimate_call(black_box(size), black_box(false)));
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("estimate_call", size),
+            &size,
+            |b, &size| {
+                b.iter(|| {
+                    black_box(GasEstimator::estimate_call(
+                        black_box(size),
+                        black_box(false),
+                    ));
+                });
+            },
+        );
 
         group.bench_with_input(
             BenchmarkId::new("estimate_deployment", size),
@@ -165,9 +172,7 @@ fn bench_gas_estimation(c: &mut Criterion) {
 /// commute — zero re-executions — and the balance folds at commit. The
 /// no-conflict batch (distinct accounts) is the baseline both paths share.
 fn bench_block_stm_delta_lanes(c: &mut Criterion) {
-    use tenzro_vm::{
-        BaseState, BlockStmExecutor, ReadWriteSet, TxExecutionStatus, ZeroBaseState,
-    };
+    use tenzro_vm::{BaseState, BlockStmExecutor, ReadWriteSet, TxExecutionStatus, ZeroBaseState};
 
     struct HotBase(Vec<u8>, u128);
     impl BaseState for HotBase {
@@ -214,14 +219,11 @@ fn bench_block_stm_delta_lanes(c: &mut Criterion) {
                 let hot = vec![0xaau8; 32];
                 let base = HotBase(hot.clone(), 1_000_000);
                 b.iter(|| {
-                    let (result, resolved) = executor.execute_block(
-                        black_box(n),
-                        &base,
-                        |_i, rw: &mut ReadWriteSet| {
+                    let (result, resolved) =
+                        executor.execute_block(black_box(n), &base, |_i, rw: &mut ReadWriteSet| {
                             rw.record_balance_delta(&hot, -1);
                             TxExecutionStatus::Success { gas_used: 21_000 }
-                        },
-                    );
+                        });
                     black_box((result, resolved));
                 });
             },

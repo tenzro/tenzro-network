@@ -169,9 +169,11 @@ async fn enforce_payment(
     headers: &HeaderMap,
 ) -> Result<(), Response> {
     let Some(gateway) = node.payment_gateway() else {
-        return Err(
-            (StatusCode::SERVICE_UNAVAILABLE, "payment gateway unavailable").into_response(),
-        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "payment gateway unavailable",
+        )
+            .into_response());
     };
     let payments = &node.config().payments;
 
@@ -181,9 +183,8 @@ async fn enforce_payment(
         .and_then(|v| v.to_str().ok());
 
     if let Some(header_value) = credential_header {
-        let credential = parse_credential(header_value).map_err(|e| {
-            PaymentGateError::InvalidCredential(e).into_response()
-        })?;
+        let credential = parse_credential(header_value)
+            .map_err(|e| PaymentGateError::InvalidCredential(e).into_response())?;
         debug!(
             "site {} verifying credential {} for {}",
             manifest.site_id, credential.credential_id, resource

@@ -122,12 +122,12 @@ pub mod zk_quorum;
 
 // Re-export commonly used types
 pub use admission::{
-    AdmissionConfig, AdmissionController, AdmissionDecision, BucketSnapshot,
-    DefaultLaneResolver, Lane, LaneResolver, LaneStats,
+    AdmissionConfig, AdmissionController, AdmissionDecision, BucketSnapshot, DefaultLaneResolver,
+    Lane, LaneResolver, LaneStats,
 };
 pub use batch_cert::{
-    agree_prefix, erasure_activation_threshold, Batch, BatchAck,
-    BatchAvailabilityCertificate, BatchCertStore, ErasurePlan, ERASURE_ACTIVATION_N,
+    Batch, BatchAck, BatchAvailabilityCertificate, BatchCertStore, ERASURE_ACTIVATION_N,
+    ErasurePlan, agree_prefix, erasure_activation_threshold,
 };
 pub use config::{BftThreshold, ConsensusConfig, ProposerElectionKind};
 pub use epoch_manager::{Epoch, EpochManager, EpochStateStore, EpochStats};
@@ -137,18 +137,18 @@ pub use hotstuff2::{
     BlockProvider, ConsensusOutMessage, HotStuff2Engine, Phase, StateRootProvider,
 };
 pub use leader_reputation::{
-    capability_multiplier_bps, proposer_window, reputation_seed, voter_window, LeaderReputation,
-    ProposerHistory, ProposerRecord, ValidatorWeights, VoterHistory, VoterRecord, ACTIVE_WEIGHT,
-    CAPABILITY_BASELINE_BPS, CAPABILITY_MAX_BPS, CAPABILITY_TEE_SPAN_BPS, FAILED_WEIGHT,
-    FAILURE_THRESHOLD_PERCENT, INACTIVE_WEIGHT,
+    ACTIVE_WEIGHT, CAPABILITY_BASELINE_BPS, CAPABILITY_MAX_BPS, CAPABILITY_TEE_SPAN_BPS,
+    FAILED_WEIGHT, FAILURE_THRESHOLD_PERCENT, INACTIVE_WEIGHT, LeaderReputation, ProposerHistory,
+    ProposerRecord, ValidatorWeights, VoterHistory, VoterRecord, capability_multiplier_bps,
+    proposer_window, reputation_seed, voter_window,
 };
 pub use mempool::{Mempool, MempoolStats};
 pub use proposer::BlockProposer;
 pub use timeout::{
-    CollectOutcome, NecCollectOutcome, NecSigner, NoEndorsementCertificate, NoEndorsementCollector,
-    NoEndorsementMsg, TcSigner, TimeoutCertificate, TimeoutCollector, TimeoutMsg,
-    NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION, NO_ENDORSEMENT_MSG_FORMAT_VERSION,
-    TIMEOUT_CERTIFICATE_FORMAT_VERSION, TIMEOUT_MSG_FORMAT_VERSION,
+    CollectOutcome, NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION, NO_ENDORSEMENT_MSG_FORMAT_VERSION,
+    NecCollectOutcome, NecSigner, NoEndorsementCertificate, NoEndorsementCollector,
+    NoEndorsementMsg, TIMEOUT_CERTIFICATE_FORMAT_VERSION, TIMEOUT_MSG_FORMAT_VERSION, TcSigner,
+    TimeoutCertificate, TimeoutCollector, TimeoutMsg,
 };
 pub use traits::{ConsensusEngine, ConsensusNetwork, SlashingCallback, StateManager};
 pub use validator::{
@@ -157,13 +157,13 @@ pub use validator::{
     ValidatorStatus,
 };
 pub use vote_state::{
-    open_default_file_store, FileVoteStateStore, LastSignState, MemoryVoteStateStore,
-    VoteStateStore, VoteStep, VrsDecision,
+    FileVoteStateStore, LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep, VrsDecision,
+    open_default_file_store,
 };
-pub use voter::{bls_payload_for_vote, QuorumCertificate, Vote, VoteCollector, VoteType};
+pub use voter::{QuorumCertificate, Vote, VoteCollector, VoteType, bls_payload_for_vote};
 pub use zk_quorum::{
-    AttestedCommitment, FraudOutcome, ZkCommitmentClaim, ZkCosign, ZkQuorumCertificate,
-    ZkQuorumMsg, ZkQuorumStore, FRAUD_WINDOW_BLOCKS, ZK_QUORUM_TOPIC,
+    AttestedCommitment, FRAUD_WINDOW_BLOCKS, FraudOutcome, ZK_QUORUM_TOPIC, ZkCommitmentClaim,
+    ZkCosign, ZkQuorumCertificate, ZkQuorumMsg, ZkQuorumStore,
 };
 
 #[cfg(test)]
@@ -210,15 +210,13 @@ mod tests {
         let address = convert_address(keypair.address());
         let pq = MlDsaSigningKey::generate();
         let bls = BlsKeyPair::generate().unwrap();
-        let validators = vec![
-            ValidatorInfo::new(
-                address,
-                keypair.public_key().clone(),
-                pq.verifying_key_bytes().to_vec(),
-                bls.public_key().to_bytes().to_vec(),
-                1000,
-            ),
-        ];
+        let validators = vec![ValidatorInfo::new(
+            address,
+            keypair.public_key().clone(),
+            pq.verifying_key_bytes().to_vec(),
+            bls.public_key().to_bytes().to_vec(),
+            1000,
+        )];
 
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
         let epoch = epoch_manager.current_epoch();
@@ -233,15 +231,13 @@ mod tests {
         let address = convert_address(keypair.address());
         let pq = MlDsaSigningKey::generate();
         let bls = BlsKeyPair::generate().unwrap();
-        let validators = vec![
-            ValidatorInfo::new(
-                address,
-                keypair.public_key().clone(),
-                pq.verifying_key_bytes().to_vec(),
-                bls.public_key().to_bytes().to_vec(),
-                1000,
-            ),
-        ];
+        let validators = vec![ValidatorInfo::new(
+            address,
+            keypair.public_key().clone(),
+            pq.verifying_key_bytes().to_vec(),
+            bls.public_key().to_bytes().to_vec(),
+            1000,
+        )];
 
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
@@ -249,6 +245,9 @@ mod tests {
         let bls_engine = BlsKeyPair::generate().unwrap();
         let engine = HotStuff2Engine::new(keypair, pq_engine, bls_engine, config, epoch_manager);
 
-        assert_eq!(engine.finalized_height().await, tenzro_types::primitives::BlockHeight::from(0));
+        assert_eq!(
+            engine.finalized_height().await,
+            tenzro_types::primitives::BlockHeight::from(0)
+        );
     }
 }

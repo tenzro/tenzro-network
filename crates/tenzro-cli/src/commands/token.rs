@@ -2,9 +2,9 @@
 //!
 //! Create, query, and manage tokens across VMs on the Tenzro Ledger.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Token management commands
 #[derive(Debug, Subcommand)]
@@ -79,25 +79,61 @@ impl TokenCreateCmd {
         let spinner = output::create_spinner("Creating token...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_createToken", serde_json::json!({
-            "name": self.name,
-            "symbol": self.symbol,
-            "creator": self.creator,
-            "initial_supply": self.supply,
-            "decimals": self.decimals,
-            "mintable": self.mintable,
-            "burnable": self.burnable,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createToken",
+                serde_json::json!({
+                    "name": self.name,
+                    "symbol": self.symbol,
+                    "creator": self.creator,
+                    "initial_supply": self.supply,
+                    "decimals": self.decimals,
+                    "mintable": self.mintable,
+                    "burnable": self.burnable,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Token created successfully!");
-        output::print_field("Token ID", result.get("token_id").and_then(|v| v.as_str()).unwrap_or("unknown"));
-        output::print_field("Name", result.get("name").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Symbol", result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Decimals", &result.get("decimals").and_then(|v| v.as_u64()).unwrap_or(18).to_string());
-        output::print_field("Supply", result.get("initial_supply").and_then(|v| v.as_str()).unwrap_or("0"));
-        output::print_field("EVM Address", result.get("evm_address").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Token ID",
+            result
+                .get("token_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
+        output::print_field(
+            "Name",
+            result.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Symbol",
+            result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Decimals",
+            &result
+                .get("decimals")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(18)
+                .to_string(),
+        );
+        output::print_field(
+            "Supply",
+            result
+                .get("initial_supply")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0"),
+        );
+        output::print_field(
+            "EVM Address",
+            result
+                .get("evm_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -129,25 +165,91 @@ impl TokenInfoCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let mut params = serde_json::Map::new();
-        if let Some(ref s) = self.symbol { params.insert("symbol".into(), serde_json::json!(s)); }
-        if let Some(ref a) = self.address { params.insert("evm_address".into(), serde_json::json!(a)); }
-        if let Some(ref i) = self.id { params.insert("token_id".into(), serde_json::json!(i)); }
+        if let Some(ref s) = self.symbol {
+            params.insert("symbol".into(), serde_json::json!(s));
+        }
+        if let Some(ref a) = self.address {
+            params.insert("evm_address".into(), serde_json::json!(a));
+        }
+        if let Some(ref i) = self.id {
+            params.insert("token_id".into(), serde_json::json!(i));
+        }
 
-        let result: serde_json::Value = rpc.call("tenzro_getToken", serde_json::Value::Object(params)).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_getToken", serde_json::Value::Object(params))
+            .await?;
 
         spinner.finish_and_clear();
 
-        output::print_field("Token ID", result.get("token_id").and_then(|v| v.as_str()).unwrap_or("unknown"));
-        output::print_field("Name", result.get("name").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Symbol", result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Decimals", &result.get("decimals").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Total Supply", result.get("total_supply").and_then(|v| v.as_str()).unwrap_or("0"));
-        output::print_field("Type", result.get("token_type").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("EVM Address", result.get("evm_address").and_then(|v| v.as_str()).unwrap_or("N/A"));
-        output::print_field("SVM Mint", result.get("svm_mint").and_then(|v| v.as_str()).unwrap_or("N/A"));
-        output::print_field("DAML Template", result.get("daml_template_id").and_then(|v| v.as_str()).unwrap_or("N/A"));
-        output::print_field("Tempo Address", result.get("tempo_address").and_then(|v| v.as_str()).unwrap_or("N/A"));
-        output::print_field("Creator", result.get("creator").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Token ID",
+            result
+                .get("token_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
+        output::print_field(
+            "Name",
+            result.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Symbol",
+            result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Decimals",
+            &result
+                .get("decimals")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Total Supply",
+            result
+                .get("total_supply")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0"),
+        );
+        output::print_field(
+            "Type",
+            result
+                .get("token_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "EVM Address",
+            result
+                .get("evm_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("N/A"),
+        );
+        output::print_field(
+            "SVM Mint",
+            result
+                .get("svm_mint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("N/A"),
+        );
+        output::print_field(
+            "DAML Template",
+            result
+                .get("daml_template_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("N/A"),
+        );
+        output::print_field(
+            "Tempo Address",
+            result
+                .get("tempo_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("N/A"),
+        );
+        output::print_field(
+            "Creator",
+            result.get("creator").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -192,11 +294,26 @@ impl TokenListCmd {
                 let mut rows = Vec::new();
                 for t in tokens {
                     rows.push(vec![
-                        t.get("symbol").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        t.get("decimals").and_then(|v| v.as_u64()).map(|v| v.to_string()).unwrap_or_default(),
-                        t.get("total_supply").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
-                        t.get("evm_address").and_then(|v| v.as_str()).unwrap_or("N/A").to_string(),
+                        t.get("symbol")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        t.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        t.get("decimals")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                        t.get("total_supply")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0")
+                            .to_string(),
+                        t.get("evm_address")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("N/A")
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
@@ -228,26 +345,46 @@ impl TokenBalanceCmd {
         let spinner = output::create_spinner("Querying balances...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getTokenBalance", serde_json::json!({
-            "address": self.address,
-            "token": self.token,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getTokenBalance",
+                serde_json::json!({
+                    "address": self.address,
+                    "token": self.token,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_field("Address", &self.address);
 
         if let Some(native) = result.get("native") {
-            output::print_field("Native (18 dec)", native.get("display").and_then(|v| v.as_str()).unwrap_or("0"));
+            output::print_field(
+                "Native (18 dec)",
+                native
+                    .get("display")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0"),
+            );
         }
         if let Some(evm) = result.get("evm_wtnzo") {
-            output::print_field("EVM wTNZO (18 dec)", evm.get("balance").and_then(|v| v.as_str()).unwrap_or("0"));
+            output::print_field(
+                "EVM wTNZO (18 dec)",
+                evm.get("balance").and_then(|v| v.as_str()).unwrap_or("0"),
+            );
         }
         if let Some(svm) = result.get("svm_wtnzo") {
-            output::print_field("SVM wTNZO (9 dec)", svm.get("balance").and_then(|v| v.as_str()).unwrap_or("0"));
+            output::print_field(
+                "SVM wTNZO (9 dec)",
+                svm.get("balance").and_then(|v| v.as_str()).unwrap_or("0"),
+            );
         }
         if let Some(daml) = result.get("daml_holding") {
-            output::print_field("DAML Holding", daml.get("amount").and_then(|v| v.as_str()).unwrap_or("0"));
+            output::print_field(
+                "DAML Holding",
+                daml.get("amount").and_then(|v| v.as_str()).unwrap_or("0"),
+            );
         }
 
         Ok(())
@@ -279,18 +416,38 @@ impl TokenWrapCmd {
         let spinner = output::create_spinner("Wrapping...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_wrapTnzo", serde_json::json!({
-            "address": self.address,
-            "amount": self.amount,
-            "to_vm": self.vm,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_wrapTnzo",
+                serde_json::json!({
+                    "address": self.address,
+                    "amount": self.amount,
+                    "to_vm": self.vm,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("TNZO wrapped successfully!");
-        output::print_field("Target VM", result.get("target_vm").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Representation", result.get("representation").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Target VM",
+            result
+                .get("target_vm")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Representation",
+            result
+                .get("representation")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Status",
+            result.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+        );
         if let Some(note) = result.get("note").and_then(|v| v.as_str()) {
             output::print_info(note);
         }
@@ -333,23 +490,43 @@ impl TokenTransferCmd {
         let spinner = output::create_spinner("Transferring...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_crossVmTransfer", serde_json::json!({
-            "token": self.token,
-            "amount": self.amount,
-            "from_vm": self.from_vm,
-            "to_vm": self.to_vm,
-            "from_address": self.from,
-            "to_address": self.to,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_crossVmTransfer",
+                serde_json::json!({
+                    "token": self.token,
+                    "amount": self.amount,
+                    "from_vm": self.from_vm,
+                    "to_vm": self.to_vm,
+                    "from_address": self.from,
+                    "to_address": self.to,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Transfer completed!");
-        output::print_field("Token", result.get("token").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Amount", result.get("amount").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("From VM", result.get("from_vm").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("To VM", result.get("to_vm").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Token",
+            result.get("token").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Amount",
+            result.get("amount").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "From VM",
+            result.get("from_vm").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "To VM",
+            result.get("to_vm").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Status",
+            result.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -384,18 +561,35 @@ impl TokenSwapCmd {
         output::print_header("Token Swap");
         let spinner = output::create_spinner("Executing swap...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_swapToken", serde_json::json!({
-            "from_token": self.from_token,
-            "to_token": self.to_token,
-            "amount": self.amount,
-            "sender": self.sender,
-            "slippage": self.slippage,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_swapToken",
+                serde_json::json!({
+                    "from_token": self.from_token,
+                    "to_token": self.to_token,
+                    "amount": self.amount,
+                    "sender": self.sender,
+                    "slippage": self.slippage,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Swap executed!");
         output::print_field("From", &format!("{} {}", self.amount, self.from_token));
-        output::print_field("To", &format!("{} {}", result.get("received_amount").and_then(|v| v.as_str()).unwrap_or("?"), self.to_token));
-        if let Some(v) = result.get("tx_hash").and_then(|v| v.as_str()) { output::print_field("Tx Hash", v); }
+        output::print_field(
+            "To",
+            &format!(
+                "{} {}",
+                result
+                    .get("received_amount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?"),
+                self.to_token
+            ),
+        );
+        if let Some(v) = result.get("tx_hash").and_then(|v| v.as_str()) {
+            output::print_field("Tx Hash", v);
+        }
         Ok(())
     }
 }
@@ -419,14 +613,19 @@ impl TokenBurnQuotaCmd {
         output::print_header("Burn Quota (Dual-Rail Gas)");
         let spinner = output::create_spinner("Querying quota state...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value =
-            rpc.call("tenzro_getBurnQuota", serde_json::Value::Null).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_getBurnQuota", serde_json::Value::Null)
+            .await?;
         spinner.finish_and_clear();
 
         let pick = |k: &str| -> String {
             result
                 .get(k)
-                .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+                .and_then(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| Some(v.to_string()))
+                })
                 .unwrap_or_else(|| "—".into())
         };
         output::print_field("Balance (1e18)", &pick("balance"));

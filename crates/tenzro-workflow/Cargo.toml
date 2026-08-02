@@ -29,3 +29,6 @@ tokio = { workspace = true }
 # up a temporary RocksDB, drop the manager, and rebuild from the same
 # on-disk store to verify the durability invariant.
 tempfile = "3"
+
+[lints]
+workspace = true

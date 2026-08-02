@@ -1,19 +1,19 @@
 //! Visa TAP server implementation
 
+use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::HashMap;
-use async_trait::async_trait;
-use chrono::Utc;
 use tracing::{debug, info, warn};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
+use super::verifier::TapVerifier;
+use crate::challenge_store::ChallengeStore;
 use crate::error::{PaymentError, Result};
+use crate::rfc9421::{AgentRegistryClient, NonceCache, RequestParts, SignedHeaders};
 use crate::traits::PaymentProtocol;
 use crate::types::{PaymentChallenge, PaymentCredential, PaymentReceipt, PaymentVerification};
-use crate::challenge_store::ChallengeStore;
-use crate::rfc9421::{AgentRegistryClient, NonceCache, RequestParts, SignedHeaders};
-use super::verifier::TapVerifier;
 
 /// Visa TAP payment protocol server
 pub struct VisaTapServer {
@@ -49,7 +49,10 @@ impl VisaTapServer {
     }
 
     /// Set settlement engine for automatic settlement
-    pub fn with_settlement_engine(mut self, engine: Arc<tenzro_settlement::SettlementEngine>) -> Self {
+    pub fn with_settlement_engine(
+        mut self,
+        engine: Arc<tenzro_settlement::SettlementEngine>,
+    ) -> Self {
         self.settlement_engine = Some(engine);
         self
     }
@@ -80,23 +83,32 @@ impl VisaTapServer {
 
     /// Extract request parts from credential extra data
     fn extract_request_parts(credential: &PaymentCredential) -> Result<RequestParts> {
-        let method = credential.extra.get("method")
+        let method = credential
+            .extra
+            .get("method")
             .and_then(|v| v.as_str())
             .unwrap_or("GET")
             .to_string();
 
-        let authority = credential.extra.get("authority")
+        let authority = credential
+            .extra
+            .get("authority")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PaymentError::CredentialError("Missing authority in credential".to_string()))?
+            .ok_or_else(|| {
+                PaymentError::CredentialError("Missing authority in credential".to_string())
+            })?
             .to_string();
 
-        let path = credential.extra.get("path")
+        let path = credential
+            .extra
+            .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| PaymentError::CredentialError("Missing path in credential".to_string()))?
             .to_string();
 
-        let headers_value = credential.extra.get("headers")
-            .ok_or_else(|| PaymentError::CredentialError("Missing headers in credential".to_string()))?;
+        let headers_value = credential.extra.get("headers").ok_or_else(|| {
+            PaymentError::CredentialError("Missing headers in credential".to_string())
+        })?;
 
         let headers: HashMap<String, String> = serde_json::from_value(headers_value.clone())
             .map_err(|e| PaymentError::CredentialError(format!("Invalid headers format: {}", e)))?;
@@ -114,20 +126,31 @@ impl VisaTapServer {
 
     /// Extract signed headers from credential extra data
     fn extract_signed_headers(credential: &PaymentCredential) -> Result<SignedHeaders> {
-        let signature_input_raw = credential.extra.get("signature_input")
+        let signature_input_raw = credential
+            .extra
+            .get("signature_input")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PaymentError::CredentialError("Missing signature_input in credential".to_string()))?
+            .ok_or_else(|| {
+                PaymentError::CredentialError("Missing signature_input in credential".to_string())
+            })?
             .to_string();
 
-        let signature_b64 = credential.extra.get("signature")
+        let signature_b64 = credential
+            .extra
+            .get("signature")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PaymentError::CredentialError("Missing signature in credential".to_string()))?;
+            .ok_or_else(|| {
+                PaymentError::CredentialError("Missing signature in credential".to_string())
+            })?;
 
-        let signature_bytes = BASE64.decode(signature_b64)
-            .map_err(|e| PaymentError::CredentialError(format!("Invalid signature base64: {}", e)))?;
+        let signature_bytes = BASE64.decode(signature_b64).map_err(|e| {
+            PaymentError::CredentialError(format!("Invalid signature base64: {}", e))
+        })?;
 
         let parsed = crate::rfc9421::signature::parse_signature_input(&signature_input_raw)
-            .map_err(|e| PaymentError::Rfc9421Error(format!("Failed to parse signature input: {}", e)))?;
+            .map_err(|e| {
+                PaymentError::Rfc9421Error(format!("Failed to parse signature input: {}", e))
+            })?;
 
         Ok(SignedHeaders {
             signature_input_raw,
@@ -144,39 +167,42 @@ impl VisaTapServer {
         // Build credential message (same format as MPP)
         let message = format!(
             "{}:{}:{}:{}",
-            challenge.challenge_id,
-            credential.payer_did,
-            credential.amount,
-            credential.asset
+            challenge.challenge_id, credential.payer_did, credential.amount, credential.asset
         );
 
         // Extract public key from extra
-        let public_key_hex = credential.extra.get("public_key")
+        let public_key_hex = credential
+            .extra
+            .get("public_key")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PaymentError::CredentialError("Missing public_key in credential".to_string()))?;
+            .ok_or_else(|| {
+                PaymentError::CredentialError("Missing public_key in credential".to_string())
+            })?;
 
         let public_key_bytes = hex::decode(public_key_hex)
             .map_err(|e| PaymentError::CryptoError(format!("Invalid public key hex: {}", e)))?;
 
         // Verify signature
-        let public_key = tenzro_crypto::PublicKey::new(
-            tenzro_crypto::KeyType::Ed25519,
-            public_key_bytes,
-        );
+        let public_key =
+            tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, public_key_bytes);
 
         let signature = tenzro_crypto::Signature::new(
             tenzro_crypto::KeyType::Ed25519,
             credential.signature.clone(),
         );
 
-        tenzro_crypto::signatures::verify(&public_key, message.as_bytes(), &signature)
-            .map_err(|e| PaymentError::CryptoError(format!("Signature verification failed: {}", e)))?;
+        tenzro_crypto::signatures::verify(&public_key, message.as_bytes(), &signature).map_err(
+            |e| PaymentError::CryptoError(format!("Signature verification failed: {}", e)),
+        )?;
 
         // Verify the Tenzro-native post-quantum leg (ML-DSA-65) over the same
         // preimage. Present on credentials minted by `create_credential`; a
         // credential carrying a `pq_public_key` must also carry a valid
         // `pq_signature`, and vice versa.
-        match (credential.pq_public_key.is_empty(), credential.pq_signature.is_empty()) {
+        match (
+            credential.pq_public_key.is_empty(),
+            credential.pq_signature.is_empty(),
+        ) {
             (true, true) => {}
             (false, false) => {
                 tenzro_crypto::pq::ml_dsa_verify(
@@ -232,10 +258,7 @@ impl PaymentProtocol for VisaTapServer {
             "max_signature_age_secs".to_string(),
             serde_json::json!(self.max_signature_age.as_secs()),
         );
-        extra.insert(
-            "domain".to_string(),
-            serde_json::json!(self.domain),
-        );
+        extra.insert("domain".to_string(), serde_json::json!(self.domain));
 
         let challenge = PaymentChallenge {
             challenge_id: challenge_id.clone(),
@@ -260,14 +283,18 @@ impl PaymentProtocol for VisaTapServer {
         challenge: &PaymentChallenge,
         credential: &PaymentCredential,
     ) -> Result<PaymentVerification> {
-        debug!("Verifying Visa TAP credential: {}", credential.credential_id);
+        debug!(
+            "Verifying Visa TAP credential: {}",
+            credential.credential_id
+        );
 
         // Check challenge expiration
         if Utc::now() > challenge.expires_at {
             warn!("Challenge expired: {}", challenge.challenge_id);
-            return Err(PaymentError::ChallengeError(
-                format!("Challenge {} has expired", challenge.challenge_id),
-            ));
+            return Err(PaymentError::ChallengeError(format!(
+                "Challenge {} has expired",
+                challenge.challenge_id
+            )));
         }
 
         // Extract request parts and signed headers from credential
@@ -287,7 +314,10 @@ impl PaymentProtocol for VisaTapServer {
         let verification_result = verifier.verify(&request_parts, &signed_headers).await?;
 
         if !verification_result.verified {
-            warn!("TAP verification failed for credential: {}", credential.credential_id);
+            warn!(
+                "TAP verification failed for credential: {}",
+                credential.credential_id
+            );
             return Ok(PaymentVerification {
                 verified: false,
                 credential_id: credential.credential_id.clone(),
@@ -316,11 +346,11 @@ impl PaymentProtocol for VisaTapServer {
         })
     }
 
-    async fn settle(
-        &self,
-        verification: &PaymentVerification,
-    ) -> Result<PaymentReceipt> {
-        debug!("Settling Visa TAP payment for challenge: {}", verification.challenge_id);
+    async fn settle(&self, verification: &PaymentVerification) -> Result<PaymentReceipt> {
+        debug!(
+            "Settling Visa TAP payment for challenge: {}",
+            verification.challenge_id
+        );
 
         // Look up original challenge
         let challenge = self.challenge_store.get(&verification.challenge_id)?;
@@ -331,7 +361,7 @@ impl PaymentProtocol for VisaTapServer {
             // Addresses are derived from the payer DID and recipient strings via SHA-256.
             use sha2::{Digest, Sha256};
             use tenzro_types::primitives::Address;
-            use tenzro_types::settlement::{ServiceProof, ServiceType, ProofType};
+            use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 
             let payer_hash = Sha256::digest(verification.payer_did.as_bytes());
             let recipient_hash = Sha256::digest(challenge.recipient.as_bytes());
@@ -380,7 +410,10 @@ impl PaymentProtocol for VisaTapServer {
 
         let mut extra = HashMap::new();
         if let Some(ref settlement_ref) = verification.settlement_ref {
-            extra.insert("agent_key_id".to_string(), serde_json::json!(settlement_ref));
+            extra.insert(
+                "agent_key_id".to_string(),
+                serde_json::json!(settlement_ref),
+            );
         }
 
         let receipt = PaymentReceipt {
@@ -411,7 +444,10 @@ impl PaymentProtocol for VisaTapServer {
         payer_did: &str,
         _wallet_id: &str,
     ) -> Result<PaymentCredential> {
-        debug!("Creating Visa TAP credential for challenge: {}", challenge.challenge_id);
+        debug!(
+            "Creating Visa TAP credential for challenge: {}",
+            challenge.challenge_id
+        );
 
         // Generate Ed25519 keypair for signing credential
         let signer = tenzro_crypto::signatures::Ed25519SignerImpl::generate()
@@ -453,9 +489,15 @@ impl PaymentProtocol for VisaTapServer {
         let signature_b64 = BASE64.encode(signature.to_bytes());
 
         let mut extra = HashMap::new();
-        extra.insert("signature_input".to_string(), serde_json::json!(signature_input));
+        extra.insert(
+            "signature_input".to_string(),
+            serde_json::json!(signature_input),
+        );
         extra.insert("signature".to_string(), serde_json::json!(signature_b64));
-        extra.insert("public_key".to_string(), serde_json::json!(hex::encode(public_key.to_bytes())));
+        extra.insert(
+            "public_key".to_string(),
+            serde_json::json!(hex::encode(public_key.to_bytes())),
+        );
         extra.insert("method".to_string(), serde_json::json!("GET"));
         extra.insert("authority".to_string(), serde_json::json!(self.domain));
         extra.insert("path".to_string(), serde_json::json!(challenge.resource));
@@ -530,12 +572,10 @@ mod tests {
             registry,
         );
 
-        let challenge = server.create_challenge(
-            "/api/resource",
-            1000000,
-            "TNZO",
-            "recipient-123",
-        ).await.unwrap();
+        let challenge = server
+            .create_challenge("/api/resource", 1000000, "TNZO", "recipient-123")
+            .await
+            .unwrap();
 
         assert_eq!(challenge.protocol, "visa-tap");
         assert_eq!(challenge.amount, 1000000);
@@ -552,18 +592,15 @@ mod tests {
             registry,
         );
 
-        let challenge = server.create_challenge(
-            "/api/resource",
-            1000000,
-            "TNZO",
-            "recipient-123",
-        ).await.unwrap();
+        let challenge = server
+            .create_challenge("/api/resource", 1000000, "TNZO", "recipient-123")
+            .await
+            .unwrap();
 
-        let credential = server.create_credential(
-            &challenge,
-            "did:tenzro:machine:agent",
-            "wallet-1",
-        ).await.unwrap();
+        let credential = server
+            .create_credential(&challenge, "did:tenzro:machine:agent", "wallet-1")
+            .await
+            .unwrap();
 
         assert_eq!(credential.protocol, "visa-tap");
         assert_eq!(credential.payer_did, "did:tenzro:machine:agent");
@@ -611,9 +648,15 @@ mod tests {
     async fn test_extract_request_parts() {
         let mut extra = HashMap::new();
         extra.insert("method".to_string(), serde_json::json!("POST"));
-        extra.insert("authority".to_string(), serde_json::json!("api.example.com"));
+        extra.insert(
+            "authority".to_string(),
+            serde_json::json!("api.example.com"),
+        );
         extra.insert("path".to_string(), serde_json::json!("/api/test"));
-        extra.insert("headers".to_string(), serde_json::json!({"content-type": "application/json"}));
+        extra.insert(
+            "headers".to_string(),
+            serde_json::json!({"content-type": "application/json"}),
+        );
 
         let credential = PaymentCredential {
             credential_id: "test".to_string(),

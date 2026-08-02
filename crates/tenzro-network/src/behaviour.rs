@@ -10,14 +10,13 @@
 //!   * `AllowBlockList` — byzantine peers permanently blocked by PeerId.
 
 use libp2p::{
-    autonat, dcutr,
+    PeerId, autonat, dcutr,
     gossipsub::{
-        self, IdentTopic, MessageAuthenticity, MessageId,
-        PeerScoreParams, PeerScoreThresholds, TopicScoreParams, ValidationMode,
+        self, IdentTopic, MessageAuthenticity, MessageId, PeerScoreParams, PeerScoreThresholds,
+        TopicScoreParams, ValidationMode,
     },
     identify, kad, mdns, ping, relay,
-    swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
-    PeerId,
+    swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
 };
 use libp2p_allow_block_list as allow_block_list;
 use libp2p_connection_limits as connection_limits;
@@ -31,7 +30,7 @@ use crate::cluster_tunnel_proto::{self, ClusterTunnelBehaviour};
 use crate::consensus_direct_proto::{self, ConsensusDirectBehaviour};
 use crate::da_committee_relay::{self, DaCommitteeBehaviour};
 use crate::db_replicate_proto::{self, DbReplicateBehaviour};
-use crate::gossip::{validate_gossip_message, MessageDeduplicator, MessageValidation};
+use crate::gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message};
 use crate::mpc_relay::{self, MpcRelayBehaviour};
 
 /// Topics on which ONLY validators may publish. Enforced in the gossip validation
@@ -188,7 +187,6 @@ pub struct TenzroBehaviour {
     // All five fields are wrapped in `Toggle` so they can be conditionally
     // disabled at build time without bifurcating the `NetworkBehaviour`
     // type. A toggled-off field is a no-op for the swarm.
-
     /// Circuit-Relay v2 SERVER (spec/libp2p/circuit-relay-v2). Enabled on
     /// public validators so joiners behind NAT can use them as relay hops
     /// for DCUtR hole-punch coordination. Gated by `enable_relay`.
@@ -515,9 +513,7 @@ impl TenzroBehaviour {
         // Only enabled on validators with a confirmed public address (same
         // gate as the relay server).
         let autonat_server = if enable_relay {
-            Toggle::from(Some(autonat::v2::server::Behaviour::new(
-                rand::rngs::OsRng,
-            )))
+            Toggle::from(Some(autonat::v2::server::Behaviour::new(rand::rngs::OsRng)))
         } else {
             Toggle::from(None)
         };
@@ -685,22 +681,21 @@ impl TenzroNetwork {
 
     /// Validates and deduplicates an incoming message.
     /// Returns true if the message should be processed (valid and not a duplicate).
-    pub fn validate_incoming(
-        &mut self,
-        topic: &gossipsub::TopicHash,
-        data: &[u8],
-    ) -> bool {
+    pub fn validate_incoming(&mut self, topic: &gossipsub::TopicHash, data: &[u8]) -> bool {
         // Step 1: Structural validation
         match validate_gossip_message(topic, data) {
-            MessageValidation::Accept => {},
+            MessageValidation::Accept => {}
             MessageValidation::Reject => {
                 tracing::debug!("Rejecting invalid inbound message on topic {:?}", topic);
                 return false;
-            },
+            }
             MessageValidation::Ignore => {
-                tracing::trace!("Ignoring message pending async validation on topic {:?}", topic);
+                tracing::trace!(
+                    "Ignoring message pending async validation on topic {:?}",
+                    topic
+                );
                 return false;
-            },
+            }
         }
 
         // Step 2: Application-level dedup

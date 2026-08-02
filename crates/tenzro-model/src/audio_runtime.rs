@@ -81,7 +81,8 @@ pub struct TranscribeResult {
 
 /// Trait for ASR models.
 pub trait Transcriber: Send + Sync {
-    fn transcribe(&self, audio_bytes: &[u8], config: &TranscribeConfig) -> Result<TranscribeResult>;
+    fn transcribe(&self, audio_bytes: &[u8], config: &TranscribeConfig)
+    -> Result<TranscribeResult>;
     fn sample_rate(&self) -> u32;
     fn max_audio_seconds(&self) -> u32;
 }
@@ -224,11 +225,7 @@ mod preprocessing {
         let in_rate = codec_params
             .sample_rate
             .ok_or_else(|| ModelError::InferenceError("missing sample_rate".to_string()))?;
-        let channels = codec_params
-            .channels
-            .map(|c| c.count())
-            .unwrap_or(1)
-            .max(1);
+        let channels = codec_params.channels.map(|c| c.count()).unwrap_or(1).max(1);
 
         let mut decoder = symphonia::default::get_codecs()
             .make(&codec_params, &DecoderOptions::default())
@@ -304,8 +301,10 @@ mod preprocessing {
             }
             _ => {
                 // Fallback: convert via f32 buffer copy.
-                let mut fbuf =
-                    symphonia::core::audio::AudioBuffer::<f32>::new(buf.capacity() as u64, *buf.spec());
+                let mut fbuf = symphonia::core::audio::AudioBuffer::<f32>::new(
+                    buf.capacity() as u64,
+                    *buf.spec(),
+                );
                 buf.convert(&mut fbuf);
                 let chans = fbuf.spec().channels.count();
                 let frames = fbuf.frames();
@@ -648,8 +647,11 @@ mod onnx_backend {
                 .first()
                 .map(|o| o.name.clone())
                 .ok_or_else(|| ModelError::InvalidModel("encoder has no outputs".to_string()))?;
-            let (decoder_input_ids_name, decoder_encoder_hidden_name, decoder_use_cache_branch_name) =
-                resolve_decoder_io(&decoder)?;
+            let (
+                decoder_input_ids_name,
+                decoder_encoder_hidden_name,
+                decoder_use_cache_branch_name,
+            ) = resolve_decoder_io(&decoder)?;
             let tokenizer = Tokenizer::from_file(tokenizer_path.as_ref())
                 .map_err(|e| ModelError::InvalidModel(format!("tokenizer load: {}", e)))?;
             // Moonshine tokenizer special tokens: <s>=1, </s>=2 in the
@@ -697,27 +699,25 @@ mod onnx_backend {
             let n_samples = pcm.len();
 
             // Encoder forward: input_values [1, T] → last_hidden_state [1, S, D].
-            let encoder_input =
-                Array2::<f32>::from_shape_vec((1, n_samples), pcm).map_err(|e| {
-                    ModelError::InferenceError(format!("encoder input shape: {}", e))
-                })?;
-            let encoder_tensor = Tensor::from_array(encoder_input).map_err(|e| {
-                ModelError::InferenceError(format!("encoder tensor: {}", e))
-            })?;
+            let encoder_input = Array2::<f32>::from_shape_vec((1, n_samples), pcm)
+                .map_err(|e| ModelError::InferenceError(format!("encoder input shape: {}", e)))?;
+            let encoder_tensor = Tensor::from_array(encoder_input)
+                .map_err(|e| ModelError::InferenceError(format!("encoder tensor: {}", e)))?;
 
             let (encoder_hidden, encoder_hidden_shape) = {
                 let mut sess = self.encoder.lock();
                 let outputs = sess
                     .run(ort::inputs![self.encoder_input_name.as_str() => encoder_tensor])
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("encoder run: {}", e))
-                    })?;
-                let out_value = outputs.get(self.encoder_output_name.as_str()).ok_or_else(|| {
-                    ModelError::InferenceError(format!(
-                        "missing encoder output {}",
-                        self.encoder_output_name
-                    ))
-                })?;
+                    .map_err(|e| ModelError::InferenceError(format!("encoder run: {}", e)))?;
+                let out_value =
+                    outputs
+                        .get(self.encoder_output_name.as_str())
+                        .ok_or_else(|| {
+                            ModelError::InferenceError(format!(
+                                "missing encoder output {}",
+                                self.encoder_output_name
+                            ))
+                        })?;
                 let (shape, data) = out_value
                     .try_extract_tensor::<f32>()
                     .map_err(|e| ModelError::InferenceError(format!("encoder extract: {}", e)))?;
@@ -816,8 +816,11 @@ mod onnx_backend {
                 .first()
                 .map(|o| o.name.clone())
                 .ok_or_else(|| ModelError::InvalidModel("encoder has no outputs".to_string()))?;
-            let (decoder_input_ids_name, decoder_encoder_hidden_name, decoder_use_cache_branch_name) =
-                resolve_decoder_io(&decoder)?;
+            let (
+                decoder_input_ids_name,
+                decoder_encoder_hidden_name,
+                decoder_use_cache_branch_name,
+            ) = resolve_decoder_io(&decoder)?;
             let tokenizer = Tokenizer::from_file(tokenizer_path.as_ref())
                 .map_err(|e| ModelError::InvalidModel(format!("tokenizer load: {}", e)))?;
             // Whisper / Distil-Whisper canonical special token IDs.
@@ -885,27 +888,24 @@ mod onnx_backend {
 
             // Encoder input: log-mel spectrogram [1, n_mels, N_FRAMES].
             let mel = log_mel_spectrogram(&pcm, self.n_mels);
-            let encoder_input = Array3::<f32>::from_shape_vec(
-                (1, self.n_mels, N_FRAMES),
-                mel,
-            )
-            .map_err(|e| ModelError::InferenceError(format!("mel shape: {}", e)))?;
-            let encoder_tensor = Tensor::from_array(encoder_input).map_err(|e| {
-                ModelError::InferenceError(format!("encoder tensor: {}", e))
-            })?;
+            let encoder_input = Array3::<f32>::from_shape_vec((1, self.n_mels, N_FRAMES), mel)
+                .map_err(|e| ModelError::InferenceError(format!("mel shape: {}", e)))?;
+            let encoder_tensor = Tensor::from_array(encoder_input)
+                .map_err(|e| ModelError::InferenceError(format!("encoder tensor: {}", e)))?;
             let (encoder_hidden, encoder_hidden_shape) = {
                 let mut sess = self.encoder.lock();
                 let outputs = sess
                     .run(ort::inputs![self.encoder_input_name.as_str() => encoder_tensor])
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("encoder run: {}", e))
-                    })?;
-                let out_value = outputs.get(self.encoder_output_name.as_str()).ok_or_else(|| {
-                    ModelError::InferenceError(format!(
-                        "missing encoder output {}",
-                        self.encoder_output_name
-                    ))
-                })?;
+                    .map_err(|e| ModelError::InferenceError(format!("encoder run: {}", e)))?;
+                let out_value =
+                    outputs
+                        .get(self.encoder_output_name.as_str())
+                        .ok_or_else(|| {
+                            ModelError::InferenceError(format!(
+                                "missing encoder output {}",
+                                self.encoder_output_name
+                            ))
+                        })?;
                 let (shape, data) = out_value
                     .try_extract_tensor::<f32>()
                     .map_err(|e| ModelError::InferenceError(format!("encoder extract: {}", e)))?;
@@ -1010,10 +1010,7 @@ mod onnx_backend {
                 let token = line[..sp].to_string();
                 let id_str = &line[sp + 1..];
                 let id: usize = id_str.parse().map_err(|e| {
-                    ModelError::InvalidModel(format!(
-                        "vocab.txt id parse {:?}: {}",
-                        id_str, e
-                    ))
+                    ModelError::InvalidModel(format!("vocab.txt id parse {:?}: {}", id_str, e))
                 })?;
                 pairs.push((token, id));
             }
@@ -1062,7 +1059,10 @@ mod onnx_backend {
                 }
             }
             // U+2581 → ASCII space.
-            let stitched: String = out.chars().map(|c| if c == '\u{2581}' { ' ' } else { c }).collect();
+            let stitched: String = out
+                .chars()
+                .map(|c| if c == '\u{2581}' { ' ' } else { c })
+                .collect();
             stitched.trim_start().to_string()
         }
     }
@@ -1134,10 +1134,7 @@ mod onnx_backend {
     /// Returns an error if the input is missing or has a non-3-D shape.
     /// Dynamic dims (None) are not expected for these states in the
     /// istupakov export and are rejected.
-    fn discover_state_shape(
-        session: &Session,
-        name: &str,
-    ) -> Result<(usize, usize, usize)> {
+    fn discover_state_shape(session: &Session, name: &str) -> Result<(usize, usize, usize)> {
         let input = session
             .inputs
             .iter()
@@ -1195,18 +1192,13 @@ mod onnx_backend {
             let n_samples = pcm.len();
 
             // ── 1. Preprocessor: waveform → 128-mel features ──────────
-            let wave_arr =
-                Array2::<f32>::from_shape_vec((1, n_samples), pcm).map_err(|e| {
-                    ModelError::InferenceError(format!("waveform shape: {}", e))
-                })?;
-            let wave_lens =
-                ndarray::Array1::<i64>::from_vec(vec![n_samples as i64]);
-            let wave_tensor = Tensor::from_array(wave_arr).map_err(|e| {
-                ModelError::InferenceError(format!("waveform tensor: {}", e))
-            })?;
-            let wave_lens_tensor = Tensor::from_array(wave_lens).map_err(|e| {
-                ModelError::InferenceError(format!("waveform lens tensor: {}", e))
-            })?;
+            let wave_arr = Array2::<f32>::from_shape_vec((1, n_samples), pcm)
+                .map_err(|e| ModelError::InferenceError(format!("waveform shape: {}", e)))?;
+            let wave_lens = ndarray::Array1::<i64>::from_vec(vec![n_samples as i64]);
+            let wave_tensor = Tensor::from_array(wave_arr)
+                .map_err(|e| ModelError::InferenceError(format!("waveform tensor: {}", e)))?;
+            let wave_lens_tensor = Tensor::from_array(wave_lens)
+                .map_err(|e| ModelError::InferenceError(format!("waveform lens tensor: {}", e)))?;
             let (features_data, features_shape, features_lens_val) = {
                 let mut sess = self.preprocessor.lock();
                 let outputs = sess
@@ -1214,40 +1206,24 @@ mod onnx_backend {
                         "waveforms" => wave_tensor,
                         "waveforms_lens" => wave_lens_tensor,
                     ])
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("preprocessor run: {}", e))
-                    })?;
+                    .map_err(|e| ModelError::InferenceError(format!("preprocessor run: {}", e)))?;
                 let feat_val = outputs.get("features").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "preprocessor missing 'features' output".into(),
-                    )
+                    ModelError::InferenceError("preprocessor missing 'features' output".into())
                 })?;
-                let (fshape, fdata) =
-                    feat_val.try_extract_tensor::<f32>().map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "features extract: {}",
-                            e
-                        ))
-                    })?;
+                let (fshape, fdata) = feat_val
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| ModelError::InferenceError(format!("features extract: {}", e)))?;
                 let fshape: Vec<i64> = fshape.iter().copied().collect();
                 let flens_val = outputs.get("features_lens").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "preprocessor missing 'features_lens' output".into(),
-                    )
+                    ModelError::InferenceError("preprocessor missing 'features_lens' output".into())
                 })?;
-                let (_, flens_data) =
-                    flens_val.try_extract_tensor::<i64>().map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "features_lens extract: {}",
-                            e
-                        ))
-                    })?;
+                let (_, flens_data) = flens_val.try_extract_tensor::<i64>().map_err(|e| {
+                    ModelError::InferenceError(format!("features_lens extract: {}", e))
+                })?;
                 let flens_val = flens_data
                     .first()
                     .copied()
-                    .ok_or_else(|| {
-                        ModelError::InferenceError("empty features_lens".into())
-                    })?;
+                    .ok_or_else(|| ModelError::InferenceError("empty features_lens".into()))?;
                 (fdata.to_vec(), fshape, flens_val)
             };
             if features_shape.len() != 3 {
@@ -1260,19 +1236,13 @@ mod onnx_backend {
             let feat_t = features_shape[2] as usize;
 
             // ── 2. Encoder: features → encoder outputs ────────────────
-            let feat_arr = Array3::<f32>::from_shape_vec(
-                (1, feat_chans, feat_t),
-                features_data,
-            )
-            .map_err(|e| ModelError::InferenceError(format!("feat shape: {}", e)))?;
-            let feat_tensor = Tensor::from_array(feat_arr).map_err(|e| {
-                ModelError::InferenceError(format!("feat tensor: {}", e))
-            })?;
-            let feat_lens =
-                ndarray::Array1::<i64>::from_vec(vec![features_lens_val]);
-            let feat_lens_tensor = Tensor::from_array(feat_lens).map_err(|e| {
-                ModelError::InferenceError(format!("feat lens tensor: {}", e))
-            })?;
+            let feat_arr = Array3::<f32>::from_shape_vec((1, feat_chans, feat_t), features_data)
+                .map_err(|e| ModelError::InferenceError(format!("feat shape: {}", e)))?;
+            let feat_tensor = Tensor::from_array(feat_arr)
+                .map_err(|e| ModelError::InferenceError(format!("feat tensor: {}", e)))?;
+            let feat_lens = ndarray::Array1::<i64>::from_vec(vec![features_lens_val]);
+            let feat_lens_tensor = Tensor::from_array(feat_lens)
+                .map_err(|e| ModelError::InferenceError(format!("feat lens tensor: {}", e)))?;
             let (enc_out_data, enc_out_shape, enc_out_len) = {
                 let mut sess = self.encoder.lock();
                 let outputs = sess
@@ -1280,38 +1250,24 @@ mod onnx_backend {
                         "audio_signal" => feat_tensor,
                         "length" => feat_lens_tensor,
                     ])
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("encoder run: {}", e))
-                    })?;
+                    .map_err(|e| ModelError::InferenceError(format!("encoder run: {}", e)))?;
                 let out_val = outputs.get("outputs").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "encoder missing 'outputs'".into(),
-                    )
+                    ModelError::InferenceError("encoder missing 'outputs'".into())
                 })?;
-                let (oshape, odata) = out_val
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "encoder outputs extract: {}",
-                            e
-                        ))
-                    })?;
+                let (oshape, odata) = out_val.try_extract_tensor::<f32>().map_err(|e| {
+                    ModelError::InferenceError(format!("encoder outputs extract: {}", e))
+                })?;
                 let oshape: Vec<i64> = oshape.iter().copied().collect();
                 let elen_val = outputs.get("encoded_lengths").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "encoder missing 'encoded_lengths'".into(),
-                    )
+                    ModelError::InferenceError("encoder missing 'encoded_lengths'".into())
                 })?;
-                let (_, elen_data) =
-                    elen_val.try_extract_tensor::<i64>().map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "encoded_lengths extract: {}",
-                            e
-                        ))
-                    })?;
-                let elen = elen_data.first().copied().ok_or_else(|| {
-                    ModelError::InferenceError("empty encoded_lengths".into())
+                let (_, elen_data) = elen_val.try_extract_tensor::<i64>().map_err(|e| {
+                    ModelError::InferenceError(format!("encoded_lengths extract: {}", e))
                 })?;
+                let elen = elen_data
+                    .first()
+                    .copied()
+                    .ok_or_else(|| ModelError::InferenceError("empty encoded_lengths".into()))?;
                 (odata.to_vec(), oshape, elen)
             };
             // Encoder outputs are channel-first `[1, D, S]`. We index
@@ -1328,14 +1284,10 @@ mod onnx_backend {
 
             // ── 3. TDT decoding inner loop ───────────────────────────
             let mut tokens: Vec<usize> = Vec::new();
-            let mut state1: Vec<f32> = vec![
-                0.0;
-                self.state1_shape.0 * self.state1_shape.1 * self.state1_shape.2
-            ];
-            let mut state2: Vec<f32> = vec![
-                0.0;
-                self.state2_shape.0 * self.state2_shape.1 * self.state2_shape.2
-            ];
+            let mut state1: Vec<f32> =
+                vec![0.0; self.state1_shape.0 * self.state1_shape.1 * self.state1_shape.2];
+            let mut state2: Vec<f32> =
+                vec![0.0; self.state2_shape.0 * self.state2_shape.1 * self.state2_shape.2];
             let blank_idx = self.vocab.blank_idx;
             let vocab_size = self.vocab.vocab_size;
             let max_decode_steps = (usable_frames * (self.max_tokens_per_step + 2)).max(64);
@@ -1356,61 +1308,35 @@ mod onnx_backend {
                 for d in 0..d_dim {
                     frame.push(enc_out_data[d * s_dim + t]);
                 }
-                let frame_arr = Array3::<f32>::from_shape_vec((1, d_dim, 1), frame)
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "encoder frame shape: {}",
-                            e
-                        ))
+                let frame_arr =
+                    Array3::<f32>::from_shape_vec((1, d_dim, 1), frame).map_err(|e| {
+                        ModelError::InferenceError(format!("encoder frame shape: {}", e))
                     })?;
-                let frame_tensor = Tensor::from_array(frame_arr).map_err(|e| {
-                    ModelError::InferenceError(format!("frame tensor: {}", e))
-                })?;
+                let frame_tensor = Tensor::from_array(frame_arr)
+                    .map_err(|e| ModelError::InferenceError(format!("frame tensor: {}", e)))?;
 
                 // Previous token: last emitted vocab token, or blank
                 // if none emitted yet.
                 let prev_tok = tokens.last().copied().unwrap_or(blank_idx) as i64;
-                let targets_arr =
-                    Array2::<i64>::from_shape_vec((1, 1), vec![prev_tok])
-                        .map_err(|e| {
-                            ModelError::InferenceError(format!(
-                                "targets shape: {}",
-                                e
-                            ))
-                        })?;
-                let targets_tensor = Tensor::from_array(targets_arr).map_err(|e| {
-                    ModelError::InferenceError(format!("targets tensor: {}", e))
+                let targets_arr = Array2::<i64>::from_shape_vec((1, 1), vec![prev_tok])
+                    .map_err(|e| ModelError::InferenceError(format!("targets shape: {}", e)))?;
+                let targets_tensor = Tensor::from_array(targets_arr)
+                    .map_err(|e| ModelError::InferenceError(format!("targets tensor: {}", e)))?;
+                let target_length_arr = ndarray::Array1::<i64>::from_vec(vec![1]);
+                let target_length_tensor = Tensor::from_array(target_length_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("target_length tensor: {}", e))
                 })?;
-                let target_length_arr =
-                    ndarray::Array1::<i64>::from_vec(vec![1]);
-                let target_length_tensor = Tensor::from_array(target_length_arr)
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "target_length tensor: {}",
-                            e
-                        ))
-                    })?;
 
-                let state1_arr = Array3::<f32>::from_shape_vec(
-                    self.state1_shape,
-                    state1.clone(),
-                )
-                .map_err(|e| {
-                    ModelError::InferenceError(format!("state1 shape: {}", e))
-                })?;
-                let state2_arr = Array3::<f32>::from_shape_vec(
-                    self.state2_shape,
-                    state2.clone(),
-                )
-                .map_err(|e| {
-                    ModelError::InferenceError(format!("state2 shape: {}", e))
-                })?;
-                let state1_tensor = Tensor::from_array(state1_arr).map_err(|e| {
-                    ModelError::InferenceError(format!("state1 tensor: {}", e))
-                })?;
-                let state2_tensor = Tensor::from_array(state2_arr).map_err(|e| {
-                    ModelError::InferenceError(format!("state2 tensor: {}", e))
-                })?;
+                let state1_arr =
+                    Array3::<f32>::from_shape_vec(self.state1_shape, state1.clone())
+                        .map_err(|e| ModelError::InferenceError(format!("state1 shape: {}", e)))?;
+                let state2_arr =
+                    Array3::<f32>::from_shape_vec(self.state2_shape, state2.clone())
+                        .map_err(|e| ModelError::InferenceError(format!("state2 shape: {}", e)))?;
+                let state1_tensor = Tensor::from_array(state1_arr)
+                    .map_err(|e| ModelError::InferenceError(format!("state1 tensor: {}", e)))?;
+                let state2_tensor = Tensor::from_array(state2_arr)
+                    .map_err(|e| ModelError::InferenceError(format!("state2 tensor: {}", e)))?;
 
                 let (joint_logits, new_state1, new_state2) = {
                     let mut sess = self.decoder_joint.lock();
@@ -1423,50 +1349,26 @@ mod onnx_backend {
                             "input_states_2" => state2_tensor,
                         ])
                         .map_err(|e| {
-                            ModelError::InferenceError(format!(
-                                "decoder_joint run: {}",
-                                e
-                            ))
+                            ModelError::InferenceError(format!("decoder_joint run: {}", e))
                         })?;
                     let out_val = outputs.get("outputs").ok_or_else(|| {
-                        ModelError::InferenceError(
-                            "decoder_joint missing 'outputs'".into(),
-                        )
+                        ModelError::InferenceError("decoder_joint missing 'outputs'".into())
                     })?;
-                    let (_, odata) = out_val
-                        .try_extract_tensor::<f32>()
-                        .map_err(|e| {
-                            ModelError::InferenceError(format!(
-                                "joint outputs extract: {}",
-                                e
-                            ))
-                        })?;
-                    let s1_val =
-                        outputs.get("output_states_1").ok_or_else(|| {
-                            ModelError::InferenceError(
-                                "decoder_joint missing 'output_states_1'".into(),
-                            )
-                        })?;
-                    let (_, s1_data) =
-                        s1_val.try_extract_tensor::<f32>().map_err(|e| {
-                            ModelError::InferenceError(format!(
-                                "state1 extract: {}",
-                                e
-                            ))
-                        })?;
-                    let s2_val =
-                        outputs.get("output_states_2").ok_or_else(|| {
-                            ModelError::InferenceError(
-                                "decoder_joint missing 'output_states_2'".into(),
-                            )
-                        })?;
-                    let (_, s2_data) =
-                        s2_val.try_extract_tensor::<f32>().map_err(|e| {
-                            ModelError::InferenceError(format!(
-                                "state2 extract: {}",
-                                e
-                            ))
-                        })?;
+                    let (_, odata) = out_val.try_extract_tensor::<f32>().map_err(|e| {
+                        ModelError::InferenceError(format!("joint outputs extract: {}", e))
+                    })?;
+                    let s1_val = outputs.get("output_states_1").ok_or_else(|| {
+                        ModelError::InferenceError("decoder_joint missing 'output_states_1'".into())
+                    })?;
+                    let (_, s1_data) = s1_val.try_extract_tensor::<f32>().map_err(|e| {
+                        ModelError::InferenceError(format!("state1 extract: {}", e))
+                    })?;
+                    let s2_val = outputs.get("output_states_2").ok_or_else(|| {
+                        ModelError::InferenceError("decoder_joint missing 'output_states_2'".into())
+                    })?;
+                    let (_, s2_data) = s2_val.try_extract_tensor::<f32>().map_err(|e| {
+                        ModelError::InferenceError(format!("state2 extract: {}", e))
+                    })?;
                     (odata.to_vec(), s1_data.to_vec(), s2_data.to_vec())
                 };
 
@@ -1586,10 +1488,7 @@ mod onnx_backend {
                 let token_raw = &line[..sp];
                 let id_str = &line[sp + 1..];
                 let id: usize = id_str.parse().map_err(|e| {
-                    ModelError::InvalidModel(format!(
-                        "vocab.txt id parse {:?}: {}",
-                        id_str, e
-                    ))
+                    ModelError::InvalidModel(format!("vocab.txt id parse {:?}: {}", id_str, e))
                 })?;
                 // Per istupakov: replace ▁ with literal space at parse
                 // time. That makes the bare ▁ decode to " ", which the
@@ -1723,8 +1622,7 @@ mod onnx_backend {
             let encoder = load_session(encoder_path)?;
             let decoder = load_session(decoder_path)?;
             let vocab = CanaryVocab::load(vocab_path)?;
-            let (decoder_num_layers, decoder_hidden_dim) =
-                discover_canary_mems_shape(&decoder)?;
+            let (decoder_num_layers, decoder_hidden_dim) = discover_canary_mems_shape(&decoder)?;
             Ok(Self {
                 preprocessor: Mutex::new(preprocessor),
                 encoder: Mutex::new(encoder),
@@ -1824,17 +1722,13 @@ mod onnx_backend {
             let n_samples = pcm.len();
 
             // ── 1. Preprocessor: waveform → 128-mel features ──────────
-            let wave_arr =
-                Array2::<f32>::from_shape_vec((1, n_samples), pcm).map_err(|e| {
-                    ModelError::InferenceError(format!("waveform shape: {}", e))
-                })?;
+            let wave_arr = Array2::<f32>::from_shape_vec((1, n_samples), pcm)
+                .map_err(|e| ModelError::InferenceError(format!("waveform shape: {}", e)))?;
             let wave_lens = ndarray::Array1::<i64>::from_vec(vec![n_samples as i64]);
-            let wave_tensor = Tensor::from_array(wave_arr).map_err(|e| {
-                ModelError::InferenceError(format!("waveform tensor: {}", e))
-            })?;
-            let wave_lens_tensor = Tensor::from_array(wave_lens).map_err(|e| {
-                ModelError::InferenceError(format!("waveform lens tensor: {}", e))
-            })?;
+            let wave_tensor = Tensor::from_array(wave_arr)
+                .map_err(|e| ModelError::InferenceError(format!("waveform tensor: {}", e)))?;
+            let wave_lens_tensor = Tensor::from_array(wave_lens)
+                .map_err(|e| ModelError::InferenceError(format!("waveform lens tensor: {}", e)))?;
             let (features_data, features_shape, features_lens_val) = {
                 let mut sess = self.preprocessor.lock();
                 let outputs = sess
@@ -1842,31 +1736,20 @@ mod onnx_backend {
                         "waveforms" => wave_tensor,
                         "waveforms_lens" => wave_lens_tensor,
                     ])
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("preprocessor run: {}", e))
-                    })?;
+                    .map_err(|e| ModelError::InferenceError(format!("preprocessor run: {}", e)))?;
                 let feat_val = outputs.get("features").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "preprocessor missing 'features' output".into(),
-                    )
+                    ModelError::InferenceError("preprocessor missing 'features' output".into())
                 })?;
-                let (fshape, fdata) =
-                    feat_val.try_extract_tensor::<f32>().map_err(|e| {
-                        ModelError::InferenceError(format!("features extract: {}", e))
-                    })?;
+                let (fshape, fdata) = feat_val
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| ModelError::InferenceError(format!("features extract: {}", e)))?;
                 let fshape: Vec<i64> = fshape.iter().copied().collect();
                 let flens_val = outputs.get("features_lens").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "preprocessor missing 'features_lens' output".into(),
-                    )
+                    ModelError::InferenceError("preprocessor missing 'features_lens' output".into())
                 })?;
-                let (_, flens_data) =
-                    flens_val.try_extract_tensor::<i64>().map_err(|e| {
-                        ModelError::InferenceError(format!(
-                            "features_lens extract: {}",
-                            e
-                        ))
-                    })?;
+                let (_, flens_data) = flens_val.try_extract_tensor::<i64>().map_err(|e| {
+                    ModelError::InferenceError(format!("features_lens extract: {}", e))
+                })?;
                 let flens_val = flens_data
                     .first()
                     .copied()
@@ -1883,16 +1766,13 @@ mod onnx_backend {
             let feat_t = features_shape[2] as usize;
 
             // ── 2. Encoder: features → encoder outputs ────────────────
-            let feat_arr =
-                Array3::<f32>::from_shape_vec((1, feat_chans, feat_t), features_data)
-                    .map_err(|e| ModelError::InferenceError(format!("feat shape: {}", e)))?;
-            let feat_tensor = Tensor::from_array(feat_arr).map_err(|e| {
-                ModelError::InferenceError(format!("feat tensor: {}", e))
-            })?;
+            let feat_arr = Array3::<f32>::from_shape_vec((1, feat_chans, feat_t), features_data)
+                .map_err(|e| ModelError::InferenceError(format!("feat shape: {}", e)))?;
+            let feat_tensor = Tensor::from_array(feat_arr)
+                .map_err(|e| ModelError::InferenceError(format!("feat tensor: {}", e)))?;
             let feat_lens = ndarray::Array1::<i64>::from_vec(vec![features_lens_val]);
-            let feat_lens_tensor = Tensor::from_array(feat_lens).map_err(|e| {
-                ModelError::InferenceError(format!("feat lens tensor: {}", e))
-            })?;
+            let feat_lens_tensor = Tensor::from_array(feat_lens)
+                .map_err(|e| ModelError::InferenceError(format!("feat lens tensor: {}", e)))?;
             let (enc_out_data, enc_out_shape, enc_out_len) = {
                 let mut sess = self.encoder.lock();
                 let outputs = sess
@@ -1900,9 +1780,7 @@ mod onnx_backend {
                         "audio_signal" => feat_tensor,
                         "length" => feat_lens_tensor,
                     ])
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("encoder run: {}", e))
-                    })?;
+                    .map_err(|e| ModelError::InferenceError(format!("encoder run: {}", e)))?;
                 let out_val = outputs.get("outputs").ok_or_else(|| {
                     ModelError::InferenceError("encoder missing 'outputs'".into())
                 })?;
@@ -1913,13 +1791,13 @@ mod onnx_backend {
                 let elen_val = outputs.get("encoded_lengths").ok_or_else(|| {
                     ModelError::InferenceError("encoder missing 'encoded_lengths'".into())
                 })?;
-                let (_, elen_data) =
-                    elen_val.try_extract_tensor::<i64>().map_err(|e| {
-                        ModelError::InferenceError(format!("encoded_lengths extract: {}", e))
-                    })?;
-                let elen = elen_data.first().copied().ok_or_else(|| {
-                    ModelError::InferenceError("empty encoded_lengths".into())
+                let (_, elen_data) = elen_val.try_extract_tensor::<i64>().map_err(|e| {
+                    ModelError::InferenceError(format!("encoded_lengths extract: {}", e))
                 })?;
+                let elen = elen_data
+                    .first()
+                    .copied()
+                    .ok_or_else(|| ModelError::InferenceError("empty encoded_lengths".into()))?;
                 (odata.to_vec(), oshape, elen)
             };
             if enc_out_shape.len() != 3 {
@@ -1940,8 +1818,7 @@ mod onnx_backend {
             }
 
             // ── 3. AED autoregressive decoding ───────────────────────
-            let prefix =
-                self.build_prefix(&self.default_source_lang, &self.default_target_lang)?;
+            let prefix = self.build_prefix(&self.default_source_lang, &self.default_target_lang)?;
             let mut emitted: Vec<u32> = Vec::new();
             // Mems start empty (L_kv = 0). Subsequent steps grow by 1.
             let mut mems: Vec<f32> = Vec::new();
@@ -1963,31 +1840,23 @@ mod onnx_backend {
                 let l_in = in_tokens.len();
 
                 let targets_arr = Array2::<i64>::from_shape_vec((1, l_in), in_tokens)
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("targets shape: {}", e))
-                    })?;
-                let targets_tensor = Tensor::from_array(targets_arr).map_err(|e| {
-                    ModelError::InferenceError(format!("targets tensor: {}", e))
-                })?;
+                    .map_err(|e| ModelError::InferenceError(format!("targets shape: {}", e)))?;
+                let targets_tensor = Tensor::from_array(targets_arr)
+                    .map_err(|e| ModelError::InferenceError(format!("targets tensor: {}", e)))?;
 
                 let enc_arr =
                     Array3::<f32>::from_shape_vec((1, s_dim, d_dim), enc_out_data.clone())
                         .map_err(|e| {
-                            ModelError::InferenceError(format!(
-                                "encoder_outputs shape: {}",
-                                e
-                            ))
+                            ModelError::InferenceError(format!("encoder_outputs shape: {}", e))
                         })?;
                 let enc_tensor = Tensor::from_array(enc_arr).map_err(|e| {
                     ModelError::InferenceError(format!("encoder_outputs tensor: {}", e))
                 })?;
 
-                let enc_mask_arr =
-                    Array2::<bool>::from_shape_vec((1, s_dim), enc_mask.clone()).map_err(
-                        |e| {
-                            ModelError::InferenceError(format!("encoder_mask shape: {}", e))
-                        },
-                    )?;
+                let enc_mask_arr = Array2::<bool>::from_shape_vec((1, s_dim), enc_mask.clone())
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("encoder_mask shape: {}", e))
+                    })?;
                 let enc_mask_tensor = Tensor::from_array(enc_mask_arr).map_err(|e| {
                     ModelError::InferenceError(format!("encoder_mask tensor: {}", e))
                 })?;
@@ -2008,16 +1877,14 @@ mod onnx_backend {
                     ),
                     mems_buf,
                 )
-                .map_err(|e| {
-                    ModelError::InferenceError(format!("decoder_mems shape: {}", e))
-                })?;
+                .map_err(|e| ModelError::InferenceError(format!("decoder_mems shape: {}", e)))?;
                 let mems_tensor = Tensor::from_array(mems_arr).map_err(|e| {
                     ModelError::InferenceError(format!("decoder_mems tensor: {}", e))
                 })?;
 
                 let dec_mask: Vec<bool> = vec![true; l_in];
-                let dec_mask_arr = Array2::<bool>::from_shape_vec((1, l_in), dec_mask)
-                    .map_err(|e| {
+                let dec_mask_arr =
+                    Array2::<bool>::from_shape_vec((1, l_in), dec_mask).map_err(|e| {
                         ModelError::InferenceError(format!("decoder_mask shape: {}", e))
                     })?;
                 let dec_mask_tensor = Tensor::from_array(dec_mask_arr).map_err(|e| {
@@ -2034,29 +1901,20 @@ mod onnx_backend {
                             "decoder_mems" => mems_tensor,
                             "decoder_mask" => dec_mask_tensor,
                         ])
-                        .map_err(|e| {
-                            ModelError::InferenceError(format!("decoder run: {}", e))
-                        })?;
+                        .map_err(|e| ModelError::InferenceError(format!("decoder run: {}", e)))?;
                     let logits_val = outputs.get("logits").ok_or_else(|| {
                         ModelError::InferenceError("decoder missing 'logits'".into())
                     })?;
-                    let (lshape, ldata) =
-                        logits_val.try_extract_tensor::<f32>().map_err(|e| {
-                            ModelError::InferenceError(format!("logits extract: {}", e))
-                        })?;
+                    let (lshape, ldata) = logits_val.try_extract_tensor::<f32>().map_err(|e| {
+                        ModelError::InferenceError(format!("logits extract: {}", e))
+                    })?;
                     let lshape: Vec<i64> = lshape.iter().copied().collect();
                     let mems_val = outputs.get("decoder_mems_new").ok_or_else(|| {
-                        ModelError::InferenceError(
-                            "decoder missing 'decoder_mems_new'".into(),
-                        )
+                        ModelError::InferenceError("decoder missing 'decoder_mems_new'".into())
                     })?;
-                    let (mshape, mdata) =
-                        mems_val.try_extract_tensor::<f32>().map_err(|e| {
-                            ModelError::InferenceError(format!(
-                                "decoder_mems_new extract: {}",
-                                e
-                            ))
-                        })?;
+                    let (mshape, mdata) = mems_val.try_extract_tensor::<f32>().map_err(|e| {
+                        ModelError::InferenceError(format!("decoder_mems_new extract: {}", e))
+                    })?;
                     let mshape: Vec<i64> = mshape.iter().copied().collect();
                     (ldata.to_vec(), lshape, mdata.to_vec(), mshape)
                 };
@@ -2120,10 +1978,7 @@ mod onnx_backend {
     }
 
     #[cfg(test)]
-    pub(super) fn canary_vocab_decode_for_test(
-        tokens: Vec<String>,
-        ids: &[u32],
-    ) -> String {
+    pub(super) fn canary_vocab_decode_for_test(tokens: Vec<String>, ids: &[u32]) -> String {
         let mut by_name = std::collections::HashMap::new();
         for (i, t) in tokens.iter().enumerate() {
             by_name.insert(t.clone(), i as u32);
@@ -2167,7 +2022,10 @@ mod onnx_backend {
     fn resolve_decoder_io(session: &Session) -> Result<(String, String, Option<String>)> {
         let names: Vec<&str> = session.inputs.iter().map(|i| i.name.as_str()).collect();
         let exact = |needle: &str| -> Option<String> {
-            names.iter().find(|n| **n == needle).map(|n| (*n).to_string())
+            names
+                .iter()
+                .find(|n| **n == needle)
+                .map(|n| (*n).to_string())
         };
         let contains = |needle: &str| -> Option<String> {
             names
@@ -2266,18 +2124,16 @@ mod onnx_backend {
             let l = step_ids.len();
             let input_ids_arr = Array2::<i64>::from_shape_vec((1, l), step_ids)
                 .map_err(|e| ModelError::InferenceError(format!("input_ids shape: {}", e)))?;
-            let input_ids_tensor = Tensor::from_array(input_ids_arr).map_err(|e| {
-                ModelError::InferenceError(format!("input_ids tensor: {}", e))
-            })?;
+            let input_ids_tensor = Tensor::from_array(input_ids_arr)
+                .map_err(|e| ModelError::InferenceError(format!("input_ids tensor: {}", e)))?;
 
-            let encoder_arr = Array3::<f32>::from_shape_vec(
-                (1, s_dim, d_dim),
-                encoder_hidden_owned.clone(),
-            )
-            .map_err(|e| ModelError::InferenceError(format!("encoder hidden shape: {}", e)))?;
-            let encoder_tensor = Tensor::from_array(encoder_arr).map_err(|e| {
-                ModelError::InferenceError(format!("encoder hidden tensor: {}", e))
-            })?;
+            let encoder_arr =
+                Array3::<f32>::from_shape_vec((1, s_dim, d_dim), encoder_hidden_owned.clone())
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("encoder hidden shape: {}", e))
+                    })?;
+            let encoder_tensor = Tensor::from_array(encoder_arr)
+                .map_err(|e| ModelError::InferenceError(format!("encoder hidden tensor: {}", e)))?;
 
             // Build the input feed.
             let mut feed: Vec<(String, SessionInputValue<'_>)> = Vec::new();
@@ -2310,19 +2166,15 @@ mod onnx_backend {
                 };
                 let (shape, data) = payload.unwrap_or((vec![1, 1, 0, 1], Vec::new()));
                 let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
-                let arr = Array4::<f32>::from_shape_vec(
-                    (dims[0], dims[1], dims[2], dims[3]),
-                    data,
-                )
-                .map_err(|e| {
-                    ModelError::InferenceError(format!(
-                        "kv cache shape ({:?}): {}",
-                        binding.past_input_name, e
-                    ))
-                })?;
-                let t = Tensor::from_array(arr).map_err(|e| {
-                    ModelError::InferenceError(format!("kv cache tensor: {}", e))
-                })?;
+                let arr = Array4::<f32>::from_shape_vec((dims[0], dims[1], dims[2], dims[3]), data)
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "kv cache shape ({:?}): {}",
+                            binding.past_input_name, e
+                        ))
+                    })?;
+                let t = Tensor::from_array(arr)
+                    .map_err(|e| ModelError::InferenceError(format!("kv cache tensor: {}", e)))?;
                 feed.push((binding.past_input_name.clone(), t.into()));
             }
 
@@ -2343,8 +2195,7 @@ mod onnx_backend {
                 let logits = (logits_shape, logits_data.to_vec());
 
                 // Read all `present.*` outputs and pair them with bindings.
-                let mut present: Vec<Option<(Vec<i64>, Vec<f32>)>> =
-                    vec![None; kv_bindings.len()];
+                let mut present: Vec<Option<(Vec<i64>, Vec<f32>)>> = vec![None; kv_bindings.len()];
                 for (i, binding) in kv_bindings.iter().enumerate() {
                     if let Some(v) = outputs.get(binding.present_output_name.as_str()) {
                         let (s, d) = v.try_extract_tensor::<f32>().map_err(|e| {
@@ -2409,10 +2260,11 @@ mod onnx_backend {
         }
         best_i as u32
     }
-
 }
 
-pub use onnx_backend::{CanaryTranscriber, MoonshineTranscriber, ParakeetTranscriber, WhisperTranscriber};
+pub use onnx_backend::{
+    CanaryTranscriber, MoonshineTranscriber, ParakeetTranscriber, WhisperTranscriber,
+};
 
 /// Runtime that owns multiple loaded ASR models.
 pub struct AudioRuntime {
@@ -2453,10 +2305,8 @@ impl AudioRuntime {
             tokenizer_path,
             max_audio_seconds,
         )?;
-        self.models.insert(
-            model_id.into(),
-            Arc::new(model) as Arc<dyn Transcriber>,
-        );
+        self.models
+            .insert(model_id.into(), Arc::new(model) as Arc<dyn Transcriber>);
         Ok(())
     }
 
@@ -2477,10 +2327,8 @@ impl AudioRuntime {
             family,
             max_audio_seconds,
         )?;
-        self.models.insert(
-            model_id.into(),
-            Arc::new(model) as Arc<dyn Transcriber>,
-        );
+        self.models
+            .insert(model_id.into(), Arc::new(model) as Arc<dyn Transcriber>);
         Ok(())
     }
 
@@ -2506,10 +2354,8 @@ impl AudioRuntime {
             vocab_path,
             max_audio_seconds,
         )?;
-        self.models.insert(
-            model_id.into(),
-            Arc::new(model) as Arc<dyn Transcriber>,
-        );
+        self.models
+            .insert(model_id.into(), Arc::new(model) as Arc<dyn Transcriber>);
         Ok(())
     }
 
@@ -2543,10 +2389,8 @@ impl AudioRuntime {
             target_lang,
             max_audio_seconds,
         )?;
-        self.models.insert(
-            model_id.into(),
-            Arc::new(model) as Arc<dyn Transcriber>,
-        );
+        self.models
+            .insert(model_id.into(), Arc::new(model) as Arc<dyn Transcriber>);
         Ok(())
     }
 
@@ -2650,11 +2494,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vocab.txt");
         // Three tokens: ▁hello=0, ▁world=1, <blk>=2
-        std::fs::write(
-            &path,
-            "\u{2581}hello 0\n\u{2581}world 1\n<blk> 2\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "\u{2581}hello 0\n\u{2581}world 1\n<blk> 2\n").unwrap();
         let (tokens, vocab_size, blank_idx) =
             onnx_backend::parakeet_vocab_load_for_test(&path).unwrap();
         assert_eq!(tokens.len(), 3);
@@ -2736,8 +2576,7 @@ mod tests {
             "\u{2581} 0\n\u{2581}hello 1\nbeliev 2\n<|endoftext|> 3\n",
         )
         .unwrap();
-        let (tokens, eos_id) =
-            onnx_backend::canary_vocab_load_for_test(&path).unwrap();
+        let (tokens, eos_id) = onnx_backend::canary_vocab_load_for_test(&path).unwrap();
         assert_eq!(tokens.len(), 4);
         assert_eq!(tokens[0], " ");
         assert_eq!(tokens[1], " hello");
@@ -2803,7 +2642,7 @@ mod tests {
     #[test]
     fn canary_vocab_decode_collapses_runs_of_spaces() {
         let tokens = vec![
-            " ".to_string(),       // bare space (was ▁)
+            " ".to_string(), // bare space (was ▁)
             " hello".to_string(),
             " world".to_string(),
             "<|endoftext|>".to_string(),

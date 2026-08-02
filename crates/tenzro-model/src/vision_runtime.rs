@@ -221,13 +221,11 @@ mod onnx_backend {
     }
 
     impl ImageEncoder for GenericImageEncoder {
-        fn embed(
-            &self,
-            image_bytes: &[u8],
-            config: &ImageEmbedConfig,
-        ) -> Result<ImageEmbedResult> {
+        fn embed(&self, image_bytes: &[u8], config: &ImageEmbedConfig) -> Result<ImageEmbedResult> {
             if image_bytes.is_empty() {
-                return Err(ModelError::InvalidModel("image bytes are empty".to_string()));
+                return Err(ModelError::InvalidModel(
+                    "image bytes are empty".to_string(),
+                ));
             }
 
             let start = Instant::now();
@@ -361,8 +359,7 @@ impl VisionRuntime {
         embedding_dim: usize,
         normalization: ImageNormalization,
     ) -> Result<()> {
-        let model =
-            GenericImageEncoder::from_onnx(path, input_size, embedding_dim, normalization)?;
+        let model = GenericImageEncoder::from_onnx(path, input_size, embedding_dim, normalization)?;
         self.models
             .insert(model_id.into(), Arc::new(model) as Arc<dyn ImageEncoder>);
         Ok(())
@@ -399,9 +396,7 @@ impl VisionRuntime {
             .models
             .get(model_id)
             .map(|kv| Arc::clone(kv.value()))
-            .ok_or_else(|| {
-                ModelError::ModelNotFound(format!("vision encoder '{}'", model_id))
-            })?;
+            .ok_or_else(|| ModelError::ModelNotFound(format!("vision encoder '{}'", model_id)))?;
 
         tokio::task::spawn_blocking(move || model.embed(&image_bytes, &config))
             .await
@@ -494,7 +489,6 @@ mod tests {
         }
     }
 
-
     /// A trivial mock encoder used to exercise the runtime dispatch path
     /// without requiring ONNX.
     struct ConstantEncoder {
@@ -534,10 +528,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_dispatches_to_registered_model() {
         let rt = VisionRuntime::new();
-        rt.register(
-            "constant",
-            Arc::new(ConstantEncoder { dim: 4, value: 1.0 }),
-        );
+        rt.register("constant", Arc::new(ConstantEncoder { dim: 4, value: 1.0 }));
         assert!(rt.is_loaded("constant"));
         let r = rt
             .embed("constant", vec![0u8; 8], ImageEmbedConfig::default())
@@ -550,14 +541,15 @@ mod tests {
     #[tokio::test]
     async fn embed_normalize_produces_unit_vector() {
         let rt = VisionRuntime::new();
-        rt.register(
-            "constant",
-            Arc::new(ConstantEncoder { dim: 4, value: 2.0 }),
-        );
+        rt.register("constant", Arc::new(ConstantEncoder { dim: 4, value: 2.0 }));
         let cfg = ImageEmbedConfig { normalize: true };
         let r = rt.embed("constant", vec![0u8; 8], cfg).await.unwrap();
         let norm: f32 = r.embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-6, "expected unit norm, got {}", norm);
+        assert!(
+            (norm - 1.0).abs() < 1e-6,
+            "expected unit norm, got {}",
+            norm
+        );
     }
 
     #[test]

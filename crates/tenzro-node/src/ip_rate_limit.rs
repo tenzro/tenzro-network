@@ -123,10 +123,7 @@ mod tests {
     #[test]
     fn loopback_peer_trusts_last_xff_entry() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            "10.0.0.1, 198.51.100.7".parse().unwrap(),
-        );
+        headers.insert("x-forwarded-for", "10.0.0.1, 198.51.100.7".parse().unwrap());
         assert_eq!(
             client_ip(sock("127.0.0.1"), &headers),
             Some("198.51.100.7".parse().unwrap())

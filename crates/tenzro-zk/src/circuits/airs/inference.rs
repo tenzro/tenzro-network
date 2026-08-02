@@ -276,7 +276,10 @@ mod tests {
         // In debug builds Plonky3 panics on unsatisfied constraints during
         // proving. In release builds we'd build the proof and have the
         // verifier reject it; debug is fine for this test.
-        assert!(result.is_err(), "bad witness must not produce a valid proof");
+        assert!(
+            result.is_err(),
+            "bad witness must not produce a valid proof"
+        );
     }
 
     #[test]

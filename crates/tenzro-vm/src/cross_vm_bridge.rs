@@ -13,13 +13,13 @@
 //! | 0xa3c573eb | getVmBalance(bytes32,address,uint8)          | 2,600   |
 //! | 0x12065fe0 | getBalance()                                 | 2,600   |
 
+use crate::VmError;
+use crate::error::Result;
 use crate::evm::wtnzo::abi;
 use crate::precompiles::PrecompileResult;
-use crate::error::Result;
-use crate::VmError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tenzro_token::{TnzoToken, TokenRegistry, TokenId, TokenVmType, cross_vm};
+use tenzro_token::{TnzoToken, TokenId, TokenRegistry, TokenVmType, cross_vm};
 use tenzro_types::primitives::Address;
 use tracing::{info, warn};
 
@@ -84,7 +84,8 @@ fn execute_cross_vm_bridge(
             if after_selector.len() < 32 {
                 return Err(VmError::PrecompileFailed(
                     "crossVmTransfer requires trusted msg.sender; invoke precompile \
-                     via PrecompileRegistry::execute (EVM runtime path).".to_string(),
+                     via PrecompileRegistry::execute (EVM runtime path)."
+                        .to_string(),
                 ));
             }
             let split = after_selector.len() - 32;
@@ -148,9 +149,8 @@ fn handle_cross_vm_transfer(
     let token_id = TokenId::new(token_id_bytes);
 
     // Parse amount
-    let amount = abi::decode_uint256_at(calldata, 32).ok_or_else(|| {
-        VmError::PrecompileFailed("crossVmTransfer: invalid amount".to_string())
-    })?;
+    let amount = abi::decode_uint256_at(calldata, 32)
+        .ok_or_else(|| VmError::PrecompileFailed("crossVmTransfer: invalid amount".to_string()))?;
 
     // Parse destination VM type
     let dest_vm_byte = calldata[95]; // Last byte of [64..96]
@@ -176,7 +176,9 @@ fn handle_cross_vm_transfer(
 
     registry
         .validate_cross_vm_transfer(&transfer)
-        .map_err(|e| VmError::PrecompileFailed(format!("crossVmTransfer: validation failed: {}", e)))?;
+        .map_err(|e| {
+            VmError::PrecompileFailed(format!("crossVmTransfer: validation failed: {}", e))
+        })?;
 
     // Execute the transfer
     // For TNZO (pointer model): the balance is already unified across VMs,
@@ -194,11 +196,17 @@ fn handle_cross_vm_transfer(
                     dest_vm,
                     hex::encode(&dest_address),
                 );
-                Ok(PrecompileResult::success(abi::encode_bool(true), GAS_CROSS_VM_TRANSFER))
+                Ok(PrecompileResult::success(
+                    abi::encode_bool(true),
+                    GAS_CROSS_VM_TRANSFER,
+                ))
             }
             Err(e) => {
                 warn!("Cross-VM transfer failed: {}", e);
-                Ok(PrecompileResult::success(abi::encode_bool(false), GAS_CROSS_VM_TRANSFER))
+                Ok(PrecompileResult::success(
+                    abi::encode_bool(false),
+                    GAS_CROSS_VM_TRANSFER,
+                ))
             }
         }
     } else {
@@ -208,7 +216,10 @@ fn handle_cross_vm_transfer(
             "Cross-VM transfer: non-TNZO token {} not yet supported",
             token_id
         );
-        Ok(PrecompileResult::success(abi::encode_bool(false), GAS_CROSS_VM_TRANSFER))
+        Ok(PrecompileResult::success(
+            abi::encode_bool(false),
+            GAS_CROSS_VM_TRANSFER,
+        ))
     }
 }
 
@@ -368,7 +379,8 @@ mod tests {
         let (token, registry) = setup();
         let nonce_counter = AtomicU64::new(1);
         let input = [&selectors::GET_SUPPORTED_VMS[..]].concat();
-        let result = execute_cross_vm_bridge(&token, &registry, &nonce_counter, &input, 100_000).unwrap();
+        let result =
+            execute_cross_vm_bridge(&token, &registry, &nonce_counter, &input, 100_000).unwrap();
         assert!(result.success);
         // Should have 5 VM types: Native, Evm, Svm, Daml, TempoTip20
         let length = abi::decode_uint256_at(&result.output, 32).unwrap();
@@ -387,7 +399,8 @@ mod tests {
         input.extend_from_slice(&owner_padded);
         input.extend_from_slice(&abi::encode_uint256(VM_TYPE_EVM as u128)); // VM type
 
-        let result = execute_cross_vm_bridge(&token, &registry, &nonce_counter, &input, 100_000).unwrap();
+        let result =
+            execute_cross_vm_bridge(&token, &registry, &nonce_counter, &input, 100_000).unwrap();
         assert!(result.success);
         let balance = abi::decode_uint256(&result.output).unwrap();
         assert!(balance > 0);

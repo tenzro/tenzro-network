@@ -2,9 +2,9 @@
 //!
 //! Create proofs, verify proofs, and list circuits.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// ZK proof operations
 #[derive(Debug, Subcommand)]
@@ -63,7 +63,10 @@ impl ZkProveCmd {
 
         let mut params: serde_json::Value = serde_json::from_str(&self.witness)?;
         if let Some(obj) = params.as_object_mut() {
-            obj.insert("circuit_id".to_string(), serde_json::Value::String(self.circuit_id.clone()));
+            obj.insert(
+                "circuit_id".to_string(),
+                serde_json::Value::String(self.circuit_id.clone()),
+            );
         } else {
             anyhow::bail!("--witness must be a JSON object");
         }
@@ -74,7 +77,10 @@ impl ZkProveCmd {
 
         output::print_success("Proof generated!");
         output::print_field("Circuit", &self.circuit_id);
-        output::print_field("Proof", &output::format_hash(result.get("proof").and_then(|v| v.as_str()).unwrap_or("")));
+        output::print_field(
+            "Proof",
+            &output::format_hash(result.get("proof").and_then(|v| v.as_str()).unwrap_or("")),
+        );
         if let Some(size) = result.get("proof_size_bytes").and_then(|v| v.as_u64()) {
             output::print_field("Size (bytes)", &size.to_string());
         }
@@ -110,21 +116,32 @@ impl ZkVerifyCmd {
 
         let public_inputs: serde_json::Value = serde_json::from_str(&self.inputs)?;
 
-        let result: serde_json::Value = rpc.call("tenzro_verifyZkProof", serde_json::json!({
-            "proof": self.proof,
-            "circuit_id": self.circuit_id,
-            "public_inputs": public_inputs,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_verifyZkProof",
+                serde_json::json!({
+                    "proof": self.proof,
+                    "circuit_id": self.circuit_id,
+                    "public_inputs": public_inputs,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        let valid = result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if valid {
             output::print_success("Proof is valid!");
             if let Some(commitment) = result.get("commitment_hex").and_then(|v| v.as_str()) {
                 output::print_field("Commitment", commitment);
             }
-            let newly = result.get("newly_attested").and_then(|v| v.as_bool()).unwrap_or(false);
+            let newly = result
+                .get("newly_attested")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             output::print_field(
                 "Attested",
                 if newly {
@@ -168,13 +185,21 @@ impl ZkFileFraudProofCmd {
         let spinner = output::create_spinner("Re-verifying proof...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_fileZkFraudProof", serde_json::json!({
-            "commitment": self.commitment,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_fileZkFraudProof",
+                serde_json::json!({
+                    "commitment": self.commitment,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        let upheld = result.get("upheld").and_then(|v| v.as_bool()).unwrap_or(false);
+        let upheld = result
+            .get("upheld")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if upheld {
             output::print_success("Fraud proof upheld — commitment retracted, co-signers slashed.");
         } else {
@@ -206,14 +231,22 @@ impl ZkAttestationCmd {
         output::print_header("ZK Attestation");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getZkAttestation", serde_json::json!({
-            "commitment": self.commitment,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getZkAttestation",
+                serde_json::json!({
+                    "commitment": self.commitment,
+                }),
+            )
+            .await?;
 
         let attested_present = result.get("circuit_id").is_some();
         if !attested_present {
             output::print_info("No open fraud window for this commitment.");
-            let on_chain = result.get("on_chain_attested").and_then(|v| v.as_bool()).unwrap_or(false);
+            let on_chain = result
+                .get("on_chain_attested")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             output::print_field("On-chain attested", if on_chain { "yes" } else { "no" });
             return Ok(());
         }
@@ -227,15 +260,24 @@ impl ZkAttestationCmd {
         if let Some(h) = result.get("attested_at_height").and_then(|v| v.as_u64()) {
             output::print_field("Attested at height", &h.to_string());
         }
-        if let Some(h) = result.get("fraud_window_closes_at").and_then(|v| v.as_u64()) {
+        if let Some(h) = result
+            .get("fraud_window_closes_at")
+            .and_then(|v| v.as_u64())
+        {
             output::print_field("Fraud window closes at", &h.to_string());
         }
-        let open = result.get("fraud_window_open").and_then(|v| v.as_bool()).unwrap_or(false);
+        let open = result
+            .get("fraud_window_open")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         output::print_field("Fraud window", if open { "open" } else { "closed" });
         if let Some(loc) = result.get("proof_locator").and_then(|v| v.as_str()) {
             output::print_field("Proof locator", loc);
         }
-        let on_chain = result.get("on_chain_attested").and_then(|v| v.as_bool()).unwrap_or(false);
+        let on_chain = result
+            .get("on_chain_attested")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         output::print_field("On-chain attested", if on_chain { "yes" } else { "no" });
 
         Ok(())
@@ -257,7 +299,9 @@ impl ZkCircuitsCmd {
         output::print_header("Available ZK Circuits");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_listZkCircuits", serde_json::json!([])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_listZkCircuits", serde_json::json!([]))
+            .await?;
 
         if let Some(circuits) = result.as_array() {
             if circuits.is_empty() {

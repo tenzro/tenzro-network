@@ -21,11 +21,11 @@ use crate::{
 };
 
 use revm::{
-    primitives::{
-        Address as RevmAddress, ExecutionResult as RevmExecutionResult, Output,
-        TransactTo, U256, Bytes,
-    },
     Evm,
+    primitives::{
+        Address as RevmAddress, Bytes, ExecutionResult as RevmExecutionResult, Output, TransactTo,
+        U256,
+    },
 };
 
 use sha3::{Digest as Sha3Digest, Keccak256};
@@ -200,66 +200,76 @@ impl EvmExecutor {
                 })
                 .build();
 
-            let result = evm.transact().map_err(|e| {
-                VmError::ExecutionFailed(format!("revm execution failed: {:?}", e))
-            })?;
+            let result = evm
+                .transact()
+                .map_err(|e| VmError::ExecutionFailed(format!("revm execution failed: {:?}", e)))?;
 
             // Extract execution result, logs, and state
-            let (success, gas_used, gas_refund, output, contract_address, logs) = match result.result {
-                RevmExecutionResult::Success {
-                    reason,
-                    gas_used,
-                    gas_refunded,
-                    output,
-                    logs,
-                    ..
-                } => {
-                    tracing::debug!(
-                        "revm execution successful: {:?}, gas: {}, refund: {}, logs: {}",
+            let (success, gas_used, gas_refund, output, contract_address, logs) =
+                match result.result {
+                    RevmExecutionResult::Success {
                         reason,
                         gas_used,
                         gas_refunded,
-                        logs.len()
-                    );
+                        output,
+                        logs,
+                        ..
+                    } => {
+                        tracing::debug!(
+                            "revm execution successful: {:?}, gas: {}, refund: {}, logs: {}",
+                            reason,
+                            gas_used,
+                            gas_refunded,
+                            logs.len()
+                        );
 
-                    let (output_data, contract_addr) = match output {
-                        Output::Call(data) => (data.to_vec(), None),
-                        Output::Create(data, addr) => {
-                            let address = addr.map(|a| a.as_slice().to_vec());
-                            tracing::info!("Contract deployed at: {:?}", address);
-                            (data.to_vec(), address)
-                        }
-                    };
+                        let (output_data, contract_addr) = match output {
+                            Output::Call(data) => (data.to_vec(), None),
+                            Output::Create(data, addr) => {
+                                let address = addr.map(|a| a.as_slice().to_vec());
+                                tracing::info!("Contract deployed at: {:?}", address);
+                                (data.to_vec(), address)
+                            }
+                        };
 
-                    // Convert revm logs to Tenzro EventLog format
-                    let event_logs: Vec<Log> = logs
-                        .into_iter()
-                        .map(|log| Log::new(
-                            log.address.as_slice().to_vec(),
-                            log.data
-                                .topics()
-                                .iter()
-                                .map(|t| t.as_slice().to_vec())
-                                .collect(),
-                            log.data.data.to_vec(),
-                        ))
-                        .collect();
+                        // Convert revm logs to Tenzro EventLog format
+                        let event_logs: Vec<Log> = logs
+                            .into_iter()
+                            .map(|log| {
+                                Log::new(
+                                    log.address.as_slice().to_vec(),
+                                    log.data
+                                        .topics()
+                                        .iter()
+                                        .map(|t| t.as_slice().to_vec())
+                                        .collect(),
+                                    log.data.data.to_vec(),
+                                )
+                            })
+                            .collect();
 
-                    (true, gas_used, gas_refunded, output_data, contract_addr, event_logs)
-                }
-                RevmExecutionResult::Revert { gas_used, output } => {
-                    tracing::warn!(
-                        "revm execution reverted, gas: {}, output: {:?}",
-                        gas_used,
-                        output
-                    );
-                    (false, gas_used, 0, output.to_vec(), None, Vec::new())
-                }
-                RevmExecutionResult::Halt { reason, gas_used } => {
-                    tracing::error!("revm execution halted: {:?}, gas: {}", reason, gas_used);
-                    (false, gas_used, 0, Vec::new(), None, Vec::new())
-                }
-            };
+                        (
+                            true,
+                            gas_used,
+                            gas_refunded,
+                            output_data,
+                            contract_addr,
+                            event_logs,
+                        )
+                    }
+                    RevmExecutionResult::Revert { gas_used, output } => {
+                        tracing::warn!(
+                            "revm execution reverted, gas: {}, output: {:?}",
+                            gas_used,
+                            output
+                        );
+                        (false, gas_used, 0, output.to_vec(), None, Vec::new())
+                    }
+                    RevmExecutionResult::Halt { reason, gas_used } => {
+                        tracing::error!("revm execution halted: {:?}, gas: {}", reason, gas_used);
+                        (false, gas_used, 0, Vec::new(), None, Vec::new())
+                    }
+                };
 
             (
                 result.state,
@@ -326,16 +336,9 @@ impl EvmExecutor {
         // Construct execution result with gas refund (Issue #81)
         if success {
             let mut result = if let Some(address) = contract_address {
-                ExecutionResult::deployment(
-                    gas_used,
-                    address,
-                    logs,
-                    state_changes,
-                )
+                ExecutionResult::deployment(gas_used, address, logs, state_changes)
             } else {
-                ExecutionResult::success(
-                    gas_used, output, logs, state_changes,
-                )
+                ExecutionResult::success(gas_used, output, logs, state_changes)
             };
             result.gas_refund = gas_refund;
             Ok(result)
@@ -395,9 +398,9 @@ impl EvmExecutor {
                 .build();
 
             // Use transact() (not transact_commit) — state changes are NOT applied
-            let result = evm.transact().map_err(|e| {
-                VmError::ExecutionFailed(format!("revm call failed: {:?}", e))
-            })?;
+            let result = evm
+                .transact()
+                .map_err(|e| VmError::ExecutionFailed(format!("revm call failed: {:?}", e)))?;
 
             match result.result {
                 RevmExecutionResult::Success {
@@ -514,10 +517,7 @@ impl VmExecutor for EvmExecutor {
     }
 
     async fn call(&self, call: &ContractCall, state: &dyn VmState) -> Result<CallResult> {
-        tracing::debug!(
-            "EVM: Read-only call to {}",
-            hex::encode(&call.contract)
-        );
+        tracing::debug!("EVM: Read-only call to {}", hex::encode(&call.contract));
 
         // Check if target is a precompile.
         //
@@ -596,8 +596,7 @@ impl VmExecutor for EvmExecutor {
         );
 
         // Validate contract size
-        self.config
-            .validate_contract_size(deployment.code.len())?;
+        self.config.validate_contract_size(deployment.code.len())?;
 
         // Build a VmTransaction for deployment
         let nonce = state.get_nonce(&deployment.deployer);
@@ -713,8 +712,7 @@ mod tests {
         // Known Ethereum CREATE address test vector:
         // Deployer 0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0, nonce 0
         // Expected: keccak256(rlp([0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0, 0]))[12..]
-        let deployer =
-            hex::decode("6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0").unwrap();
+        let deployer = hex::decode("6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0").unwrap();
         let address = EvmExecutor::compute_create_address(&deployer, 0);
 
         // Verify it's 20 bytes and deterministic
@@ -747,10 +745,7 @@ mod tests {
         );
 
         // Test via VmExecutor trait (uses downcasting to StateAdapter)
-        let result = executor
-            .execute_transaction(&tx, &mut state)
-            .await
-            .unwrap();
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
         assert!(result.success);
         assert!(result.gas_used >= 21_000);
 
@@ -1062,10 +1057,11 @@ mod tests {
             1337,
         );
 
-        let result = executor
-            .execute_with_state_adapter(&tx, &mut state)
-            .await;
-        assert!(result.is_ok(), "Transaction with correct nonce should succeed");
+        let result = executor.execute_with_state_adapter(&tx, &mut state).await;
+        assert!(
+            result.is_ok(),
+            "Transaction with correct nonce should succeed"
+        );
         assert!(result.unwrap().success);
     }
 
@@ -1092,9 +1088,7 @@ mod tests {
             1337,
         );
 
-        let result = executor
-            .execute_with_state_adapter(&tx, &mut state)
-            .await;
+        let result = executor.execute_with_state_adapter(&tx, &mut state).await;
         assert!(result.is_err(), "Transaction with wrong nonce should fail");
 
         match result {
@@ -1130,9 +1124,7 @@ mod tests {
         );
 
         // First execution should succeed
-        let result = executor
-            .execute_with_state_adapter(&tx, &mut state)
-            .await;
+        let result = executor.execute_with_state_adapter(&tx, &mut state).await;
         assert!(result.is_ok(), "First transaction should succeed");
 
         // Nonce should now be 1
@@ -1194,7 +1186,10 @@ mod tests {
 
         assert!(result.success);
         // Simple transfers don't have refunds, but the field should exist
-        assert_eq!(result.gas_refund, 0, "Simple transfer should have no gas refund");
+        assert_eq!(
+            result.gas_refund, 0,
+            "Simple transfer should have no gas refund"
+        );
         // Call depth should be tracked (at least 1 for the transaction itself)
         assert!(result.call_depth >= 1, "Call depth should be at least 1");
     }

@@ -113,8 +113,7 @@ async fn test_settlement_engine_receipt_and_indices_survive_restart() {
     let storage = Arc::new(RocksDbStore::open_default(path).expect("reopen rocksdb"));
     let treasury = Arc::new(NetworkTreasury::new(addr(0xff)));
     let config = SettlementConfig::new(addr(0xff));
-    let engine = SettlementEngine::with_storage(config, treasury, storage)
-        .expect("rebuild engine");
+    let engine = SettlementEngine::with_storage(config, treasury, storage).expect("rebuild engine");
 
     // Receipt visible via direct lookup.
     let restored = engine
@@ -153,12 +152,9 @@ async fn test_settlement_engine_multi_receipt_fan_out_survives_restart() {
     {
         let storage = Arc::new(RocksDbStore::open_default(path).expect("open rocksdb"));
         let treasury = Arc::new(NetworkTreasury::new(addr(0xff)));
-        let engine = SettlementEngine::with_storage(
-            SettlementConfig::new(addr(0xff)),
-            treasury,
-            storage,
-        )
-        .expect("build engine");
+        let engine =
+            SettlementEngine::with_storage(SettlementConfig::new(addr(0xff)), treasury, storage)
+                .expect("build engine");
 
         engine.set_balance(&customer_x, &tnzo(), 10_000_000);
         engine.set_balance(&customer_y, &tnzo(), 10_000_000);
@@ -180,12 +176,9 @@ async fn test_settlement_engine_multi_receipt_fan_out_survives_restart() {
     // Phase 2 — reopen.
     let storage = Arc::new(RocksDbStore::open_default(path).expect("reopen rocksdb"));
     let treasury = Arc::new(NetworkTreasury::new(addr(0xff)));
-    let engine = SettlementEngine::with_storage(
-        SettlementConfig::new(addr(0xff)),
-        treasury,
-        storage,
-    )
-    .expect("rebuild engine");
+    let engine =
+        SettlementEngine::with_storage(SettlementConfig::new(addr(0xff)), treasury, storage)
+            .expect("rebuild engine");
 
     // Every individual record reachable.
     for id in &ids {
@@ -510,4 +503,3 @@ fn test_channel_dispute_survives_restart() {
         assert_eq!(by_channel[0].dispute_id, dispute_id);
     }
 }
-

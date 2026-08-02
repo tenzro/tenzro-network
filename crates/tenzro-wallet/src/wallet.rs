@@ -16,8 +16,8 @@ use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_crypto::frost::{PublicKeyPackage, SecretShare, SignerIndex};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::{KeyType, PublicKey};
-use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::AssetId;
+use tenzro_types::primitives::{Address, Timestamp};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -110,8 +110,7 @@ impl KeyShare {
 
     /// Restore from bytes (the persisted blob carries the secret share).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| WalletError::SerializationError(e.to_string()))
+        serde_json::from_slice(bytes).map_err(|e| WalletError::SerializationError(e.to_string()))
     }
 }
 

@@ -70,7 +70,12 @@ impl Tip20Balance {
         let divisor = 10u128.pow(self.decimals as u32);
         let whole = self.balance / divisor;
         let frac = self.balance % divisor;
-        format!("{}.{:0>width$}", whole, frac, width = self.decimals as usize)
+        format!(
+            "{}.{:0>width$}",
+            whole,
+            frac,
+            width = self.decimals as usize
+        )
     }
 }
 

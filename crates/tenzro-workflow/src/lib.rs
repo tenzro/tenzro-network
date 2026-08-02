@@ -29,9 +29,9 @@
 pub mod approval;
 pub mod attested_clock;
 pub mod codegen;
-pub mod idempotency;
 pub mod error;
 pub mod fee_route;
+pub mod idempotency;
 pub mod lifecycle;
 pub mod manager;
 pub mod metrics;
@@ -58,11 +58,11 @@ pub use obligation::{
 };
 pub use participant::{Participant, ParticipantRole};
 pub use policy_dsl::{
-    evaluate, ApproverSpec, IdentityLookup, NullLookup, PolicyContext, PolicyExpr, PolicyVerdict,
+    ApproverSpec, IdentityLookup, NullLookup, PolicyContext, PolicyExpr, PolicyVerdict, evaluate,
 };
 pub use privacy::{
-    acl_check, AclDecision, AddressedEnvelope, EncryptedReceipt, PrivacyDomain,
-    PrivacyDomainRegistry, PrivacyRecipient,
+    AclDecision, AddressedEnvelope, EncryptedReceipt, PrivacyDomain, PrivacyDomainRegistry,
+    PrivacyRecipient, acl_check,
 };
 pub use receipt::{WorkflowEventKind, WorkflowReceipt, WorkflowReceiptId};
 pub use workflow::{

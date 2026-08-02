@@ -1,11 +1,11 @@
 //! Node management commands for the Tenzro CLI
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
-use tenzro_types::RoleSet;
 use crate::output::{self};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
+use tenzro_types::RoleSet;
 
 /// Node management commands
 #[derive(Debug, Subcommand)]
@@ -30,6 +30,8 @@ pub enum NodeCommand {
     MempoolLane(NodeMempoolLaneCmd),
     /// Show network-layer counters and gauges (gossip, connections, peer-address migrations)
     Stats(NodeStatsCmd),
+    /// Show this node's DID Document — every way of reaching it, in one place
+    DidDocument(NodeDidDocumentCmd),
     /// Storage-provider operations (store objects, open/charge streaming deals, pricing)
     #[command(subcommand)]
     Storage(StorageCommand),
@@ -51,6 +53,7 @@ impl NodeCommand {
             Self::MempoolStats(cmd) => cmd.execute().await,
             Self::MempoolLane(cmd) => cmd.execute().await,
             Self::Stats(cmd) => cmd.execute().await,
+            Self::DidDocument(cmd) => cmd.execute().await,
             Self::Storage(cmd) => cmd.execute().await,
             Self::Compute(cmd) => cmd.execute().await,
         }
@@ -70,9 +73,13 @@ pub struct NodeStartCmd {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Data directory for blockchain storage
-    #[arg(long, default_value = "~/.tenzro/data")]
-    data_dir: PathBuf,
+    /// Data directory for blockchain storage. Defaults to the canonical
+    /// per-instance directory under the Tenzro root ($TENZRO_HOME, or
+    /// ~/.tenzro) — the same one `tenzro-node` picks with no flags, so
+    /// starting through the CLI and starting the binary directly land on the
+    /// same state rather than two half-populated trees.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
 
     /// Enable metrics server
     #[arg(long, default_value = "true")]
@@ -108,7 +115,16 @@ impl NodeStartCmd {
         output::print_success("Node started successfully!");
         println!();
         output::print_field("Roles", &roles.to_string());
-        output::print_field("Data Directory", &self.data_dir.display().to_string());
+        output::print_field(
+            "Data Directory",
+            &self
+                .data_dir
+                .as_ref()
+                .map(tenzro_types::paths::expand_tilde)
+                .unwrap_or_else(tenzro_types::paths::default_data_dir)
+                .display()
+                .to_string(),
+        );
         output::print_field("RPC Address", &self.rpc_addr);
         output::print_field("P2P Address", &self.p2p_addr);
         output::print_field("Metrics Enabled", &self.metrics.to_string());
@@ -124,12 +140,26 @@ impl NodeStartCmd {
         // Start the actual node process
         output::print_info("Starting tenzro-node binary...");
         let mut args = vec![
-            "--roles".to_string(), roles.to_string(),
-            "--rpc-addr".to_string(), self.rpc_addr.clone(),
-            "--listen-addr".to_string(), format!("/ip4/{}/tcp/{}",
+            "--roles".to_string(),
+            roles.to_string(),
+            "--rpc-addr".to_string(),
+            self.rpc_addr.clone(),
+            "--listen-addr".to_string(),
+            format!(
+                "/ip4/{}/tcp/{}",
                 self.p2p_addr.split(':').next().unwrap_or("0.0.0.0"),
-                self.p2p_addr.split(':').nth(1).unwrap_or("30333")),
-            "--data-dir".to_string(), self.data_dir.display().to_string(),
+                self.p2p_addr.split(':').nth(1).unwrap_or("30333")
+            ),
+            "--data-dir".to_string(),
+            // A tilde in `--data-dir` reaches us verbatim when the argument
+            // was quoted or came from a unit file; passing it through
+            // unexpanded is what created directories named `~`.
+            self.data_dir
+                .as_ref()
+                .map(tenzro_types::paths::expand_tilde)
+                .unwrap_or_else(tenzro_types::paths::default_data_dir)
+                .display()
+                .to_string(),
         ];
         if let Some(config) = &self.config {
             args.push("--config".to_string());
@@ -144,8 +174,16 @@ impl NodeStartCmd {
 
         match status {
             Ok(s) if s.success() => output::print_success("Node exited successfully"),
-            Ok(s) => output::print_warning(&format!("Node exited with code: {}", s.code().unwrap_or(-1))),
-            Err(e) => return Err(anyhow::anyhow!("Failed to start tenzro-node: {}. Is it installed?", e)),
+            Ok(s) => output::print_warning(&format!(
+                "Node exited with code: {}",
+                s.code().unwrap_or(-1)
+            )),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to start tenzro-node: {}. Is it installed?",
+                    e
+                ));
+            }
         }
 
         Ok(())
@@ -175,17 +213,24 @@ impl NodeStatusCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // Fetch node information
-        let node_info: serde_json::Value = rpc.call("tenzro_nodeInfo", serde_json::json!([])).await?;
+        let node_info: serde_json::Value =
+            rpc.call("tenzro_nodeInfo", serde_json::json!([])).await?;
         let block_number: String = rpc.call("eth_blockNumber", serde_json::json!([])).await?;
         let peer_count: String = rpc.call("net_peerCount", serde_json::json!([])).await?;
-        let listening: bool = rpc.call("net_listening", serde_json::json!([])).await.unwrap_or(false);
+        let listening: bool = rpc
+            .call("net_listening", serde_json::json!([]))
+            .await
+            .unwrap_or(false);
         // Try derived API URL first, then fallback to default port 8080
         let api_status: serde_json::Value = match rpc.api_get("/status").await {
             Ok(v) => v,
             Err(_) => {
                 // Fallback: try default web API port
                 let fallback = RpcClient::new("http://127.0.0.1:8545");
-                fallback.api_get("/status").await.unwrap_or_else(|_| serde_json::json!({}))
+                fallback
+                    .api_get("/status")
+                    .await
+                    .unwrap_or_else(|_| serde_json::json!({}))
             }
         };
 
@@ -227,7 +272,8 @@ impl NodeStatusCmd {
             }
             println!();
 
-            let status_str = api_status.get("node_state")
+            let status_str = api_status
+                .get("node_state")
                 .or_else(|| api_status.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("Running");
@@ -236,7 +282,10 @@ impl NodeStatusCmd {
             println!();
 
             output::print_field("Best Block", &format!("{}", best_block));
-            output::print_field("Finalized Block", &format!("{}", best_block.saturating_sub(3)));
+            output::print_field(
+                "Finalized Block",
+                &format!("{}", best_block.saturating_sub(3)),
+            );
             output::print_field("Connected Peers", &peers.to_string());
             // Handle both "uptime_secs" (numeric) and "uptime" (string) response formats
             if let Some(uptime_secs) = api_status.get("uptime_secs").and_then(|v| v.as_u64()) {
@@ -280,9 +329,14 @@ impl NodeStopCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // Send shutdown RPC call
-        let result: Result<serde_json::Value, _> = rpc.call("tenzro_shutdown", serde_json::json!([{
-            "force": self.force
-        }])).await;
+        let result: Result<serde_json::Value, _> = rpc
+            .call(
+                "tenzro_shutdown",
+                serde_json::json!([{
+                    "force": self.force
+                }]),
+            )
+            .await;
 
         spinner.finish_and_clear();
 
@@ -339,8 +393,11 @@ impl NodeSyncingCmd {
         let result: serde_json::Value = rpc.call("tenzro_syncing", serde_json::json!([])).await?;
         if result.is_boolean() {
             let syncing = result.as_bool().unwrap_or(false);
-            if syncing { output::print_info("Node is syncing..."); }
-            else { output::print_success("Node is fully synced."); }
+            if syncing {
+                output::print_info("Node is syncing...");
+            } else {
+                output::print_success("Node is fully synced.");
+            }
         } else {
             // Heights come back hex-encoded ("0x...") per the eth_syncing /
             // tenzro_syncing JSON-RPC convention.
@@ -429,10 +486,7 @@ impl NodeSyncRangeCmd {
             .get("moreAvailable")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let local_tip = result
-            .get("localTip")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let local_tip = result.get("localTip").and_then(|v| v.as_u64()).unwrap_or(0);
 
         output::print_field("Blocks Returned", &blocks.to_string());
         output::print_field("Next Height", &next_height.to_string());
@@ -496,9 +550,7 @@ impl NodeFeeMarketCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let gas_price_hex: String = rpc
-            .call("eth_gasPrice", serde_json::json!([]))
-            .await?;
+        let gas_price_hex: String = rpc.call("eth_gasPrice", serde_json::json!([])).await?;
         let priority_hex: String = rpc
             .call("eth_maxPriorityFeePerGas", serde_json::json!([]))
             .await?;
@@ -520,8 +572,14 @@ impl NodeFeeMarketCmd {
         }
 
         output::print_header("Fee Market (EIP-1559)");
-        output::print_field("Effective Gas Price (wei)", &parse_hex_u128_str(&gas_price_hex));
-        output::print_field("Suggested Priority Tip (wei)", &parse_hex_u128_str(&priority_hex));
+        output::print_field(
+            "Effective Gas Price (wei)",
+            &parse_hex_u128_str(&gas_price_hex),
+        );
+        output::print_field(
+            "Suggested Priority Tip (wei)",
+            &parse_hex_u128_str(&priority_hex),
+        );
 
         if let Some(base_fees) = history.get("baseFeePerGas").and_then(|v| v.as_array()) {
             output::print_field(
@@ -534,8 +592,8 @@ impl NodeFeeMarketCmd {
         }
 
         if let Some(ratios) = history.get("gasUsedRatio").and_then(|v| v.as_array()) {
-            let avg: f64 = ratios.iter().filter_map(|v| v.as_f64()).sum::<f64>()
-                / ratios.len().max(1) as f64;
+            let avg: f64 =
+                ratios.iter().filter_map(|v| v.as_f64()).sum::<f64>() / ratios.len().max(1) as f64;
             output::print_field("Avg Gas-Used Ratio", &format!("{:.3}", avg));
         }
 
@@ -649,7 +707,10 @@ impl NodeMempoolStatsCmd {
                 output::print_field("  Admitted", &admitted.to_string());
                 output::print_field("  Rejected (rate-limited)", &rejected_rate.to_string());
                 output::print_field("  Rejected (fee-floor)", &rejected_fee_floor.to_string());
-                output::print_field("  Rejected (mempool-full)", &rejected_mempool_full.to_string());
+                output::print_field(
+                    "  Rejected (mempool-full)",
+                    &rejected_mempool_full.to_string(),
+                );
                 output::print_field("  Refill (tx/s)", &format!("{:.3}", refill));
                 output::print_field("  Burst Capacity", &burst.to_string());
                 output::print_field("  Fee Floor Multiplier", &format!("{:.3}x", fee_mult));
@@ -737,10 +798,7 @@ impl NodeMempoolLaneCmd {
             println!();
             output::print_info("Current Bucket State");
             let tokens = bucket.get("tokens").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let capacity = bucket
-                .get("capacity")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let capacity = bucket.get("capacity").and_then(|v| v.as_u64()).unwrap_or(0);
             let bucket_refill = bucket
                 .get("refill_per_sec")
                 .and_then(|v| v.as_f64())
@@ -749,7 +807,9 @@ impl NodeMempoolLaneCmd {
             output::print_field("  Capacity", &capacity.to_string());
             output::print_field("  Refill (tx/s)", &format!("{:.3}", bucket_refill));
         } else {
-            output::print_info("Bucket has not been instantiated yet (no traffic from this address)");
+            output::print_info(
+                "Bucket has not been instantiated yet (no traffic from this address)",
+            );
         }
 
         Ok(())
@@ -791,7 +851,11 @@ impl NodeStatsCmd {
 
         output::print_header("Network Stats");
 
-        if !result.get("available").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !result
+            .get("available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let reason = result
                 .get("reason")
                 .and_then(|v| v.as_str())
@@ -804,9 +868,18 @@ impl NodeStatsCmd {
         let ifield = |k: &str| result.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
 
         output::print_info("Connections");
-        output::print_field("  Established (current)", &ifield("connections_established").to_string());
-        output::print_field("  Inbound total", &field("connections_inbound_total").to_string());
-        output::print_field("  Outbound total", &field("connections_outbound_total").to_string());
+        output::print_field(
+            "  Established (current)",
+            &ifield("connections_established").to_string(),
+        );
+        output::print_field(
+            "  Inbound total",
+            &field("connections_inbound_total").to_string(),
+        );
+        output::print_field(
+            "  Outbound total",
+            &field("connections_outbound_total").to_string(),
+        );
         output::print_field("  Peers connected", &ifield("peers_connected").to_string());
         output::print_field("  Peers banned", &ifield("peers_banned").to_string());
 
@@ -814,17 +887,38 @@ impl NodeStatsCmd {
         output::print_info("Gossipsub");
         output::print_field("  Published", &field("gossip_published").to_string());
         output::print_field("  Accepted", &field("gossip_accepted").to_string());
-        output::print_field("  Rejected (validator-only)", &field("gossip_rejected_validator_only").to_string());
-        output::print_field("  Rejected (invalid)", &field("gossip_rejected_invalid").to_string());
-        output::print_field("  Rejected (duplicate)", &field("gossip_rejected_duplicate").to_string());
+        output::print_field(
+            "  Rejected (validator-only)",
+            &field("gossip_rejected_validator_only").to_string(),
+        );
+        output::print_field(
+            "  Rejected (invalid)",
+            &field("gossip_rejected_invalid").to_string(),
+        );
+        output::print_field(
+            "  Rejected (duplicate)",
+            &field("gossip_rejected_duplicate").to_string(),
+        );
         output::print_field("  Mesh size", &ifield("gossipsub_mesh_size").to_string());
 
         println!();
         output::print_info("Discovery & Dialing");
-        output::print_field("  Kademlia routing table", &ifield("kad_routing_table_size").to_string());
-        output::print_field("  Dials rejected (per-IP)", &field("dials_rejected_per_ip").to_string());
-        output::print_field("  Dials rejected (global)", &field("dials_rejected_global").to_string());
-        output::print_field("  Swarm events dropped", &field("events_dropped").to_string());
+        output::print_field(
+            "  Kademlia routing table",
+            &ifield("kad_routing_table_size").to_string(),
+        );
+        output::print_field(
+            "  Dials rejected (per-IP)",
+            &field("dials_rejected_per_ip").to_string(),
+        );
+        output::print_field(
+            "  Dials rejected (global)",
+            &field("dials_rejected_global").to_string(),
+        );
+        output::print_field(
+            "  Swarm events dropped",
+            &field("events_dropped").to_string(),
+        );
 
         println!();
         output::print_info("Path Migration");
@@ -1068,16 +1162,24 @@ impl StorageStatusCmd {
         use crate::rpc::RpcClient;
         output::print_header("Storage Provider Status");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value =
-            rpc.call("tenzro_storageStatus", serde_json::json!([])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_storageStatus", serde_json::json!([]))
+            .await?;
 
         output::print_field(
             "Effective Rate (wei/byte-epoch)",
-            result.get("effective_rate_wei").and_then(|v| v.as_str()).unwrap_or("0"),
+            result
+                .get("effective_rate_wei")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0"),
         );
         output::print_field(
             "Objects Stored",
-            &result.get("object_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+            &result
+                .get("object_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
         );
         Ok(())
     }
@@ -1256,17 +1358,72 @@ impl ComputeStatusCmd {
         use crate::rpc::RpcClient;
         output::print_header("Compute Provider Status");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value =
-            rpc.call("tenzro_computeStatus", serde_json::json!([])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_computeStatus", serde_json::json!([]))
+            .await?;
 
         output::print_field(
             "Effective Rate (wei/epoch)",
-            result.get("effective_rate_wei").and_then(|v| v.as_str()).unwrap_or("0"),
+            result
+                .get("effective_rate_wei")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0"),
         );
         output::print_field(
             "Active Rentals",
-            &result.get("active_rentals").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+            &result
+                .get("active_rentals")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
         );
+        Ok(())
+    }
+}
+
+/// Show this node's DID Document.
+///
+/// A node is addressed five different ways — TDIP DID, Ed25519 key, iroh
+/// `EndpointId`, libp2p `PeerId`, Pkarr record — plus its service URLs.
+/// Resolving the DID is the single entry point that yields all of them, so a
+/// caller holding any one identifier can get the rest.
+#[derive(Debug, Parser)]
+pub struct NodeDidDocumentCmd {
+    /// RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl NodeDidDocumentCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let doc: serde_json::Value = rpc
+            .call("tenzro_nodeDidDocument", serde_json::json!({}))
+            .await?;
+
+        output::print_header("Node DID Document");
+        output::print_field("DID", doc.get("id").and_then(|v| v.as_str()).unwrap_or("?"));
+
+        // The service list is the useful part — it is the map from one
+        // identifier to all the others.
+        if let Some(services) = doc.get("service").and_then(|v| v.as_array()) {
+            for svc in services {
+                output::print_field(
+                    svc.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
+                    svc.get("serviceEndpoint")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?"),
+                );
+            }
+        }
+
+        output::print_info(
+            "Also served at /.well-known/did.json on this node's web API, for generic DID \
+             resolvers.",
+        );
+        println!("\n{}", serde_json::to_string_pretty(&doc)?);
         Ok(())
     }
 }

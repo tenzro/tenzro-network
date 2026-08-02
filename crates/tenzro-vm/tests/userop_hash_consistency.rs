@@ -5,7 +5,7 @@
 //! is the contract enforcement.
 
 use tenzro_vm::account_abstraction::UserOperation as VmUserOp;
-use tenzro_wallet::userop::{user_op_hash, UserOp as WalletUserOp};
+use tenzro_wallet::userop::{UserOp as WalletUserOp, user_op_hash};
 
 fn paired_ops() -> (WalletUserOp, VmUserOp) {
     let wallet = WalletUserOp {

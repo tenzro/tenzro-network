@@ -231,13 +231,9 @@ mod onnx_backend {
             // CLIP's `<|endoftext|>` token serves as both BOS, EOS, and
             // pad. Resolve it once at load time and reuse for padding
             // shorter sequences out to `SAM3_CONTEXT_LENGTH`.
-            let eot_id = tokenizer
-                .token_to_id("<|endoftext|>")
-                .ok_or_else(|| {
-                    ModelError::InvalidModel(
-                        "CLIP tokenizer missing '<|endoftext|>' token".to_string(),
-                    )
-                })?;
+            let eot_id = tokenizer.token_to_id("<|endoftext|>").ok_or_else(|| {
+                ModelError::InvalidModel("CLIP tokenizer missing '<|endoftext|>' token".to_string())
+            })?;
 
             Ok(Self {
                 image_encoder: parking_lot::Mutex::new(image_encoder),
@@ -258,8 +254,12 @@ mod onnx_backend {
             let orig_w = img.width();
             let orig_h = img.height();
 
-            let resized =
-                image::imageops::resize(&img, SAM3_INPUT_SIZE, SAM3_INPUT_SIZE, FilterType::Triangle);
+            let resized = image::imageops::resize(
+                &img,
+                SAM3_INPUT_SIZE,
+                SAM3_INPUT_SIZE,
+                FilterType::Triangle,
+            );
 
             // Build a (3, H, W) array in CHW order. The reference
             // Python script does `np.asarray(image).transpose(2, 0, 1)`
@@ -303,9 +303,8 @@ mod onnx_backend {
                 out[SAM3_CONTEXT_LENGTH - 1] = self.eot_id as i64;
             }
 
-            let arr = Array2::<i64>::from_shape_vec((1, SAM3_CONTEXT_LENGTH), out).map_err(
-                |e| ModelError::InferenceError(format!("token tensor reshape: {}", e)),
-            )?;
+            let arr = Array2::<i64>::from_shape_vec((1, SAM3_CONTEXT_LENGTH), out)
+                .map_err(|e| ModelError::InferenceError(format!("token tensor reshape: {}", e)))?;
             Ok(arr)
         }
     }
@@ -317,7 +316,9 @@ mod onnx_backend {
             config: &TextSegmentConfig,
         ) -> Result<TextSegmentResult> {
             if image_bytes.is_empty() {
-                return Err(ModelError::InvalidModel("image bytes are empty".to_string()));
+                return Err(ModelError::InvalidModel(
+                    "image bytes are empty".to_string(),
+                ));
             }
             if config.text_prompt.is_empty() && config.box_prompt.is_none() {
                 return Err(ModelError::InvalidModel(
@@ -345,9 +346,7 @@ mod onnx_backend {
                     session.outputs.iter().map(|o| o.name.clone()).collect();
                 let outputs = session
                     .run(ort::inputs!["image" => image_tensor])
-                    .map_err(|e| {
-                        ModelError::InferenceError(format!("image encoder run: {}", e))
-                    })?;
+                    .map_err(|e| ModelError::InferenceError(format!("image encoder run: {}", e)))?;
 
                 let mut collected = Vec::with_capacity(output_names.len());
                 for name in output_names {
@@ -400,14 +399,11 @@ mod onnx_backend {
                     })?;
 
                 let mask_v = outputs.get("language_mask").ok_or_else(|| {
-                    ModelError::InferenceError(
-                        "language encoder missing 'language_mask'".into(),
-                    )
+                    ModelError::InferenceError("language encoder missing 'language_mask'".into())
                 })?;
-                let (mask_shape, mask_data) =
-                    mask_v.try_extract_tensor::<f32>().map_err(|e| {
-                        ModelError::InferenceError(format!("language_mask extract: {}", e))
-                    })?;
+                let (mask_shape, mask_data) = mask_v.try_extract_tensor::<f32>().map_err(|e| {
+                    ModelError::InferenceError(format!("language_mask extract: {}", e))
+                })?;
 
                 let feats_v = outputs.get("language_features").ok_or_else(|| {
                     ModelError::InferenceError(
@@ -465,17 +461,12 @@ mod onnx_backend {
                 Some(b) => ([b.cx, b.cy, b.w, b.h], false),
                 None => ([0.0, 0.0, 0.0, 0.0], true),
             };
-            let box_coords_arr =
-                Array3::<f32>::from_shape_vec((1, 1, 4), box_coords_vals.to_vec()).map_err(
-                    |e| ModelError::InferenceError(format!("box_coords reshape: {}", e)),
-                )?;
-            let box_labels_arr = Array2::<i64>::from_shape_vec((1, 1), vec![1]).map_err(|e| {
-                ModelError::InferenceError(format!("box_labels reshape: {}", e))
-            })?;
-            let box_masks_arr =
-                Array2::<bool>::from_shape_vec((1, 1), vec![box_masks_val]).map_err(|e| {
-                    ModelError::InferenceError(format!("box_masks reshape: {}", e))
-                })?;
+            let box_coords_arr = Array3::<f32>::from_shape_vec((1, 1, 4), box_coords_vals.to_vec())
+                .map_err(|e| ModelError::InferenceError(format!("box_coords reshape: {}", e)))?;
+            let box_labels_arr = Array2::<i64>::from_shape_vec((1, 1), vec![1])
+                .map_err(|e| ModelError::InferenceError(format!("box_labels reshape: {}", e)))?;
+            let box_masks_arr = Array2::<bool>::from_shape_vec((1, 1), vec![box_masks_val])
+                .map_err(|e| ModelError::InferenceError(format!("box_masks reshape: {}", e)))?;
 
             let box_coords_tensor = Tensor::from_array(box_coords_arr)
                 .map_err(|e| ModelError::InferenceError(format!("box_coords tensor: {}", e)))?;
@@ -632,9 +623,8 @@ mod onnx_backend {
             t.1[2] as usize,
             t.1[3] as usize,
         );
-        Array4::<f32>::from_shape_vec(dims, t.2.clone()).map_err(|e| {
-            ModelError::InferenceError(format!("reshape '{}' to 4-D: {}", t.0, e))
-        })
+        Array4::<f32>::from_shape_vec(dims, t.2.clone())
+            .map_err(|e| ModelError::InferenceError(format!("reshape '{}' to 4-D: {}", t.0, e)))
     }
 
     /// Reshape an arbitrary-rank `(name, shape, data)` triple back into
@@ -643,9 +633,8 @@ mod onnx_backend {
     /// we just preserve it round-trip.
     fn reshape_nd(t: &(String, Vec<i64>, Vec<f32>)) -> Result<ndarray::ArrayD<f32>> {
         let dims: Vec<usize> = t.1.iter().map(|d| *d as usize).collect();
-        ndarray::ArrayD::<f32>::from_shape_vec(ndarray::IxDyn(&dims), t.2.clone()).map_err(|e| {
-            ModelError::InferenceError(format!("reshape '{}' to ND: {}", t.0, e))
-        })
+        ndarray::ArrayD::<f32>::from_shape_vec(ndarray::IxDyn(&dims), t.2.clone())
+            .map_err(|e| ModelError::InferenceError(format!("reshape '{}' to ND: {}", t.0, e)))
     }
 
     /// Bilinear-resample logits from `(src_h, src_w)` to
@@ -738,8 +727,10 @@ impl TextSegmentationRuntime {
             decoder_path,
             tokenizer_path,
         )?;
-        self.models
-            .insert(model_id.into(), Arc::new(model) as Arc<dyn TextPromptableSegmenter>);
+        self.models.insert(
+            model_id.into(),
+            Arc::new(model) as Arc<dyn TextPromptableSegmenter>,
+        );
         Ok(())
     }
 
@@ -842,10 +833,7 @@ mod tests {
             box_prompt: None,
             score_threshold: 0.5,
         };
-        let r = rt
-            .segment_with_text("mock", vec![1], cfg)
-            .await
-            .unwrap();
+        let r = rt.segment_with_text("mock", vec![1], cfg).await.unwrap();
         assert_eq!(r.segmentations.len(), 1);
         assert_eq!(r.segmentations[0].width, 10);
         assert_eq!(r.segmentations[0].mask.len(), 100);

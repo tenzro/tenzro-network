@@ -7,17 +7,17 @@
 
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use p3_field::PrimeCharacteristicRing;
 use p3_koala_bear::KoalaBear;
 use p3_matrix::dense::RowMajorMatrix;
 
 use tenzro_zk::plonky3::{encode_proof, encode_public_inputs};
 use tenzro_zk::{
-    generate_identity_trace, generate_inference_trace, generate_pq_qc_trace,
+    IdentityAir, InferenceAir, Plonky3Prover, Plonky3Verifier, PqQcAggregationAir, Proof,
+    SettlementAir, generate_identity_trace, generate_inference_trace, generate_pq_qc_trace,
     generate_settlement_trace, identity_public_inputs, inference_public_inputs,
-    pq_qc_public_inputs, settlement_public_inputs, verify_proof_envelope, IdentityAir,
-    InferenceAir, Plonky3Prover, Plonky3Verifier, PqQcAggregationAir, Proof, SettlementAir,
+    pq_qc_public_inputs, settlement_public_inputs, verify_proof_envelope,
 };
 
 const TRACE_HEIGHT: usize = 1 << 3;

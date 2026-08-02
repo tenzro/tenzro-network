@@ -65,12 +65,8 @@ impl SandboxedToolRegistry {
     /// gate for every `tenzro:*` host call made from a component.
     pub fn new(host: SharedHost) -> WasmResult<Self> {
         let engine = Arc::new(WasmEngine::new()?);
-        let runtime = SkillRuntime::new(
-            engine,
-            host,
-            std::time::Duration::from_secs(10),
-            50_000_000,
-        );
+        let runtime =
+            SkillRuntime::new(engine, host, std::time::Duration::from_secs(10), 50_000_000);
         Ok(Self {
             inner: Arc::new(runtime),
         })
@@ -79,7 +75,7 @@ impl SandboxedToolRegistry {
     /// Convenience constructor that wires the registry to the default
     /// [`McpToolHost`] policy.
     pub fn with_default_host() -> WasmResult<Self> {
-        Self::new(Arc::new(McpToolHost::default()))
+        Self::new(Arc::new(McpToolHost))
     }
 
     /// Register a `.wasm` tool component. Returns the component id from
@@ -117,6 +113,7 @@ impl SandboxedToolRegistry {
 
 impl std::fmt::Debug for SandboxedToolRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SandboxedToolRegistry").finish_non_exhaustive()
+        f.debug_struct("SandboxedToolRegistry")
+            .finish_non_exhaustive()
     }
 }

@@ -1,14 +1,12 @@
 //! Visa TAP 7-stage CDN Proxy verification pipeline
 
+use chrono::Utc;
 use std::sync::Arc;
 use std::time::Duration;
-use chrono::Utc;
 use tracing::{debug, info, warn};
 
 use crate::error::{PaymentError, Result};
-use crate::rfc9421::{
-    AgentRegistryClient, NonceCache, RequestParts, SignedHeaders,
-};
+use crate::rfc9421::{AgentRegistryClient, NonceCache, RequestParts, SignedHeaders};
 use crate::visa_tap::types::AgentTag;
 
 /// Result of TAP verification pipeline
@@ -142,8 +140,13 @@ impl TapVerifier {
 
         // Stage 3: Key retrieval
         let key_id = &signed_headers.parsed.params.keyid;
-        let public_key_info = self.agent_registry.get_public_key(key_id).await
-            .map_err(|e| PaymentError::AgentRegistryError(format!("Key retrieval failed: {}", e)))?;
+        let public_key_info = self
+            .agent_registry
+            .get_public_key(key_id)
+            .await
+            .map_err(|e| {
+                PaymentError::AgentRegistryError(format!("Key retrieval failed: {}", e))
+            })?;
 
         if !public_key_info.is_active {
             warn!("Agent key {} is not active", key_id);
@@ -161,8 +164,10 @@ impl TapVerifier {
 
         // Stage 4: Timestamp validation
         if let Some(created) = signed_headers.parsed.params.created {
-            let created_time = chrono::DateTime::from_timestamp(created as i64, 0)
-                .ok_or_else(|| PaymentError::VisaTapError("Invalid created timestamp".to_string()))?;
+            let created_time =
+                chrono::DateTime::from_timestamp(created as i64, 0).ok_or_else(|| {
+                    PaymentError::VisaTapError("Invalid created timestamp".to_string())
+                })?;
             let now = Utc::now();
             let age = now.signed_duration_since(created_time);
 
@@ -173,12 +178,19 @@ impl TapVerifier {
                 ));
             }
 
-            if age > chrono::Duration::from_std(self.max_signature_age)
-                .map_err(|e| PaymentError::VisaTapError(format!("Duration conversion error: {}", e)))? {
-                warn!("Signature too old: age={:?}, max={:?}", age, self.max_signature_age);
-                return Err(PaymentError::VisaTapError(
-                    format!("Signature age ({:?}) exceeds maximum ({:?})", age, self.max_signature_age),
-                ));
+            if age
+                > chrono::Duration::from_std(self.max_signature_age).map_err(|e| {
+                    PaymentError::VisaTapError(format!("Duration conversion error: {}", e))
+                })?
+            {
+                warn!(
+                    "Signature too old: age={:?}, max={:?}",
+                    age, self.max_signature_age
+                );
+                return Err(PaymentError::VisaTapError(format!(
+                    "Signature age ({:?}) exceeds maximum ({:?})",
+                    age, self.max_signature_age
+                )));
             }
 
             stages_passed.push("timestamp_validation".to_string());
@@ -192,7 +204,8 @@ impl TapVerifier {
 
         // Stage 5: Replay prevention
         if let Some(nonce) = &signed_headers.parsed.params.nonce {
-            self.nonce_cache.check_and_store(nonce)
+            self.nonce_cache
+                .check_and_store(nonce)
                 .map_err(|e| PaymentError::ReplayDetected(format!("Nonce check failed: {}", e)))?;
 
             stages_passed.push("replay_prevention".to_string());
@@ -206,7 +219,11 @@ impl TapVerifier {
 
         // Stage 6: Domain binding
         if let Some(required_domain) = &self.required_domain {
-            if !signed_headers.parsed.covered_components.contains(&"@authority".to_string()) {
+            if !signed_headers
+                .parsed
+                .covered_components
+                .contains(&"@authority".to_string())
+            {
                 warn!("Signature does not cover @authority component");
                 return Err(PaymentError::VisaTapError(
                     "Signature must cover @authority component for domain binding".to_string(),
@@ -218,9 +235,10 @@ impl TapVerifier {
                     "Domain mismatch: expected {}, got {}",
                     required_domain, request_parts.authority
                 );
-                return Err(PaymentError::VisaTapError(
-                    format!("Domain mismatch: expected {}, got {}", required_domain, request_parts.authority),
-                ));
+                return Err(PaymentError::VisaTapError(format!(
+                    "Domain mismatch: expected {}, got {}",
+                    required_domain, request_parts.authority
+                )));
             }
 
             stages_passed.push("domain_binding".to_string());
@@ -241,7 +259,10 @@ impl TapVerifier {
         .map_err(|e| PaymentError::Rfc9421Error(format!("Signature verification failed: {}", e)))?;
 
         stages_passed.push("cryptographic_verification".to_string());
-        info!("Stage 7: Cryptographic verification successful for agent {}", key_id);
+        info!(
+            "Stage 7: Cryptographic verification successful for agent {}",
+            key_id
+        );
 
         // Stage 8: Build verification result
         stages_passed.push("result_construction".to_string());
@@ -271,7 +292,8 @@ mod tests {
     #[async_trait]
     impl AgentRegistryClient for MockAgentRegistry {
         async fn get_public_key(&self, key_id: &str) -> Result<AgentPublicKeyInfo> {
-            self.keys.get(key_id)
+            self.keys
+                .get(key_id)
                 .cloned()
                 .ok_or_else(|| PaymentError::AgentRegistryError("Key not found".to_string()))
         }
@@ -314,7 +336,9 @@ mod tests {
     fn create_test_signed_headers() -> SignedHeaders {
         let now = Utc::now().timestamp() as u64;
         SignedHeaders {
-            signature_input_raw: "sig1=(\"@authority\" \"@path\" \"content-type\");created=123;nonce=\"abc\"".to_string(),
+            signature_input_raw:
+                "sig1=(\"@authority\" \"@path\" \"content-type\");created=123;nonce=\"abc\""
+                    .to_string(),
             signature_bytes: vec![0; 64],
             parsed: SignatureInput {
                 label: "sig1".to_string(),
@@ -352,7 +376,10 @@ mod tests {
             .with_domain("api.example.com".to_string());
 
         assert_eq!(verifier.max_signature_age, Duration::from_secs(300));
-        assert_eq!(verifier.required_domain, Some("api.example.com".to_string()));
+        assert_eq!(
+            verifier.required_domain,
+            Some("api.example.com".to_string())
+        );
     }
 
     #[tokio::test]
@@ -384,8 +411,8 @@ mod tests {
     #[tokio::test]
     async fn test_verify_domain_mismatch() {
         let registry = create_mock_registry();
-        let verifier = TapVerifier::new(registry.clone())
-            .with_domain("required-domain.com".to_string());
+        let verifier =
+            TapVerifier::new(registry.clone()).with_domain("required-domain.com".to_string());
         let request_parts = create_test_request_parts(); // uses api.example.com
         let signed_headers = create_test_signed_headers();
 
@@ -414,7 +441,10 @@ mod tests {
         let mut signed_headers = create_test_signed_headers();
         signed_headers.parsed.params.keyid = "inactive-key".to_string();
 
-        let result = verifier.verify(&request_parts, &signed_headers).await.unwrap();
+        let result = verifier
+            .verify(&request_parts, &signed_headers)
+            .await
+            .unwrap();
         assert!(!result.verified);
         assert_eq!(result.agent_key_id, "inactive-key");
     }
@@ -454,8 +484,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify_required_tag_missing() {
         let registry = create_mock_registry();
-        let verifier = TapVerifier::new(registry.clone())
-            .with_required_tag(AgentTag::PayerAuth);
+        let verifier = TapVerifier::new(registry.clone()).with_required_tag(AgentTag::PayerAuth);
         let request_parts = create_test_request_parts();
         // signature stops at cryptographic verification because of mock keys, but
         // the tag check fires before cryptographic_verification when tag is None.
@@ -476,8 +505,14 @@ mod tests {
     #[tokio::test]
     async fn test_verify_required_tag_mismatch_rejected() {
         // Direct unit test of the tag check via parse — confirms enum & wire strings line up.
-        assert_eq!(AgentTag::parse("agent-browser-auth"), Some(AgentTag::BrowserAuth));
-        assert_eq!(AgentTag::parse("agent-payer-auth"), Some(AgentTag::PayerAuth));
+        assert_eq!(
+            AgentTag::parse("agent-browser-auth"),
+            Some(AgentTag::BrowserAuth)
+        );
+        assert_eq!(
+            AgentTag::parse("agent-payer-auth"),
+            Some(AgentTag::PayerAuth)
+        );
         assert_eq!(AgentTag::parse("nonsense"), None);
         assert_ne!(AgentTag::BrowserAuth, AgentTag::PayerAuth);
     }
@@ -485,8 +520,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify_expired_signature() {
         let registry = create_mock_registry();
-        let verifier = TapVerifier::new(registry.clone())
-            .with_max_age(Duration::from_secs(60));
+        let verifier = TapVerifier::new(registry.clone()).with_max_age(Duration::from_secs(60));
         let request_parts = create_test_request_parts();
         let mut signed_headers = create_test_signed_headers();
 

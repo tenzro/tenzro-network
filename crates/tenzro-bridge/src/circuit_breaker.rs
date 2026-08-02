@@ -148,10 +148,7 @@ impl CircuitBreaker {
 
     /// Returns the current failure count for an endpoint (0 if never called).
     pub fn failure_count(&self, endpoint: &str) -> u32 {
-        self.states
-            .get(endpoint)
-            .map(|s| s.failures)
-            .unwrap_or(0)
+        self.states.get(endpoint).map(|s| s.failures).unwrap_or(0)
     }
 
     /// Returns true if the breaker is currently open for the given endpoint.
@@ -210,7 +207,9 @@ mod tests {
             .call("test", || async { Ok::<i32, BridgeError>(42) })
             .await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(BridgeError::NetworkError(ref s)) if s.contains("circuit open")));
+        assert!(
+            matches!(result, Err(BridgeError::NetworkError(ref s)) if s.contains("circuit open"))
+        );
     }
 
     #[tokio::test]

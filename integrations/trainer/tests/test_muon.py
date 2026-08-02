@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 
 torch = pytest.importorskip("torch")
-from torch import nn  # noqa: E402
+from torch import nn
 
-from tenzro_trainer.muon import (  # noqa: E402
+from tenzro_trainer.muon import (
     Muon,
     build_inner_optimizer,
     partition_parameters,

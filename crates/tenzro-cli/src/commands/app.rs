@@ -3,7 +3,7 @@
 //! Register applications in the on-chain app registry, manage their status,
 //! and submit developer-signed settlement authorizations.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use rand::RngCore;
 
@@ -48,8 +48,7 @@ fn now_ms() -> u64 {
 
 /// Decode a hex string (0x-optional) into bytes.
 fn decode_hex(label: &str, s: &str) -> Result<Vec<u8>> {
-    hex::decode(s.strip_prefix("0x").unwrap_or(s))
-        .with_context(|| format!("invalid {label} hex"))
+    hex::decode(s.strip_prefix("0x").unwrap_or(s)).with_context(|| format!("invalid {label} hex"))
 }
 
 /// Parse a wallet address the same way the node does: hex, up to 32 bytes,
@@ -65,10 +64,13 @@ fn parse_wallet_address(s: &str) -> Result<tenzro_types::primitives::Address> {
 }
 
 /// Build an Ed25519 signer from a 32-byte hex seed.
-pub(crate) fn ed25519_signer(signing_key_hex: &str) -> Result<tenzro_crypto::signatures::Ed25519SignerImpl> {
+pub(crate) fn ed25519_signer(
+    signing_key_hex: &str,
+) -> Result<tenzro_crypto::signatures::Ed25519SignerImpl> {
     let seed = decode_hex("signing key", signing_key_hex)?;
-    let keypair = tenzro_crypto::keys::KeyPair::from_bytes(tenzro_crypto::keys::KeyType::Ed25519, &seed)
-        .map_err(|e| anyhow!("invalid Ed25519 signing key: {e}"))?;
+    let keypair =
+        tenzro_crypto::keys::KeyPair::from_bytes(tenzro_crypto::keys::KeyType::Ed25519, &seed)
+            .map_err(|e| anyhow!("invalid Ed25519 signing key: {e}"))?;
     tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair)
         .map_err(|e| anyhow!("failed to build signer: {e}"))
 }
@@ -111,19 +113,33 @@ fn print_app_record(record: &serde_json::Value) {
     );
     output::print_field(
         "Developer DID",
-        record.get("developer_did").and_then(|v| v.as_str()).unwrap_or(""),
+        record
+            .get("developer_did")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "App Wallet",
-        record.get("app_wallet").and_then(|v| v.as_str()).unwrap_or(""),
+        record
+            .get("app_wallet")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "Margin (bps)",
-        &record.get("margin_bps").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+        &record
+            .get("margin_bps")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .to_string(),
     );
     output::print_field(
         "Active",
-        &record.get("active").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+        &record
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            .to_string(),
     );
     if let Some(keys) = record.get("signing_pubkeys").and_then(|v| v.as_array()) {
         output::print_field("Signing Keys", &keys.len().to_string());
@@ -310,10 +326,8 @@ impl AppSetStatusCmd {
                     .did
                     .as_deref()
                     .ok_or_else(|| anyhow!("--did is required with --signing-key"))?;
-                let canonical = tenzro_node::app_registry::canonical_status_params(
-                    &self.app_id,
-                    self.active,
-                );
+                let canonical =
+                    tenzro_node::app_registry::canonical_status_params(&self.app_id, self.active);
                 sign_envelope(
                     did,
                     tenzro_node::app_registry::METHOD_SET_APP_STATUS,
@@ -363,7 +377,10 @@ impl AppGetCmd {
         output::print_header("Application");
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
-            .call("tenzro_getApp", serde_json::json!({ "app_id": self.app_id }))
+            .call(
+                "tenzro_getApp",
+                serde_json::json!({ "app_id": self.app_id }),
+            )
             .await?;
         print_app_record(&result);
         output::print_json(&result)?;
@@ -385,16 +402,17 @@ impl AppListCmd {
 
         output::print_header("Registered Applications");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
-            .call("tenzro_listApps", serde_json::json!({}))
-            .await?;
+        let result: serde_json::Value = rpc.call("tenzro_listApps", serde_json::json!({})).await?;
 
         let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
         output::print_field("Count", &count.to_string());
         if let Some(apps) = result.get("apps").and_then(|v| v.as_array()) {
             for app in apps {
                 let id = app.get("app_id").and_then(|v| v.as_str()).unwrap_or("?");
-                let did = app.get("developer_did").and_then(|v| v.as_str()).unwrap_or("?");
+                let did = app
+                    .get("developer_did")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let active = app.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
                 output::print_field(id, &format!("{did} (active: {active})"));
             }
@@ -505,8 +523,14 @@ impl AppSettleAuthorizedCmd {
             .await?;
         spinner.finish_and_clear();
 
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-        let duplicate = result.get("duplicate").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let duplicate = result
+            .get("duplicate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if success {
             output::print_success(if duplicate {
                 "Settlement already recorded (idempotent replay)"

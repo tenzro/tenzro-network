@@ -7,9 +7,9 @@
 //! `tenzro_listValidators`, `tenzro_listActiveValidators`) hit the node's
 //! in-process `ValidatorRegistry` cache.
 
-use clap::{Parser, Subcommand};
-use anyhow::{anyhow, Result};
 use crate::output;
+use anyhow::{Result, anyhow};
+use clap::{Parser, Subcommand};
 
 /// Validator set commands (Dynamic Validator Set)
 #[derive(Debug, Subcommand)]
@@ -52,8 +52,7 @@ const DEFAULT_UPDATE_METADATA_GAS: u64 = 80_000;
 /// Decode a 0x-prefixed (or bare) hex string into a fixed-size byte array.
 fn hex_to_fixed<const N: usize>(s: &str, label: &str) -> Result<[u8; N]> {
     let trimmed = s.trim().trim_start_matches("0x");
-    let bytes = hex::decode(trimmed)
-        .map_err(|e| anyhow!("invalid hex for {}: {}", label, e))?;
+    let bytes = hex::decode(trimmed).map_err(|e| anyhow!("invalid hex for {}: {}", label, e))?;
     if bytes.len() != N {
         return Err(anyhow!(
             "{} must be {} bytes ({} hex chars), got {}",
@@ -71,15 +70,11 @@ fn hex_to_fixed<const N: usize>(s: &str, label: &str) -> Result<[u8; N]> {
 /// Decode a 0x-prefixed (or bare) hex string into a variable-length Vec<u8>.
 fn hex_to_vec(s: &str, label: &str) -> Result<Vec<u8>> {
     let trimmed = s.trim().trim_start_matches("0x");
-    hex::decode(trimmed)
-        .map_err(|e| anyhow!("invalid hex for {}: {}", label, e))
+    hex::decode(trimmed).map_err(|e| anyhow!("invalid hex for {}: {}", label, e))
 }
 
 /// Query nonce + chain_id for the sender.
-async fn fetch_nonce_and_chain_id(
-    rpc: &crate::rpc::RpcClient,
-    address: &str,
-) -> (u64, u64) {
+async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
     let nonce = rpc
         .call::<serde_json::Value>(
             "eth_getTransactionCount",
@@ -165,8 +160,7 @@ impl ValidatorRegisterCmd {
 
         // Validate + decode keys client-side so the user gets a clear error
         // rather than a server-side serde failure.
-        let consensus_bytes: [u8; 32] =
-            hex_to_fixed(&self.consensus_pubkey, "consensus_pubkey")?;
+        let consensus_bytes: [u8; 32] = hex_to_fixed(&self.consensus_pubkey, "consensus_pubkey")?;
         let pq_bytes = hex_to_vec(&self.pq_pubkey, "pq_pubkey")?;
         if pq_bytes.len() != 1952 {
             return Err(anyhow!(
@@ -202,19 +196,21 @@ impl ValidatorRegisterCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.from,
-                "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "value": 0u64,
-                "gas_limit": DEFAULT_REGISTER_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_REGISTER_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -232,7 +228,7 @@ impl ValidatorRegisterCmd {
         output::print_warning(
             "Candidate is staged under PendingActive. The next epoch boundary \
              admits it (subject to churn budget); activation is effective \
-             ACTIVATION_EFFECTIVE_DELAY_BLOCKS after that boundary."
+             ACTIVATION_EFFECTIVE_DELAY_BLOCKS after that boundary.",
         );
         Ok(())
     }
@@ -266,19 +262,21 @@ impl ValidatorExitCmd {
         // Unit variant — externally-tagged serde renders it as a bare string.
         let tx_type = serde_json::json!("ExitValidator");
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.from,
-                "to": self.from,
-                "value": 0u64,
-                "gas_limit": DEFAULT_EXIT_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": self.from,
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_EXIT_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -290,7 +288,7 @@ impl ValidatorExitCmd {
             "Validator transitions to PendingExit. Removal is effective \
              ACTIVATION_EFFECTIVE_DELAY_BLOCKS after the next epoch boundary. \
              Re-registration is blocked for `reentry_cooldown_epochs` (default 4) \
-             following voluntary exit."
+             following voluntary exit.",
         );
         Ok(())
     }
@@ -352,29 +350,28 @@ impl ValidatorUpdateMetadataCmd {
                 "tee_attestation_hash".to_string(),
                 serde_json::to_value(arr).unwrap(),
             ),
-            None => data.insert(
-                "tee_attestation_hash".to_string(),
-                serde_json::Value::Null,
-            ),
+            None => data.insert("tee_attestation_hash".to_string(), serde_json::Value::Null),
         };
 
         let tx_type = serde_json::json!({
             "UpdateValidatorMetadata": serde_json::Value::Object(data),
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.from,
-                "to": self.from,
-                "value": 0u64,
-                "gas_limit": DEFAULT_UPDATE_METADATA_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": self.from,
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_UPDATE_METADATA_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -462,10 +459,7 @@ impl ValidatorRotateKeysCmd {
         if status == "pending_epoch_activation" {
             output::print_success("Rotation accepted — pending epoch activation");
         } else {
-            return Err(anyhow!(
-                "Rotation returned unexpected status: {}",
-                status
-            ));
+            return Err(anyhow!("Rotation returned unexpected status: {}", status));
         }
         output::print_field("Address", &self.address);
         output::print_field(
@@ -552,10 +546,7 @@ impl ValidatorListCmd {
             params.insert("status".to_string(), serde_json::Value::String(s.clone()));
         }
         let result: serde_json::Value = rpc
-            .call(
-                "tenzro_listValidators",
-                serde_json::Value::Object(params),
-            )
+            .call("tenzro_listValidators", serde_json::Value::Object(params))
             .await?;
 
         println!();

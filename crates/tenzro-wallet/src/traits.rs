@@ -9,9 +9,9 @@ use crate::history::{HistoryFilter, TxRecord};
 use crate::signing::HybridSignatureBytes;
 use crate::wallet::{MpcWallet, WalletId};
 use async_trait::async_trait;
+use tenzro_types::AssetId;
 use tenzro_types::primitives::{Address, Hash, Nonce};
 use tenzro_types::transaction::Transaction;
-use tenzro_types::AssetId;
 
 /// Wallet service trait for Tenzro Network.
 ///
@@ -73,11 +73,7 @@ pub trait WalletService: Send + Sync {
     ) -> Result<HybridSignatureBytes>;
 
     /// Sign arbitrary data with the wallet, producing a hybrid signature.
-    async fn sign_data(
-        &self,
-        wallet_id: &WalletId,
-        data: &[u8],
-    ) -> Result<HybridSignatureBytes>;
+    async fn sign_data(&self, wallet_id: &WalletId, data: &[u8]) -> Result<HybridSignatureBytes>;
 
     // === Nonce ===
 

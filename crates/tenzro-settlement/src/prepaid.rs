@@ -31,7 +31,7 @@
 use crate::error::{Result, SettlementError};
 use dashmap::DashMap;
 use std::sync::Arc;
-use tenzro_storage::{KvStore, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::Address;
 use tracing::warn;
@@ -196,9 +196,9 @@ impl PrepaidLedger {
 
     fn persist_key(&self, key: &(Address, AssetId), balance: u128) {
         let storage_key = encode_key(&key.0, &key.1);
-        if let Err(e) =
-            self.storage
-                .put(CF_SETTLEMENTS, &storage_key, &balance.to_be_bytes())
+        if let Err(e) = self
+            .storage
+            .put(CF_SETTLEMENTS, &storage_key, &balance.to_be_bytes())
         {
             warn!("Failed to persist prepaid balance: {}", e);
         }

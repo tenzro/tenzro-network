@@ -32,7 +32,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 
-import tenzro_rpc  # noqa: E402
+import tenzro_rpc
 
 POST_PRICE_WEI = 1_000_000_000_000_000_000  # 1 TNZO
 QUOTE_PRICE_WEI = 900_000_000_000_000_000   # 0.9 TNZO

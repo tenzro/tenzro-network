@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use tenzro_consensus::epoch_manager::EpochStateStore;
 use tenzro_consensus::error::{ConsensusError, Result as ConsensusResult};
-use tenzro_storage::{KvStore, RocksDbStore, CF_METADATA};
+use tenzro_storage::{CF_METADATA, KvStore, RocksDbStore};
 
 /// Key prefix for persisted epoch records under `CF_METADATA`.
 ///
@@ -80,9 +80,7 @@ impl EpochStateStore for RocksDbEpochStateStore {
         self.storage
             .put(CF_METADATA, &epoch_key(epoch_number), &bytes)
             .map_err(|e| {
-                ConsensusError::Internal(format!(
-                    "epoch persist (epoch {epoch_number}): {e}"
-                ))
+                ConsensusError::Internal(format!("epoch persist (epoch {epoch_number}): {e}"))
             })
     }
 
@@ -90,9 +88,7 @@ impl EpochStateStore for RocksDbEpochStateStore {
         let pairs = self
             .storage
             .scan_prefix(CF_METADATA, EPOCH_KEY_PREFIX)
-            .map_err(|e| {
-                ConsensusError::Internal(format!("epoch scan_prefix: {e}"))
-            })?;
+            .map_err(|e| ConsensusError::Internal(format!("epoch scan_prefix: {e}")))?;
 
         // scan_prefix returns (key, value) pairs in RocksDB lexicographic order.
         // Because the key suffix is u64::to_be_bytes, lexicographic order ==

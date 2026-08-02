@@ -16,12 +16,12 @@
 //! - Errors are funneled through [`AgentKitError`] so callers can match on
 //!   transport vs RPC vs deserialization failures.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use tenzro_types::agent_template::{AgentTemplate, AgentTemplateFilter};
 use tenzro_types::skill::{SkillDefinition, SkillFilter};
@@ -91,11 +91,7 @@ impl RegistryClient {
     /// [`serde_json::Value`] result. Used by the executor for dispatch
     /// methods that don't have a typed wrapper (e.g. `tenzro_bridgeTokens`,
     /// `tenzro_payMpp`, `tenzro_payX402`, `tenzro_submitDamlCommand`).
-    pub async fn call_raw(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, AgentKitError> {
+    pub async fn call_raw(&self, method: &str, params: Value) -> Result<Value, AgentKitError> {
         self.call_inner(method, params, None).await
     }
 
@@ -128,9 +124,8 @@ impl RegistryClient {
         params: Value,
     ) -> Result<T, AgentKitError> {
         let value = self.call_inner(method, params, None).await?;
-        serde_json::from_value::<T>(value).map_err(|e| {
-            AgentKitError::RpcDeserialize(format!("result decode for {method}: {e}"))
-        })
+        serde_json::from_value::<T>(value)
+            .map_err(|e| AgentKitError::RpcDeserialize(format!("result decode for {method}: {e}")))
     }
 
     /// Single dispatch site that handles both the anonymous and the
@@ -256,14 +251,20 @@ impl RegistryClient {
     /// Fetches a single template by id.
     pub async fn get_template(&self, template_id: &str) -> Result<AgentTemplate, AgentKitError> {
         let result: Option<AgentTemplate> = self
-            .call("tenzro_getAgentTemplate", json!({ "template_id": template_id }))
+            .call(
+                "tenzro_getAgentTemplate",
+                json!({ "template_id": template_id }),
+            )
             .await?;
         result.ok_or_else(|| AgentKitError::TemplateNotFound(template_id.to_string()))
     }
 
     /// Publishes a new agent template to `CF_AGENT_TEMPLATES`. Returns the
     /// minted `template_id`.
-    pub async fn register_template(&self, template: &AgentTemplate) -> Result<String, AgentKitError> {
+    pub async fn register_template(
+        &self,
+        template: &AgentTemplate,
+    ) -> Result<String, AgentKitError> {
         let mut params = serde_json::Map::new();
         // Stable manifest id — without it the node mints a UUID and the
         // bundled `ref-*` ids become unresolvable (and bootstrap loses
@@ -281,10 +282,12 @@ impl RegistryClient {
         );
         params.insert(
             "template_type".to_string(),
-            json!(serde_json::to_string(&template.template_type)
-                .unwrap_or_else(|_| "\"autonomous\"".to_string())
-                .trim_matches('"')
-                .to_string()),
+            json!(
+                serde_json::to_string(&template.template_type)
+                    .unwrap_or_else(|_| "\"autonomous\"".to_string())
+                    .trim_matches('"')
+                    .to_string()
+            ),
         );
         params.insert("tags".to_string(), json!(template.tags));
         if let Some(docs_url) = &template.docs_url {

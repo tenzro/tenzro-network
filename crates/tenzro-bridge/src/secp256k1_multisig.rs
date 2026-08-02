@@ -106,9 +106,7 @@ impl ValidatorSet {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let recovered = match VerifyingKey::recover_from_prehash(
-                prehash, &sig, recovery_id,
-            ) {
+            let recovered = match VerifyingKey::recover_from_prehash(prehash, &sig, recovery_id) {
                 Ok(vk) => vk,
                 Err(_) => continue,
             };
@@ -142,9 +140,7 @@ impl ValidatorSet {
 /// `(body_slice, parsed_signatures)`. This wire shape is shared by
 /// Hyperlane ISM and Axelar gateway metadata; LayerZero and deBridge
 /// use a different layout and decode their own trailers.
-pub fn parse_trailing_signature_set(
-    payload: &[u8],
-) -> Result<(&[u8], Vec<([u8; 20], [u8; 65])>)> {
+pub fn parse_trailing_signature_set(payload: &[u8]) -> Result<(&[u8], Vec<([u8; 20], [u8; 65])>)> {
     let n = payload.len();
     if n < 1 {
         return Err(BridgeError::InvalidParameter(
@@ -176,7 +172,7 @@ pub fn parse_trailing_signature_set(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+    use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
     use k256::elliptic_curve::sec1::ToSec1Point;
     use sha3::{Digest as Sha3Digest, Keccak256};
 
@@ -230,10 +226,7 @@ mod tests {
     fn quorum_rejects_below_threshold() {
         let sk1 = sk_from_seed(1);
         let sk2 = sk_from_seed(2);
-        let addrs = vec![
-            addr_for(sk1.verifying_key()),
-            addr_for(sk2.verifying_key()),
-        ];
+        let addrs = vec![addr_for(sk1.verifying_key()), addr_for(sk2.verifying_key())];
         let set = ValidatorSet::new(addrs, 2, "test-set");
         let prehash = [9u8; 32];
         let sigs = vec![signed_pair(&sk1, &prehash)];
@@ -244,11 +237,7 @@ mod tests {
     fn quorum_rejects_unauthorised_signer() {
         let sk_authorised = sk_from_seed(1);
         let sk_attacker = sk_from_seed(2);
-        let set = ValidatorSet::new(
-            vec![addr_for(sk_authorised.verifying_key())],
-            1,
-            "test-set",
-        );
+        let set = ValidatorSet::new(vec![addr_for(sk_authorised.verifying_key())], 1, "test-set");
         let prehash = [9u8; 32];
         let sigs = vec![signed_pair(&sk_attacker, &prehash)];
         assert!(set.verify_quorum(&prehash, &sigs).is_err());
@@ -259,10 +248,7 @@ mod tests {
         let sk1 = sk_from_seed(1);
         let sk2 = sk_from_seed(2);
         let set = ValidatorSet::new(
-            vec![
-                addr_for(sk1.verifying_key()),
-                addr_for(sk2.verifying_key()),
-            ],
+            vec![addr_for(sk1.verifying_key()), addr_for(sk2.verifying_key())],
             2,
             "test-set",
         );

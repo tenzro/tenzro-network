@@ -40,7 +40,11 @@ pub struct DeBridgeAdapter {
     /// Per-source-chain DLN Submission validator set. Inbound delivery
     /// requires `threshold`-many DLN-validator signatures over the
     /// submission prehash `keccak256(submissionId || dst_chain_id)`.
-    validator_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
+    validator_sets: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>,
+        >,
+    >,
     /// Replay cache for inbound submissions keyed
     /// `{src_chain_id}:{submission_id_hex}`.
     seen_submissions: Arc<DashMap<String, ()>>,
@@ -86,10 +90,7 @@ impl DeBridgeAdapter {
 
     /// Attach RocksDB persistence: hydrates the inbound-submission
     /// replay cache from `CF_SETTLEMENTS / bridge_seen:debridge:*`.
-    pub fn with_storage(
-        mut self,
-        storage: Arc<dyn tenzro_storage::KvStore>,
-    ) -> Self {
+    pub fn with_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
         for key in crate::message_format::load_seen_keys(&storage, "debridge") {
             self.seen_submissions.insert(key, ());
         }
@@ -189,39 +190,43 @@ impl DeBridgeAdapter {
 
         // Submit the order on-chain — requires both API tx data and a signer
         match api_result {
-            Ok(api_response) => {
-                match (&api_response.tx, &self.signer) {
-                    (Some(tx_data), Some(signer)) => {
-                        let calldata = hex::decode(tx_data.data.trim_start_matches("0x"))
-                            .unwrap_or_default();
-                        let value = u128::from_str_radix(
-                            tx_data.value.trim_start_matches("0x"),
-                            16,
-                        )
+            Ok(api_response) => match (&api_response.tx, &self.signer) {
+                (Some(tx_data), Some(signer)) => {
+                    let calldata =
+                        hex::decode(tx_data.data.trim_start_matches("0x")).unwrap_or_default();
+                    let value = u128::from_str_radix(tx_data.value.trim_start_matches("0x"), 16)
                         .unwrap_or(0);
 
-                        signer.send_transaction(&tx_data.to, &calldata, value).await
-                            .map_err(|e| BridgeError::TransferFailed(format!(
-                                "deBridge DLN: On-chain order creation failed: {}", e
-                            )))?;
+                    signer
+                        .send_transaction(&tx_data.to, &calldata, value)
+                        .await
+                        .map_err(|e| {
+                            BridgeError::TransferFailed(format!(
+                                "deBridge DLN: On-chain order creation failed: {}",
+                                e
+                            ))
+                        })?;
 
-                        info!("deBridge DLN: Order {} submitted on-chain", order_id);
-                    }
-                    (None, _) => {
-                        warn!("deBridge DLN: API returned no transaction data for order {}", order_id);
-                    }
-                    (_, None) => {
-                        return Err(BridgeError::ConfigurationError(
-                            "deBridge DLN: No signer configured — cannot submit order on-chain. \
-                             Call with_signer() to configure an EVM transaction signer."
-                                .to_string(),
-                        ));
-                    }
+                    info!("deBridge DLN: Order {} submitted on-chain", order_id);
                 }
-            }
+                (None, _) => {
+                    warn!(
+                        "deBridge DLN: API returned no transaction data for order {}",
+                        order_id
+                    );
+                }
+                (_, None) => {
+                    return Err(BridgeError::ConfigurationError(
+                        "deBridge DLN: No signer configured — cannot submit order on-chain. \
+                             Call with_signer() to configure an EVM transaction signer."
+                            .to_string(),
+                    ));
+                }
+            },
             Err(e) => {
                 return Err(BridgeError::NetworkError(format!(
-                    "deBridge DLN: API unavailable — cannot create order: {}", e
+                    "deBridge DLN: API unavailable — cannot create order: {}",
+                    e
                 )));
             }
         }
@@ -249,10 +254,8 @@ impl DeBridgeAdapter {
                 "Created" | "Pending" | "OrderCreated" => DlnOrderStatus::Created,
                 // Terminal success (Fulfilled = taker filled, SentUnlock/ClaimedUnlock = unlock flow,
                 // GiveOrderClaimed = source funds released — all indicate successful completion)
-                "Fulfilled" | "ClaimedOrder" | "Completed" | "Filled"
-                | "ClaimedUnlock" | "SentUnlock" | "GiveOrderClaimed" => {
-                    DlnOrderStatus::Filled
-                }
+                "Fulfilled" | "ClaimedOrder" | "Completed" | "Filled" | "ClaimedUnlock"
+                | "SentUnlock" | "GiveOrderClaimed" => DlnOrderStatus::Filled,
                 // Terminal failure
                 "Cancelled" | "Expired" | "OrderCancelled" => DlnOrderStatus::Cancelled,
                 _ => DlnOrderStatus::Created,
@@ -299,10 +302,7 @@ impl DeBridgeAdapter {
             order.taker = Some(taker.to_string());
         }
 
-        info!(
-            "deBridge DLN: Order {} filled by taker {}",
-            order_id, taker
-        );
+        info!("deBridge DLN: Order {} filled by taker {}", order_id, taker);
 
         Ok(())
     }
@@ -361,7 +361,9 @@ impl DeBridgeAdapter {
         response
             .json::<DlnCreateOrderResponse>()
             .await
-            .map_err(|e| BridgeError::SerializationError(format!("Failed to parse response: {}", e)))
+            .map_err(|e| {
+                BridgeError::SerializationError(format!("Failed to parse response: {}", e))
+            })
     }
 
     /// Calls the deBridge stats API to get order status
@@ -396,7 +398,9 @@ impl DeBridgeAdapter {
         response
             .json::<DlnOrderStatusResponse>()
             .await
-            .map_err(|e| BridgeError::SerializationError(format!("Failed to parse response: {}", e)))
+            .map_err(|e| {
+                BridgeError::SerializationError(format!("Failed to parse response: {}", e))
+            })
     }
 
     /// Gets the next order ID for offline mode
@@ -439,7 +443,14 @@ impl DeBridgeAdapter {
             ("srcChainTokenInAmount", give_amount.to_string()),
             ("dstChainId", take_chain_id.to_string()),
             ("dstChainTokenOut", take_token.to_string()),
-            ("dstChainTokenOutAmount", if take_amount == 0 { "auto".to_string() } else { take_amount.to_string() }),
+            (
+                "dstChainTokenOutAmount",
+                if take_amount == 0 {
+                    "auto".to_string()
+                } else {
+                    take_amount.to_string()
+                },
+            ),
             ("srcChainOrderAuthorityAddress", maker.to_string()),
             ("dstChainTokenOutRecipient", maker.to_string()),
             ("dstChainOrderAuthorityAddress", maker.to_string()),
@@ -464,7 +475,9 @@ impl DeBridgeAdapter {
             .query(&query_params)
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!("deBridge API request failed: {}", e)))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!("deBridge API request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             return Err(BridgeError::AdapterError(format!(
@@ -473,10 +486,9 @@ impl DeBridgeAdapter {
             )));
         }
 
-        let api_response: DlnCreateOrderResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("Failed to parse response: {}", e)))?;
+        let api_response: DlnCreateOrderResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("Failed to parse response: {}", e))
+        })?;
 
         let order_id = api_response.order_id.clone().unwrap_or_else(|| {
             let order_num = self.get_next_order_id(give_chain);
@@ -486,17 +498,33 @@ impl DeBridgeAdapter {
         // Submit on-chain
         match (&api_response.tx, &self.signer) {
             (Some(tx_data), Some(signer)) => {
-                let calldata = hex::decode(tx_data.data.trim_start_matches("0x")).unwrap_or_default();
-                let value = u128::from_str_radix(tx_data.value.trim_start_matches("0x"), 16).unwrap_or(0);
-                signer.send_transaction(&tx_data.to, &calldata, value).await
-                    .map_err(|e| BridgeError::TransferFailed(format!("On-chain order creation failed: {}", e)))?;
-                info!("deBridge DLN: Order {} with hook submitted on-chain", order_id);
+                let calldata =
+                    hex::decode(tx_data.data.trim_start_matches("0x")).unwrap_or_default();
+                let value =
+                    u128::from_str_radix(tx_data.value.trim_start_matches("0x"), 16).unwrap_or(0);
+                signer
+                    .send_transaction(&tx_data.to, &calldata, value)
+                    .await
+                    .map_err(|e| {
+                        BridgeError::TransferFailed(format!(
+                            "On-chain order creation failed: {}",
+                            e
+                        ))
+                    })?;
+                info!(
+                    "deBridge DLN: Order {} with hook submitted on-chain",
+                    order_id
+                );
             }
             (None, _) => {
-                return Err(BridgeError::AdapterError("API returned no transaction data".to_string()));
+                return Err(BridgeError::AdapterError(
+                    "API returned no transaction data".to_string(),
+                ));
             }
             (_, None) => {
-                return Err(BridgeError::ConfigurationError("No signer configured".to_string()));
+                return Err(BridgeError::ConfigurationError(
+                    "No signer configured".to_string(),
+                ));
             }
         }
 
@@ -529,7 +557,10 @@ impl DeBridgeAdapter {
         skip: u64,
         take: u64,
     ) -> Result<Vec<DlnOrderSummary>> {
-        let url = format!("{}/api/Orders/filteredList", self.config.stats_api_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/api/Orders/filteredList",
+            self.config.stats_api_url.trim_end_matches('/')
+        );
 
         let body = serde_json::json!({
             "address": wallet_address,
@@ -543,7 +574,9 @@ impl DeBridgeAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::NetworkError(format!("Stats API filteredList failed: {}", e)))?;
+            .map_err(|e| {
+                BridgeError::NetworkError(format!("Stats API filteredList failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             return Err(BridgeError::AdapterError(format!(
@@ -552,10 +585,9 @@ impl DeBridgeAdapter {
             )));
         }
 
-        let result: DlnFilteredListResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("Failed to parse filteredList: {}", e)))?;
+        let result: DlnFilteredListResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("Failed to parse filteredList: {}", e))
+        })?;
 
         Ok(result.orders)
     }
@@ -570,21 +602,18 @@ impl DeBridgeAdapter {
             tx_hash
         );
 
-        let response = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| BridgeError::NetworkError(format!("Stats API request failed: {}", e)))?;
+        let response =
+            self.http_client.get(&url).send().await.map_err(|e| {
+                BridgeError::NetworkError(format!("Stats API request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             return Err(BridgeError::TransferNotFound(tx_hash.to_string()));
         }
 
-        let status_resp: DlnOrderStatusResponse = response
-            .json()
-            .await
-            .map_err(|e| BridgeError::SerializationError(format!("Failed to parse response: {}", e)))?;
+        let status_resp: DlnOrderStatusResponse = response.json().await.map_err(|e| {
+            BridgeError::SerializationError(format!("Failed to parse response: {}", e))
+        })?;
 
         Ok(DlnOrderSummary {
             order_id: status_resp.order_id,
@@ -721,11 +750,13 @@ impl BridgeAdapter for DeBridgeAdapter {
             .read()
             .get(&src_chain_id)
             .cloned()
-            .ok_or_else(|| BridgeError::AdapterError(format!(
-                "deBridge adapter has no DLN validator set installed for chain \
+            .ok_or_else(|| {
+                BridgeError::AdapterError(format!(
+                    "deBridge adapter has no DLN validator set installed for chain \
                  {src_chain_id} — inbound traffic refused. Call \
                  install_validator_set at startup."
-            )))?;
+                ))
+            })?;
 
         let (body, signatures) = crate::secp256k1_multisig::parse_trailing_signature_set(&payload)?;
         if body.len() < 32 {
@@ -737,8 +768,7 @@ impl BridgeAdapter for DeBridgeAdapter {
         // Replay protection keyed on the DLN submission id (globally
         // unique per submission). Checked before quorum verification;
         // recorded only after the quorum verifies.
-        let submission_key =
-            format!("{}:{}", src_chain_id, hex::encode(submission_id));
+        let submission_key = format!("{}:{}", src_chain_id, hex::encode(submission_id));
         if self.seen_submissions.contains_key(&submission_key) {
             return Err(BridgeError::ReplayAttack(submission_key));
         }
@@ -754,15 +784,16 @@ impl BridgeAdapter for DeBridgeAdapter {
         // Inner Tenzro-side check on the submission body after the
         // 32-byte submission id. Submission-id replay protection above
         // covers dedup.
-        let verified =
-            crate::message_format::verify_inner_message(&body[32..], None)?;
+        let verified = crate::message_format::verify_inner_message(&body[32..], None)?;
         if let Some(ref storage) = self.seen_storage {
             crate::message_format::persist_seen_key(storage, "debridge", &submission_key);
         }
         self.seen_submissions.insert(submission_key, ());
         info!(
             "deBridge DLN: validator quorum verified ({} sigs, threshold {}, src {})",
-            signatures.len(), set.threshold, src_chain_id
+            signatures.len(),
+            set.threshold,
+            src_chain_id
         );
         Ok(verified)
     }
@@ -867,9 +898,9 @@ impl BridgeAdapter for DeBridgeAdapter {
         // This uses the create-tx endpoint with dstChainTokenOutAmount=auto
         let api_fee_result = self
             .api_create_order_tx(
-                1, // Use ethereum as source
+                1,                                            // Use ethereum as source
                 "0x0000000000000000000000000000000000000000", // ETH
-                1_000_000_000_000_000_000, // 1 ETH
+                1_000_000_000_000_000_000,                    // 1 ETH
                 dest_chain_id,
                 "0x0000000000000000000000000000000000000000",
                 0, // auto
@@ -1104,7 +1135,11 @@ pub struct DlnHook {
 
 impl DlnHook {
     /// Creates a new hook that will call a contract on the destination chain
-    pub fn new(target: impl Into<String>, call_data: impl Into<String>, revert_if_fails: bool) -> Self {
+    pub fn new(
+        target: impl Into<String>,
+        call_data: impl Into<String>,
+        revert_if_fails: bool,
+    ) -> Self {
         Self {
             target: target.into(),
             call_data: call_data.into(),
@@ -1212,19 +1247,15 @@ mod tests {
         let adapter = DeBridgeAdapter::new(config);
         let result = adapter
             .create_order(
-                "ethereum",
-                "arbitrum",
-                "USDC",
-                1000000,
-                "USDC",
-                999000,
-                "0xmaker",
-                None,
+                "ethereum", "arbitrum", "USDC", 1000000, "USDC", 999000, "0xmaker", None,
             )
             .await;
 
         // Without API access or signer, create_order should fail
-        assert!(result.is_err(), "create_order should fail without API/signer");
+        assert!(
+            result.is_err(),
+            "create_order should fail without API/signer"
+        );
     }
 
     #[tokio::test]
@@ -1275,7 +1306,10 @@ mod tests {
 
         // Without API access or signer, bridge_tokens should return an error
         let result = adapter.bridge_tokens(request).await;
-        assert!(result.is_err(), "bridge_tokens should fail without API/signer");
+        assert!(
+            result.is_err(),
+            "bridge_tokens should fail without API/signer"
+        );
     }
 
     #[tokio::test]
@@ -1307,7 +1341,10 @@ mod tests {
         assert_eq!(status, TransferStatus::Pending);
 
         // Fill the order
-        adapter.fill_order(&order.order_id, "0xtaker").await.unwrap();
+        adapter
+            .fill_order(&order.order_id, "0xtaker")
+            .await
+            .unwrap();
 
         // Should be delivered (Filled maps to Delivered)
         let status = adapter.get_transfer_status(&order.order_id).await.unwrap();

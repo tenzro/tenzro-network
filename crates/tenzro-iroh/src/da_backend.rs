@@ -171,7 +171,7 @@ impl DaBackend for IrohBlobsDaBackend {
                 return Err(StorageError::Generic(format!(
                     "IrohBackedResolver::publish_bytes returned non-Blob URI: {:?}",
                     other
-                )))
+                )));
             }
         };
         let raw = hex::decode(&hex_hash).map_err(|e| {
@@ -228,7 +228,7 @@ impl std::fmt::Debug for IrohBlobsDaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_storage::da::{compute_commitment, ReceiptEnvelope, ReceiptKind, ReceiptSummary};
+    use tenzro_storage::da::{ReceiptEnvelope, ReceiptKind, ReceiptSummary, compute_commitment};
     use tenzro_types::primitives::{Hash, Timestamp};
 
     fn sample_summary() -> ReceiptSummary {
@@ -315,7 +315,10 @@ mod tests {
             attestation_root: None,
         };
 
-        let err = backend.fetch(&bogus).await.expect_err("zero-hash must miss");
+        let err = backend
+            .fetch(&bogus)
+            .await
+            .expect_err("zero-hash must miss");
         assert!(matches!(err, StorageError::KeyNotFound(_)), "got {:?}", err);
 
         let verify_err = backend
@@ -393,8 +396,12 @@ mod tests {
             .expect("submit");
         let commitment = compute_commitment(&payload);
 
-        let envelope =
-            ReceiptEnvelope::offloaded(ReceiptKind::Inference, sample_summary(), pointer, commitment);
+        let envelope = ReceiptEnvelope::offloaded(
+            ReceiptKind::Inference,
+            sample_summary(),
+            pointer,
+            commitment,
+        );
         envelope.validate().expect("offloaded envelope valid");
 
         let pointer = envelope.da_pointer.as_ref().expect("has pointer");

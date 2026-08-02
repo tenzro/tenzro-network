@@ -12,8 +12,8 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use tenzro_database::{
-    catalog::engine_ids, DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth,
-    QueryRequest, QueryResponse, Result,
+    DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
+    Result, catalog::engine_ids,
 };
 
 /// A thin client to an operator-run Valkey endpoint.
@@ -27,8 +27,9 @@ impl ValkeyEngine {
     pub fn new(url: String) -> Self {
         // A malformed URL yields a client that errors on connect; we surface it
         // then rather than panic at registration.
-        let client = redis::Client::open(url.clone())
-            .unwrap_or_else(|_| redis::Client::open("redis://invalid-valkey-url-placeholder/").unwrap());
+        let client = redis::Client::open(url.clone()).unwrap_or_else(|_| {
+            redis::Client::open("redis://invalid-valkey-url-placeholder/").unwrap()
+        });
         Self { client }
     }
 
@@ -79,7 +80,9 @@ impl DatabaseEngine for ValkeyEngine {
             .query_async(&mut conn)
             .await
             .map_err(|e| DatabaseError::Query(format!("valkey command: {e}")))?;
-        Ok(QueryResponse { body: redis_value_to_json(value) })
+        Ok(QueryResponse {
+            body: redis_value_to_json(value),
+        })
     }
 
     async fn partition_health(&self, _handle: &PartitionHandle) -> Result<PartitionHealth> {
@@ -147,8 +150,14 @@ mod tests {
 
     #[test]
     fn value_renders_scalars_and_arrays() {
-        assert_eq!(redis_value_to_json(redis::Value::Int(7)), serde_json::json!(7));
-        assert_eq!(redis_value_to_json(redis::Value::Okay), serde_json::json!("OK"));
+        assert_eq!(
+            redis_value_to_json(redis::Value::Int(7)),
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            redis_value_to_json(redis::Value::Okay),
+            serde_json::json!("OK")
+        );
         assert_eq!(
             redis_value_to_json(redis::Value::BulkString(b"hi".to_vec())),
             serde_json::json!("hi")

@@ -90,7 +90,12 @@ fn sign_mpp_credential(
     let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq);
     let composite = hybrid.sign(&message).expect("hybrid sign");
 
-    (public_key_bytes, composite.classical, pq_public_key_bytes, composite.pq)
+    (
+        public_key_bytes,
+        composite.classical,
+        pq_public_key_bytes,
+        composite.pq,
+    )
 }
 
 /// Build a settlement-engine `ServiceProof` carrying a real Ed25519 signature
@@ -219,8 +224,14 @@ async fn mpp_payment_challenge_credential_settle() -> Result<(), Box<dyn std::er
     println!("  protocol      = {}", receipt.protocol);
     println!("  challenge_id  = {}", receipt.challenge_id);
 
-    let still_present = server.challenge_store().get(&challenge.challenge_id).is_ok();
-    println!("  challenge still in store after settle = {}", still_present);
+    let still_present = server
+        .challenge_store()
+        .get(&challenge.challenge_id)
+        .is_ok();
+    println!(
+        "  challenge still in store after settle = {}",
+        still_present
+    );
 
     Ok(())
 }
@@ -372,7 +383,10 @@ async fn x402_pay_resource() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let wrong_network_accepted = facilitator.verify(&requirements, &wrong_network).await?;
-    println!("→ wrong-network payload accepted = {}", wrong_network_accepted);
+    println!(
+        "→ wrong-network payload accepted = {}",
+        wrong_network_accepted
+    );
 
     let settle_ref = facilitator.settle(&requirements, &payload).await?;
     println!("→ settled, reference = {settle_ref}");

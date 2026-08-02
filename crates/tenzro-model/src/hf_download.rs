@@ -213,8 +213,7 @@ pub trait BlobFetcher: Send + Sync {
     /// copying its bytes. Model artifacts are multi-gigabyte, so this is the
     /// path every download-side publish takes; `publish` remains for callers
     /// that only hold bytes.
-    async fn publish_file(&self, path: &Path)
-        -> std::result::Result<TenzroUri, String>;
+    async fn publish_file(&self, path: &Path) -> std::result::Result<TenzroUri, String>;
 }
 
 /// Generic artifact downloader for HuggingFace Hub.
@@ -301,11 +300,48 @@ impl HfDownloader {
         if !dir.is_dir() {
             return None;
         }
-        std::fs::read_dir(&dir).ok()?.filter_map(|e| e.ok()).find_map(|e| {
-            let name = e.file_name();
-            let name = name.to_str()?;
-            (name.contains("-00001-of-") && name.ends_with(".gguf")).then(|| e.path())
-        })
+        std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .find_map(|e| {
+                let name = e.file_name();
+                let name = name.to_str()?;
+                (name.contains("-00001-of-") && name.ends_with(".gguf")).then(|| e.path())
+            })
+    }
+
+    /// Resolve the on-disk GGUF for `model_id`, whatever layout it landed in.
+    ///
+    /// Three layouts exist because three writers produced them: a shard set
+    /// under `<storage>/<id>/` with the `-00001-of-` naming, a flat
+    /// `<storage>/<id>.gguf`, and a single unshard-named `.gguf` sitting alone
+    /// inside `<storage>/<id>/`.
+    ///
+    /// This is the one place that knows the rule. It used to be four places —
+    /// three of them hand-rolled `$HOME/.tenzro/models` probes inside
+    /// `tenzro-node`, written because the CLI and the node resolved their
+    /// model directories differently and each had to go looking in the other's.
+    /// They now share one directory, so the probes are gone and the layout
+    /// question is answered by the crate that owns the layout.
+    ///
+    /// Returns `None` when nothing matching is on disk.
+    pub fn resolve_local_gguf(&self, model_id: &str) -> Option<PathBuf> {
+        if let Some(shard) = self.sharded_first_shard(model_id) {
+            return Some(shard);
+        }
+        let flat = self.storage_path.join(format!("{}.gguf", model_id));
+        if flat.exists() {
+            return Some(flat);
+        }
+        let dir = self.storage_path.join(model_id);
+        if !dir.is_dir() {
+            return None;
+        }
+        std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|ext| ext == "gguf"))
     }
 
     /// Check if a model is already downloaded locally.
@@ -411,14 +447,8 @@ impl HfDownloader {
                     };
 
                     if sha_ok {
-                        write_bytes_atomic(
-                            &entry.id,
-                            &bytes,
-                            &dest_path,
-                            &tmp_path,
-                            &progress_tx,
-                        )
-                        .await?;
+                        write_bytes_atomic(&entry.id, &bytes, &dest_path, &tmp_path, &progress_tx)
+                            .await?;
                         info!(
                             "{}: served from verified provider ({} bytes via {})",
                             entry.id,
@@ -814,9 +844,9 @@ impl HfArtifactDownloader {
     /// - `Bundle { dir_name }` → `<storage>/<dir_name>/`
     pub fn artifact_path(&self, model_id: &str, spec: &ArtifactSpec) -> PathBuf {
         match spec {
-            ArtifactSpec::SingleFile { extension, .. } => {
-                self.storage_path.join(format!("{}.{}", model_id, extension))
-            }
+            ArtifactSpec::SingleFile { extension, .. } => self
+                .storage_path
+                .join(format!("{}.{}", model_id, extension)),
             ArtifactSpec::Bundle { dir_name, .. } => self.storage_path.join(dir_name),
         }
     }
@@ -895,9 +925,7 @@ impl HfArtifactDownloader {
                 peer_hints,
             } => {
                 let dest_dir = self.storage_path.join(dir_name);
-                let tmp_dir = self
-                    .storage_path
-                    .join(format!("{}.tmp", dir_name));
+                let tmp_dir = self.storage_path.join(format!("{}.tmp", dir_name));
 
                 // Clean any stale tmp dir from a previous failed attempt.
                 if tmp_dir.exists() {
@@ -1226,6 +1254,91 @@ fn parse_shard_spec(hf_filename: &str) -> Option<(String, u32, String)> {
     Some((prefix, total, ext_suffix))
 }
 
+/// The operator's HuggingFace access token, if they have configured one.
+///
+/// Read from `HF_TOKEN`, falling back to `HUGGING_FACE_HUB_TOKEN` (what the
+/// `huggingface_hub` Python library uses) and then to `~/.cache/huggingface/token`
+/// (what `huggingface-cli login` writes). Checking all three means an operator
+/// who has already logged in the ordinary way does not have to do anything
+/// else.
+///
+/// # Why this exists
+///
+/// Some of the strongest open checkpoints are *gated*: ungated to read about,
+/// but requiring per-account approval to fetch. `FLUX.2-dev`, `FLUX.2-klein-9B`
+/// and the whole `klein-base-9B` line are all `gated: auto` on the Hub. Without
+/// a token the download returns 401 or 403 and the operator is told, unhelpfully,
+/// that HuggingFace said no.
+///
+/// The token is the operator's own credential for their own account. It is
+/// never transmitted anywhere except huggingface.co, never persisted by this
+/// node, and never appears in a log line — see [`redact_token`].
+pub fn hf_token() -> Option<String> {
+    for var in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"] {
+        if let Ok(t) = std::env::var(var) {
+            let t = t.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    // Then the token file inside the Tenzro root, then the standard
+    // `huggingface-cli login` location. Both are read; only the first is ever
+    // written, so a machine's Tenzro footprint stays inside one directory
+    // without making an operator who already logged in the ordinary way do it
+    // again.
+    let candidates = std::iter::once(tenzro_types::paths::hf_token_path())
+        .chain(tenzro_types::paths::external_hf_token_path());
+    for path in candidates {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let t = raw.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a token is configured, without revealing it.
+///
+/// What a status surface reports: an operator needs to know whether gated
+/// downloads will work, and must not be shown the credential to find out.
+pub fn has_hf_token() -> bool {
+    hf_token().is_some()
+}
+
+/// Turn an HF HTTP failure into something that names the actual problem.
+///
+/// A bare "HTTP 401" on a gated repo sends an operator looking for a network
+/// fault. The repo is fine and reachable; they simply have not accepted its
+/// terms or have not given this node a token.
+fn explain_hf_status(status: reqwest::StatusCode, repo: &str, had_token: bool) -> String {
+    match status.as_u16() {
+        401 | 403 => {
+            if had_token {
+                format!(
+                    "HuggingFace returned {status} for {repo} even with a token. The token is \
+                     being sent, so this is an authorization decision: accept the model's terms \
+                     at https://huggingface.co/{repo} with the same account, or use a token that \
+                     has."
+                )
+            } else {
+                format!(
+                    "HuggingFace returned {status} for {repo}, which is a gated repository and \
+                     this node has no token. Accept its terms at https://huggingface.co/{repo}, \
+                     then set HF_TOKEN (or run `huggingface-cli login`) and retry."
+                )
+            }
+        }
+        404 => format!(
+            "HuggingFace returned 404 for {repo}. Either the repository or the file within it \
+             does not exist — check the catalog entry against the Hub."
+        ),
+        _ => format!("HTTP {status} from HuggingFace for {repo}"),
+    }
+}
+
 async fn download_one_file(
     progress_label: &str,
     hf_repo: &str,
@@ -1272,16 +1385,28 @@ async fn download_one_file(
         .build()
         .map_err(|e| ModelError::DownloadError(format!("Failed to create HTTP client: {}", e)))?;
 
-    let response = client.get(&download_url).send().await.map_err(|e| {
+    // Gated repositories need the operator's own HuggingFace token. Attached
+    // when configured, absent otherwise — an ungated download works either way,
+    // so there is no reason to require one.
+    let token = hf_token();
+    let mut request = client.get(&download_url);
+    if let Some(t) = &token {
+        request = request.bearer_auth(t);
+    }
+
+    let response = request.send().await.map_err(|e| {
         error!("HTTP download request failed for {}: {}", progress_label, e);
         ModelError::DownloadError(format!("HTTP request failed: {}", e))
     })?;
 
     if !response.status().is_success() {
-        return Err(ModelError::DownloadError(format!(
-            "HTTP {} from HuggingFace for {}",
+        // Names the real problem: a gated repo without a token is an
+        // authorization decision, not a network fault, and the two send an
+        // operator looking in completely different places.
+        return Err(ModelError::DownloadError(explain_hf_status(
             response.status(),
-            progress_label
+            hf_repo,
+            token.is_some(),
         )));
     }
 
@@ -1289,18 +1414,17 @@ async fn download_one_file(
 
     {
         use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::File::create(tmp_path).await.map_err(|e| {
-            ModelError::DownloadError(format!("Failed to create temp file: {}", e))
-        })?;
+        let mut file = tokio::fs::File::create(tmp_path)
+            .await
+            .map_err(|e| ModelError::DownloadError(format!("Failed to create temp file: {}", e)))?;
 
         let mut downloaded: u64 = 0;
         let mut stream = response.bytes_stream();
         use futures::StreamExt;
 
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| {
-                ModelError::DownloadError(format!("Download stream error: {}", e))
-            })?;
+            let chunk = chunk_result
+                .map_err(|e| ModelError::DownloadError(format!("Download stream error: {}", e)))?;
 
             file.write_all(&chunk)
                 .await
@@ -1389,9 +1513,8 @@ mod tests {
 
     #[test]
     fn parse_shard_spec_bare_first_shard() {
-        let (prefix, total, ext) =
-            parse_shard_spec("DeepSeek-V3-0324-Q4_K_M-00001-of-00009.gguf")
-                .expect("should parse bare first shard");
+        let (prefix, total, ext) = parse_shard_spec("DeepSeek-V3-0324-Q4_K_M-00001-of-00009.gguf")
+            .expect("should parse bare first shard");
         assert_eq!(prefix, "DeepSeek-V3-0324-Q4_K_M");
         assert_eq!(total, 9);
         assert_eq!(ext, ".gguf");
@@ -1410,10 +1533,7 @@ mod tests {
 
     #[test]
     fn sharded_model_path_prefers_first_shard() {
-        let tmp = std::env::temp_dir().join(format!(
-            "ipnops-shard-test-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("ipnops-shard-test-{}", std::process::id()));
         let dir = tmp.join("kimi-k2");
         std::fs::create_dir_all(&dir).unwrap();
         // Write shards out of order to confirm we pick shard 1.
@@ -1513,5 +1633,77 @@ mod tests {
             ArtifactSpec::SingleFile { peer_hint, .. } => assert_eq!(peer_hint, Some(hint)),
             _ => panic!("wrong variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod hf_token_tests {
+    use super::*;
+
+    #[test]
+    fn a_gated_failure_without_a_token_says_what_to_do() {
+        // A bare "HTTP 401" sends an operator looking for a network fault. The
+        // repo is reachable; they have not accepted its terms or not given the
+        // node a token, and the message has to say which.
+        let msg = explain_hf_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "black-forest-labs/FLUX.2-klein-9B",
+            false,
+        );
+        assert!(msg.contains("gated"), "{msg}");
+        assert!(msg.contains("HF_TOKEN"), "{msg}");
+        assert!(
+            msg.contains("huggingface.co/black-forest-labs/FLUX.2-klein-9B"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_gated_failure_with_a_token_points_at_the_account_not_the_token() {
+        // The distinction that saves an hour: the token is being sent and was
+        // rejected, so the problem is which account it belongs to.
+        let msg = explain_hf_status(
+            reqwest::StatusCode::FORBIDDEN,
+            "black-forest-labs/FLUX.2-dev",
+            true,
+        );
+        assert!(msg.contains("even with a token"), "{msg}");
+        assert!(msg.contains("accept the model's terms"), "{msg}");
+    }
+
+    #[test]
+    fn a_missing_repo_is_not_reported_as_an_auth_problem() {
+        let msg = explain_hf_status(reqwest::StatusCode::NOT_FOUND, "who/what", false);
+        assert!(msg.contains("does not exist"), "{msg}");
+        assert!(
+            !msg.contains("HF_TOKEN"),
+            "a 404 is not a credentials problem: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unexpected_status_is_reported_verbatim() {
+        // Guessing at a cause we did not anticipate is worse than saying what
+        // the server said.
+        let msg = explain_hf_status(reqwest::StatusCode::BAD_GATEWAY, "a/b", false);
+        assert!(msg.contains("502"), "{msg}");
+    }
+
+    #[test]
+    fn an_empty_token_is_treated_as_absent() {
+        // An exported-but-blank variable is a very common way to end up
+        // sending `Authorization: Bearer ` and getting an opaque rejection.
+        let saved = std::env::var("HF_TOKEN").ok();
+        // SAFETY: single-threaded test process.
+        unsafe { std::env::set_var("HF_TOKEN", "   ") };
+        let got = hf_token();
+        match saved {
+            Some(v) => unsafe { std::env::set_var("HF_TOKEN", v) },
+            None => unsafe { std::env::remove_var("HF_TOKEN") },
+        }
+        // Either None, or a real token from one of the fallbacks — never the
+        // blank string.
+        assert!(got.as_deref() != Some("   "), "a blank token was accepted");
+        assert!(got.as_deref() != Some(""), "an empty token was accepted");
     }
 }

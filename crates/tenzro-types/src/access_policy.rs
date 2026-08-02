@@ -85,12 +85,16 @@ pub enum AccessPolicy {
 impl AccessPolicy {
     /// Owner-only policy for `owner_did`.
     pub fn owner_only(owner_did: impl Into<String>) -> Self {
-        AccessPolicy::OwnerOnly { owner_did: owner_did.into() }
+        AccessPolicy::OwnerOnly {
+            owner_did: owner_did.into(),
+        }
     }
 
     /// Public-read policy owned by `owner_did`.
     pub fn public(owner_did: impl Into<String>) -> Self {
-        AccessPolicy::Public { owner_did: owner_did.into() }
+        AccessPolicy::Public {
+            owner_did: owner_did.into(),
+        }
     }
 
     /// Capability-gated policy with the default read/write actions.
@@ -197,7 +201,11 @@ impl ConfidentialSeal {
     /// A seal with the default wrap suite over `data_key_hash`, granting the
     /// listed wrapped keys.
     pub fn new(data_key_hash: [u8; 32], wrapped_keys: Vec<WrappedDataKey>) -> Self {
-        Self { wrap_alg: WRAP_ALG.to_string(), data_key_hash, wrapped_keys }
+        Self {
+            wrap_alg: WRAP_ALG.to_string(),
+            data_key_hash,
+            wrapped_keys,
+        }
     }
 
     /// Whether `did` has a wrapped copy of the data key (and therefore can

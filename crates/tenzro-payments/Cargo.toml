@@ -73,3 +73,6 @@ chrono = { workspace = true }
 [[bench]]
 name = "payment_benchmarks"
 harness = false
+
+[lints]
+workspace = true

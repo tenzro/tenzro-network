@@ -58,12 +58,12 @@ impl Default for InitialDistribution {
     fn default() -> Self {
         let total = 1_000_000_000u128 * 10u128.pow(18); // 1 billion TNZO
         Self {
-            treasury: (total * 25) / 100,          // 25% (network treasury & grants)
-            team: (total * 10) / 100,              // 10% (4-year vest, 1-year cliff)
-            investors: (total * 10) / 100,         // 10% (strategic rounds, vested)
-            community: (total * 35) / 100,         // 35% (airdrops, incentives, ecosystem growth)
+            treasury: (total * 25) / 100,  // 25% (network treasury & grants)
+            team: (total * 10) / 100,      // 10% (4-year vest, 1-year cliff)
+            investors: (total * 10) / 100, // 10% (strategic rounds, vested)
+            community: (total * 35) / 100, // 35% (airdrops, incentives, ecosystem growth)
             provider_incentives: (total * 15) / 100, // 15% (TEE/compute/model providers)
-            liquidity: (total * 5) / 100,          // 5% (DEX/CEX liquidity)
+            liquidity: (total * 5) / 100,  // 5% (DEX/CEX liquidity)
         }
     }
 }
@@ -86,10 +86,10 @@ pub struct TokenEconomics {
 impl Default for TokenEconomics {
     fn default() -> Self {
         Self {
-            inflation_rate: 200,         // 2% per year
-            transaction_fee_bps: 10,     // 0.1%
-            staking_reward_rate: 500,    // 5% per year
-            burn_rate_bps: 5000,         // 50% of fees burned
+            inflation_rate: 200,                  // 2% per year
+            transaction_fee_bps: 10,              // 0.1%
+            staking_reward_rate: 500,             // 5% per year
+            burn_rate_bps: 5000,                  // 50% of fees burned
             min_stake: 1000u128 * 10u128.pow(18), // 1000 TNZO minimum
         }
     }
@@ -152,7 +152,7 @@ impl Default for TreasuryParameters {
         Self {
             max_grant_amount: 1_000_000u128 * 10u128.pow(18), // 1M TNZO
             min_proposal_threshold: 10_000u128 * 10u128.pow(18), // 10K TNZO
-            grant_approval_quorum: 5000,                  // 50%
+            grant_approval_quorum: 5000,                      // 50%
         }
     }
 }
@@ -195,10 +195,12 @@ impl StakingPool {
 
     /// Adds stake to the pool using checked arithmetic
     pub fn add_stake(&mut self, amount: u128) -> Result<(), &'static str> {
-        self.total_staked = self.total_staked
+        self.total_staked = self
+            .total_staked
             .checked_add(amount)
             .ok_or("Stake addition would overflow")?;
-        self.staker_count = self.staker_count
+        self.staker_count = self
+            .staker_count
             .checked_add(1)
             .ok_or("Staker count would overflow")?;
         Ok(())
@@ -206,10 +208,12 @@ impl StakingPool {
 
     /// Removes stake from the pool using checked arithmetic
     pub fn remove_stake(&mut self, amount: u128) -> Result<(), &'static str> {
-        self.total_staked = self.total_staked
+        self.total_staked = self
+            .total_staked
             .checked_sub(amount)
             .ok_or("Insufficient stake to remove")?;
-        self.staker_count = self.staker_count
+        self.staker_count = self
+            .staker_count
             .checked_sub(1)
             .ok_or("Staker count underflow")?;
         Ok(())
@@ -281,9 +285,7 @@ impl ProviderStake {
 
     /// Sets a lock period
     pub fn with_lock_period(mut self, duration_ms: i64) -> Self {
-        self.lock_until = Some(Timestamp::new(
-            Timestamp::now().as_millis() + duration_ms,
-        ));
+        self.lock_until = Some(Timestamp::new(Timestamp::now().as_millis() + duration_ms));
         self
     }
 
@@ -298,7 +300,8 @@ impl ProviderStake {
 
     /// Adds rewards using checked arithmetic
     pub fn add_rewards(&mut self, amount: u128) -> Result<(), &'static str> {
-        self.rewards_earned = self.rewards_earned
+        self.rewards_earned = self
+            .rewards_earned
             .checked_add(amount)
             .ok_or("Reward addition would overflow")?;
         Ok(())
@@ -378,9 +381,10 @@ pub enum CloudTier {
 ///
 /// Roles that collateralise a privilege rather than a quantity pass
 /// [`StakeCapacity::None`] and take their flat bond.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StakeCapacity {
     /// No capacity dimension — the role's flat bond applies.
+    #[default]
     None,
     /// Accelerators pledged for rental.
     Accelerators(Vec<AcceleratorClass>),
@@ -388,12 +392,6 @@ pub enum StakeCapacity {
     Terabytes(u32),
     /// Highest cloud service class offered.
     Cloud(CloudTier),
-}
-
-impl Default for StakeCapacity {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl ProviderType {
@@ -622,7 +620,10 @@ impl GovernanceProposal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalType {
     /// Parameter change proposal
-    ParameterChange { parameter: String, new_value: String },
+    ParameterChange {
+        parameter: String,
+        new_value: String,
+    },
     /// Treasury grant proposal
     TreasuryGrant { recipient: Address, amount: u128 },
     /// Protocol upgrade proposal

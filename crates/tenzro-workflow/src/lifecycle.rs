@@ -74,7 +74,14 @@ impl LifecycleTransition {
         at: i64,
     ) -> Self {
         let transition_hash = Self::compute_hash(&workflow_id, from, to, &trigger, at);
-        Self { workflow_id, from, to, trigger, at, transition_hash }
+        Self {
+            workflow_id,
+            from,
+            to,
+            trigger,
+            at,
+            transition_hash,
+        }
     }
 
     fn compute_hash(
@@ -108,14 +115,18 @@ mod tests {
             wf,
             WorkflowStatus::Draft,
             WorkflowStatus::AwaitingSignatures,
-            TransitionTrigger::Participant { did: "alice".into() },
+            TransitionTrigger::Participant {
+                did: "alice".into(),
+            },
             100,
         );
         let b = LifecycleTransition::new(
             wf,
             WorkflowStatus::Draft,
             WorkflowStatus::AwaitingSignatures,
-            TransitionTrigger::Participant { did: "alice".into() },
+            TransitionTrigger::Participant {
+                did: "alice".into(),
+            },
             100,
         );
         assert_eq!(a.transition_hash, b.transition_hash);

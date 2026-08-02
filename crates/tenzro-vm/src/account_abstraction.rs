@@ -115,7 +115,7 @@ use thiserror::Error;
 use tracing::info;
 
 use tenzro_crypto::hash::keccak256;
-use tenzro_storage::{KvStore, CF_AGENTS};
+use tenzro_storage::{CF_AGENTS, KvStore};
 
 use crate::error::VmError;
 use crate::runtime::MultiVmRuntime;
@@ -150,7 +150,10 @@ impl Nonce {
     /// A nonce with `key = 0` and the given `seq` — the default-key
     /// ordered stream every legacy wallet uses.
     pub const fn from_seq(seq: u64) -> Self {
-        Self { key: [0u8; 24], seq }
+        Self {
+            key: [0u8; 24],
+            seq,
+        }
     }
 
     /// Pack `(key, seq)` into the 32-byte big-endian uint256 the wire
@@ -168,7 +171,10 @@ impl Nonce {
         key.copy_from_slice(&bytes[..24]);
         let mut seq_buf = [0u8; 8];
         seq_buf.copy_from_slice(&bytes[24..]);
-        Self { key, seq: u64::from_be_bytes(seq_buf) }
+        Self {
+            key,
+            seq: u64::from_be_bytes(seq_buf),
+        }
     }
 
     /// Hex form of the key portion (48 chars) for storage paths.
@@ -194,7 +200,11 @@ pub enum AccountAbstractionError {
 
     /// Invalid nonce — strict monotonic seq enforced per `(sender, key)`.
     #[error("Invalid nonce: expected seq {expected}, got seq {got} (key 0x{key_hex})")]
-    InvalidNonce { expected: u64, got: u64, key_hex: String },
+    InvalidNonce {
+        expected: u64,
+        got: u64,
+        key_hex: String,
+    },
 
     /// Paymaster error
     #[error("Paymaster error: {0}")]
@@ -395,7 +405,9 @@ impl UserOperation {
         data.extend_from_slice(&encode_u128_as_uint256(self.max_fee_per_gas));
         data.extend_from_slice(&encode_u128_as_uint256(self.max_priority_fee_per_gas));
         data.extend_from_slice(&encode_address(&self.paymaster));
-        data.extend_from_slice(&encode_u64_as_uint256(self.paymaster_verification_gas_limit));
+        data.extend_from_slice(&encode_u64_as_uint256(
+            self.paymaster_verification_gas_limit,
+        ));
         data.extend_from_slice(&encode_u64_as_uint256(self.paymaster_post_op_gas_limit));
         data.extend_from_slice(&keccak256_bytes(&self.paymaster_data));
 
@@ -426,7 +438,8 @@ impl UserOperation {
     ///
     /// In v0.8, this includes paymaster gas limits when a paymaster is present.
     pub fn total_gas_limit(&self) -> u64 {
-        let mut total = self.call_gas_limit
+        let mut total = self
+            .call_gas_limit
             .saturating_add(self.verification_gas_limit)
             .saturating_add(self.pre_verification_gas);
 
@@ -553,10 +566,14 @@ impl PackedUserOperation {
             if self.paymaster_and_data.len() >= 36 {
                 let pm = self.paymaster_and_data[..20].to_vec();
                 let ver_gas = u64::from_be_bytes(
-                    self.paymaster_and_data[20..28].try_into().unwrap_or([0u8; 8]),
+                    self.paymaster_and_data[20..28]
+                        .try_into()
+                        .unwrap_or([0u8; 8]),
                 );
                 let post_gas = u64::from_be_bytes(
-                    self.paymaster_and_data[28..36].try_into().unwrap_or([0u8; 8]),
+                    self.paymaster_and_data[28..36]
+                        .try_into()
+                        .unwrap_or([0u8; 8]),
                 );
                 let data = self.paymaster_and_data[36..].to_vec();
                 (pm, ver_gas, post_gas, data)
@@ -695,7 +712,10 @@ impl std::fmt::Debug for EntryPoint {
         f.debug_struct("EntryPoint")
             .field("address", &self.address)
             .field("chain_id", &self.chain_id)
-            .field("supported_account_factories", &self.supported_account_factories)
+            .field(
+                "supported_account_factories",
+                &self.supported_account_factories,
+            )
             .field("nonces", &self.nonces)
             .field("total_ops_processed", &self.total_ops_processed)
             .field("validator_registry", &self.validator_registry.is_some())
@@ -788,9 +808,11 @@ impl EntryPoint {
         let prefix = AA_NONCE_PREFIX.as_bytes();
         let keys = storage
             .get_keys_with_prefix(CF_AGENTS, prefix)
-            .map_err(|e| AccountAbstractionError::InvalidUserOp(format!(
-                "hydrate_nonces: list keys failed: {e}"
-            )))?;
+            .map_err(|e| {
+                AccountAbstractionError::InvalidUserOp(format!(
+                    "hydrate_nonces: list keys failed: {e}"
+                ))
+            })?;
         let mut count = 0usize;
         for storage_key in keys {
             // storage_key = "aa/nonce/{sender_hex}/{key_hex}"
@@ -996,12 +1018,11 @@ impl EntryPoint {
         // unified `VmState`, not in a parallel deposit pool.
 
         // Validate account creation (v0.8: factory field must be a valid address)
-        if op.is_account_creation()
-            && op.factory.len() < 20 {
-                return Err(AccountAbstractionError::InvalidUserOp(
-                    "factory must be a valid 20-byte address".to_string(),
-                ));
-            }
+        if op.is_account_creation() && op.factory.len() < 20 {
+            return Err(AccountAbstractionError::InvalidUserOp(
+                "factory must be a valid 20-byte address".to_string(),
+            ));
+        }
 
         Ok(())
     }
@@ -1092,9 +1113,8 @@ impl EntryPoint {
                 // (smart-account-as-router pattern). When absent, fall back
                 // to the legacy self-call shape (smart-account-as-target)
                 // so callers wiring raw bytecode keep working.
-                let (sub_to, sub_value, sub_data) =
-                    decode_execute_calldata(&op.call_data)
-                        .unwrap_or_else(|| (op.sender.clone(), 0u128, op.call_data.clone()));
+                let (sub_to, sub_value, sub_data) = decode_execute_calldata(&op.call_data)
+                    .unwrap_or_else(|| (op.sender.clone(), 0u128, op.call_data.clone()));
 
                 let tx = VmTransaction {
                     from: op.sender.clone(),
@@ -1128,11 +1148,8 @@ impl EntryPoint {
 
                 match runtime.execute_transaction(&tx, &mut state).await {
                     Ok(result) => {
-                        let logs: Vec<Vec<u8>> = result
-                            .logs
-                            .iter()
-                            .map(|l| l.data.clone())
-                            .collect();
+                        let logs: Vec<Vec<u8>> =
+                            result.logs.iter().map(|l| l.data.clone()).collect();
                         (result.success, result.gas_used, logs)
                     }
                     Err(e) => {
@@ -1141,7 +1158,11 @@ impl EntryPoint {
                             error = %e,
                             "UserOp execution failed"
                         );
-                        (false, 0u64, vec![format!("Execution failed: {}", e).into_bytes()])
+                        (
+                            false,
+                            0u64,
+                            vec![format!("Execution failed: {}", e).into_bytes()],
+                        )
                     }
                 }
             }
@@ -1158,7 +1179,11 @@ impl EntryPoint {
                         .saturating_add(op.paymaster_verification_gas_limit)
                         .saturating_add(op.paymaster_post_op_gas_limit);
                 }
-                (true, total_gas, vec![b"UserOp executed (no runtime)".to_vec()])
+                (
+                    true,
+                    total_gas,
+                    vec![b"UserOp executed (no runtime)".to_vec()],
+                )
             }
         };
 
@@ -1421,7 +1446,8 @@ impl AccountFactory {
     /// `deployed_accounts` directly so the on-disk state stays in sync.
     pub fn update_account(&self, account: SmartAccount) {
         self.persist(&account);
-        self.deployed_accounts.insert(account.address.clone(), account);
+        self.deployed_accounts
+            .insert(account.address.clone(), account);
     }
 
     /// Get the counterfactual address for an account
@@ -1489,7 +1515,8 @@ pub struct SmartAccount {
     /// re-issue installs to fresh registries (e.g. on rehydration) and answer
     /// `isModuleInstalled`.
     #[serde(default)]
-    pub validator_modules: std::collections::BTreeMap<[u8; 20], crate::erc7579::ValidatorModuleConfig>,
+    pub validator_modules:
+        std::collections::BTreeMap<[u8; 20], crate::erc7579::ValidatorModuleConfig>,
 }
 
 impl SmartAccount {
@@ -1509,12 +1536,15 @@ impl SmartAccount {
 
     /// Check if account has a specific module type
     pub fn has_module_type(&self, module_type: &str) -> bool {
-        self.modules.iter().any(|m| matches!((module_type, m),
-            ("social_recovery", AccountModule::SocialRecovery { .. })
-            | ("session_key", AccountModule::SessionKey { .. })
-            | ("spending_limit", AccountModule::SpendingLimit { .. })
-            | ("batching", AccountModule::Batching)
-        ))
+        self.modules.iter().any(|m| {
+            matches!(
+                (module_type, m),
+                ("social_recovery", AccountModule::SocialRecovery { .. })
+                    | ("session_key", AccountModule::SessionKey { .. })
+                    | ("spending_limit", AccountModule::SpendingLimit { .. })
+                    | ("batching", AccountModule::Batching)
+            )
+        })
     }
 
     /// Get session keys that are currently valid
@@ -1522,7 +1552,9 @@ impl SmartAccount {
         self.modules
             .iter()
             .filter_map(|m| {
-                if let AccountModule::SessionKey { key, expires_at, .. } = m
+                if let AccountModule::SessionKey {
+                    key, expires_at, ..
+                } = m
                     && *expires_at > current_time
                 {
                     return Some(key.clone());
@@ -1868,8 +1900,8 @@ pub fn recover_eoa_from_7702_signature(auth: &Eip7702Authorization) -> Result<Ve
 
     let mut sig_bytes = [0u8; 64];
     sig_bytes.copy_from_slice(&auth.signature[..64]);
-    let signature = Signature::from_bytes(&sig_bytes.into())
-        .map_err(|_| VmError::InvalidSignature)?;
+    let signature =
+        Signature::from_bytes(&sig_bytes.into()).map_err(|_| VmError::InvalidSignature)?;
 
     let hash = auth.signing_hash();
     let recovered = VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id)
@@ -2097,7 +2129,10 @@ mod tests {
 
         // Different salt should give different address
         let address3 = factory.get_address(&owner, salt + 1);
-        assert_ne!(address1, address3, "Different salts should give different addresses");
+        assert_ne!(
+            address1, address3,
+            "Different salts should give different addresses"
+        );
 
         // Create account
         let account = factory.create_account(owner.clone(), salt);
@@ -2585,8 +2620,14 @@ mod tests {
         assert_eq!(restored.factory_data, user_op.factory_data);
         assert_eq!(restored.call_data, user_op.call_data);
         assert_eq!(restored.paymaster, user_op.paymaster);
-        assert_eq!(restored.paymaster_verification_gas_limit, user_op.paymaster_verification_gas_limit);
-        assert_eq!(restored.paymaster_post_op_gas_limit, user_op.paymaster_post_op_gas_limit);
+        assert_eq!(
+            restored.paymaster_verification_gas_limit,
+            user_op.paymaster_verification_gas_limit
+        );
+        assert_eq!(
+            restored.paymaster_post_op_gas_limit,
+            user_op.paymaster_post_op_gas_limit
+        );
         assert_eq!(restored.paymaster_data, user_op.paymaster_data);
     }
 
@@ -2866,8 +2907,7 @@ mod tests {
     #[test]
     fn account_factory_hydrates_after_restart() {
         use std::sync::Arc;
-        let store: Arc<dyn tenzro_storage::KvStore> =
-            Arc::new(tenzro_storage::MemoryStore::new());
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
 
         // Factory A — create two accounts and install a validator on the first.
         let factory_addr = vec![0xAB; 20];
@@ -2875,14 +2915,18 @@ mod tests {
             let factory = AccountFactory::with_storage(factory_addr.clone(), store.clone());
             let _acc1 = factory.create_account(b"owner-1".to_vec(), 0);
             let _acc2 = factory.create_account(b"owner-2".to_vec(), 7);
-            let mut mutated = factory.get_account(&factory.get_address(b"owner-1", 0)).unwrap();
+            let mut mutated = factory
+                .get_account(&factory.get_address(b"owner-1", 0))
+                .unwrap();
             let cfg = crate::erc7579::ValidatorModuleConfig {
                 type_id: 1,
                 module_address: [0xCD; 20],
                 init_data: vec![1, 2, 3, 4],
                 priority: 0,
             };
-            mutated.install_validator_module(cfg.clone(), /* owner_authorized = */ true).unwrap();
+            mutated
+                .install_validator_module(cfg.clone(), /* owner_authorized = */ true)
+                .unwrap();
             factory.update_account(mutated);
         }
 
@@ -2892,8 +2936,10 @@ mod tests {
         let acc1_addr = factory.get_address(b"owner-1", 0);
         let restored = factory.get_account(&acc1_addr).expect("acc1 hydrated");
         assert_eq!(restored.owner, b"owner-1");
-        assert!(restored.is_validator_installed(&[0xCD; 20]),
-            "installed validator must survive restart");
+        assert!(
+            restored.is_validator_installed(&[0xCD; 20]),
+            "installed validator must survive restart"
+        );
 
         let acc2_addr = factory.get_address(b"owner-2", 7);
         let restored2 = factory.get_account(&acc2_addr).expect("acc2 hydrated");

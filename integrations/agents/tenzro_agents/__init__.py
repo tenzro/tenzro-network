@@ -32,18 +32,18 @@ from .core import (
 __version__ = "0.1.0"
 
 __all__ = [
-    "__version__",
     # core
     "DOMAIN_TAG",
     "ReputationHook",
     "TenzroClient",
     "TenzroDidEnvelope",
     "TenzroRpcError",
+    "__version__",
     "canonical_params_hash",
     "canonical_preimage",
     # AP2 mandate helpers
     "cart_item",
-    "checkout_mandate",
     "checkout_hash",
+    "checkout_mandate",
     "payment_mandate",
 ]

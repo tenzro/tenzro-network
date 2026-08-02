@@ -472,7 +472,10 @@ mod tests {
             }
             ef.commit_transmitted(&t, &sent);
         }
-        assert!(crossed, "error feedback never surfaced the sub-threshold coord");
+        assert!(
+            crossed,
+            "error feedback never surfaced the sub-threshold coord"
+        );
     }
 
     #[test]

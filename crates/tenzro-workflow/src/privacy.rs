@@ -33,9 +33,9 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tenzro_crypto::encryption::{
-    envelope_decrypt, envelope_encrypt, EncryptedEnvelope, X25519KeyPair, X25519PublicKey,
+    EncryptedEnvelope, X25519KeyPair, X25519PublicKey, envelope_decrypt, envelope_encrypt,
 };
-use tenzro_storage::kv::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::kv::{CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::primitives::Hash;
 use tracing::{debug, info};
 
@@ -219,11 +219,17 @@ pub struct PrivacyDomainRegistry {
 
 impl PrivacyDomainRegistry {
     pub fn new() -> Self {
-        Self { domains: DashMap::new(), storage: None }
+        Self {
+            domains: DashMap::new(),
+            storage: None,
+        }
     }
 
     pub fn with_storage(storage: Arc<dyn KvStore>) -> Result<Self> {
-        let reg = Self { domains: DashMap::new(), storage: Some(storage) };
+        let reg = Self {
+            domains: DashMap::new(),
+            storage: Some(storage),
+        };
         reg.hydrate()?;
         Ok(reg)
     }
@@ -238,7 +244,10 @@ impl PrivacyDomainRegistry {
             self.domains.insert(d.domain_id, d);
             count += 1;
         }
-        info!(domains = count, "PrivacyDomainRegistry hydrated from storage");
+        info!(
+            domains = count,
+            "PrivacyDomainRegistry hydrated from storage"
+        );
         Ok(())
     }
 
@@ -281,9 +290,10 @@ impl PrivacyDomainRegistry {
 
     /// Freeze a domain — no new encryptions will succeed.
     pub fn freeze(&self, id: &PrivacyDomainId) -> Result<()> {
-        let mut entry = self.domains.get_mut(id).ok_or_else(|| {
-            WorkflowError::PrivacyDomainNotFound(hex::encode(id.as_bytes()))
-        })?;
+        let mut entry = self
+            .domains
+            .get_mut(id)
+            .ok_or_else(|| WorkflowError::PrivacyDomainNotFound(hex::encode(id.as_bytes())))?;
         entry.frozen = true;
         let snap = entry.clone();
         drop(entry);

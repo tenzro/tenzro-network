@@ -12,8 +12,8 @@ use crate::x402::payment_payload::{ExactAuthorization, ExactSchemePayload, X402P
 use crate::x402::payment_required::X402PaymentRequired;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tenzro_wallet::wallet::WalletId;
 use tenzro_wallet::WalletService;
+use tenzro_wallet::wallet::WalletId;
 use tracing::{debug, info};
 
 /// x402-aware HTTP client that automatically handles 402 Payment Required responses
@@ -157,16 +157,16 @@ impl X402Client {
         &self,
         requirement: &crate::x402::payment_required::X402PaymentRequirement,
     ) -> Result<X402PaymentPayload> {
-        let (wallet_service, wallet_id) =
-            self.wallet_service
-                .as_ref()
-                .zip(self.wallet_id.as_ref())
-                .ok_or_else(|| {
-                    PaymentError::CredentialError(
-                        "Wallet service required for x402 payments — call with_wallet() first"
-                            .to_string(),
-                    )
-                })?;
+        let (wallet_service, wallet_id) = self
+            .wallet_service
+            .as_ref()
+            .zip(self.wallet_id.as_ref())
+            .ok_or_else(|| {
+                PaymentError::CredentialError(
+                    "Wallet service required for x402 payments — call with_wallet() first"
+                        .to_string(),
+                )
+            })?;
 
         // Canonical preimage matches `TenzroHybridBackend::verify_payload`.
         let mut message = Vec::new();

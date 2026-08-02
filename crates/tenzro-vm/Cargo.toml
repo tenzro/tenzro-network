@@ -117,3 +117,6 @@ harness = false
 [[bench]]
 name = "passkey_benchmarks"
 harness = false
+
+[lints]
+workspace = true

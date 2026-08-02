@@ -29,9 +29,9 @@ use std::collections::HashMap;
 
 use dkls23_core::protocols::{Abort, AbortKind, AbortReason};
 use serde::{Deserialize, Serialize};
-use tenzro_crypto::{signatures::Signature, PublicKey};
 #[cfg(test)]
 use tenzro_crypto::KeyType;
+use tenzro_crypto::{PublicKey, signatures::Signature};
 use thiserror::Error;
 
 use crate::mpc::setup::{InstanceId, MpcParameters};
@@ -469,14 +469,18 @@ mod tests {
 
     use dkls23_core::protocols::PartyIndex;
     use std::sync::Mutex;
-    use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
     use tenzro_crypto::KeyPair;
+    use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 
     fn ed25519_keypair() -> KeyPair {
         KeyPair::generate(KeyType::Ed25519).unwrap()
     }
 
-    fn sign_evidence(evidence: &MpcAbortEvidence, signer: &Ed25519SignerImpl, did: &str) -> EvidenceSigner {
+    fn sign_evidence(
+        evidence: &MpcAbortEvidence,
+        signer: &Ed25519SignerImpl,
+        did: &str,
+    ) -> EvidenceSigner {
         let sig = signer.sign(&evidence.signing_preimage()).unwrap();
         EvidenceSigner {
             witness_did: did.to_string(),
@@ -502,13 +506,9 @@ mod tests {
                 _ => None,
             }
         };
-        let evidence = MpcAbortEvidence::from_protocol_abort(
-            &abort,
-            sample_instance(),
-            parameters,
-            did_for,
-        )
-        .unwrap();
+        let evidence =
+            MpcAbortEvidence::from_protocol_abort(&abort, sample_instance(), parameters, did_for)
+                .unwrap();
         assert_eq!(
             evidence.severity,
             AbortSeverity::BanCounterparty { party_index: 2 }
@@ -529,13 +529,11 @@ mod tests {
             },
         };
         let parameters = MpcParameters::new(MpcCurve::Secp256k1, 2, 3).unwrap();
-        let evidence = MpcAbortEvidence::from_protocol_abort(
-            &abort,
-            sample_instance(),
-            parameters,
-            |_| Some("did:tenzro:machine:p1".into()),
-        )
-        .unwrap();
+        let evidence =
+            MpcAbortEvidence::from_protocol_abort(&abort, sample_instance(), parameters, |_| {
+                Some("did:tenzro:machine:p1".into())
+            })
+            .unwrap();
         assert_eq!(evidence.category, AbortCategory::ProtocolError);
         assert_eq!(evidence.severity, AbortSeverity::Recoverable);
     }
@@ -550,12 +548,8 @@ mod tests {
             },
         };
         let parameters = MpcParameters::new(MpcCurve::Secp256k1, 2, 3).unwrap();
-        let result = MpcAbortEvidence::from_protocol_abort(
-            &abort,
-            sample_instance(),
-            parameters,
-            |_| None,
-        );
+        let result =
+            MpcAbortEvidence::from_protocol_abort(&abort, sample_instance(), parameters, |_| None);
         assert!(result.is_none());
     }
 
@@ -568,8 +562,16 @@ mod tests {
         let pk_b = kp_b.public_key().clone();
         let signer_a = Ed25519SignerImpl::new(kp_a).unwrap();
         let signer_b = Ed25519SignerImpl::new(kp_b).unwrap();
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer_a, "did:tenzro:machine:w1"));
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer_b, "did:tenzro:machine:w2"));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer_a,
+            "did:tenzro:machine:w1",
+        ));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer_b,
+            "did:tenzro:machine:w2",
+        ));
 
         let mut map = HashMap::new();
         map.insert("did:tenzro:machine:w1".to_string(), pk_a);
@@ -583,13 +585,23 @@ mod tests {
         let kp = ed25519_keypair();
         let pk = kp.public_key().clone();
         let signer = Ed25519SignerImpl::new(kp).unwrap();
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer, "did:tenzro:machine:w1"));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer,
+            "did:tenzro:machine:w1",
+        ));
 
         let mut map = HashMap::new();
         map.insert("did:tenzro:machine:w1".to_string(), pk);
         // threshold = 2 but only one witness
         let err = admit_evidence(&evidence, &map).unwrap_err();
-        assert!(matches!(err, AdmissionError::InsufficientWitnesses { got: 1, required: 2 }));
+        assert!(matches!(
+            err,
+            AdmissionError::InsufficientWitnesses {
+                got: 1,
+                required: 2
+            }
+        ));
     }
 
     #[test]
@@ -598,8 +610,16 @@ mod tests {
         let kp = ed25519_keypair();
         let pk = kp.public_key().clone();
         let signer = Ed25519SignerImpl::new(kp).unwrap();
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer, "did:tenzro:machine:w1"));
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer, "did:tenzro:machine:w1"));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer,
+            "did:tenzro:machine:w1",
+        ));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer,
+            "did:tenzro:machine:w1",
+        ));
 
         let mut map = HashMap::new();
         map.insert("did:tenzro:machine:w1".to_string(), pk);
@@ -615,14 +635,24 @@ mod tests {
         let pk_a = kp_a.public_key().clone();
         let signer_a = Ed25519SignerImpl::new(kp_a).unwrap();
         let signer_b = Ed25519SignerImpl::new(kp_b).unwrap();
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer_a, "did:tenzro:machine:w1"));
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer_b, "did:tenzro:machine:w2"));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer_a,
+            "did:tenzro:machine:w1",
+        ));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer_b,
+            "did:tenzro:machine:w2",
+        ));
 
         let mut map = HashMap::new();
         map.insert("did:tenzro:machine:w1".to_string(), pk_a);
         // w2 missing from registry
         let err = admit_evidence(&evidence, &map).unwrap_err();
-        assert!(matches!(err, AdmissionError::UnknownWitness(ref d) if d == "did:tenzro:machine:w2"));
+        assert!(
+            matches!(err, AdmissionError::UnknownWitness(ref d) if d == "did:tenzro:machine:w2")
+        );
     }
 
     #[test]
@@ -679,8 +709,16 @@ mod tests {
         let pk_b = kp_b.public_key().clone();
         let signer_a = Ed25519SignerImpl::new(kp_a).unwrap();
         let signer_b = Ed25519SignerImpl::new(kp_b).unwrap();
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer_a, "did:tenzro:machine:w1"));
-        evidence.signers.push(sign_evidence(&evidence.clone(), &signer_b, "did:tenzro:machine:w2"));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer_a,
+            "did:tenzro:machine:w1",
+        ));
+        evidence.signers.push(sign_evidence(
+            &evidence.clone(),
+            &signer_b,
+            "did:tenzro:machine:w2",
+        ));
 
         let mut map = HashMap::new();
         map.insert("did:tenzro:machine:w1".to_string(), pk_a);

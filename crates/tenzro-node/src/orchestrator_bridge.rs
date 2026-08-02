@@ -17,18 +17,18 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
-use tenzro_storage::KvStore;
+use serde_json::{Value, json};
 use tenzro_model::meta_router::RouteIntent;
+use tenzro_storage::KvStore;
 use tenzro_types::agent::SwarmConfig;
 use tenzro_types::primitives::Address;
 
 use crate::node::TenzroNode;
-use crate::rpc::AuthContext;
 use crate::orchestrator::{
     CapabilityCard, CatalogSnapshot, DeterministicPlanner, LlmPlanner, Orchestrator,
     OrchestratorError, PlanCompletion, Result as OrchResult, StepExecutor, SwarmMemberSpec,
 };
+use crate::rpc::AuthContext;
 
 /// The agent id the orchestrator spawns swarm/agent members under when it needs
 /// to delegate. Present in the runtime only when this node runs an agent

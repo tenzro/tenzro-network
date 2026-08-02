@@ -67,10 +67,10 @@ impl Default for StableControllerConfig {
         // relative to the 100% floor.
         Self {
             target_q18: Q18,
-            kp_bps: 5_000,   // 0.5
-            ki_bps: 500,     // 0.05
-            leak_bps: 9_000, // retain 90% of the integral each epoch
-            max_supply_step_bps: 500, // 5%
+            kp_bps: 5_000,             // 0.5
+            ki_bps: 500,               // 0.05
+            leak_bps: 9_000,           // retain 90% of the integral each epoch
+            max_supply_step_bps: 500,  // 5%
             target_buffer_bps: 12_000, // 120%
             warn_buffer_bps: 11_000,   // 110%
             trip_buffer_bps: 10_500,   // 105%
@@ -88,7 +88,9 @@ impl StableControllerConfig {
             return Err("leak_bps must be in 0..=10_000".into());
         }
         if self.trip_buffer_bps >= self.warn_buffer_bps {
-            return Err("trip_buffer_bps must be < warn_buffer_bps (band gap prevents hysteresis)".into());
+            return Err(
+                "trip_buffer_bps must be < warn_buffer_bps (band gap prevents hysteresis)".into(),
+            );
         }
         if self.max_supply_step_bps < 0 {
             return Err("max_supply_step_bps must be non-negative".into());
@@ -282,7 +284,11 @@ mod tests {
         // Market 2% above target → controller mints to push price down.
         let market = Q18 + (Q18 * 2 / 100);
         let out = ctrl.step(market, 1_000_000, 1_200_000, u128::MAX);
-        assert!(out.supply_delta > 0, "expected expansion, got {}", out.supply_delta);
+        assert!(
+            out.supply_delta > 0,
+            "expected expansion, got {}",
+            out.supply_delta
+        );
         // Clamped to 5% of 1_000_000 = 50_000.
         assert!(out.supply_delta <= 50_000);
     }
@@ -292,7 +298,11 @@ mod tests {
         let mut ctrl = StableController::new(cfg()).unwrap();
         let market = Q18 - (Q18 * 2 / 100);
         let out = ctrl.step(market, 1_000_000, 1_200_000, u128::MAX);
-        assert!(out.supply_delta < 0, "expected contraction, got {}", out.supply_delta);
+        assert!(
+            out.supply_delta < 0,
+            "expected contraction, got {}",
+            out.supply_delta
+        );
     }
 
     #[test]
@@ -302,7 +312,11 @@ mod tests {
         // Only 1_000 units of headroom under the reserve floor.
         let out = ctrl.step(market, 1_000_000, 1_200_000, 1_000);
         assert!(out.supply_delta > 0);
-        assert!(out.supply_delta <= 1_000, "must not cross floor: {}", out.supply_delta);
+        assert!(
+            out.supply_delta <= 1_000,
+            "must not cross floor: {}",
+            out.supply_delta
+        );
     }
 
     #[test]

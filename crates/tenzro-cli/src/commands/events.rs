@@ -2,9 +2,9 @@
 //!
 //! Subscribe to real-time events, query event history, and manage webhooks.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Event streaming commands
 #[derive(Debug, Subcommand)]
@@ -96,7 +96,9 @@ impl EventSubscribeCmd {
         let mut count: u64 = 0;
 
         // First, get the current sequence to start from
-        let status: serde_json::Value = rpc.call("tenzro_eventStatus", serde_json::json!({})).await?;
+        let status: serde_json::Value = rpc
+            .call("tenzro_eventStatus", serde_json::json!({}))
+            .await?;
         if let Some(seq) = status.get("current_sequence").and_then(|v| v.as_u64()) {
             from_sequence = seq;
         }
@@ -114,8 +116,15 @@ impl EventSubscribeCmd {
                 for event in events {
                     count += 1;
                     let seq = event.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let event_type = event.get("event_type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let block = event.get("block_height").and_then(|v| v.as_u64()).map(|h| h.to_string()).unwrap_or("-".to_string());
+                    let event_type = event
+                        .get("event_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let block = event
+                        .get("block_height")
+                        .and_then(|v| v.as_u64())
+                        .map(|h| h.to_string())
+                        .unwrap_or("-".to_string());
 
                     if self.format == "json" {
                         println!("{}", serde_json::to_string(event).unwrap_or_default());
@@ -142,7 +151,12 @@ impl EventSubscribeCmd {
             }
 
             // If no events, wait a bit before polling again
-            if result.get("events").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(true) {
+            if result
+                .get("events")
+                .and_then(|v| v.as_array())
+                .map(|a| a.is_empty())
+                .unwrap_or(true)
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
         }
@@ -181,18 +195,29 @@ impl EventHistoryCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let mut filter = serde_json::Map::new();
-        if let Some(from) = self.from_block { filter.insert("from_block".into(), serde_json::json!(from)); }
-        if let Some(to) = self.to_block { filter.insert("to_block".into(), serde_json::json!(to)); }
-        if let Some(seq) = self.from_sequence { filter.insert("from_sequence".into(), serde_json::json!(seq)); }
+        if let Some(from) = self.from_block {
+            filter.insert("from_block".into(), serde_json::json!(from));
+        }
+        if let Some(to) = self.to_block {
+            filter.insert("to_block".into(), serde_json::json!(to));
+        }
+        if let Some(seq) = self.from_sequence {
+            filter.insert("from_sequence".into(), serde_json::json!(seq));
+        }
         if let Some(ref types) = self.types {
             let types: Vec<&str> = types.split(',').collect();
             filter.insert("event_types".into(), serde_json::json!(types));
         }
 
-        let result: serde_json::Value = rpc.call("tenzro_getEvents", serde_json::json!({
-            "filter": serde_json::Value::Object(filter),
-            "limit": self.limit,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getEvents",
+                serde_json::json!({
+                    "filter": serde_json::Value::Object(filter),
+                    "limit": self.limit,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -204,10 +229,26 @@ impl EventHistoryCmd {
                 let headers = vec!["Seq", "Block", "Type", "Details"];
                 let mut rows = Vec::new();
                 for e in events {
-                    let seq = e.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0).to_string();
-                    let block = e.get("block_height").and_then(|v| v.as_u64()).map(|h| h.to_string()).unwrap_or("-".to_string());
-                    let etype = e.get("event_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let details = e.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let seq = e
+                        .get("sequence")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        .to_string();
+                    let block = e
+                        .get("block_height")
+                        .and_then(|v| v.as_u64())
+                        .map(|h| h.to_string())
+                        .unwrap_or("-".to_string());
+                    let etype = e
+                        .get("event_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let details = e
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     rows.push(vec![seq, block, etype, details]);
                 }
                 output::print_table(&headers, &rows);
@@ -215,7 +256,10 @@ impl EventHistoryCmd {
         }
 
         if let Some(cursor) = result.get("next_cursor").and_then(|v| v.as_u64()) {
-            output::print_info(&format!("Next cursor: {} (use --from-sequence {})", cursor, cursor));
+            output::print_info(&format!(
+                "Next cursor: {} (use --from-sequence {})",
+                cursor, cursor
+            ));
         }
 
         Ok(())
@@ -254,16 +298,25 @@ impl EventLogsCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let mut filter = serde_json::Map::new();
-        if let Some(ref addr) = self.address { filter.insert("address".into(), serde_json::json!(addr)); }
-        if let Some(ref t0) = self.topic0 { filter.insert("topics".into(), serde_json::json!([[t0]])); }
+        if let Some(ref addr) = self.address {
+            filter.insert("address".into(), serde_json::json!(addr));
+        }
+        if let Some(ref t0) = self.topic0 {
+            filter.insert("topics".into(), serde_json::json!([[t0]]));
+        }
         if let Some(from) = self.from_block {
-            filter.insert("fromBlock".into(), serde_json::json!(format!("0x{:x}", from)));
+            filter.insert(
+                "fromBlock".into(),
+                serde_json::json!(format!("0x{:x}", from)),
+            );
         }
         if let Some(to) = self.to_block {
             filter.insert("toBlock".into(), serde_json::json!(format!("0x{:x}", to)));
         }
 
-        let result: serde_json::Value = rpc.call("eth_getLogs", serde_json::Value::Object(filter)).await?;
+        let result: serde_json::Value = rpc
+            .call("eth_getLogs", serde_json::Value::Object(filter))
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -275,18 +328,45 @@ impl EventLogsCmd {
                 let headers = vec!["Block", "TxHash", "Address", "Topic0", "Data"];
                 let mut rows = Vec::new();
                 for log in logs.iter().take(self.limit as usize) {
-                    let block = log.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let tx = log.get("transactionHash").and_then(|v| v.as_str()).map(|s| {
-                        if s.len() > 18 { format!("{}...", &s[..18]) } else { s.to_string() }
-                    }).unwrap_or_default();
-                    let addr = log.get("address").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let topic0 = log.get("topics").and_then(|v| v.as_array()).and_then(|a| a.first())
-                        .and_then(|v| v.as_str()).map(|s| {
-                            if s.len() > 18 { format!("{}...", &s[..18]) } else { s.to_string() }
-                        }).unwrap_or_default();
-                    let data_len = log.get("data").and_then(|v| v.as_str()).map(|s| {
-                        format!("{} bytes", (s.len() - 2) / 2)
-                    }).unwrap_or_default();
+                    let block = log
+                        .get("blockNumber")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let tx = log
+                        .get("transactionHash")
+                        .and_then(|v| v.as_str())
+                        .map(|s| {
+                            if s.len() > 18 {
+                                format!("{}...", &s[..18])
+                            } else {
+                                s.to_string()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let addr = log
+                        .get("address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let topic0 = log
+                        .get("topics")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                        .map(|s| {
+                            if s.len() > 18 {
+                                format!("{}...", &s[..18])
+                            } else {
+                                s.to_string()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let data_len = log
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .map(|s| format!("{} bytes", (s.len() - 2) / 2))
+                        .unwrap_or_default();
                     rows.push(vec![block, tx, addr, topic0, data_len]);
                 }
                 output::print_table(&headers, &rows);
@@ -312,6 +392,13 @@ pub struct RegisterWebhookCmd {
     /// Secret for HMAC-SHA256 signature verification
     #[arg(long)]
     secret: String,
+    /// DID that owns this webhook. Only this DID can list or delete it.
+    #[arg(long)]
+    owner_did: String,
+    /// Hex DID envelope proving control of --owner-did, bound to method
+    /// `tenzro_registerWebhook` with the URL as the params hash.
+    #[arg(long)]
+    did_envelope: String,
     /// Enable dual delivery (unconfirmed + confirmed)
     #[arg(long)]
     confirmed_delivery: bool,
@@ -337,17 +424,30 @@ impl RegisterWebhookCmd {
             filter.insert("addresses".into(), serde_json::json!([addr]));
         }
 
-        let result: serde_json::Value = rpc.call("tenzro_registerWebhook", serde_json::json!({
-            "url": self.url,
-            "filter": serde_json::Value::Object(filter),
-            "secret": self.secret,
-            "confirmed_delivery": self.confirmed_delivery,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_registerWebhook",
+                serde_json::json!({
+                    "url": self.url,
+                    "owner_did": self.owner_did,
+                    "did_envelope": self.did_envelope,
+                    "filter": serde_json::Value::Object(filter),
+                    "secret": self.secret,
+                    "confirmed_delivery": self.confirmed_delivery,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Webhook registered!");
-        output::print_field("Webhook ID", result.get("webhook_id").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Webhook ID",
+            result
+                .get("webhook_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
         output::print_field("URL", &self.url);
         output::print_field("Confirmed Delivery", &self.confirmed_delivery.to_string());
         output::print_info("Payloads will include X-Tenzro-Signature header (HMAC-SHA256)");
@@ -356,9 +456,19 @@ impl RegisterWebhookCmd {
     }
 }
 
-/// List registered webhooks
+/// List the webhooks registered under one owner DID.
+///
+/// Scoped rather than node-wide: a webhook row carries its delivery URL and
+/// the addresses its owner watches, which is not the next tenant's business.
 #[derive(Debug, Parser)]
 pub struct ListWebhooksCmd {
+    /// DID whose webhooks to list.
+    #[arg(long)]
+    owner_did: String,
+    /// Hex DID envelope proving control of --owner-did, bound to method
+    /// `tenzro_listWebhooks` with the DID string as the params hash.
+    #[arg(long)]
+    did_envelope: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -372,7 +482,15 @@ impl ListWebhooksCmd {
         let spinner = output::create_spinner("Loading...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_listWebhooks", serde_json::json!({})).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_listWebhooks",
+                serde_json::json!({
+                    "owner_did": self.owner_did,
+                    "did_envelope": self.did_envelope,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -384,13 +502,33 @@ impl ListWebhooksCmd {
                 let mut rows = Vec::new();
                 for wh in webhooks {
                     rows.push(vec![
-                        wh.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        wh.get("url").and_then(|v| v.as_str()).map(|u| {
-                            if u.len() > 40 { format!("{}...", &u[..40]) } else { u.to_string() }
-                        }).unwrap_or_default(),
-                        wh.get("active").and_then(|v| v.as_bool()).map(|b| if b { "yes" } else { "no" }).unwrap_or("?").to_string(),
-                        wh.get("total_deliveries").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
-                        wh.get("failed_deliveries").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                        wh.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        wh.get("url")
+                            .and_then(|v| v.as_str())
+                            .map(|u| {
+                                if u.len() > 40 {
+                                    format!("{}...", &u[..40])
+                                } else {
+                                    u.to_string()
+                                }
+                            })
+                            .unwrap_or_default(),
+                        wh.get("active")
+                            .and_then(|v| v.as_bool())
+                            .map(|b| if b { "yes" } else { "no" })
+                            .unwrap_or("?")
+                            .to_string(),
+                        wh.get("total_deliveries")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                            .to_string(),
+                        wh.get("failed_deliveries")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
@@ -406,6 +544,11 @@ impl ListWebhooksCmd {
 pub struct DeleteWebhookCmd {
     /// Webhook ID to delete
     webhook_id: String,
+    /// Hex DID envelope proving control of the webhook's recorded owner_did,
+    /// bound to method `tenzro_deleteWebhook` with the webhook id as the
+    /// params hash.
+    #[arg(long)]
+    did_envelope: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -419,9 +562,15 @@ impl DeleteWebhookCmd {
         let spinner = output::create_spinner("Deleting...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let _result: serde_json::Value = rpc.call("tenzro_deleteWebhook", serde_json::json!({
-            "webhook_id": self.webhook_id,
-        })).await?;
+        let _result: serde_json::Value = rpc
+            .call(
+                "tenzro_deleteWebhook",
+                serde_json::json!({
+                    "webhook_id": self.webhook_id,
+                    "did_envelope": self.did_envelope,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -447,21 +596,67 @@ impl EventInfoCmd {
         let spinner = output::create_spinner("Loading...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_eventStatus", serde_json::json!({})).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_eventStatus", serde_json::json!({}))
+            .await?;
 
         spinner.finish_and_clear();
 
-        output::print_field("Current Sequence", &result.get("current_sequence").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Total Events", &result.get("total_events").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Active Subscribers", &result.get("active_subscribers").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Active Webhooks", &result.get("active_webhooks").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
+        output::print_field(
+            "Current Sequence",
+            &result
+                .get("current_sequence")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Total Events",
+            &result
+                .get("total_events")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Active Subscribers",
+            &result
+                .get("active_subscribers")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Active Webhooks",
+            &result
+                .get("active_webhooks")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
 
         println!();
-        output::print_field("WebSocket", &format!("ws://{}/ws", self.rpc.trim_start_matches("http://").trim_start_matches("https://")));
-        output::print_field("gRPC Stream", &format!("{}:3008", self.rpc.split(':').take(2).collect::<Vec<_>>().join(":")));
+        output::print_field(
+            "WebSocket",
+            &format!(
+                "ws://{}/ws",
+                self.rpc
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://")
+            ),
+        );
+        output::print_field(
+            "gRPC Stream",
+            &format!(
+                "{}:3008",
+                self.rpc.split(':').take(2).collect::<Vec<_>>().join(":")
+            ),
+        );
 
         println!();
-        output::print_info("Subscription types: newHeads, logs, newPendingTransactions, syncing, tenzroEvents");
+        output::print_info(
+            "Subscription types: newHeads, logs, newPendingTransactions, syncing, tenzroEvents",
+        );
         output::print_info("Use 'tenzro events subscribe' for real-time event streaming");
 
         Ok(())

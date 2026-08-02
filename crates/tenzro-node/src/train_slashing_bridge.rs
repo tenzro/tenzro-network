@@ -38,7 +38,10 @@ pub struct TrainerComputeBondSlashingBridge {
 
 impl TrainerComputeBondSlashingBridge {
     pub fn new(bonds: Arc<ComputeBondManager>, block_height_fn: BlockHeightFn) -> Self {
-        Self { bonds, block_height_fn }
+        Self {
+            bonds,
+            block_height_fn,
+        }
     }
 }
 
@@ -48,7 +51,10 @@ impl TrainerSlashingCallback for TrainerComputeBondSlashingBridge {
         let height = (self.block_height_fn)();
         // Full slash — eviction is terminal for the run. `slash` caps at the
         // bond balance, so u128::MAX zeroes it and marks it Slashed.
-        match self.bonds.slash(trainer_did, u128::MAX, reason.tag(), height) {
+        match self
+            .bonds
+            .slash(trainer_did, u128::MAX, reason.tag(), height)
+        {
             Ok(snapshot) => {
                 info!(
                     task = %task_id,
@@ -99,7 +105,11 @@ mod tests {
             .expect("post bond");
         let bridge = TrainerComputeBondSlashingBridge::new(bonds.clone(), block_fn(202));
         bridge
-            .slash_and_evict("run-1", "did:tenzro:machine:t1", EvictionReason::AcceptRejected)
+            .slash_and_evict(
+                "run-1",
+                "did:tenzro:machine:t1",
+                EvictionReason::AcceptRejected,
+            )
             .await;
         let bond = bonds.get("did:tenzro:machine:t1").unwrap();
         assert_eq!(bond.amount, 0);

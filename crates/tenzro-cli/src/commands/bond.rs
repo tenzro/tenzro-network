@@ -13,9 +13,9 @@
 //! (`tenzro_getAgentBond`, `tenzro_listAgentBondsByController`) hit the
 //! node's in-process `BondManager` cache.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// AgentBond surety commands (Spec 9)
 #[derive(Debug, Subcommand)]
@@ -49,10 +49,7 @@ const DEFAULT_BOND_INCREASE_GAS: u64 = 60_000;
 const DEFAULT_BOND_WITHDRAW_GAS: u64 = 50_000;
 
 /// Query nonce + chain_id for the sender.
-async fn fetch_nonce_and_chain_id(
-    rpc: &crate::rpc::RpcClient,
-    address: &str,
-) -> (u64, u64) {
+async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
     let nonce = rpc
         .call::<serde_json::Value>(
             "eth_getTransactionCount",
@@ -131,19 +128,21 @@ impl BondPostCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.from,
-                "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "value": 0u64,
-                "gas_limit": DEFAULT_BOND_POST_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_BOND_POST_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -196,19 +195,21 @@ impl BondIncreaseCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.from,
-                "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "value": 0u64,
-                "gas_limit": DEFAULT_BOND_INCREASE_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_BOND_INCREASE_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -255,19 +256,21 @@ impl BondWithdrawCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.from,
-                "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "value": 0u64,
-                "gas_limit": DEFAULT_BOND_WITHDRAW_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_BOND_WITHDRAW_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -277,7 +280,7 @@ impl BondWithdrawCmd {
         output::print_field("Transaction Hash", &extract_tx_hash(&result));
         output::print_warning(
             "Bond enters Cooldown lifecycle; principal returns to controller after \
-             the configured cooldown window finalizes."
+             the configured cooldown window finalizes.",
         );
         Ok(())
     }

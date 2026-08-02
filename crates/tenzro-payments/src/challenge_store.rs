@@ -8,7 +8,7 @@ use crate::types::PaymentChallenge;
 use chrono::Utc;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tenzro_storage::kv::{KvStore, CF_CHANNELS};
+use tenzro_storage::kv::{CF_CHANNELS, KvStore};
 use tracing::{debug, info, warn};
 
 /// Key prefix for challenges in CF_CHANNELS
@@ -97,11 +97,17 @@ impl ChallengeStore {
             match serde_json::to_vec(challenge) {
                 Ok(bytes) => {
                     if let Err(e) = store.put(CF_CHANNELS, key.as_bytes(), &bytes) {
-                        warn!("Failed to persist challenge {}: {}", challenge.challenge_id, e);
+                        warn!(
+                            "Failed to persist challenge {}: {}",
+                            challenge.challenge_id, e
+                        );
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to serialize challenge {}: {}", challenge.challenge_id, e);
+                    warn!(
+                        "Failed to serialize challenge {}: {}",
+                        challenge.challenge_id, e
+                    );
                 }
             }
         }
@@ -112,7 +118,10 @@ impl ChallengeStore {
         if let Some(ref store) = self.storage {
             let key = format!("{}{}", CHALLENGE_KEY_PREFIX, challenge_id);
             if let Err(e) = store.delete(CF_CHANNELS, key.as_bytes()) {
-                warn!("Failed to delete challenge {} from storage: {}", challenge_id, e);
+                warn!(
+                    "Failed to delete challenge {} from storage: {}",
+                    challenge_id, e
+                );
             }
         }
     }
@@ -131,10 +140,7 @@ impl ChallengeStore {
             .get(challenge_id)
             .map(|c| c.clone())
             .ok_or_else(|| {
-                PaymentError::ChallengeError(format!(
-                    "Challenge not found: {}",
-                    challenge_id
-                ))
+                PaymentError::ChallengeError(format!("Challenge not found: {}", challenge_id))
             })
     }
 

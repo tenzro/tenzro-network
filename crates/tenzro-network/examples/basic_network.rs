@@ -4,7 +4,7 @@
 //! subscribe to topics, and broadcast messages.
 
 use tenzro_network::{
-    NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService, MessagePayload,
+    MessagePayload, NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService,
 };
 
 #[tokio::main]

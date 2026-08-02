@@ -49,7 +49,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use libp2p::PeerId;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use tenzro_bridge::mpc::keygen::{KeygenConfig, KeygenSession};
@@ -184,7 +184,9 @@ pub(crate) async fn handle_mpc_keygen(
             v.as_str()
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .ok_or_else(|| invalid_params("'participant_dids' entries must be non-empty strings"))
+                .ok_or_else(|| {
+                    invalid_params("'participant_dids' entries must be non-empty strings")
+                })
         })
         .collect::<Result<_, _>>()?;
     // Canonical ordering: GroupId + party indices depend on it, and every
@@ -206,17 +208,13 @@ pub(crate) async fn handle_mpc_keygen(
     if threshold > u8::MAX as u64 || total_parties > u8::MAX as usize {
         return Err(invalid_params("threshold / participant count out of range"));
     }
-    let parameters = MpcParameters::new(
-        MpcCurve::Secp256k1,
-        threshold as u8,
-        total_parties as u8,
-    )
-    .ok_or_else(|| {
-        invalid_params(format!(
-            "invalid MpcParameters threshold={} total_parties={} (need 2 <= t <= n <= 32)",
-            threshold, total_parties
-        ))
-    })?;
+    let parameters = MpcParameters::new(MpcCurve::Secp256k1, threshold as u8, total_parties as u8)
+        .ok_or_else(|| {
+            invalid_params(format!(
+                "invalid MpcParameters threshold={} total_parties={} (need 2 <= t <= n <= 32)",
+                threshold, total_parties
+            ))
+        })?;
 
     // -------- Instance id: must agree byte-for-byte across parties ----
     let block_hash_bytes = decode_hex_32(&p, "finalized_block_hash")?;
@@ -262,7 +260,10 @@ pub(crate) async fn handle_mpc_keygen(
             .as_str()
             .ok_or_else(|| invalid_params(format!("peer_bindings['{}'] must be a string", did)))?;
         let peer_id = PeerId::from_str(peer_str).map_err(|e| {
-            invalid_params(format!("peer_bindings['{}'] PeerId parse failed: {}", did, e))
+            invalid_params(format!(
+                "peer_bindings['{}'] PeerId parse failed: {}",
+                did, e
+            ))
         })?;
         registry.insert(did.clone(), peer_id);
     }
@@ -280,9 +281,7 @@ pub(crate) async fn handle_mpc_keygen(
         .map_err(|e| internal(format!("installing MPC DID resolver failed: {}", e)))?;
 
     // -------- Runtime dependencies (mirrors the signer construction) --
-    let keyshare_store = Arc::new(crate::mpc_keyshare_store::NodeKeyshareStore::new(
-        storage,
-    ));
+    let keyshare_store = Arc::new(crate::mpc_keyshare_store::NodeKeyshareStore::new(storage));
     // Production-posture sealer: TEE-rooted IKM. Fails closed off-hardware
     // (no-simulation policy) — same rule as the signing path.
     let sealer: Arc<dyn tenzro_bridge::mpc::sealing::KeyshareSealer> =
@@ -361,8 +360,7 @@ pub(crate) async fn handle_mpc_keygen(
                     );
                     entry.status = "completed".to_string();
                     entry.group_id = Some(output.group_id.to_hex());
-                    entry.group_public_key =
-                        Some(hex::encode(&output.group_public_key_compressed));
+                    entry.group_public_key = Some(hex::encode(&output.group_public_key_compressed));
                     entry.epoch = Some(output.epoch);
                     entry.address = Some(output.address);
                 }

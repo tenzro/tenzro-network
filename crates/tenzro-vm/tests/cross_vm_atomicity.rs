@@ -35,8 +35,8 @@
 use std::sync::Arc;
 
 use tenzro_vm::{
-    EvmExecutor, GasOracle, MultiVmRuntime, PrecompileRegistry, StateAdapter, VmConfig,
-    VmState, VmTransaction, VmType,
+    EvmExecutor, GasOracle, MultiVmRuntime, PrecompileRegistry, StateAdapter, VmConfig, VmState,
+    VmTransaction, VmType,
 };
 
 // 10 TNZO in wei-equivalent — comfortable headroom over gas costs.
@@ -102,10 +102,7 @@ async fn conservation_across_mixed_evm_svm_block() {
     state.set_balance(&evm_alice, SEED_BALANCE);
     state.set_balance(&svm_carol, SEED_BALANCE);
 
-    let pre_total = total_balance(
-        &state,
-        &[&evm_alice, &evm_bob, &svm_carol, &svm_dave],
-    );
+    let pre_total = total_balance(&state, &[&evm_alice, &evm_bob, &svm_carol, &svm_dave]);
     assert_eq!(pre_total, 2 * SEED_BALANCE);
 
     // EVM tx: alice -> bob, 1 TNZO. Plain value transfer (empty data).
@@ -124,10 +121,10 @@ async fn conservation_across_mixed_evm_svm_block() {
         .expect("EVM transfer dispatch");
     assert!(evm_result.success, "EVM value transfer must succeed");
 
-    // SVM tx: carol -> dave_program, 1 TNZO. We must pre-install bytes
-    // at the destination so the SVM executor doesn't bail on
-    // `ContractNotFound` before the value transfer is applied.
-    state.set_code(&svm_dave, vec![0x00, 0x61, 0x73, 0x6D]);
+    // SVM tx: carol -> dave, 1 TNZO. `dave` is a plain account with no
+    // stored code — the SVM executor treats a target with no program as an
+    // ordinary value transfer, matching Solana, where crediting lamports to a
+    // non-executable account is routine.
     let svm_tx = build_tx(
         svm_carol.clone(),
         Some(svm_dave.clone()),
@@ -150,10 +147,7 @@ async fn conservation_across_mixed_evm_svm_block() {
     // Conservation: every wei is accounted for as either still on a
     // sender, on a recipient, or burned as gas. Both gas burns are
     // bounded by `gas_used * gas_price`.
-    let post_total = total_balance(
-        &state,
-        &[&evm_alice, &evm_bob, &svm_carol, &svm_dave],
-    );
+    let post_total = total_balance(&state, &[&evm_alice, &evm_bob, &svm_carol, &svm_dave]);
     let gas_burn = (evm_result.gas_used as u128 + svm_result.gas_used as u128) * GAS_PRICE;
     assert_eq!(
         pre_total,
@@ -282,10 +276,11 @@ async fn sequential_semantics_svm_double_spend() {
     let mut state = StateAdapter::new();
 
     let sender = mk_svm_pubkey(0x55);
-    let prog_a = mk_svm_pubkey(0x56);
-    let prog_b = mk_svm_pubkey(0x57);
-    state.set_code(&prog_a, vec![0x00, 0x61, 0x73, 0x6D]);
-    state.set_code(&prog_b, vec![0x00, 0x61, 0x73, 0x6D]);
+    let dest_a = mk_svm_pubkey(0x56);
+    let dest_b = mk_svm_pubkey(0x57);
+    // Both destinations are plain accounts with no stored program, so each
+    // transaction is an ordinary value transfer — which is what this test is
+    // about. The balance check is the same either way.
 
     let initial = 7 * ONE_TNZO;
     state.set_balance(&sender, initial);
@@ -293,7 +288,7 @@ async fn sequential_semantics_svm_double_spend() {
     // tx_1: sender -> prog_a, 6 TNZO.
     let tx1 = build_tx(
         sender.clone(),
-        Some(prog_a.clone()),
+        Some(dest_a.clone()),
         6 * ONE_TNZO,
         Vec::new(),
         50_000,
@@ -305,12 +300,12 @@ async fn sequential_semantics_svm_double_spend() {
         .await
         .expect("tx_1 dispatch");
     assert!(r1.success, "tx_1 must succeed");
-    assert_eq!(state.get_balance(&prog_a), 6 * ONE_TNZO);
+    assert_eq!(state.get_balance(&dest_a), 6 * ONE_TNZO);
 
     // tx_2: sender -> prog_b, 6 TNZO. Must overdraft.
     let tx2 = build_tx(
         sender.clone(),
-        Some(prog_b.clone()),
+        Some(dest_b.clone()),
         6 * ONE_TNZO,
         Vec::new(),
         50_000,
@@ -336,14 +331,14 @@ async fn sequential_semantics_svm_double_spend() {
 
     // No phantom credit on prog_b.
     assert_eq!(
-        state.get_balance(&prog_b),
+        state.get_balance(&dest_b),
         0,
         "no phantom credit at tx_2 destination"
     );
 
     // Conservation still holds.
     let post_total =
-        state.get_balance(&sender) + state.get_balance(&prog_a) + state.get_balance(&prog_b);
+        state.get_balance(&sender) + state.get_balance(&dest_a) + state.get_balance(&dest_b);
     assert!(
         post_total <= initial,
         "no balance fabricated under SVM contention"
@@ -376,7 +371,8 @@ async fn no_cross_vm_bleed_for_disjoint_senders() {
     let svm_recipient = mk_svm_pubkey(0x78);
     state.set_balance(&evm_sender, SEED_BALANCE);
     state.set_balance(&svm_sender, SEED_BALANCE);
-    state.set_code(&svm_recipient, vec![0x00, 0x61, 0x73, 0x6D]);
+    // `svm_recipient` deliberately has no code: a target with no stored
+    // program is an ordinary account, and sending to it is a value transfer.
 
     let pre_evm = state.get_balance(&evm_sender);
     let pre_svm = state.get_balance(&svm_sender);
@@ -415,4 +411,13 @@ async fn no_cross_vm_bleed_for_disjoint_senders() {
     let evm_gas = r_evm.gas_used as u128 * GAS_PRICE;
     assert_eq!(state.get_balance(&evm_sender), pre_evm - ONE_TNZO - evm_gas);
     assert_eq!(state.get_nonce(&evm_sender), pre_evm_nonce + 1);
+
+    // The 32-byte SVM recipient must not have been credited by a 20-byte EVM
+    // transfer under any padding scheme — that is the aliasing this test is
+    // guarding against.
+    assert_eq!(
+        state.get_balance(&svm_recipient),
+        0,
+        "SVM recipient must not alias the EVM recipient"
+    );
 }

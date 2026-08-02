@@ -68,7 +68,13 @@ impl WorkflowReceipt {
         prev_receipt: Hash,
     ) -> Self {
         let receipt_id = Self::derive_id(&workflow_id, &event, at, &prev_receipt);
-        Self { receipt_id, workflow_id, event, at, prev_receipt }
+        Self {
+            receipt_id,
+            workflow_id,
+            event,
+            at,
+            prev_receipt,
+        }
     }
 
     fn derive_id(
@@ -119,8 +125,18 @@ mod tests {
     #[test]
     fn receipt_id_chain() {
         let wf = Hash::from([5u8; 32]);
-        let r1 = WorkflowReceipt::new(wf, WorkflowEventKind::Created, Timestamp(100), Hash::default());
-        let r2 = WorkflowReceipt::new(wf, WorkflowEventKind::Activated, Timestamp(200), r1.receipt_id);
+        let r1 = WorkflowReceipt::new(
+            wf,
+            WorkflowEventKind::Created,
+            Timestamp(100),
+            Hash::default(),
+        );
+        let r2 = WorkflowReceipt::new(
+            wf,
+            WorkflowEventKind::Activated,
+            Timestamp(200),
+            r1.receipt_id,
+        );
         assert_ne!(r1.receipt_id, r2.receipt_id);
         assert_eq!(r2.prev_receipt, r1.receipt_id);
     }
@@ -128,7 +144,12 @@ mod tests {
     #[test]
     fn projects_to_inline_envelope() {
         let wf = Hash::from([1u8; 32]);
-        let r = WorkflowReceipt::new(wf, WorkflowEventKind::Created, Timestamp(1), Hash::default());
+        let r = WorkflowReceipt::new(
+            wf,
+            WorkflowEventKind::Created,
+            Timestamp(1),
+            Hash::default(),
+        );
         let env = r.to_envelope();
         assert!(matches!(env.kind, ReceiptKind::Lifecycle));
         assert!(env.inline_payload.is_some());

@@ -36,9 +36,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use tenzro_types::model::{InferenceProvider, MoeExpertResidency, MoeProviderRole};
 #[cfg(test)]
 use tenzro_types::model::MoeExpertHolding;
+use tenzro_types::model::{InferenceProvider, MoeExpertResidency, MoeProviderRole};
 use tenzro_types::primitives::Address;
 
 /// Identifies one expert in an MoE model.
@@ -194,11 +194,7 @@ impl MoeShardView {
     /// batch primary, so this ordering is what steers a batch to the
     /// fastest reachable holder.
     pub fn holders(&self, expert: ExpertId) -> Vec<ExpertHolder> {
-        let mut hs = self
-            .by_expert
-            .get(&expert)
-            .cloned()
-            .unwrap_or_default();
+        let mut hs = self.by_expert.get(&expert).cloned().unwrap_or_default();
         hs.sort_by(|a, b| {
             let ra = residency_rank(a.residency);
             let rb = residency_rank(b.residency);
@@ -257,7 +253,10 @@ impl MoeShardView {
         self.by_expert
             .iter()
             .filter_map(|(eid, hs)| {
-                if hs.iter().any(|h| h.committed_tps >= policy.hot_threshold_tps) {
+                if hs
+                    .iter()
+                    .any(|h| h.committed_tps >= policy.hot_threshold_tps)
+                {
                     Some(*eid)
                 } else {
                     None
@@ -306,13 +305,15 @@ impl MoeShardView {
     ) -> Vec<RepairAssignment> {
         let mut out = Vec::new();
         for expert in self.under_replicated(policy) {
-            let holders = self.by_expert.get(&expert).map(Vec::as_slice).unwrap_or(&[]);
+            let holders = self
+                .by_expert
+                .get(&expert)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             let Some(blob_uri) = holders.iter().find_map(|h| h.blob_uri.clone()) else {
                 continue;
             };
-            let missing = policy
-                .min_replication
-                .saturating_sub(holders.len() as u32) as usize;
+            let missing = policy.min_replication.saturating_sub(holders.len() as u32) as usize;
             if missing == 0 {
                 continue;
             }
@@ -372,7 +373,11 @@ fn score_holder(h: &ExpertHolder) -> u64 {
     // committed-TPS signals, so a warm GPU holder beats a warm CPU holder
     // while never overriding residency.
     let gpu_bonus: u64 = if h.gpu { 50_000 } else { 0 };
-    let iroh_bonus: u64 = if h.iroh_endpoint_id.is_some() { 10_000 } else { 0 };
+    let iroh_bonus: u64 = if h.iroh_endpoint_id.is_some() {
+        10_000
+    } else {
+        0
+    };
     residency_score + gpu_bonus + iroh_bonus + h.committed_tps as u64
 }
 
@@ -381,7 +386,11 @@ mod tests {
     use super::*;
     use tenzro_types::model::{ProviderCapacity, ProviderStatus};
 
-    fn provider(addr: u8, model: &str, experts: &[(u32, u32, MoeExpertResidency, u32)]) -> InferenceProvider {
+    fn provider(
+        addr: u8,
+        model: &str,
+        experts: &[(u32, u32, MoeExpertResidency, u32)],
+    ) -> InferenceProvider {
         let mut p = InferenceProvider::new(Address::new([addr; 32]), format!("p{}", addr));
         p.status = ProviderStatus::Active;
         let mut capacity = ProviderCapacity {
@@ -408,7 +417,10 @@ mod tests {
         let alice = provider(
             1,
             "qwen",
-            &[(0, 1, MoeExpertResidency::Warm, 500), (0, 2, MoeExpertResidency::Warm, 500)],
+            &[
+                (0, 1, MoeExpertResidency::Warm, 500),
+                (0, 2, MoeExpertResidency::Warm, 500),
+            ],
         );
         let v = MoeShardView::build("qwen", [&alice]);
         assert_eq!(v.replication_of(ExpertId::new(0, 1)), 1);
@@ -436,7 +448,14 @@ mod tests {
 
     #[test]
     fn under_replicated_reports_floor_violators() {
-        let alice = provider(1, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500), (0, 2, MoeExpertResidency::Warm, 500)]);
+        let alice = provider(
+            1,
+            "qwen",
+            &[
+                (0, 1, MoeExpertResidency::Warm, 500),
+                (0, 2, MoeExpertResidency::Warm, 500),
+            ],
+        );
         let bob = provider(2, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500)]);
         let v = MoeShardView::build("qwen", [&alice, &bob]);
         let mut under = v.under_replicated(ReplicationPolicy {
@@ -450,7 +469,14 @@ mod tests {
 
     #[test]
     fn hot_experts_match_threshold() {
-        let alice = provider(1, "qwen", &[(0, 1, MoeExpertResidency::Warm, 2_000), (0, 2, MoeExpertResidency::Warm, 100)]);
+        let alice = provider(
+            1,
+            "qwen",
+            &[
+                (0, 1, MoeExpertResidency::Warm, 2_000),
+                (0, 2, MoeExpertResidency::Warm, 100),
+            ],
+        );
         let v = MoeShardView::build("qwen", [&alice]);
         let hot = v.hot_experts(ReplicationPolicy::default());
         assert_eq!(hot, vec![ExpertId::new(0, 1)]);
@@ -475,8 +501,22 @@ mod tests {
 
     #[test]
     fn covers_returns_true_when_all_experts_meet_floor() {
-        let alice = provider(1, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500), (0, 2, MoeExpertResidency::Warm, 500)]);
-        let bob = provider(2, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500), (0, 2, MoeExpertResidency::Warm, 500)]);
+        let alice = provider(
+            1,
+            "qwen",
+            &[
+                (0, 1, MoeExpertResidency::Warm, 500),
+                (0, 2, MoeExpertResidency::Warm, 500),
+            ],
+        );
+        let bob = provider(
+            2,
+            "qwen",
+            &[
+                (0, 1, MoeExpertResidency::Warm, 500),
+                (0, 2, MoeExpertResidency::Warm, 500),
+            ],
+        );
         let v = MoeShardView::build("qwen", [&alice, &bob]);
         assert!(v.covers(&[ExpertId::new(0, 1), ExpertId::new(0, 2)], 2));
         assert!(!v.covers(&[ExpertId::new(0, 1), ExpertId::new(0, 2)], 3));
@@ -523,7 +563,10 @@ mod tests {
         alice.capacity.moe_holdings[0].blob_uri = None;
         let v = MoeShardView::build("qwen", [&alice]);
         let candidates = [Address::new([1; 32]), Address::new([2; 32])];
-        assert!(v.plan_repair(ReplicationPolicy::default(), &candidates).is_empty());
+        assert!(
+            v.plan_repair(ReplicationPolicy::default(), &candidates)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -536,7 +579,10 @@ mod tests {
             Address::new([2; 32]),
             Address::new([3; 32]),
         ];
-        assert!(v.plan_repair(ReplicationPolicy::default(), &candidates).is_empty());
+        assert!(
+            v.plan_repair(ReplicationPolicy::default(), &candidates)
+                .is_empty()
+        );
     }
 
     #[test]

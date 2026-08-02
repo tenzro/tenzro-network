@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 try:
     import torch
@@ -67,9 +68,9 @@ class _TimeSeriesPatchTransformer(nn.Module if nn is not None else object):  # t
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
         self.proj_out = nn.Linear(d_model, patch_size)
 
-    def forward(self, x_patches: "torch.Tensor") -> "torch.Tensor":  # noqa: D401
+    def forward(self, x_patches: torch.Tensor) -> torch.Tensor:
         # x_patches: [B, P, patch_size]
-        b, p, _ = x_patches.shape
+        _b, p, _ = x_patches.shape
         h = self.proj_in(x_patches) + self.pos[:p].unsqueeze(0)
         causal_mask = nn.Transformer.generate_square_subsequent_mask(p).to(h.device)
         h = self.encoder(h, mask=causal_mask)
@@ -81,7 +82,7 @@ class _TimeSeriesPatchTransformer(nn.Module if nn is not None else object):  # t
 # ---------------------------------------------------------------------------
 
 
-def _load_parquet_series(uri: str) -> "torch.Tensor":
+def _load_parquet_series(uri: str) -> torch.Tensor:
     """Load a univariate series from a parquet shard URI.
 
     ``tenzro://`` shards fetch from the local node's iroh blob store;
@@ -115,17 +116,17 @@ def _load_parquet_series(uri: str) -> "torch.Tensor":
 class TimeseriesAdapter:
     """Concrete :class:`TrainerAdapter` for the timeseries reference model."""
 
-    _model: "_TimeSeriesPatchTransformer"
-    _optimizer: "torch.optim.Optimizer"
+    _model: _TimeSeriesPatchTransformer
+    _optimizer: torch.optim.Optimizer
     patch_size: int = 32
     context_patches: int = 16
     horizon_patches: int = 4
     batch_size: int = 8
 
-    def model(self) -> "torch.nn.Module":
+    def model(self) -> torch.nn.Module:
         return self._model
 
-    def optimizer(self) -> "torch.optim.Optimizer":
+    def optimizer(self) -> torch.optim.Optimizer:
         return self._optimizer
 
     def shard_batches(self, shard_uri: str) -> Iterable[object]:
@@ -156,7 +157,7 @@ class TimeseriesAdapter:
             )
             yield ctx_batch, tgt_batch
 
-    def compute_loss(self, batch: object) -> "torch.Tensor":
+    def compute_loss(self, batch: object) -> torch.Tensor:
         if torch is None:
             raise RuntimeError("PyTorch is required")
         ctx_batch, tgt_batch = batch  # type: ignore[misc]

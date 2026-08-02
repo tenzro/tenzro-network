@@ -38,11 +38,11 @@ use crate::error::NodeError;
 
 use axum::{
     extract::{Form, Query, State},
-    http::{header, Request, StatusCode},
+    http::{Request, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Json, Redirect, Response},
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,9 +52,9 @@ use tenzro_auth::{AuthClaims, AuthorizationDetail, AuthorizationDetails};
 use tenzro_storage::KvStore;
 use tenzro_types::AssetId;
 
+use super::auth_page;
 use crate::node::TenzroNode;
 use crate::web::handlers::WebState;
-use super::auth_page;
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -213,9 +213,7 @@ pub struct RevokeRequest {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 /// RFC 8414 — OAuth Authorization Server Metadata discovery.
-pub async fn metadata_handler(
-    State(state): State<Arc<OAuthState>>,
-) -> Json<serde_json::Value> {
+pub async fn metadata_handler(State(state): State<Arc<OAuthState>>) -> Json<serde_json::Value> {
     let iss = &state.config.issuer;
     let node_version = &state.web_state.node_version;
     Json(serde_json::json!({
@@ -331,8 +329,9 @@ pub async fn register_handler(
     }
 
     if let Some(ref auth_method) = req.token_endpoint_auth_method
-        && auth_method != "none" {
-            return (
+        && auth_method != "none"
+    {
+        return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": "invalid_client_metadata",
@@ -340,7 +339,7 @@ pub async fn register_handler(
                 })),
             )
                 .into_response();
-        }
+    }
 
     let client_id = format!("client_{}", Uuid::new_v4().simple());
 
@@ -352,9 +351,14 @@ pub async fn register_handler(
     state.clients.insert(client_id.clone(), client);
 
     let grant_types = req.grant_types.unwrap_or_else(|| {
-        vec!["authorization_code".to_string(), "refresh_token".to_string()]
+        vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ]
     });
-    let response_types = req.response_types.unwrap_or_else(|| vec!["code".to_string()]);
+    let response_types = req
+        .response_types
+        .unwrap_or_else(|| vec!["code".to_string()]);
     let auth_method = req
         .token_endpoint_auth_method
         .unwrap_or_else(|| "none".to_string());
@@ -630,30 +634,32 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
     }
 
     if let Some(ref redirect_uri) = req.redirect_uri
-        && *redirect_uri != session.redirect_uri {
-            tracing::warn!(
-                expected = %session.redirect_uri,
-                got = %redirect_uri,
-                "redirect_uri mismatch in token request"
-            );
-            return oauth_error(
-                "invalid_grant",
-                "redirect_uri does not match authorization request",
-            );
-        }
+        && *redirect_uri != session.redirect_uri
+    {
+        tracing::warn!(
+            expected = %session.redirect_uri,
+            got = %redirect_uri,
+            "redirect_uri mismatch in token request"
+        );
+        return oauth_error(
+            "invalid_grant",
+            "redirect_uri does not match authorization request",
+        );
+    }
 
     if let Some(ref client_id) = req.client_id
-        && *client_id != session.client_id {
-            tracing::warn!(
-                expected = %session.client_id,
-                got = %client_id,
-                "client_id mismatch in token request"
-            );
-            return oauth_error(
-                "invalid_grant",
-                "client_id does not match authorization request",
-            );
-        }
+        && *client_id != session.client_id
+    {
+        tracing::warn!(
+            expected = %session.client_id,
+            got = %client_id,
+            "client_id mismatch in token request"
+        );
+        return oauth_error(
+            "invalid_grant",
+            "client_id does not match authorization request",
+        );
+    }
 
     if !session.approved {
         return oauth_error("invalid_grant", "Authorization was not approved");
@@ -678,7 +684,10 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "Identity provisioning failed");
-            return oauth_error("server_error", &format!("Identity provisioning failed: {}", e));
+            return oauth_error(
+                "server_error",
+                &format!("Identity provisioning failed: {}", e),
+            );
         }
     };
 
@@ -701,7 +710,9 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
         dpop_jkt,
         expires_at: refresh_expires,
     };
-    state.refresh_tokens.insert(refresh_token.clone(), entry.clone());
+    state
+        .refresh_tokens
+        .insert(refresh_token.clone(), entry.clone());
 
     if let Some(storage) = state.node.storage() {
         let key = format!("oauth_refresh:{}", refresh_token);
@@ -790,29 +801,50 @@ async fn handle_refresh_grant(state: Arc<OAuthState>, req: TokenRequest) -> Resp
 /// Read-only MCP tools that do not require authentication.
 const PUBLIC_MCP_TOOLS: &[&str] = &[
     // Network & status
-    "get_node_status", "get_block", "get_block_range", "get_transaction",
+    "get_node_status",
+    "get_block",
+    "get_block_range",
+    "get_transaction",
     // Read-only queries
-    "get_balance", "token_balance", "total_supply", "get_token_info",
-    "list_tokens", "get_token_balance",
+    "get_balance",
+    "token_balance",
+    "total_supply",
+    "get_token_info",
+    "list_tokens",
+    "get_token_balance",
     // Model discovery
-    "list_models", "list_model_endpoints", "get_download_progress",
+    "list_models",
+    "list_model_endpoints",
+    "get_download_progress",
     // Provenance & training status (read-only)
-    "get_provenance", "get_trainer_daemon_status",
+    "get_provenance",
+    "get_trainer_daemon_status",
     // Bridge info
-    "get_bridge_routes", "list_bridge_adapters",
+    "get_bridge_routes",
+    "list_bridge_adapters",
     // deBridge read-only
-    "debridge_search_tokens", "debridge_get_chains", "debridge_get_instructions",
+    "debridge_search_tokens",
+    "debridge_get_chains",
+    "debridge_get_instructions",
     // Staking & governance queries
-    "get_provider_stats", "get_provider_schedule", "get_provider_pricing",
-    "list_proposals", "get_voting_power",
+    "get_provider_stats",
+    "get_provider_schedule",
+    "get_provider_pricing",
+    "list_proposals",
+    "get_voting_power",
     // Task & agent browsing
-    "list_tasks", "get_task", "list_agent_templates", "get_agent_template",
+    "list_tasks",
+    "get_task",
+    "list_agent_templates",
+    "get_agent_template",
     // Canton read-only
-    "list_canton_domains", "list_daml_contracts",
+    "list_canton_domains",
+    "list_daml_contracts",
     // Payment info
     "list_payment_protocols",
     // Verification
-    "verify_zk_proof", "get_zk_attestation",
+    "verify_zk_proof",
+    "get_zk_attestation",
     // Identity resolution
     "resolve_did",
 ];
@@ -823,8 +855,12 @@ fn is_public_mcp_request(body: &[u8]) -> bool {
     };
     let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
-        "initialize" | "notifications/initialized" | "tools/list" | "resources/list" |
-        "prompts/list" | "ping" => true,
+        "initialize"
+        | "notifications/initialized"
+        | "tools/list"
+        | "resources/list"
+        | "prompts/list"
+        | "ping" => true,
         "tools/call" => {
             let tool_name = json
                 .get("params")
@@ -1091,11 +1127,12 @@ async fn provision_or_retrieve_identity(
             .map_err(|e| NodeError::Internal(format!("Invalid DID encoding: {}", e)))?;
 
         if let Some(registry) = node.identity_registry()
-            && let Ok(identity) = registry.resolve(&did) {
-                let address = format!("0x{}", hex::encode(identity.wallet_address.as_bytes()));
-                tracing::info!(did = %did, address = %address, "Retrieved existing OAuth identity");
-                return Ok((did, address));
-            }
+            && let Ok(identity) = registry.resolve(&did)
+        {
+            let address = format!("0x{}", hex::encode(identity.wallet_address.as_bytes()));
+            tracing::info!(did = %did, address = %address, "Retrieved existing OAuth identity");
+            return Ok((did, address));
+        }
         tracing::warn!(did = %did, "DID mapping exists but identity not found, re-provisioning");
     }
 
@@ -1129,15 +1166,16 @@ async fn provision_or_retrieve_identity(
         let faucet_key = b"genesis_faucet_address";
         if let Ok(Some(faucet_bytes)) = storage.get("metadata", faucet_key)
             && let Ok(faucet_hex) = String::from_utf8(faucet_bytes)
-                && let Ok(faucet_addr) = tenzro_types::primitives::Address::from_hex(&faucet_hex) {
-                    let amount = seed_tnzo.saturating_mul(10u128.pow(18));
-                    match token.transfer(&faucet_addr, &identity.wallet_address, amount) {
-                        Ok(_) => tracing::info!(did = %did, tnzo = seed_tnzo, "Funded new OAuth user"),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to fund new OAuth user from faucet")
-                        }
-                    }
+            && let Ok(faucet_addr) = tenzro_types::primitives::Address::from_hex(&faucet_hex)
+        {
+            let amount = seed_tnzo.saturating_mul(10u128.pow(18));
+            match token.transfer(&faucet_addr, &identity.wallet_address, amount) {
+                Ok(_) => tracing::info!(did = %did, tnzo = seed_tnzo, "Funded new OAuth user"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to fund new OAuth user from faucet")
                 }
+            }
+        }
     }
 
     Ok((did, address))
@@ -1179,16 +1217,14 @@ fn mint_jwt(
     // Empty cnf.jkt means the JWT is bearer-only; this is acceptable
     // for MCP read/write tools but DPoP-bound endpoints will reject it.
     let jkt = cnf_jkt.unwrap_or("");
-    engine
-        .issue_jwt(did, did, jkt, details, None)
-        .map_err(|e| {
-            tracing::error!(error = %e, "AuthEngine::issue_jwt failed");
-            crate::web::error::WalletApiError::new(
-                StatusCode::BAD_REQUEST,
-                "server_error",
-                "Token generation failed",
-            )
-        })
+    engine.issue_jwt(did, did, jkt, details, None).map_err(|e| {
+        tracing::error!(error = %e, "AuthEngine::issue_jwt failed");
+        crate::web::error::WalletApiError::new(
+            StatusCode::BAD_REQUEST,
+            "server_error",
+            "Token generation failed",
+        )
+    })
 }
 
 /// Coarse RAR envelope granted to OAuth-flow tokens. Allows the bearer

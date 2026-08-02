@@ -29,11 +29,9 @@
 use std::sync::Arc;
 
 use tenzro_bridge::evm_signer::EvmTransactionSigner;
-use tenzro_identity::erc8004::{
-    abi, addresses, selectors, EthAddress, OnChainAgentRegistry,
-};
+use tenzro_identity::erc8004::{EthAddress, OnChainAgentRegistry, abi, addresses, selectors};
 use tenzro_identity::error::{IdentityError, Result as IdentityResult};
-use tenzro_storage::{KvStore, CF_IDENTITIES};
+use tenzro_storage::{CF_IDENTITIES, KvStore};
 
 /// Off-chain RocksDB keyspace prefix for the `did → agentId` index.
 ///
@@ -112,10 +110,7 @@ impl OnChainAgentRegistry for NativeErc8004Mirror {
         // intentionally ignored here. To rebind the controller, callers
         // must additionally invoke `setAgentWallet` (with the agent's
         // owner-signed EIP-712 consent) once the agentId is known.
-        let calldata = abi::encode_register_with_uri(
-            selectors::REGISTER_WITH_URI,
-            metadata_uri,
-        );
+        let calldata = abi::encode_register_with_uri(selectors::REGISTER_WITH_URI, metadata_uri);
 
         let signer = Arc::clone(&self.signer);
         let to = Self::identity_registry_hex();
@@ -231,7 +226,10 @@ mod tests {
     fn did_index_key_is_prefix_concat() {
         let key = did_index_key("did:tenzro:machine:abc");
         assert!(key.starts_with(ERC8004_DID_INDEX_PREFIX));
-        assert_eq!(&key[ERC8004_DID_INDEX_PREFIX.len()..], b"did:tenzro:machine:abc");
+        assert_eq!(
+            &key[ERC8004_DID_INDEX_PREFIX.len()..],
+            b"did:tenzro:machine:abc"
+        );
     }
 
     #[test]
@@ -245,7 +243,10 @@ mod tests {
                 .expect("dev signer"),
         );
         let mirror = NativeErc8004Mirror::new(signer, storage);
-        assert_eq!(mirror.lookup_agent_id_by_did("did:tenzro:machine:nope"), None);
+        assert_eq!(
+            mirror.lookup_agent_id_by_did("did:tenzro:machine:nope"),
+            None
+        );
     }
 
     #[test]

@@ -12,8 +12,6 @@ pub mod units;
 
 // Re-export commonly used types
 pub use commands::{
-    NodeCommand, WalletCommand, ModelCommand, StakeCommand,
-    GovernanceCommand, ProviderCommand, InferenceCommand,
-    IdentityCommand, PaymentCommand, JoinCmd, ScheduleCommand,
-    SetUsernameCmd,
+    GovernanceCommand, IdentityCommand, InferenceCommand, JoinCmd, ModelCommand, NodeCommand,
+    PaymentCommand, ProviderCommand, ScheduleCommand, SetUsernameCmd, StakeCommand, WalletCommand,
 };

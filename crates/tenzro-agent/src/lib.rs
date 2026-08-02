@@ -141,25 +141,28 @@ pub mod transactions;
 // Re-export commonly used types
 pub use a2a_protocol::{
     A2aMessage, A2aMessageType, A2aProtocol, CapabilityInfo, CapabilityQuery, CapabilityResponse,
-    McpBridge, McpClient, McpMessage, McpMessageType, TaskRequest, TaskResponse, ToolCall, ToolResult,
+    McpBridge, McpClient, McpMessage, McpMessageType, TaskRequest, TaskResponse, ToolCall,
+    ToolResult,
 };
 pub use autonomy::{
     AgentAutonomy, AgentExecutionLoop, AutonomousScheduler, ScheduledTask, SpendingPolicy,
     TaskExecutor, TaskHandler, TaskResult,
 };
-pub use swarm::SwarmManager;
 pub use capabilities::{AttestationConfig, CapabilityAttestation, CapabilityRegistry};
 pub use error::{AgentError, Result};
 pub use identity::{AgentIdentityManager, AgentStatus, RegisteredAgent};
-pub use lifecycle::{AgentLifecycle, AgentLifecycleEvent, AgentLifecycleInfo, AgentState, HeartbeatConfig};
+pub use lifecycle::{
+    AgentLifecycle, AgentLifecycleEvent, AgentLifecycleInfo, AgentState, HeartbeatConfig,
+};
 pub use memory::{
-    LanceVectorBackend, MemoryError, MemoryFilter, MemoryKind, MemoryManager,
-    MemoryManagerConfig, MemoryRecord, MemorySource, SearchModes, TantivyTextBackend,
+    LanceVectorBackend, MemoryError, MemoryFilter, MemoryKind, MemoryManager, MemoryManagerConfig,
+    MemoryRecord, MemorySource, SearchModes, TantivyTextBackend,
 };
 pub use messaging::{
     EchoMessageHandler, GossipsubTransport, MessageHandler, MessageRouter, MessageRouterConfig,
     NetworkTransport, RateLimitConfig,
 };
+pub use swarm::SwarmManager;
 
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentTransactionRecord, RuntimeStatistics};
 pub use transactions::{

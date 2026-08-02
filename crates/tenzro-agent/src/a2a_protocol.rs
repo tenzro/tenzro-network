@@ -9,7 +9,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use tenzro_types::{primitives::Timestamp, AgentIdentity};
+use tenzro_types::{AgentIdentity, primitives::Timestamp};
 use uuid::Uuid;
 
 /// A2A protocol version
@@ -389,7 +389,12 @@ impl A2aProtocol {
         };
 
         let payload = serde_json::to_value(response)?;
-        let message = A2aMessage::new(sender, receiver, A2aMessageType::CapabilityResponse, payload);
+        let message = A2aMessage::new(
+            sender,
+            receiver,
+            A2aMessageType::CapabilityResponse,
+            payload,
+        );
 
         Ok(message)
     }
@@ -535,7 +540,8 @@ impl McpClient {
     }
 
     fn next_request_id(&self) -> u64 {
-        self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        self.next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Sends a JSON-RPC request to the MCP server and returns the result.
@@ -550,7 +556,8 @@ impl McpClient {
             body["params"] = p;
         }
 
-        let mut request = self.http_client
+        let mut request = self
+            .http_client
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
@@ -577,10 +584,9 @@ impl McpClient {
             )));
         }
 
-        let result: JsonValue = response
-            .json()
-            .await
-            .map_err(|e| AgentError::ProtocolError(format!("Failed to parse MCP response: {}", e)))?;
+        let result: JsonValue = response.json().await.map_err(|e| {
+            AgentError::ProtocolError(format!("Failed to parse MCP response: {}", e))
+        })?;
 
         // Check for JSON-RPC error
         if let Some(error) = result.get("error") {
@@ -612,7 +618,8 @@ impl McpClient {
             }
         });
 
-        let mut request = self.http_client
+        let mut request = self
+            .http_client
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
@@ -643,17 +650,18 @@ impl McpClient {
             )));
         }
 
-        let result: JsonValue = response
-            .json()
-            .await
-            .map_err(|e| AgentError::ProtocolError(format!("Failed to parse initialize response: {}", e)))?;
+        let result: JsonValue = response.json().await.map_err(|e| {
+            AgentError::ProtocolError(format!("Failed to parse initialize response: {}", e))
+        })?;
 
         let server_info = result.get("result").cloned().unwrap_or(JsonValue::Null);
         self.server_info = Some(server_info.clone());
         self.initialized = true;
 
         // Send initialized notification (per MCP spec)
-        let _notification = self.send_notification("notifications/initialized", None).await;
+        let _notification = self
+            .send_notification("notifications/initialized", None)
+            .await;
 
         Ok(server_info)
     }
@@ -668,7 +676,8 @@ impl McpClient {
             body["params"] = p;
         }
 
-        let mut request = self.http_client
+        let mut request = self
+            .http_client
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
@@ -677,11 +686,10 @@ impl McpClient {
             request = request.header("Mcp-Session-Id", session_id);
         }
 
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentError::ProtocolError(format!("MCP notification failed: {}", e)))?;
+        let response =
+            request.json(&body).send().await.map_err(|e| {
+                AgentError::ProtocolError(format!("MCP notification failed: {}", e))
+            })?;
 
         // Notifications should return 202 Accepted
         let status = response.status();
@@ -715,10 +723,14 @@ impl McpClient {
                 "MCP client not initialized. Call initialize() first.".to_string(),
             ));
         }
-        self.send_request("tools/call", Some(serde_json::json!({
-            "name": tool_name,
-            "arguments": arguments,
-        }))).await
+        self.send_request(
+            "tools/call",
+            Some(serde_json::json!({
+                "name": tool_name,
+                "arguments": arguments,
+            })),
+        )
+        .await
     }
 
     /// Returns whether the client has been initialized.
@@ -741,9 +753,7 @@ pub struct McpBridge {
 impl McpBridge {
     /// Creates a new MCP bridge (local format conversion only)
     pub fn new() -> Self {
-        Self {
-            mcp_client: None,
-        }
+        Self { mcp_client: None }
     }
 
     /// Creates a new MCP bridge connected to a remote MCP server.
@@ -780,7 +790,11 @@ impl McpBridge {
     }
 
     /// Calls a tool on the remote MCP server.
-    pub async fn call_remote_tool(&self, tool_name: &str, arguments: JsonValue) -> Result<JsonValue> {
+    pub async fn call_remote_tool(
+        &self,
+        tool_name: &str,
+        arguments: JsonValue,
+    ) -> Result<JsonValue> {
         if let Some(ref client) = self.mcp_client {
             client.call_tool(tool_name, arguments).await
         } else {
@@ -840,7 +854,8 @@ impl McpBridge {
         };
 
         let payload = serde_json::to_value(task_response)?;
-        let mut a2a_message = A2aMessage::new(sender, receiver, A2aMessageType::TaskResponse, payload);
+        let mut a2a_message =
+            A2aMessage::new(sender, receiver, A2aMessageType::TaskResponse, payload);
 
         if let Some(correlation_id) = &mcp_message.correlation_id {
             a2a_message = a2a_message.with_correlation_id(correlation_id.clone());
@@ -853,10 +868,7 @@ impl McpBridge {
     ///
     /// If a remote MCP client is connected, forwards the tool call to the remote server.
     /// Otherwise, performs local A2A-to-MCP format conversion only.
-    pub async fn bridge_a2a_to_mcp_remote(
-        &self,
-        message: &A2aMessage,
-    ) -> Result<McpMessage> {
+    pub async fn bridge_a2a_to_mcp_remote(&self, message: &A2aMessage) -> Result<McpMessage> {
         // Convert A2A to MCP tool call
         let mcp_message = self.a2a_to_mcp_tool_call(message)?;
 
@@ -865,10 +877,12 @@ impl McpBridge {
             && client.is_initialized()
         {
             let tool_call: ToolCall = serde_json::from_value(mcp_message.payload.clone())?;
-            let result = client.call_tool(
-                &tool_call.tool_name,
-                serde_json::to_value(&tool_call.arguments)?,
-            ).await?;
+            let result = client
+                .call_tool(
+                    &tool_call.tool_name,
+                    serde_json::to_value(&tool_call.arguments)?,
+                )
+                .await?;
 
             let tool_result = ToolResult {
                 success: true,
@@ -879,7 +893,8 @@ impl McpBridge {
             return Ok(McpMessage::new(
                 McpMessageType::ToolResult,
                 serde_json::to_value(tool_result)?,
-            ).with_correlation_id(mcp_message.message_id));
+            )
+            .with_correlation_id(mcp_message.message_id));
         }
 
         // No remote client — return the local conversion only

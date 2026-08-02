@@ -32,8 +32,8 @@ use tenzro_payments::traits::{PaymentGateway, PaymentProtocol};
 use tenzro_payments::types::{
     PaymentChallenge, PaymentCredential, PaymentReceipt, PaymentVerification,
 };
-use tenzro_types::primitives::{Address, BlockHeight};
 use tenzro_types::RoleSet;
+use tenzro_types::primitives::{Address, BlockHeight};
 
 // ---------------------------------------------------------------------------
 // Boilerplate — same node-booting harness the escrow integration test uses,
@@ -87,9 +87,8 @@ async fn setup_test_server() -> (
     let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
     let rpc = RpcServer::new(node.clone(), "127.0.0.1:0".to_string());
-    let handle = tokio::spawn(async move {
-        rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await
-    });
+    let handle =
+        tokio::spawn(async move { rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await });
 
     // Wait for the RPC server to bind so the node is fully wired.
     let _addr = addr_rx.await.expect("receive bound address");

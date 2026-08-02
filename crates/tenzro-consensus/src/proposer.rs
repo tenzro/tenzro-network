@@ -5,8 +5,8 @@ use crate::error::{ConsensusError, Result};
 use crate::mempool::Mempool;
 use std::sync::Arc;
 use tenzro_types::block::{
-    calculate_next_base_fee, Block, BlockHeader, BlockMetadata, ConsensusAlgorithm,
-    ConsensusProof, FeeMarketParams,
+    Block, BlockHeader, BlockMetadata, ConsensusAlgorithm, ConsensusProof, FeeMarketParams,
+    calculate_next_base_fee,
 };
 use tenzro_types::primitives::{Address, BlockHeight, Hash};
 use tenzro_types::transaction::SignedTransaction;
@@ -204,10 +204,7 @@ impl BlockProposer {
         let tx_count = transactions.len() as u64;
 
         // Calculate total gas used
-        let gas_used: u64 = transactions
-            .iter()
-            .map(|tx| tx.transaction.gas_limit)
-            .sum();
+        let gas_used: u64 = transactions.iter().map(|tx| tx.transaction.gas_limit).sum();
 
         BlockMetadata {
             gas_used,
@@ -248,8 +245,7 @@ impl BlockProposer {
         if block.header.metadata.gas_used > self.config.max_gas_per_block {
             return Err(ConsensusError::InvalidProposal(format!(
                 "Gas limit exceeded: {} > {}",
-                block.header.metadata.gas_used,
-                self.config.max_gas_per_block
+                block.header.metadata.gas_used, self.config.max_gas_per_block
             )));
         }
 
@@ -324,9 +320,7 @@ impl BlockProposer {
 
     /// Estimates the size of a block in bytes
     pub fn estimate_block_size(&self, block: &Block) -> usize {
-        serde_json::to_string(block)
-            .map(|s| s.len())
-            .unwrap_or(0)
+        serde_json::to_string(block).map(|s| s.len()).unwrap_or(0)
     }
 
     /// Checks if a block exceeds the maximum size
@@ -359,9 +353,9 @@ mod tests {
     use super::*;
     use crate::mempool::Mempool;
     use tenzro_crypto::pq::MlDsaSigningKey;
+    use tenzro_types::Signature;
     use tenzro_types::primitives::{ChainId, Nonce};
     use tenzro_types::transaction::{Transaction, TransactionType};
-    use tenzro_types::Signature;
 
     fn create_test_transaction(gas_price: u64, nonce: u64) -> SignedTransaction {
         let pq_key = MlDsaSigningKey::generate();
@@ -386,8 +380,12 @@ mod tests {
         let proposer = BlockProposer::new(mempool.clone(), config);
 
         // Add transactions to mempool
-        mempool.add_transaction(create_test_transaction(100, 1)).unwrap();
-        mempool.add_transaction(create_test_transaction(200, 2)).unwrap();
+        mempool
+            .add_transaction(create_test_transaction(100, 1))
+            .unwrap();
+        mempool
+            .add_transaction(create_test_transaction(200, 2))
+            .unwrap();
 
         // Propose a block. Genesis-edge case: parent_gas_limit=0 → child
         // uses initial_base_fee.
@@ -433,7 +431,11 @@ mod tests {
         );
 
         // Should validate successfully
-        assert!(proposer.validate_proposal(&block, BlockHeight::from(1)).is_ok());
+        assert!(
+            proposer
+                .validate_proposal(&block, BlockHeight::from(1))
+                .is_ok()
+        );
     }
 
     #[test]

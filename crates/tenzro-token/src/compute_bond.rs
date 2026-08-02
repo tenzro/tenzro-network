@@ -25,7 +25,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_PROVIDERS};
+use tenzro_storage::{CF_PROVIDERS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info};
 
@@ -77,10 +77,21 @@ impl ComputeBondStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ComputeBondEvent {
-    Posted { amount: u128, at: Timestamp },
-    Increased { amount: u128, at: Timestamp },
-    WithdrawInitiated { cooldown_until: Timestamp, at: Timestamp },
-    Returned { at: Timestamp },
+    Posted {
+        amount: u128,
+        at: Timestamp,
+    },
+    Increased {
+        amount: u128,
+        at: Timestamp,
+    },
+    WithdrawInitiated {
+        cooldown_until: Timestamp,
+        at: Timestamp,
+    },
+    Returned {
+        at: Timestamp,
+    },
     /// One SLA-driven slash. `reason` is a short structured code such as
     /// `"sla:probe_timeout"` or `"sla:probe_invalid_sig"`. `remaining` is
     /// the post-slash bond balance.
@@ -123,11 +134,7 @@ impl ComputeBondState {
 
     /// Amount eligible to back registration. Active → `amount`, else 0.
     pub fn effective_amount(&self) -> u128 {
-        if self.is_eligible() {
-            self.amount
-        } else {
-            0
-        }
+        if self.is_eligible() { self.amount } else { 0 }
     }
 }
 
@@ -415,9 +422,9 @@ impl ComputeBondManager {
         bond_ref.status = ComputeBondStatus::Returned;
         bond_ref.amount = 0;
         bond_ref.last_modified_block = block_height;
-        bond_ref
-            .history
-            .push(ComputeBondEvent::Returned { at: Timestamp::now() });
+        bond_ref.history.push(ComputeBondEvent::Returned {
+            at: Timestamp::now(),
+        });
         let snapshot = bond_ref.clone();
         drop(bond_ref);
         self.persist(&snapshot)?;
@@ -636,10 +643,7 @@ mod tests {
 
     #[test]
     fn meets_requirement_gate() {
-        let m = ComputeBondManager::new().with_governance(
-            DEFAULT_COMPUTE_BOND_COOLDOWN_MS,
-            500,
-        );
+        let m = ComputeBondManager::new().with_governance(DEFAULT_COMPUTE_BOND_COOLDOWN_MS, 500);
         m.post("p1", addr(1), 400, 1).unwrap();
         assert!(!m.meets_requirement("p1", 500));
         m.increase("p1", 200, 2).unwrap();
@@ -661,7 +665,11 @@ mod tests {
         assert_eq!(snap.status, ComputeBondStatus::Active);
         assert!(matches!(
             snap.history.last().unwrap(),
-            ComputeBondEvent::Slashed { amount: 250, remaining: 750, .. }
+            ComputeBondEvent::Slashed {
+                amount: 250,
+                remaining: 750,
+                ..
+            }
         ));
     }
 

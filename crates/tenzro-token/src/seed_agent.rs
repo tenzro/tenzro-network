@@ -42,7 +42,7 @@
 use crate::error::{Result, TokenError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::primitives::{Hash, Timestamp};
 use tracing::{debug, info};
 
@@ -252,19 +252,58 @@ impl DecaySchedule {
             prod / 10_000
         };
         let points = vec![
-            DecayPoint { month: 0, max_draw_wei: pct(10_000) },
-            DecayPoint { month: 1, max_draw_wei: pct(10_000) },
-            DecayPoint { month: 2, max_draw_wei: pct(10_000) },
-            DecayPoint { month: 3, max_draw_wei: pct(7_500) },
-            DecayPoint { month: 4, max_draw_wei: pct(7_500) },
-            DecayPoint { month: 5, max_draw_wei: pct(7_500) },
-            DecayPoint { month: 6, max_draw_wei: pct(5_000) },
-            DecayPoint { month: 7, max_draw_wei: pct(5_000) },
-            DecayPoint { month: 8, max_draw_wei: pct(5_000) },
-            DecayPoint { month: 9, max_draw_wei: pct(2_500) },
-            DecayPoint { month: 10, max_draw_wei: pct(2_500) },
-            DecayPoint { month: 11, max_draw_wei: pct(2_500) },
-            DecayPoint { month: 12, max_draw_wei: 0 },
+            DecayPoint {
+                month: 0,
+                max_draw_wei: pct(10_000),
+            },
+            DecayPoint {
+                month: 1,
+                max_draw_wei: pct(10_000),
+            },
+            DecayPoint {
+                month: 2,
+                max_draw_wei: pct(10_000),
+            },
+            DecayPoint {
+                month: 3,
+                max_draw_wei: pct(7_500),
+            },
+            DecayPoint {
+                month: 4,
+                max_draw_wei: pct(7_500),
+            },
+            DecayPoint {
+                month: 5,
+                max_draw_wei: pct(7_500),
+            },
+            DecayPoint {
+                month: 6,
+                max_draw_wei: pct(5_000),
+            },
+            DecayPoint {
+                month: 7,
+                max_draw_wei: pct(5_000),
+            },
+            DecayPoint {
+                month: 8,
+                max_draw_wei: pct(5_000),
+            },
+            DecayPoint {
+                month: 9,
+                max_draw_wei: pct(2_500),
+            },
+            DecayPoint {
+                month: 10,
+                max_draw_wei: pct(2_500),
+            },
+            DecayPoint {
+                month: 11,
+                max_draw_wei: pct(2_500),
+            },
+            DecayPoint {
+                month: 12,
+                max_draw_wei: 0,
+            },
         ];
         Self { points }
     }
@@ -281,9 +320,7 @@ impl DecaySchedule {
 
     pub fn validate(&self) -> Result<()> {
         if self.points.is_empty() {
-            return Err(TokenError::InvalidParameter(
-                "decay schedule empty".into(),
-            ));
+            return Err(TokenError::InvalidParameter("decay schedule empty".into()));
         }
         // Final month must be 0 (hard sunset).
         let last = self.points.last().unwrap();
@@ -628,8 +665,7 @@ impl SeedAgentEarmarkManager {
     /// Add or replace a charter (governance write path).
     pub fn upsert_charter(&self, charter: Charter) -> Result<()> {
         charter.validate()?;
-        self.charters
-            .insert(charter.charter_id, charter.clone());
+        self.charters.insert(charter.charter_id, charter.clone());
         self.persist_charter(&charter)?;
         // Sync charter id list onto the earmark if needed.
         let needs_sync = {
@@ -658,8 +694,7 @@ impl SeedAgentEarmarkManager {
             )));
         }
         let new_record = !self.agents.contains_key(&record.agent_did);
-        self.agents
-            .insert(record.agent_did.clone(), record.clone());
+        self.agents.insert(record.agent_did.clone(), record.clone());
         self.persist_agent(&record)?;
         if new_record {
             let snapshot = {
@@ -679,18 +714,11 @@ impl SeedAgentEarmarkManager {
 
     /// Update an agent's status (governance pause/quarantine/terminate
     /// or daemon-driven wind-down).
-    pub fn set_agent_status(
-        &self,
-        agent_did: &str,
-        status: SeedAgentStatus,
-    ) -> Result<()> {
+    pub fn set_agent_status(&self, agent_did: &str, status: SeedAgentStatus) -> Result<()> {
         let record = {
-            let mut entry = self
-                .agents
-                .get_mut(agent_did)
-                .ok_or_else(|| TokenError::InvalidParameter(
-                    format!("unknown SeedAgent {}", agent_did),
-                ))?;
+            let mut entry = self.agents.get_mut(agent_did).ok_or_else(|| {
+                TokenError::InvalidParameter(format!("unknown SeedAgent {}", agent_did))
+            })?;
             entry.status = status;
             entry.last_active = Timestamp::now();
             entry.value().clone()
@@ -741,10 +769,7 @@ impl SeedAgentEarmarkManager {
             .get(agent_did)
             .map(|e| e.value().clone())
             .ok_or_else(|| {
-                TokenError::InvalidParameter(format!(
-                    "unknown SeedAgent {}",
-                    agent_did
-                ))
+                TokenError::InvalidParameter(format!("unknown SeedAgent {}", agent_did))
             })?;
         if matches!(agent_snapshot.status, SeedAgentStatus::Terminated) {
             return Err(TokenError::InvalidParameter(format!(
@@ -775,9 +800,7 @@ impl SeedAgentEarmarkManager {
                 charter.charter_id
             )));
         }
-        if now.as_millis() >= charter.sunset.as_millis()
-            && charter.sunset.as_millis() != 0
-        {
+        if now.as_millis() >= charter.sunset.as_millis() && charter.sunset.as_millis() != 0 {
             return Err(TokenError::InvalidParameter(format!(
                 "charter {:?} has sunsetted",
                 charter.charter_id
@@ -807,9 +830,7 @@ impl SeedAgentEarmarkManager {
                 guard.month_drawn_wei = 0;
             }
 
-            let schedule_cap = guard
-                .decay_schedule
-                .cap_for_month(guard.current_month);
+            let schedule_cap = guard.decay_schedule.cap_for_month(guard.current_month);
             // Per-agent cap = min(schedule, charter monthly cap, requested).
             let per_agent_cap = schedule_cap
                 .min(charter.spend_caps.monthly_cap_wei)
@@ -819,10 +840,8 @@ impl SeedAgentEarmarkManager {
             // monthly draw at `schedule_cap * seed_agent_count` (so each
             // agent gets its own monthly cap, summed). Compute the
             // remaining month-budget and clamp to it.
-            let month_budget = schedule_cap
-                .saturating_mul(guard.seed_agent_count as u128);
-            let month_remaining = month_budget
-                .saturating_sub(guard.month_drawn_wei);
+            let month_budget = schedule_cap.saturating_mul(guard.seed_agent_count as u128);
+            let month_remaining = month_budget.saturating_sub(guard.month_drawn_wei);
 
             let mut granted = per_agent_cap.min(month_remaining);
             // Cannot exceed the global allocation remaining.
@@ -840,15 +859,9 @@ impl SeedAgentEarmarkManager {
                 return Ok(snapshot);
             }
 
-            guard.allocation_remaining_wei = guard
-                .allocation_remaining_wei
-                .saturating_sub(granted);
-            guard.total_drawn_wei = guard
-                .total_drawn_wei
-                .saturating_add(granted);
-            guard.month_drawn_wei = guard
-                .month_drawn_wei
-                .saturating_add(granted);
+            guard.allocation_remaining_wei = guard.allocation_remaining_wei.saturating_sub(granted);
+            guard.total_drawn_wei = guard.total_drawn_wei.saturating_add(granted);
+            guard.month_drawn_wei = guard.month_drawn_wei.saturating_add(granted);
 
             let snapshot = guard.clone();
             (granted, snapshot)
@@ -859,15 +872,10 @@ impl SeedAgentEarmarkManager {
 
         // Mutate + persist the agent record.
         let agent_record = {
-            let mut entry = self
-                .agents
-                .get_mut(agent_did)
-                .ok_or_else(|| TokenError::InvalidParameter(
-                    format!("unknown SeedAgent {}", agent_did),
-                ))?;
-            entry.allocation_used_wei = entry
-                .allocation_used_wei
-                .saturating_add(granted);
+            let mut entry = self.agents.get_mut(agent_did).ok_or_else(|| {
+                TokenError::InvalidParameter(format!("unknown SeedAgent {}", agent_did))
+            })?;
+            entry.allocation_used_wei = entry.allocation_used_wei.saturating_add(granted);
             entry.last_active = now;
             entry.value().clone()
         };
@@ -930,13 +938,15 @@ impl SeedAgentEarmarkManager {
             if !matches!(agent.status, SeedAgentStatus::Paused) {
                 continue;
             }
-            let charter = self.charters.get(&agent.charter_id).map(|e| e.value().clone());
+            let charter = self
+                .charters
+                .get(&agent.charter_id)
+                .map(|e| e.value().clone());
             let should_quarantine = match charter {
                 None => true, // dangling charter — quarantine defensively
                 Some(c) => {
                     !c.enabled
-                        || (c.sunset.as_millis() != 0
-                            && now.as_millis() >= c.sunset.as_millis())
+                        || (c.sunset.as_millis() != 0 && now.as_millis() >= c.sunset.as_millis())
                 }
             };
             if !should_quarantine {
@@ -951,7 +961,9 @@ impl SeedAgentEarmarkManager {
             if !matches!(agent.status, SeedAgentStatus::Quarantined) {
                 continue;
             }
-            let age = now.as_millis().saturating_sub(agent.last_active.as_millis());
+            let age = now
+                .as_millis()
+                .saturating_sub(agent.last_active.as_millis());
             if age < quarantine_grace_ms {
                 continue;
             }
@@ -976,13 +988,13 @@ impl SeedAgentEarmarkManager {
             !charters.is_empty()
                 && charters.iter().all(|c| {
                     !c.enabled
-                        || (c.sunset.as_millis() != 0
-                            && now.as_millis() >= c.sunset.as_millis())
+                        || (c.sunset.as_millis() != 0 && now.as_millis() >= c.sunset.as_millis())
                 })
         };
-        let no_live_agents = self.list_agents(None).iter().all(|a| {
-            matches!(a.status, SeedAgentStatus::Terminated)
-        });
+        let no_live_agents = self
+            .list_agents(None)
+            .iter()
+            .all(|a| matches!(a.status, SeedAgentStatus::Terminated));
 
         if all_charters_sunset && no_live_agents {
             let snapshot = self.earmark.read().clone();
@@ -1031,12 +1043,9 @@ impl SeedAgentEarmarkManager {
         now: Timestamp,
     ) -> Result<()> {
         let record = {
-            let mut entry = self
-                .agents
-                .get_mut(agent_did)
-                .ok_or_else(|| TokenError::InvalidParameter(
-                    format!("unknown SeedAgent {}", agent_did),
-                ))?;
+            let mut entry = self.agents.get_mut(agent_did).ok_or_else(|| {
+                TokenError::InvalidParameter(format!("unknown SeedAgent {}", agent_did))
+            })?;
             entry.status = status;
             entry.last_active = now;
             entry.value().clone()
@@ -1085,10 +1094,11 @@ impl SeedAgentEarmarkManager {
         }
 
         // Charters.
-        let charter_keys =
-            storage.get_keys_with_prefix(CF_TOKENS, SEED_CHARTER_PREFIX)?;
+        let charter_keys = storage.get_keys_with_prefix(CF_TOKENS, SEED_CHARTER_PREFIX)?;
         for key in charter_keys {
-            let Some(bytes) = storage.get(CF_TOKENS, &key)? else { continue };
+            let Some(bytes) = storage.get(CF_TOKENS, &key)? else {
+                continue;
+            };
             match serde_json::from_slice::<Charter>(&bytes) {
                 Ok(charter) => {
                     self.charters.insert(charter.charter_id, charter);
@@ -1109,10 +1119,11 @@ impl SeedAgentEarmarkManager {
         }
 
         // Agents.
-        let agent_keys =
-            storage.get_keys_with_prefix(CF_TOKENS, SEED_AGENT_PREFIX)?;
+        let agent_keys = storage.get_keys_with_prefix(CF_TOKENS, SEED_AGENT_PREFIX)?;
         for key in agent_keys {
-            let Some(bytes) = storage.get(CF_TOKENS, &key)? else { continue };
+            let Some(bytes) = storage.get(CF_TOKENS, &key)? else {
+                continue;
+            };
             match serde_json::from_slice::<SeedAgentRecord>(&bytes) {
                 Ok(record) => {
                     self.agents.insert(record.agent_did.clone(), record);
@@ -1141,10 +1152,11 @@ impl SeedAgentEarmarkManager {
     }
 
     fn persist_earmark(&self, earmark: &TreasuryEarmark) -> Result<()> {
-        let Some(storage) = &self.storage else { return Ok(()); };
-        let bytes = serde_json::to_vec(earmark).map_err(|e| {
-            TokenError::StorageError(format!("encode SeedAgent earmark: {}", e))
-        })?;
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        let bytes = serde_json::to_vec(earmark)
+            .map_err(|e| TokenError::StorageError(format!("encode SeedAgent earmark: {}", e)))?;
         storage.write_batch_sync(vec![WriteOp::Put {
             cf: CF_TOKENS.to_string(),
             key: SEED_EARMARK_KEY.to_vec(),
@@ -1154,10 +1166,11 @@ impl SeedAgentEarmarkManager {
     }
 
     fn persist_charter(&self, charter: &Charter) -> Result<()> {
-        let Some(storage) = &self.storage else { return Ok(()); };
-        let bytes = serde_json::to_vec(charter).map_err(|e| {
-            TokenError::StorageError(format!("encode SeedAgent charter: {}", e))
-        })?;
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        let bytes = serde_json::to_vec(charter)
+            .map_err(|e| TokenError::StorageError(format!("encode SeedAgent charter: {}", e)))?;
         let mut key = SEED_CHARTER_PREFIX.to_vec();
         key.extend_from_slice(charter.charter_id.as_bytes());
         storage.write_batch_sync(vec![WriteOp::Put {
@@ -1169,10 +1182,11 @@ impl SeedAgentEarmarkManager {
     }
 
     fn persist_agent(&self, record: &SeedAgentRecord) -> Result<()> {
-        let Some(storage) = &self.storage else { return Ok(()); };
-        let bytes = serde_json::to_vec(record).map_err(|e| {
-            TokenError::StorageError(format!("encode SeedAgent record: {}", e))
-        })?;
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        let bytes = serde_json::to_vec(record)
+            .map_err(|e| TokenError::StorageError(format!("encode SeedAgent record: {}", e)))?;
         let mut key = SEED_AGENT_PREFIX.to_vec();
         key.extend_from_slice(record.agent_did.as_bytes());
         storage.write_batch_sync(vec![WriteOp::Put {
@@ -1194,7 +1208,10 @@ mod tests {
 
     #[test]
     fn operation_kind_strings_are_stable() {
-        assert_eq!(OperationKind::InferenceConsumer.as_str(), "inference_consumer");
+        assert_eq!(
+            OperationKind::InferenceConsumer.as_str(),
+            "inference_consumer"
+        );
         assert_eq!(OperationKind::DisputeFiler.as_str(), "dispute_filer");
     }
 
@@ -1227,8 +1244,14 @@ mod tests {
     fn decay_schedule_rejects_non_zero_final() {
         let s = DecaySchedule {
             points: vec![
-                DecayPoint { month: 0, max_draw_wei: 1_000 },
-                DecayPoint { month: 1, max_draw_wei: 500 }, // doesn't end at zero
+                DecayPoint {
+                    month: 0,
+                    max_draw_wei: 1_000,
+                },
+                DecayPoint {
+                    month: 1,
+                    max_draw_wei: 500,
+                }, // doesn't end at zero
             ],
         };
         assert!(s.validate().is_err());
@@ -1254,7 +1277,9 @@ mod tests {
             purpose: "Steady inference load on registered models".to_string(),
             operations: vec![OperationKind::InferenceConsumer],
             spend_caps: SpendCaps::default_inference_caps(),
-            target_throughput: Some(TargetThroughput { ops_per_sec_milli: 167 }),
+            target_throughput: Some(TargetThroughput {
+                ops_per_sec_milli: 167,
+            }),
             counterparty_filter: CounterpartyFilter::default(),
             sunset: Timestamp::new(1_000_000),
             enabled: true,
@@ -1445,11 +1470,7 @@ mod tests {
         mgr.upsert_charter(charter).unwrap();
 
         let r = mgr
-            .refill_agent_monthly(
-                "did:tenzro:machine:seed:a",
-                500,
-                Timestamp::new(0),
-            )
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 500, Timestamp::new(0))
             .unwrap();
         assert_eq!(r.granted_wei, 30);
     }
@@ -1515,23 +1536,19 @@ mod tests {
     #[test]
     fn refill_rejects_paused_or_terminated_agent() {
         let mgr = seeded_manager_for_refill();
-        mgr.set_agent_status(
-            "did:tenzro:machine:seed:a",
-            SeedAgentStatus::Paused,
-        )
-        .unwrap();
-        assert!(mgr
-            .refill_agent_monthly("did:tenzro:machine:seed:a", 10, Timestamp::new(0))
-            .is_err());
+        mgr.set_agent_status("did:tenzro:machine:seed:a", SeedAgentStatus::Paused)
+            .unwrap();
+        assert!(
+            mgr.refill_agent_monthly("did:tenzro:machine:seed:a", 10, Timestamp::new(0))
+                .is_err()
+        );
 
-        mgr.set_agent_status(
-            "did:tenzro:machine:seed:b",
-            SeedAgentStatus::Terminated,
-        )
-        .unwrap();
-        assert!(mgr
-            .refill_agent_monthly("did:tenzro:machine:seed:b", 10, Timestamp::new(0))
-            .is_err());
+        mgr.set_agent_status("did:tenzro:machine:seed:b", SeedAgentStatus::Terminated)
+            .unwrap();
+        assert!(
+            mgr.refill_agent_monthly("did:tenzro:machine:seed:b", 10, Timestamp::new(0))
+                .is_err()
+        );
     }
 
     #[test]
@@ -1685,7 +1702,9 @@ mod tests {
         // Charter sunset at t=1000; sweep at t=1500.
         let mgr = seeded_manager_for_sweep(2, Timestamp::new(1_000), true);
         let now = Timestamp::new(1_500);
-        let report = mgr.sunset_wind_down_sweep(now, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let report = mgr
+            .sunset_wind_down_sweep(now, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert_eq!(report.quarantined.len(), 2);
         assert_eq!(report.terminated.len(), 0);
         assert!(report.surplus.is_none(), "still inside grace window");
@@ -1699,7 +1718,9 @@ mod tests {
         // Charter sunset in the future, but disabled — still quarantines.
         let mgr = seeded_manager_for_sweep(1, Timestamp::new(10_000_000), false);
         let now = Timestamp::new(1_500);
-        let report = mgr.sunset_wind_down_sweep(now, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let report = mgr
+            .sunset_wind_down_sweep(now, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert_eq!(report.quarantined.len(), 1);
     }
 
@@ -1708,18 +1729,24 @@ mod tests {
         let mgr = seeded_manager_for_sweep(1, Timestamp::new(1_000), true);
         // First sweep: Paused → Quarantined at t=1_500.
         let t1 = Timestamp::new(1_500);
-        let r1 = mgr.sunset_wind_down_sweep(t1, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let r1 = mgr
+            .sunset_wind_down_sweep(t1, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert_eq!(r1.quarantined.len(), 1);
         assert_eq!(mgr.earmark().seed_agent_count, 1);
 
         // Second sweep before grace elapses: still Quarantined.
         let t2 = Timestamp::new(1_500 + DEFAULT_QUARANTINE_GRACE_MS - 1);
-        let r2 = mgr.sunset_wind_down_sweep(t2, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let r2 = mgr
+            .sunset_wind_down_sweep(t2, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert!(r2.terminated.is_empty());
 
         // Third sweep after grace: Terminated, surplus disposed, earmark frozen.
         let t3 = Timestamp::new(1_500 + DEFAULT_QUARANTINE_GRACE_MS);
-        let r3 = mgr.sunset_wind_down_sweep(t3, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let r3 = mgr
+            .sunset_wind_down_sweep(t3, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert_eq!(r3.terminated.len(), 1);
         assert_eq!(mgr.earmark().seed_agent_count, 0);
         // All charters sunset + no live agents → surplus path triggers.
@@ -1740,13 +1767,20 @@ mod tests {
         mgr.sunset_wind_down_sweep(Timestamp::new(1_500), DEFAULT_QUARANTINE_GRACE_MS)
             .unwrap();
         // Second sweep: Quarantined → Terminated + surplus disposed.
-        let r1 = mgr.sunset_wind_down_sweep(t_far, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let r1 = mgr
+            .sunset_wind_down_sweep(t_far, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert!(r1.surplus.is_some());
         // Third sweep: nothing left to do.
-        let r2 = mgr.sunset_wind_down_sweep(t_far, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let r2 = mgr
+            .sunset_wind_down_sweep(t_far, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert!(r2.quarantined.is_empty());
         assert!(r2.terminated.is_empty());
-        assert!(r2.surplus.is_none(), "surplus already disposed, earmark frozen");
+        assert!(
+            r2.surplus.is_none(),
+            "surplus already disposed, earmark frozen"
+        );
     }
 
     #[test]
@@ -1769,9 +1803,13 @@ mod tests {
         // First sweep quarantines the agent under the sunsetted C1 (anchors
         // last_active = sweep-time). Second sweep beyond grace terminates it.
         let t1 = Timestamp::new(1_500);
-        let _ = mgr.sunset_wind_down_sweep(t1, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let _ = mgr
+            .sunset_wind_down_sweep(t1, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         let t2 = Timestamp::new(1_500 + DEFAULT_QUARANTINE_GRACE_MS);
-        let report = mgr.sunset_wind_down_sweep(t2, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let report = mgr
+            .sunset_wind_down_sweep(t2, DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
         assert_eq!(report.terminated.len(), 1);
         // Live charter still around → no surplus disposition.
         assert!(report.surplus.is_none());

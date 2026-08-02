@@ -1,7 +1,7 @@
 //! Real Solana transaction processing via Anza's `solana-svm`.
 //!
 //! This module is compiled only under the `svm-full` cargo feature (it is
-//! `mod`-declared inside `executor.rs` behind `#[cfg(feature = "svm-full")]`).
+//! `mod`-declared in `svm/mod.rs` behind `#[cfg(feature = "svm-full")]`).
 //! It drives a [`TransactionBatchProcessor`] over a [`VmState`]-backed account
 //! loader so that an unmodified mainnet SBF ELF (the SPL Token program, a CPI
 //! program, etc.) executes with syscalls under the Tenzro runtime.
@@ -40,17 +40,22 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock, Weak};
 
-use solana_account::{AccountSharedData, ReadableAccount, WritableAccount};
+use solana_account::{AccountSharedData, WritableAccount};
 use solana_clock::{Clock, Slot};
 use solana_instruction::{AccountMeta, Instruction};
 use solana_message::Message;
 use solana_program_runtime::execution_budget::{
-    SVMTransactionExecutionAndFeeBudgetLimits, SVMTransactionExecutionBudget,
-    MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,
+    MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES, SVMTransactionExecutionAndFeeBudgetLimits,
+    SVMTransactionExecutionBudget,
 };
 use solana_program_runtime::loaded_programs::{
-    BlockRelation, ForkGraph, ProgramCacheEntry, ProgramRuntimeEnvironments,
+    BlockRelation, ForkGraph, ProgramRuntimeEnvironments,
 };
+use solana_program_runtime::program_cache_entry::ProgramCacheEntry;
+// `register` is a provided method on `BuiltinFunctionDefinition`, not an
+// inherent one on the generated `Entrypoint` struct, so the trait has to be in
+// scope for `Entrypoint::register` to resolve.
+use solana_program_runtime::solana_sbpf::program::BuiltinFunctionDefinition;
 use solana_pubkey::Pubkey;
 use solana_svm::account_loader::CheckedTransactionDetails;
 use solana_svm::transaction_processing_result::ProcessedTransaction;
@@ -58,10 +63,10 @@ use solana_svm::transaction_processor::{
     ExecutionRecordingConfig, TransactionBatchProcessor, TransactionProcessingConfig,
     TransactionProcessingEnvironment,
 };
-use solana_svm_callback::TransactionProcessingCallback;
+use solana_svm_callback::{InvokeContextCallback, TransactionProcessingCallback};
 use solana_svm_feature_set::SVMFeatureSet;
-use solana_transaction::sanitized::SanitizedTransaction;
 use solana_transaction::Transaction;
+use solana_transaction::sanitized::SanitizedTransaction;
 
 use crate::error::{Result, VmError};
 use crate::traits::VmState;
@@ -132,6 +137,12 @@ impl<'a> VmStateAccountLoader<'a> {
     }
 }
 
+/// Supertrait of [`TransactionProcessingCallback`]. Every method has a
+/// default, and every default is right here: this node is not a Solana
+/// validator, so it has no epoch stake to report, and it runs no precompiles —
+/// Tenzro's precompiles live on the EVM side of the `MultiVmRuntime`.
+impl InvokeContextCallback for VmStateAccountLoader<'_> {}
+
 impl TransactionProcessingCallback for VmStateAccountLoader<'_> {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
         // Clock sysvar: served from block context.
@@ -142,8 +153,11 @@ impl TransactionProcessingCallback for VmStateAccountLoader<'_> {
         // The program under test: serve its ELF as an executable, BPF-loader
         // owned account so the processor loads and runs it.
         if *pubkey == self.program_id {
-            let mut account =
-                AccountSharedData::new(0, self.program_elf.len(), &solana_sdk_ids::bpf_loader::id());
+            let mut account = AccountSharedData::new(
+                0,
+                self.program_elf.len(),
+                &solana_sdk_ids::bpf_loader::id(),
+            );
             account.set_data_from_slice(&self.program_elf);
             account.set_executable(true);
             return Some((account, EXECUTION_SLOT));
@@ -179,14 +193,15 @@ fn runtime_environments(
     feature_set: &SVMFeatureSet,
     budget: &SVMTransactionExecutionBudget,
 ) -> Result<ProgramRuntimeEnvironments> {
-    let execution = Arc::new(
+    // `create_program_runtime_environment` already hands back a
+    // `ProgramRuntimeEnvironment`, which owns the `Arc` internally — wrapping
+    // it again would not typecheck.
+    let execution =
         solana_syscalls::create_program_runtime_environment(feature_set, budget, false, false)
-            .map_err(|e| VmError::ExecutionFailed(format!("SVM runtime environment: {e}")))?,
-    );
-    let deployment = Arc::new(
+            .map_err(|e| VmError::ExecutionFailed(format!("SVM runtime environment: {e}")))?;
+    let deployment =
         solana_syscalls::create_program_runtime_environment(feature_set, budget, true, false)
-            .map_err(|e| VmError::ExecutionFailed(format!("SVM deployment environment: {e}")))?,
-    );
+            .map_err(|e| VmError::ExecutionFailed(format!("SVM deployment environment: {e}")))?;
     Ok(ProgramRuntimeEnvironments::new(execution, deployment))
 }
 
@@ -199,8 +214,7 @@ fn clock_sysvar_account(unix_timestamp: i64) -> AccountSharedData {
         ..Clock::default()
     };
     let data = bincode::serialize(&clock).unwrap_or_default();
-    let mut account =
-        AccountSharedData::new(1, data.len(), &solana_sdk_ids::sysvar::id());
+    let mut account = AccountSharedData::new(1, data.len(), &solana_sdk_ids::sysvar::id());
     account.set_data_from_slice(&data);
     account
 }
@@ -229,8 +243,8 @@ pub(crate) fn process_sbf_transaction(
         )));
     }
 
-    let program_pubkey =
-        Pubkey::try_from(program_id).map_err(|_| VmError::InvalidAddress(hex::encode(program_id)))?;
+    let program_pubkey = Pubkey::try_from(program_id)
+        .map_err(|_| VmError::InvalidAddress(hex::encode(program_id)))?;
 
     let cu_limit = compute_unit_limit.min(max_compute_unit_limit).max(1);
 

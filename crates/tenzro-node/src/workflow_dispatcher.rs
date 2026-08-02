@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::workflow_executor::{ExecutorError, StepDispatcher};
 use crate::TenzroNode;
+use crate::workflow_executor::{ExecutorError, StepDispatcher};
 
 pub struct NodeStepDispatcher {
     node: Arc<TenzroNode>,
@@ -338,10 +338,7 @@ mod tests {
         let out = model_step_output(chat_reply(
             "```json\n{\"recommendation\":\"buy\",\"size\":\"10\"}\n```",
         ));
-        assert_eq!(
-            out,
-            json!({ "recommendation": "buy", "size": "10" })
-        );
+        assert_eq!(out, json!({ "recommendation": "buy", "size": "10" }));
     }
 
     #[test]

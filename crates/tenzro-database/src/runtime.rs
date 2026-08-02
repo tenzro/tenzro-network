@@ -44,6 +44,10 @@ pub struct PartitionHandle {
     pub partition_index: usize,
     /// Engine-specific config, opaque to the registry, interpreted by the
     /// runtime backend.
+    ///
+    /// Same `json_value_serde` treatment as
+    /// [`crate::database::DatabaseDescriptor::engine_config`] — see there.
+    #[serde(with = "tenzro_types::primitives::json_value_serde")]
     pub engine_config: serde_json::Value,
 }
 
@@ -184,8 +188,9 @@ impl QueryRouter {
     }
 
     fn holders_for(&self, request: &QueryRequest) -> Result<Vec<String>> {
-        let placement =
-            self.registry.get_partition(&request.database_id, request.partition_index)?;
+        let placement = self
+            .registry
+            .get_partition(&request.database_id, request.partition_index)?;
         let holders = placement.all_holders();
         if holders.is_empty() {
             // Possible after mark_holder_lost drains the set entirely.
@@ -301,7 +306,10 @@ mod tests {
         assert_eq!(handle.database_id, "db-1");
         assert_eq!(handle.engine_id, crate::catalog::engine_ids::POSTGRES);
         assert_eq!(handle.partition_index, 3);
-        assert_eq!(handle.engine_config, serde_json::json!({ "schema": "public" }));
+        assert_eq!(
+            handle.engine_config,
+            serde_json::json!({ "schema": "public" })
+        );
     }
 
     #[test]
@@ -322,21 +330,31 @@ mod tests {
 
     #[async_trait]
     impl HolderDispatch for ScriptedDispatch {
-        async fn dispatch(&self, endpoint_id: &str, _request: &QueryRequest) -> Result<QueryResponse> {
+        async fn dispatch(
+            &self,
+            endpoint_id: &str,
+            _request: &QueryRequest,
+        ) -> Result<QueryResponse> {
             if self.fail.contains(endpoint_id) {
                 return Err(DatabaseError::Backend(format!("{endpoint_id} down")));
             }
-            Ok(QueryResponse { body: serde_json::json!({ "served_by": endpoint_id }) })
+            Ok(QueryResponse {
+                body: serde_json::json!({ "served_by": endpoint_id }),
+            })
         }
     }
 
     fn router_with_three_holders(fail: &[&str]) -> (QueryRouter, Vec<String>) {
         let registry = Arc::new(DatabaseRegistry::new());
-        let cands: Vec<TieredCandidate> =
-            (0..5).map(|i| TieredCandidate::direct(format!("net-{i}"))).collect();
+        let cands: Vec<TieredCandidate> = (0..5)
+            .map(|i| TieredCandidate::direct(format!("net-{i}")))
+            .collect();
         let mut desc = descriptor();
         desc.partitions = 1;
-        desc.replication = ReplicationPolicy { min_replication: 3, max_replication: 4 };
+        desc.replication = ReplicationPolicy {
+            min_replication: 3,
+            max_replication: 4,
+        };
         registry.create_database(desc, &cands).unwrap();
         let holders = registry.get_partition("db-1", 0).unwrap().all_holders();
         let fail: HashSet<String> = fail.iter().map(|s| s.to_string()).collect();
@@ -358,11 +376,17 @@ mod tests {
         // HRW is deterministic over a fixed candidate set, so two builds see
         // the same holder order.
         let (router, holders) = router_with_three_holders(&[]);
-        let resp = router.route_read(&request(WriteConsistency::Quorum)).await.unwrap();
+        let resp = router
+            .route_read(&request(WriteConsistency::Quorum))
+            .await
+            .unwrap();
         assert_eq!(resp.body["served_by"], holders[0].as_str());
 
         let (router_dead, _) = router_with_three_holders(&[holders[0].as_str()]);
-        let resp = router_dead.route_read(&request(WriteConsistency::Quorum)).await.unwrap();
+        let resp = router_dead
+            .route_read(&request(WriteConsistency::Quorum))
+            .await
+            .unwrap();
         assert_eq!(resp.body["served_by"], holders[1].as_str());
     }
 
@@ -371,7 +395,10 @@ mod tests {
         let (_, holders) = router_with_three_holders(&[]);
         let fails: Vec<&str> = holders.iter().map(|s| s.as_str()).collect();
         let (router, _) = router_with_three_holders(&fails);
-        let err = router.route_read(&request(WriteConsistency::Quorum)).await.unwrap_err();
+        let err = router
+            .route_read(&request(WriteConsistency::Quorum))
+            .await
+            .unwrap_err();
         assert!(matches!(err, DatabaseError::Backend(_)));
     }
 
@@ -379,7 +406,10 @@ mod tests {
     async fn quorum_write_tolerates_one_of_three_failing() {
         let (_, holders) = router_with_three_holders(&[]);
         let (router, _) = router_with_three_holders(&[holders[2].as_str()]);
-        let receipt = router.route_write(&request(WriteConsistency::Quorum)).await.unwrap();
+        let receipt = router
+            .route_write(&request(WriteConsistency::Quorum))
+            .await
+            .unwrap();
         assert_eq!(receipt.acked_holders.len(), 2);
         assert_eq!(receipt.failed_holders, vec![holders[2].clone()]);
         assert_eq!(receipt.response.body["served_by"], holders[0].as_str());
@@ -389,9 +419,17 @@ mod tests {
     async fn all_write_fails_on_any_holder_failure() {
         let (_, holders) = router_with_three_holders(&[]);
         let (router, _) = router_with_three_holders(&[holders[1].as_str()]);
-        let err = router.route_write(&request(WriteConsistency::All)).await.unwrap_err();
+        let err = router
+            .route_write(&request(WriteConsistency::All))
+            .await
+            .unwrap_err();
         match err {
-            DatabaseError::WriteConsistencyNotMet { required, acked, failed_holders, .. } => {
+            DatabaseError::WriteConsistencyNotMet {
+                required,
+                acked,
+                failed_holders,
+                ..
+            } => {
                 assert_eq!(required, 3);
                 assert_eq!(acked, 2);
                 assert_eq!(failed_holders, vec![holders[1].clone()]);
@@ -405,9 +443,17 @@ mod tests {
         let (_, holders) = router_with_three_holders(&[]);
         let fails = [holders[0].as_str(), holders[2].as_str()];
         let (router, _) = router_with_three_holders(&fails);
-        let err = router.route_write(&request(WriteConsistency::Quorum)).await.unwrap_err();
+        let err = router
+            .route_write(&request(WriteConsistency::Quorum))
+            .await
+            .unwrap_err();
         match err {
-            DatabaseError::WriteConsistencyNotMet { required, acked, failed_holders, .. } => {
+            DatabaseError::WriteConsistencyNotMet {
+                required,
+                acked,
+                failed_holders,
+                ..
+            } => {
                 assert_eq!(required, 2);
                 assert_eq!(acked, 1);
                 assert_eq!(failed_holders, vec![holders[0].clone(), holders[2].clone()]);

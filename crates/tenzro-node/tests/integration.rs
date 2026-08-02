@@ -4,7 +4,7 @@
 //! Each test gets its own temp directory to avoid RocksDB lock contention.
 
 use std::sync::Arc;
-use tenzro_node::{NodeConfig, TenzroNode, MetricsCollector};
+use tenzro_node::{MetricsCollector, NodeConfig, TenzroNode};
 
 /// Helper: create a NodeConfig with a unique temp data directory
 fn test_config() -> (NodeConfig, tempfile::TempDir) {
@@ -30,7 +30,7 @@ async fn test_node_lifecycle() {
 /// Test: Event loop processes transactions and blocks
 #[tokio::test]
 async fn test_event_loop_processes_block() {
-    use tenzro_types::block::{Block, BlockHeader, ConsensusProof, ConsensusAlgorithm};
+    use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
     use tenzro_types::primitives::{Address, BlockHeight, Hash};
 
     let (config, _tmp) = test_config();
@@ -142,7 +142,10 @@ async fn test_health_subsystem_status() {
 
     // Make one unhealthy
     monitor.mark_unhealthy("consensus", "No quorum".to_string());
-    assert_eq!(monitor.check_health(), tenzro_node::OverallHealth::Unhealthy);
+    assert_eq!(
+        monitor.check_health(),
+        tenzro_node::OverallHealth::Unhealthy
+    );
 }
 
 /// Test: Node configuration validation
@@ -182,9 +185,7 @@ async fn test_rpc_server_graceful_shutdown() {
 
     // Bind to port 0 for auto-assigned port
     let rpc_server = RpcServer::new(node_arc.clone(), "127.0.0.1:0".to_string());
-    let handle = tokio::spawn(async move {
-        rpc_server.start_with_shutdown(shutdown_rx).await
-    });
+    let handle = tokio::spawn(async move { rpc_server.start_with_shutdown(shutdown_rx).await });
 
     // Give server time to start
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -193,10 +194,7 @@ async fn test_rpc_server_graceful_shutdown() {
     let _ = shutdown_tx.send(());
 
     // Server should exit cleanly
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        handle,
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
 
     assert!(result.is_ok(), "Server should shut down within 5s");
 }
@@ -230,10 +228,10 @@ async fn test_rpc_server_start_no_args() {
 #[tokio::test]
 async fn test_transaction_submission() {
     use tenzro_crypto::pq::MlDsaSigningKey;
-    use tenzro_types::primitives::{Address, ChainId, Nonce};
-    use tenzro_types::transaction::{Transaction, SignedTransaction, TransactionType};
-    use tenzro_types::Signature;
     use tenzro_node::event_loop::NodeEvent;
+    use tenzro_types::Signature;
+    use tenzro_types::primitives::{Address, ChainId, Nonce};
+    use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
 
     let (config, _tmp) = test_config();
     let mut node = TenzroNode::new(config).await.expect("node creation");
@@ -253,10 +251,13 @@ async fn test_transaction_submission() {
         pq_key.verifying_key_bytes().to_vec(),
     );
     let pq_sig = pq_key.sign(tx.hash().as_bytes()).to_vec();
-    let signed_tx = SignedTransaction::new(tx, Signature::new(vec![0x42; 64], vec![0x42; 32]), pq_sig);
+    let signed_tx =
+        SignedTransaction::new(tx, Signature::new(vec![0x42; 64], vec![0x42; 32]), pq_sig);
 
     // Submit transaction
-    event_sender.send(NodeEvent::NewTransaction(signed_tx)).await
+    event_sender
+        .send(NodeEvent::NewTransaction(signed_tx))
+        .await
         .expect("send tx");
 
     // Give event loop time to process

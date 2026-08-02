@@ -13,28 +13,29 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use iroh::{
+    Endpoint, EndpointId,
     address_lookup::{AddrFilter, DnsAddressLookup, PkarrPublisher, PkarrResolver},
     endpoint::presets,
     protocol::Router,
-    Endpoint, EndpointId,
 };
 use iroh_blobs::{
+    ALPN, BlobFormat, BlobsProtocol, Hash,
     api::{
+        Store as BlobStore,
         blobs::{AddPathOptions, ImportMode},
         downloader::Downloader,
-        Store as BlobStore,
     },
     store::{fs::FsStore, mem::MemStore},
-    BlobFormat, BlobsProtocol, Hash, ALPN,
 };
 use tokio::sync::Mutex;
 
 use crate::config::TenzroIrohConfig;
 use crate::error::{IrohError, IrohResult};
 use crate::jsonrpc::{
-    HttpForwardHandler, HttpForwardProtocol, JsonRpcDispatcher, JsonRpcProtocol, McpProtocol,
-    McpStreamHandler, ALPN_A2A, ALPN_HTTP, ALPN_INFER, ALPN_MCP, ALPN_MOE,
+    ALPN_A2A, ALPN_HTTP, ALPN_INFER, ALPN_MCP, ALPN_MOE, HttpForwardHandler, HttpForwardProtocol,
+    JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler,
 };
+use crate::shell::{ALPN_SHELL, ShellHandler, ShellProtocol};
 use crate::tdip::derive_iroh_secret_key_from_ed25519;
 use tenzro_types::tenzro_uri::TenzroUri;
 
@@ -170,6 +171,7 @@ impl IrohBackedResolver {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -208,7 +210,7 @@ impl IrohBackedResolver {
     pub async fn bind_with_config(cfg: &TenzroIrohConfig) -> IrohResult<Arc<Self>> {
         let endpoint = Self::bind_endpoint_for_config(cfg).await?;
         let store = Self::load_fs_store(cfg).await?;
-        Self::with_endpoint(endpoint, store, None, None, None, None, None)
+        Self::with_endpoint(endpoint, store, None, None, None, None, None, None)
     }
 
     /// Endpoint bind decision shared by `bind_with_config` and
@@ -243,9 +245,7 @@ impl IrohBackedResolver {
         builder = builder
             .clear_ip_transports()
             .bind_addr(cfg.bind_addr)
-            .map_err(|e| {
-                IrohError::Backend(format!("bind_addr {} invalid: {e}", cfg.bind_addr))
-            })?;
+            .map_err(|e| IrohError::Backend(format!("bind_addr {} invalid: {e}", cfg.bind_addr)))?;
         // IPv6 wildcard at the same port — `bind_addr_with_opts` would allow
         // tuning the prefix length, but the default (`/0`) matches the
         // builder's pre-configured `[::]:0` semantics. Failure to bind the
@@ -310,8 +310,7 @@ impl IrohBackedResolver {
         // branch). The same `pkarr_filter` decision applies — if we have a
         // routable public addr we want the n0 mirror to advertise it too.
         if cfg.publish_to_n0_default_discovery {
-            builder =
-                builder.address_lookup(PkarrPublisher::n0_dns().addr_filter(pkarr_filter));
+            builder = builder.address_lookup(PkarrPublisher::n0_dns().addr_filter(pkarr_filter));
             builder = builder.address_lookup(DnsAddressLookup::n0_dns());
         }
 
@@ -341,10 +340,11 @@ impl IrohBackedResolver {
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
         infer: Option<Arc<dyn JsonRpcDispatcher>>,
         http: Option<Arc<dyn HttpForwardHandler>>,
+        shell: Option<Arc<dyn ShellHandler>>,
     ) -> IrohResult<Arc<Self>> {
         let endpoint = Self::bind_endpoint_for_config(cfg).await?;
         let store = Self::load_fs_store(cfg).await?;
-        Self::with_endpoint(endpoint, store, a2a, mcp, moe, infer, http)
+        Self::with_endpoint(endpoint, store, a2a, mcp, moe, infer, http, shell)
     }
 
     /// Stand up the blob store + iroh-blobs ALPN router on top of an
@@ -360,6 +360,7 @@ impl IrohBackedResolver {
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
         infer: Option<Arc<dyn JsonRpcDispatcher>>,
         http: Option<Arc<dyn HttpForwardHandler>>,
+        shell: Option<Arc<dyn ShellHandler>>,
     ) -> IrohResult<Arc<Self>> {
         let blobs = BlobsProtocol::new(&store, None);
         let mut builder = Router::builder(endpoint.clone()).accept(ALPN, blobs);
@@ -377,6 +378,9 @@ impl IrohBackedResolver {
         }
         if let Some(handler) = http {
             builder = builder.accept(ALPN_HTTP, HttpForwardProtocol::new(handler));
+        }
+        if let Some(handler) = shell {
+            builder = builder.accept(ALPN_SHELL, ShellProtocol::new(handler));
         }
         let router = builder.spawn();
         let downloader = Downloader::new(&store, &endpoint);
@@ -571,9 +575,7 @@ impl IrohResolver for IrohBackedResolver {
         // verifies the BLAKE3 root on `get_bytes`, so a hash mismatch fails
         // here rather than silently returning corrupt data.
         let bytes = self.store.blobs().get_bytes(hash).await.map_err(|e| {
-            IrohError::Backend(format!(
-                "blob {hex} downloaded but get_bytes failed: {e}"
-            ))
+            IrohError::Backend(format!("blob {hex} downloaded but get_bytes failed: {e}"))
         })?;
         Ok(bytes)
     }
@@ -601,9 +603,7 @@ impl IrohResolver for IrohBackedResolver {
                 mode: ImportMode::TryReference,
             })
             .await
-            .map_err(|e| {
-                IrohError::Backend(format!("add_path {}: {e}", path.display()))
-            })?;
+            .map_err(|e| IrohError::Backend(format!("add_path {}: {e}", path.display())))?;
         Ok(TenzroUri::Blob {
             hash: tag.hash.to_string(),
             provider_hint: None,
@@ -640,7 +640,10 @@ mod tests {
                 provider_hint,
             } => {
                 assert_eq!(hash.len(), 64, "blake3 hex should be 64 chars");
-                assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+                assert!(
+                    hash.chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+                );
                 assert!(provider_hint.is_none());
             }
             other => panic!("publish_bytes returned non-Blob URI: {other:?}"),
@@ -734,7 +737,10 @@ mod tests {
         let providers = resolver.known_blob_providers(&hash);
         assert_eq!(providers.len(), MAX_PROVIDERS_PER_BLOB);
         assert_eq!(*providers.last().unwrap(), extra);
-        assert!(!providers.contains(&mk(2)), "oldest entry should be evicted");
+        assert!(
+            !providers.contains(&mk(2)),
+            "oldest entry should be evicted"
+        );
 
         resolver.shutdown().await.ok();
     }

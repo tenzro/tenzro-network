@@ -9,3 +9,6 @@ description = "Engine-agnostic local-network cluster substrate for Tenzro Networ
 [dependencies]
 serde = { workspace = true }
 sha2 = { workspace = true }
+
+[lints]
+workspace = true

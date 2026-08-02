@@ -160,7 +160,10 @@ mod tests {
     use super::*;
 
     fn m(id: &str, r: MemberReachability) -> CostMember {
-        CostMember { id: id.into(), reachability: r }
+        CostMember {
+            id: id.into(),
+            reachability: r,
+        }
     }
 
     #[test]
@@ -183,9 +186,27 @@ mod tests {
         let near: MemberId = "near".into();
         let far: MemberId = "far".into();
         let mut probes = HashMap::new();
-        probes.insert(link_key(&head, &near), LinkProbe { rtt_ms: 1.0, bandwidth_gbps: 10.0 });
-        probes.insert(link_key(&head, &far), LinkProbe { rtt_ms: 50.0, bandwidth_gbps: 1.0 });
-        probes.insert(link_key(&near, &far), LinkProbe { rtt_ms: 2.0, bandwidth_gbps: 10.0 });
+        probes.insert(
+            link_key(&head, &near),
+            LinkProbe {
+                rtt_ms: 1.0,
+                bandwidth_gbps: 10.0,
+            },
+        );
+        probes.insert(
+            link_key(&head, &far),
+            LinkProbe {
+                rtt_ms: 50.0,
+                bandwidth_gbps: 1.0,
+            },
+        );
+        probes.insert(
+            link_key(&near, &far),
+            LinkProbe {
+                rtt_ms: 2.0,
+                bandwidth_gbps: 10.0,
+            },
+        );
         let members = vec![
             m("far", MemberReachability::LocalDirect),
             m("near", MemberReachability::LocalDirect),
@@ -196,14 +217,23 @@ mod tests {
 
     #[test]
     fn transfer_cost_accounts_for_bandwidth() {
-        let fast = LinkProbe { rtt_ms: 1.0, bandwidth_gbps: 100.0 };
-        let slow = LinkProbe { rtt_ms: 1.0, bandwidth_gbps: 1.0 };
+        let fast = LinkProbe {
+            rtt_ms: 1.0,
+            bandwidth_gbps: 100.0,
+        };
+        let slow = LinkProbe {
+            rtt_ms: 1.0,
+            bandwidth_gbps: 1.0,
+        };
         assert!(fast.transfer_ms(16384) < slow.transfer_ms(16384));
     }
 
     #[test]
     fn zero_bandwidth_is_infinite() {
-        let dead = LinkProbe { rtt_ms: 1.0, bandwidth_gbps: 0.0 };
+        let dead = LinkProbe {
+            rtt_ms: 1.0,
+            bandwidth_gbps: 0.0,
+        };
         assert!(dead.transfer_ms(1024).is_infinite());
     }
 

@@ -22,23 +22,19 @@
 //! the typical inference range: TTFT 100 ms - 30 s, inter-token 5 ms - 5 s.
 
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// TTFT bucket upper bounds in seconds. Spans the realistic range from a
 /// hot-cached local model (~100 ms) to a cold cloud GPU with attestation
 /// (~30 s).
-pub const TTFT_BUCKETS_S: &[f64] = &[
-    0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0,
-];
+pub const TTFT_BUCKETS_S: &[f64] = &[0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0];
 
 /// Inter-token latency bucket upper bounds in seconds. A healthy local
 /// 7B-class model at fp16 generates ~30-100 tok/s (10-33 ms/token); cloud
 /// providers float around 20-50 tok/s (20-50 ms/token). The upper buckets
 /// catch degraded providers approaching the stall budget.
-pub const INTERTOKEN_BUCKETS_S: &[f64] = &[
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
-];
+pub const INTERTOKEN_BUCKETS_S: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
 
 /// Fixed-bucket histogram with `+Inf` overflow.
 #[derive(Debug)]
@@ -178,11 +174,7 @@ impl StreamSloMetrics {
         use std::fmt::Write as _;
 
         // Stable key ordering for deterministic output.
-        let mut keys: Vec<(String, String)> = self
-            .inner
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
+        let mut keys: Vec<(String, String)> = self.inner.iter().map(|e| e.key().clone()).collect();
         keys.sort();
 
         // TTFT histogram
@@ -196,13 +188,7 @@ impl StreamSloMetrics {
                 Some(r) => r.clone(),
                 None => continue,
             };
-            emit_histogram(
-                out,
-                "tenzro_inference_ttft_seconds",
-                &k.0,
-                &k.1,
-                &row.ttft,
-            );
+            emit_histogram(out, "tenzro_inference_ttft_seconds", &k.0, &k.1, &row.ttft);
         }
 
         // Intertoken histogram
@@ -210,10 +196,7 @@ impl StreamSloMetrics {
             out,
             "# HELP tenzro_inference_intertoken_seconds Gap between consecutive tokens of a streamed inference, by provider and model."
         );
-        let _ = writeln!(
-            out,
-            "# TYPE tenzro_inference_intertoken_seconds histogram"
-        );
+        let _ = writeln!(out, "# TYPE tenzro_inference_intertoken_seconds histogram");
         for k in &keys {
             let row = match self.inner.get(k) {
                 Some(r) => r.clone(),
@@ -233,10 +216,7 @@ impl StreamSloMetrics {
             out,
             "# HELP tenzro_inference_streams_started_total Streams opened, by provider and model."
         );
-        let _ = writeln!(
-            out,
-            "# TYPE tenzro_inference_streams_started_total counter"
-        );
+        let _ = writeln!(out, "# TYPE tenzro_inference_streams_started_total counter");
         for k in &keys {
             let row = match self.inner.get(k) {
                 Some(r) => r.clone(),
@@ -277,10 +257,7 @@ impl StreamSloMetrics {
             out,
             "# HELP tenzro_inference_streams_failed_total Streams that mid-stream errored or stalled (watchdog)."
         );
-        let _ = writeln!(
-            out,
-            "# TYPE tenzro_inference_streams_failed_total counter"
-        );
+        let _ = writeln!(out, "# TYPE tenzro_inference_streams_failed_total counter");
         for k in &keys {
             let row = match self.inner.get(k) {
                 Some(r) => r.clone(),
@@ -311,13 +288,7 @@ fn escape_label(s: &str) -> String {
     out
 }
 
-fn emit_histogram(
-    out: &mut String,
-    metric: &str,
-    provider: &str,
-    model: &str,
-    hist: &Histogram,
-) {
+fn emit_histogram(out: &mut String, metric: &str, provider: &str, model: &str, hist: &Histogram) {
     use std::fmt::Write as _;
     let prov = escape_label(provider);
     let mdl = escape_label(model);
@@ -330,7 +301,11 @@ fn emit_histogram(
         let _ = writeln!(
             out,
             "{}_bucket{{provider=\"{}\",model=\"{}\",le=\"{}\"}} {}",
-            metric, prov, mdl, format_le(*upper), cumulative
+            metric,
+            prov,
+            mdl,
+            format_le(*upper),
+            cumulative
         );
     }
     let inf = hist.buckets[hist.upper_bounds_s.len()].load(Ordering::Relaxed);
@@ -348,7 +323,10 @@ fn emit_histogram(
     let _ = writeln!(
         out,
         "{}_count{{provider=\"{}\",model=\"{}\"}} {}",
-        metric, prov, mdl, hist.count.load(Ordering::Relaxed)
+        metric,
+        prov,
+        mdl,
+        hist.count.load(Ordering::Relaxed)
     );
 }
 
@@ -440,12 +418,12 @@ mod tests {
         m.record_stream_completed("p", "m", false);
         let mut out = String::new();
         m.encode_prometheus(&mut out);
-        assert!(out.contains(
-            "tenzro_inference_streams_failed_total{provider=\"p\",model=\"m\"} 1"
-        ));
-        assert!(out.contains(
-            "tenzro_inference_streams_completed_total{provider=\"p\",model=\"m\"} 0"
-        ));
+        assert!(
+            out.contains("tenzro_inference_streams_failed_total{provider=\"p\",model=\"m\"} 1")
+        );
+        assert!(
+            out.contains("tenzro_inference_streams_completed_total{provider=\"p\",model=\"m\"} 0")
+        );
     }
 
     #[test]
@@ -473,8 +451,6 @@ mod tests {
         m.encode_prometheus(&mut out);
         // Only HELP/TYPE lines; no observations.
         assert!(out.contains("# TYPE tenzro_inference_ttft_seconds histogram"));
-        assert!(out.contains(
-            "# TYPE tenzro_inference_streams_started_total counter"
-        ));
+        assert!(out.contains("# TYPE tenzro_inference_streams_started_total counter"));
     }
 }

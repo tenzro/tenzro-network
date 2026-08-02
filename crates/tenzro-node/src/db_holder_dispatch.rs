@@ -52,10 +52,14 @@ fn split_endpoint(endpoint_id: &str) -> Option<(&str, &str)> {
 /// dial target.
 fn peer_id_of(endpoint_id: &str) -> DbResult<PeerId> {
     let (_, peer) = split_endpoint(endpoint_id).ok_or_else(|| {
-        DatabaseError::Backend(format!("holder endpoint '{endpoint_id}' carries no peer id"))
+        DatabaseError::Backend(format!(
+            "holder endpoint '{endpoint_id}' carries no peer id"
+        ))
     })?;
     PeerId::from_str(peer).map_err(|e| {
-        DatabaseError::Backend(format!("holder endpoint '{endpoint_id}' has an unparseable peer id: {e}"))
+        DatabaseError::Backend(format!(
+            "holder endpoint '{endpoint_id}' has an unparseable peer id: {e}"
+        ))
     })
 }
 
@@ -80,7 +84,12 @@ impl HolderDispatchTransport {
         registry: Arc<DatabaseRegistry>,
         local_peer: PeerId,
     ) -> Self {
-        Self { network, engines, registry, local_peer }
+        Self {
+            network,
+            engines,
+            registry,
+            local_peer,
+        }
     }
 
     /// The catalog engine id serving `database_id`, read from the shared
@@ -104,9 +113,8 @@ impl HolderDispatchTransport {
         peer: PeerId,
         request: &QueryRequest,
     ) -> DbResult<QueryResponse> {
-        let body = serde_json::to_vec(&request.body).map_err(|e| {
-            DatabaseError::Backend(format!("encode replicated-write body: {e}"))
-        })?;
+        let body = serde_json::to_vec(&request.body)
+            .map_err(|e| DatabaseError::Backend(format!("encode replicated-write body: {e}")))?;
         let wire = DbReplicateRequest::ApplyWrite {
             database_id: request.database_id.clone(),
             partition_index: request.partition_index as u32,
@@ -131,11 +139,7 @@ impl HolderDispatchTransport {
 
 #[async_trait::async_trait]
 impl HolderDispatch for HolderDispatchTransport {
-    async fn dispatch(
-        &self,
-        endpoint_id: &str,
-        request: &QueryRequest,
-    ) -> DbResult<QueryResponse> {
+    async fn dispatch(&self, endpoint_id: &str, request: &QueryRequest) -> DbResult<QueryResponse> {
         let peer = peer_id_of(endpoint_id)?;
         if peer == self.local_peer {
             self.dispatch_local(request).await
@@ -149,17 +153,18 @@ impl HolderDispatch for HolderDispatchTransport {
 /// router speaks. The serving-side detail is preserved verbatim.
 fn replicate_error_to_db(e: DbReplicateError) -> DatabaseError {
     match e {
-        DbReplicateError::ServerBusy { limit } => {
-            DatabaseError::Backend(format!("holder busy — over {limit} concurrent inbound streams"))
-        }
+        DbReplicateError::ServerBusy { limit } => DatabaseError::Backend(format!(
+            "holder busy — over {limit} concurrent inbound streams"
+        )),
         DbReplicateError::NoHandler => {
             DatabaseError::Backend("holder has no database-replication handler attached".into())
         }
-        DbReplicateError::NotHolder { database_id, partition_index } => {
-            DatabaseError::Backend(format!(
-                "peer is not a holder for {database_id}/{partition_index}"
-            ))
-        }
+        DbReplicateError::NotHolder {
+            database_id,
+            partition_index,
+        } => DatabaseError::Backend(format!(
+            "peer is not a holder for {database_id}/{partition_index}"
+        )),
         DbReplicateError::Engine(msg) => DatabaseError::Backend(msg),
     }
 }
@@ -188,7 +193,12 @@ impl DbReplicateServer {
         registry: Arc<DatabaseRegistry>,
         local_peer: PeerId,
     ) -> Self {
-        Self { network, engines, registry, local_peer }
+        Self {
+            network,
+            engines,
+            registry,
+            local_peer,
+        }
     }
 
     /// Subscribe to inbound requests and spawn the serving loop. Returns the
@@ -218,8 +228,13 @@ impl DbReplicateServer {
     /// failure is folded into a `DbReplicateResponse::Error`.
     async fn handle(&self, origin: PeerId, request: DbReplicateRequest) -> DbReplicateResponse {
         match request {
-            DbReplicateRequest::ApplyWrite { database_id, partition_index, body } => {
-                self.apply_write(origin, database_id, partition_index, body).await
+            DbReplicateRequest::ApplyWrite {
+                database_id,
+                partition_index,
+                body,
+            } => {
+                self.apply_write(origin, database_id, partition_index, body)
+                    .await
             }
         }
     }
@@ -240,7 +255,7 @@ impl DbReplicateServer {
                 return DbReplicateResponse::Error(DbReplicateError::NotHolder {
                     database_id,
                     partition_index: partition_index as u32,
-                })
+                });
             }
         };
         let holders = placement.all_holders();
@@ -248,7 +263,9 @@ impl DbReplicateServer {
         // Fail closed unless BOTH sides are recognized holders: this node must
         // hold the partition, and the origin peer must be a holder too (an
         // outsider cannot inject writes into someone else's replica set).
-        let local_holds = holders.iter().any(|h| endpoint_has_peer(h, &self.local_peer));
+        let local_holds = holders
+            .iter()
+            .any(|h| endpoint_has_peer(h, &self.local_peer));
         let origin_holds = holders.iter().any(|h| endpoint_has_peer(h, &origin));
         if !local_holds || !origin_holds {
             return DbReplicateResponse::Error(DbReplicateError::NotHolder {
@@ -267,7 +284,7 @@ impl DbReplicateServer {
             Err(e) => {
                 return DbReplicateResponse::Error(DbReplicateError::Engine(format!(
                     "decode replicated-write body: {e}"
-                )))
+                )));
             }
         };
         // Consistency is a writer-side concern; the applying holder just runs

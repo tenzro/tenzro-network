@@ -89,10 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scope = DelegationScope::unrestricted()
         .with_max_transaction_value(500 * ONE_USDC)
         .with_max_daily_spend(2_000 * ONE_USDC)
-        .with_allowed_operations(vec![
-            "bridge".to_string(),
-            "yield-route".to_string(),
-        ])
+        .with_allowed_operations(vec!["bridge".to_string(), "yield-route".to_string()])
         .with_allowed_chains(vec![
             "ethereum".to_string(),
             "arbitrum".to_string(),
@@ -223,7 +220,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Ask the router which adapter has the cheapest live quote for this
         // destination. The static fallbacks will be used if RPC is offline.
-        let comparisons = match router.compare_fees(source_chain, opp.chain, payload_size).await {
+        let comparisons = match router
+            .compare_fees(source_chain, opp.chain, payload_size)
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 println!("  compare_fees failed: {e}");
@@ -251,7 +251,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Enforce the delegation scope BEFORE dispatching the bridge call.
         match registry.enforce_operation(&agent_did, "bridge", Some(opp.deploy_amount)) {
-            Ok(()) => println!("  delegation OK ({} USDC ≤ 500 USDC cap)", opp.deploy_amount / ONE_USDC),
+            Ok(()) => println!(
+                "  delegation OK ({} USDC ≤ 500 USDC cap)",
+                opp.deploy_amount / ONE_USDC
+            ),
             Err(e) => {
                 println!("  BLOCKED by delegation: {e}");
                 continue;
@@ -296,14 +299,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let oversized = 1_000 * ONE_USDC; // exceeds max_transaction_value (500 USDC)
     match registry.enforce_operation(&agent_did, "bridge", Some(oversized)) {
         Ok(()) => println!("→ unexpected: oversized bridge was allowed"),
-        Err(err) => println!("→ oversized {} USDC bridge rejected: {err}", oversized / ONE_USDC),
+        Err(err) => println!(
+            "→ oversized {} USDC bridge rejected: {err}",
+            oversized / ONE_USDC
+        ),
     }
 
     // ------------------------------------------------------------------
     // Step 6: demonstrate that an unsupported destination chain is refused
     // ------------------------------------------------------------------
     println!("\n=== Step 6: Confirm unsupported chain is refused by router ===");
-    match router.compare_fees(source_chain, "fantom", payload_size).await {
+    match router
+        .compare_fees(source_chain, "fantom", payload_size)
+        .await
+    {
         Ok(c) if c.is_empty() => println!("→ no adapters support ethereum → fantom (correct)"),
         Ok(c) => println!("→ unexpected: got {} fee quotes for fantom", c.len()),
         Err(e) => println!("→ router refused fantom route: {e}"),

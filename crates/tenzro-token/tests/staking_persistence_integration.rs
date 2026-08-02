@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 use tenzro_storage::RocksDbStore;
-use tenzro_token::{StakingManager, StakeStatus};
+use tenzro_token::{StakeStatus, StakingManager};
 use tenzro_types::constants::MIN_VALIDATOR_STAKE;
 use tenzro_types::primitives::Address;
 use tenzro_types::token::ProviderType;
@@ -20,10 +20,8 @@ const BOND: u128 = MIN_VALIDATOR_STAKE;
 #[test]
 fn test_complete_staking_lifecycle_with_persistence() {
     // Create a temporary directory for this test
-    let temp_dir = std::env::temp_dir().join(format!(
-        "tenzro_integration_test_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("tenzro_integration_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     // Phase 1: Initial setup and staking
@@ -123,17 +121,13 @@ fn test_complete_staking_lifecycle_with_persistence() {
         // Verify validator1 was slashed
         let validator1 = Address::new([1u8; 32]);
         let stake1_info = manager.get_stake(&validator1).unwrap();
-        assert_eq!(
-            stake1_info.amount,
-            BOND - (BOND / 10)
-        );
+        assert_eq!(stake1_info.amount, BOND - (BOND / 10));
         assert_eq!(stake1_info.slashing_history.len(), 1);
         assert_eq!(stake1_info.slashing_history[0].reason, "Test misbehavior");
         println!("  ✓ Validator1 slash history persisted");
 
         // Verify final totals
-        let expected_validator_total =
-            BOND - (BOND / 10) + BOND * 2;
+        let expected_validator_total = BOND - (BOND / 10) + BOND * 2;
         assert_eq!(
             manager.get_total_staked(ProviderType::Validator),
             expected_validator_total
@@ -149,10 +143,8 @@ fn test_complete_staking_lifecycle_with_persistence() {
 
 #[test]
 fn test_config_persistence_across_restarts() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "tenzro_config_test_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("tenzro_config_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     // Set custom config

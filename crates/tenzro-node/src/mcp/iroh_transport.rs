@@ -60,11 +60,7 @@ impl IrohMcpHandler {
 
 #[async_trait]
 impl McpStreamHandler for IrohMcpHandler {
-    async fn serve_stream(
-        self: Arc<Self>,
-        send: SendStream,
-        recv: RecvStream,
-    ) -> IrohResult<()> {
+    async fn serve_stream(self: Arc<Self>, send: SendStream, recv: RecvStream) -> IrohResult<()> {
         debug!(
             target: "tenzro_node::mcp::iroh_transport",
             "starting MCP session over iroh bi-stream",

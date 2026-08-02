@@ -89,12 +89,20 @@ pub struct ChainlinkCcipAdapter {
     /// Per-source-chain OCR commit-store committee signer set.
     /// Inbound `receive_message` requires `threshold`-many committee
     /// signatures over the commit report's prehash.
-    commit_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
+    commit_sets: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>,
+        >,
+    >,
     /// RMN Risk Management Network ARM blessing set. The blessed
     /// commit report MUST additionally carry `threshold`-many RMN
     /// signatures over the SAME prehash. The RMN ARM acts as a second
     /// layer of defence against a compromised OCR committee.
-    rmn_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
+    rmn_sets: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>,
+        >,
+    >,
     /// Replay cache for inbound commit reports keyed
     /// `{src_selector}:{report_hash_hex}`.
     seen_reports: Arc<DashMap<String, ()>>,
@@ -119,10 +127,7 @@ impl ChainlinkCcipAdapter {
 
     /// Attach RocksDB persistence: hydrates the inbound commit-report
     /// replay cache from `CF_SETTLEMENTS / bridge_seen:ccip:*`.
-    pub fn with_storage(
-        mut self,
-        storage: Arc<dyn tenzro_storage::KvStore>,
-    ) -> Self {
+    pub fn with_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
         for key in crate::message_format::load_seen_keys(&storage, "ccip") {
             self.seen_reports.insert(key, ());
         }
@@ -155,11 +160,8 @@ impl ChainlinkCcipAdapter {
         rmn_addresses: Vec<[u8; 20]>,
         threshold: u8,
     ) {
-        let set = crate::secp256k1_multisig::ValidatorSet::new(
-            rmn_addresses,
-            threshold,
-            "CCIP RMN ARM",
-        );
+        let set =
+            crate::secp256k1_multisig::ValidatorSet::new(rmn_addresses, threshold, "CCIP RMN ARM");
         self.rmn_sets.write().insert(source_selector, set);
     }
 
@@ -247,7 +249,11 @@ impl ChainlinkCcipAdapter {
     }
 
     /// Encodes the calldata for Router.getFee(uint64, EVM2AnyMessage)
-    fn encode_get_fee_calldata(&self, dest_selector: u64, message: &CcipMessage) -> Result<Vec<u8>> {
+    fn encode_get_fee_calldata(
+        &self,
+        dest_selector: u64,
+        message: &CcipMessage,
+    ) -> Result<Vec<u8>> {
         // getFee function selector: first 4 bytes of keccak256("getFee(uint64,(bytes,bytes,(address,uint256)[],address,bytes))")
         // Precomputed: 0x5e307a45
         let mut calldata = vec![0x5e, 0x30, 0x7a, 0x45];
@@ -279,9 +285,8 @@ impl ChainlinkCcipAdapter {
         encoded.push(0xa0);
 
         // Offset to data bytes (calculate after receiver)
-        let receiver_bytes = hex::decode(message.receiver.trim_start_matches("0x")).map_err(|e| {
-            BridgeError::InvalidParameter(format!("Invalid receiver hex: {}", e))
-        })?;
+        let receiver_bytes = hex::decode(message.receiver.trim_start_matches("0x"))
+            .map_err(|e| BridgeError::InvalidParameter(format!("Invalid receiver hex: {}", e)))?;
         let receiver_length_padded = receiver_bytes.len().div_ceil(32) * 32;
         let data_offset = 0xa0 + 32 + receiver_length_padded;
         encoded.extend_from_slice(&pad_u256(data_offset as u128));
@@ -296,8 +301,8 @@ impl ChainlinkCcipAdapter {
             FeeToken::Native => "0x0000000000000000000000000000000000000000",
             FeeToken::Link => &self.config.link_token_address,
         };
-        let fee_token_bytes =
-            hex::decode(fee_token_address.trim_start_matches("0x")).unwrap_or_else(|_| vec![0u8; 20]);
+        let fee_token_bytes = hex::decode(fee_token_address.trim_start_matches("0x"))
+            .unwrap_or_else(|_| vec![0u8; 20]);
         encoded.extend_from_slice(&[0u8; 12]);
         encoded.extend_from_slice(&fee_token_bytes[..20]);
 
@@ -363,7 +368,11 @@ impl ChainlinkCcipAdapter {
     }
 
     /// Encodes the calldata for Router.ccipSend(uint64, EVM2AnyMessage)
-    fn encode_ccip_send_calldata(&self, dest_selector: u64, message: &CcipMessage) -> Result<Vec<u8>> {
+    fn encode_ccip_send_calldata(
+        &self,
+        dest_selector: u64,
+        message: &CcipMessage,
+    ) -> Result<Vec<u8>> {
         // ccipSend function selector: first 4 bytes of keccak256("ccipSend(uint64,(bytes,bytes,(address,uint256)[],address,bytes))")
         // Precomputed: 0x96f4e9f9
         let mut calldata = vec![0x96, 0xf4, 0xe9, 0xf9];
@@ -415,7 +424,12 @@ impl ChainlinkCcipAdapter {
 
     /// Calculates a deterministic message ID from the message data
     #[cfg(test)]
-    fn calculate_message_id(&self, dest_selector: u64, message: &CcipMessage, calldata: &[u8]) -> String {
+    fn calculate_message_id(
+        &self,
+        dest_selector: u64,
+        message: &CcipMessage,
+        calldata: &[u8],
+    ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(dest_selector.to_be_bytes());
         hasher.update(&message.receiver);
@@ -429,10 +443,15 @@ impl ChainlinkCcipAdapter {
     async fn query_ccip_explorer(&self, message_id: &str) -> Result<TransferStatus> {
         let explorer_url = format!("https://ccip.chain.link/api/h/atlas/message/{}", message_id);
 
-        let response = self.http_client.get(&explorer_url).send().await.map_err(|e| {
-            debug!("CCIP: Failed to query explorer API: {}", e);
-            BridgeError::NetworkError(format!("Explorer API error: {}", e))
-        })?;
+        let response = self
+            .http_client
+            .get(&explorer_url)
+            .send()
+            .await
+            .map_err(|e| {
+                debug!("CCIP: Failed to query explorer API: {}", e);
+                BridgeError::NetworkError(format!("Explorer API error: {}", e))
+            })?;
 
         if !response.status().is_success() {
             debug!("CCIP: Explorer API returned status {}", response.status());
@@ -457,7 +476,10 @@ impl ChainlinkCcipAdapter {
             _ => TransferStatus::Pending,
         };
 
-        debug!("CCIP: Message {} status from explorer: {:?}", message_id, status);
+        debug!(
+            "CCIP: Message {} status from explorer: {:?}",
+            message_id, status
+        );
 
         Ok(status)
     }
@@ -467,7 +489,11 @@ impl ChainlinkCcipAdapter {
     /// CCIP v1.6 OffRamp emits `ExecutionStateChanged(uint64 sequenceNumber, bytes32 messageId,
     /// Internal.MessageExecutionState state, bytes returnData)`.
     /// States: 0=UNTOUCHED, 1=IN_PROGRESS, 2=SUCCESS, 3=FAILURE
-    async fn query_offramp_status(&self, message_id: &str, dest_chain: &str) -> Result<TransferStatus> {
+    async fn query_offramp_status(
+        &self,
+        message_id: &str,
+        dest_chain: &str,
+    ) -> Result<TransferStatus> {
         let dest_rpc = self.get_dest_rpc_url(dest_chain)?;
 
         // Query ExecutionStateChanged events on the OffRamp matching our messageId
@@ -502,9 +528,7 @@ impl ChainlinkCcipAdapter {
             BridgeError::NetworkError(format!("OffRamp response parse error: {}", e))
         })?;
 
-        let logs = json_response
-            .get("result")
-            .and_then(|r| r.as_array());
+        let logs = json_response.get("result").and_then(|r| r.as_array());
 
         if let Some(logs) = logs
             && let Some(last_log) = logs.last()
@@ -515,10 +539,10 @@ impl ChainlinkCcipAdapter {
                 if !data_bytes.is_empty() {
                     let state = data_bytes[31]; // uint8 is right-aligned in 32 bytes
                     return Ok(match state {
-                        0 => TransferStatus::Pending,      // UNTOUCHED
-                        1 => TransferStatus::InTransit,     // IN_PROGRESS
-                        2 => TransferStatus::Delivered,     // SUCCESS
-                        3 => TransferStatus::Failed,        // FAILURE
+                        0 => TransferStatus::Pending,   // UNTOUCHED
+                        1 => TransferStatus::InTransit, // IN_PROGRESS
+                        2 => TransferStatus::Delivered, // SUCCESS
+                        3 => TransferStatus::Failed,    // FAILURE
                         _ => TransferStatus::Pending,
                     });
                 }
@@ -550,7 +574,10 @@ impl ChainlinkCcipAdapter {
                 if !self.config.rpc_url.is_empty() {
                     Ok(self.config.rpc_url.clone())
                 } else {
-                    Err(BridgeError::ChainNotSupported(format!("{} (no RPC URL)", chain_id)))
+                    Err(BridgeError::ChainNotSupported(format!(
+                        "{} (no RPC URL)",
+                        chain_id
+                    )))
                 }
             }
         }
@@ -582,9 +609,10 @@ impl ChainlinkCcipAdapter {
             .await
             .map_err(|e| BridgeError::NetworkError(e.to_string()))?;
 
-        let json_response: serde_json::Value = response.json().await.map_err(|e| {
-            BridgeError::NetworkError(e.to_string())
-        })?;
+        let json_response: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| BridgeError::NetworkError(e.to_string()))?;
 
         if let Some(result) = json_response.get("result").and_then(|r| r.as_str()) {
             let result_bytes = hex::decode(result.trim_start_matches("0x")).unwrap_or_default();
@@ -721,16 +749,26 @@ impl ChainlinkCcipAdapter {
 
     /// Queries live transfer status, trying OffRamp on-chain query first (authoritative),
     /// then falling back to the CCIP Explorer API.
-    async fn query_live_status(&self, message_id: &str, dest_chain: &str) -> Result<TransferStatus> {
+    async fn query_live_status(
+        &self,
+        message_id: &str,
+        dest_chain: &str,
+    ) -> Result<TransferStatus> {
         // 1. Try OffRamp on-chain query if we know the destination chain (authoritative source)
         if !dest_chain.is_empty() {
             match self.query_offramp_status(message_id, dest_chain).await {
                 Ok(status) if !matches!(status, TransferStatus::Pending) => {
-                    debug!("CCIP: Got status from OffRamp for {} on {}: {:?}", message_id, dest_chain, status);
+                    debug!(
+                        "CCIP: Got status from OffRamp for {} on {}: {:?}",
+                        message_id, dest_chain, status
+                    );
                     return Ok(status);
                 }
                 Err(e) => {
-                    debug!("CCIP: OffRamp query failed for {} on {}: {}", message_id, dest_chain, e);
+                    debug!(
+                        "CCIP: OffRamp query failed for {} on {}: {}",
+                        message_id, dest_chain, e
+                    );
                 }
                 _ => {}
             }
@@ -739,7 +777,10 @@ impl ChainlinkCcipAdapter {
         // 2. Fall back to CCIP Explorer API (chain-agnostic)
         match self.query_ccip_explorer(message_id).await {
             Ok(status) if !matches!(status, TransferStatus::Pending) => {
-                debug!("CCIP: Got status from Explorer for {}: {:?}", message_id, status);
+                debug!(
+                    "CCIP: Got status from Explorer for {}: {:?}",
+                    message_id, status
+                );
                 return Ok(status);
             }
             _ => {}
@@ -774,7 +815,10 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
 
     fn classes(&self) -> Vec<crate::traits::BridgeAdapterClass> {
         use crate::traits::BridgeAdapterClass;
-        vec![BridgeAdapterClass::RegulatedRail, BridgeAdapterClass::Generic]
+        vec![
+            BridgeAdapterClass::RegulatedRail,
+            BridgeAdapterClass::Generic,
+        ]
     }
 
     fn supported_chains(&self) -> Vec<ChainInfo> {
@@ -792,9 +836,12 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         let receiver_bytes = match crate::message_format::TenzroMessage::decode(&payload) {
             Ok(msg) => {
                 let hex_str = msg.receiver.trim_start_matches("0x");
-                hex::decode(hex_str).map_err(|e| BridgeError::AdapterError(format!(
-                    "CCIP: Invalid receiver hex in TenzroMessage: {}", e
-                )))?
+                hex::decode(hex_str).map_err(|e| {
+                    BridgeError::AdapterError(format!(
+                        "CCIP: Invalid receiver hex in TenzroMessage: {}",
+                        e
+                    ))
+                })?
             }
             Err(e) => {
                 return Err(BridgeError::AdapterError(format!(
@@ -828,7 +875,9 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         };
 
         // Calculate fee via Router.getFee()
-        let fee = self.get_fee(dest_chain, &message, self.config.fee_token).await?;
+        let fee = self
+            .get_fee(dest_chain, &message, self.config.fee_token)
+            .await?;
 
         info!(
             "CCIP: Sending message to chain {} (selector: {}), payload_size={}, fee={} wei",
@@ -842,7 +891,13 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         let message_id = self.submit_ccip_send(dest_selector, &message, fee).await?;
 
         // Track transfer as pending
-        self.transfers.insert(message_id.clone(), TrackedTransfer { status: TransferStatus::Pending, dest_chain: dest_chain.to_string() });
+        self.transfers.insert(
+            message_id.clone(),
+            TrackedTransfer {
+                status: TransferStatus::Pending,
+                dest_chain: dest_chain.to_string(),
+            },
+        );
 
         debug!(
             "CCIP message sent: id={}, fee_token={:?}",
@@ -883,25 +938,31 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
             .read()
             .get(&src_selector)
             .cloned()
-            .ok_or_else(|| BridgeError::AdapterError(format!(
-                "CCIP adapter has no commit-store committee set installed for \
+            .ok_or_else(|| {
+                BridgeError::AdapterError(format!(
+                    "CCIP adapter has no commit-store committee set installed for \
                  selector {src_selector} — inbound traffic refused. Call \
                  install_commit_set at startup."
-            )))?;
+                ))
+            })?;
         let rmn_set = self
             .rmn_sets
             .read()
             .get(&src_selector)
             .cloned()
-            .ok_or_else(|| BridgeError::AdapterError(format!(
-                "CCIP adapter has no RMN ARM blessing set installed for \
+            .ok_or_else(|| {
+                BridgeError::AdapterError(format!(
+                    "CCIP adapter has no RMN ARM blessing set installed for \
                  selector {src_selector} — inbound traffic refused. Call \
                  install_rmn_set at startup."
-            )))?;
+                ))
+            })?;
 
         // Peel RMN trailer first (back end), then committee trailer.
-        let (after_rmn, rmn_sigs) = crate::secp256k1_multisig::parse_trailing_signature_set(&payload)?;
-        let (body, committee_sigs) = crate::secp256k1_multisig::parse_trailing_signature_set(after_rmn)?;
+        let (after_rmn, rmn_sigs) =
+            crate::secp256k1_multisig::parse_trailing_signature_set(&payload)?;
+        let (body, committee_sigs) =
+            crate::secp256k1_multisig::parse_trailing_signature_set(after_rmn)?;
         if body.is_empty() {
             return Err(BridgeError::InvalidParameter(
                 "CCIP: commit report body is empty".into(),
@@ -932,7 +993,9 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         self.seen_reports.insert(report_key, ());
         info!(
             "CCIP: commit-store + RMN ARM quorum verified ({} committee sigs, {} RMN sigs, selector {})",
-            committee_sigs.len(), rmn_sigs.len(), src_selector
+            committee_sigs.len(),
+            rmn_sigs.len(),
+            src_selector
         );
         Ok(verified)
     }
@@ -965,7 +1028,9 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         };
 
         // Calculate fee via Router.getFee()
-        let fee = self.get_fee(&request.dest_chain, &message, self.config.fee_token).await?;
+        let fee = self
+            .get_fee(&request.dest_chain, &message, self.config.fee_token)
+            .await?;
 
         info!("CCIP: Token bridge fee = {} wei", fee);
 
@@ -987,7 +1052,13 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
             + 30_000; // + 30 seconds for CCIP processing
 
         // Track transfer
-        self.transfers.insert(message_id.clone(), TrackedTransfer { status: TransferStatus::Pending, dest_chain: request.dest_chain.clone() });
+        self.transfers.insert(
+            message_id.clone(),
+            TrackedTransfer {
+                status: TransferStatus::Pending,
+                dest_chain: request.dest_chain.clone(),
+            },
+        );
 
         info!(
             "CCIP: Transfer {} initiated, tx_hash={}, fee={} wei",
@@ -1012,15 +1083,23 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
             // If still pending or in-transit, check for updated status
             if tracked.status.is_in_progress() {
                 // Try OffRamp on-chain status first (authoritative), then Explorer API as fallback
-                let live_status = self.query_live_status(transfer_id, &tracked.dest_chain).await;
+                let live_status = self
+                    .query_live_status(transfer_id, &tracked.dest_chain)
+                    .await;
 
                 if let Ok(status) = live_status {
                     if status != tracked.status {
-                        self.transfers.insert(transfer_id.to_string(), TrackedTransfer {
-                            status,
-                            dest_chain: tracked.dest_chain.clone(),
-                        });
-                        info!("CCIP: Transfer {} status updated: {:?} -> {:?}", transfer_id, tracked.status, status);
+                        self.transfers.insert(
+                            transfer_id.to_string(),
+                            TrackedTransfer {
+                                status,
+                                dest_chain: tracked.dest_chain.clone(),
+                            },
+                        );
+                        info!(
+                            "CCIP: Transfer {} status updated: {:?} -> {:?}",
+                            transfer_id, tracked.status, status
+                        );
                     }
                     return Ok(status);
                 }
@@ -1034,10 +1113,13 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         // Not in cache, try querying Explorer (no dest chain known)
         match self.query_ccip_explorer(transfer_id).await {
             Ok(status) => {
-                self.transfers.insert(transfer_id.to_string(), TrackedTransfer {
-                    status,
-                    dest_chain: String::new(),
-                });
+                self.transfers.insert(
+                    transfer_id.to_string(),
+                    TrackedTransfer {
+                        status,
+                        dest_chain: String::new(),
+                    },
+                );
                 Ok(status)
             }
             Err(_) => Err(BridgeError::TransferNotFound(transfer_id.to_string())),
@@ -1058,7 +1140,8 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         };
 
         // Call Router.getFee() via eth_call
-        self.get_fee(dest_chain, &message, self.config.fee_token).await
+        self.get_fee(dest_chain, &message, self.config.fee_token)
+            .await
     }
 }
 
@@ -1209,9 +1292,18 @@ mod tests {
         let config = CcipConfig::ethereum_mainnet(FeeToken::Native);
         let adapter = ChainlinkCcipAdapter::new(config);
 
-        assert_eq!(adapter.get_chain_selector("ethereum").unwrap(), 5009297550715157269);
-        assert_eq!(adapter.get_chain_selector("arbitrum").unwrap(), 4949039107694359620);
-        assert_eq!(adapter.get_chain_selector("base").unwrap(), 15971525489660198786);
+        assert_eq!(
+            adapter.get_chain_selector("ethereum").unwrap(),
+            5009297550715157269
+        );
+        assert_eq!(
+            adapter.get_chain_selector("arbitrum").unwrap(),
+            4949039107694359620
+        );
+        assert_eq!(
+            adapter.get_chain_selector("base").unwrap(),
+            15971525489660198786
+        );
         assert!(adapter.get_chain_selector("unknown").is_err());
     }
 
@@ -1247,7 +1339,9 @@ mod tests {
             extra_args: vec![],
         };
 
-        let calldata = adapter.encode_get_fee_calldata(5009297550715157269, &message).unwrap();
+        let calldata = adapter
+            .encode_get_fee_calldata(5009297550715157269, &message)
+            .unwrap();
 
         // Verify function selector (first 4 bytes)
         assert_eq!(&calldata[0..4], &[0x5e, 0x30, 0x7a, 0x45]);
@@ -1272,7 +1366,9 @@ mod tests {
             extra_args: vec![],
         };
 
-        let calldata = adapter.encode_ccip_send_calldata(15971525489660198786, &message).unwrap();
+        let calldata = adapter
+            .encode_ccip_send_calldata(15971525489660198786, &message)
+            .unwrap();
 
         // Verify function selector (first 4 bytes)
         assert_eq!(&calldata[0..4], &[0x96, 0xf4, 0xe9, 0xf9]);
@@ -1313,7 +1409,9 @@ mod tests {
             extra_args: vec![],
         };
 
-        let calldata = adapter.encode_get_fee_calldata(4949039107694359620, &message).unwrap();
+        let calldata = adapter
+            .encode_get_fee_calldata(4949039107694359620, &message)
+            .unwrap();
         let msg_id = adapter.calculate_message_id(4949039107694359620, &message, &calldata);
 
         // Message ID should be a hex string starting with 0x

@@ -547,9 +547,13 @@ mod tests {
     async fn setup_active_agent(mgr: &AgentIdentityManager) -> String {
         let creator = Address::from([1u8; 32]);
         let caps = vec![Capability::SmartContractExecution];
-        let agent = mgr.register_agent("test-agent".to_string(), creator, caps, false, 0).await.unwrap();
+        let agent = mgr
+            .register_agent("test-agent".to_string(), creator, caps, false, 0)
+            .await
+            .unwrap();
         let agent_id = agent.identity.agent_id.clone();
-        mgr.update_agent(&agent_id, |a| a.status = AgentStatus::Active).unwrap();
+        mgr.update_agent(&agent_id, |a| a.status = AgentStatus::Active)
+            .unwrap();
         agent_id
     }
 
@@ -558,8 +562,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         let tx = AgentTransaction::Transfer {
             to: Address::from([2u8; 32]),
@@ -585,8 +588,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         let tx = AgentTransaction::CreateToken {
             name: "TestToken".to_string(),
@@ -605,8 +607,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         let tx = AgentTransaction::DeployContract {
             vm_type: "evm".to_string(),
@@ -623,8 +624,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         let tx = AgentTransaction::CrossVmTransfer {
             token: "TNZO".to_string(),
@@ -641,8 +641,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_rejects_nonexistent_agent() {
         let mgr = make_mgr();
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         let tx = AgentTransaction::Transfer {
             to: Address::from([2u8; 32]),
@@ -666,8 +665,7 @@ mod tests {
         mgr.update_agent(&agent_id, |a| a.status = AgentStatus::Suspended)
             .unwrap();
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         let tx = AgentTransaction::Transfer {
             to: Address::from([2u8; 32]),
@@ -684,8 +682,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         // Allow max 500 per tx, 10000 per day.
         executor.set_spending_policy(&agent_id, SpendingPolicy::new(500, 10_000));
@@ -709,8 +706,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         // Allow max 1000 per tx, 1500 per day.
         executor.set_spending_policy(&agent_id, SpendingPolicy::new(1000, 1500));
@@ -758,8 +754,8 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(FailingSubmitter));
+        let executor =
+            AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(FailingSubmitter));
 
         executor.set_spending_policy(&agent_id, SpendingPolicy::new(10_000, 100_000));
 
@@ -786,8 +782,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         // Very restrictive policy: 0 per tx, 0 per day.
         executor.set_spending_policy(&agent_id, SpendingPolicy::new(0, 0));
@@ -809,8 +804,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         // No spending policy set — should allow any amount.
         let tx = AgentTransaction::Transfer {
@@ -828,8 +822,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         // Execute 3 transactions.
         for i in 0..3 {
@@ -903,8 +896,7 @@ mod tests {
         let mgr = make_mgr();
         let agent_id = setup_active_agent(&mgr).await;
 
-        let executor = AgentTransactionExecutor::new(mgr)
-            .with_submitter(Arc::new(MockSubmitter));
+        let executor = AgentTransactionExecutor::new(mgr).with_submitter(Arc::new(MockSubmitter));
 
         // Set a restrictive policy.
         executor.set_spending_policy(&agent_id, SpendingPolicy::new(0, 0));

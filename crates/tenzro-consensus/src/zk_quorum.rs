@@ -45,7 +45,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_crypto::bls::{BlsKeyPair, BlsPublicKey, BlsSignature};
-use tenzro_storage::{KvStore, CF_AUDIT};
+use tenzro_storage::{CF_AUDIT, KvStore};
 use tenzro_types::primitives::Address;
 
 /// Domain-separation tag for the ZK commitment co-signature preimage. Distinct
@@ -492,8 +492,7 @@ impl ZkQuorumStore {
         };
         for (_key, bytes) in entries {
             if let Ok(record) = serde_json::from_slice::<AttestedCommitment>(&bytes) {
-                self.attested
-                    .insert(record.certificate.commitment, record);
+                self.attested.insert(record.certificate.commitment, record);
             }
         }
     }
@@ -556,12 +555,8 @@ impl ZkQuorumStore {
             .get(&commitment)
             .map(|e| e.clone())
             .unwrap_or_default();
-        match ZkQuorumCertificate::form(
-            circuit_id.to_string(),
-            commitment,
-            &cosigns,
-            validator_set,
-        ) {
+        match ZkQuorumCertificate::form(circuit_id.to_string(), commitment, &cosigns, validator_set)
+        {
             Ok(cert) => {
                 self.pending.remove(&commitment);
                 Ok(Some(cert))
@@ -724,13 +719,8 @@ mod tests {
                 bls_signature: sig.to_bytes().to_vec(),
             });
         }
-        let cert = ZkQuorumCertificate::form(
-            "inference".to_string(),
-            commitment,
-            &cosigns,
-            &set,
-        )
-        .expect("forms at quorum");
+        let cert = ZkQuorumCertificate::form("inference".to_string(), commitment, &cosigns, &set)
+            .expect("forms at quorum");
         cert.verify(&set).expect("verifies");
         assert_eq!(cert.signers(&set).len(), 3);
     }

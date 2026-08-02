@@ -32,7 +32,7 @@
 //! signed one.
 
 use libp2p::PeerId;
-use tenzro_crypto::{signatures, KeyType, PublicKey, Signature};
+use tenzro_crypto::{KeyType, PublicKey, Signature, signatures};
 
 /// Domain-separation prefix for the binding signature payload.
 pub const PEER_BINDING_DOMAIN: &[u8] = b"TENZRO_PEER_BINDING:";
@@ -100,8 +100,8 @@ pub fn verify_peer_binding(peer_id: &PeerId, validator_pubkey: &[u8], signature:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
     use tenzro_crypto::KeyPair;
+    use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 
     fn signed_binding(peer_id: &PeerId) -> (Vec<u8>, Vec<u8>) {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();

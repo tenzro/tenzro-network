@@ -11,14 +11,14 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tenzro_crypto::composite::{
-    CompositePublicKey, CompositeSignature, HybridSigner, HybridVerifier,
-    InMemoryHybridSigner, StandardHybridVerifier,
+    CompositePublicKey, CompositeSignature, HybridSigner, HybridVerifier, InMemoryHybridSigner,
+    StandardHybridVerifier,
 };
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_settlement::engine::SettlementEngine;
-use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 use tenzro_types::Address;
+use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 use tracing::{debug, info};
 
 /// MPP server-side payment handler
@@ -171,18 +171,14 @@ impl PaymentProtocol for MppPaymentServer {
                 "Internal Tenzro MPP credential is missing pq_signature (ML-DSA-65)".to_string(),
             ));
         }
-        let composite_pk =
-            CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
+        let composite_pk = CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
         let composite_sig = CompositeSignature::new(
             credential.signature.clone(),
             credential.pq_signature.clone(),
         );
         let verifier = StandardHybridVerifier::new(composite_pk);
         verifier.verify(&message, &composite_sig).map_err(|e| {
-            PaymentError::VerificationFailed(format!(
-                "Hybrid signature verification failed: {}",
-                e
-            ))
+            PaymentError::VerificationFailed(format!("Hybrid signature verification failed: {}", e))
         })?;
 
         debug!("Credential hybrid signature verified successfully");
@@ -216,7 +212,10 @@ impl PaymentProtocol for MppPaymentServer {
 
         // If a settlement engine is configured, execute real settlement
         if let Some(engine) = &self.settlement_engine {
-            debug!("Executing settlement via engine for amount={}", challenge.amount);
+            debug!(
+                "Executing settlement via engine for amount={}",
+                challenge.amount
+            );
 
             let amount_u64 = u64::try_from(challenge.amount).map_err(|_| {
                 PaymentError::SettlementError("Settlement amount exceeds u64 range".to_string())
@@ -312,14 +311,18 @@ impl PaymentProtocol for MppPaymentServer {
 
         // Generate an Ed25519 keypair for the classical leg.
         // In production, this would use the wallet service to get the keypair for wallet_id.
-        let keypair = tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519)
-            .map_err(|e| PaymentError::CredentialError(format!("Failed to generate keypair: {}", e)))?;
+        let keypair =
+            tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519).map_err(|e| {
+                PaymentError::CredentialError(format!("Failed to generate keypair: {}", e))
+            })?;
 
         // Extract public key bytes before consuming keypair (KeyPair doesn't implement Clone for security)
         let public_key_bytes = keypair.public_key().as_bytes().to_vec();
 
-        let classical = tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair)
-            .map_err(|e| PaymentError::CredentialError(format!("Failed to create signer: {}", e)))?;
+        let classical =
+            tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair).map_err(|e| {
+                PaymentError::CredentialError(format!("Failed to create signer: {}", e))
+            })?;
 
         // Generate the post-quantum leg (ML-DSA-65).
         let pq = MlDsaSigningKey::generate();
@@ -463,10 +466,12 @@ mod tests {
         server.settle(&verification).await.unwrap();
 
         // Challenge should be removed after settlement
-        assert!(server
-            .challenge_store()
-            .get(&challenge.challenge_id)
-            .is_err());
+        assert!(
+            server
+                .challenge_store()
+                .get(&challenge.challenge_id)
+                .is_err()
+        );
     }
 
     #[tokio::test]

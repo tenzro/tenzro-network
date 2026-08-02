@@ -31,8 +31,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 
 use tenzro_media_gen::{
-    compute_output_hash, verify_input, verify_latent, verify_output, MediaGenError,
-    MediaGenHandoff, MediaGenOutputStore, MediaGenReceipt, Result as MediaGenResult,
+    MediaGenError, MediaGenHandoff, MediaGenOutputStore, MediaGenReceipt, Result as MediaGenResult,
+    compute_output_hash, verify_input, verify_latent, verify_output,
 };
 use tenzro_types::primitives::Hash;
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -94,7 +94,9 @@ impl IrohMediaGenOutputStore {
     /// hash — this is the transport half only.
     async fn fetch_by_sha256(&self, sha256: &Hash) -> MediaGenResult<Bytes> {
         let blake3_hex = self.blake3_for(sha256).ok_or_else(|| {
-            MediaGenError::OutputNotFound(format!("no iroh-blobs locator known for sha256 {sha256}"))
+            MediaGenError::OutputNotFound(format!(
+                "no iroh-blobs locator known for sha256 {sha256}"
+            ))
         })?;
         let uri = TenzroUri::Blob {
             hash: blake3_hex,
@@ -258,7 +260,9 @@ mod tests {
         let high_noise = IrohMediaGenOutputStore::new(resolver.clone());
         let latent = Bytes::from_static(b"partly-denoised latent tensor");
         let hash = high_noise.publish(latent.clone()).await.unwrap();
-        let locator = high_noise.blake3_for(&hash).expect("publisher knows locator");
+        let locator = high_noise
+            .blake3_for(&hash)
+            .expect("publisher knows locator");
 
         let handoff = MediaGenHandoff {
             job_id: "job-iroh-1".to_string(),
@@ -278,7 +282,10 @@ mod tests {
         ));
 
         low_noise.record_blake3(hash, locator);
-        let fetched = low_noise.fetch_latent(&handoff).await.expect("fetch latent");
+        let fetched = low_noise
+            .fetch_latent(&handoff)
+            .await
+            .expect("fetch latent");
         assert_eq!(fetched, latent);
     }
 

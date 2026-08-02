@@ -39,15 +39,12 @@ pub use plonky3::{
 
 // Re-export Plonky3 AIRs
 pub use circuits::{
-    InferenceAir, IdentityAir, PqQcAggregationAir, SettlementAir,
-    NUM_INFERENCE_COLS, NUM_INFERENCE_PUBLIC_VALUES,
-    NUM_IDENTITY_COLS, NUM_IDENTITY_PUBLIC_VALUES,
-    NUM_SETTLEMENT_COLS, NUM_SETTLEMENT_PUBLIC_VALUES,
-    pq_qc_cols_for, pq_qc_message_digest, pq_qc_public_inputs, pq_qc_public_values_for,
-    generate_inference_trace, inference_public_inputs,
-    generate_identity_trace, identity_public_inputs,
-    generate_pq_qc_trace,
-    generate_settlement_trace, settlement_public_inputs,
+    IdentityAir, InferenceAir, NUM_IDENTITY_COLS, NUM_IDENTITY_PUBLIC_VALUES, NUM_INFERENCE_COLS,
+    NUM_INFERENCE_PUBLIC_VALUES, NUM_SETTLEMENT_COLS, NUM_SETTLEMENT_PUBLIC_VALUES,
+    PqQcAggregationAir, SettlementAir, generate_identity_trace, generate_inference_trace,
+    generate_pq_qc_trace, generate_settlement_trace, identity_public_inputs,
+    inference_public_inputs, pq_qc_cols_for, pq_qc_message_digest, pq_qc_public_inputs,
+    pq_qc_public_values_for, settlement_public_inputs,
 };
 
 // Re-export KoalaBear field type and trait for downstream witness builders.
@@ -57,6 +54,5 @@ pub use p3_koala_bear::KoalaBear;
 // Re-export TEE integration helpers.
 pub use tee_integration::{
     bind_external_attestation_result, extract_tee_public_key, generate_tee_zk_proof,
-    get_expected_measurement, sign_tee_zk_proof, sign_tee_zk_proof_hybrid,
-    verify_tee_zk_proof, verify_tee_zk_signature,
+    sign_tee_zk_proof, sign_tee_zk_proof_hybrid, verify_tee_zk_proof, verify_tee_zk_signature,
 };

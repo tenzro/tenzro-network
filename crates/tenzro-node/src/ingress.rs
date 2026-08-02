@@ -34,7 +34,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tenzro_iroh::{
-    open_http_stream, EndpointId, HttpForwardHandler, IrohResolver as _, RecvStream, SendStream,
+    EndpointId, HttpForwardHandler, IrohResolver as _, RecvStream, SendStream, open_http_stream,
 };
 use tenzro_storage::{CF_METADATA, KvStore};
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -42,7 +42,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::node::TenzroNode;
-use crate::sites::{is_asset_path, normalize_hostname, SiteManifest};
+use crate::sites::{SiteManifest, is_asset_path, normalize_hostname};
 use crate::web::sites::parse_credential;
 
 /// Key prefix for site-placement records within `CF_METADATA`.
@@ -420,7 +420,9 @@ impl IrohIngressHandler {
         // public-facing 402 body; a bare forward with no credential returns
         // 402 and the edge relays it).
         if let Some(price) = manifest.price_per_request
-            && let Err(resp) = self.enforce_payment(manifest, &request_path, price, head).await
+            && let Err(resp) = self
+                .enforce_payment(manifest, &request_path, price, head)
+                .await
         {
             return resp;
         }
@@ -436,11 +438,7 @@ impl IrohIngressHandler {
             .header("if-none-match")
             .is_some_and(|inm| inm.split(',').any(|c| c.trim() == etag))
         {
-            return http_response_with_headers(
-                304,
-                &[("etag", &etag)],
-                b"",
-            );
+            return http_response_with_headers(304, &[("etag", &etag)], b"");
         }
 
         let registry = self.node.site_registry();
@@ -478,7 +476,11 @@ impl IrohIngressHandler {
             return http_response(502, "text/plain; charset=utf-8", b"blob too large");
         }
 
-        let status_code: u16 = if status_line.starts_with("404") { 404 } else { 200 };
+        let status_code: u16 = if status_line.starts_with("404") {
+            404
+        } else {
+            200
+        };
         http_response_with_headers(
             status_code,
             &[
@@ -679,7 +681,11 @@ impl IrohIngressHandler {
         }
 
         let Some(resolver) = self.node.iroh_resolver() else {
-            return http_response(503, "text/plain; charset=utf-8", b"blob resolver unavailable");
+            return http_response(
+                503,
+                "text/plain; charset=utf-8",
+                b"blob resolver unavailable",
+            );
         };
         let uri = TenzroUri::Blob {
             hash: deployment.wasm_blob_hash.clone(),
@@ -688,10 +694,7 @@ impl IrohIngressHandler {
         let wasm_bytes = match resolver.fetch_bytes(&uri).await {
             Ok(bytes) => bytes,
             Err(e) => {
-                warn!(
-                    "ingress: function {} blob fetch failed: {e}",
-                    deployment.id
-                );
+                warn!("ingress: function {} blob fetch failed: {e}", deployment.id);
                 return http_response(502, "text/plain; charset=utf-8", b"component fetch failed");
             }
         };
@@ -704,13 +707,21 @@ impl IrohIngressHandler {
             Ok(c) => c,
             Err(e) => {
                 warn!("ingress: function {} compile failed: {e}", deployment.id);
-                return http_response(502, "text/plain; charset=utf-8", b"component compile failed");
+                return http_response(
+                    502,
+                    "text/plain; charset=utf-8",
+                    b"component compile failed",
+                );
             }
         };
 
         // The guest sees the resolved path as its request target. Reuse the
         // original method and headers; the body is forwarded verbatim.
-        let target = if request_suffix.is_empty() { "/" } else { request_suffix };
+        let target = if request_suffix.is_empty() {
+            "/"
+        } else {
+            request_suffix
+        };
         match component
             .serve_buffered(
                 true, // edge terminates TLS: guest sees https
@@ -732,7 +743,11 @@ impl IrohIngressHandler {
             }
             Err(e) => {
                 warn!("ingress: function {} invocation failed: {e}", deployment.id);
-                http_response(502, "text/plain; charset=utf-8", b"function invocation failed")
+                http_response(
+                    502,
+                    "text/plain; charset=utf-8",
+                    b"function invocation failed",
+                )
             }
         }
     }

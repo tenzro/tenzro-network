@@ -157,19 +157,19 @@ pub async fn verify_challenge(
             })?;
 
         let uri: TenzroUri =
-            sref.uri.parse().map_err(|e| StorageProviderError::ChallengeFailed {
-                object_id: challenge.object_id.clone(),
-                reason: format!("shard {} has unparseable URI: {}", idx, e),
-            })?;
-
-        let bytes: Bytes =
-            resolver
-                .fetch_bytes(&uri)
-                .await
+            sref.uri
+                .parse()
                 .map_err(|e| StorageProviderError::ChallengeFailed {
                     object_id: challenge.object_id.clone(),
-                    reason: format!("shard {} not retrievable: {}", idx, e),
+                    reason: format!("shard {} has unparseable URI: {}", idx, e),
                 })?;
+
+        let bytes: Bytes = resolver.fetch_bytes(&uri).await.map_err(|e| {
+            StorageProviderError::ChallengeFailed {
+                object_id: challenge.object_id.clone(),
+                reason: format!("shard {} not retrievable: {}", idx, e),
+            }
+        })?;
 
         // Bytes must match their stored commitment (no silent corruption).
         if crate::redundancy::Shard::commit(&bytes) != sref.commitment {
@@ -199,7 +199,11 @@ mod tests {
     use std::collections::HashMap;
     use tenzro_iroh::{IrohBackedResolver, IrohResolver};
 
-    async fn stored() -> (Arc<dyn IrohResolver>, ObjectDescriptor, HashMap<usize, Vec<u8>>) {
+    async fn stored() -> (
+        Arc<dyn IrohResolver>,
+        ObjectDescriptor,
+        HashMap<usize, Vec<u8>>,
+    ) {
         let resolver: Arc<dyn IrohResolver> = IrohBackedResolver::bind_in_memory().await.unwrap();
         let provider = StorageProvider::new(resolver.clone());
         let scheme = RedundancyScheme::erasure(4, 2).unwrap();
@@ -243,8 +247,7 @@ mod tests {
         let (resolver, desc, _held) = stored().await;
         let challenge = new_challenge(&desc, 2);
         // Prover answers with garbage bytes it does not actually hold.
-        let response =
-            answer_challenge(&challenge, |_idx| Ok(vec![0u8; 16])).unwrap();
+        let response = answer_challenge(&challenge, |_idx| Ok(vec![0u8; 16])).unwrap();
         let err = verify_challenge(&desc, &challenge, &response, &resolver)
             .await
             .unwrap_err();

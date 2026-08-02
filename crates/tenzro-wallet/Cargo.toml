@@ -63,3 +63,6 @@ ledger-signer = ["dep:ledger-transport-hid", "dep:ledger-apdu", "dep:hidapi"]
 trezor-signer = ["dep:trezor-client"]
 gridplus-signer = []  # reqwest is in main deps already
 all-hardware-signers = ["ledger-signer", "trezor-signer", "gridplus-signer"]
+
+[lints]
+workspace = true

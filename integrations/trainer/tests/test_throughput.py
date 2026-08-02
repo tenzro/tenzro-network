@@ -13,8 +13,8 @@ import pytest
 torch = pytest.importorskip("torch")
 pd = pytest.importorskip("pandas")
 
-from tenzro_trainer.adapters.timeseries import build_adapter  # noqa: E402
-from tenzro_trainer.inner_loop import run_inner_loop  # noqa: E402
+from tenzro_trainer.adapters.timeseries import build_adapter
+from tenzro_trainer.inner_loop import run_inner_loop
 
 
 def _write_series_shard(tmp_path, n_points: int = 8192):

@@ -13,11 +13,11 @@
 
 use crate::error::{Result, WalletError};
 use crate::wallet::{KeyShare, MpcWallet};
-use tenzro_crypto::frost::{
-    aggregate_signature, build_signing_package, round1_commit, round2_sign, PublicKeyPackage,
-    SignatureShare, SigningCommitments, SigningNonces,
-};
 use tenzro_crypto::Signature;
+use tenzro_crypto::frost::{
+    PublicKeyPackage, SignatureShare, SigningCommitments, SigningNonces, aggregate_signature,
+    build_signing_package, round1_commit, round2_sign,
+};
 use tracing::{debug, info};
 
 /// FROST signing coordinator for Tenzro Network wallets.
@@ -48,10 +48,7 @@ impl MpcSigner {
         let signing_set = &wallet.key_shares[..wallet.threshold as usize];
         let signature = run_frost_session(signing_set, pubkey_pkg, data)?;
 
-        info!(
-            "Successfully FROST-signed with wallet {}",
-            wallet.wallet_id
-        );
+        info!("Successfully FROST-signed with wallet {}", wallet.wallet_id);
 
         Ok(signature)
     }

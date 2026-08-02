@@ -379,8 +379,12 @@ impl ModelModality {
         }
         match *self {
             ModelModality::Multimodal => !matches!(requested, ModelModality::Timeseries),
-            ModelModality::TextImage => matches!(requested, ModelModality::Text | ModelModality::Image),
-            ModelModality::TextAudio => matches!(requested, ModelModality::Text | ModelModality::Audio),
+            ModelModality::TextImage => {
+                matches!(requested, ModelModality::Text | ModelModality::Image)
+            }
+            ModelModality::TextAudio => {
+                matches!(requested, ModelModality::Text | ModelModality::Audio)
+            }
             _ => false,
         }
     }
@@ -714,12 +718,7 @@ pub struct InferenceRequest {
 
 impl InferenceRequest {
     /// Creates a new inference request
-    pub fn new(
-        model_id: String,
-        requester: Address,
-        input: Vec<u8>,
-        max_price: u64,
-    ) -> Self {
+    pub fn new(model_id: String, requester: Address, input: Vec<u8>, max_price: u64) -> Self {
         Self {
             request_id: uuid::Uuid::new_v4().to_string(),
             model_id,
@@ -1813,7 +1812,10 @@ impl PrefixCacheSummary {
             });
         }
         let warm_token_total = (hashes.len() * PREFIX_RUN_BYTES) as u32;
-        Self { nodes, warm_token_total }
+        Self {
+            nodes,
+            warm_token_total,
+        }
     }
 
     /// Merge another warm prompt's run path into this summary, sharing the
@@ -1839,8 +1841,9 @@ impl PrefixCacheSummary {
                         run_len: PREFIX_RUN_BYTES as u32,
                     });
                     parent = Some(idx);
-                    self.warm_token_total =
-                        self.warm_token_total.saturating_add(PREFIX_RUN_BYTES as u32);
+                    self.warm_token_total = self
+                        .warm_token_total
+                        .saturating_add(PREFIX_RUN_BYTES as u32);
                 }
             }
         }
@@ -1862,9 +1865,11 @@ impl PrefixCacheSummary {
         // the last matched node.
         let mut parent: Option<u32> = None;
         for expected in prompt_run_hashes {
-            let hit = self.nodes.iter().enumerate().find(|(_, n)| {
-                n.parent == parent && n.run_hash == *expected
-            });
+            let hit = self
+                .nodes
+                .iter()
+                .enumerate()
+                .find(|(_, n)| n.parent == parent && n.run_hash == *expected);
             match hit {
                 Some((idx, node)) => {
                     matched = matched.saturating_add(node.run_len);
@@ -2221,10 +2226,7 @@ pub enum ToolResultContent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSource {
-    Base64 {
-        media_type: String,
-        data: String,
-    },
+    Base64 { media_type: String, data: String },
 }
 
 /// A message in the rich shape. `content` is either a plain string (which
@@ -2282,9 +2284,7 @@ impl ContentBlock {
         match self {
             ContentBlock::Text { text, .. } => text.len(),
             ContentBlock::Thinking { thinking } => thinking.len(),
-            ContentBlock::ToolUse { name, input, .. } => {
-                name.len() + input.to_string().len()
-            }
+            ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
             ContentBlock::ToolResult { content, .. } => match content {
                 ToolResultContent::Text(s) => s.len(),
                 ToolResultContent::Blocks(bs) => bs.iter().map(ContentBlock::payload_len).sum(),
@@ -2299,7 +2299,11 @@ impl ContentBlock {
 impl RichChatMessage {
     /// Total byte length of this message's content payload across all blocks.
     pub fn payload_len(&self) -> usize {
-        self.content.as_blocks().iter().map(ContentBlock::payload_len).sum()
+        self.content
+            .as_blocks()
+            .iter()
+            .map(ContentBlock::payload_len)
+            .sum()
     }
 }
 
@@ -2444,15 +2448,20 @@ mod rich_chat_tests {
     fn message_content_accepts_string_or_blocks() {
         let s: MessageContent = serde_json::from_str(r#""hello""#).unwrap();
         assert!(matches!(s, MessageContent::Text(_)));
-        let b: MessageContent =
-            serde_json::from_str(r#"[{"type":"text","text":"hi"}]"#).unwrap();
+        let b: MessageContent = serde_json::from_str(r#"[{"type":"text","text":"hi"}]"#).unwrap();
         assert!(matches!(b, MessageContent::Blocks(_)));
     }
 
     #[test]
     fn stop_reason_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&StopReason::EndTurn).unwrap(), r#""end_turn""#);
-        assert_eq!(serde_json::to_string(&StopReason::ToolUse).unwrap(), r#""tool_use""#);
+        assert_eq!(
+            serde_json::to_string(&StopReason::EndTurn).unwrap(),
+            r#""end_turn""#
+        );
+        assert_eq!(
+            serde_json::to_string(&StopReason::ToolUse).unwrap(),
+            r#""tool_use""#
+        );
         assert_eq!(
             serde_json::to_string(&StopReason::MaxTokens).unwrap(),
             r#""max_tokens""#
@@ -2461,8 +2470,14 @@ mod rich_chat_tests {
 
     #[test]
     fn reasoning_effort_serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&ReasoningEffort::Low).unwrap(), r#""low""#);
-        assert_eq!(serde_json::to_string(&ReasoningEffort::High).unwrap(), r#""high""#);
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Low).unwrap(),
+            r#""low""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::High).unwrap(),
+            r#""high""#
+        );
     }
 
     #[test]
@@ -2540,7 +2555,11 @@ mod moe_tests {
 
     #[test]
     fn moe_metadata_specialization_roundtrip() {
-        let labels = vec!["math".to_string(), "code".to_string(), "reasoning".to_string()];
+        let labels = vec![
+            "math".to_string(),
+            "code".to_string(),
+            "reasoning".to_string(),
+        ];
         let moe = MoeMetadata::new(3, 1, MoeRoutingStrategy::Switch)
             .with_expert_specialization(labels.clone());
         assert_eq!(moe.expert_specialization.as_ref(), Some(&labels));

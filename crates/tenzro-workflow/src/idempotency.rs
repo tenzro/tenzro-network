@@ -179,10 +179,7 @@ mod tests {
             base,
             IdempotencyKey::derive(b"wf1", b"step2", b"alice", b"p")
         );
-        assert_ne!(
-            base,
-            IdempotencyKey::derive(b"wf1", b"step1", b"bob", b"p")
-        );
+        assert_ne!(base, IdempotencyKey::derive(b"wf1", b"step1", b"bob", b"p"));
         assert_ne!(
             base,
             IdempotencyKey::derive(b"wf1", b"step1", b"alice", b"different")

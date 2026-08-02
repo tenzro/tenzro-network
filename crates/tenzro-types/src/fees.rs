@@ -192,9 +192,13 @@ impl ServiceFeeSchedule {
         model_count: u128,
         bridge_count: u128,
     ) -> Option<u128> {
-        let total = self.human_identity_registration
+        let total = self
+            .human_identity_registration
             .checked_mul(human_identity_count)?
-            .checked_add(self.machine_identity_registration.checked_mul(machine_identity_count)?)?
+            .checked_add(
+                self.machine_identity_registration
+                    .checked_mul(machine_identity_count)?,
+            )?
             .checked_add(self.agent_registration.checked_mul(agent_count)?)?
             .checked_add(self.credential_issuance.checked_mul(credential_count)?)?
             .checked_add(self.identity_verification.checked_mul(verification_count)?)?
@@ -249,10 +253,10 @@ pub struct NetworkCommissionRates {
 impl Default for NetworkCommissionRates {
     fn default() -> Self {
         Self {
-            inference_commission_bps: 500,      // 5%
-            tee_commission_bps: 500,            // 5%
-            custody_commission_bps: 500,        // 5%
-            model_hosting_commission_bps: 500,  // 5%
+            inference_commission_bps: 500,     // 5%
+            tee_commission_bps: 500,           // 5%
+            custody_commission_bps: 500,       // 5%
+            model_hosting_commission_bps: 500, // 5%
         }
     }
 }
@@ -306,9 +310,7 @@ impl NetworkCommissionRates {
     /// Returns None if the calculation would overflow.
     fn calculate_commission(&self, amount: u128, bps: u32) -> Option<u128> {
         // Commission = amount * bps / 10000
-        amount
-            .checked_mul(bps as u128)?
-            .checked_div(10000)
+        amount.checked_mul(bps as u128)?.checked_div(10000)
     }
 
     /// Validates that all commission rates are within reasonable bounds (0-10000 bps = 0-100%)
@@ -377,7 +379,9 @@ mod tests {
         const ONE_HUNDRED_TNZO: u128 = 100_000_000_000_000_000_000; // 100 * 10^18
 
         // 5% of 100 TNZO = 5 TNZO
-        let commission = rates.calculate_inference_commission(ONE_HUNDRED_TNZO).unwrap();
+        let commission = rates
+            .calculate_inference_commission(ONE_HUNDRED_TNZO)
+            .unwrap();
         assert_eq!(commission, 5_000_000_000_000_000_000);
     }
 
@@ -409,7 +413,10 @@ mod tests {
         assert_eq!(user_pays, 110_000_000_000_000_000_000);
 
         // Zero margin is identity
-        assert_eq!(apply_developer_margin(ONE_HUNDRED_TNZO, 0), Some(ONE_HUNDRED_TNZO));
+        assert_eq!(
+            apply_developer_margin(ONE_HUNDRED_TNZO, 0),
+            Some(ONE_HUNDRED_TNZO)
+        );
 
         // Cap itself is accepted
         let at_cap = apply_developer_margin(ONE_HUNDRED_TNZO, MAX_DEVELOPER_MARGIN_BPS).unwrap();

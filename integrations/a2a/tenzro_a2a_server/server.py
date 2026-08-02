@@ -7,21 +7,21 @@ Endpoints:
   GET  /health                  -- Health check
 """
 
+import json
+import os
+
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
-import json
-import os
-import uvicorn
 
-from .agent_card import build_agent_card
-from .task_manager import TaskManager
-from .router import route_message
-from .handlers import HANDLERS
 from . import x402_extension as x402
+from .agent_card import build_agent_card
+from .handlers import HANDLERS
+from .router import route_message
+from .task_manager import TaskManager
 from .x402_extension import (
-    PaymentStatus,
     UnimplementedSchemeVerifier,
     VerifyFailure,
 )

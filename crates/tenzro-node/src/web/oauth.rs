@@ -42,17 +42,17 @@
 //! - The `/.well-known/*` endpoints are unauthenticated GET.
 
 use axum::{
+    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use tenzro_auth::{
-    peek_unverified_jti, AapCapabilityClaim, AuthClaims, AuthError, AuthorizationDetails,
-    IntrospectionResponse, TokenExchangeRequest,
+    AapCapabilityClaim, AuthClaims, AuthError, AuthorizationDetails, IntrospectionResponse,
+    TokenExchangeRequest, peek_unverified_jti,
 };
 
 use super::handlers::WebState;
@@ -66,8 +66,7 @@ use super::handlers::WebState;
 /// is forwarded to the next layer (currently rejected — V1's web
 /// `/oauth/token` only handles token-exchange; the authorization-code
 /// and refresh-token grants live on the MCP module's `/token`).
-const GRANT_TYPE_TOKEN_EXCHANGE: &str =
-    "urn:ietf:params:oauth:grant-type:token-exchange";
+const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
 /// Required `subject_token_type` value. We accept exactly one shape.
 const TOKEN_TYPE_JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
@@ -185,7 +184,7 @@ pub async fn token_exchange_handler(
                             StatusCode::UNAUTHORIZED,
                             "invalid_dpop_proof",
                             &format!("DPoP proof parse failed: {}", e),
-                        )
+                        );
                     }
                 };
             let now_unix = std::time::SystemTime::now()
@@ -322,11 +321,7 @@ pub async fn revoke_handler(
     State(state): State<Arc<WebState>>,
     Json(body): Json<RevokeRequestBody>,
 ) -> Response {
-    let Some(engine) = state
-        .node
-        .as_ref()
-        .and_then(|n| n.auth_engine().cloned())
-    else {
+    let Some(engine) = state.node.as_ref().and_then(|n| n.auth_engine().cloned()) else {
         // Per RFC 7009 §2.2, even when revocation is unavailable we
         // return 200; logging the misconfiguration on our side.
         tracing::warn!("revoke called but auth engine not initialized");
@@ -663,10 +658,7 @@ pub(super) async fn validate_wallet_auth(
         return Err(oauth_error(
             StatusCode::FORBIDDEN,
             "insufficient_scope",
-            &format!(
-                "token lacks aap_capabilities action '{}'",
-                required_action
-            ),
+            &format!("token lacks aap_capabilities action '{}'", required_action),
         ));
     }
 
@@ -686,9 +678,11 @@ fn auth_error_to_response(e: AuthError) -> Response {
         AuthError::TokenExpired | AuthError::TokenRevoked(_) | AuthError::InvalidToken(_) => {
             oauth_error(StatusCode::UNAUTHORIZED, "invalid_token", &e.to_string())
         }
-        AuthError::InvalidDpop(_) => {
-            oauth_error(StatusCode::UNAUTHORIZED, "invalid_dpop_proof", &e.to_string())
-        }
+        AuthError::InvalidDpop(_) => oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_dpop_proof",
+            &e.to_string(),
+        ),
         AuthError::InsufficientAuthorization(_)
         | AuthError::DelegationViolation(_)
         | AuthError::Forbidden(_)

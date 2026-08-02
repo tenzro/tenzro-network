@@ -27,7 +27,10 @@ impl GossipTopics {
 
         // Core protocol topics
         topics.insert("blocks".to_string(), IdentTopic::new("tenzro/blocks"));
-        topics.insert("transactions".to_string(), IdentTopic::new("tenzro/transactions"));
+        topics.insert(
+            "transactions".to_string(),
+            IdentTopic::new("tenzro/transactions"),
+        );
         topics.insert("consensus".to_string(), IdentTopic::new("tenzro/consensus"));
 
         // Batch availability certificates — data-dissemination plane decoupled
@@ -36,7 +39,10 @@ impl GossipTopics {
         topics.insert("batches".to_string(), IdentTopic::new("tenzro/batches"));
 
         // Provider topics
-        topics.insert("attestations".to_string(), IdentTopic::new("tenzro/attestations"));
+        topics.insert(
+            "attestations".to_string(),
+            IdentTopic::new("tenzro/attestations"),
+        );
         topics.insert("models".to_string(), IdentTopic::new("tenzro/models"));
         topics.insert("inference".to_string(), IdentTopic::new("tenzro/inference"));
 
@@ -55,10 +61,16 @@ impl GossipTopics {
 
         // Tenzro Train: outer-gradient broadcast and syncer round publication
         topics.insert("training".to_string(), IdentTopic::new("tenzro/training"));
-        topics.insert("training_syncer".to_string(), IdentTopic::new("tenzro/training/syncer"));
+        topics.insert(
+            "training_syncer".to_string(),
+            IdentTopic::new("tenzro/training/syncer"),
+        );
 
         // SeedAgent (Spec 10) — provisioning lifecycle, refill, sunset
-        topics.insert("seed_agents".to_string(), IdentTopic::new("tenzro/seed-agents"));
+        topics.insert(
+            "seed_agents".to_string(),
+            IdentTopic::new("tenzro/seed-agents"),
+        );
 
         // Distributed database registration and rescale events
         topics.insert("databases".to_string(), IdentTopic::new("tenzro/databases"));
@@ -96,17 +108,23 @@ impl GossipTopics {
 
     /// Transactions topic
     pub fn transactions(&self) -> &IdentTopic {
-        self.topics.get("transactions").expect("transactions topic must exist")
+        self.topics
+            .get("transactions")
+            .expect("transactions topic must exist")
     }
 
     /// Consensus topic
     pub fn consensus(&self) -> &IdentTopic {
-        self.topics.get("consensus").expect("consensus topic must exist")
+        self.topics
+            .get("consensus")
+            .expect("consensus topic must exist")
     }
 
     /// Attestations topic
     pub fn attestations(&self) -> &IdentTopic {
-        self.topics.get("attestations").expect("attestations topic must exist")
+        self.topics
+            .get("attestations")
+            .expect("attestations topic must exist")
     }
 
     /// Models topic
@@ -116,7 +134,9 @@ impl GossipTopics {
 
     /// Inference topic
     pub fn inference(&self) -> &IdentTopic {
-        self.topics.get("inference").expect("inference topic must exist")
+        self.topics
+            .get("inference")
+            .expect("inference topic must exist")
     }
 
     /// Status topic
@@ -131,7 +151,9 @@ impl GossipTopics {
 
     /// Providers topic
     pub fn providers(&self) -> &IdentTopic {
-        self.topics.get("providers").expect("providers topic must exist")
+        self.topics
+            .get("providers")
+            .expect("providers topic must exist")
     }
 
     /// Iroh blob availability topic
@@ -146,12 +168,16 @@ impl GossipTopics {
 
     /// SeedAgent lifecycle topic (Spec 10)
     pub fn seed_agents(&self) -> &IdentTopic {
-        self.topics.get("seed_agents").expect("seed_agents topic must exist")
+        self.topics
+            .get("seed_agents")
+            .expect("seed_agents topic must exist")
     }
 
     /// Distributed-database registration/rescale topic
     pub fn databases(&self) -> &IdentTopic {
-        self.topics.get("databases").expect("databases topic must exist")
+        self.topics
+            .get("databases")
+            .expect("databases topic must exist")
     }
 }
 

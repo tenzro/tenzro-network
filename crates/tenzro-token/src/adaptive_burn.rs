@@ -42,7 +42,7 @@
 use crate::error::{Result, TokenError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::primitives::{BlockHeight, Timestamp};
 use tracing::{debug, info};
 
@@ -286,8 +286,7 @@ pub struct EmissionBreakdown {
 
 impl EmissionBreakdown {
     pub fn total(&self) -> u128 {
-        self.staking_rewards
-            .saturating_add(self.treasury_emissions)
+        self.staking_rewards.saturating_add(self.treasury_emissions)
     }
 }
 
@@ -347,8 +346,7 @@ impl RecommendationAction {
     pub fn is_alarm(&self) -> bool {
         matches!(
             self,
-            RecommendationAction::AlarmHighInflation
-                | RecommendationAction::AlarmHighDeflation
+            RecommendationAction::AlarmHighInflation | RecommendationAction::AlarmHighDeflation
         )
     }
 }
@@ -464,8 +462,7 @@ pub fn compute_recommendation(
     // deviation. `deviation` is already in bps. So:
     //     magnitude = (|deviation| / 100) * gain_bps_per_pct
     let abs_dev = deviation.unsigned_abs();
-    let raw_magnitude =
-        (abs_dev as u64 * targets.gain_bps_per_pct as u64 / 100) as i32;
+    let raw_magnitude = (abs_dev as u64 * targets.gain_bps_per_pct as u64 / 100) as i32;
     let cap = targets.magnitude_cap_normal_bps as i32;
     let capped = raw_magnitude.min(cap);
 
@@ -477,8 +474,7 @@ pub fn compute_recommendation(
         (RecommendationAction::DecreaseBurnPct, -capped)
     };
 
-    let above_floor =
-        magnitude.unsigned_abs() >= targets.auto_proposal_min_magnitude_bps as u32;
+    let above_floor = magnitude.unsigned_abs() >= targets.auto_proposal_min_magnitude_bps as u32;
 
     BurnRateRecommendation {
         action,
@@ -576,9 +572,7 @@ impl BurnRateConfigManager {
 
     /// Apply a governance-ratified update to supply targets.
     pub fn apply_targets(&self, new_targets: SupplyTargets) -> Result<()> {
-        if new_targets.epoch_neutral_band_bps > 10_000
-            || new_targets.gain_bps_per_pct > 10_000
-        {
+        if new_targets.epoch_neutral_band_bps > 10_000 || new_targets.gain_bps_per_pct > 10_000 {
             return Err(TokenError::InvalidParameter(
                 "epoch_neutral_band_bps / gain_bps_per_pct must be <= 10000".into(),
             ));
@@ -665,9 +659,8 @@ impl BurnRateConfigManager {
             .get(CF_TOKENS, SUPPLY_METRICS_KEY)
             .map_err(|e| TokenError::StorageError(format!("get supply metrics: {}", e)))?
         {
-            let m: SupplyMetricsSnapshot = serde_json::from_slice(&value).map_err(|e| {
-                TokenError::StorageError(format!("decode supply metrics: {}", e))
-            })?;
+            let m: SupplyMetricsSnapshot = serde_json::from_slice(&value)
+                .map_err(|e| TokenError::StorageError(format!("decode supply metrics: {}", e)))?;
             *self.metrics.write() = m;
             info!("SupplyMetricsSnapshot hydrated from storage");
         }
@@ -677,9 +670,8 @@ impl BurnRateConfigManager {
 
     fn persist_config(&self, cfg: &BurnRateConfig) -> Result<()> {
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(cfg).map_err(|e| {
-                TokenError::StorageError(format!("encode burn rate config: {}", e))
-            })?;
+            let value = serde_json::to_vec(cfg)
+                .map_err(|e| TokenError::StorageError(format!("encode burn rate config: {}", e)))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_TOKENS.to_string(),
@@ -695,36 +687,30 @@ impl BurnRateConfigManager {
 
     fn persist_targets(&self, t: &SupplyTargets) -> Result<()> {
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(t).map_err(|e| {
-                TokenError::StorageError(format!("encode supply targets: {}", e))
-            })?;
+            let value = serde_json::to_vec(t)
+                .map_err(|e| TokenError::StorageError(format!("encode supply targets: {}", e)))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_TOKENS.to_string(),
                     key: SUPPLY_TARGETS_KEY.to_vec(),
                     value,
                 }])
-                .map_err(|e| {
-                    TokenError::StorageError(format!("persist supply targets: {}", e))
-                })?;
+                .map_err(|e| TokenError::StorageError(format!("persist supply targets: {}", e)))?;
         }
         Ok(())
     }
 
     fn persist_metrics(&self, m: &SupplyMetricsSnapshot) -> Result<()> {
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(m).map_err(|e| {
-                TokenError::StorageError(format!("encode supply metrics: {}", e))
-            })?;
+            let value = serde_json::to_vec(m)
+                .map_err(|e| TokenError::StorageError(format!("encode supply metrics: {}", e)))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_TOKENS.to_string(),
                     key: SUPPLY_METRICS_KEY.to_vec(),
                     value,
                 }])
-                .map_err(|e| {
-                    TokenError::StorageError(format!("persist supply metrics: {}", e))
-                })?;
+                .map_err(|e| TokenError::StorageError(format!("persist supply metrics: {}", e)))?;
         }
         Ok(())
     }
@@ -906,9 +892,12 @@ impl AutoProposalGenerator {
             paymaster_burn_bps: proposed.paymaster_burn_bps,
         };
 
-        let proposal_id = self
-            .governance
-            .create_system_proposal(title, description, proposal_type, voting_duration_ms)?;
+        let proposal_id = self.governance.create_system_proposal(
+            title,
+            description,
+            proposal_type,
+            voting_duration_ms,
+        )?;
 
         *self.last_issued_at.lock() = Some(std::time::Instant::now());
 
@@ -929,8 +918,9 @@ impl AutoProposalGenerator {
             RecommendationAction::IncreaseBurnPct | RecommendationAction::DecreaseBurnPct => {
                 rec.above_proposal_floor
             }
-            RecommendationAction::AlarmHighInflation
-            | RecommendationAction::AlarmHighDeflation => true,
+            RecommendationAction::AlarmHighInflation | RecommendationAction::AlarmHighDeflation => {
+                true
+            }
         }
     }
 
@@ -973,19 +963,37 @@ mod tests {
         assert_eq!(s.total(), 1_000);
 
         // 50/50 on an odd amount: floor to burn, remainder (dust) to treasury.
-        let c2 = BurnRateConfig { base_fee_burn_bps: 5_000, ..Default::default() };
+        let c2 = BurnRateConfig {
+            base_fee_burn_bps: 5_000,
+            ..Default::default()
+        };
         let s2 = c2.split_base_fee(1_001);
         assert_eq!((s2.burn, s2.treasury), (500, 501));
         assert_eq!(s2.total(), 1_001);
 
         // 0% burn → everything to treasury.
-        let c3 = BurnRateConfig { base_fee_burn_bps: 0, ..Default::default() };
+        let c3 = BurnRateConfig {
+            base_fee_burn_bps: 0,
+            ..Default::default()
+        };
         let s3 = c3.split_base_fee(777);
         assert_eq!((s3.burn, s3.treasury), (0, 777));
 
         // local + paymaster use their own dials (genesis 100% burn).
-        assert_eq!(c.split_local_fee(42), FeeSplit { burn: 42, treasury: 0 });
-        assert_eq!(c.split_paymaster(42), FeeSplit { burn: 42, treasury: 0 });
+        assert_eq!(
+            c.split_local_fee(42),
+            FeeSplit {
+                burn: 42,
+                treasury: 0
+            }
+        );
+        assert_eq!(
+            c.split_paymaster(42),
+            FeeSplit {
+                burn: 42,
+                treasury: 0
+            }
+        );
     }
 
     fn metrics_with_rolling(bps: i32) -> SupplyMetricsSnapshot {
@@ -1177,7 +1185,10 @@ mod tests {
     ) {
         let manager = Arc::new(BurnRateConfigManager::new());
         let governance = Arc::new(crate::governance::GovernanceEngine::new());
-        let generator = Arc::new(AutoProposalGenerator::new(manager.clone(), governance.clone()));
+        let generator = Arc::new(AutoProposalGenerator::new(
+            manager.clone(),
+            governance.clone(),
+        ));
         (manager, governance, generator)
     }
 
@@ -1308,6 +1319,9 @@ mod tests {
             deviation_bps: 400,
         };
         let ms = generator.voting_duration_ms(&rec, &targets);
-        assert_eq!(ms, DEFAULT_AUTO_PROPOSAL_NORMAL_VOTING_HOURS as i64 * 3_600_000);
+        assert_eq!(
+            ms,
+            DEFAULT_AUTO_PROPOSAL_NORMAL_VOTING_HOURS as i64 * 3_600_000
+        );
     }
 }

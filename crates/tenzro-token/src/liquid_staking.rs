@@ -34,7 +34,7 @@ use crate::error::{Result, TokenError};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -90,7 +90,7 @@ impl Default for LiquidStakingConfig {
         Self {
             protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
             min_deposit: ONE_STTNZO / 10, // 0.1 TNZO minimum
-            max_total_deposits: 0, // Unlimited
+            max_total_deposits: 0,        // Unlimited
             unbonding_period_ms: 7 * 24 * 60 * 60 * 1000, // 7 days
             max_validators: 50,
         }
@@ -183,7 +183,10 @@ impl LiquidStakingPool {
             )));
         }
 
-        info!("Initializing stTNZO liquid staking pool (fee: {}bps)", config.protocol_fee_bps);
+        info!(
+            "Initializing stTNZO liquid staking pool (fee: {}bps)",
+            config.protocol_fee_bps
+        );
 
         Ok(Self {
             config: parking_lot::RwLock::new(config),
@@ -202,10 +205,7 @@ impl LiquidStakingPool {
     /// Create a liquid staking pool with persistent backing in `CF_TOKENS`.
     /// Hydrates config, aggregate totals, per-holder balances, validator
     /// delegations, and pending withdrawal requests on construction.
-    pub fn with_storage(
-        config: LiquidStakingConfig,
-        storage: Arc<dyn KvStore>,
-    ) -> Result<Self> {
+    pub fn with_storage(config: LiquidStakingConfig, storage: Arc<dyn KvStore>) -> Result<Self> {
         if config.protocol_fee_bps > 5000 {
             return Err(TokenError::InvalidAmount(format!(
                 "Protocol fee {} bps exceeds maximum 5000 bps (50%)",
@@ -258,9 +258,8 @@ impl LiquidStakingPool {
             .get(CF_TOKENS, LIQUID_TOTALS_KEY)
             .map_err(|e| TokenError::StorageError(format!("get liquid totals: {}", e)))?
         {
-            let totals: LiquidStakingTotals = serde_json::from_slice(&bytes).map_err(|e| {
-                TokenError::StorageError(format!("decode liquid totals: {}", e))
-            })?;
+            let totals: LiquidStakingTotals = serde_json::from_slice(&bytes)
+                .map_err(|e| TokenError::StorageError(format!("decode liquid totals: {}", e)))?;
             *self.total_sttnzo_supply.write() = totals.total_sttnzo_supply;
             *self.total_underlying_wei.write() = totals.total_underlying_wei;
             *self.total_protocol_fees.write() = totals.total_protocol_fees;
@@ -278,9 +277,8 @@ impl LiquidStakingPool {
             else {
                 continue;
             };
-            let entry: (Address, u128) = serde_json::from_slice(&bytes).map_err(|e| {
-                TokenError::StorageError(format!("decode liquid balance: {}", e))
-            })?;
+            let entry: (Address, u128) = serde_json::from_slice(&bytes)
+                .map_err(|e| TokenError::StorageError(format!("decode liquid balance: {}", e)))?;
             self.sttnzo_balances.insert(entry.0, entry.1);
         }
 
@@ -349,9 +347,7 @@ impl LiquidStakingPool {
                     key: LIQUID_CONFIG_KEY.to_vec(),
                     value,
                 }])
-                .map_err(|e| {
-                    TokenError::StorageError(format!("persist liquid config: {}", e))
-                })?;
+                .map_err(|e| TokenError::StorageError(format!("persist liquid config: {}", e)))?;
         }
         Ok(())
     }
@@ -372,9 +368,7 @@ impl LiquidStakingPool {
                     key: LIQUID_TOTALS_KEY.to_vec(),
                     value,
                 }])
-                .map_err(|e| {
-                    TokenError::StorageError(format!("persist liquid totals: {}", e))
-                })?;
+                .map_err(|e| TokenError::StorageError(format!("persist liquid totals: {}", e)))?;
         }
         Ok(())
     }
@@ -510,11 +504,9 @@ impl LiquidStakingPool {
             // (backing % supply) * ONE_STTNZO / supply gives the fractional part
             let quotient = backing / supply;
             let remainder = backing % supply;
-            quotient.saturating_mul(ONE_STTNZO)
-                .saturating_add(
-                    remainder.saturating_mul(ONE_STTNZO)
-                        / supply
-                )
+            quotient
+                .saturating_mul(ONE_STTNZO)
+                .saturating_add(remainder.saturating_mul(ONE_STTNZO) / supply)
         }
     }
 
@@ -540,9 +532,7 @@ impl LiquidStakingPool {
         if config.max_total_deposits > 0 {
             let current_total = *self.total_underlying_wei.read();
             if current_total + tnzo_amount > config.max_total_deposits {
-                return Err(TokenError::InvalidAmount(
-                    "Pool cap exceeded".to_string()
-                ));
+                return Err(TokenError::InvalidAmount("Pool cap exceeded".to_string()));
             }
         }
         drop(config);
@@ -559,11 +549,7 @@ impl LiquidStakingPool {
             let remainder = tnzo_amount % rate;
             quotient
                 .checked_mul(ONE_STTNZO)
-                .and_then(|q| {
-                    remainder
-                        .checked_mul(ONE_STTNZO)
-                        .map(|r| q + r / rate)
-                })
+                .and_then(|q| remainder.checked_mul(ONE_STTNZO).map(|r| q + r / rate))
                 .ok_or_else(|| TokenError::ArithmeticOverflow {
                     operation: "stTNZO mint calculation".to_string(),
                 })?
@@ -571,12 +557,14 @@ impl LiquidStakingPool {
 
         if sttnzo_amount == 0 {
             return Err(TokenError::InvalidAmount(
-                "Deposit too small to mint any stTNZO".to_string()
+                "Deposit too small to mint any stTNZO".to_string(),
             ));
         }
 
         // Mint stTNZO to depositor
-        let current_balance = self.sttnzo_balances.get(&depositor)
+        let current_balance = self
+            .sttnzo_balances
+            .get(&depositor)
             .map(|v| *v)
             .unwrap_or(0);
         let new_balance = current_balance + sttnzo_amount;
@@ -606,9 +594,15 @@ impl LiquidStakingPool {
     ///
     /// The TNZO amount is calculated from the current exchange rate at request time.
     /// User must wait the unbonding period before claiming.
-    pub fn request_withdrawal(&self, requester: Address, sttnzo_amount: u128) -> Result<WithdrawalRequest> {
+    pub fn request_withdrawal(
+        &self,
+        requester: Address,
+        sttnzo_amount: u128,
+    ) -> Result<WithdrawalRequest> {
         // Check balance
-        let balance = self.sttnzo_balances.get(&requester)
+        let balance = self
+            .sttnzo_balances
+            .get(&requester)
             .map(|v| *v)
             .unwrap_or(0);
 
@@ -627,11 +621,7 @@ impl LiquidStakingPool {
         let remainder = sttnzo_amount % ONE_STTNZO;
         let tnzo_amount = quotient
             .checked_mul(rate)
-            .and_then(|q| {
-                remainder
-                    .checked_mul(rate)
-                    .map(|r| q + r / ONE_STTNZO)
-            })
+            .and_then(|q| remainder.checked_mul(rate).map(|r| q + r / ONE_STTNZO))
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "stTNZO withdrawal calculation".to_string(),
             })?;
@@ -655,15 +645,14 @@ impl LiquidStakingPool {
             requester,
             sttnzo_amount,
             tnzo_amount,
-            unbonding_complete_at: Timestamp::new(
-                Timestamp::now().as_millis() + unbonding_ms,
-            ),
+            unbonding_complete_at: Timestamp::new(Timestamp::now().as_millis() + unbonding_ms),
             claimed: false,
             request_id: uuid::Uuid::new_v4().to_string(),
         };
 
         let request_id = request.request_id.clone();
-        self.withdrawal_requests.insert(request_id.clone(), request.clone());
+        self.withdrawal_requests
+            .insert(request_id.clone(), request.clone());
 
         // Persist updated holder balance, aggregate totals, and the new
         // withdrawal request.
@@ -776,7 +765,7 @@ impl LiquidStakingPool {
     pub fn distribute_rewards(&self, reward_amount: u128) -> Result<RewardDistribution> {
         if reward_amount == 0 {
             return Err(TokenError::InvalidAmount(
-                "Reward amount must be greater than zero".to_string()
+                "Reward amount must be greater than zero".to_string(),
             ));
         }
 
@@ -785,10 +774,7 @@ impl LiquidStakingPool {
         drop(config);
 
         // Calculate protocol fee
-        let protocol_fee = reward_amount
-            .checked_mul(fee_bps as u128)
-            .unwrap_or(0)
-            / 10000;
+        let protocol_fee = reward_amount.checked_mul(fee_bps as u128).unwrap_or(0) / 10000;
         let staker_reward = reward_amount - protocol_fee;
 
         // Add staker portion to underlying (increases exchange rate)
@@ -830,7 +816,8 @@ impl LiquidStakingPool {
         // Avoid overflow: split into quotient and remainder
         let quotient = sttnzo_amount / ONE_STTNZO;
         let remainder = sttnzo_amount % ONE_STTNZO;
-        quotient.saturating_mul(rate)
+        quotient
+            .saturating_mul(rate)
             .saturating_add(remainder.saturating_mul(rate) / ONE_STTNZO)
     }
 
@@ -844,7 +831,9 @@ impl LiquidStakingPool {
             total_protocol_fees: *self.total_protocol_fees.read(),
             total_rewards_distributed: *self.total_rewards_distributed.read(),
             holder_count: self.sttnzo_balances.len() as u64,
-            pending_withdrawals: self.withdrawal_requests.iter()
+            pending_withdrawals: self
+                .withdrawal_requests
+                .iter()
                 .filter(|r| !r.claimed)
                 .count() as u64,
         }
@@ -852,7 +841,9 @@ impl LiquidStakingPool {
 
     /// Add a validator delegation
     pub fn add_validator(&self, validator: Address, amount: u128) {
-        let current = self.validator_delegations.get(&validator)
+        let current = self
+            .validator_delegations
+            .get(&validator)
             .map(|v| *v)
             .unwrap_or(0);
         let new_amount = current + amount;
@@ -864,7 +855,8 @@ impl LiquidStakingPool {
 
     /// Get all validator delegations
     pub fn validator_delegations(&self) -> Vec<(Address, u128)> {
-        self.validator_delegations.iter()
+        self.validator_delegations
+            .iter()
             .map(|entry| (*entry.key(), *entry.value()))
             .collect()
     }
@@ -907,7 +899,9 @@ impl LiquidStakingPool {
 
     /// Look up a single withdrawal request by ID.
     pub fn get_withdrawal(&self, request_id: &str) -> Option<WithdrawalRequest> {
-        self.withdrawal_requests.get(request_id).map(|r| r.value().clone())
+        self.withdrawal_requests
+            .get(request_id)
+            .map(|r| r.value().clone())
     }
 
     /// Read a snapshot of the current liquid staking config.
@@ -918,8 +912,7 @@ impl LiquidStakingPool {
 
 impl Default for LiquidStakingPool {
     fn default() -> Self {
-        Self::new(LiquidStakingConfig::default())
-            .expect("Default config should always be valid")
+        Self::new(LiquidStakingConfig::default()).expect("Default config should always be valid")
     }
 }
 
@@ -1010,11 +1003,17 @@ mod tests {
         pool.distribute_rewards(100 * one_tnzo()).unwrap();
 
         let rate_after = pool.exchange_rate();
-        assert!(rate_after > rate_before, "Exchange rate should increase after rewards");
+        assert!(
+            rate_after > rate_before,
+            "Exchange rate should increase after rewards"
+        );
 
         // User's stTNZO should now be worth more TNZO
         let value = pool.tnzo_value(pool.balance_of(&user));
-        assert!(value > deposit, "stTNZO value should increase after rewards");
+        assert!(
+            value > deposit,
+            "stTNZO value should increase after rewards"
+        );
     }
 
     #[test]
@@ -1115,7 +1114,9 @@ mod tests {
         pool.distribute_rewards(100 * one_tnzo()).unwrap();
         assert!(pool.exchange_rate() > ONE_STTNZO);
         assert_eq!(
-            pool.get_withdrawal(&request.request_id).unwrap().tnzo_amount,
+            pool.get_withdrawal(&request.request_id)
+                .unwrap()
+                .tnzo_amount,
             1000 * one_tnzo()
         );
     }
@@ -1134,7 +1135,10 @@ mod tests {
 
         // Bob deposits now — should get less stTNZO per TNZO
         let bob_sttnzo = pool.deposit(bob, 1000 * one_tnzo()).unwrap();
-        assert!(bob_sttnzo < 1000 * one_tnzo(), "Bob should get less stTNZO at higher rate");
+        assert!(
+            bob_sttnzo < 1000 * one_tnzo(),
+            "Bob should get less stTNZO at higher rate"
+        );
 
         let stats = pool.stats();
         assert_eq!(stats.holder_count, 2);

@@ -211,7 +211,7 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_execution_time: 60_000, // 60 seconds
+            max_execution_time: 60_000,     // 60 seconds
             max_memory: 1024 * 1024 * 1024, // 1 GB
             max_cpu_percent: 80,
             max_storage: 1024 * 1024 * 100, // 100 MB
@@ -289,11 +289,7 @@ impl AgentMessage {
     }
 
     /// Adds a full hybrid (Ed25519 + ML-DSA-65) signature to the message.
-    pub fn with_hybrid_signature(
-        mut self,
-        classical: Vec<u8>,
-        pq: Vec<u8>,
-    ) -> Self {
+    pub fn with_hybrid_signature(mut self, classical: Vec<u8>, pq: Vec<u8>) -> Self {
         self.signature = Some(classical);
         self.pq_signature = Some(pq);
         self

@@ -67,27 +67,17 @@ impl WasiState {
         }
 
         for (host_path, guest_path) in &caps.storage.read_only {
-            let _ = builder.preopened_dir(
-                host_path,
-                guest_path,
-                DirPerms::READ,
-                FilePerms::READ,
-            );
+            let _ = builder.preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ);
         }
         for (host_path, guest_path) in &caps.storage.read_write {
-            let _ = builder.preopened_dir(
-                host_path,
-                guest_path,
-                DirPerms::all(),
-                FilePerms::all(),
-            );
+            let _ = builder.preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all());
         }
 
         // Network is opt-in. `inherit_network` enables the socket
         // machinery; without at least one declared destination we do
         // not call it, so the component has no outbound reachability.
-        let wants_network = !caps.network.outbound_tcp.is_empty()
-            || !caps.network.dns_allow.is_empty();
+        let wants_network =
+            !caps.network.outbound_tcp.is_empty() || !caps.network.dns_allow.is_empty();
         if wants_network {
             builder.inherit_network();
             builder.allow_ip_name_lookup(!caps.network.dns_allow.is_empty());
@@ -110,8 +100,7 @@ impl WasiState {
                 // destination reached the resolver through a permitted
                 // DNS name, so accept. Otherwise the connection IP must
                 // match a declared IP literal.
-                let permitted =
-                    all_entries_are_hostnames || allowed_ips.contains(&addr.ip());
+                let permitted = all_entries_are_hostnames || allowed_ips.contains(&addr.ip());
                 Box::pin(async move { permitted })
             });
         }

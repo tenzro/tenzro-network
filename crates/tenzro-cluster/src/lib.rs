@@ -43,5 +43,5 @@ pub mod topology;
 
 pub use placement::{hrw_score, select_holders, should_replicate};
 pub use reachability::MemberReachability;
-pub use tiered::{select_tiered_holders, should_replicate_tiered, TieredCandidate, TieredHolders};
-pub use topology::{link_key, order_members, CostMember, LinkProbe, MemberId, OrderedMembers};
+pub use tiered::{TieredCandidate, TieredHolders, select_tiered_holders, should_replicate_tiered};
+pub use topology::{CostMember, LinkProbe, MemberId, OrderedMembers, link_key, order_members};

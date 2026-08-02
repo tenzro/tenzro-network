@@ -80,7 +80,8 @@ impl NonceCache {
         let mut removed = 0;
 
         // Collect expired keys first to avoid holding locks during iteration
-        let expired_keys: Vec<String> = self.nonces
+        let expired_keys: Vec<String> = self
+            .nonces
             .iter()
             .filter_map(|entry| {
                 let timestamp = *entry.value();

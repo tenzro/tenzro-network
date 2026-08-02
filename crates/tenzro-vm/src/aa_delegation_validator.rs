@@ -452,7 +452,8 @@ impl IValidator for DelegationScopeValidator {
         // decode. Delegate to the inner authenticator only. Scope is
         // enforced at validate_user_op time, which is the only path that
         // actually moves funds.
-        self.inner.is_valid_signature_with_sender(sender, hash, signature)
+        self.inner
+            .is_valid_signature_with_sender(sender, hash, signature)
     }
 }
 
@@ -480,7 +481,7 @@ fn merge_time_bounds(a: ValidationData, b: ValidationData) -> ValidationData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aa_validators::{NoOpValidator, ERC1271_FAILURE_VALUE};
+    use crate::aa_validators::{ERC1271_FAILURE_VALUE, NoOpValidator};
     use crate::account_abstraction::UserOperation;
 
     /// A test inner validator that fails iff `signature` is empty.
@@ -500,12 +501,7 @@ mod tests {
                 Ok(ValidationData::success())
             }
         }
-        fn is_valid_signature_with_sender(
-            &self,
-            _s: &[u8],
-            _h: &[u8; 32],
-            sig: &[u8],
-        ) -> [u8; 4] {
+        fn is_valid_signature_with_sender(&self, _s: &[u8], _h: &[u8; 32], sig: &[u8]) -> [u8; 4] {
             if sig.is_empty() {
                 ERC1271_FAILURE_VALUE
             } else {
@@ -605,7 +601,9 @@ mod tests {
         assert!(r.is_err());
     }
 
-    fn build_validator(scope: EnforcedScope) -> (DelegationScopeValidator, Arc<InMemoryScopeOracle>) {
+    fn build_validator(
+        scope: EnforcedScope,
+    ) -> (DelegationScopeValidator, Arc<InMemoryScopeOracle>) {
         let oracle = Arc::new(InMemoryScopeOracle::new());
         oracle.set(ACCOUNT.to_vec(), scope);
         let inner = Arc::new(LengthValidator([0xEE; 20]));
@@ -683,7 +681,10 @@ mod tests {
         let (v, _) = build_validator(s);
         let op = dummy_user_op(account(), cd, vec![1]);
         let r = v.validate_user_op(&op, &[0; 32]).unwrap();
-        assert!(r.is_failure(), "spend that exceeds remaining day budget must fail");
+        assert!(
+            r.is_failure(),
+            "spend that exceeds remaining day budget must fail"
+        );
     }
 
     #[test]
@@ -768,7 +769,10 @@ mod tests {
         let (v, _) = build_validator(s);
         let op = dummy_user_op(account(), cd, vec![1]);
         let r = v.validate_user_op(&op, &[0; 32]).unwrap();
-        assert!(r.is_failure(), "pure value transfer blocked when zero selector not in allow-list");
+        assert!(
+            r.is_failure(),
+            "pure value transfer blocked when zero selector not in allow-list"
+        );
     }
 
     #[test]
@@ -779,7 +783,10 @@ mod tests {
         let (v, _) = build_validator(s);
         let op = dummy_user_op(account(), cd, vec![1]);
         let r = v.validate_user_op(&op, &[0; 32]).unwrap();
-        assert!(!r.is_failure(), "pure value transfer allowed when zero selector listed");
+        assert!(
+            !r.is_failure(),
+            "pure value transfer allowed when zero selector listed"
+        );
     }
 
     #[test]
@@ -840,9 +847,16 @@ mod tests {
         let oracle = Arc::new(InMemoryScopeOracle::new());
         oracle.set(ACCOUNT.to_vec(), unrestricted_scope());
         let v = DelegationScopeValidator::new([0x77; 20], inner, oracle);
-        let cd = encode_execute(TARGET_BAD, 100u128, &[SEL_OK[0], SEL_OK[1], SEL_OK[2], SEL_OK[3]]);
+        let cd = encode_execute(
+            TARGET_BAD,
+            100u128,
+            &[SEL_OK[0], SEL_OK[1], SEL_OK[2], SEL_OK[3]],
+        );
         let op = dummy_user_op(account(), cd, vec![1]);
         let r = v.validate_user_op(&op, &[0; 32]).unwrap();
-        assert!(r.is_failure(), "scope check applies even when inner is no-op");
+        assert!(
+            r.is_failure(),
+            "scope check applies even when inner is no-op"
+        );
     }
 }

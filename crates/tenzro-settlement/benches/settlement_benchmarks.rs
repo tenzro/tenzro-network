@@ -13,7 +13,7 @@
 //! cover the full transaction path, see
 //! `crates/tenzro-node/tests/escrow_onchain_integration.rs`.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dashmap::DashMap;
 use std::sync::Arc;
 use tenzro_crypto::keys::{KeyPair, KeyType};
@@ -101,11 +101,7 @@ fn bench_immediate_settlement(c: &mut Criterion) {
                 let engine = make_engine();
                 let request = make_settlement_request(1);
                 // Fund the customer
-                engine.set_balance(
-                    &request.customer,
-                    &AssetId::tnzo(),
-                    1_000_000_000,
-                );
+                engine.set_balance(&request.customer, &AssetId::tnzo(), 1_000_000_000);
                 black_box(engine.settle(request).await.unwrap());
             });
         });
@@ -135,11 +131,7 @@ fn bench_batch_settlement(c: &mut Criterion) {
                         let requests: Vec<SettlementRequest> = (0..batch_size)
                             .map(|i| {
                                 let req = make_settlement_request(i as u8);
-                                engine.set_balance(
-                                    &req.customer,
-                                    &AssetId::tnzo(),
-                                    1_000_000_000,
-                                );
+                                engine.set_balance(&req.customer, &AssetId::tnzo(), 1_000_000_000);
                                 req
                             })
                             .collect();
@@ -255,8 +247,7 @@ fn bench_micropayment_channel(c: &mut Criterion) {
                 let next = state.next(channel.deposit - spent, spent);
                 let msg = next.canonical_message();
                 let sig = signer.sign(&msg).unwrap();
-                let _ = manager
-                    .update_channel(&channel.channel_id, 100, sig.as_bytes().to_vec());
+                let _ = manager.update_channel(&channel.channel_id, 100, sig.as_bytes().to_vec());
                 state = next;
             }
 
@@ -287,15 +278,18 @@ fn bench_fee_calculation(c: &mut Criterion) {
             i += 1;
             let settlement_id = format!("settle-{}", i);
             collector
-            .collect_fee(&settlement_id, &asset, black_box(500))
-            .unwrap();
-            black_box(
-                (),
-            );
+                .collect_fee(&settlement_id, &asset, black_box(500))
+                .unwrap();
+            black_box(());
         });
     });
 
-    for &amount in &[1_000u128, 1_000_000, 1_000_000_000, 1_000_000_000_000_000_000] {
+    for &amount in &[
+        1_000u128,
+        1_000_000,
+        1_000_000_000,
+        1_000_000_000_000_000_000,
+    ] {
         group.bench_with_input(
             BenchmarkId::new("fee_for_amount", amount),
             &amount,

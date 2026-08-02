@@ -39,14 +39,14 @@ use crate::rpc::JsonRpcError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+use tenzro_crypto::composite::CompositePublicKey;
+use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
 use tenzro_crypto::webauthn::WebAuthnAssertion;
 use tenzro_storage::{CF_VALIDATOR_MODULES, KvStore};
 use tenzro_vm::{
-    HybridWebAuthnSignature, SecondFactorPolicy, SessionKeyConfig,
-    SocialRecoveryConfig, SpendingLimitConfig, WebAuthnAccountKey,
+    HybridWebAuthnSignature, SecondFactorPolicy, SessionKeyConfig, SocialRecoveryConfig,
+    SpendingLimitConfig, WebAuthnAccountKey,
 };
-use tenzro_crypto::composite::CompositePublicKey;
-use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
 
 // =============================================================================
 // PendingRecoveryStore — in-flight guardian-quorum ceremony persistence
@@ -99,14 +99,13 @@ fn local_mac_key() -> &'static [u8; 32] {
     use std::sync::OnceLock;
     static KEY: OnceLock<[u8; 32]> = OnceLock::new();
     KEY.get_or_init(|| {
-        let home = match std::env::var("HOME").ok().map(std::path::PathBuf::from) {
-            Some(p) => p,
-            None => {
-                tracing::warn!("local_mac_key: no $HOME — using zero key (tests only)");
+        let path = match tenzro_types::paths::try_tenzro_home() {
+            Ok(_) => tenzro_types::paths::local_state_mac_key_path(),
+            Err(e) => {
+                tracing::warn!(%e, "local_mac_key: using zero key (tests only)");
                 return [0u8; 32];
             }
         };
-        let path = home.join(".tenzro").join("local_state_mac.key");
         if let Ok(bytes) = std::fs::read(&path)
             && bytes.len() == 32
         {
@@ -217,10 +216,12 @@ impl PendingRecoveryStore {
                     message: format!("tampered pending recovery row: {}", e),
                     data: None,
                 })?;
-                Ok(Some(serde_json::from_slice(payload).map_err(|e| JsonRpcError {
-                    code: -32603,
-                    message: format!("deserialize pending recovery: {}", e),
-                    data: None,
+                Ok(Some(serde_json::from_slice(payload).map_err(|e| {
+                    JsonRpcError {
+                        code: -32603,
+                        message: format!("deserialize pending recovery: {}", e),
+                        data: None,
+                    }
                 })?))
             }
             None => Ok(None),
@@ -458,6 +459,12 @@ pub struct AddGuardianRequest {
     /// previous threshold is preserved.
     #[serde(default)]
     pub threshold: Option<u32>,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -545,6 +552,12 @@ pub struct GrantSessionKeyRequest {
     /// Optional label for audit ("Agent payment pipeline", etc.).
     #[serde(default)]
     pub label: Option<String>,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -558,6 +571,12 @@ pub struct GrantSessionKeyResponse {
 #[derive(Debug, Deserialize)]
 pub struct RevokeSessionKeyRequest {
     pub account_address: String,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -587,6 +606,12 @@ pub struct AddHardwareSignerRequest {
     /// Optional label.
     #[serde(default)]
     pub label: Option<String>,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -605,6 +630,12 @@ pub struct SetSpendingLimitRequest {
     /// changes. Typically the smart account's primary passkey or a guardian
     /// composite-key digest.
     pub authenticator_pubkey_hex: String,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -639,9 +670,7 @@ pub struct InstalledValidatorSummary {
 // Helpers
 // =============================================================================
 
-fn parse_params<T: for<'de> Deserialize<'de>>(
-    params: Option<Value>,
-) -> Result<T, JsonRpcError> {
+fn parse_params<T: for<'de> Deserialize<'de>>(params: Option<Value>) -> Result<T, JsonRpcError> {
     let p = params.ok_or_else(|| JsonRpcError {
         code: -32602,
         message: "Missing params".to_string(),
@@ -767,18 +796,19 @@ pub(crate) async fn handle_enroll_passkey(
             data: None,
         });
     }
-    let account_key = WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| {
-        JsonRpcError {
+    let account_key =
+        WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("WebAuthnAccountKey: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     let credential_id = decode_hex(&req.credential_id_hex)?;
 
     // 3. Generate the human DID up front. The smart-account owner seed binds
     //    to it (step 4), and it is the DID the passkey-custody identity carries.
-    let display_name = req.display_name.unwrap_or_else(|| "Passkey User".to_string());
+    let display_name = req
+        .display_name
+        .unwrap_or_else(|| "Passkey User".to_string());
     let did = tenzro_identity::TenzroDid::new_human();
     let did_string = did.to_string();
 
@@ -905,9 +935,16 @@ pub(crate) async fn handle_enroll_passkey(
         );
     }
 
+    // Genesis record. Version 0's trust comes from being created here, at
+    // enrollment, when the credential just installed is by definition the
+    // account's only authority — there is no prior signer to sign with, and
+    // every later version chains back to this one.
+    let account_hex = format!("0x{}", hex::encode(&smart_account.address));
+    crate::account_record::republish(node, &account_hex, &did_string, None);
+
     let resp = EnrollPasskeyResponse {
         did: did_string,
-        smart_account_address: format!("0x{}", hex::encode(&smart_account.address)),
+        smart_account_address: account_hex,
         credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
         webauthn_validator_address: format!("0x{}", hex::encode(webauthn_module_addr)),
         installed_validators: vec!["webauthn".to_string()],
@@ -1042,6 +1079,426 @@ pub(crate) async fn handle_sign_with_passkey(
 }
 
 // =============================================================================
+// Custody authorization — proving control of an account before mutating it
+// =============================================================================
+//
+// Every handler below this point changes *who can spend from a wallet*: which
+// passkeys sign for it, which session keys act on its behalf, what its spending
+// ceilings are, who its recovery guardians are. Before this gate existed, six
+// of those eight handlers took only the account address and did as they were
+// told.
+//
+// The account address is a public identifier. It is returned by
+// `tenzro_enrollPasskey`, listed by `tenzro_listSmartAccounts`, and visible
+// on-chain. So "knows the address" is not a credential, and treating it as one
+// meant an unauthenticated caller could add their own passkey to a stranger's
+// wallet and then remove the owner's — taking sole control of it. Both halves
+// were reachable over the open RPC port with no key, no token, and no
+// signature.
+//
+// The fix is a single gate every custody mutation runs through, rather than a
+// check per handler. Eight independent checks are eight chances to write one
+// differently, and the one written differently is the one that gets found.
+//
+// # What counts as proof
+//
+// A WebAuthn assertion from a credential **already enrolled on that account**,
+// over a challenge the *node* issued, which binds:
+//
+//   domain-separator ‖ account ‖ operation ‖ operation-specific target ‖ nonce
+//
+// Binding the operation and its target is what stops an assertion collected for
+// "add my new phone" being replayed as "remove the owner's laptop". Issuing the
+// challenge server-side and consuming it single-use is what stops a captured
+// assertion being replayed at all.
+//
+// Verification reuses `WebAuthnValidator::validate_user_op` — the same path
+// `tenzro_signWithPasskey` runs, including the post-quantum ML-DSA leg. A
+// second verification routine written specially for custody would be a second
+// thing to get wrong.
+
+/// How long an issued custody challenge stays valid.
+///
+/// Long enough to walk to a phone and complete a ceremony; short enough that a
+/// challenge left in a terminal's scrollback is not a standing authorization.
+pub const CUSTODY_CHALLENGE_TTL_SECS: u64 = 300;
+
+/// Domain separator for the custody challenge preimage.
+///
+/// Keeps a custody challenge from ever colliding with a UserOperation hash or
+/// any other 32-byte digest this node asks a passkey to sign. Two subsystems
+/// agreeing by accident on what a signature authorizes is how a signature for
+/// one thing becomes a signature for another.
+const CUSTODY_DOMAIN: &[u8] = b"tenzro/custody-challenge/v1";
+
+/// The custody operations that require proof of account control.
+///
+/// An enum rather than a free string: the operation is bound into the signed
+/// challenge, so a typo would not be a rejected call but a *differently scoped*
+/// authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustodyOperation {
+    /// Enroll an additional passkey on an existing account.
+    AddPasskey,
+    /// Revoke an enrolled passkey.
+    RemovePasskey,
+    /// Change the second-factor policy.
+    SetPasskeyPolicy,
+    /// Install a scoped session key.
+    GrantSessionKey,
+    /// Revoke a session key.
+    RevokeSessionKey,
+    /// Change a spending ceiling.
+    SetSpendingLimit,
+    /// Install an additional hardware signer.
+    AddHardwareSigner,
+    /// Register a recovery guardian.
+    AddGuardian,
+}
+
+impl CustodyOperation {
+    /// Stable byte tag bound into the challenge preimage.
+    fn tag(self) -> &'static [u8] {
+        match self {
+            Self::AddPasskey => b"add_passkey",
+            Self::RemovePasskey => b"remove_passkey",
+            Self::SetPasskeyPolicy => b"set_passkey_policy",
+            Self::GrantSessionKey => b"grant_session_key",
+            Self::RevokeSessionKey => b"revoke_session_key",
+            Self::SetSpendingLimit => b"set_spending_limit",
+            Self::AddHardwareSigner => b"add_hardware_signer",
+            Self::AddGuardian => b"add_guardian",
+        }
+    }
+}
+
+/// The digest a passkey must sign to authorize one custody mutation.
+///
+/// `target` is the operation's own subject — the credential being added, the
+/// session key being granted — so an assertion is scoped to exactly the change
+/// it was collected for.
+pub fn custody_challenge_digest(
+    account: &[u8],
+    operation: CustodyOperation,
+    target: &[u8],
+    nonce: &[u8; 16],
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(CUSTODY_DOMAIN);
+    // Length-prefixed, so ("ab","c") and ("a","bc") cannot hash alike — an
+    // ambiguity here would let one operation's challenge satisfy another's.
+    h.update((account.len() as u32).to_be_bytes());
+    h.update(account);
+    let tag = operation.tag();
+    h.update((tag.len() as u32).to_be_bytes());
+    h.update(tag);
+    h.update((target.len() as u32).to_be_bytes());
+    h.update(target);
+    h.update(nonce);
+    h.finalize().into()
+}
+
+/// An issued, not-yet-consumed custody challenge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IssuedChallenge {
+    account: Vec<u8>,
+    operation: CustodyOperation,
+    target: Vec<u8>,
+    nonce: [u8; 16],
+    issued_at_secs: u64,
+}
+
+/// Single-use, TTL-bounded custody challenges.
+///
+/// In memory rather than persisted, deliberately: a challenge outliving a node
+/// restart buys nothing — the client simply asks for another — while a
+/// persisted one is a replay window that survives the process that issued it.
+#[derive(Debug, Default)]
+pub struct CustodyChallengeStore {
+    issued: parking_lot::Mutex<std::collections::HashMap<String, IssuedChallenge>>,
+}
+
+impl CustodyChallengeStore {
+    /// A store with nothing issued.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Issue a challenge for one specific mutation.
+    ///
+    /// Returns `(challenge_id, digest)`. The client signs `digest` with an
+    /// enrolled passkey and presents both back.
+    pub fn issue(
+        &self,
+        account: &[u8],
+        operation: CustodyOperation,
+        target: &[u8],
+    ) -> (String, [u8; 32]) {
+        let mut nonce = [0u8; 16];
+        getrandom_0_4::fill(&mut nonce).ok();
+        let digest = custody_challenge_digest(account, operation, target, &nonce);
+        let id = hex::encode(digest);
+        let mut issued = self.issued.lock();
+        Self::sweep_expired(&mut issued);
+        issued.insert(
+            id.clone(),
+            IssuedChallenge {
+                account: account.to_vec(),
+                operation,
+                target: target.to_vec(),
+                nonce,
+                issued_at_secs: now_secs(),
+            },
+        );
+        (id, digest)
+    }
+
+    /// Consume a challenge, checking it authorizes exactly this mutation.
+    ///
+    /// Removal happens on every outcome, success or failure: a challenge that
+    /// was presented against the wrong target has been observed by whoever
+    /// presented it, and letting them retry with a corrected target would make
+    /// the binding advisory.
+    pub fn consume(
+        &self,
+        challenge_id: &str,
+        account: &[u8],
+        operation: CustodyOperation,
+        target: &[u8],
+    ) -> Result<[u8; 32], String> {
+        let mut issued = self.issued.lock();
+        Self::sweep_expired(&mut issued);
+        let entry = issued
+            .remove(challenge_id)
+            .ok_or_else(|| "custody challenge is unknown, expired, or already used".to_string())?;
+        if entry.account != account {
+            return Err("custody challenge was issued for a different account".to_string());
+        }
+        if entry.operation != operation {
+            return Err(format!(
+                "custody challenge authorizes {:?}, not {:?}",
+                entry.operation, operation
+            ));
+        }
+        if entry.target != target {
+            return Err(
+                "custody challenge was issued for a different target; a challenge authorizes one \
+                 specific change"
+                    .to_string(),
+            );
+        }
+        Ok(custody_challenge_digest(
+            account,
+            operation,
+            target,
+            &entry.nonce,
+        ))
+    }
+
+    /// How many challenges are outstanding. For tests and operator diagnostics.
+    pub fn outstanding(&self) -> usize {
+        let mut issued = self.issued.lock();
+        Self::sweep_expired(&mut issued);
+        issued.len()
+    }
+
+    fn sweep_expired(issued: &mut std::collections::HashMap<String, IssuedChallenge>) {
+        let now = now_secs();
+        issued.retain(|_, c| now.saturating_sub(c.issued_at_secs) < CUSTODY_CHALLENGE_TTL_SECS);
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The proof a caller presents to mutate an account's custody.
+#[derive(Debug, Deserialize)]
+pub struct CustodyAuthorization {
+    /// The challenge id returned by `tenzro_createCustodyChallenge`.
+    pub challenge_id: String,
+    /// Credential id of a passkey **already enrolled on this account**.
+    pub credential_id_hex: String,
+    /// WebAuthn assertion from that credential over the challenge digest.
+    pub assertion: WebAuthnAssertion,
+    /// ML-DSA-65 signature over the same digest — the post-quantum leg.
+    #[serde(default)]
+    pub ml_dsa_signature_hex: Option<String>,
+}
+
+/// Refuse unless the caller proves they already control `account`.
+///
+/// The single gate every custody mutation runs through. Returns `Ok(())` only
+/// when an already-enrolled credential has signed a node-issued challenge bound
+/// to this exact operation and target.
+pub(crate) async fn require_account_control(
+    node: &Arc<TenzroNode>,
+    account: &[u8],
+    operation: CustodyOperation,
+    target: &[u8],
+    auth: Option<CustodyAuthorization>,
+) -> Result<String, JsonRpcError> {
+    let auth = auth.ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: format!(
+            "changing an account's custody requires proof you already control it: call \
+             tenzro_createCustodyChallenge for {:?}, sign the returned digest with a passkey \
+             already enrolled on this account, and present it as `authorization`",
+            operation
+        ),
+        data: None,
+    })?;
+
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    // The authorizing credential must already be enrolled here. Without this,
+    // a caller could sign the challenge with any key of their own choosing.
+    let credential_id = decode_hex(&auth.credential_id_hex)?;
+    // Kept before `credential_id` is moved into the signature bundle below.
+    let authorizing_credential_hex = hex::encode(&credential_id);
+    if webauthn_validator
+        .get_credential(account, &credential_id)
+        .is_none()
+    {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!(
+                "credential 0x{} is not enrolled on account 0x{}, so it cannot authorize a \
+                 change to that account",
+                hex::encode(&credential_id),
+                hex::encode(account)
+            ),
+            data: None,
+        });
+    }
+
+    // Consume the challenge, which checks it was issued for this account, this
+    // operation, and this target — then yields the digest that must have been
+    // signed.
+    let digest = node
+        .custody_challenges()
+        .consume(&auth.challenge_id, account, operation, target)
+        .map_err(|message| JsonRpcError {
+            code: -32001,
+            message,
+            data: None,
+        })?;
+
+    // Verify through the same path `tenzro_signWithPasskey` uses, so the
+    // custody gate and the signing gate cannot disagree about what a valid
+    // assertion is.
+    let legs = vec![HybridWebAuthnSignature {
+        assertion: auth.assertion,
+        ml_dsa_signature: auth
+            .ml_dsa_signature_hex
+            .as_deref()
+            .map(decode_hex)
+            .transpose()?
+            .unwrap_or_default(),
+        credential_id,
+    }];
+    let sig_bytes = HybridWebAuthnSignature::encode_bundle(&legs).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("encode hybrid sig: {}", e),
+        data: None,
+    })?;
+    let op = minimal_user_op(account.to_vec(), sig_bytes);
+
+    use tenzro_vm::aa_validators::IValidator as _;
+    let validation = webauthn_validator
+        .validate_user_op(&op, &digest)
+        .map_err(|e| JsonRpcError {
+            code: -32001,
+            message: format!("custody authorization failed: {}", e),
+            data: None,
+        })?;
+    if validation.is_failure() {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "custody authorization failed: the assertion did not verify against an \
+                      enrolled credential"
+                .to_string(),
+            data: None,
+        });
+    }
+    // Hand back who authorized. The published account record chains each
+    // version to the credential that permitted it, so "someone was allowed"
+    // is not enough — the caller needs the identity.
+    Ok(authorizing_credential_hex)
+}
+
+/// A UserOperation carrying only what the WebAuthn validator reads.
+///
+/// The validator inspects `sender` and `signature` and computes the challenge
+/// from the supplied hash; nothing else on the operation participates.
+fn minimal_user_op(sender: Vec<u8>, signature: Vec<u8>) -> tenzro_vm::UserOperation {
+    tenzro_vm::UserOperation {
+        sender,
+        nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
+        factory: Vec::new(),
+        factory_data: Vec::new(),
+        call_data: Vec::new(),
+        call_gas_limit: 0,
+        verification_gas_limit: 0,
+        pre_verification_gas: 0,
+        max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
+        paymaster: Vec::new(),
+        paymaster_verification_gas_limit: 0,
+        paymaster_post_op_gas_limit: 0,
+        paymaster_data: Vec::new(),
+        signature,
+    }
+}
+
+/// `tenzro_createCustodyChallenge` — issue the digest a passkey must sign to
+/// authorize one custody mutation.
+///
+/// Params: `account_address`, `operation`, `target_hex`. Open by design: a
+/// challenge is worthless without an enrolled credential to sign it, and
+/// gating issuance would only mean a legitimate owner cannot start.
+#[derive(Debug, Deserialize)]
+pub struct CreateCustodyChallengeRequest {
+    pub account_address: String,
+    pub operation: CustodyOperation,
+    /// The operation's subject, hex-encoded — the credential being added, the
+    /// session key being granted. Empty for operations with no distinct target.
+    #[serde(default)]
+    pub target_hex: Option<String>,
+}
+
+pub(crate) async fn handle_create_custody_challenge(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: CreateCustodyChallengeRequest = parse_params(params)?;
+    let account = decode_hex(&req.account_address)?;
+    let target = match req.target_hex.as_deref() {
+        Some(t) if !t.is_empty() => decode_hex(t)?,
+        _ => Vec::new(),
+    };
+    let (challenge_id, digest) = node
+        .custody_challenges()
+        .issue(&account, req.operation, &target);
+    Ok(serde_json::json!({
+        "challenge_id": challenge_id,
+        "challenge_hex": format!("0x{}", hex::encode(digest)),
+        "account_address": format!("0x{}", hex::encode(&account)),
+        "operation": req.operation,
+        "expires_in_secs": CUSTODY_CHALLENGE_TTL_SECS,
+    }))
+}
+
+// =============================================================================
 // Handler: tenzro_addGuardian
 // =============================================================================
 
@@ -1050,21 +1507,33 @@ pub(crate) async fn handle_add_guardian(
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     let req: AddGuardianRequest = parse_params(params)?;
-    let validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "SocialRecoveryValidator not initialized".to_string(),
-        data: None,
-    })?;
+    let validator = node
+        .social_recovery_validator()
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "SocialRecoveryValidator not initialized".to_string(),
+            data: None,
+        })?;
     let account_addr = decode_hex(&req.account_address)?;
+
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    let _authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::AddGuardian,
+        &[],
+        req.authorization,
+    )
+    .await?;
     let ed_pk_bytes = decode_hex(&req.guardian_ed25519_pubkey_hex)?;
     let pq_pk_bytes = decode_hex(&req.guardian_ml_dsa_pubkey_hex)?;
     if ed_pk_bytes.len() != 32 {
         return Err(JsonRpcError {
             code: -32602,
-            message: format!(
-                "Ed25519 pubkey must be 32 bytes, got {}",
-                ed_pk_bytes.len()
-            ),
+            message: format!("Ed25519 pubkey must be 32 bytes, got {}", ed_pk_bytes.len()),
             data: None,
         });
     }
@@ -1094,13 +1563,12 @@ pub(crate) async fn handle_add_guardian(
     let threshold = req
         .threshold
         .unwrap_or_else(|| prev_threshold.max(1).min(guardians.len() as u32));
-    let cfg = SocialRecoveryConfig::new(guardians.clone(), threshold).map_err(|e| {
-        JsonRpcError {
+    let cfg =
+        SocialRecoveryConfig::new(guardians.clone(), threshold).map_err(|e| JsonRpcError {
             code: -32602,
             message: format!("invalid recovery config: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     validator
         .install_for(account_addr.clone(), cfg.clone())
         .map_err(|e| JsonRpcError {
@@ -1134,17 +1602,20 @@ pub(crate) async fn handle_initiate_recovery(
         message: "Recovery store not initialized (node lacks storage backend)".to_string(),
         data: None,
     })?;
-    let validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "SocialRecoveryValidator not initialized".to_string(),
-        data: None,
-    })?;
+    let validator = node
+        .social_recovery_validator()
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "SocialRecoveryValidator not initialized".to_string(),
+            data: None,
+        })?;
     let account_addr_bytes = decode_hex(&req.account_address)?;
     let cfg = validator
         .config_for(&account_addr_bytes)
         .ok_or_else(|| JsonRpcError {
             code: -32404,
-            message: "no guardians registered for this account; call tenzro_addGuardian first".to_string(),
+            message: "no guardians registered for this account; call tenzro_addGuardian first"
+                .to_string(),
             data: None,
         })?;
     let new_passkey_bytes = decode_hex(&req.new_passkey_public_key_hex)?;
@@ -1174,13 +1645,12 @@ pub(crate) async fn handle_initiate_recovery(
             data: None,
         });
     }
-    let new_key = WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| {
-        JsonRpcError {
+    let new_key =
+        WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("WebAuthnAccountKey: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     let ttl_secs = req.ttl_secs.unwrap_or(86_400).min(86_400 * 7);
     let now = now_ms();
     let mut id_seed = Vec::new();
@@ -1237,18 +1707,18 @@ pub(crate) async fn handle_submit_recovery_signature(
         message: "Recovery store not initialized".to_string(),
         data: None,
     })?;
-    let validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "SocialRecoveryValidator not initialized".to_string(),
-        data: None,
-    })?;
-    let mut rec = store
-        .get(&req.recovery_id)?
+    let validator = node
+        .social_recovery_validator()
         .ok_or_else(|| JsonRpcError {
-            code: -32404,
-            message: "Unknown recovery_id".to_string(),
+            code: -32603,
+            message: "SocialRecoveryValidator not initialized".to_string(),
             data: None,
         })?;
+    let mut rec = store.get(&req.recovery_id)?.ok_or_else(|| JsonRpcError {
+        code: -32404,
+        message: "Unknown recovery_id".to_string(),
+        data: None,
+    })?;
     if rec.finalized {
         return Err(JsonRpcError {
             code: -32602,
@@ -1295,7 +1765,8 @@ pub(crate) async fn handle_submit_recovery_signature(
         });
     }
     use base64::Engine;
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(decode_hex(&req.composite_signature_hex)?);
+    let sig_b64 =
+        base64::engine::general_purpose::STANDARD.encode(decode_hex(&req.composite_signature_hex)?);
     rec.guardian_signatures.push((req.guardian_index, sig_b64));
     let collected = rec.guardian_signatures.len() as u32;
     let quorum_reached = collected >= cfg.threshold;
@@ -1337,18 +1808,18 @@ pub(crate) async fn handle_finalize_recovery(
         message: "WebAuthnValidator not initialized".to_string(),
         data: None,
     })?;
-    let social_validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "SocialRecoveryValidator not initialized".to_string(),
-        data: None,
-    })?;
-    let mut rec = store
-        .get(&req.recovery_id)?
+    let social_validator = node
+        .social_recovery_validator()
         .ok_or_else(|| JsonRpcError {
-            code: -32404,
-            message: "Unknown recovery_id".to_string(),
+            code: -32603,
+            message: "SocialRecoveryValidator not initialized".to_string(),
             data: None,
         })?;
+    let mut rec = store.get(&req.recovery_id)?.ok_or_else(|| JsonRpcError {
+        code: -32404,
+        message: "Unknown recovery_id".to_string(),
+        data: None,
+    })?;
     if rec.finalized {
         return Err(JsonRpcError {
             code: -32602,
@@ -1426,7 +1897,10 @@ pub(crate) async fn handle_finalize_recovery(
         priority: 0,
     };
     smart_account
-        .install_validator_module_with_recovery(module_config, /* recovery_authorized = */ true)
+        .install_validator_module_with_recovery(
+            module_config,
+            /* recovery_authorized = */ true,
+        )
         .map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("install rotated WebAuthnValidator: {}", e),
@@ -1474,6 +1948,19 @@ pub(crate) async fn handle_grant_session_key(
     })?;
     let account_addr = decode_hex(&req.account_address)?;
     let session_pubkey_bytes = decode_hex(&req.session_pubkey_hex)?;
+
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    let _authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::GrantSessionKey,
+        &session_pubkey_bytes,
+        req.authorization,
+    )
+    .await?;
     if session_pubkey_bytes.len() != 32 {
         return Err(JsonRpcError {
             code: -32602,
@@ -1509,23 +1996,29 @@ pub(crate) async fn handle_grant_session_key(
         .map(|s| decode_address_20(s))
         .collect::<Result<Vec<_>, JsonRpcError>>()?;
     let max_per_call: Option<u128> = match req.max_value_per_call_wei.as_deref() {
-        Some(s) if !s.is_empty() => Some(s.parse().map_err(|e: std::num::ParseIntError| {
-            JsonRpcError {
-                code: -32602,
-                message: format!("max_value_per_call_wei: {}", e),
-                data: None,
-            }
-        })?),
+        Some(s) if !s.is_empty() => {
+            Some(
+                s.parse()
+                    .map_err(|e: std::num::ParseIntError| JsonRpcError {
+                        code: -32602,
+                        message: format!("max_value_per_call_wei: {}", e),
+                        data: None,
+                    })?,
+            )
+        }
         _ => None,
     };
     let max_total: Option<u128> = match req.max_total_value_wei.as_deref() {
-        Some(s) if !s.is_empty() => Some(s.parse().map_err(|e: std::num::ParseIntError| {
-            JsonRpcError {
-                code: -32602,
-                message: format!("max_total_value_wei: {}", e),
-                data: None,
-            }
-        })?),
+        Some(s) if !s.is_empty() => {
+            Some(
+                s.parse()
+                    .map_err(|e: std::num::ParseIntError| JsonRpcError {
+                        code: -32602,
+                        message: format!("max_total_value_wei: {}", e),
+                        data: None,
+                    })?,
+            )
+        }
         _ => None,
     };
     let cfg = SessionKeyConfig {
@@ -1566,6 +2059,19 @@ pub(crate) async fn handle_revoke_session_key(
         data: None,
     })?;
     let account_addr = decode_hex(&req.account_address)?;
+
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    let _authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::RevokeSessionKey,
+        &[],
+        req.authorization,
+    )
+    .await?;
     let had_config = validator.config_for(&account_addr).is_some();
     validator.uninstall_for(&account_addr);
     let resp = RevokeSessionKeyResponse {
@@ -1588,26 +2094,43 @@ pub(crate) async fn handle_set_spending_limit(
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     let req: SetSpendingLimitRequest = parse_params(params)?;
-    let validator = node.spending_limit_validator().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "SpendingLimitValidator not initialized".to_string(),
-        data: None,
-    })?;
+    let validator = node
+        .spending_limit_validator()
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "SpendingLimitValidator not initialized".to_string(),
+            data: None,
+        })?;
     let account_addr = decode_hex(&req.account_address)?;
-    let per_tx: u128 = req.per_tx_cap_wei.parse().map_err(|e: std::num::ParseIntError| {
-        JsonRpcError {
+
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    let _authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::SetSpendingLimit,
+        &[],
+        req.authorization,
+    )
+    .await?;
+    let per_tx: u128 = req
+        .per_tx_cap_wei
+        .parse()
+        .map_err(|e: std::num::ParseIntError| JsonRpcError {
             code: -32602,
             message: format!("per_tx_cap_wei: {}", e),
             data: None,
-        }
-    })?;
-    let daily: u128 = req.daily_cap_wei.parse().map_err(|e: std::num::ParseIntError| {
-        JsonRpcError {
+        })?;
+    let daily: u128 = req
+        .daily_cap_wei
+        .parse()
+        .map_err(|e: std::num::ParseIntError| JsonRpcError {
             code: -32602,
             message: format!("daily_cap_wei: {}", e),
             data: None,
-        }
-    })?;
+        })?;
     let cfg = SpendingLimitConfig {
         max_per_transaction: if per_tx == 0 { None } else { Some(per_tx) },
         max_daily_spend: if daily == 0 { None } else { Some(daily) },
@@ -1655,6 +2178,19 @@ pub(crate) async fn handle_add_hardware_signer(
         data: None,
     })?;
     let account_addr = decode_hex(&req.account_address)?;
+
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    let _authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::AddHardwareSigner,
+        &[],
+        req.authorization,
+    )
+    .await?;
     let mut smart_account = factory
         .get_account(&account_addr)
         .ok_or_else(|| JsonRpcError {
@@ -1892,6 +2428,12 @@ pub struct AddPasskeyRequest {
     /// Optional display label (e.g. "Phone 1", "YubiKey").
     #[serde(default)]
     pub label: Option<String>,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1917,6 +2459,36 @@ pub(crate) async fn handle_add_passkey(
     let account_addr = decode_hex(&req.account_address)?;
     let credential_id = decode_hex(&req.new_credential_id_hex)?;
 
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    // Target is empty for an add, unlike every other operation here.
+    //
+    // The other mutations name something that already exists — the credential
+    // being revoked, the session key being withdrawn — so the challenge can be
+    // issued against it and a caller cannot spend one authorization on a
+    // different subject. A device being *added* does not exist yet: its
+    // credential id is produced by `navigator.credentials.create()` partway
+    // through the same ceremony that collects this proof, so there is nothing
+    // to bind at issue time.
+    //
+    // What still binds it: the account, the operation, a single-use claim, and
+    // a five-minute TTL. So this authorizes "add one device to this account,
+    // once, now" rather than "add this specific device" — which is exactly the
+    // ceremony the user is performing, and it is the reason both the session
+    // path and the direct-RPC path must agree on an empty target. They did not
+    // at first, and a mismatch here is not a security hole but a permanent
+    // refusal: the challenge would never match and no device could be added.
+    let authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::AddPasskey,
+        &[],
+        req.authorization,
+    )
+    .await?;
+
     if credential_id.is_empty() {
         return Err(JsonRpcError {
             code: -32602,
@@ -1929,7 +2501,10 @@ pub(crate) async fn handle_add_passkey(
     // second device only makes sense on an account that was enrolled
     // through `tenzro_enrollPasskey` first. This guards against an
     // attacker-supplied account that the user has never authorised.
-    if webauthn_validator.list_credentials(&account_addr).is_empty() {
+    if webauthn_validator
+        .list_credentials(&account_addr)
+        .is_empty()
+    {
         return Err(JsonRpcError {
             code: -32404,
             message: format!(
@@ -1973,14 +2548,13 @@ pub(crate) async fn handle_add_passkey(
     let ml_dsa = tenzro_crypto::pq::MlDsaSigningKey::generate();
     let ml_dsa_vk = ml_dsa.verifying_key_bytes().to_vec();
 
-    let account_key = tenzro_vm::aa_webauthn_validator::WebAuthnAccountKey::new(
-        pubkey_x, pubkey_y, ml_dsa_vk,
-    )
-    .map_err(|e| JsonRpcError {
-        code: -32603,
-        message: format!("WebAuthnAccountKey: {}", e),
-        data: None,
-    })?;
+    let account_key =
+        tenzro_vm::aa_webauthn_validator::WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk)
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("WebAuthnAccountKey: {}", e),
+                data: None,
+            })?;
 
     webauthn_validator
         .enroll(account_addr.clone(), credential_id.clone(), account_key)
@@ -1991,6 +2565,17 @@ pub(crate) async fn handle_add_passkey(
         })?;
 
     let total = webauthn_validator.list_credentials(&account_addr).len();
+
+    // Publish the new device set, chained to the credential that authorized
+    // this change — so a node that has never seen this account can still learn
+    // which devices may sign, and verify that authority came from a device that
+    // already could.
+    crate::account_record::republish(
+        node,
+        &format!("0x{}", hex::encode(&account_addr)),
+        "",
+        Some(&authorizing_credential),
+    );
 
     serde_json::to_value(AddPasskeyResponse {
         account_address: format!("0x{}", hex::encode(&account_addr)),
@@ -2053,6 +2638,12 @@ pub(crate) async fn handle_list_passkeys(
 pub struct RemovePasskeyRequest {
     pub account_address: String,
     pub credential_id_hex: String,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2075,6 +2666,19 @@ pub(crate) async fn handle_remove_passkey(
     })?;
     let account_addr = decode_hex(&req.account_address)?;
     let credential_id = decode_hex(&req.credential_id_hex)?;
+
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    let authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::RemovePasskey,
+        &credential_id,
+        req.authorization,
+    )
+    .await?;
     let removed = webauthn_validator
         .revoke_credential(&account_addr, &credential_id)
         .map_err(|e| JsonRpcError {
@@ -2083,6 +2687,17 @@ pub(crate) async fn handle_remove_passkey(
             data: None,
         })?;
     let remaining = webauthn_validator.list_credentials(&account_addr).len();
+
+    // Publish the reduced device set. A revocation that never propagated would
+    // leave other nodes still believing a removed device may sign — which is
+    // the more dangerous direction of staleness.
+    crate::account_record::republish(
+        node,
+        &format!("0x{}", hex::encode(&account_addr)),
+        "",
+        Some(&authorizing_credential),
+    );
+
     serde_json::to_value(RemovePasskeyResponse {
         account_address: format!("0x{}", hex::encode(&account_addr)),
         credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
@@ -2113,6 +2728,12 @@ pub struct SetPasskeyPolicyRequest {
     pub account_address: String,
     /// `"single_credential"` or `"two_credentials"`.
     pub second_factor: SecondFactorPolicy,
+    /// Proof the caller already controls this account: a
+    /// node-issued challenge signed by an already-enrolled passkey.
+    /// Without it the call is refused — the account address is a
+    /// public identifier, not a credential.
+    #[serde(default)]
+    pub authorization: Option<CustodyAuthorization>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2134,6 +2755,19 @@ pub(crate) async fn handle_set_passkey_policy(
         data: None,
     })?;
     let account_addr = decode_hex(&req.account_address)?;
+
+    // Custody gate. The account address is a public identifier, so
+    // "knows the address" is not a credential — this refuses unless an
+    // already-enrolled passkey has signed a node-issued challenge bound
+    // to exactly this operation and target.
+    let _authorizing_credential = require_account_control(
+        node,
+        &account_addr,
+        CustodyOperation::SetPasskeyPolicy,
+        &[],
+        req.authorization,
+    )
+    .await?;
     webauthn_validator
         .set_second_factor_policy(account_addr.clone(), req.second_factor)
         .map_err(|e| JsonRpcError {
@@ -2297,7 +2931,11 @@ impl PasskeySessionStore {
         })?;
         let tagged = mac_wrap(&bytes);
         self.storage
-            .put(CF_VALIDATOR_MODULES, &Self::key(&session.session_id), &tagged)
+            .put(
+                CF_VALIDATOR_MODULES,
+                &Self::key(&session.session_id),
+                &tagged,
+            )
             .map_err(|e| JsonRpcError {
                 code: -32603,
                 message: format!("persist auth session: {}", e),
@@ -2444,13 +3082,14 @@ pub(crate) async fn handle_create_passkey_session(
     // the CLI instead of a dead browser page.
     let (challenge_b64, params_value) = match req.kind {
         AuthSessionKind::Enroll => {
-            let vk_hex = req.ml_dsa_public_key_hex.as_deref().ok_or_else(|| {
-                JsonRpcError {
+            let vk_hex = req
+                .ml_dsa_public_key_hex
+                .as_deref()
+                .ok_or_else(|| JsonRpcError {
                     code: -32602,
                     message: "ml_dsa_public_key_hex is required for enroll sessions".to_string(),
                     data: None,
-                }
-            })?;
+                })?;
             let vk = decode_hex(vk_hex)?;
             if vk.len() != ML_DSA_65_VK_LEN {
                 return Err(JsonRpcError {
@@ -2485,13 +3124,15 @@ pub(crate) async fn handle_create_passkey_session(
             // node mints the new credential's PQ leg when the ceremony
             // completes (see handle_add_passkey). The browser/phone performs
             // only the standard WebAuthn ceremony.
-            let webauthn_validator =
-                node.webauthn_validator().ok_or_else(|| JsonRpcError {
-                    code: -32603,
-                    message: "WebAuthnValidator not initialized on this node".to_string(),
-                    data: None,
-                })?;
-            if webauthn_validator.list_credentials(&account_addr).is_empty() {
+            let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+                code: -32603,
+                message: "WebAuthnValidator not initialized on this node".to_string(),
+                data: None,
+            })?;
+            if webauthn_validator
+                .list_credentials(&account_addr)
+                .is_empty()
+            {
                 return Err(JsonRpcError {
                     code: -32404,
                     message: format!(
@@ -2531,13 +3172,15 @@ pub(crate) async fn handle_create_passkey_session(
                     data: None,
                 });
             }
-            let webauthn_validator =
-                node.webauthn_validator().ok_or_else(|| JsonRpcError {
-                    code: -32603,
-                    message: "WebAuthnValidator not initialized on this node".to_string(),
-                    data: None,
-                })?;
-            if webauthn_validator.list_credentials(&account_addr).is_empty() {
+            let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+                code: -32603,
+                message: "WebAuthnValidator not initialized on this node".to_string(),
+                data: None,
+            })?;
+            if webauthn_validator
+                .list_credentials(&account_addr)
+                .is_empty()
+            {
                 return Err(JsonRpcError {
                     code: -32404,
                     message: format!(
@@ -2589,6 +3232,70 @@ pub(crate) async fn handle_create_passkey_session(
         message: format!("serialize response: {}", e),
         data: None,
     })
+}
+
+/// Create a `Sign` ceremony for a shell sign-in.
+///
+/// Reuses the wallet's existing signing ceremony rather than adding a fourth
+/// kind: what a shell sign-in needs is exactly "prove you hold this wallet,
+/// over these bytes". The only difference is the extra `shell_lease_id` in
+/// `params`, which is what the completion path keys off to mint the grant.
+///
+/// Returns `(session_id, verification_path, expires_at_ms)`.
+pub(crate) async fn create_session_for_shell(
+    node: &Arc<TenzroNode>,
+    account_address: &str,
+    op_hash_hex: &str,
+    lease_id: &str,
+) -> Result<(String, String, u64), JsonRpcError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::RngCore;
+
+    let store = node.passkey_sessions().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "PasskeySessionStore not initialized on this node".to_string(),
+        data: None,
+    })?;
+    store.sweep();
+
+    let op_hash = decode_hex(op_hash_hex)?;
+    if op_hash.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("op_hash must be 32 bytes, got {}", op_hash.len()),
+            data: None,
+        });
+    }
+
+    let mut sid_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut sid_bytes);
+    let session_id = hex::encode(sid_bytes);
+    let now = now_ms();
+    let session = PendingAuthSession {
+        session_id: session_id.clone(),
+        kind: AuthSessionKind::Sign,
+        status: AuthSessionStatus::Pending,
+        // The challenge IS the op hash — the validator binds the assertion's
+        // clientDataJSON challenge to the op it signs.
+        challenge_b64: URL_SAFE_NO_PAD.encode(&op_hash),
+        params: serde_json::json!({
+            "account_address": account_address.to_ascii_lowercase(),
+            "op_hash_hex": format!("0x{}", hex::encode(&op_hash)),
+            "ml_dsa_signature_hex": Value::Null,
+            "shell_lease_id": lease_id,
+        }),
+        result: None,
+        error: None,
+        created_at_ms: now,
+        expires_at_ms: now + AUTH_SESSION_TTL_MS,
+    };
+    store.put(&session)?;
+
+    Ok((
+        session_id.clone(),
+        format!("/auth/passkey?session={}", session_id),
+        session.expires_at_ms,
+    ))
 }
 
 // =============================================================================
@@ -2681,7 +3388,26 @@ pub(crate) async fn complete_passkey_session(
     };
 
     match outcome {
-        Ok(result) => {
+        Ok(mut result) => {
+            // A shell sign-in is an ordinary `Sign` ceremony plus one extra
+            // step: now that the wallet has proved itself, mint the single-use
+            // grant the CLI redeems when it opens the stream. Ceremonies that
+            // are not shell sign-ins fall through untouched.
+            if let Some(grant) = crate::remote_access_rpc::mint_grant_for_completed_shell_session(
+                node,
+                &session.params,
+            ) && let Some(obj) = result.as_object_mut()
+            {
+                obj.insert(
+                    "shell_grant".to_string(),
+                    serde_json::json!({
+                        "grant_id": grant.grant_id,
+                        "lease_id": grant.lease_id,
+                        "wallet": grant.wallet,
+                        "expires_at_ms": grant.expires_at_ms,
+                    }),
+                );
+            }
             session.status = AuthSessionStatus::Completed;
             session.result = Some(result.clone());
             store.put(&session)?;
@@ -2720,20 +3446,45 @@ fn build_completion_params(
             "ml_dsa_public_key_hex": session.params.get("ml_dsa_public_key_hex"),
             "salt": session.params.get("salt"),
         })),
-        AuthSessionKind::Add => Ok(serde_json::json!({
-            "account_address": session.params.get("account_address"),
-            "new_passkey_public_key_hex": str_field(&browser_payload, "passkey_public_key_hex")?,
-            "new_credential_id_hex": str_field(&browser_payload, "credential_id_hex")?,
-            "label": session.params.get("label"),
-        })),
-        AuthSessionKind::Sign => {
-            let assertion = browser_payload.get("assertion").cloned().ok_or_else(|| {
-                JsonRpcError {
+        AuthSessionKind::Add => {
+            // Adding a device is a custody change, so the ceremony has two
+            // halves: `create()` for the new credential, and `get()` from a
+            // credential already on the account proving the person doing it is
+            // the owner. The browser sends both; the second becomes the
+            // `authorization` the custody gate requires.
+            //
+            // Without it the add is refused — which is the point. A device-add
+            // that needed only the account address was an unauthenticated
+            // takeover of anyone whose address you knew.
+            let authorization = browser_payload
+                .get("authorization")
+                .cloned()
+                .ok_or_else(|| JsonRpcError {
                     code: -32602,
-                    message: "completion payload missing `assertion`".to_string(),
+                    message: "completion payload missing `authorization`: adding a device \
+                                  requires an assertion from a passkey already enrolled on this \
+                                  account, over the custody challenge"
+                        .to_string(),
                     data: None,
-                }
-            })?;
+                })?;
+            Ok(serde_json::json!({
+                "account_address": session.params.get("account_address"),
+                "new_passkey_public_key_hex": str_field(&browser_payload, "passkey_public_key_hex")?,
+                "new_credential_id_hex": str_field(&browser_payload, "credential_id_hex")?,
+                "label": session.params.get("label"),
+                "authorization": authorization,
+            }))
+        }
+        AuthSessionKind::Sign => {
+            let assertion =
+                browser_payload
+                    .get("assertion")
+                    .cloned()
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "completion payload missing `assertion`".to_string(),
+                        data: None,
+                    })?;
             Ok(serde_json::json!({
                 "account_address": session.params.get("account_address"),
                 "op_hash_hex": session.params.get("op_hash_hex"),

@@ -5,7 +5,7 @@ use crate::error::{PaymentError, Result};
 use crate::traits::PaymentProtocol;
 use crate::types::{PaymentChallenge, PaymentCredential, PaymentReceipt, PaymentVerification};
 use crate::x402::receipt::X402SettlementReceiptBody;
-use crate::x402::scheme::{build_credential_preimage, SchemeRegistry};
+use crate::x402::scheme::{SchemeRegistry, build_credential_preimage};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -13,8 +13,8 @@ use std::sync::Arc;
 use tenzro_crypto::composite::{HybridSigner, InMemoryHybridSigner};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_settlement::engine::SettlementEngine;
-use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 use tenzro_types::Address;
+use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 use tracing::{debug, info};
 
 /// x402 server-side payment handler.
@@ -145,11 +145,7 @@ impl X402PaymentServer {
     /// Derive the idempotency key for a settlement, if the challenge carries a
     /// valid offer commitment. Returns `None` when no offer was signed (so
     /// idempotency simply doesn't apply to that flow).
-    fn payment_id_for(
-        &self,
-        challenge: &PaymentChallenge,
-        payer_did: &str,
-    ) -> Option<String> {
+    fn payment_id_for(&self, challenge: &PaymentChallenge, payer_did: &str) -> Option<String> {
         let hex = challenge
             .extra
             .get(crate::x402::offer::OFFER_COMMITMENT_KEY)
@@ -160,7 +156,10 @@ impl X402PaymentServer {
         }
         let mut commitment = [0u8; crate::x402::offer::X402_OFFER_COMMITMENT_LEN];
         commitment.copy_from_slice(&bytes);
-        Some(crate::x402::offer::derive_payment_id(&commitment, payer_did))
+        Some(crate::x402::offer::derive_payment_id(
+            &commitment,
+            payer_did,
+        ))
     }
 }
 
@@ -528,14 +527,18 @@ impl PaymentProtocol for X402PaymentServer {
     ) -> Result<PaymentCredential> {
         // Generate an Ed25519 keypair for the classical leg.
         // In production, this would use the wallet service to get the keypair for wallet_id.
-        let keypair = tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519)
-            .map_err(|e| PaymentError::CredentialError(format!("Failed to generate keypair: {}", e)))?;
+        let keypair =
+            tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519).map_err(|e| {
+                PaymentError::CredentialError(format!("Failed to generate keypair: {}", e))
+            })?;
 
         // Extract public key bytes before consuming keypair (KeyPair doesn't implement Clone for security)
         let public_key_bytes = keypair.public_key().as_bytes().to_vec();
 
-        let classical = tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair)
-            .map_err(|e| PaymentError::CredentialError(format!("Failed to create signer: {}", e)))?;
+        let classical =
+            tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair).map_err(|e| {
+                PaymentError::CredentialError(format!("Failed to create signer: {}", e))
+            })?;
 
         // Generate the post-quantum leg (ML-DSA-65).
         let pq = MlDsaSigningKey::generate();
@@ -767,13 +770,21 @@ mod tests {
             .unwrap();
 
         // The offer commitment + sig + signer are carried on the challenge.
-        assert!(challenge
-            .extra
-            .contains_key(crate::x402::offer::OFFER_COMMITMENT_KEY));
-        assert!(challenge.extra.contains_key(crate::x402::offer::OFFER_SIG_KEY));
-        assert!(challenge
-            .extra
-            .contains_key(crate::x402::offer::OFFER_SIGNER_KEY));
+        assert!(
+            challenge
+                .extra
+                .contains_key(crate::x402::offer::OFFER_COMMITMENT_KEY)
+        );
+        assert!(
+            challenge
+                .extra
+                .contains_key(crate::x402::offer::OFFER_SIG_KEY)
+        );
+        assert!(
+            challenge
+                .extra
+                .contains_key(crate::x402::offer::OFFER_SIGNER_KEY)
+        );
     }
 
     #[tokio::test]
@@ -825,9 +836,10 @@ mod tests {
             .create_challenge("/api/r", 100, "USDC", "0xrecipient")
             .await
             .unwrap();
-        challenge
-            .extra
-            .insert("scheme".to_string(), serde_json::json!("definitely-not-real"));
+        challenge.extra.insert(
+            "scheme".to_string(),
+            serde_json::json!("definitely-not-real"),
+        );
 
         let credential = PaymentCredential {
             credential_id: "cred".to_string(),

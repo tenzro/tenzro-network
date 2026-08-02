@@ -98,7 +98,11 @@ pub fn select_signing_quorum(
         .collect();
     // Stable sort by (score, did) so cryptographically-negligible ties
     // resolve deterministically across nodes.
-    scored.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then_with(|| a.1.cmp(b.1)));
+    scored.sort_by(|a, b| {
+        a.0.as_bytes()
+            .cmp(b.0.as_bytes())
+            .then_with(|| a.1.cmp(b.1))
+    });
     scored
         .into_iter()
         .take(threshold.min(members.len()))
@@ -197,9 +201,16 @@ pub fn is_in_quorum(
     members: &[String],
     threshold: usize,
 ) -> bool {
-    select_signing_quorum(group_id, epoch, message_hash, chain_entropy, members, threshold)
-        .iter()
-        .any(|d| d == local_did)
+    select_signing_quorum(
+        group_id,
+        epoch,
+        message_hash,
+        chain_entropy,
+        members,
+        threshold,
+    )
+    .iter()
+    .any(|d| d == local_did)
 }
 
 #[cfg(test)]
@@ -385,7 +396,10 @@ mod tests {
         )
         .expect("under-quorum is a CommitteeRole variant, not an error");
         match role {
-            CommitteeRole::UnderQuorum { available, threshold } => {
+            CommitteeRole::UnderQuorum {
+                available,
+                threshold,
+            } => {
                 assert_eq!(available, 2);
                 assert_eq!(threshold, 3);
             }

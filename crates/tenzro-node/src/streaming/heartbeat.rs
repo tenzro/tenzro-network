@@ -51,8 +51,7 @@ impl Default for HeartbeatConfig {
 impl HeartbeatConfig {
     /// Total detection budget: `interval * missed_threshold`.
     pub fn stall_budget(&self) -> Duration {
-        self.interval
-            .saturating_mul(self.missed_threshold.max(1))
+        self.interval.saturating_mul(self.missed_threshold.max(1))
     }
 }
 
@@ -124,11 +123,7 @@ mod tests {
             missed_threshold: 2,
         };
         // Inner stream yields three items quickly, then ends.
-        let inner = futures::stream::iter(vec![
-            Ok::<u32, ()>(1),
-            Ok(2),
-            Ok(3),
-        ]);
+        let inner = futures::stream::iter(vec![Ok::<u32, ()>(1), Ok(2), Ok(3)]);
         let mut out = Box::pin(with_heartbeat(inner, cfg));
         let mut seen = Vec::new();
         let mut stalled = false;

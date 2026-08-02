@@ -65,11 +65,7 @@ impl NodeKeyshareStore {
     }
 
     /// Write the epoch index for `group_id`.
-    fn write_epoch_index(
-        &self,
-        group_id: &GroupId,
-        epochs: &[u64],
-    ) -> Result<(), KeyshareError> {
+    fn write_epoch_index(&self, group_id: &GroupId, epochs: &[u64]) -> Result<(), KeyshareError> {
         let key = epoch_index_key(group_id);
         let bytes = bincode::serialize(epochs)
             .map_err(|e| KeyshareError::Backend(format!("epoch index encode: {}", e)))?;
@@ -119,11 +115,7 @@ impl KeyshareStore for NodeKeyshareStore {
         Ok(())
     }
 
-    async fn get(
-        &self,
-        group_id: &GroupId,
-        epoch: u64,
-    ) -> Result<KeyshareEnvelope, KeyshareError> {
+    async fn get(&self, group_id: &GroupId, epoch: u64) -> Result<KeyshareEnvelope, KeyshareError> {
         let key = envelope_key(group_id, epoch);
         let bytes = self
             .storage
@@ -150,11 +142,7 @@ impl KeyshareStore for NodeKeyshareStore {
         self.read_epoch_index(group_id)
     }
 
-    async fn prune(
-        &self,
-        group_id: &GroupId,
-        keep_last_n: usize,
-    ) -> Result<usize, KeyshareError> {
+    async fn prune(&self, group_id: &GroupId, keep_last_n: usize) -> Result<usize, KeyshareError> {
         let epochs = self.read_epoch_index(group_id)?;
         if epochs.len() <= keep_last_n {
             return Ok(0);

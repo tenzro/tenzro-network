@@ -49,9 +49,9 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::collections::VecDeque;
 
 /// Reserved metadata keys for the Tenzro DID envelope.
 pub const KEY_SENDER: &str = "tenzro.a2a.envelope.sender";
@@ -172,10 +172,7 @@ impl EnvelopeError {
     /// caller (consistent with the rest of the auth-rejection surface).
     pub fn message(&self) -> String {
         match self {
-            Self::Missing(field) => format!(
-                "Missing required A2A envelope field: {}",
-                field
-            ),
+            Self::Missing(field) => format!("Missing required A2A envelope field: {}", field),
             Self::InvalidEnvelope(_) => {
                 // Coarse — do not leak which step failed.
                 "Invalid A2A envelope (signature or public_key binding failed)".to_string()
@@ -184,10 +181,7 @@ impl EnvelopeError {
                 "A2A envelope timestamp out of window (skew {} ms, max ±{} ms)",
                 skew_ms, MAX_SKEW_MS
             ),
-            Self::UnknownSender(did) => format!(
-                "Unknown sender DID: {}",
-                did
-            ),
+            Self::UnknownSender(did) => format!("Unknown sender DID: {}", did),
             Self::NoIdentityRegistry => {
                 "Identity registry not initialized — cannot verify A2A envelope".to_string()
             }
@@ -248,7 +242,7 @@ pub fn verify_envelope(
 ) -> Result<String, EnvelopeError> {
     use subtle::ConstantTimeEq;
     use tenzro_crypto::keys::{KeyType, PublicKey};
-    use tenzro_crypto::signatures::{verify, Signature};
+    use tenzro_crypto::signatures::{Signature, verify};
 
     let get_str = |key: &'static str| -> Result<String, EnvelopeError> {
         metadata
@@ -291,7 +285,11 @@ pub fn verify_envelope(
     let key_type = match pk_bytes.len() {
         32 => KeyType::Ed25519,
         33 => KeyType::Secp256k1,
-        _ => return Err(EnvelopeError::InvalidEnvelope("public_key length".to_string())),
+        _ => {
+            return Err(EnvelopeError::InvalidEnvelope(
+                "public_key length".to_string(),
+            ));
+        }
     };
 
     let pk = PublicKey::new(key_type, pk_bytes);

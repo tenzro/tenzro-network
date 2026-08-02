@@ -76,9 +76,15 @@ pub trait IdentityLookup {
 /// A no-op lookup for tests / contexts where counterparty data is not needed.
 pub struct NullLookup;
 impl IdentityLookup for NullLookup {
-    fn kyc_tier(&self, _did: &str) -> Option<u8> { None }
-    fn bond_wei(&self, _did: &str) -> Option<u128> { None }
-    fn risk_tier(&self, _did: &str) -> Option<u8> { None }
+    fn kyc_tier(&self, _did: &str) -> Option<u8> {
+        None
+    }
+    fn bond_wei(&self, _did: &str) -> Option<u128> {
+        None
+    }
+    fn risk_tier(&self, _did: &str) -> Option<u8> {
+        None
+    }
 }
 
 /// Inputs to policy evaluation.
@@ -101,7 +107,9 @@ pub struct PolicyContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyVerdict {
     Allow,
-    Deny { reason: String },
+    Deny {
+        reason: String,
+    },
     RequireApproval {
         approvers: ApproverSpec,
         reason: String,
@@ -133,7 +141,9 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
     use PolicyExpr::*;
     match expr {
         Allow => PolicyVerdict::Allow,
-        Deny => PolicyVerdict::Deny { reason: "explicit Deny".into() },
+        Deny => PolicyVerdict::Deny {
+            reason: "explicit Deny".into(),
+        },
 
         And(parts) => {
             let mut accumulated = PolicyVerdict::Allow;
@@ -175,7 +185,9 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
         }
 
         Not(inner) => match evaluate(inner, ctx) {
-            PolicyVerdict::Allow => PolicyVerdict::Deny { reason: "Not(Allow)".into() },
+            PolicyVerdict::Allow => PolicyVerdict::Deny {
+                reason: "Not(Allow)".into(),
+            },
             PolicyVerdict::Deny { .. } => PolicyVerdict::Allow,
             PolicyVerdict::RequireApproval { .. } => PolicyVerdict::Deny {
                 reason: "Not(RequireApproval) collapses to Deny".into(),
@@ -198,7 +210,11 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
         CounterpartyIn(allowed) => {
             let cp = match ctx.counterparty_did {
                 Some(c) => c,
-                None => return PolicyVerdict::Deny { reason: "no counterparty".into() },
+                None => {
+                    return PolicyVerdict::Deny {
+                        reason: "no counterparty".into(),
+                    };
+                }
             };
             bool_to_verdict(allowed.iter().any(|a| a == cp), || {
                 format!("counterparty {} not in allowlist", cp)
@@ -207,7 +223,11 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
         CounterpartyDomain(domain) => {
             let cp = match ctx.counterparty_did {
                 Some(c) => c,
-                None => return PolicyVerdict::Deny { reason: "no counterparty".into() },
+                None => {
+                    return PolicyVerdict::Deny {
+                        reason: "no counterparty".into(),
+                    };
+                }
             };
             bool_to_verdict(cp.ends_with(domain.as_str()), || {
                 format!("counterparty {} not in domain {}", cp, domain)
@@ -216,29 +236,45 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
         CounterpartyKycTierGte(min) => {
             let cp = match ctx.counterparty_did {
                 Some(c) => c,
-                None => return PolicyVerdict::Deny { reason: "no counterparty".into() },
+                None => {
+                    return PolicyVerdict::Deny {
+                        reason: "no counterparty".into(),
+                    };
+                }
             };
             match ctx.identity_lookup.kyc_tier(cp) {
                 Some(tier) => bool_to_verdict(tier >= *min, || {
                     format!("counterparty kyc tier {} < min {}", tier, min)
                 }),
-                None => PolicyVerdict::Deny { reason: format!("kyc tier unknown for {}", cp) },
+                None => PolicyVerdict::Deny {
+                    reason: format!("kyc tier unknown for {}", cp),
+                },
             }
         }
         CounterpartyBondGte(min_wei) => {
             let cp = match ctx.counterparty_did {
                 Some(c) => c,
-                None => return PolicyVerdict::Deny { reason: "no counterparty".into() },
+                None => {
+                    return PolicyVerdict::Deny {
+                        reason: "no counterparty".into(),
+                    };
+                }
             };
             match ctx.identity_lookup.bond_wei(cp) {
                 Some(b) => bool_to_verdict(b >= *min_wei, || {
                     format!("counterparty bond {} < min {}", b, min_wei)
                 }),
-                None => PolicyVerdict::Deny { reason: format!("bond unknown for {}", cp) },
+                None => PolicyVerdict::Deny {
+                    reason: format!("bond unknown for {}", cp),
+                },
             }
         }
 
-        TimeWindow { start_hour, end_hour, tz_offset_minutes } => {
+        TimeWindow {
+            start_hour,
+            end_hour,
+            tz_offset_minutes,
+        } => {
             let local_seconds = ctx.current_ts + (*tz_offset_minutes as i64) * 60;
             // Unix epoch / 86400 = days since epoch (Thu 1970-01-01).
             // Hour-of-day = (local_seconds mod 86400) / 3600.
@@ -273,10 +309,10 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
                 None => return PolicyVerdict::Allow, // no counterparty = no risk
             };
             match ctx.identity_lookup.risk_tier(cp) {
-                Some(t) => bool_to_verdict(t <= *max, || {
-                    format!("risk tier {} > max {}", t, max)
-                }),
-                None => PolicyVerdict::Deny { reason: format!("risk unknown for {}", cp) },
+                Some(t) => bool_to_verdict(t <= *max, || format!("risk tier {} > max {}", t, max)),
+                None => PolicyVerdict::Deny {
+                    reason: format!("risk unknown for {}", cp),
+                },
             }
         }
         AssetIn(allowed) => bool_to_verdict(allowed.iter().any(|a| a == ctx.asset), || {
@@ -285,16 +321,19 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
         ChainIn(allowed) => bool_to_verdict(allowed.iter().any(|a| a == ctx.chain), || {
             format!("chain {} not in allowlist", ctx.chain)
         }),
-        PaymentProtocolIn(allowed) => bool_to_verdict(
-            allowed.iter().any(|a| a == ctx.payment_protocol),
-            || format!("payment protocol {} not in allowlist", ctx.payment_protocol),
-        ),
+        PaymentProtocolIn(allowed) => {
+            bool_to_verdict(allowed.iter().any(|a| a == ctx.payment_protocol), || {
+                format!("payment protocol {} not in allowlist", ctx.payment_protocol)
+            })
+        }
 
         InWorkflowStatus(allowed) => match ctx.workflow_status {
             Some(s) => bool_to_verdict(allowed.iter().any(|a| a == s), || {
                 format!("workflow status {} not in allowlist", s)
             }),
-            None => PolicyVerdict::Deny { reason: "workflow not in scope".into() },
+            None => PolicyVerdict::Deny {
+                reason: "workflow not in scope".into(),
+            },
         },
         ParticipantHasRole(role) => bool_to_verdict(
             ctx.workflow_roles_held_by_actor.iter().any(|r| r == role),
@@ -318,7 +357,11 @@ pub fn evaluate(expr: &PolicyExpr, ctx: &PolicyContext) -> PolicyVerdict {
 
 #[inline]
 fn bool_to_verdict<F: FnOnce() -> String>(ok: bool, reason: F) -> PolicyVerdict {
-    if ok { PolicyVerdict::Allow } else { PolicyVerdict::Deny { reason: reason() } }
+    if ok {
+        PolicyVerdict::Allow
+    } else {
+        PolicyVerdict::Deny { reason: reason() }
+    }
 }
 
 #[cfg(test)]
@@ -347,9 +390,15 @@ mod tests {
         risk: Option<u8>,
     }
     impl IdentityLookup for FixedLookup {
-        fn kyc_tier(&self, _did: &str) -> Option<u8> { self.kyc }
-        fn bond_wei(&self, _did: &str) -> Option<u128> { self.bond }
-        fn risk_tier(&self, _did: &str) -> Option<u8> { self.risk }
+        fn kyc_tier(&self, _did: &str) -> Option<u8> {
+            self.kyc
+        }
+        fn bond_wei(&self, _did: &str) -> Option<u128> {
+            self.bond
+        }
+        fn risk_tier(&self, _did: &str) -> Option<u8> {
+            self.risk
+        }
     }
 
     #[test]
@@ -357,23 +406,35 @@ mod tests {
         let lookup = NullLookup;
         let c = ctx(0, 0, &lookup);
         assert_eq!(evaluate(&PolicyExpr::Allow, &c), PolicyVerdict::Allow);
-        assert!(matches!(evaluate(&PolicyExpr::Deny, &c), PolicyVerdict::Deny { .. }));
+        assert!(matches!(
+            evaluate(&PolicyExpr::Deny, &c),
+            PolicyVerdict::Deny { .. }
+        ));
     }
 
     #[test]
     fn amount_lte() {
         let lookup = NullLookup;
         let c1 = ctx(100, 0, &lookup);
-        assert_eq!(evaluate(&PolicyExpr::AmountLte(200), &c1), PolicyVerdict::Allow);
+        assert_eq!(
+            evaluate(&PolicyExpr::AmountLte(200), &c1),
+            PolicyVerdict::Allow
+        );
         let c2 = ctx(300, 0, &lookup);
-        assert!(matches!(evaluate(&PolicyExpr::AmountLte(200), &c2), PolicyVerdict::Deny { .. }));
+        assert!(matches!(
+            evaluate(&PolicyExpr::AmountLte(200), &c2),
+            PolicyVerdict::Deny { .. }
+        ));
     }
 
     #[test]
     fn daily_amount_lte_uses_projected_total() {
         let lookup = NullLookup;
         let c = ctx(50, 100, &lookup);
-        assert_eq!(evaluate(&PolicyExpr::DailyAmountLte(200), &c), PolicyVerdict::Allow);
+        assert_eq!(
+            evaluate(&PolicyExpr::DailyAmountLte(200), &c),
+            PolicyVerdict::Allow
+        );
         assert!(matches!(
             evaluate(&PolicyExpr::DailyAmountLte(120), &c),
             PolicyVerdict::Deny { .. }
@@ -412,7 +473,10 @@ mod tests {
         ]);
         match evaluate(&expr, &c) {
             PolicyVerdict::RequireApproval { approvers, .. } => {
-                assert_eq!(approvers, ApproverSpec::Single("did:tenzro:human:treasurer:1".into()));
+                assert_eq!(
+                    approvers,
+                    ApproverSpec::Single("did:tenzro:human:treasurer:1".into())
+                );
             }
             v => panic!("expected RequireApproval, got {:?}", v),
         }
@@ -426,7 +490,10 @@ mod tests {
             PolicyExpr::AmountLte(1000),
             PolicyExpr::RequiresApprovalFrom("did:tenzro:human:treasurer:1".into()),
         ]);
-        assert!(matches!(evaluate(&expr, &c), PolicyVerdict::RequireApproval { .. }));
+        assert!(matches!(
+            evaluate(&expr, &c),
+            PolicyVerdict::RequireApproval { .. }
+        ));
     }
 
     #[test]
@@ -445,7 +512,11 @@ mod tests {
 
     #[test]
     fn counterparty_kyc_tier_check() {
-        let lookup = FixedLookup { kyc: Some(2), bond: None, risk: None };
+        let lookup = FixedLookup {
+            kyc: Some(2),
+            bond: None,
+            risk: None,
+        };
         let c = ctx(0, 0, &lookup);
         assert_eq!(
             evaluate(&PolicyExpr::CounterpartyKycTierGte(2), &c),
@@ -463,7 +534,11 @@ mod tests {
         // 2026-05-09 14:00 UTC -> hour 14
         let mut c = ctx(0, 0, &lookup);
         c.current_ts = 1_778_421_600;
-        let expr = PolicyExpr::TimeWindow { start_hour: 9, end_hour: 17, tz_offset_minutes: 0 };
+        let expr = PolicyExpr::TimeWindow {
+            start_hour: 9,
+            end_hour: 17,
+            tz_offset_minutes: 0,
+        };
         assert_eq!(evaluate(&expr, &c), PolicyVerdict::Allow);
         // 2026-05-09 22:00 UTC -> hour 22
         c.current_ts = 1_778_450_400;
@@ -475,7 +550,11 @@ mod tests {
         let lookup = NullLookup;
         let mut c = ctx(0, 0, &lookup);
         // overnight window 22..06
-        let expr = PolicyExpr::TimeWindow { start_hour: 22, end_hour: 6, tz_offset_minutes: 0 };
+        let expr = PolicyExpr::TimeWindow {
+            start_hour: 22,
+            end_hour: 6,
+            tz_offset_minutes: 0,
+        };
         // 23:00 UTC
         c.current_ts = 23 * 3600;
         assert_eq!(evaluate(&expr, &c), PolicyVerdict::Allow);

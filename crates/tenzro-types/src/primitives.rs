@@ -148,7 +148,9 @@ impl Address {
         // For 20-byte Ethereum addresses, validate EIP-55 checksum
         if s.len() == 40 {
             // Decode the hex
-            let bytes = hex::decode(s).map_err(|e| crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {}", e)))?;
+            let bytes = hex::decode(s).map_err(|e| {
+                crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {}", e))
+            })?;
 
             // Compute Keccak-256 hash of the lowercase address
             use sha3::{Digest, Keccak256};
@@ -168,7 +170,9 @@ impl Address {
 
                     let should_be_uppercase = hash_nibble >= 8;
                     if c.is_uppercase() != should_be_uppercase {
-                        return Err(crate::error::TenzroError::InvalidAddress("Invalid EIP-55 checksum".to_string()));
+                        return Err(crate::error::TenzroError::InvalidAddress(
+                            "Invalid EIP-55 checksum".to_string(),
+                        ));
                     }
                 }
             }
@@ -179,12 +183,17 @@ impl Address {
             Ok(Self(addr))
         } else if s.len() == 64 {
             // 32-byte address (full Tenzro address)
-            let bytes = hex::decode(s).map_err(|e| crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {}", e)))?;
+            let bytes = hex::decode(s).map_err(|e| {
+                crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {}", e))
+            })?;
             let mut addr = [0u8; 32];
             addr.copy_from_slice(&bytes);
             Ok(Self(addr))
         } else {
-            Err(crate::error::TenzroError::InvalidAddress(format!("Invalid address length: expected 40 or 64 hex chars, got {}", s.len())))
+            Err(crate::error::TenzroError::InvalidAddress(format!(
+                "Invalid address length: expected 40 or 64 hex chars, got {}",
+                s.len()
+            )))
         }
     }
 }
@@ -214,8 +223,7 @@ impl Default for Address {
 /// Both `bytes` and `public_key` are bounded at deserialization time to
 /// `MAX_SIGNATURE_BYTES` and `MAX_PUBLIC_KEY_BYTES` respectively, to protect
 /// against OOM via untrusted payloads (HIGH #69 in the production audit).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Signature {
     /// The signature bytes
     #[serde(deserialize_with = "crate::validation::bounded_signature_bytes")]
@@ -231,7 +239,6 @@ impl Signature {
         Self { bytes, public_key }
     }
 }
-
 
 /// The height of a block in the Tenzro Network blockchain
 ///
@@ -345,10 +352,10 @@ impl From<u64> for Nonce {
 /// A timestamp representing Unix time in milliseconds
 ///
 /// Used for block timestamps and time-based operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct Timestamp(pub i64);
-
 
 impl Timestamp {
     /// Creates a new Timestamp
@@ -503,9 +510,22 @@ pub mod u128_serde {
     use std::fmt;
 
     pub fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        // Only self-describing formats get the number-or-string treatment.
+        //
+        // Choosing the representation from the *value* means the encoded layout
+        // is value-dependent. JSON can cope — the decoder sees a token type and
+        // dispatches. A fixed-layout format like bincode cannot: the decoder
+        // has only the schema to go on, so a field that is sometimes a u64 and
+        // sometimes a string is undecodable. Emitting the native 16-byte u128
+        // there keeps the layout constant, which is what such formats require.
+        if !serializer.is_human_readable() {
+            return serializer.serialize_u128(*value);
+        }
         if *value <= u64::MAX as u128 {
             serializer.serialize_u64(*value as u64)
         } else {
+            // Beyond u64 a JSON number cannot round-trip through the usual
+            // f64-backed parsers without precision loss, so widen to a string.
             serializer.serialize_str(&value.to_string())
         }
     }
@@ -530,7 +550,9 @@ pub mod u128_serde {
 
             fn visit_i64<E: de::Error>(self, v: i64) -> Result<u128, E> {
                 if v < 0 {
-                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
                 } else {
                     Ok(v as u128)
                 }
@@ -538,7 +560,9 @@ pub mod u128_serde {
 
             fn visit_i128<E: de::Error>(self, v: i128) -> Result<u128, E> {
                 if v < 0 {
-                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
                 } else {
                     Ok(v as u128)
                 }
@@ -552,9 +576,89 @@ pub mod u128_serde {
             fn visit_string<E: de::Error>(self, s: String) -> Result<u128, E> {
                 self.visit_str(&s)
             }
+
+            /// serde_json routes any JSON integer literal that exceeds `u64` to
+            /// `visit_f64` under `deserialize_any` — `5000000000000000000000`
+            /// arrives here as `5e21`, not through `visit_u128`.
+            ///
+            /// Refuse it. An `f64` carries 53 bits of mantissa, so beyond 2^53
+            /// it cannot represent every integer: `5000000000000000000001`
+            /// parses to the same `5e21` and would decode as
+            /// `5000000000000000000000`. These fields carry billable work units
+            /// and token amounts, where silently rounding is far worse than
+            /// refusing, and the caller cannot tell it happened.
+            ///
+            /// There is no loss of expressiveness — `serialize` above emits a
+            /// quoted decimal string above `u64::MAX`, so anything this crate
+            /// produces round-trips. Only hand-written JSON with a bare oversized
+            /// integer lands here, and the message says how to fix it.
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<u128, E> {
+                Err(E::custom(format!(
+                    "JSON number {v} exceeds u64 and was parsed as floating point, \
+                     which cannot represent it exactly; quote it as a decimal \
+                     string (e.g. \"{}\") to preserve precision",
+                    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 {
+                        format!("{v:.0}")
+                    } else {
+                        "<integer>".to_string()
+                    }
+                )))
+            }
         }
 
-        deserializer.deserialize_any(U128Visitor)
+        // `deserialize_any` requires the format to be self-describing. bincode
+        // and other fixed-layout formats return
+        // `DeserializeAnyNotSupported` for it, which is how a `BillableUnits`
+        // (whose `pixel_steps` uses this module) failed to decode from RocksDB
+        // and silently hydrated as empty.
+        //
+        // Ask the format which it is, and pair each branch with the matching
+        // arm of `serialize` above.
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(U128Visitor)
+        } else {
+            deserializer.deserialize_u128(U128Visitor)
+        }
+    }
+}
+
+/// Serde adapter for `serde_json::Value` fields that have to survive a
+/// non-self-describing format. Apply via
+/// `#[serde(with = "tenzro_types::primitives::json_value_serde")]`.
+///
+/// `serde_json::Value` deserializes by calling `deserialize_any` — it has to,
+/// since the shape is only known from the data. bincode and other fixed-layout
+/// formats cannot answer that, so a struct carrying a bare `Value` *encodes*
+/// happily and then fails to decode with:
+///
+/// ```text
+/// Bincode does not support the serde::Deserializer::deserialize_any method
+/// ```
+///
+/// which is silent until something tries to read the row back.
+///
+/// Human-readable formats embed the value inline exactly as before, so JSON
+/// output is unchanged. Everything else carries it as its JSON text, which has
+/// a definite layout bincode can length-prefix.
+pub mod json_value_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(value: &Value, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            value.serialize(serializer)
+        } else {
+            serializer.serialize_str(&value.to_string())
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Value, D::Error> {
+        if deserializer.is_human_readable() {
+            Value::deserialize(deserializer)
+        } else {
+            let text = String::deserialize(deserializer)?;
+            serde_json::from_str(&text).map_err(serde::de::Error::custom)
+        }
     }
 }
 
@@ -573,10 +677,29 @@ pub mod u128_serde_opt {
         value: &Option<u128>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
+        // Same split as `u128_serde::serialize` — see the reasoning there.
+        // Non-self-describing formats need `Option` encoded as their own
+        // native option representation with a fixed-layout payload.
+        if !serializer.is_human_readable() {
+            return match value {
+                None => serializer.serialize_none(),
+                Some(v) => serializer.serialize_some(&U128Native(*v)),
+            };
+        }
         match value {
             None => serializer.serialize_none(),
             Some(v) if *v <= u64::MAX as u128 => serializer.serialize_u64(*v as u64),
             Some(v) => serializer.serialize_str(&v.to_string()),
+        }
+    }
+
+    /// Newtype that always serializes as a native `u128`, used for the
+    /// non-human-readable `Some(_)` payload so the layout never varies.
+    struct U128Native(u128);
+
+    impl serde::Serialize for U128Native {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_u128(self.0)
         }
     }
 
@@ -617,7 +740,9 @@ pub mod u128_serde_opt {
 
             fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<u128>, E> {
                 if v < 0 {
-                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
                 } else {
                     Ok(Some(v as u128))
                 }
@@ -625,7 +750,9 @@ pub mod u128_serde_opt {
 
             fn visit_i128<E: de::Error>(self, v: i128) -> Result<Option<u128>, E> {
                 if v < 0 {
-                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
                 } else {
                     Ok(Some(v as u128))
                 }
@@ -642,7 +769,13 @@ pub mod u128_serde_opt {
             }
         }
 
-        deserializer.deserialize_any(OptU128Visitor)
+        // See `u128_serde::deserialize` — `deserialize_any` is unavailable on
+        // fixed-layout formats, so pair each branch with its `serialize` arm.
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(OptU128Visitor)
+        } else {
+            deserializer.deserialize_option(OptU128Visitor)
+        }
     }
 }
 
@@ -667,7 +800,9 @@ mod u128_serde_tests {
 
     #[test]
     fn round_trips_large_value_as_string() {
-        let w = Wrap { v: 5_000_000_000_000_000_000_000u128 };
+        let w = Wrap {
+            v: 5_000_000_000_000_000_000_000u128,
+        };
         let json = serde_json::to_string(&w).unwrap();
         assert_eq!(json, r#"{"v":"5000000000000000000000"}"#);
         let back: Wrap = serde_json::from_str(&json).unwrap();
@@ -675,10 +810,24 @@ mod u128_serde_tests {
     }
 
     #[test]
-    fn deserializes_large_raw_number() {
-        // The whole point: accept the existing template JSON shape.
+    fn rejects_large_raw_number_rather_than_rounding_it() {
+        // serde_json parses a bare integer literal above u64::MAX as f64, so
+        // this arrives as 5e21. Accepting it would mean accepting silent
+        // rounding: `5000000000000000000001` parses to the *same* f64 and
+        // would decode as ...000. These fields carry billable units and token
+        // amounts, so the decode is refused instead.
         let json = r#"{"v":5000000000000000000000}"#;
-        let back: Wrap = serde_json::from_str(json).unwrap();
+        let err = serde_json::from_str::<Wrap>(json)
+            .expect_err("bare integer above u64::MAX must not decode via f64");
+        assert!(
+            err.to_string().contains("quote it as a decimal string"),
+            "error should tell the producer how to fix it, got: {err}"
+        );
+
+        // The supported spelling for the same value, which is also what
+        // `serialize` emits above u64::MAX.
+        let quoted = r#"{"v":"5000000000000000000000"}"#;
+        let back: Wrap = serde_json::from_str(quoted).unwrap();
         assert_eq!(back.v, 5_000_000_000_000_000_000_000u128);
     }
 

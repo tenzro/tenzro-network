@@ -17,7 +17,10 @@ use crate::error::AgentKitError;
 /// Substitution is intentionally simple: no escaping, no expressions —
 /// just `{{key}}` → `context[key]`. For richer logic, use the `When`
 /// step variant with a JMESPath expression.
-pub fn substitute(template: &str, context: &HashMap<String, String>) -> Result<String, AgentKitError> {
+pub fn substitute(
+    template: &str,
+    context: &HashMap<String, String>,
+) -> Result<String, AgentKitError> {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find("{{") {

@@ -74,9 +74,7 @@ impl PruneTasksCmd {
             Some(s) => serde_json::json!({ "purge_after_secs": s }),
             None => serde_json::Value::Null,
         };
-        let result: serde_json::Value = rpc
-            .call("tenzro_pruneTaskRegistry", params)
-            .await?;
+        let result: serde_json::Value = rpc.call("tenzro_pruneTaskRegistry", params).await?;
         spinner.finish_and_clear();
 
         if self.format == "json" {
@@ -125,7 +123,9 @@ impl ListTasksCmd {
             filter["task_type"] = serde_json::json!(t);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_listTasks", serde_json::json!([filter])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_listTasks", serde_json::json!([filter]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -138,7 +138,8 @@ impl ListTasksCmd {
                     let task_id = task["task_id"].as_str().unwrap_or("?");
                     let title = task["title"].as_str().unwrap_or("Untitled");
                     let status = task["status"].as_str().unwrap_or("unknown");
-                    let max_price = task["max_price"].as_str()
+                    let max_price = task["max_price"]
+                        .as_str()
                         .or_else(|| task["max_price"].as_u64().map(|_| "?"))
                         .unwrap_or("?");
                     let task_type = task["task_type"].as_str().unwrap_or("?");
@@ -199,7 +200,9 @@ impl PostTaskCmd {
             "input": self.input,
         });
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_postTask", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_postTask", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -236,10 +239,12 @@ impl GetTaskCmd {
         let spinner = output::create_spinner("Fetching task...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let result: Result<serde_json::Value> = rpc.call(
-            "tenzro_getTask",
-            serde_json::json!([{ "task_id": self.task_id }]),
-        ).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_getTask",
+                serde_json::json!([{ "task_id": self.task_id }]),
+            )
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -272,10 +277,12 @@ impl CancelTaskCmd {
         let spinner = output::create_spinner("Cancelling task...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let result: Result<serde_json::Value> = rpc.call(
-            "tenzro_cancelTask",
-            serde_json::json!([{ "task_id": self.task_id }]),
-        ).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_cancelTask",
+                serde_json::json!([{ "task_id": self.task_id }]),
+            )
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -322,7 +329,9 @@ impl SubmitQuoteCmd {
             "estimated_duration_secs": self.estimated_secs,
         });
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_quoteTask", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_quoteTask", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -361,13 +370,15 @@ impl AssignTaskCmd {
         let spinner = output::create_spinner("Assigning task...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let result: Result<serde_json::Value> = rpc.call(
-            "tenzro_assignTask",
-            serde_json::json!([{
-                "task_id": self.task_id,
-                "provider": self.provider
-            }]),
-        ).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_assignTask",
+                serde_json::json!([{
+                    "task_id": self.task_id,
+                    "provider": self.provider
+                }]),
+            )
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -406,13 +417,15 @@ impl CompleteTaskCmd {
         let spinner = output::create_spinner("Submitting task output...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let result: Result<serde_json::Value> = rpc.call(
-            "tenzro_completeTask",
-            serde_json::json!([{
-                "task_id": self.task_id,
-                "output": self.output
-            }]),
-        ).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_completeTask",
+                serde_json::json!([{
+                    "task_id": self.task_id,
+                    "output": self.output
+                }]),
+            )
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -458,13 +471,19 @@ impl UpdateTaskCmd {
         let spinner = output::create_spinner("Updating...");
         let rpc = rpc::RpcClient::new(&self.rpc);
         let mut params = serde_json::json!({ "task_id": self.task_id });
-        if let Some(ref s) = self.status { params["status"] = serde_json::json!(s); }
-        if let Some(ref d) = self.description { params["description"] = serde_json::json!(d); }
+        if let Some(ref s) = self.status {
+            params["status"] = serde_json::json!(s);
+        }
+        if let Some(ref d) = self.description {
+            params["description"] = serde_json::json!(d);
+        }
         if let Some(ref p) = self.max_price {
             let wei = crate::units::tnzo_to_wei_string(p)?;
             params["max_price"] = serde_json::json!(wei);
         }
-        let _result: serde_json::Value = rpc.call("tenzro_updateTask", serde_json::json!([params])).await?;
+        let _result: serde_json::Value = rpc
+            .call("tenzro_updateTask", serde_json::json!([params]))
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Task updated!");
         output::print_field("Task ID", &self.task_id);

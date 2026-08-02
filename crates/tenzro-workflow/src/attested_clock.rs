@@ -40,7 +40,7 @@
 //! - Pure consensus path (block timestamps are already attested by the
 //!   QC, no separate enclave attestation needed)
 
-use crate::error::{WorkflowError, Result};
+use crate::error::{Result, WorkflowError};
 use serde::{Deserialize, Serialize};
 
 /// TEE vendor that produced the attestation. Cross-vendor verification

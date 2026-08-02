@@ -50,7 +50,7 @@
 //! information lossless-ly in a single token's `aap_delegation.chain`,
 //! so we drop `actor_token` and use the cleaner representation.
 
-use crate::aap::{rar_to_aap_action, AapCapabilityClaim, AapDelegationClaim};
+use crate::aap::{AapCapabilityClaim, AapDelegationClaim, rar_to_aap_action};
 use crate::error::{AuthError, Result};
 use crate::rar::{AuthorizationDetail, AuthorizationDetails};
 use tenzro_types::Address;
@@ -268,21 +268,15 @@ pub fn detail_covers(parent: &AuthorizationDetail, child: &AuthorizationDetail) 
                 allow_deploy: cdep,
             },
         ) => {
-            covers_optional_allowlist(pc, cc)
-                && (!*cdep || *pdep) // child may deploy only if parent may
+            covers_optional_allowlist(pc, cc) && (!*cdep || *pdep) // child may deploy only if parent may
         }
-        (
-            D::RegisterIdentity {
-                max_children: pmc,
-            },
-            D::RegisterIdentity {
-                max_children: cmc,
-            },
-        ) => match (pmc, cmc) {
-            (None, _) => true,             // parent unbounded → covers any child
-            (Some(_), None) => false,      // child unbounded but parent bounded → fail
-            (Some(p), Some(c)) => c <= p,
-        },
+        (D::RegisterIdentity { max_children: pmc }, D::RegisterIdentity { max_children: cmc }) => {
+            match (pmc, cmc) {
+                (None, _) => true,        // parent unbounded → covers any child
+                (Some(_), None) => false, // child unbounded but parent bounded → fail
+                (Some(p), Some(c)) => c <= p,
+            }
+        }
         (
             D::ResourceInvocation {
                 max_amount_per_call: pmc,
@@ -331,7 +325,10 @@ fn covers_optional_allowlist(parent: &Option<Vec<Address>>, child: &Option<Vec<A
 
 /// Allowlist subset check for `Vec<String>`-style fields (model_ids,
 /// proposal ids, …).
-fn covers_optional_allowlist_str(parent: &Option<Vec<String>>, child: &Option<Vec<String>>) -> bool {
+fn covers_optional_allowlist_str(
+    parent: &Option<Vec<String>>,
+    child: &Option<Vec<String>>,
+) -> bool {
     match (parent, child) {
         (None, _) => true,
         (Some(_), None) => false,

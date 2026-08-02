@@ -17,6 +17,7 @@ repeated rounds over the same shard hit the network once.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import logging
 import os
@@ -31,11 +32,31 @@ log = logging.getLogger(__name__)
 _REMOTE_SCHEMES = ("tenzro://", "ipfs://", "ar://", "https://", "http://")
 
 
+def _tenzro_home() -> Path:
+    """The one Tenzro root: ``$TENZRO_HOME``, else ``~/.tenzro``.
+
+    Mirrors ``tenzro_types::paths::tenzro_home`` on the Rust side. The node
+    exports ``TENZRO_HOME`` when it spawns this trainer, so a trainer launched
+    by a node lands in the same place as everything else that node owns; a
+    trainer run by hand still agrees with it by construction.
+    """
+    root = os.environ.get("TENZRO_HOME", "").strip()
+    if root:
+        return Path(root).expanduser()
+    return Path.home() / ".tenzro"
+
+
 def _cache_dir() -> Path:
-    root = os.environ.get(
-        "TENZRO_TRAINER_CACHE", str(Path.home() / ".cache" / "tenzro-trainer")
-    )
-    return Path(root) / "shards"
+    """Shared dataset-shard cache.
+
+    Shared across every trainer on the machine, deliberately: shards are
+    keyed by digest, so two trainers pulling the same dataset deduplicate for
+    free. ``TENZRO_TRAINER_CACHE`` still overrides for operators keeping
+    datasets on a separate volume.
+    """
+    override = os.environ.get("TENZRO_TRAINER_CACHE", "").strip()
+    root = Path(override).expanduser() if override else _tenzro_home() / "trainer-cache"
+    return root / "shards"
 
 
 def _cache_path(shard_uri: str) -> Path:
@@ -51,10 +72,8 @@ def _atomic_write(dest: Path, payload: bytes) -> None:
             f.write(payload)
         os.replace(tmp, dest)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -83,7 +102,11 @@ def _fetch_tenzro(shard_uri: str) -> bytes:
     result = body.get("result") or {}
     b64 = result.get("bytes_b64")
     if not isinstance(b64, str):
-        raise RuntimeError(f"malformed tenzro_iroh_fetchBlob result for {shard_uri}")
+        # noqa-worthy on TRY004: a malformed response from the node is a
+        # protocol failure, not the caller passing the wrong type.
+        raise RuntimeError(  # noqa: TRY004
+            f"malformed tenzro_iroh_fetchBlob result for {shard_uri}"
+        )
     return base64.b64decode(b64)
 
 

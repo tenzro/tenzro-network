@@ -11,7 +11,6 @@ Usage:
 """
 
 import asyncio
-import json
 import os
 
 from mcp import ClientSession

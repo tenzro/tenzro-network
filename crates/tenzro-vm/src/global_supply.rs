@@ -37,7 +37,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{VmError, Result as VmResult};
+use crate::error::{Result as VmResult, VmError};
 use tenzro_types::primitives::Hash;
 
 /// Bridge rail id. Same wire shape as `tenzro_bridge::traits::BridgeAdapterId`
@@ -139,7 +139,9 @@ impl GlobalSupplyRegistry {
 
     /// Install or overwrite a per-asset policy.
     pub fn set_policy(&self, policy: GlobalSupplyPolicy) {
-        self.policies.write().insert(policy.asset_id.clone(), policy);
+        self.policies
+            .write()
+            .insert(policy.asset_id.clone(), policy);
     }
 
     /// Look up a policy.
@@ -168,12 +170,12 @@ impl GlobalSupplyRegistry {
     /// Apply a delta. Fails on replay, sequence regression, unknown
     /// policy, supply-cap breach, or burn underflow.
     pub fn apply(&self, delta: &GlobalSupplyDelta) -> VmResult<Hash> {
-        let policy = self
-            .get_policy(&delta.asset_id)
-            .ok_or_else(|| VmError::InvalidTransaction(format!(
+        let policy = self.get_policy(&delta.asset_id).ok_or_else(|| {
+            VmError::InvalidTransaction(format!(
                 "global-supply: no policy for asset {}",
                 delta.asset_id
-            )))?;
+            ))
+        })?;
         if delta.sequence < policy.min_accepted_seq {
             return Err(VmError::InvalidTransaction(format!(
                 "global-supply: sequence {} below min_accepted_seq {}",
@@ -194,9 +196,7 @@ impl GlobalSupplyRegistry {
                 let projected = account
                     .circulating
                     .checked_add(delta.amount)
-                    .ok_or_else(|| VmError::InvalidTransaction(
-                        "global-supply: overflow".into(),
-                    ))?;
+                    .ok_or_else(|| VmError::InvalidTransaction("global-supply: overflow".into()))?;
                 if projected > policy.max_supply {
                     return Err(VmError::InvalidTransaction(format!(
                         "global-supply: mint would breach max_supply ({}+{}>{})",
@@ -255,7 +255,13 @@ mod tests {
         GlobalSupplyRail::new(s)
     }
 
-    fn delta(asset: &str, rail_str: &str, seq: u64, kind: GlobalSupplyKind, amt: u128) -> GlobalSupplyDelta {
+    fn delta(
+        asset: &str,
+        rail_str: &str,
+        seq: u64,
+        kind: GlobalSupplyKind,
+        amt: u128,
+    ) -> GlobalSupplyDelta {
         GlobalSupplyDelta {
             asset_id: asset.into(),
             rail: rail(rail_str),

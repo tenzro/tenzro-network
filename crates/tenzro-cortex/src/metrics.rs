@@ -28,8 +28,8 @@
 //! A [`CortexMetrics`] handle is `Clone` (cheap `Arc` bump) and
 //! thread-safe; workers hold one, dashboards can hold another.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tenzro_types::cortex::{AttestationRequirement, ReasoningTier};
@@ -163,12 +163,7 @@ fn saturating_add_u128_into_u64(target: &AtomicU64, add: u128) {
     let mut current = target.load(Ordering::Relaxed);
     loop {
         let next = current.saturating_add(bounded);
-        match target.compare_exchange_weak(
-            current,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match target.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => break,
             Err(observed) => current = observed,
         }

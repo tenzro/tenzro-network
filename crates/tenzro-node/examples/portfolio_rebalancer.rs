@@ -33,9 +33,7 @@ use tenzro_vm::{
     VmType,
 };
 
-const TRADING_RUNTIME_CODE: &[u8] = &[
-    0x60, 0x00, 0x35, 0x60, 0x00, 0x55, 0x00,
-];
+const TRADING_RUNTIME_CODE: &[u8] = &[0x60, 0x00, 0x35, 0x60, 0x00, 0x55, 0x00];
 
 /// 1 TNZO in base units (10^18).
 const ONE_TNZO: u128 = 1_000_000_000_000_000_000;
@@ -107,10 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scope = DelegationScope::unrestricted()
         .with_max_transaction_value(50 * ONE_TNZO)
         .with_max_daily_spend(200 * ONE_TNZO)
-        .with_allowed_operations(vec![
-            "rebalance".to_string(),
-            "trade".to_string(),
-        ])
+        .with_allowed_operations(vec!["rebalance".to_string(), "trade".to_string()])
         .with_time_bound(TimeBound::new(now, now + chrono::Duration::days(7)));
 
     let agent = registry
@@ -190,7 +185,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for asset in &assets {
         let drift_bps = (asset.target_bps as i32) - (asset.current_bps as i32);
         if drift_bps == 0 {
-            println!("→ {} already on target ({}bps)", asset.symbol, asset.target_bps);
+            println!(
+                "→ {} already on target ({}bps)",
+                asset.symbol, asset.target_bps
+            );
             continue;
         }
 
@@ -241,8 +239,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stored = state
             .get_storage(&mk_evm_address(asset.address_byte), &[0u8; 32])
             .expect("oracle slot 0 should be set");
-        let stored_bps = ((*stored.get(30).unwrap_or(&0) as u16) << 8)
-            | (*stored.get(31).unwrap_or(&0) as u16);
+        let stored_bps =
+            ((*stored.get(30).unwrap_or(&0) as u16) << 8) | (*stored.get(31).unwrap_or(&0) as u16);
         println!(
             "  on-chain target weight for {} = {}bps",
             asset.symbol, stored_bps

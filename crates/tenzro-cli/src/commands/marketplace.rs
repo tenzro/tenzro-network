@@ -81,7 +81,9 @@ impl ListTemplatesCmd {
             filter["tag"] = serde_json::json!(tag);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_listAgentTemplates", serde_json::json!([filter])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_listAgentTemplates", serde_json::json!([filter]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -132,10 +134,12 @@ impl GetTemplateCmd {
         let spinner = output::create_spinner("Fetching template...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let result: Result<serde_json::Value> = rpc.call(
-            "tenzro_getAgentTemplate",
-            serde_json::json!([{ "template_id": self.template_id }]),
-        ).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_getAgentTemplate",
+                serde_json::json!([{ "template_id": self.template_id }]),
+            )
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -144,7 +148,8 @@ impl GetTemplateCmd {
                 if let Some(obj) = tmpl.as_object() {
                     for (key, val) in obj {
                         if key == "system_prompt" {
-                            let preview: String = val.as_str().unwrap_or("").chars().take(100).collect();
+                            let preview: String =
+                                val.as_str().unwrap_or("").chars().take(100).collect();
                             output::print_field(key, &format!("{}...", preview));
                         } else {
                             output::print_field(key, val.to_string().trim_matches('"'));
@@ -212,7 +217,8 @@ impl RegisterTemplateCmd {
         let spinner = output::create_spinner("Registering template...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let tags: Vec<String> = self.tags
+        let tags: Vec<String> = self
+            .tags
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_string())
@@ -238,7 +244,9 @@ impl RegisterTemplateCmd {
             params["creator_wallet"] = serde_json::json!(wallet);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_registerAgentTemplate", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_registerAgentTemplate", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -285,7 +293,12 @@ impl SearchTemplatesCmd {
         output::print_header("Search Agent Templates");
         let spinner = output::create_spinner(&format!("Searching for \"{}\"...", self.query));
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> = rpc.call("tenzro_searchAgentTemplates", serde_json::json!([{ "query": self.query, "limit": self.limit }])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_searchAgentTemplates",
+                serde_json::json!([{ "query": self.query, "limit": self.limit }]),
+            )
+            .await;
         spinner.finish_and_clear();
         match result {
             Ok(templates) => {
@@ -297,7 +310,9 @@ impl SearchTemplatesCmd {
                     output::print_field("Name", tmpl["name"].as_str().unwrap_or("?"));
                     output::print_field("Type", tmpl["template_type"].as_str().unwrap_or("?"));
                 }
-                if arr.is_empty() { output::print_info("No templates found."); }
+                if arr.is_empty() {
+                    output::print_info("No templates found.");
+                }
             }
             Err(e) => output::print_error(&format!("Search failed: {}", e)),
         }
@@ -319,11 +334,18 @@ impl DownloadTemplateCmd {
         output::print_header("Download Agent Template");
         let spinner = output::create_spinner("Downloading...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_downloadAgentTemplate", serde_json::json!([{ "template_id": self.template_id }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_downloadAgentTemplate",
+                serde_json::json!([{ "template_id": self.template_id }]),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Template downloaded!");
         output::print_field("Template ID", &self.template_id);
-        if let Some(v) = result.get("status").and_then(|v| v.as_str()) { output::print_field("Status", v); }
+        if let Some(v) = result.get("status").and_then(|v| v.as_str()) {
+            output::print_field("Status", v);
+        }
         Ok(())
     }
 }
@@ -342,12 +364,38 @@ impl TemplateStatsCmd {
         output::print_header("Agent Template Statistics");
         let spinner = output::create_spinner("Fetching stats...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_getAgentTemplateStats", serde_json::json!([{ "template_id": self.template_id }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getAgentTemplateStats",
+                serde_json::json!([{ "template_id": self.template_id }]),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_field("Template ID", &self.template_id);
-        output::print_field("Downloads", &result.get("download_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Rating", &result.get("rating").and_then(|v| v.as_u64()).map(|r| format!("{}/100", r)).unwrap_or_else(|| "N/A".to_string()));
-        output::print_field("Active Instances", &result.get("active_instances").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
+        output::print_field(
+            "Downloads",
+            &result
+                .get("download_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Rating",
+            &result
+                .get("rating")
+                .and_then(|v| v.as_u64())
+                .map(|r| format!("{}/100", r))
+                .unwrap_or_else(|| "N/A".to_string()),
+        );
+        output::print_field(
+            "Active Instances",
+            &result
+                .get("active_instances")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
         Ok(())
     }
 }
@@ -371,10 +419,18 @@ impl RateTemplateCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header("Rate Agent Template");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let _result: serde_json::Value = rpc.call("tenzro_rateAgentTemplate", serde_json::json!([{
-            "template_id": self.template_id, "rating": self.rating, "comment": self.comment,
-        }])).await?;
-        output::print_success(&format!("Rated template {} with {}/100", self.template_id, self.rating));
+        let _result: serde_json::Value = rpc
+            .call(
+                "tenzro_rateAgentTemplate",
+                serde_json::json!([{
+                    "template_id": self.template_id, "rating": self.rating, "comment": self.comment,
+                }]),
+            )
+            .await?;
+        output::print_success(&format!(
+            "Rated template {} with {}/100",
+            self.template_id, self.rating
+        ));
         Ok(())
     }
 }
@@ -403,13 +459,19 @@ impl UpdateTemplateCmd {
         let spinner = output::create_spinner("Updating...");
         let rpc = rpc::RpcClient::new(&self.rpc);
         let mut params = serde_json::json!({ "template_id": self.template_id });
-        if let Some(ref d) = self.description { params["description"] = serde_json::json!(d); }
-        if let Some(ref s) = self.system_prompt { params["system_prompt"] = serde_json::json!(s); }
+        if let Some(ref d) = self.description {
+            params["description"] = serde_json::json!(d);
+        }
+        if let Some(ref s) = self.system_prompt {
+            params["system_prompt"] = serde_json::json!(s);
+        }
         if let Some(ref t) = self.tags {
             let tags: Vec<&str> = t.split(',').map(|s| s.trim()).collect();
             params["tags"] = serde_json::json!(tags);
         }
-        let _result: serde_json::Value = rpc.call("tenzro_updateAgentTemplate", serde_json::json!([params])).await?;
+        let _result: serde_json::Value = rpc
+            .call("tenzro_updateAgentTemplate", serde_json::json!([params]))
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Template updated!");
         Ok(())
@@ -464,8 +526,9 @@ impl RunTemplateCmd {
             params["payer_wallet"] = serde_json::json!(w);
         }
 
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_runAgentTemplate", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_runAgentTemplate", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -481,10 +544,13 @@ impl RunTemplateCmd {
                 if let Some(v) = report.get("steps_failed").and_then(|v| v.as_u64()) {
                     output::print_field("Steps Failed", &v.to_string());
                 }
-                if let Some(v) = report.get("steps_skipped_by_dry_run").and_then(|v| v.as_u64())
-                    && v > 0 {
-                        output::print_field("Steps Skipped (dry-run)", &v.to_string());
-                    }
+                if let Some(v) = report
+                    .get("steps_skipped_by_dry_run")
+                    .and_then(|v| v.as_u64())
+                    && v > 0
+                {
+                    output::print_field("Steps Skipped (dry-run)", &v.to_string());
+                }
                 if let Some(v) = report.get("fee_paid").and_then(|v| v.as_str()) {
                     output::print_field("Fee Paid", &format!("{} base units", v));
                 }

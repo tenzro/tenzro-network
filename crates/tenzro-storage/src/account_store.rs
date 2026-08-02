@@ -3,7 +3,7 @@
 //! This module provides storage and retrieval of account state data.
 
 use crate::error::{Result, StorageError};
-use crate::kv::{KvStore, CF_ACCOUNTS};
+use crate::kv::{CF_ACCOUNTS, KvStore};
 use crate::traits::AccountStore;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -62,7 +62,8 @@ impl<K: KvStore + 'static> AccountStore for AccountStoreImpl<K> {
         // Also update balance and nonce indexes
         let balance_key = Self::balance_key(&account.address);
         let balance_data = bincode::serialize(&account.balance)?;
-        self.kv_store.put(CF_ACCOUNTS, &balance_key, &balance_data)?;
+        self.kv_store
+            .put(CF_ACCOUNTS, &balance_key, &balance_data)?;
 
         let nonce_key = Self::nonce_key(&account.address);
         let nonce_data = bincode::serialize(&account.nonce.0)?;
@@ -222,14 +223,8 @@ mod tests {
         account_store.put_account(&account1).await.unwrap();
         account_store.put_account(&account2).await.unwrap();
 
-        assert_eq!(
-            account_store.get_balance(&addr1).await.unwrap(),
-            1000
-        );
-        assert_eq!(
-            account_store.get_balance(&addr2).await.unwrap(),
-            2000
-        );
+        assert_eq!(account_store.get_balance(&addr1).await.unwrap(), 1000);
+        assert_eq!(account_store.get_balance(&addr2).await.unwrap(), 2000);
 
         assert_eq!(
             account_store.get_nonce(&addr1).await.unwrap(),

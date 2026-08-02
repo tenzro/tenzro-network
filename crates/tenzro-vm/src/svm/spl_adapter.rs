@@ -22,9 +22,9 @@
 //! | GetBalance | Query account balance |
 
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_token::{TnzoToken, native_to_spl, spl_to_native, SPL_DECIMALS};
+use tenzro_token::{SPL_DECIMALS, TnzoToken, native_to_spl, spl_to_native};
 use tenzro_types::primitives::Address;
 use tracing::debug;
 
@@ -385,9 +385,7 @@ mod tests {
         let owner = [1u8; 32];
 
         let instruction = vec![SplInstruction::GetBalance as u8];
-        let result = adapter
-            .process_instruction(&instruction, &[owner])
-            .unwrap();
+        let result = adapter.process_instruction(&instruction, &[owner]).unwrap();
 
         let balance = u64::from_le_bytes(result[..8].try_into().unwrap());
         assert_eq!(balance, 1_000_000_000_000u64);

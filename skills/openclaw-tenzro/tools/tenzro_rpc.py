@@ -238,7 +238,7 @@ Usage:
 
 import json
 import sys
-from typing import Any, List, Optional
+from typing import Any
 
 try:
     import requests
@@ -504,7 +504,7 @@ def get_balance(address: str) -> dict:
 def send_transaction(from_addr: str, to_addr: str, value: int,
                      gas_limit: int = 21000,
                      gas_price: int = 1_000_000_000,
-                     approval_id: str = None) -> dict:
+                     approval_id: str | None = None) -> dict:
     """Send a TNZO transfer transaction via ambient OAuth/DPoP auth.
 
     The server looks up the wallet bound to the bearer DID (set
@@ -545,8 +545,8 @@ def send_transaction(from_addr: str, to_addr: str, value: int,
 def sign_transaction(from_addr: str, to_addr: str, value: int,
                      gas_limit: int = 21000,
                      gas_price: int = 1_000_000_000,
-                     nonce: int = None,
-                     chain_id: int = None) -> dict:
+                     nonce: int | None = None,
+                     chain_id: int | None = None) -> dict:
     """Sign a transaction server-side without submitting it.
 
     Uses ambient OAuth/DPoP auth — the bearer JWT identifies which wallet
@@ -603,8 +603,8 @@ def send_self_custody_transaction(from_addr: str, to_addr: str, value: int,
                                   timestamp: int,
                                   gas_limit: int = 21000,
                                   gas_price: int = 1_000_000_000,
-                                  nonce: int = None,
-                                  chain_id: int = None) -> dict:
+                                  nonce: int | None = None,
+                                  chain_id: int | None = None) -> dict:
     """Submit a pre-signed self-custody TNZO transfer via eth_sendRawTransaction.
 
     A self-custody runner holds its Ed25519 + ML-DSA-65 keypair locally (in a
@@ -733,15 +733,47 @@ def node_info() -> dict:
     return _rpc("tenzro_nodeInfo")
 
 
+def node_did_document() -> dict:
+    """Resolve this node's DID Document — every way of reaching it.
+
+    A node is addressed five ways (TDIP DID, Ed25519 public key, iroh
+    EndpointId, libp2p PeerId, Pkarr record) plus its JSON-RPC / MCP / A2A /
+    web service URLs. Resolving the DID yields all of them, so a caller
+    holding any one identifier can get the rest.
+
+    Also served at ``/.well-known/did.json`` for generic DID resolvers.
+    """
+    return _rpc("tenzro_nodeDidDocument")
+
+
+def get_settlement_preference(payee_did: str) -> dict:
+    """What asset this payee is paid in.
+
+    Defaults to keeping whatever asset arrived. A payee who declared TNZO is
+    paid TNZO or the payment is refused — crediting the inbound stablecoin
+    instead would hand them an asset they did not choose.
+    """
+    return _rpc("tenzro_getSettlementPreference", {"payee_did": payee_did})
+
+
+def service_key_status() -> dict:
+    """Whether this node's operator requires a service key to reach it.
+
+    The gate covers JSON-RPC, MCP, A2A and the web API at once. It never
+    covers consensus or P2P, and never gates /health or /ready.
+    """
+    return _rpc("tenzro_serviceKeyStatus")
+
+
 # ── Identity ──────────────────────────────────────────────────────
 
 
-def register_identity(display_name: str = None,
+def register_identity(display_name: str | None = None,
                       identity_type: str = "human",
-                      controller_did: str = None,
-                      capabilities: list = None,
-                      delegation_scope: dict = None,
-                      public_key: str = None,
+                      controller_did: str | None = None,
+                      capabilities: list | None = None,
+                      delegation_scope: dict | None = None,
+                      public_key: str | None = None,
                       key_type: str = "ed25519") -> dict:
     """Register a TDIP identity. Returns the new DID and (when keypair is
     auto-generated) the private key.
@@ -778,25 +810,8 @@ def register_identity(display_name: str = None,
     return _rpc("tenzro_registerIdentity", params)
 
 
-def register_machine_identity(controller_did: str,
-                              capabilities: list,
-                              delegation_scope: dict = None,
-                              public_key: str = None,
-                              key_type: str = "ed25519") -> dict:
-    """Register a machine identity bound to a human controller. Convenience
-    wrapper around register_identity(identity_type='machine')."""
-    return register_identity(
-        identity_type="machine",
-        controller_did=controller_did,
-        capabilities=capabilities,
-        delegation_scope=delegation_scope,
-        public_key=public_key,
-        key_type=key_type,
-    )
-
-
 def register_autonomous_identity(capabilities: list,
-                                 public_key: str = None,
+                                 public_key: str | None = None,
                                  key_type: str = "ed25519") -> dict:
     """Register an autonomous machine identity (no human controller).
     Convenience wrapper around register_identity(identity_type='autonomous')."""
@@ -874,7 +889,7 @@ def verify_zk_proof(proof_bytes: str, public_inputs: list,
 
 
 def verify_tee_attestation(vendor: str, report_data: str,
-                           measurement: str = None) -> dict:
+                           measurement: str | None = None) -> dict:
     """Verify a TEE attestation via Web API."""
     body = {"vendor": vendor, "report_data": report_data}
     if measurement:
@@ -899,8 +914,8 @@ def verify_tee_attestation(vendor: str, report_data: str,
 # docs/api-keys.md.
 
 
-def create_api_key(label: str, scopes: list = None,
-                   subject: str = None,
+def create_api_key(label: str, scopes: list | None = None,
+                   subject: str | None = None,
                    key_class: str = "subject") -> dict:
     """Mint a new API key on this node. Operator-only (admin-token gated).
 
@@ -997,7 +1012,7 @@ def token_balance(address: str) -> dict:
     return _rpc("tenzro_tokenBalance", {"address": address})
 
 
-def get_price(symbol: str = "", symbols: list = None) -> dict:
+def get_price(symbol: str = "", symbols: list | None = None) -> dict:
     """Read one or more asset prices from the node's price oracle.
 
     Pass a single ``symbol`` (e.g. "ETH") or a ``symbols`` list.
@@ -1044,8 +1059,8 @@ def create_token(name: str, symbol: str, creator: str,
     return _rpc("tenzro_createToken", params)
 
 
-def get_token_info(symbol: str = None, evm_address: str = None,
-                   token_id: str = None) -> dict:
+def get_token_info(symbol: str | None = None, evm_address: str | None = None,
+                   token_id: str | None = None) -> dict:
     """Look up a token by symbol, EVM address, or token ID.
 
     Provide exactly one of: symbol, evm_address, or token_id.
@@ -1062,7 +1077,7 @@ def get_token_info(symbol: str = None, evm_address: str = None,
     return _rpc("tenzro_getToken", params)
 
 
-def list_tokens(vm_type: str = None, limit: int = 50) -> dict:
+def list_tokens(vm_type: str | None = None, limit: int = 50) -> dict:
     """List registered tokens in the unified token registry.
 
     vm_type: optional filter — evm | svm | daml | native
@@ -1104,7 +1119,7 @@ def cross_vm_transfer(token: str, amount: str, from_vm: str, to_vm: str,
 
 
 def deploy_contract(vm_type: str, bytecode: str, deployer: str,
-                    constructor_args: str = None,
+                    constructor_args: str | None = None,
                     gas_limit: int = 3_000_000) -> dict:
     """Deploy smart contract bytecode to EVM, SVM, or DAML.
 
@@ -1149,10 +1164,10 @@ def list_model_endpoints() -> dict:
     return _rpc("tenzro_listModelEndpoints")
 
 
-def _intent_params(use_case: str, budget: int = None, optimize: float = None,
-                   quality_floor: str = None, est_input_tokens: int = None,
-                   est_output_tokens: int = None, payer_did: str = None,
-                   payer_address: str = None) -> dict:
+def _intent_params(use_case: str, budget: int | None = None, optimize: float | None = None,
+                   quality_floor: str | None = None, est_input_tokens: int | None = None,
+                   est_output_tokens: int | None = None, payer_did: str | None = None,
+                   payer_address: str | None = None) -> dict:
     """Assemble the intent fields shared by route_intent and chat_by_intent."""
     params = {"use_case": use_case}
     for key, value in (
@@ -1169,10 +1184,10 @@ def _intent_params(use_case: str, budget: int = None, optimize: float = None,
     return params
 
 
-def route_intent(use_case: str, budget: int = None, optimize: float = None,
-                 quality_floor: str = None, est_input_tokens: int = None,
-                 est_output_tokens: int = None, payer_did: str = None,
-                 payer_address: str = None, prompt: str = None) -> dict:
+def route_intent(use_case: str, budget: int | None = None, optimize: float | None = None,
+                 quality_floor: str | None = None, est_input_tokens: int | None = None,
+                 est_output_tokens: int | None = None, payer_did: str | None = None,
+                 payer_address: str | None = None, prompt: str | None = None) -> dict:
     """Select the best model for an intent without naming one.
 
     use_case: chat | code | reasoning | research | summarize | extract | embed
@@ -1199,11 +1214,11 @@ def route_intent(use_case: str, budget: int = None, optimize: float = None,
     return _rpc("tenzro_routeIntent", params)
 
 
-def chat_by_intent(use_case: str, message: str, budget: int = None,
-                   optimize: float = None, quality_floor: str = None,
-                   est_input_tokens: int = None, est_output_tokens: int = None,
-                   payer_did: str = None, payer_address: str = None,
-                   temperature: float = None, max_tokens: int = None) -> dict:
+def chat_by_intent(use_case: str, message: str, budget: int | None = None,
+                   optimize: float | None = None, quality_floor: str | None = None,
+                   est_input_tokens: int | None = None, est_output_tokens: int | None = None,
+                   payer_did: str | None = None, payer_address: str | None = None,
+                   temperature: float | None = None, max_tokens: int | None = None) -> dict:
     """Resolve an intent to a model and run the chat in one call.
 
     Selection walks the cross-model fallback chain, so the intent resolves as
@@ -1242,7 +1257,7 @@ def record_route_outcome(model_id: str, cluster: int, outcome: str) -> dict:
     })
 
 
-def route_difficulty_stats(model_id: str = None) -> dict:
+def route_difficulty_stats(model_id: str | None = None) -> dict:
     """Read the node's difficulty index: cluster count and prompts per cluster.
 
     With `model_id`, also returns that model's per-cluster outcome counters and
@@ -1261,7 +1276,7 @@ def route_difficulty_stats(model_id: str = None) -> dict:
 
 def create_payment_challenge(protocol: str, resource: str, amount: int,
                              asset: str = "TNZO",
-                             recipient: str = None) -> dict:
+                             recipient: str | None = None) -> dict:
     """Create a payment challenge (MPP, x402, or native).
 
     protocol: mpp | x402 | native
@@ -1301,8 +1316,8 @@ def verify_payment(challenge_id: str, protocol: str, payer_did: str,
 
 def set_delegation_scope(machine_did: str, max_transaction_value: int,
                          max_daily_spend: int,
-                         allowed_operations: list = None,
-                         allowed_chains: list = None) -> dict:
+                         allowed_operations: list | None = None,
+                         allowed_chains: list | None = None) -> dict:
     """Set delegation scope for a machine DID.
 
     max_transaction_value, max_daily_spend: amounts in wei (10^-18 TNZO),
@@ -1325,10 +1340,10 @@ def set_delegation_scope(machine_did: str, max_transaction_value: int,
 
 def post_task(title: str, description: str, task_type: str,
               budget_wei: int, poster: str,
-              required_capabilities: list = None,
-              required_model: str = None,
-              preferred_model_id: str = None,
-              deadline: int = None,
+              required_capabilities: list | None = None,
+              required_model: str | None = None,
+              preferred_model_id: str | None = None,
+              deadline: int | None = None,
               input_text: str = "") -> dict:
     """Post a task to the decentralized AI task marketplace.
 
@@ -1357,7 +1372,7 @@ def post_task(title: str, description: str, task_type: str,
     return _rpc("tenzro_postTask", params)
 
 
-def list_tasks(status: str = None, task_type: str = None) -> dict:
+def list_tasks(status: str | None = None, task_type: str | None = None) -> dict:
     """List tasks on the marketplace, optionally filtered."""
     params = {}
     if status:
@@ -1378,8 +1393,8 @@ def cancel_task(task_id: str) -> dict:
 
 
 def quote_task(task_id: str, provider: str, price_wei: int,
-               model_id: str = None, confidence: int = None,
-               estimated_duration_secs: int = None) -> dict:
+               model_id: str | None = None, confidence: int | None = None,
+               estimated_duration_secs: int | None = None) -> dict:
     """Submit a quote for an open task as a provider/agent.
 
     price_wei: amount in wei (10^-18 TNZO), sent as decimal string
@@ -1407,7 +1422,7 @@ def quote_task(task_id: str, provider: str, price_wei: int,
 # ── Agent Template Marketplace ───────────────────────────────────
 
 
-def list_agent_templates(tag: str = None, creator: str = None,
+def list_agent_templates(tag: str | None = None, creator: str | None = None,
                          free_only: bool = False, limit: int = 50) -> dict:
     """List available agent templates.
 
@@ -1429,11 +1444,11 @@ def register_agent_template(name: str, description: str,
                             template_type: str,
                             creator: str,
                             system_prompt: str = "",
-                            tags: list = None,
-                            template_id: str = None,
+                            tags: list | None = None,
+                            template_id: str | None = None,
                             pricing: str = "free",
-                            creator_did: str = None,
-                            creator_wallet: str = None) -> dict:
+                            creator_did: str | None = None,
+                            creator_wallet: str | None = None) -> dict:
     """Register a new agent template on the marketplace.
 
     template_type: autonomous | tool_agent | orchestrator | specialist | multi_modal
@@ -1468,8 +1483,8 @@ def get_agent_template(template_id: str) -> dict:
 
 
 def spawn_agent_from_template(template_id: str, name: str,
-                              capabilities: list = None,
-                              parent_machine_did: str = None) -> dict:
+                              capabilities: list | None = None,
+                              parent_machine_did: str | None = None) -> dict:
     """Spawn a new agent from a marketplace template.
 
     template_id: the template to instantiate
@@ -1493,7 +1508,7 @@ def spawn_agent_from_template(template_id: str, name: str,
 
 
 def rate_agent_template(template_id: str, rating: int,
-                        review: str = None) -> dict:
+                        review: str | None = None) -> dict:
     """Rate an agent template (1-5 stars) with an optional text review.
 
     template_id: the template to rate
@@ -1509,7 +1524,7 @@ def rate_agent_template(template_id: str, rating: int,
     return _rpc("tenzro_rateAgentTemplate", params)
 
 
-def search_agent_templates(query: str, agent_type: str = None,
+def search_agent_templates(query: str, agent_type: str | None = None,
                            limit: int = 20) -> dict:
     """Search agent templates by free-text query.
 
@@ -1551,9 +1566,9 @@ def _skill_bundle(uri: str, sha256: str, size_bytes: int) -> dict:
     }
 
 
-def list_skills(tag: str = None, creator_did: str = None,
-                max_price: int = None, active_only: bool = True,
-                category: str = None, capability: str = None,
+def list_skills(tag: str | None = None, creator_did: str | None = None,
+                max_price: int | None = None, active_only: bool = True,
+                category: str | None = None, capability: str | None = None,
                 bundled_only: bool = False,
                 limit: int = 50, offset: int = 0) -> dict:
     """List skills in the decentralized Skills Registry.
@@ -1587,12 +1602,12 @@ def list_skills(tag: str = None, creator_did: str = None,
 
 def register_skill(name: str, version: str, creator_did: str,
                    description: str, price_per_call: int,
-                   tags: list = None, required_capabilities: list = None,
-                   endpoint: str = None, input_schema: dict = None,
-                   output_schema: dict = None, category: str = None,
-                   creator_wallet: str = None,
-                   bundle_uri: str = None, bundle_sha256: str = None,
-                   bundle_size: int = None) -> dict:
+                   tags: list | None = None, required_capabilities: list | None = None,
+                   endpoint: str | None = None, input_schema: dict | None = None,
+                   output_schema: dict | None = None, category: str | None = None,
+                   creator_wallet: str | None = None,
+                   bundle_uri: str | None = None, bundle_sha256: str | None = None,
+                   bundle_size: int | None = None) -> dict:
     """Register a new skill in the permissionless Skills Registry.
 
     price_per_call: amount in wei (10^-18 TNZO), sent as decimal string
@@ -1628,8 +1643,8 @@ def register_skill(name: str, version: str, creator_did: str,
     return _rpc("tenzro_registerSkill", params)
 
 
-def search_skills(query: str, tag: str = None, max_price: int = None,
-                  category: str = None, capability: str = None,
+def search_skills(query: str, tag: str | None = None, max_price: int | None = None,
+                  category: str | None = None, capability: str | None = None,
                   bundled_only: bool = False, limit: int = 20) -> dict:
     """Search skills by free-text query over name, description and tags.
 
@@ -1652,9 +1667,9 @@ def search_skills(query: str, tag: str = None, max_price: int = None,
     return _rpc("tenzro_searchSkills", params)
 
 
-def use_skill(skill_id: str, input_data: dict = None,
-              expected_version: str = None,
-              expected_sha256: str = None) -> dict:
+def use_skill(skill_id: str, input_data: dict | None = None,
+              expected_version: str | None = None,
+              expected_sha256: str | None = None) -> dict:
     """Invoke a skill by ID with given input payload.
 
     Because the registry is permissionless, pinning is how a caller fixes which
@@ -1690,7 +1705,7 @@ def get_tool_usage(tool_id: str) -> dict:
 
 
 def spawn_agent_with_skill(parent_id: str, name: str, skill_id: str,
-                           capabilities: list = None) -> dict:
+                           capabilities: list | None = None) -> dict:
     """Spawn a new agent pre-configured with a specific skill."""
     params = {
         "parent_id": parent_id,
@@ -1706,9 +1721,9 @@ def spawn_agent_with_skill(parent_id: str, name: str, skill_id: str,
 
 
 def register_agent(name: str, creator: str,
-                   capabilities: list = None,
-                   tenzro_did: str = None,
-                   kind: str = None) -> dict:
+                   capabilities: list | None = None,
+                   tenzro_did: str | None = None,
+                   kind: str | None = None) -> dict:
     """Register a new AI agent with identity and wallet.
 
     Parameters:
@@ -1734,7 +1749,7 @@ def register_agent(name: str, creator: str,
 
 
 def spawn_agent(parent_id: str, name: str,
-                capabilities: list = None) -> dict:
+                capabilities: list | None = None) -> dict:
     """Spawn a sub-agent from a parent agent."""
     params = {
         "parent_id": parent_id,
@@ -1818,9 +1833,9 @@ def bridge_tokens(source_chain: str, dest_chain: str, asset: str,
 
 def stake_tokens(amount_wei: int,
                  provider_type: str = "validator",
-                 accelerators: Optional[List[str]] = None,
-                 terabytes: Optional[int] = None,
-                 cloud_tier: Optional[str] = None) -> dict:
+                 accelerators: list[str] | None = None,
+                 terabytes: int | None = None,
+                 cloud_tier: str | None = None) -> dict:
     """Stake TNZO tokens.
 
     amount_wei: amount in wei (10^-18 TNZO). Sent as decimal string
@@ -1851,9 +1866,9 @@ def unstake_tokens(amount_wei: int) -> dict:
 
 
 def register_provider(provider_type: str,
-                      accelerators: Optional[List[str]] = None,
-                      terabytes: Optional[int] = None,
-                      cloud_tier: Optional[str] = None) -> dict:
+                      accelerators: list[str] | None = None,
+                      terabytes: int | None = None,
+                      cloud_tier: str | None = None) -> dict:
     """Register for a role on the network.
 
     provider_type: validator | rpc | tee | model | compute | storage |
@@ -2012,7 +2027,7 @@ def list_nft_collections(limit: int = 50) -> dict:
 
 
 def bridge_quote(from_chain: str, to_chain: str, token: str,
-                 amount: int, protocol: str = None) -> dict:
+                 amount: int, protocol: str | None = None) -> dict:
     """Get a fee quote for bridging tokens between chains.
 
     from_chain: source chain (tenzro, ethereum, solana, base, etc.)
@@ -2034,7 +2049,7 @@ def bridge_quote(from_chain: str, to_chain: str, token: str,
 
 def bridge_execute(from_chain: str, to_chain: str, token: str,
                    amount: int, sender: str, recipient: str,
-                   protocol: str = None) -> dict:
+                   protocol: str | None = None) -> dict:
     """Execute a cross-chain token bridge transfer.
 
     from_chain: source chain
@@ -2058,7 +2073,7 @@ def bridge_execute(from_chain: str, to_chain: str, token: str,
     return _rpc("tenzro_bridgeTokens", params)
 
 
-def bridge_status(transfer_id: str, protocol: str = None) -> dict:
+def bridge_status(transfer_id: str, protocol: str | None = None) -> dict:
     """Check the status of a cross-chain bridge transfer.
 
     transfer_id: the bridge transfer ID or tx hash
@@ -2145,7 +2160,7 @@ def debridge_same_chain_swap(chain_id, token_in, token_out, amount):
 
 
 def crosschain_mint(bridge: str, adapter: str, source_chain: str,
-                    payload: str, to: str = None, amount: int = None) -> dict:
+                    payload: str, to: str | None = None, amount: int | None = None) -> dict:
     """Mint tokens via an authorized crosschain bridge (ERC-7802).
 
     The node dispatches the payload through its bridge router for quorum
@@ -2190,8 +2205,8 @@ def crosschain_burn(bridge: str, from_addr: str, amount: int,
 
 
 def authorize_bridge(bridge: str, name: str,
-                     daily_mint_limit: int = None,
-                     daily_burn_limit: int = None) -> dict:
+                     daily_mint_limit: int | None = None,
+                     daily_burn_limit: int | None = None) -> dict:
     """Authorize a bridge for crosschain mint/burn operations (ERC-7802).
 
     bridge: bridge contract address to authorize
@@ -2320,8 +2335,8 @@ def check_compliance(token_id: str, from_addr: str, to: str,
 def register_compliance(token_id: str, require_kyc: bool = False,
                         min_kyc_tier: int = 1,
                         require_accreditation: bool = False,
-                        max_holders: int = None,
-                        max_transfer_amount: int = None) -> dict:
+                        max_holders: int | None = None,
+                        max_transfer_amount: int | None = None) -> dict:
     """Register compliance rules for a token (ERC-3643).
 
     token_id: token to attach rules to
@@ -2447,7 +2462,7 @@ def list_trusted_issuers() -> dict:
 # ── Events & Webhooks ────────────────────────────────────────────
 
 
-def get_events(filter: dict = None, from_sequence: int = None,
+def get_events(filter: dict | None = None, from_sequence: int | None = None,
                limit: int = 100) -> dict:
     """Get events from the network event stream.
 
@@ -2470,9 +2485,9 @@ def get_event_status() -> dict:
     return _rpc("tenzro_eventStatus")
 
 
-def register_webhook(url: str,
-                     event_types: list = None,
-                     addresses: list = None,
+def register_webhook(url: str, owner_did: str, did_envelope: str,
+                     event_types: list | None = None,
+                     addresses: list | None = None,
                      secret: str = "") -> dict:
     """Register a webhook for real-time event delivery.
 
@@ -2489,7 +2504,7 @@ def register_webhook(url: str,
     secret: optional HMAC-SHA256 secret (≥16 characters when provided)
         for verifying webhook payload signatures
     """
-    params = {"url": url}
+    params = {"url": url, "owner_did": owner_did, "did_envelope": did_envelope}
     if event_types:
         params["event_types"] = event_types
     if addresses:
@@ -2499,17 +2514,35 @@ def register_webhook(url: str,
     return _rpc("tenzro_registerWebhook", params)
 
 
-def list_webhooks() -> dict:
-    """List all registered webhooks."""
-    return _rpc("tenzro_listWebhooks")
+def list_webhooks(owner_did: str, did_envelope: str) -> dict:
+    """List the webhooks registered under one owner DID.
+
+    Scoped to one owner rather than the whole node: a webhook row carries
+    its delivery URL and the addresses its owner watches.
+
+    owner_did: the DID whose webhooks to list
+    did_envelope: hex envelope proving control of owner_did, bound to
+        method `tenzro_listWebhooks` with the DID string as the params hash
+    """
+    return _rpc("tenzro_listWebhooks", {
+        "owner_did": owner_did,
+        "did_envelope": did_envelope,
+    })
 
 
-def delete_webhook(webhook_id: str) -> dict:
+def delete_webhook(webhook_id: str, did_envelope: str) -> dict:
     """Delete a registered webhook.
 
     webhook_id: the webhook ID to remove
+    did_envelope: hex envelope proving control of the owner_did recorded at
+        registration, bound to method `tenzro_deleteWebhook` with the webhook
+        id as the params hash. A webhook id comes back from every list call,
+        so it identifies the row and authorizes nothing.
     """
-    return _rpc("tenzro_deleteWebhook", {"webhook_id": webhook_id})
+    return _rpc("tenzro_deleteWebhook", {
+        "webhook_id": webhook_id,
+        "did_envelope": did_envelope,
+    })
 
 
 # ── SLA Fault Detector ──────────────────────────────────────────
@@ -2603,33 +2636,12 @@ def get_snapshot_chunk(height: int, chunk_index: int) -> dict:
     })
 
 
-def offer_snapshot(manifest: dict) -> dict:
-    """Register an inbound manifest from a peer.
-
-    IMPORTANT: The caller MUST verify `manifest.state_root_hex` against
-    a trusted QC at the same height before invoking this. This RPC just
-    registers the offer and provisions the spool directory; it does not
-    itself validate the manifest against chain state.
-
-    Returns: { "accepted": true, "height", "num_chunks" }
-    """
-    return _rpc("tenzro_offerSnapshot", manifest)
-
-
-def apply_snapshot_chunk(height: int, chunk_index: int,
-                         data_b64: str) -> dict:
-    """Write one inbound chunk. The chunk's SHA-256 is verified against
-    `manifest.chunk_hashes_hex[chunk_index]` before any disk write. On
-    the final chunk, all chunks are decoded and atomically committed
-    via `write_batch_sync`; `complete` will be `true` on that call.
-
-    Returns: { "complete": bool, "height", "chunk_index" }
-    """
-    return _rpc("tenzro_applySnapshotChunk", {
-        "height": int(height),
-        "chunk_index": int(chunk_index),
-        "data_b64": data_b64,
-    })
+# `tenzro_offerSnapshot` and `tenzro_applySnapshotChunk` are gone from the
+# node's JSON-RPC surface. The manifest attested only to its own chunks and
+# nothing bound it to the chain, so reachable over RPC they were arbitrary
+# state replacement by an unauthenticated caller. The inbound half of
+# state-sync is driven in-process by the node's bootstrap path; the read half
+# above is what a syncing node calls on a serving one.
 
 
 # ── EIP-7702 (Set EOA Account Code) ─────────────────────────────
@@ -2692,8 +2704,8 @@ def permit2_domain_separator(chain_id: int) -> dict:
 
 def permit2_digest(chain_id: int, owner: str, token: str, amount: str,
                    spender: str, nonce: str, deadline: int,
-                   witness: str = None,
-                   witness_type_string: str = None) -> dict:
+                   witness: str | None = None,
+                   witness_type_string: str | None = None) -> dict:
     """Compute the EIP-712 digest a user signs for a Permit2
     SignatureTransfer. Optional witness binds the permit to a 32-byte
     witness (used by ERC-7683 origin opens)."""
@@ -2716,8 +2728,8 @@ def permit2_digest(chain_id: int, owner: str, token: str, amount: str,
 def permit2_verify_and_consume(chain_id: int, owner: str, token: str,
                                amount: str, spender: str, nonce: str,
                                deadline: int, signature: str,
-                               witness: str = None,
-                               witness_type_string: str = None) -> dict:
+                               witness: str | None = None,
+                               witness_type_string: str | None = None) -> dict:
     """Atomically verify a signed Permit2 message and consume its
     (owner, nonce) bitmap slot."""
     params = {
@@ -2748,10 +2760,10 @@ def permit2_nonce_used(owner: str, nonce: str) -> dict:
 def set_secure_mint_policy(token: str, asset_id: str, reserve: str,
                            por_feed_id: str, attester_did: str,
                            attestation_hash: str, attested_at: int,
-                           ttl_secs: int, circulating: str = None,
-                           heartbeat_secs: int = None,
-                           mint_window_cap: str = None,
-                           mint_window_secs: int = None,
+                           ttl_secs: int, circulating: str | None = None,
+                           heartbeat_secs: int | None = None,
+                           mint_window_cap: str | None = None,
+                           mint_window_secs: int | None = None,
                            paused: bool = False) -> dict:
     """Set or update a Secure-Mint policy for a tokenized RWA. Enforces
     per-token 1:1 reserve attestation `circulating + amount ≤ reserve`.
@@ -2868,8 +2880,8 @@ def hyperlane_list_chains() -> dict:
 
 def hyperlane_quote_dispatch(origin_domain: int, destination_domain: int,
                              recipient: str, body_hex: str,
-                             sender: str = None,
-                             interchain_gas_payment: str = None) -> dict:
+                             sender: str | None = None,
+                             interchain_gas_payment: str | None = None) -> dict:
     """Quote the interchain gas payment for a dispatch."""
     params = {
         "origin_domain": int(origin_domain),
@@ -2886,8 +2898,8 @@ def hyperlane_quote_dispatch(origin_domain: int, destination_domain: int,
 
 def hyperlane_dispatch(origin_domain: int, destination_domain: int,
                        recipient: str, body_hex: str,
-                       sender: str = None,
-                       interchain_gas_payment: str = None) -> dict:
+                       sender: str | None = None,
+                       interchain_gas_payment: str | None = None) -> dict:
     """Dispatch a Hyperlane V3 message through the canonical Mailbox."""
     params = {
         "origin_domain": int(origin_domain),
@@ -2917,8 +2929,8 @@ def axelar_list_chains() -> dict:
 
 def axelar_call_contract(source_chain: str, destination_chain: str,
                          destination_address: str, payload_hex: str,
-                         gas_token: str = None,
-                         gas_amount: str = None) -> dict:
+                         gas_token: str | None = None,
+                         gas_amount: str | None = None) -> dict:
     """Dispatch an Axelar `call_contract` GMP message."""
     params = {
         "source_chain": source_chain,
@@ -3011,8 +3023,8 @@ def caip10(address: str) -> dict:
     return _rpc("tenzro_caip10", {"address": address})
 
 
-def caip19(kind: str, token_id: str = None, collection_id: str = None,
-           nft_token_id: str = None) -> dict:
+def caip19(kind: str, token_id: str | None = None, collection_id: str | None = None,
+           nft_token_id: str | None = None) -> dict:
     """Get the CAIP-19 asset id.
     kind: 'slip44' (native TNZO, SLIP-44 coin index 1414421071),
           'token' (Tenzro token registry id),
@@ -3032,9 +3044,9 @@ def caip19(kind: str, token_id: str = None, collection_id: str = None,
 
 
 def register_tool(name: str, description: str, endpoint: str,
-                  tool_type: str = "mcp", capabilities: list = None,
+                  tool_type: str = "mcp", capabilities: list | None = None,
                   category: str = "general", version: str = "1.0.0",
-                  creator_did: str = None) -> dict:
+                  creator_did: str | None = None) -> dict:
     """Register a new tool (MCP server endpoint) in the Tools Registry.
 
     name: tool name
@@ -3061,8 +3073,8 @@ def register_tool(name: str, description: str, endpoint: str,
     return _rpc("tenzro_registerTool", [params])
 
 
-def list_tools(tool_type: str = None, category: str = None,
-               status: str = None, limit: int = 20) -> dict:
+def list_tools(tool_type: str | None = None, category: str | None = None,
+               status: str | None = None, limit: int = 20) -> dict:
     """List registered tools (MCP servers) on the network.
 
     tool_type: optional filter — mcp | api | native
@@ -3090,8 +3102,8 @@ def search_tools(query: str, limit: int = 10) -> dict:
     return _rpc("tenzro_searchTools", [{"query": query, "limit": limit}])
 
 
-def use_tool(tool_id: str, params: dict = None,
-             tool_name: str = None) -> dict:
+def use_tool(tool_id: str, params: dict | None = None,
+             tool_name: str | None = None) -> dict:
     """Invoke a tool via its MCP endpoint.
 
     tool_id: tool ID to invoke
@@ -3107,10 +3119,10 @@ def use_tool(tool_id: str, params: dict = None,
     return _rpc("tenzro_useTool", [call_params])
 
 
-def update_tool(tool_id: str, description: str = None,
-                endpoint: str = None, version: str = None,
-                capabilities: list = None,
-                status: str = None) -> dict:
+def update_tool(tool_id: str, description: str | None = None,
+                endpoint: str | None = None, version: str | None = None,
+                capabilities: list | None = None,
+                status: str | None = None) -> dict:
     """Update an existing tool registration.
 
     tool_id: tool to update
@@ -3138,14 +3150,14 @@ def get_skill(skill_id: str) -> dict:
     return _rpc("tenzro_getSkill", [{"skill_id": skill_id}])
 
 
-def update_skill(skill_id: str, description: str = None,
-                 version: str = None, price_per_call: int = None,
-                 tags: list = None, endpoint: str = None,
-                 status: str = None, category: str = None,
-                 creator_wallet: str = None,
-                 required_capabilities: list = None,
-                 bundle_uri: str = None, bundle_sha256: str = None,
-                 bundle_size: int = None,
+def update_skill(skill_id: str, description: str | None = None,
+                 version: str | None = None, price_per_call: int | None = None,
+                 tags: list | None = None, endpoint: str | None = None,
+                 status: str | None = None, category: str | None = None,
+                 creator_wallet: str | None = None,
+                 required_capabilities: list | None = None,
+                 bundle_uri: str | None = None, bundle_sha256: str | None = None,
+                 bundle_size: int | None = None,
                  withdraw_bundle: bool = False) -> dict:
     """Update an existing skill registration.
 
@@ -3185,7 +3197,7 @@ def update_skill(skill_id: str, description: str = None,
 # ── Task Marketplace (Extended) ─────────────────────────────────
 
 
-def assign_task(task_id: str, provider: str, quoted_price_wei: int = None) -> dict:
+def assign_task(task_id: str, provider: str, quoted_price_wei: int | None = None) -> dict:
     """Assign a task to a specific provider/agent.
 
     task_id: the task to assign
@@ -3211,8 +3223,8 @@ def complete_task(task_id: str, output: str) -> dict:
     return _rpc("tenzro_completeTask", [{"task_id": task_id, "output": output}])
 
 
-def update_task(task_id: str, status: str = None,
-                description: str = None, budget_wei: int = None) -> dict:
+def update_task(task_id: str, status: str | None = None,
+                description: str | None = None, budget_wei: int | None = None) -> dict:
     """Update an existing task.
 
     task_id: task to update
@@ -3231,10 +3243,10 @@ def update_task(task_id: str, status: str = None,
 # ── Agent Template Marketplace (Extended) ───────────────────────
 
 
-def update_agent_template(template_id: str, description: str = None,
-                          system_prompt: str = None,
-                          capabilities: list = None,
-                          status: str = None) -> dict:
+def update_agent_template(template_id: str, description: str | None = None,
+                          system_prompt: str | None = None,
+                          capabilities: list | None = None,
+                          status: str | None = None) -> dict:
     """Update an existing agent template.
 
     template_id: template to update
@@ -3276,7 +3288,7 @@ def download_agent_template(template_id: str) -> dict:
 
 
 def spawn_agent_template(template_id: str, display_name: str,
-                         parent_machine_did: str = None) -> dict:
+                         parent_machine_did: str | None = None) -> dict:
     """Spawn a new agent from a template with identity and wallet provisioning.
 
     template_id: the template to instantiate
@@ -3319,7 +3331,7 @@ def send_agent_message(from_id: str, to_id: str, message: str) -> dict:
 
 
 def delegate_task(agent_id: str, task: str,
-                  target_agent: str = None) -> dict:
+                  target_agent: str | None = None) -> dict:
     """Delegate a task to an agent or sub-agent.
 
     agent_id: the agent doing the delegation
@@ -3332,7 +3344,7 @@ def delegate_task(agent_id: str, task: str,
     return _rpc("tenzro_delegateTask", params)
 
 
-def discover_models(query: str = None, category: str = None) -> dict:
+def discover_models(query: str | None = None, category: str | None = None) -> dict:
     """Discover AI models available on the network.
 
     query: optional search query
@@ -3346,7 +3358,7 @@ def discover_models(query: str = None, category: str = None) -> dict:
     return _rpc("tenzro_discoverModels", params)
 
 
-def discover_agents(capability: str = None) -> dict:
+def discover_agents(capability: str | None = None) -> dict:
     """Discover agents available on the network.
 
     capability: optional capability filter
@@ -3489,8 +3501,8 @@ def import_identity(did: str, private_key: str,
 
 
 def register_machine_identity(controller_did: str,
-                               capabilities: list = None,
-                               display_name: str = None) -> dict:
+                               capabilities: list | None = None,
+                               display_name: str | None = None) -> dict:
     """Register a machine identity controlled by a human DID.
 
     controller_did: the human DID that controls this machine
@@ -3526,8 +3538,8 @@ def add_service(did: str, service_type: str, endpoint: str,
 
 
 def add_credential(did: str, credential_type: str, issuer: str,
-                   envelope: str, claims: dict = None,
-                   proof_value: str = None, proof_type: str = None) -> dict:
+                   envelope: str, claims: dict | None = None,
+                   proof_value: str | None = None, proof_type: str | None = None) -> dict:
     """Add a verifiable credential to an identity.
 
     did: the DID to add the credential to
@@ -3555,7 +3567,7 @@ def add_credential(did: str, credential_type: str, issuer: str,
     return _rpc("tenzro_addCredential", [params])
 
 
-def list_identities(identity_type: str = None) -> dict:
+def list_identities(identity_type: str | None = None) -> dict:
     """List all registered identities on the node.
 
     identity_type: optional filter — human | machine | all
@@ -3569,8 +3581,8 @@ def list_identities(identity_type: str = None) -> dict:
 # ── Payments (Extended) ─────────────────────────────────────────
 
 
-def pay_mpp(url: str, payer_did: str = None, wallet: str = None,
-            max_amount: int = None) -> dict:
+def pay_mpp(url: str, payer_did: str | None = None, wallet: str | None = None,
+            max_amount: int | None = None) -> dict:
     """Pay for a resource using the MPP (Machine Payments Protocol).
 
     url: resource URL to pay for
@@ -3588,8 +3600,8 @@ def pay_mpp(url: str, payer_did: str = None, wallet: str = None,
     return _rpc("tenzro_payMpp", [params])
 
 
-def pay_x402(url: str, payer_did: str = None, wallet: str = None,
-             max_amount: int = None) -> dict:
+def pay_x402(url: str, payer_did: str | None = None, wallet: str | None = None,
+             max_amount: int | None = None) -> dict:
     """Pay for a resource using x402 (HTTP 402 Payment Protocol).
 
     url: resource URL to pay for
@@ -3641,9 +3653,9 @@ def x402_register_resource(seller_did: str, resource: str, pay_to: str,
                            max_amount_required: str,
                            scheme: str = "tenzro-hybrid",
                            network: str = "tenzro", asset: str = "TNZO",
-                           description: str = None, mime_type: str = None,
-                           max_timeout_seconds: int = None,
-                           tags: list = None, extra: dict = None) -> dict:
+                           description: str | None = None, mime_type: str | None = None,
+                           max_timeout_seconds: int | None = None,
+                           tags: list | None = None, extra: dict | None = None) -> dict:
     """Register an HTTP-402 monetized resource on the x402 Bazaar.
 
     scheme: tenzro-hybrid | exact-eip3009 | permit2 | erc7710
@@ -3671,9 +3683,9 @@ def x402_register_resource(seller_did: str, resource: str, pay_to: str,
     return _rpc("tenzro_x402RegisterResource", params)
 
 
-def x402_discover_resources(scheme: str = None, network: str = None,
-                            asset: str = None, seller_did: str = None,
-                            tags: list = None, limit: int = None) -> dict:
+def x402_discover_resources(scheme: str | None = None, network: str | None = None,
+                            asset: str | None = None, seller_did: str | None = None,
+                            tags: list | None = None, limit: int | None = None) -> dict:
     """Discover registered x402 resources, filtered by any of the fields.
 
     Returns {listings, count}.
@@ -3710,8 +3722,8 @@ def x402_verify_offer(requirement: dict) -> dict:
     return _rpc("tenzro_x402VerifyOffer", {"requirement": requirement})
 
 
-def x402_payment_id(payer_did: str, requirement: dict = None,
-                    offer_commitment: str = None) -> dict:
+def x402_payment_id(payer_did: str, requirement: dict | None = None,
+                    offer_commitment: str | None = None) -> dict:
     """Derive the deterministic payment id for a payer + offer.
 
     Provide either `requirement` or `offer_commitment`. Returns `pay_<hex>`.
@@ -4017,7 +4029,7 @@ def inference_request(model_id: str, input_text: str,
 
 
 def register_model_endpoint(model_id: str, api_url: str,
-                            mcp_url: str = None) -> dict:
+                            mcp_url: str | None = None) -> dict:
     """Register a model service endpoint.
 
     model_id: model ID being served
@@ -4046,7 +4058,7 @@ def unregister_model_endpoint(instance_id: str) -> dict:
     return _rpc("tenzro_unregisterModelEndpoint", {"instance_id": instance_id})
 
 
-def download_model(model_id: str, source: str = None) -> dict:
+def download_model(model_id: str, source: str | None = None) -> dict:
     """Download a model's weights.
 
     model_id: model to download
@@ -4201,7 +4213,7 @@ def list_proposals() -> dict:
 
 def create_proposal(title: str, description: str,
                     proposal_type: str = "parameter_change",
-                    params: dict = None) -> dict:
+                    params: dict | None = None) -> dict:
     """Create a governance proposal.
 
     title: proposal title
@@ -4219,7 +4231,7 @@ def create_proposal(title: str, description: str,
     return _rpc("tenzro_createProposal", p)
 
 
-def vote(proposal_id: str, vote_value: str, voter: str = None) -> dict:
+def vote(proposal_id: str, vote_value: str, voter: str | None = None) -> dict:
     """Vote on a governance proposal.
 
     proposal_id: proposal to vote on
@@ -4265,7 +4277,7 @@ def list_canton_domains() -> dict:
 
 
 def list_daml_contracts(template_ids: list,
-                        query: dict = None) -> dict:
+                        query: dict | None = None) -> dict:
     """Query active DAML contracts on the shared Canton domain.
 
     The Canton v2 active-contracts endpoint requires at least one template
@@ -4350,7 +4362,7 @@ def get_provider_pricing() -> dict:
     return _rpc("tenzro_getProviderPricing")
 
 
-def list_providers(provider_type: str = None) -> dict:
+def list_providers(provider_type: str | None = None) -> dict:
     """List all providers discovered via gossipsub.
 
     provider_type: optional filter — llm | tee | general
@@ -4412,7 +4424,7 @@ def eth_max_priority_fee_per_gas() -> dict:
 
 def eth_fee_history(block_count: int = 10,
                     newest_block: str = "latest",
-                    reward_percentiles: list = None) -> dict:
+                    reward_percentiles: list | None = None) -> dict:
     """Get base-fee history and gas-usage ratios over the last N blocks.
 
     block_count: how many recent blocks to include (1..=1024).
@@ -4583,7 +4595,7 @@ def solana_stake(amount_sol: float, validator_address: str) -> dict:
     })
 
 
-def solana_get_yield(protocol: str = None) -> dict:
+def solana_get_yield(protocol: str | None = None) -> dict:
     """Get Solana staking/DeFi yield information.
 
     protocol: optional protocol filter
@@ -4692,7 +4704,7 @@ def solana_resolve_domain(domain: str) -> dict:
 # ── Ethereum (via ethereum-mcp.tenzro.xyz) ───────────────────
 
 
-def eth_get_price_chainlink(feed_address: str = None) -> dict:
+def eth_get_price_chainlink(feed_address: str | None = None) -> dict:
     """Get token price from Chainlink data feeds.
 
     feed_address: optional Chainlink feed address (defaults to ETH/USD)
@@ -4708,8 +4720,8 @@ def eth_get_gas_price_ext() -> dict:
     return _mcp_tool_call(ETHEREUM_MCP_URL, "eth_get_gas_price", {})
 
 
-def eth_estimate_gas_ext(to: str, data: str = None,
-                         value: str = None) -> dict:
+def eth_estimate_gas_ext(to: str, data: str | None = None,
+                         value: str | None = None) -> dict:
     """Estimate gas for an Ethereum transaction.
 
     to: recipient address
@@ -4757,7 +4769,7 @@ def eth_get_tx(tx_hash: str) -> dict:
     })
 
 
-def eth_get_block_info(block_number: str = None) -> dict:
+def eth_get_block_info(block_number: str | None = None) -> dict:
     """Get an Ethereum block by number.
 
     block_number: block number (hex or decimal) or "latest"
@@ -4847,7 +4859,7 @@ def eth_lookup_agent_8004(agent_id: str) -> dict:
     })
 
 
-def eth_get_attestation(schema_id: str, attester: str = None) -> dict:
+def eth_get_attestation(schema_id: str, attester: str | None = None) -> dict:
     """Get an EAS (Ethereum Attestation Service) attestation.
 
     schema_id: attestation schema ID
@@ -4863,7 +4875,7 @@ def eth_get_attestation(schema_id: str, attester: str = None) -> dict:
 
 
 def lz_quote_fee(src_eid: int, dst_eid: int, message: str,
-                 options: str = None) -> dict:
+                 options: str | None = None) -> dict:
     """Quote LayerZero messaging fee via EndpointV2.quote().
 
     src_eid: source chain endpoint ID
@@ -4882,7 +4894,7 @@ def lz_quote_fee(src_eid: int, dst_eid: int, message: str,
 
 
 def lz_send_message(src_eid: int, dst_eid: int, receiver: str,
-                    message: str, options: str = None) -> dict:
+                    message: str, options: str | None = None) -> dict:
     """Build LayerZero EndpointV2.send() calldata.
 
     src_eid: source chain endpoint ID
@@ -4913,7 +4925,7 @@ def lz_track_message(tx_hash: str) -> dict:
 
 
 def lz_oft_quote(src_eid: int, dst_eid: int, amount: int,
-                 token: str = None) -> dict:
+                 token: str | None = None) -> dict:
     """Quote an OFT (Omnichain Fungible Token) transfer.
 
     src_eid: source chain endpoint ID
@@ -4932,7 +4944,7 @@ def lz_oft_quote(src_eid: int, dst_eid: int, amount: int,
 
 
 def lz_oft_send(src_eid: int, dst_eid: int, amount: int,
-                recipient: str, token: str = None) -> dict:
+                recipient: str, token: str | None = None) -> dict:
     """Build OFT send() calldata with auto fee quoting.
 
     src_eid: source chain endpoint ID
@@ -4967,7 +4979,7 @@ def lz_get_chain_rpc(chain: str) -> dict:
     })
 
 
-def lz_list_dvns(chain: str = None) -> dict:
+def lz_list_dvns(chain: str | None = None) -> dict:
     """List LayerZero DVNs (Decentralized Verifier Networks).
 
     chain: optional chain filter
@@ -4978,7 +4990,7 @@ def lz_list_dvns(chain: str = None) -> dict:
     return _mcp_tool_call(LAYERZERO_MCP_URL, "lz_list_dvns", params)
 
 
-def lz_get_deployments(chain: str = None) -> dict:
+def lz_get_deployments(chain: str | None = None) -> dict:
     """Get LayerZero contract deployments.
 
     chain: optional chain filter
@@ -5177,7 +5189,7 @@ def por_list_feeds() -> dict:
 
 
 def canton_submit_command(command_type: str, template_id: str,
-                          party: str, payload: dict = None) -> dict:
+                          party: str, payload: dict | None = None) -> dict:
     """Submit a DAML command via Canton JSON Ledger API v2.
 
     command_type: create | exercise
@@ -5195,8 +5207,8 @@ def canton_submit_command(command_type: str, template_id: str,
     return _mcp_tool_call(CANTON_MCP_URL, "canton_submit_command", params)
 
 
-def canton_list_contracts(party: str = None,
-                          template_id: str = None) -> dict:
+def canton_list_contracts(party: str | None = None,
+                          template_id: str | None = None) -> dict:
     """List active DAML contracts.
 
     party: optional party filter
@@ -5255,7 +5267,7 @@ def canton_get_health() -> dict:
     return _mcp_tool_call(CANTON_MCP_URL, "canton_get_health", {})
 
 
-def canton_get_balance_ext(party: str, token: str = None) -> dict:
+def canton_get_balance_ext(party: str, token: str | None = None) -> dict:
     """Get CIP-56 token balance on Canton.
 
     party: Canton party identifier
@@ -5326,7 +5338,7 @@ def canton_upload_dar(dar_path: str) -> dict:
     })
 
 
-def canton_get_fee_schedule(domain: str = None) -> dict:
+def canton_get_fee_schedule(domain: str | None = None) -> dict:
     """Get Canton fee schedule for a synchronizer domain.
 
     domain: optional domain ID
@@ -5557,7 +5569,7 @@ def detect_tee() -> dict:
     return _rpc("tenzro_detectTee", {})
 
 
-def get_tee_attestation(tee_type: str = None) -> dict:
+def get_tee_attestation(tee_type: str | None = None) -> dict:
     """Generate a TEE attestation report."""
     params = {}
     if tee_type:
@@ -5668,19 +5680,34 @@ def get_spending_limits(wallet_id: str) -> dict:
     return _rpc("tenzro_getSpendingLimits", {"wallet_id": wallet_id})
 
 
-def authorize_session(wallet_id: str, duration_secs: int,
+def authorize_session(wallet_id: str, did_envelope: str, duration_secs: int,
                       operations: list) -> dict:
-    """Authorize a temporary wallet session with allowed operations."""
+    """Authorize a temporary wallet session with allowed operations.
+
+    did_envelope proves control of the DID that owns wallet_id, bound to
+    method `tenzro_authorizeSession` with the wallet id as the params hash.
+    Opening a session is an act on the wallet, so it belongs to the wallet's
+    owner; a wallet id names the subject and proves nothing about the caller.
+    """
     return _rpc("tenzro_authorizeSession", {
         "wallet_id": wallet_id,
+        "did_envelope": did_envelope,
         "duration_secs": duration_secs,
         "operations": operations,
     })
 
 
-def revoke_session(session_id: str) -> dict:
-    """Revoke an active wallet session."""
-    return _rpc("tenzro_revokeSession", {"session_id": session_id})
+def revoke_session(session_id: str, did_envelope: str) -> dict:
+    """Revoke an active wallet session.
+
+    did_envelope proves control of the DID that owns the session's wallet,
+    bound to method `tenzro_revokeSession` with the session id as the params
+    hash. A session id is a handle the node hands back, not a credential.
+    """
+    return _rpc("tenzro_revokeSession", {
+        "session_id": session_id,
+        "did_envelope": did_envelope,
+    })
 
 
 # ── App registry + settlement authorization ──────────────────────
@@ -5688,7 +5715,7 @@ def revoke_session(session_id: str) -> dict:
 
 def register_app(app_id: str, developer_did: str, app_wallet: str,
                  signing_pubkeys: list, margin_bps: int, envelope: str,
-                 min_balance: str = None, active: bool = True) -> dict:
+                 min_balance: str | None = None, active: bool = True) -> dict:
     """Register a developer app in the on-chain app registry.
 
     Permissionless: the developer signs a DID envelope with their own key; the
@@ -5763,7 +5790,7 @@ def get_settle_authorized_outcome(app_id: str, external_ref: str) -> dict:
 # ── Contract ABI ─────────────────────────────────────────────────
 
 
-def encode_function(function_sig: str, args: list = None) -> dict:
+def encode_function(function_sig: str, args: list | None = None) -> dict:
     """ABI-encode a function call (e.g. 'transfer(address,uint256)')."""
     return _rpc("tenzro_encodeFunction", {
         "function_sig": function_sig,
@@ -5851,14 +5878,35 @@ def link_wallet_for_auth(wallet_id, dpop_jkt=None, display_name=None, ttl_secs=N
     return _rpc("tenzro_linkWalletForAuth", params)
 
 
-def revoke_jwt(jti, reason="revoked"):
-    """Revoke a single JWT by its `jti` claim."""
-    return _rpc("tenzro_revokeJwt", {"jti": jti, "reason": reason})
+def revoke_jwt(jti, did_envelope, reason="revoked"):
+    """Revoke a single JWT by its `jti` claim.
+
+    did_envelope proves control of the token's bearer DID or of the
+    controller DID that authorized it, bound to method `tenzro_revokeJwt`
+    with the jti as the params hash. A jti travels in every audit row, so
+    knowing one is not authority to destroy the token.
+    """
+    return _rpc("tenzro_revokeJwt", {
+        "jti": jti,
+        "did_envelope": did_envelope,
+        "reason": reason,
+    })
 
 
-def revoke_did(did, reason="revoked"):
-    """Revoke an entire identity by DID — cascades through the act-chain."""
-    return _rpc("tenzro_revokeDid", {"did": did, "reason": reason})
+def revoke_did(did, did_envelope, reason="revoked"):
+    """Revoke an entire identity by DID — cascades through the act-chain.
+
+    Requires both the operator admin token on the transport and a
+    did_envelope from the DID itself or, for a machine, its controller,
+    bound to method `tenzro_revokeDid` with the DID string as the params
+    hash. The revocation is gossiped network-wide, so neither the operator
+    nor the owner gets to make that call alone.
+    """
+    return _rpc("tenzro_revokeDid", {
+        "did": did,
+        "did_envelope": did_envelope,
+        "reason": reason,
+    })
 
 
 # ── Passkey-first wallet custody (WebAuthn P-256 + ML-DSA-65 hybrid) ──
@@ -6520,7 +6568,7 @@ def iroh_resolve(tenzro_uri: str) -> bytes:
 # The node verifies the envelope's did equals the owner_did.
 
 
-def _with_env(params: dict, did_envelope: Optional[str]) -> dict:
+def _with_env(params: dict, did_envelope: str | None) -> dict:
     """Attach the signed DID envelope to a mutation's params when supplied."""
     if did_envelope is not None:
         params = dict(params)
@@ -6534,15 +6582,15 @@ def _with_env(params: dict, did_envelope: Optional[str]) -> dict:
 def site_publish(
     name: str,
     owner_did: str,
-    routes: List[dict],
-    index_path: Optional[str] = None,
-    not_found_path: Optional[str] = None,
-    spa: Optional[bool] = None,
-    price_per_request: Optional[str] = None,
-    replicas: Optional[int] = None,
-    region_hint: Optional[str] = None,
-    max_price_per_hour: Optional[str] = None,
-    did_envelope: Optional[str] = None,
+    routes: list[dict],
+    index_path: str | None = None,
+    not_found_path: str | None = None,
+    spa: bool | None = None,
+    price_per_request: str | None = None,
+    replicas: int | None = None,
+    region_hint: str | None = None,
+    max_price_per_hour: str | None = None,
+    did_envelope: str | None = None,
 ) -> dict:
     """Publish a static site from a route map.
 
@@ -6576,12 +6624,12 @@ def site_get(site_id: str) -> dict:
     return _rpc("tenzro_siteGet", {"site_id": site_id})
 
 
-def list_sites(owner_did: Optional[str] = None) -> dict:
+def list_sites(owner_did: str | None = None) -> dict:
     """List sites, optionally filtered by owner DID."""
     return _rpc("tenzro_listSites", {"owner_did": owner_did} if owner_did else {})
 
 
-def site_remove(site_id: str, owner_did: str, did_envelope: Optional[str] = None) -> dict:
+def site_remove(site_id: str, owner_did: str, did_envelope: str | None = None) -> dict:
     """Remove a site. Owner-authenticated."""
     return _rpc(
         "tenzro_siteRemove",
@@ -6593,7 +6641,7 @@ def site_remove(site_id: str, owner_did: str, did_envelope: Optional[str] = None
 
 
 def site_set_alias(
-    hostname: str, site_id: str, owner_did: str, did_envelope: Optional[str] = None
+    hostname: str, site_id: str, owner_did: str, did_envelope: str | None = None
 ) -> dict:
     """Point a public hostname at a site so it serves by name. Owner-authenticated."""
     return _rpc(
@@ -6610,7 +6658,7 @@ def site_get_alias(hostname: str) -> dict:
     return _rpc("tenzro_siteGetAlias", {"hostname": hostname})
 
 
-def list_site_aliases(owner_did: Optional[str] = None) -> dict:
+def list_site_aliases(owner_did: str | None = None) -> dict:
     """List hostname aliases, optionally filtered by owner DID."""
     return _rpc(
         "tenzro_listSiteAliases", {"owner_did": owner_did} if owner_did else {}
@@ -6618,7 +6666,7 @@ def list_site_aliases(owner_did: Optional[str] = None) -> dict:
 
 
 def site_remove_alias(
-    hostname: str, owner_did: str, did_envelope: Optional[str] = None
+    hostname: str, owner_did: str, did_envelope: str | None = None
 ) -> dict:
     """Remove a hostname alias. Owner-authenticated."""
     return _rpc(
@@ -6631,7 +6679,7 @@ def site_remove_alias(
 
 
 def site_set_placement(
-    site_id: str, serving_nodes: List[str], did_envelope: Optional[str] = None
+    site_id: str, serving_nodes: list[str], did_envelope: str | None = None
 ) -> dict:
     """Set the serving nodes (iroh EndpointId strings) that answer
     tenzro/http forwards for a site. An empty list serves locally.
@@ -6655,7 +6703,7 @@ def list_site_placements() -> dict:
     return _rpc("tenzro_listSitePlacements", {})
 
 
-def site_remove_placement(site_id: str, did_envelope: Optional[str] = None) -> dict:
+def site_remove_placement(site_id: str, did_envelope: str | None = None) -> dict:
     """Remove a site's ingress placement (reverts to local serving). Owner-authenticated."""
     return _rpc(
         "tenzro_siteRemovePlacement", _with_env({"site_id": site_id}, did_envelope)
@@ -6666,7 +6714,7 @@ def site_remove_placement(site_id: str, did_envelope: Optional[str] = None) -> d
 
 
 def site_claim_domain(
-    hostname: str, site_id: str, owner_did: str, did_envelope: Optional[str] = None
+    hostname: str, site_id: str, owner_did: str, did_envelope: str | None = None
 ) -> dict:
     """Claim a custom domain for a site. Returns the DNS records the owner
     must publish (`dns_records` + `ownership_txt_name`). Owner-authenticated.
@@ -6681,7 +6729,7 @@ def site_claim_domain(
 
 
 def site_verify_domain(
-    hostname: str, owner_did: str, did_envelope: Optional[str] = None
+    hostname: str, owner_did: str, did_envelope: str | None = None
 ) -> dict:
     """Verify a claimed domain against its published DNS TXT proof. Owner-authenticated."""
     return _rpc(
@@ -6695,7 +6743,7 @@ def site_get_domain(hostname: str) -> dict:
     return _rpc("tenzro_siteGetDomain", {"hostname": hostname})
 
 
-def list_site_domains(owner_did: Optional[str] = None) -> dict:
+def list_site_domains(owner_did: str | None = None) -> dict:
     """List custom domains, optionally filtered by owner DID."""
     return _rpc(
         "tenzro_listSiteDomains", {"owner_did": owner_did} if owner_did else {}
@@ -6703,7 +6751,7 @@ def list_site_domains(owner_did: Optional[str] = None) -> dict:
 
 
 def site_remove_domain(
-    hostname: str, owner_did: str, did_envelope: Optional[str] = None
+    hostname: str, owner_did: str, did_envelope: str | None = None
 ) -> dict:
     """Remove a custom domain. Owner-authenticated."""
     return _rpc(
@@ -6719,14 +6767,14 @@ def function_deploy(
     name: str,
     owner_did: str,
     wasm_blob_hash: str,
-    capabilities: Optional[dict] = None,
-    fuel_limit: Optional[int] = None,
-    deadline_ms: Optional[int] = None,
-    price_per_request: Optional[str] = None,
-    replicas: Optional[int] = None,
-    region_hint: Optional[str] = None,
-    max_price_per_hour: Optional[str] = None,
-    did_envelope: Optional[str] = None,
+    capabilities: dict | None = None,
+    fuel_limit: int | None = None,
+    deadline_ms: int | None = None,
+    price_per_request: str | None = None,
+    replicas: int | None = None,
+    region_hint: str | None = None,
+    max_price_per_hour: str | None = None,
+    did_envelope: str | None = None,
 ) -> dict:
     """Deploy a wasi:http function from a component blob hash."""
     params: dict = {
@@ -6756,12 +6804,12 @@ def function_get(id: str) -> dict:
     return _rpc("tenzro_functionGet", {"id": id})
 
 
-def list_functions(owner_did: Optional[str] = None) -> dict:
+def list_functions(owner_did: str | None = None) -> dict:
     """List function deployments, optionally filtered by owner DID."""
     return _rpc("tenzro_listFunctions", {"owner_did": owner_did} if owner_did else {})
 
 
-def function_remove(id: str, owner_did: str, did_envelope: Optional[str] = None) -> dict:
+def function_remove(id: str, owner_did: str, did_envelope: str | None = None) -> dict:
     """Remove a function deployment. Owner-authenticated."""
     return _rpc(
         "tenzro_functionRemove",
@@ -6777,14 +6825,14 @@ def machine_deploy(
     owner_did: str,
     artifact_caid: str,
     internal_port: int,
-    resources: Optional[dict] = None,
-    sealed_env: Optional[dict] = None,
-    tee_required: Optional[bool] = None,
-    price_per_request: Optional[str] = None,
-    replicas: Optional[int] = None,
-    region_hint: Optional[str] = None,
-    max_price_per_hour: Optional[str] = None,
-    did_envelope: Optional[str] = None,
+    resources: dict | None = None,
+    sealed_env: dict | None = None,
+    tee_required: bool | None = None,
+    price_per_request: str | None = None,
+    replicas: int | None = None,
+    region_hint: str | None = None,
+    max_price_per_hour: str | None = None,
+    did_envelope: str | None = None,
 ) -> dict:
     """Deploy a microVM from an image artifact CAID and the loopback port
     the guest server listens on. Wrap each secret in `sealed_env` to the
@@ -6818,12 +6866,12 @@ def machine_get(id: str) -> dict:
     return _rpc("tenzro_machineGet", {"id": id})
 
 
-def list_machines(owner_did: Optional[str] = None) -> dict:
+def list_machines(owner_did: str | None = None) -> dict:
     """List machine deployments, optionally filtered by owner DID."""
     return _rpc("tenzro_listMachines", {"owner_did": owner_did} if owner_did else {})
 
 
-def machine_remove(id: str, owner_did: str, did_envelope: Optional[str] = None) -> dict:
+def machine_remove(id: str, owner_did: str, did_envelope: str | None = None) -> dict:
     """Remove a machine deployment (stops any running microVM first). Owner-authenticated."""
     return _rpc(
         "tenzro_machineRemove",
@@ -6889,8 +6937,8 @@ def list_forecast_models() -> dict:
 
 
 def forecast(model_id: str, history: list, horizon: int,
-             quantiles: list = None,
-             frequency_seconds: int = None) -> dict:
+             quantiles: list | None = None,
+             frequency_seconds: int | None = None) -> dict:
     """Run a probabilistic forecast. `history` is oldest-first observations."""
     params = {"model_id": model_id, "history": history, "horizon": horizon}
     if quantiles is not None:
@@ -6951,7 +6999,7 @@ def list_text_embedding_models() -> dict:
 
 
 def text_embed(model_id: str, inputs: list,
-               requested_dim: int = None,
+               requested_dim: int | None = None,
                normalize: bool = False) -> dict:
     """Embed a batch of strings; optional Matryoshka truncation."""
     params = {"model_id": model_id, "inputs": inputs, "normalize": normalize}
@@ -7017,7 +7065,7 @@ def unload_text_segmentation_model(model_id: str) -> dict:
 
 
 def text_segment(model_id: str, image_b64: str, text_prompt: str,
-                 box_prompt: dict = None,
+                 box_prompt: dict | None = None,
                  score_threshold: float = 0.5) -> dict:
     """Segment by free-text label (e.g. "dog", "sofa") — no click needed.
 
@@ -7069,9 +7117,9 @@ def list_audio_models() -> dict:
     return _rpc("tenzro_listAudioModels", {})
 
 
-def transcribe(model_id: str, audio_b64: str, language: str = None,
+def transcribe(model_id: str, audio_b64: str, language: str | None = None,
                timestamps: bool = False,
-               temperature: float = None) -> dict:
+               temperature: float | None = None) -> dict:
     """Transcribe a base64-encoded audio buffer (WAV/MP3/FLAC)."""
     params = {
         "model_id": model_id,
@@ -7098,7 +7146,7 @@ def list_video_models() -> dict:
 
 
 def video_embed(model_id: str, video_b64: str, normalize: bool = False,
-                frame_stride: int = None) -> dict:
+                frame_stride: int | None = None) -> dict:
     """Embed a base64-encoded video clip into one clip-level vector.
 
     The node extracts evenly-spaced frames, embeds each through the image
@@ -7137,10 +7185,10 @@ def video_embed(model_id: str, video_b64: str, normalize: bool = False,
 # JSON-RPC -32011 (ProviderNotAvailable).
 
 
-def load_forecast_model(model_id: str, path: str, catalog_id: str = None,
-                        context_length: int = None, max_horizon: int = None,
-                        output_name: str = None,
-                        batch_size: int = None) -> dict:
+def load_forecast_model(model_id: str, path: str, catalog_id: str | None = None,
+                        context_length: int | None = None, max_horizon: int | None = None,
+                        output_name: str | None = None,
+                        batch_size: int | None = None) -> dict:
     """Load a forecast (timeseries) ONNX. Pass catalog_id to inherit context_length/max_horizon/output_name/batch_size and enforce the entry's license tier."""
     params = {"model_id": model_id, "path": path}
     if catalog_id is not None:
@@ -7161,9 +7209,9 @@ def unload_forecast_model(model_id: str) -> dict:
     return _rpc("tenzro_unloadForecastModel", {"model_id": model_id})
 
 
-def load_vision_model(model_id: str, path: str, catalog_id: str = None,
-                      input_size: int = None, embedding_dim: int = None,
-                      normalization: str = None) -> dict:
+def load_vision_model(model_id: str, path: str, catalog_id: str | None = None,
+                      input_size: int | None = None, embedding_dim: int | None = None,
+                      normalization: str | None = None) -> dict:
     """Load a vision encoder ONNX. Pass catalog_id to inherit input_size/embedding_dim/normalization."""
     params = {"model_id": model_id, "path": path}
     if catalog_id is not None: params["catalog_id"] = catalog_id
@@ -7178,12 +7226,12 @@ def unload_vision_model(model_id: str) -> dict:
     return _rpc("tenzro_unloadVisionModel", {"model_id": model_id})
 
 
-def load_text_embedding_model(model_id: str, path: str = None,
-                              tokenizer_path: str = None,
-                              family: str = None,
-                              catalog_id: str = None,
-                              embedding_dim: int = None,
-                              max_sequence_length: int = None) -> dict:
+def load_text_embedding_model(model_id: str, path: str | None = None,
+                              tokenizer_path: str | None = None,
+                              family: str | None = None,
+                              catalog_id: str | None = None,
+                              embedding_dim: int | None = None,
+                              max_sequence_length: int | None = None) -> dict:
     """Load a text encoder. Two paths.
 
     Pass a catalog id as `model_id` and omit `path`, and the node fetches
@@ -7210,9 +7258,9 @@ def unload_text_embedding_model(model_id: str) -> dict:
 
 
 def load_segmentation_model(model_id: str, encoder_path: str,
-                            decoder_path: str, family: str = None,
-                            input_size: int = None,
-                            catalog_id: str = None) -> dict:
+                            decoder_path: str, family: str | None = None,
+                            input_size: int | None = None,
+                            catalog_id: str | None = None) -> dict:
     """Load a segmenter (SAM 2 / EdgeSAM / MobileSAM) from node-local ONNX.
 
     Pass `catalog_id` to inherit family and input_size from the catalog,
@@ -7235,9 +7283,9 @@ def unload_segmentation_model(model_id: str) -> dict:
     return _rpc("tenzro_unloadSegmentationModel", {"model_id": model_id})
 
 
-def load_detection_model(model_id: str, path: str, family: str = None,
-                         input_size: int = None, num_classes: int = None,
-                         catalog_id: str = None) -> dict:
+def load_detection_model(model_id: str, path: str, family: str | None = None,
+                         input_size: int | None = None, num_classes: int | None = None,
+                         catalog_id: str | None = None) -> dict:
     """Load a detector from a node-local ONNX file.
 
     Pass `catalog_id` to inherit family, input_size and num_classes from
@@ -7258,13 +7306,13 @@ def unload_detection_model(model_id: str) -> dict:
 
 
 def load_audio_model(model_id: str, encoder_path: str, decoder_path: str,
-                     tokenizer_path: str = None,
-                     preprocessor_path: str = None, vocab_path: str = None,
-                     catalog_id: str = None,
-                     family: str = None, max_audio_seconds: int = None,
-                     whisper_variant: str = None,
-                     source_lang: str = None,
-                     target_lang: str = None) -> dict:
+                     tokenizer_path: str | None = None,
+                     preprocessor_path: str | None = None, vocab_path: str | None = None,
+                     catalog_id: str | None = None,
+                     family: str | None = None, max_audio_seconds: int | None = None,
+                     whisper_variant: str | None = None,
+                     source_lang: str | None = None,
+                     target_lang: str | None = None) -> dict:
     """Load an ASR model from node-local ONNX files.
 
     Which auxiliary paths are required depends on the family: 'moonshine'
@@ -7298,7 +7346,7 @@ def unload_audio_model(model_id: str) -> dict:
 
 
 def load_video_model(model_id: str, vision_model_id: str,
-                     num_frames: int = None) -> dict:
+                     num_frames: int | None = None) -> dict:
     """Register a clip encoder over an already-loaded image encoder.
 
     Video embedding is frame-based: the node extracts `num_frames`
@@ -7327,7 +7375,7 @@ def unload_video_model(model_id: str) -> dict:
 
 
 def memory_grant(agent_did: str, text: str, kind: str = "granted",
-                 source: str = "controller", metadata: dict = None) -> dict:
+                 source: str = "controller", metadata: dict | None = None) -> dict:
     """Grant a memory to an agent. Embeds via TextEmbeddingRuntime + writes to Lance + Tantivy.
 
     Requires DPoP+JWT bearer auth — see module-level note above.
@@ -7344,7 +7392,7 @@ def memory_grant(agent_did: str, text: str, kind: str = "granted",
 
 
 def memory_recall(agent_did: str, query: str, mode: str = "hybrid",
-                  limit: int = 10, kind: str = None) -> dict:
+                  limit: int = 10, kind: str | None = None) -> dict:
     """Recall memories via vector kNN / BM25 / hybrid RRF (k=60). mode in {'vector','text','hybrid'}."""
     params = {
         "agent_did": agent_did,
@@ -7365,8 +7413,8 @@ def memory_archive(agent_did: str, record_id: str) -> dict:
     })
 
 
-def list_memory_records(agent_did: str, limit: int = None,
-                        kind: str = None) -> dict:
+def list_memory_records(agent_did: str, limit: int | None = None,
+                        kind: str | None = None) -> dict:
     """List newest-first memories for an agent; optional kind filter."""
     params = {"agent_did": agent_did}
     if limit is not None: params["limit"] = limit
@@ -7489,8 +7537,8 @@ def withdraw_agent_bond(controller_address: str, agent_did: str) -> dict:
 def file_insurance_claim(claimant_did: str, claimant_address: str,
                          against_agent_did: str, amount_requested_wei: int,
                          nonce: int,
-                         receipt_refs: list = None,
-                         narrative: str = None) -> dict:
+                         receipt_refs: list | None = None,
+                         narrative: str | None = None) -> dict:
     """Open a new insurance claim against a bonded agent.
 
     The claim enters `Open` status awaiting governance adjudication; payout
@@ -7574,7 +7622,7 @@ def list_adaptive_burn_proposals() -> dict:
 # ── SeedAgent (Spec 10) ───────────────────────────────────────────
 
 
-def get_treasury_earmark(name: str = None) -> dict:
+def get_treasury_earmark(name: str | None = None) -> dict:
     """Read the SeedAgent treasury earmark singleton.
 
     Returns the genesis-funded TNZO allocation, decay schedule, remaining
@@ -7602,7 +7650,7 @@ def list_seed_agent_charters() -> dict:
     return _rpc("tenzro_listSeedAgentCharters", {})
 
 
-def list_seed_agents(charter_id: str = None) -> dict:
+def list_seed_agents(charter_id: str | None = None) -> dict:
     """List SeedAgent registry records, optionally filtered by `charter_id`.
 
     Returns per-DID provisioning state: agent_did, controller_did,
@@ -7615,7 +7663,7 @@ def list_seed_agents(charter_id: str = None) -> dict:
     return _rpc("tenzro_listSeedAgents", params)
 
 
-def get_network_activity(window: str = None,
+def get_network_activity(window: str | None = None,
                          exclude_seed: bool = False) -> dict:
     """Read aggregated network-activity counters.
 
@@ -7645,9 +7693,9 @@ def get_7683_order(order_id: str) -> dict:
     return _rpc("tenzro_get7683Order", {"order_id": order_id})
 
 
-def list_7683_orders(state: str = None,
-                     dest_chain: int = None,
-                     limit: int = None) -> dict:
+def list_7683_orders(state: str | None = None,
+                     dest_chain: int | None = None,
+                     limit: int | None = None) -> dict:
     """Paginated scan of persisted ERC-7683 cross-chain orders.
 
     `state` filters by one of: open, awaiting_proof, settled, refunded,
@@ -7859,8 +7907,8 @@ def list_receipts_by_controller(controller_did: str) -> dict:
 
 
 def summarize_controller(controller_did: str,
-                        since: int = None,
-                        until: int = None) -> dict:
+                        since: int | None = None,
+                        until: int | None = None) -> dict:
     """Aggregate a controller's activity across an optional unix-second window.
 
     Returns receipt count, total settled value, distinct delegated agents,
@@ -7916,8 +7964,8 @@ def get_kill_switch_receipt(receipt_id: str) -> dict:
 # ── Inference usage & provider reputation ─────────────────────────
 
 
-def list_inference_usage(model_id: str = None,
-                         provider: str = None) -> dict:
+def list_inference_usage(model_id: str | None = None,
+                         provider: str | None = None) -> dict:
     """List inference usage records / aggregates.
 
     Both filters absent → `{ global, models, providers }` aggregates.
@@ -8003,7 +8051,7 @@ def get_validator_state(address: str) -> dict:
     return _rpc("tenzro_getValidatorState", {"address": address})
 
 
-def list_validators(status: str = None) -> dict:
+def list_validators(status: str | None = None) -> dict:
     """List validators, optionally filtered by status.
 
     Status is one of: Active / Candidate / PendingActive / PendingExit
@@ -8193,9 +8241,9 @@ def capital_intent_quote(intent_id: str, solver_did: str, plan: str,
     })
 
 
-def capital_intent_assign(intent_id: str, solver_did: str = None,
-                          auto: bool = False, payer: str = None,
-                          payee: str = None) -> dict:
+def capital_intent_assign(intent_id: str, solver_did: str | None = None,
+                          auto: bool = False, payer: str | None = None,
+                          payee: str | None = None) -> dict:
     params = {"intent_id": intent_id}
     if solver_did is not None:
         params["solver_did"] = solver_did
@@ -8220,7 +8268,7 @@ def capital_intent_compensate(intent_id: str) -> dict:
     return _rpc("tenzro_capitalIntentCompensate", {"intent_id": intent_id})
 
 
-def capital_intent_settle(intent_id: str, payee: str = None) -> dict:
+def capital_intent_settle(intent_id: str, payee: str | None = None) -> dict:
     params = {"intent_id": intent_id}
     if payee is not None:
         params["payee"] = payee
@@ -8267,7 +8315,7 @@ def get_workflow_operational_metrics(workflow_id: str) -> dict:
     return _rpc("tenzro_getWorkflowOperationalMetrics", {"workflow_id": workflow_id})
 
 
-def list_workflow_receipts(limit: int = None) -> dict:
+def list_workflow_receipts(limit: int | None = None) -> dict:
     params = {}
     if limit is not None:
         params["limit"] = limit
@@ -8307,7 +8355,7 @@ def urwa_get_frozen_tokens(token_id_hex: str, account_hex: str) -> dict:
 
 
 def urwa_set_frozen_tokens(token_id_hex: str, account_hex: str,
-                           amount: str, reason: str = None) -> dict:
+                           amount: str, reason: str | None = None) -> dict:
     """(Admin) Freeze a specific amount on an ERC-7943 token account."""
     return _rpc(
         "tenzro_urwaSetFrozenTokens",
@@ -8321,8 +8369,8 @@ def urwa_set_frozen_tokens(token_id_hex: str, account_hex: str,
 
 
 def urwa_trigger_kill_switch(token_id_hex: str,
-                             triggered_by_did: str = None,
-                             reason: str = None) -> dict:
+                             triggered_by_did: str | None = None,
+                             reason: str | None = None) -> dict:
     """(Admin) Activate the ERC-7943 kill-switch on a token."""
     return _rpc(
         "tenzro_urwaTriggerKillSwitch",
@@ -8467,6 +8515,133 @@ def storage_store_object(object_id: str, data: str, owner: str = "",
     return _rpc("tenzro_storageStoreObject", params)
 
 
+# ── Universal RPC gateway ─────────────────────────────────────────
+#
+# The ~690 wrappers in this module cover what the node served when each was
+# written. These two cover everything, including methods added to a node newer
+# than this file — the directory comes from the node, not from a list here.
+#
+# Authorization is unchanged: a call through the gateway runs behind the same
+# admin-token gate, API-key scope gate, and default-deny classification as any
+# other call, so it reaches exactly what your credentials already allow.
+
+
+def list_rpc_methods(namespace: str | None = None, contains: str | None = None) -> dict:
+    """Enumerate every JSON-RPC method this node serves.
+
+    Each entry carries how it is gated (`admin` vs `open`) and which API-key
+    scope it needs, so you can tell "I need a differently-scoped key" from "I
+    need the operator's token" without provoking the error first.
+
+    `namespace` and `contains` narrow the listing; unfiltered it is ~900 rows.
+    """
+    params = {}
+    if namespace is not None:
+        params["namespace"] = namespace
+    if contains is not None:
+        params["contains"] = contains
+    return _rpc("tenzro_listRpcMethods", params)
+
+
+def call_rpc(method: str, params: dict | None = None) -> dict:
+    """Invoke any JSON-RPC method by name.
+
+    The escape hatch for anything without a named wrapper above. Discover names
+    with `list_rpc_methods` first.
+    """
+    return _rpc(method, params if params is not None else {})
+
+
+def supports(method: str) -> bool:
+    """Whether this node serves `method`.
+
+    Asks the node rather than checking a list in this file, so it stays correct
+    against a node newer than this skill.
+    """
+    result = list_rpc_methods(contains=method)
+    rows = result.get("methods") or []
+    return any(r.get("method") == method for r in rows)
+
+
+# ── Tenant Files (/v1/files) ──────────────────────────────────────
+#
+# The tenant-facing layer over the storage market above. Where
+# `storage_store_object` addresses an object by an id you choose and
+# leaves ownership, deals, and naming to you, these carry all three: the
+# subject on your `TENZRO_API_KEY` owns the file, a deal is opened for
+# you, and the filename comes back on every listing.
+#
+# Every function here needs an API key carrying the `storage` scope.
+# There is no unauthenticated path, including for reads — a file with no
+# owner is one nobody can list, retrieve, or be billed for.
+
+
+def upload_file(filename: str, data: str, purpose: str | None = None) -> dict:
+    """Store a file owned by your API key's subject.
+
+    `data` is the base64-encoded payload. `purpose` is one of assistants,
+    batch, fine_tune, vision, user_data (default). The bytes are
+    erasure-coded across independent providers and a storage deal is
+    opened to fund the shards — check `deal_id` on the result: a null
+    there means the file is stored but unbilled, and its shards are not
+    funded.
+    """
+    params = {"filename": filename, "data": data}
+    if purpose is not None:
+        params["purpose"] = purpose
+    return _rpc("tenzro_uploadFile", params)
+
+
+def list_files(purpose: str | None = None, limit: int | None = None) -> dict:
+    """List your own files, newest first, with your total stored bytes.
+
+    Never returns another tenant's files — the listing is scoped
+    server-side to the subject on the presented key.
+    """
+    params = {}
+    if purpose is not None:
+        params["purpose"] = purpose
+    if limit is not None:
+        params["limit"] = limit
+    return _rpc("tenzro_listFiles", params)
+
+
+def get_file(file_id: str) -> dict:
+    """Fetch one file's record.
+
+    A file belonging to another tenant reports the same "no such file" as
+    one that never existed, so ownership cannot be probed by guessing ids.
+    """
+    return _rpc("tenzro_getFile", {"file_id": file_id})
+
+
+def download_file(file_id: str) -> dict:
+    """Retrieve a file's contents, rebuilt from its erasure-coded shards.
+
+    Returns `{file_id, filename, bytes, data}` where `data` is base64.
+    """
+    return _rpc("tenzro_downloadFile", {"file_id": file_id})
+
+
+def delete_file(file_id: str) -> dict:
+    """Unlink a file and stop its storage deal.
+
+    This is NOT erasure. Objects are content-addressed and erasure-coded
+    across independent providers, so deletion cannot reach into every
+    provider holding a shard. Shards expire when the deal stops paying
+    for them. The returned `note` says so on every call — do not treat
+    deletion as redaction.
+    """
+    return _rpc("tenzro_deleteFile", {"file_id": file_id})
+
+
+def file_storage_usage() -> dict:
+    """What you are storing: file count, total bytes, how many files have
+    an open deal (and how many do not), and your derived billing address.
+    """
+    return _rpc("tenzro_fileStorageUsage", {})
+
+
 def storage_open_deal(object_id: str, renter: str, size_bytes: int,
                       total_epochs: int) -> dict:
     """Open a streaming storage deal for a stored object."""
@@ -8489,7 +8664,7 @@ def storage_get_deal(deal_id: str) -> dict:
 
 
 def storage_set_pricing(mode: str = "dynamic", capacity: str = "0",
-                        min_rate: str = None, max_rate: str = None) -> dict:
+                        min_rate: str | None = None, max_rate: str | None = None) -> dict:
     """Set the byte-epoch storage pricing policy."""
     params = {"mode": mode, "capacity": capacity}
     if min_rate is not None:
@@ -8513,11 +8688,11 @@ def list_database_engines() -> dict:
     return _rpc("tenzro_listDatabaseEngines", [])
 
 
-def create_database(database_id: str, engine_id: str, owner_did: str = None,
-                    access_policy: dict = None, placement: str = "local",
-                    partitions: int = 1, min_replication: int = None,
-                    max_replication: int = None,
-                    engine_config: dict = None,
+def create_database(database_id: str, engine_id: str, owner_did: str | None = None,
+                    access_policy: dict | None = None, placement: str = "local",
+                    partitions: int = 1, min_replication: int | None = None,
+                    max_replication: int | None = None,
+                    engine_config: dict | None = None,
                     confidential: bool = False) -> dict:
     """Register a database this node serves and compute its partition
     placement over the live cluster.
@@ -8574,9 +8749,9 @@ def get_database_partition(database_id: str, partition_index: int) -> dict:
 
 
 def issue_database_connection(database_id: str, caller_did: str,
-                              bearer_did: str = None, write: bool = False,
-                              ttl_secs: int = None,
-                              capability: str = None) -> dict:
+                              bearer_did: str | None = None, write: bool = False,
+                              ttl_secs: int | None = None,
+                              capability: str | None = None) -> dict:
     """Mint a managed-database connection credential scoped to one database.
 
     Returns the bearer token a developer presents on every query.
@@ -8597,7 +8772,7 @@ def issue_database_connection(database_id: str, caller_did: str,
 
 def database_query(database_id: str, caller_did: str, body: dict,
                    partition_index: int = 0, write: bool = False,
-                   capability: str = None, consistency: str = None) -> dict:
+                   capability: str | None = None, consistency: str | None = None) -> dict:
     """Run an engine-dialect query against a database partition.
 
     `body` is the engine dialect ({sql, params} for Postgres, {op, ...} for
@@ -8622,7 +8797,7 @@ def database_query(database_id: str, caller_did: str, body: dict,
 
 
 def authorize_database_read(database_id: str, caller_did: str,
-                            capability: str = None) -> dict:
+                            capability: str | None = None) -> dict:
     """Check — without side effects — whether caller_did may read the
     database. Returns {authorized, reason}."""
     params = {"database_id": database_id, "caller_did": caller_did}
@@ -8632,9 +8807,9 @@ def authorize_database_read(database_id: str, caller_did: str,
 
 
 def rescale_database(database_id: str, caller_did: str, placement: str,
-                     partitions: int = None, min_replication: int = None,
-                     max_replication: int = None,
-                     capability: str = None) -> dict:
+                     partitions: int | None = None, min_replication: int | None = None,
+                     max_replication: int | None = None,
+                     capability: str | None = None) -> dict:
     """Grow or shrink a database along the local → LAN-cluster → network
     continuum in place. Gated on the write action. `min_replication` and
     `max_replication` must be supplied together; omitted, the database's
@@ -8687,7 +8862,7 @@ def compute_get_rental(rental_id: str) -> dict:
 
 
 def compute_set_pricing(mode: str = "dynamic", capacity: str = "0",
-                        min_rate: str = None, max_rate: str = None) -> dict:
+                        min_rate: str | None = None, max_rate: str | None = None) -> dict:
     """Set the per-epoch compute pricing policy."""
     params = {"mode": mode, "capacity": capacity}
     if min_rate is not None:
@@ -8730,7 +8905,7 @@ def moe_catalog_shape(model_id: str) -> dict:
     return _rpc("tenzro_moeCatalogShape", {"model_id": model_id})
 
 
-def moe_prepare_experts(model_id: str, layer: int, experts: list = None,
+def moe_prepare_experts(model_id: str, layer: int, experts: list | None = None,
                         include_gate: bool = True, quant=None) -> dict:
     """Slice a checkpoint into per-expert blobs and publish them for holders.
 
@@ -8889,7 +9064,9 @@ COMMANDS = {
     "resolve_did_document": lambda args: resolve_did_document(args[0]),
     "set_username": lambda args: set_username(args[0], args[1]),
     "resolve_username": lambda args: resolve_username(args[0]),
-    "revoke_did": lambda args: revoke_did(args[0], args[1] if len(args) > 1 else "revoked"),
+    "revoke_did": lambda args: revoke_did(
+        args[0], args[1], args[2] if len(args) > 2 else "revoked",
+    ),
     "forget_identity": lambda args: forget_identity(args[0]),
     # Passkey smart accounts
     "enroll_passkey": lambda args: enroll_passkey(
@@ -9415,13 +9592,13 @@ COMMANDS = {
     ),
     "get_event_status": lambda args: get_event_status(),
     "register_webhook": lambda args: register_webhook(
-        args[0],
-        args[1] if len(args) > 1 else None,
-        args[2] if len(args) > 2 else None,
-        args[3] if len(args) > 3 else "",
+        args[0], args[1], args[2],
+        args[3] if len(args) > 3 else None,
+        args[4] if len(args) > 4 else None,
+        args[5] if len(args) > 5 else "",
     ),
-    "list_webhooks": lambda args: list_webhooks(),
-    "delete_webhook": lambda args: delete_webhook(args[0]),
+    "list_webhooks": lambda args: list_webhooks(args[0], args[1]),
+    "delete_webhook": lambda args: delete_webhook(args[0], args[1]),
     # SLA Fault Detector
     "sla_issue_probe": lambda args: sla_issue_probe(
         args[0], int(args[1]), int(args[2]), int(args[3]),
@@ -9433,12 +9610,6 @@ COMMANDS = {
     "get_snapshot_manifest": lambda args: get_snapshot_manifest(int(args[0])),
     "get_snapshot_chunk": lambda args: get_snapshot_chunk(
         int(args[0]), int(args[1]),
-    ),
-    "offer_snapshot": lambda args: offer_snapshot(
-        args[0] if isinstance(args[0], dict) else json.loads(args[0]),
-    ),
-    "apply_snapshot_chunk": lambda args: apply_snapshot_chunk(
-        int(args[0]), int(args[1]), args[2],
     ),
     # ── EIP-7702 ──
     "eip7702_signing_hash": lambda args: eip7702_signing_hash(
@@ -9784,10 +9955,10 @@ COMMANDS = {
     ),
     "get_spending_limits": lambda args: get_spending_limits(args[0]),
     "authorize_session": lambda args: authorize_session(
-        args[0], int(args[1]),
-        args[2].split(",") if len(args) > 2 else [],
+        args[0], args[1], int(args[2]),
+        args[3].split(",") if len(args) > 3 else [],
     ),
-    "revoke_session": lambda args: revoke_session(args[0]),
+    "revoke_session": lambda args: revoke_session(args[0], args[1]),
     # ── App registry + settlement authorization ──
     "register_app": lambda args: register_app(
         args[0], args[1], args[2],
@@ -9827,8 +9998,9 @@ COMMANDS = {
         args[2] if len(args) > 2 else None,
         int(args[3]) if len(args) > 3 else None,
     ),
-    "revoke_jwt": lambda args: revoke_jwt(args[0], args[1] if len(args) > 1 else "revoked"),
-    "revoke_did": lambda args: revoke_did(args[0], args[1] if len(args) > 1 else "revoked"),
+    "revoke_jwt": lambda args: revoke_jwt(
+        args[0], args[1], args[2] if len(args) > 2 else "revoked",
+    ),
     "list_pending_approvals": lambda args: list_pending_approvals(args[0]),
     "decide_approval": lambda args: decide_approval(
         args[0], args[1], args[2], args[3] if len(args) > 3 else None

@@ -22,12 +22,12 @@
 //! | 0xec0ec5b3 | crosschainMint(address,uint256,bytes) | 15,000 | ERC-7802
 //! | 0xcba5b0a7 | crosschainBurn(address,uint256,bytes) | 15,000 | ERC-7802
 
+use crate::VmError;
+use crate::error::Result;
 use crate::evm::wtnzo::{abi, selectors};
 use crate::precompiles::PrecompileResult;
-use crate::error::Result;
-use crate::VmError;
 use std::sync::Arc;
-use tenzro_token::{TnzoToken, TokenRegistry, TokenId};
+use tenzro_token::{TnzoToken, TokenId, TokenRegistry};
 use tenzro_types::primitives::Address;
 use tracing::{debug, info, warn};
 
@@ -98,12 +98,8 @@ fn execute_tnzo_bridge(
         s if s == selectors::SYMBOL => handle_symbol(gas_limit),
         s if s == selectors::DECIMALS => handle_decimals(gas_limit),
         s if s == selectors::TOTAL_SUPPLY => handle_total_supply(token, gas_limit),
-        s if s == selectors::BALANCE_OF => {
-            handle_balance_of(token, after_selector, gas_limit)
-        }
-        s if s == selectors::ALLOWANCE => {
-            handle_allowance(registry, after_selector, gas_limit)
-        }
+        s if s == selectors::BALANCE_OF => handle_balance_of(token, after_selector, gas_limit),
+        s if s == selectors::ALLOWANCE => handle_allowance(registry, after_selector, gas_limit),
         // Write selectors: strip trusted-caller slot, dispatch on the
         // remaining calldata.
         s if s == selectors::TRANSFER => {
@@ -136,10 +132,7 @@ fn execute_tnzo_bridge(
             handle_crosschain_burn(token, &caller, calldata, gas_limit)
         }
         _ => {
-            warn!(
-                "TNZO bridge: unknown selector 0x{}",
-                hex::encode(selector)
-            );
+            warn!("TNZO bridge: unknown selector 0x{}", hex::encode(selector));
             Ok(PrecompileResult::failed(gas_limit))
         }
     }
@@ -166,10 +159,7 @@ fn handle_symbol(gas_limit: u64) -> Result<PrecompileResult> {
 /// decimals() -> uint8(18)
 fn handle_decimals(gas_limit: u64) -> Result<PrecompileResult> {
     check_gas(gas_limit, GAS_READ)?;
-    Ok(PrecompileResult::success(
-        abi::encode_uint8(18),
-        GAS_READ,
-    ))
+    Ok(PrecompileResult::success(abi::encode_uint8(18), GAS_READ))
 }
 
 /// totalSupply() -> uint256
@@ -228,16 +218,17 @@ fn handle_transfer(
         return Ok(PrecompileResult::failed(GAS_TRANSFER));
     }
 
-    let to_20 = abi::decode_address_at(calldata, 0).ok_or_else(|| {
-        VmError::PrecompileFailed("transfer: invalid to address".to_string())
-    })?;
+    let to_20 = abi::decode_address_at(calldata, 0)
+        .ok_or_else(|| VmError::PrecompileFailed("transfer: invalid to address".to_string()))?;
 
-    let amount = abi::decode_uint256_at(calldata, 32).ok_or_else(|| {
-        VmError::PrecompileFailed("transfer: invalid amount".to_string())
-    })?;
+    let amount = abi::decode_uint256_at(calldata, 32)
+        .ok_or_else(|| VmError::PrecompileFailed("transfer: invalid amount".to_string()))?;
 
     if amount == 0 {
-        return Ok(PrecompileResult::success(abi::encode_bool(true), GAS_TRANSFER));
+        return Ok(PrecompileResult::success(
+            abi::encode_bool(true),
+            GAS_TRANSFER,
+        ));
     }
 
     let from_addr = evm_addr_to_tenzro(caller);
@@ -251,11 +242,17 @@ fn handle_transfer(
                 hex::encode(to_20),
                 amount
             );
-            Ok(PrecompileResult::success(abi::encode_bool(true), GAS_TRANSFER))
+            Ok(PrecompileResult::success(
+                abi::encode_bool(true),
+                GAS_TRANSFER,
+            ))
         }
         Err(e) => {
             warn!("TNZO bridge transfer failed: {}", e);
-            Ok(PrecompileResult::success(abi::encode_bool(false), GAS_TRANSFER))
+            Ok(PrecompileResult::success(
+                abi::encode_bool(false),
+                GAS_TRANSFER,
+            ))
         }
     }
 }
@@ -276,13 +273,11 @@ fn handle_approve(
         return Ok(PrecompileResult::failed(GAS_APPROVE));
     }
 
-    let spender = abi::decode_address_at(calldata, 0).ok_or_else(|| {
-        VmError::PrecompileFailed("approve: invalid spender address".to_string())
-    })?;
+    let spender = abi::decode_address_at(calldata, 0)
+        .ok_or_else(|| VmError::PrecompileFailed("approve: invalid spender address".to_string()))?;
 
-    let amount = abi::decode_uint256_at(calldata, 32).ok_or_else(|| {
-        VmError::PrecompileFailed("approve: invalid amount".to_string())
-    })?;
+    let amount = abi::decode_uint256_at(calldata, 32)
+        .ok_or_else(|| VmError::PrecompileFailed("approve: invalid amount".to_string()))?;
 
     let owner = *caller;
 
@@ -298,7 +293,10 @@ fn handle_approve(
         amount
     );
 
-    Ok(PrecompileResult::success(abi::encode_bool(true), GAS_APPROVE))
+    Ok(PrecompileResult::success(
+        abi::encode_bool(true),
+        GAS_APPROVE,
+    ))
 }
 
 /// allowance(address owner, address spender) -> uint256
@@ -313,9 +311,8 @@ fn handle_allowance(
         return Ok(PrecompileResult::failed(GAS_READ));
     }
 
-    let owner = abi::decode_address_at(calldata, 0).ok_or_else(|| {
-        VmError::PrecompileFailed("allowance: invalid owner address".to_string())
-    })?;
+    let owner = abi::decode_address_at(calldata, 0)
+        .ok_or_else(|| VmError::PrecompileFailed("allowance: invalid owner address".to_string()))?;
 
     let spender = abi::decode_address_at(calldata, 32).ok_or_else(|| {
         VmError::PrecompileFailed("allowance: invalid spender address".to_string())
@@ -351,25 +348,29 @@ fn handle_transfer_from(
         VmError::PrecompileFailed("transferFrom: invalid from address".to_string())
     })?;
 
-    let to_20 = abi::decode_address_at(calldata, 32).ok_or_else(|| {
-        VmError::PrecompileFailed("transferFrom: invalid to address".to_string())
-    })?;
+    let to_20 = abi::decode_address_at(calldata, 32)
+        .ok_or_else(|| VmError::PrecompileFailed("transferFrom: invalid to address".to_string()))?;
 
-    let amount = abi::decode_uint256_at(calldata, 64).ok_or_else(|| {
-        VmError::PrecompileFailed("transferFrom: invalid amount".to_string())
-    })?;
+    let amount = abi::decode_uint256_at(calldata, 64)
+        .ok_or_else(|| VmError::PrecompileFailed("transferFrom: invalid amount".to_string()))?;
 
     let spender = *caller;
 
     if amount == 0 {
-        return Ok(PrecompileResult::success(abi::encode_bool(true), GAS_TRANSFER_FROM));
+        return Ok(PrecompileResult::success(
+            abi::encode_bool(true),
+            GAS_TRANSFER_FROM,
+        ));
     }
 
     // Check and spend approval
     let token_id = TokenId::tnzo();
     if let Err(e) = registry.spend_approval(&from_20, &spender, &token_id, amount) {
         warn!("TNZO bridge transferFrom: approval check failed: {}", e);
-        return Ok(PrecompileResult::success(abi::encode_bool(false), GAS_TRANSFER_FROM));
+        return Ok(PrecompileResult::success(
+            abi::encode_bool(false),
+            GAS_TRANSFER_FROM,
+        ));
     }
 
     // Execute the transfer
@@ -385,11 +386,17 @@ fn handle_transfer_from(
                 amount,
                 hex::encode(spender),
             );
-            Ok(PrecompileResult::success(abi::encode_bool(true), GAS_TRANSFER_FROM))
+            Ok(PrecompileResult::success(
+                abi::encode_bool(true),
+                GAS_TRANSFER_FROM,
+            ))
         }
         Err(e) => {
             warn!("TNZO bridge transferFrom failed: {}", e);
-            Ok(PrecompileResult::success(abi::encode_bool(false), GAS_TRANSFER_FROM))
+            Ok(PrecompileResult::success(
+                abi::encode_bool(false),
+                GAS_TRANSFER_FROM,
+            ))
         }
     }
 }
@@ -466,9 +473,8 @@ fn handle_crosschain_mint(
     })?;
 
     // Parse amount
-    let amount = abi::decode_uint256_at(calldata, 32).ok_or_else(|| {
-        VmError::PrecompileFailed("crosschainMint: invalid amount".to_string())
-    })?;
+    let amount = abi::decode_uint256_at(calldata, 32)
+        .ok_or_else(|| VmError::PrecompileFailed("crosschainMint: invalid amount".to_string()))?;
 
     if amount == 0 {
         return Ok(PrecompileResult::success(Vec::new(), GAS_CROSSCHAIN));
@@ -493,7 +499,9 @@ fn handle_crosschain_mint(
     let data = decode_dynamic_bytes(calldata, 64);
     let source_chain_id = data.as_ref().and_then(|d| {
         if d.len() >= 32 {
-            Some(u128::from_be_bytes(d[16..32].try_into().unwrap_or([0u8; 16])))
+            Some(u128::from_be_bytes(
+                d[16..32].try_into().unwrap_or([0u8; 16]),
+            ))
         } else {
             None
         }
@@ -504,26 +512,24 @@ fn handle_crosschain_mint(
     let treasury = token.treasury_address_ref();
 
     match treasury {
-        Some(treasury_addr) => {
-            match token.mint(&to_addr, amount, &treasury_addr) {
-                Ok(()) => {
-                    info!(
-                        "ERC-7802 crosschainMint: {} TNZO to 0x{} (source_chain: {:?})",
-                        amount,
-                        hex::encode(to_20),
-                        source_chain_id,
-                    );
-                    Ok(PrecompileResult::success(Vec::new(), GAS_CROSSCHAIN))
-                }
-                Err(e) => {
-                    warn!("crosschainMint failed: {}", e);
-                    Err(VmError::PrecompileFailed(format!(
-                        "crosschainMint: mint failed: {}",
-                        e
-                    )))
-                }
+        Some(treasury_addr) => match token.mint(&to_addr, amount, &treasury_addr) {
+            Ok(()) => {
+                info!(
+                    "ERC-7802 crosschainMint: {} TNZO to 0x{} (source_chain: {:?})",
+                    amount,
+                    hex::encode(to_20),
+                    source_chain_id,
+                );
+                Ok(PrecompileResult::success(Vec::new(), GAS_CROSSCHAIN))
             }
-        }
+            Err(e) => {
+                warn!("crosschainMint failed: {}", e);
+                Err(VmError::PrecompileFailed(format!(
+                    "crosschainMint: mint failed: {}",
+                    e
+                )))
+            }
+        },
         None => Err(VmError::PrecompileFailed(
             "crosschainMint: treasury not configured".to_string(),
         )),
@@ -560,9 +566,8 @@ fn handle_crosschain_burn(
     })?;
 
     // Parse amount
-    let amount = abi::decode_uint256_at(calldata, 32).ok_or_else(|| {
-        VmError::PrecompileFailed("crosschainBurn: invalid amount".to_string())
-    })?;
+    let amount = abi::decode_uint256_at(calldata, 32)
+        .ok_or_else(|| VmError::PrecompileFailed("crosschainBurn: invalid amount".to_string()))?;
 
     if amount == 0 {
         return Ok(PrecompileResult::success(Vec::new(), GAS_CROSSCHAIN));
@@ -584,7 +589,9 @@ fn handle_crosschain_burn(
     let data = decode_dynamic_bytes(calldata, 64);
     let dest_chain_id = data.as_ref().and_then(|d| {
         if d.len() >= 32 {
-            Some(u128::from_be_bytes(d[16..32].try_into().unwrap_or([0u8; 16])))
+            Some(u128::from_be_bytes(
+                d[16..32].try_into().unwrap_or([0u8; 16]),
+            ))
         } else {
             None
         }
@@ -688,7 +695,11 @@ mod tests {
         let treasury = Address::new([0xFF; 32]);
         token.set_treasury_address(treasury);
         token
-            .mint(&Address::new([0u8; 32]), 1_000_000_000_000_000_000_000u128, &treasury)
+            .mint(
+                &Address::new([0u8; 32]),
+                1_000_000_000_000_000_000_000u128,
+                &treasury,
+            )
             .unwrap();
 
         (token, registry)

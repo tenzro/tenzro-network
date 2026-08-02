@@ -107,7 +107,10 @@ mod tests {
     fn clipped_contributor_is_evicted_for_norm_budget() {
         let c = vec![("did:t1".to_string(), true, 0.99)];
         let d = eviction_decisions(&c, 0.0);
-        assert_eq!(d, vec![("did:t1".to_string(), EvictionReason::NormBudgetExceeded)]);
+        assert_eq!(
+            d,
+            vec![("did:t1".to_string(), EvictionReason::NormBudgetExceeded)]
+        );
     }
 
     #[test]
@@ -115,7 +118,10 @@ mod tests {
         // Not clipped, but cosine -0.4 <= floor 0.0 → agreement eviction.
         let c = vec![("did:t1".to_string(), false, -0.4)];
         let d = eviction_decisions(&c, 0.0);
-        assert_eq!(d, vec![("did:t1".to_string(), EvictionReason::AgreementBelowFloor)]);
+        assert_eq!(
+            d,
+            vec![("did:t1".to_string(), EvictionReason::AgreementBelowFloor)]
+        );
     }
 
     #[test]
@@ -129,7 +135,10 @@ mod tests {
         // Both clipped AND disagreeing → attributed to norm budget.
         let c = vec![("did:t1".to_string(), true, -0.9)];
         let d = eviction_decisions(&c, 0.0);
-        assert_eq!(d, vec![("did:t1".to_string(), EvictionReason::NormBudgetExceeded)]);
+        assert_eq!(
+            d,
+            vec![("did:t1".to_string(), EvictionReason::NormBudgetExceeded)]
+        );
     }
 
     #[test]
@@ -137,6 +146,9 @@ mod tests {
         // agreement exactly at floor → evicted (<=).
         let c = vec![("did:t1".to_string(), false, 0.25)];
         let d = eviction_decisions(&c, 0.25);
-        assert_eq!(d, vec![("did:t1".to_string(), EvictionReason::AgreementBelowFloor)]);
+        assert_eq!(
+            d,
+            vec![("did:t1".to_string(), EvictionReason::AgreementBelowFloor)]
+        );
     }
 }

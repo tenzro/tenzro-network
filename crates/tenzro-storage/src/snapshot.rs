@@ -32,9 +32,9 @@
 //! ```
 
 use crate::error::{Result, StorageError};
-use crate::kv::{KvStore, RocksDbStore, WriteOp, CF_SNAPSHOTS};
-use flate2::read::{GzDecoder, GzEncoder};
+use crate::kv::{CF_SNAPSHOTS, KvStore, RocksDbStore, WriteOp};
 use flate2::Compression;
+use flate2::read::{GzDecoder, GzEncoder};
 use parking_lot::RwLock;
 use rocksdb::checkpoint::Checkpoint;
 use serde::{Deserialize, Serialize};
@@ -93,9 +93,9 @@ pub enum CompressionType {
 fn compress_gzip(data: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = GzEncoder::new(data, Compression::default());
     let mut compressed = Vec::new();
-    encoder.read_to_end(&mut compressed).map_err(|e| {
-        StorageError::InvalidSnapshot(format!("gzip compression failed: {}", e))
-    })?;
+    encoder
+        .read_to_end(&mut compressed)
+        .map_err(|e| StorageError::InvalidSnapshot(format!("gzip compression failed: {}", e)))?;
     Ok(compressed)
 }
 
@@ -106,9 +106,9 @@ fn compress_gzip(data: &[u8]) -> Result<Vec<u8>> {
 fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = GzDecoder::new(data);
     let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed).map_err(|e| {
-        StorageError::InvalidSnapshot(format!("gzip decompression failed: {}", e))
-    })?;
+    decoder
+        .read_to_end(&mut decompressed)
+        .map_err(|e| StorageError::InvalidSnapshot(format!("gzip decompression failed: {}", e)))?;
     Ok(decompressed)
 }
 
@@ -419,11 +419,13 @@ impl SnapshotManager<RocksDbStore> {
     ) -> Result<Snapshot> {
         // Create a RocksDB checkpoint for consistent point-in-time snapshot
         let db = self.kv_store.db();
-        let checkpoint = Checkpoint::new(db)
-            .map_err(|e| StorageError::InvalidSnapshot(format!("Failed to create checkpoint: {}", e)))?;
+        let checkpoint = Checkpoint::new(db).map_err(|e| {
+            StorageError::InvalidSnapshot(format!("Failed to create checkpoint: {}", e))
+        })?;
 
-        checkpoint.create_checkpoint(checkpoint_path)
-            .map_err(|e| StorageError::InvalidSnapshot(format!("Failed to create checkpoint at path: {}", e)))?;
+        checkpoint.create_checkpoint(checkpoint_path).map_err(|e| {
+            StorageError::InvalidSnapshot(format!("Failed to create checkpoint at path: {}", e))
+        })?;
 
         // The checkpoint is now a consistent snapshot of the entire database
         // For the metadata, we need to read the checkpoint to get the actual size
@@ -636,14 +638,13 @@ impl SnapshotRestorer {
         // Attempt to decode as a Vec<SnapshotEntry>. If the data is not in
         // that format (e.g. it is a checkpoint path), return an error rather
         // than silently ignoring the contents.
-        let entries: Vec<SnapshotEntry> =
-            bincode::deserialize(&raw_data).map_err(|e| {
-                StorageError::InvalidSnapshot(format!(
-                    "state_data is not a valid SnapshotEntry list \
+        let entries: Vec<SnapshotEntry> = bincode::deserialize(&raw_data).map_err(|e| {
+            StorageError::InvalidSnapshot(format!(
+                "state_data is not a valid SnapshotEntry list \
                      (is this a RocksDB checkpoint snapshot?): {}",
-                    e
-                ))
-            })?;
+                e
+            ))
+        })?;
 
         let entry_count = entries.len();
         tracing::info!(
@@ -780,10 +781,7 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded = manager
-            .load_snapshot(BlockHeight::new(100))
-            .await
-            .unwrap();
+        let loaded = manager.load_snapshot(BlockHeight::new(100)).await.unwrap();
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().height, BlockHeight::new(100));
     }
@@ -822,22 +820,12 @@ mod tests {
         let manager = SnapshotManager::new(kv_store, 5);
 
         manager
-            .create_snapshot(
-                BlockHeight::new(100),
-                Hash::zero(),
-                Hash::zero(),
-                vec![1],
-            )
+            .create_snapshot(BlockHeight::new(100), Hash::zero(), Hash::zero(), vec![1])
             .await
             .unwrap();
 
         manager
-            .create_snapshot(
-                BlockHeight::new(200),
-                Hash::zero(),
-                Hash::zero(),
-                vec![2],
-            )
+            .create_snapshot(BlockHeight::new(200), Hash::zero(), Hash::zero(), vec![2])
             .await
             .unwrap();
 
@@ -852,16 +840,14 @@ mod tests {
         let manager = SnapshotManager::new(kv_store, 5);
 
         manager
-            .create_snapshot(
-                BlockHeight::new(100),
-                Hash::zero(),
-                Hash::zero(),
-                vec![1],
-            )
+            .create_snapshot(BlockHeight::new(100), Hash::zero(), Hash::zero(), vec![1])
             .await
             .unwrap();
 
-        manager.delete_snapshot(BlockHeight::new(100)).await.unwrap();
+        manager
+            .delete_snapshot(BlockHeight::new(100))
+            .await
+            .unwrap();
 
         let loaded = manager.load_snapshot(BlockHeight::new(100)).await.unwrap();
         assert!(loaded.is_none());
@@ -869,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_restore_from_snapshot_writes_entries() {
-        use crate::kv::{MemoryStore, CF_STATE, CF_ACCOUNTS};
+        use crate::kv::{CF_ACCOUNTS, CF_STATE, MemoryStore};
 
         let entries = vec![
             SnapshotEntry {
@@ -889,12 +875,7 @@ mod tests {
         let manager = SnapshotManager::new(restore_store.clone(), 5);
 
         let snapshot = manager
-            .create_snapshot(
-                BlockHeight::new(42),
-                Hash::zero(),
-                Hash::zero(),
-                state_data,
-            )
+            .create_snapshot(BlockHeight::new(42), Hash::zero(), Hash::zero(), state_data)
             .await
             .unwrap();
 
@@ -912,7 +893,10 @@ mod tests {
             .get(CF_STATE, b"balance:0xabc")
             .unwrap()
             .expect("balance entry should be present");
-        assert_eq!(u128::from_le_bytes(balance_bytes.try_into().unwrap()), 1234u128);
+        assert_eq!(
+            u128::from_le_bytes(balance_bytes.try_into().unwrap()),
+            1234u128
+        );
 
         let account_bytes = target_store
             .get(CF_ACCOUNTS, b"account:0xabc")
@@ -941,7 +925,8 @@ mod tests {
             state_data: vec![],
         };
 
-        let result = SnapshotRestorer::restore_from_snapshot(&snapshot, target_store.as_ref()).await;
+        let result =
+            SnapshotRestorer::restore_from_snapshot(&snapshot, target_store.as_ref()).await;
         assert!(result.is_err(), "empty state_data must return an error");
 
         // Silence unused variable warning
@@ -950,14 +935,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_restore_roundtrip_via_snapshot_manager() {
-        use crate::kv::{MemoryStore, CF_STATE};
+        use crate::kv::{CF_STATE, MemoryStore};
 
         // Populate source state
-        let source_entries = (0u8..5).map(|i| SnapshotEntry {
-            cf: CF_STATE.to_string(),
-            key: format!("key:{}", i).into_bytes(),
-            value: vec![i * 10],
-        }).collect::<Vec<_>>();
+        let source_entries = (0u8..5)
+            .map(|i| SnapshotEntry {
+                cf: CF_STATE.to_string(),
+                key: format!("key:{}", i).into_bytes(),
+                value: vec![i * 10],
+            })
+            .collect::<Vec<_>>();
 
         let state_data = serialize_snapshot_entries(&source_entries).unwrap();
 
@@ -1017,7 +1004,11 @@ mod tests {
         let root_a = compute_state_root(&entries_a);
         let root_b = compute_state_root(&entries_b);
         assert_eq!(root_a, root_b, "root must be order-independent");
-        assert_ne!(root_a, Hash::zero(), "root must be non-zero for non-empty payload");
+        assert_ne!(
+            root_a,
+            Hash::zero(),
+            "root must be non-zero for non-empty payload"
+        );
     }
 
     #[test]

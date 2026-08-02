@@ -114,7 +114,7 @@ pub use signing::{HybridSignatureBytes, HybridSigner};
 pub use state_sync::{ChainStateProvider, LocalStateProvider, WalletStateSync};
 pub use traits::WalletService;
 pub use userop::{
-    encode_user_op_json, pack_validator_signature, user_op_hash, UserOp, UserOpBuilder,
+    UserOp, UserOpBuilder, encode_user_op_json, pack_validator_signature, user_op_hash,
 };
 pub use validation::{TransactionValidator, ValidationConfig};
 pub use wallet::{KeyShare, MpcWallet, WalletId};

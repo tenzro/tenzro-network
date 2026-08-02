@@ -37,9 +37,9 @@ use serde::{Deserialize, Serialize};
 use tenzro_storage::kv::KvStore;
 use tenzro_types::primitives::{BlockHeight, Hash};
 use tenzro_workflow::{
-    ApprovalDecision, ApprovalGate, DischargeProof, FeeRouteRegistry, KillSwitchScope,
-    Obligation, ParticipantSignature, PrivacyDomain, PrivacyDomainRegistry, Workflow,
-    WorkflowManager, WorkflowStatus,
+    ApprovalDecision, ApprovalGate, DischargeProof, FeeRouteRegistry, KillSwitchScope, Obligation,
+    ParticipantSignature, PrivacyDomain, PrivacyDomainRegistry, Workflow, WorkflowManager,
+    WorkflowStatus,
 };
 use tracing::{debug, warn};
 
@@ -262,7 +262,10 @@ impl WorkflowRuntime {
         let payload = match decode_workflow_log_payload(log_data) {
             Some(p) => p,
             None => {
-                warn!(block_height = block_height.0, "Malformed WorkflowCreate log");
+                warn!(
+                    block_height = block_height.0,
+                    "Malformed WorkflowCreate log"
+                );
                 return;
             }
         };
@@ -302,7 +305,10 @@ impl WorkflowRuntime {
 
     pub fn apply_transition(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowTransition log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowTransition log"
+            );
             return;
         };
         let p: TransitionWorkflowPayload = match serde_json::from_slice(payload) {
@@ -327,7 +333,10 @@ impl WorkflowRuntime {
 
     pub fn apply_register_obligation(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowObligationRegister log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowObligationRegister log"
+            );
             return;
         };
         let p: RegisterObligationPayload = match serde_json::from_slice(payload) {
@@ -344,7 +353,10 @@ impl WorkflowRuntime {
 
     pub fn apply_discharge_obligation(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowObligationDischarge log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowObligationDischarge log"
+            );
             return;
         };
         let p: DischargeObligationPayload = match serde_json::from_slice(payload) {
@@ -365,7 +377,10 @@ impl WorkflowRuntime {
 
     pub fn apply_default_obligation(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowObligationDefault log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowObligationDefault log"
+            );
             return;
         };
         let p: DefaultObligationPayload = match serde_json::from_slice(payload) {
@@ -386,7 +401,10 @@ impl WorkflowRuntime {
 
     pub fn apply_register_gate(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowGateRegister log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowGateRegister log"
+            );
             return;
         };
         let p: RegisterGatePayload = match serde_json::from_slice(payload) {
@@ -403,7 +421,10 @@ impl WorkflowRuntime {
 
     pub fn apply_open_approval(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowApprovalOpen log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowApprovalOpen log"
+            );
             return;
         };
         let p: OpenApprovalPayload = match serde_json::from_slice(payload) {
@@ -417,14 +438,20 @@ impl WorkflowRuntime {
             warn!(gate = %p.gate_id, "WorkflowApprovalOpen: invalid gate_id hex");
             return;
         };
-        if let Err(e) = self.manager.open_approval(&gid, p.trigger_context, p.created_at) {
+        if let Err(e) = self
+            .manager
+            .open_approval(&gid, p.trigger_context, p.created_at)
+        {
             warn!(gate = %p.gate_id, error = %e, "WorkflowApprovalOpen mirror rejected");
         }
     }
 
     pub fn apply_submit_decision(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowApprovalDecision log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowApprovalDecision log"
+            );
             return;
         };
         let p: SubmitDecisionPayload = match serde_json::from_slice(payload) {
@@ -452,13 +479,18 @@ impl WorkflowRuntime {
         }
         match self.manager.submit_decision(&rid, p.decision) {
             Ok(_) => {}
-            Err(e) => warn!(request = %p.request_id, error = %e, "WorkflowApprovalDecision mirror rejected"),
+            Err(e) => {
+                warn!(request = %p.request_id, error = %e, "WorkflowApprovalDecision mirror rejected")
+            }
         }
     }
 
     pub fn apply_kill_switch(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowKillSwitch log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowKillSwitch log"
+            );
             return;
         };
         let p: KillSwitchPayload = match serde_json::from_slice(payload) {
@@ -472,14 +504,20 @@ impl WorkflowRuntime {
             warn!(workflow_id = %p.workflow_id, "WorkflowKillSwitch: invalid workflow_id hex");
             return;
         };
-        if let Err(e) = self.manager.invoke_kill_switch(&wf_id, p.invoker, p.scope, p.reason, p.at) {
+        if let Err(e) = self
+            .manager
+            .invoke_kill_switch(&wf_id, p.invoker, p.scope, p.reason, p.at)
+        {
             warn!(workflow_id = %p.workflow_id, error = %e, "WorkflowKillSwitch mirror rejected");
         }
     }
 
     pub fn apply_register_privacy_domain(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowPrivacyDomainRegister log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowPrivacyDomainRegister log"
+            );
             return;
         };
         let p: RegisterPrivacyDomainPayload = match serde_json::from_slice(payload) {
@@ -496,7 +534,10 @@ impl WorkflowRuntime {
 
     pub fn apply_freeze_privacy_domain(&self, log_data: &[u8], block_height: BlockHeight) {
         let Some(payload) = decode_workflow_log_payload(log_data) else {
-            warn!(block_height = block_height.0, "Malformed WorkflowPrivacyDomainFreeze log");
+            warn!(
+                block_height = block_height.0,
+                "Malformed WorkflowPrivacyDomainFreeze log"
+            );
             return;
         };
         let p: FreezePrivacyDomainPayload = match serde_json::from_slice(payload) {

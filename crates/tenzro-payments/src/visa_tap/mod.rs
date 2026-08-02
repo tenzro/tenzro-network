@@ -4,30 +4,30 @@
 //! for agentic commerce. Provides both server-side verification and
 //! client-side request signing capabilities.
 
-pub mod types;
-pub mod server;
 pub mod client;
-pub mod registry;
 pub mod did_registry;
-pub mod verifier;
 pub mod facilitator_server;
 pub mod issuer;
+pub mod registry;
+pub mod server;
+pub mod types;
+pub mod verifier;
 
-pub use types::{
-    AgentRecognition, AgentTag, ConsumerRecognition, PaymentContainer,
-    PaymentMethod, VisaTapChallenge,
-};
-pub use server::VisaTapServer;
 pub use client::VisaTapClient;
-pub use registry::VisaAgentRegistryClient;
 pub use did_registry::DidResolverAgentRegistry;
-pub use verifier::{TapVerifier, VerificationResult};
 pub use facilitator_server::{
-    tap_facilitator_router, TapFacilitatorState, TapSupportedResponse, TapVerifyRequest,
-    TapVerifyResponse,
+    TapFacilitatorState, TapSupportedResponse, TapVerifyRequest, TapVerifyResponse,
+    tap_facilitator_router,
 };
 pub use issuer::{
     AgentToken, AgentTokenStatus, CreatePaymentInstructionRequest, CredentialVerification,
-    IssuerApiError, PaymentInstruction, PaymentInstructionStatus, ProvisionAgentTokenRequest,
-    VerifyCredentialRequest, VisaTapIssuerClient, DEFAULT_ISSUER_API_BASE,
+    DEFAULT_ISSUER_API_BASE, IssuerApiError, PaymentInstruction, PaymentInstructionStatus,
+    ProvisionAgentTokenRequest, VerifyCredentialRequest, VisaTapIssuerClient,
 };
+pub use registry::VisaAgentRegistryClient;
+pub use server::VisaTapServer;
+pub use types::{
+    AgentRecognition, AgentTag, ConsumerRecognition, PaymentContainer, PaymentMethod,
+    VisaTapChallenge,
+};
+pub use verifier::{TapVerifier, VerificationResult};

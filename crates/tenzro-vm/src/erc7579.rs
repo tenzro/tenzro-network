@@ -59,16 +59,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
-use tenzro_crypto::composite::{CompositePublicKey, CompositeSignature, StandardHybridVerifier};
 use tenzro_crypto::HybridVerifier;
+use tenzro_crypto::composite::{CompositePublicKey, CompositeSignature, StandardHybridVerifier};
 
+use crate::VmError;
 use crate::aa_validators::{
-    IValidator, ValidationData, ValidatorError, ERC1271_FAILURE_VALUE, ERC1271_MAGIC_VALUE,
+    ERC1271_FAILURE_VALUE, ERC1271_MAGIC_VALUE, IValidator, ValidationData, ValidatorError,
 };
 use crate::account_abstraction::UserOperation;
-use crate::precompiles::{PrecompileFn, PrecompileResult};
 use crate::error::Result as VmResult;
-use crate::VmError;
+use crate::precompiles::{PrecompileFn, PrecompileResult};
 
 // -----------------------------------------------------------------------------
 // ERC-7579 standard selectors (keccak256 4-byte prefix)
@@ -94,16 +94,19 @@ pub const MODULE_TYPE_VALIDATOR: u64 = 1;
 // -----------------------------------------------------------------------------
 
 /// `0x101d` — `SocialRecoveryValidator` precompile (ERC-7579 module).
-pub const PRECOMPILE_SOCIAL_RECOVERY_VALIDATOR: &[u8] =
-    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1d, 0];
+pub const PRECOMPILE_SOCIAL_RECOVERY_VALIDATOR: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1d, 0,
+];
 
 /// `0x101e` — `SessionKeyValidator` precompile (ERC-7579 module).
-pub const PRECOMPILE_SESSION_KEY_VALIDATOR: &[u8] =
-    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1e, 0];
+pub const PRECOMPILE_SESSION_KEY_VALIDATOR: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1e, 0,
+];
 
 /// `0x101f` — `SpendingLimitValidator` precompile (ERC-7579 module).
-pub const PRECOMPILE_SPENDING_LIMIT_VALIDATOR: &[u8] =
-    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1f, 0];
+pub const PRECOMPILE_SPENDING_LIMIT_VALIDATOR: &[u8] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1f, 0,
+];
 
 /// Hardware signer module-address slots. The node-side `tenzro_addHardwareSigner`
 /// RPC assigns one of these to each installed device. Multiple hardware
@@ -163,10 +166,7 @@ pub struct SocialRecoveryConfig {
 }
 
 impl SocialRecoveryConfig {
-    pub fn new(
-        guardians: Vec<CompositePublicKey>,
-        threshold: u32,
-    ) -> Result<Self, ValidatorError> {
+    pub fn new(guardians: Vec<CompositePublicKey>, threshold: u32) -> Result<Self, ValidatorError> {
         if guardians.is_empty() {
             return Err(ValidatorError::InvalidInput(
                 "SocialRecovery: guardian set must be non-empty".into(),
@@ -284,8 +284,10 @@ impl SocialRecoveryValidator {
 
     fn forget(&self, account: &[u8]) {
         if let Some(ref storage) = self.storage {
-            let _ = storage
-                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::social_key(account));
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::social_key(account),
+            );
         }
     }
 
@@ -329,8 +331,8 @@ impl IValidator for SocialRecoveryValidator {
             )));
         };
 
-        let payload: SocialRecoverySignaturePayload = bincode::deserialize(&op.signature)
-            .map_err(|e| {
+        let payload: SocialRecoverySignaturePayload =
+            bincode::deserialize(&op.signature).map_err(|e| {
                 ValidatorError::InvalidInput(format!(
                     "SocialRecovery: signature decode failed: {e}"
                 ))
@@ -496,9 +498,7 @@ impl SessionKeyValidator {
             return;
         };
         let cfg_prefix: &[u8] = b"erc7579/session/";
-        if let Ok(entries) =
-            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, cfg_prefix)
-        {
+        if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, cfg_prefix) {
             for (key, value) in entries {
                 if key.len() <= cfg_prefix.len() {
                     continue;
@@ -510,8 +510,7 @@ impl SessionKeyValidator {
             }
         }
         let state_prefix: &[u8] = b"erc7579/session_state/";
-        if let Ok(entries) =
-            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, state_prefix)
+        if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, state_prefix)
         {
             for (key, value) in entries {
                 if key.len() <= state_prefix.len() {
@@ -551,10 +550,14 @@ impl SessionKeyValidator {
 
     fn forget(&self, account: &[u8]) {
         if let Some(ref storage) = self.storage {
-            let _ = storage
-                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::cfg_key(account));
-            let _ = storage
-                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::state_key(account));
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::cfg_key(account),
+            );
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::state_key(account),
+            );
         }
     }
 
@@ -611,9 +614,7 @@ impl IValidator for SessionKeyValidator {
 
         let payload: SessionKeySignaturePayload =
             bincode::deserialize(&op.signature).map_err(|e| {
-                ValidatorError::InvalidInput(format!(
-                    "SessionKey: signature decode failed: {e}"
-                ))
+                ValidatorError::InvalidInput(format!("SessionKey: signature decode failed: {e}"))
             })?;
 
         // 1. Ed25519 signature check.
@@ -822,9 +823,7 @@ impl SpendingLimitValidator {
             return;
         };
         let cfg_prefix: &[u8] = b"erc7579/spending/";
-        if let Ok(entries) =
-            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, cfg_prefix)
-        {
+        if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, cfg_prefix) {
             for (key, value) in entries {
                 if key.len() <= cfg_prefix.len() {
                     continue;
@@ -836,8 +835,7 @@ impl SpendingLimitValidator {
             }
         }
         let state_prefix: &[u8] = b"erc7579/spending_state/";
-        if let Ok(entries) =
-            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, state_prefix)
+        if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, state_prefix)
         {
             for (key, value) in entries {
                 if key.len() <= state_prefix.len() {
@@ -850,8 +848,7 @@ impl SpendingLimitValidator {
             }
         }
         let auth_prefix: &[u8] = b"erc7579/spending_auth/";
-        if let Ok(entries) =
-            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, auth_prefix)
+        if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, auth_prefix)
         {
             for (key, value) in entries {
                 if key.len() <= auth_prefix.len() || value.len() != 32 {
@@ -901,12 +898,18 @@ impl SpendingLimitValidator {
 
     fn forget(&self, account: &[u8]) {
         if let Some(ref storage) = self.storage {
-            let _ = storage
-                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::cfg_key(account));
-            let _ = storage
-                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::state_key(account));
-            let _ = storage
-                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::auth_key(account));
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::cfg_key(account),
+            );
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::state_key(account),
+            );
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::auth_key(account),
+            );
         }
     }
 
@@ -982,9 +985,7 @@ impl IValidator for SpendingLimitValidator {
 
         let payload: SpendingLimitSignaturePayload =
             bincode::deserialize(&op.signature).map_err(|e| {
-                ValidatorError::InvalidInput(format!(
-                    "SpendingLimit: signature decode failed: {e}"
-                ))
+                ValidatorError::InvalidInput(format!("SpendingLimit: signature decode failed: {e}"))
             })?;
 
         // The validator pins its own authenticator pubkey at install time;
@@ -1123,97 +1124,103 @@ fn decode_install_module_calldata(input: &[u8]) -> VmResult<(u64, [u8; 20], Vec<
 pub fn create_social_recovery_validator_precompile(
     validator: Arc<SocialRecoveryValidator>,
 ) -> PrecompileFn {
-    Arc::new(move |input: &[u8], _gas_limit: u64| -> VmResult<PrecompileResult> {
-        if input.len() < 4 {
-            return Ok(PrecompileResult::failed(0));
-        }
-        let mut sel = [0u8; 4];
-        sel.copy_from_slice(&input[..4]);
-        match sel {
-            SELECTOR_INSTALL_MODULE => {
-                let (type_id, _module_addr, init_data) = decode_install_module_calldata(input)?;
-                if type_id != MODULE_TYPE_VALIDATOR {
-                    return Ok(PrecompileResult::failed(0));
-                }
-                // Tenzro-native install_data: bincode of (account, SocialRecoveryConfig).
-                let (account, config): (Vec<u8>, SocialRecoveryConfig) =
-                    bincode::deserialize(&init_data).map_err(|e| {
-                        VmError::PrecompileFailed(format!(
-                            "SocialRecovery install: decode failed: {e}"
-                        ))
-                    })?;
-                validator.install_for(account, config).map_err(|e| {
-                    VmError::PrecompileFailed(format!("SocialRecovery install: {e}"))
-                })?;
-                Ok(PrecompileResult::success(vec![1u8], 5_000))
+    Arc::new(
+        move |input: &[u8], _gas_limit: u64| -> VmResult<PrecompileResult> {
+            if input.len() < 4 {
+                return Ok(PrecompileResult::failed(0));
             }
-            _ => Ok(PrecompileResult::failed(0)),
-        }
-    })
+            let mut sel = [0u8; 4];
+            sel.copy_from_slice(&input[..4]);
+            match sel {
+                SELECTOR_INSTALL_MODULE => {
+                    let (type_id, _module_addr, init_data) = decode_install_module_calldata(input)?;
+                    if type_id != MODULE_TYPE_VALIDATOR {
+                        return Ok(PrecompileResult::failed(0));
+                    }
+                    // Tenzro-native install_data: bincode of (account, SocialRecoveryConfig).
+                    let (account, config): (Vec<u8>, SocialRecoveryConfig) =
+                        bincode::deserialize(&init_data).map_err(|e| {
+                            VmError::PrecompileFailed(format!(
+                                "SocialRecovery install: decode failed: {e}"
+                            ))
+                        })?;
+                    validator.install_for(account, config).map_err(|e| {
+                        VmError::PrecompileFailed(format!("SocialRecovery install: {e}"))
+                    })?;
+                    Ok(PrecompileResult::success(vec![1u8], 5_000))
+                }
+                _ => Ok(PrecompileResult::failed(0)),
+            }
+        },
+    )
 }
 
 /// Build the precompile function for `SessionKeyValidator`.
 pub fn create_session_key_validator_precompile(
     validator: Arc<SessionKeyValidator>,
 ) -> PrecompileFn {
-    Arc::new(move |input: &[u8], _gas_limit: u64| -> VmResult<PrecompileResult> {
-        if input.len() < 4 {
-            return Ok(PrecompileResult::failed(0));
-        }
-        let mut sel = [0u8; 4];
-        sel.copy_from_slice(&input[..4]);
-        match sel {
-            SELECTOR_INSTALL_MODULE => {
-                let (type_id, _module_addr, init_data) = decode_install_module_calldata(input)?;
-                if type_id != MODULE_TYPE_VALIDATOR {
-                    return Ok(PrecompileResult::failed(0));
-                }
-                let (account, config): (Vec<u8>, SessionKeyConfig) =
-                    bincode::deserialize(&init_data).map_err(|e| {
-                        VmError::PrecompileFailed(format!(
-                            "SessionKey install: decode failed: {e}"
-                        ))
-                    })?;
-                validator.install_for(account, config);
-                Ok(PrecompileResult::success(vec![1u8], 5_000))
+    Arc::new(
+        move |input: &[u8], _gas_limit: u64| -> VmResult<PrecompileResult> {
+            if input.len() < 4 {
+                return Ok(PrecompileResult::failed(0));
             }
-            _ => Ok(PrecompileResult::failed(0)),
-        }
-    })
+            let mut sel = [0u8; 4];
+            sel.copy_from_slice(&input[..4]);
+            match sel {
+                SELECTOR_INSTALL_MODULE => {
+                    let (type_id, _module_addr, init_data) = decode_install_module_calldata(input)?;
+                    if type_id != MODULE_TYPE_VALIDATOR {
+                        return Ok(PrecompileResult::failed(0));
+                    }
+                    let (account, config): (Vec<u8>, SessionKeyConfig) =
+                        bincode::deserialize(&init_data).map_err(|e| {
+                            VmError::PrecompileFailed(format!(
+                                "SessionKey install: decode failed: {e}"
+                            ))
+                        })?;
+                    validator.install_for(account, config);
+                    Ok(PrecompileResult::success(vec![1u8], 5_000))
+                }
+                _ => Ok(PrecompileResult::failed(0)),
+            }
+        },
+    )
 }
 
 /// Build the precompile function for `SpendingLimitValidator`.
 pub fn create_spending_limit_validator_precompile(
     validator: Arc<SpendingLimitValidator>,
 ) -> PrecompileFn {
-    Arc::new(move |input: &[u8], _gas_limit: u64| -> VmResult<PrecompileResult> {
-        if input.len() < 4 {
-            return Ok(PrecompileResult::failed(0));
-        }
-        let mut sel = [0u8; 4];
-        sel.copy_from_slice(&input[..4]);
-        match sel {
-            SELECTOR_INSTALL_MODULE => {
-                let (type_id, _module_addr, init_data) = decode_install_module_calldata(input)?;
-                if type_id != MODULE_TYPE_VALIDATOR {
-                    return Ok(PrecompileResult::failed(0));
-                }
-                // Tenzro-native install_data: bincode of (account, config, authenticator_pk).
-                let (account, config, authenticator_pk): (
-                    Vec<u8>,
-                    SpendingLimitConfig,
-                    [u8; 32],
-                ) = bincode::deserialize(&init_data).map_err(|e| {
-                    VmError::PrecompileFailed(format!(
-                        "SpendingLimit install: decode failed: {e}"
-                    ))
-                })?;
-                validator.install_for(account, config, authenticator_pk);
-                Ok(PrecompileResult::success(vec![1u8], 5_000))
+    Arc::new(
+        move |input: &[u8], _gas_limit: u64| -> VmResult<PrecompileResult> {
+            if input.len() < 4 {
+                return Ok(PrecompileResult::failed(0));
             }
-            _ => Ok(PrecompileResult::failed(0)),
-        }
-    })
+            let mut sel = [0u8; 4];
+            sel.copy_from_slice(&input[..4]);
+            match sel {
+                SELECTOR_INSTALL_MODULE => {
+                    let (type_id, _module_addr, init_data) = decode_install_module_calldata(input)?;
+                    if type_id != MODULE_TYPE_VALIDATOR {
+                        return Ok(PrecompileResult::failed(0));
+                    }
+                    // Tenzro-native install_data: bincode of (account, config, authenticator_pk).
+                    let (account, config, authenticator_pk): (
+                        Vec<u8>,
+                        SpendingLimitConfig,
+                        [u8; 32],
+                    ) = bincode::deserialize(&init_data).map_err(|e| {
+                        VmError::PrecompileFailed(format!(
+                            "SpendingLimit install: decode failed: {e}"
+                        ))
+                    })?;
+                    validator.install_for(account, config, authenticator_pk);
+                    Ok(PrecompileResult::success(vec![1u8], 5_000))
+                }
+                _ => Ok(PrecompileResult::failed(0)),
+            }
+        },
+    )
 }
 
 // -----------------------------------------------------------------------------
@@ -1227,7 +1234,7 @@ pub fn create_spending_limit_validator_precompile(
 
 mod ed25519_dalek_verify {
     use tenzro_crypto::keys::{KeyType, PublicKey};
-    use tenzro_crypto::signatures::{verify, Signature};
+    use tenzro_crypto::signatures::{Signature, verify};
 
     /// Verify a raw 64-byte Ed25519 signature against a 32-byte verifying key
     /// and a message. Returns `false` on any decoding or verification error.
@@ -1251,11 +1258,11 @@ mod tests {
     use crate::aa_validators::{ModuleAttestation, ModuleType, ValidatorRegistry};
     use crate::account_abstraction::{EntryPoint, SmartAccount};
     use ed25519_dalek::{Signer as DalekSigner, SigningKey};
+    use tenzro_crypto::HybridSigner;
     use tenzro_crypto::composite::InMemoryHybridSigner;
     use tenzro_crypto::keys::{KeyPair, KeyType};
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::signatures::Ed25519SignerImpl;
-    use tenzro_crypto::HybridSigner;
 
     fn make_user_op(sender: Vec<u8>, sig: Vec<u8>) -> UserOperation {
         UserOperation {
@@ -1779,7 +1786,9 @@ mod tests {
         };
         // Build op but bind the hash to EntryPoint's actual EIP-712 domain.
         let mut op = make_user_op(other.clone(), bincode::serialize(&session_payload).unwrap());
-        op.nonce = crate::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&other)).to_bytes();
+        op.nonce =
+            crate::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&other))
+                .to_bytes();
         let h = op.hash(1337, &[0xEEu8; 20]);
         // Re-sign with the EntryPoint-domain hash.
         let mut real_hash = [0u8; 32];
@@ -1799,7 +1808,10 @@ mod tests {
         // We craft a payload that passes SessionKey but uses call_value=200
         // which trips the SpendingLimit cap.
         let mut op2 = make_user_op(account.clone(), vec![]);
-        op2.nonce = crate::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&account)).to_bytes();
+        op2.nonce = crate::account_abstraction::Nonce::from_seq(
+            entry_point.get_nonce_default_key(&account),
+        )
+        .to_bytes();
         let h2 = op2.hash(1337, &[0xEEu8; 20]);
         let mut real_hash2 = [0u8; 32];
         real_hash2.copy_from_slice(&h2[..32]);
@@ -1868,7 +1880,9 @@ mod tests {
         .unwrap();
 
         let mut op3 = make_user_op(other2.clone(), vec![]);
-        op3.nonce = crate::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&other2)).to_bytes();
+        op3.nonce =
+            crate::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&other2))
+                .to_bytes();
         let h3 = op3.hash(1337, &[0xEEu8; 20]);
         let mut rh3 = [0u8; 32];
         rh3.copy_from_slice(&h3[..32]);
@@ -1925,7 +1939,9 @@ mod tests {
             init_data: vec![],
             priority: 200,
         };
-        let err = acct.install_validator_module(cfg2.clone(), false).unwrap_err();
+        let err = acct
+            .install_validator_module(cfg2.clone(), false)
+            .unwrap_err();
         assert!(matches!(err, ValidatorError::InvalidInput(_)));
         // With the recovery override, install succeeds.
         acct.install_validator_module_with_recovery(cfg2, true)
@@ -2219,7 +2235,7 @@ impl IValidator for HardwareSignerValidator {
 mod hardware_tests {
     use super::*;
     use crate::account_abstraction::UserOperation;
-    use k256::ecdsa::{signature::Signer, SigningKey};
+    use k256::ecdsa::{SigningKey, signature::Signer};
 
     fn test_signing_key(seed: u8) -> SigningKey {
         let mut bytes = [0u8; 32];

@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 _NS_COEFFS = (3.4445, -4.7750, 2.0315)
 
 
-def zeropower_via_newtonschulz5(g: "torch.Tensor", steps: int = 5) -> "torch.Tensor":
+def zeropower_via_newtonschulz5(g: torch.Tensor, steps: int = 5) -> torch.Tensor:
     """Approximate ``U V^T`` for ``G = U S V^T`` via quintic Newton-Schulz.
 
     Runs in float32. The iteration does not converge singular values exactly
@@ -60,8 +60,8 @@ def zeropower_via_newtonschulz5(g: "torch.Tensor", steps: int = 5) -> "torch.Ten
 
 
 def partition_parameters(
-    model: "nn.Module",
-) -> tuple[list["torch.Tensor"], list["torch.Tensor"]]:
+    model: nn.Module,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Split trainable parameters into ``(muon_params, fallback_params)``.
 
     Muon takes matrix-shaped weights (``ndim >= 2``; conv filters are
@@ -112,20 +112,20 @@ class Muon(torch.optim.Optimizer if torch is not None else object):  # type: ign
     ):
         if torch is None:
             raise RuntimeError("PyTorch is required")
-        defaults = dict(
-            lr=lr,
-            momentum=momentum,
-            nesterov=nesterov,
-            ns_steps=ns_steps,
-            weight_decay=weight_decay,
-            adamw_betas=adamw_betas,
-            adamw_eps=adamw_eps,
-            use_muon=True,
-        )
+        defaults = {
+            "lr": lr,
+            "momentum": momentum,
+            "nesterov": nesterov,
+            "ns_steps": ns_steps,
+            "weight_decay": weight_decay,
+            "adamw_betas": adamw_betas,
+            "adamw_eps": adamw_eps,
+            "use_muon": True,
+        }
         super().__init__(params, defaults)
 
     @torch.no_grad()
-    def step(self, closure: Any = None) -> Any:  # noqa: D102
+    def step(self, closure: Any = None) -> Any:
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -201,13 +201,13 @@ class Muon(torch.optim.Optimizer if torch is not None else object):  # type: ign
 
 
 def build_inner_optimizer(
-    model: "nn.Module",
+    model: nn.Module,
     arch_metadata: dict[str, Any] | None,
     hyperparams: dict[str, Any] | None,
     *,
     default_lr: float,
     default_weight_decay: float = 0.0,
-) -> "torch.optim.Optimizer":
+) -> torch.optim.Optimizer:
     """Construct the inner optimizer every adapter uses.
 
     ``inner_optimizer`` (``"muon"`` | ``"adamw"`` | ``"sgd"``) is read from

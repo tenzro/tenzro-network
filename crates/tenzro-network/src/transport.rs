@@ -26,11 +26,7 @@
 //! (which targets the no-NAT-traversal test path).
 
 use crate::error::{NetworkError, Result};
-use libp2p::{
-    core::upgrade,
-    identity::Keypair,
-    yamux, PeerId, Transport,
-};
+use libp2p::{PeerId, Transport, core::upgrade, identity::Keypair, yamux};
 use std::time::Duration;
 
 /// Builds the libp2p transport stack
@@ -64,14 +60,16 @@ pub fn build_transport(
     let quic = libp2p::quic::tokio::Transport::new(libp2p::quic::Config::new(keypair));
 
     // Combine transports with DNS support
-    let transport = libp2p::dns::tokio::Transport::system(
-        tcp_transport.or_transport(quic)
-    )
-    .map_err(|e| NetworkError::Transport(format!("Failed to create DNS transport: {}", e)))?
-    .map(|either, _| match either {
-        futures::future::Either::Left((peer_id, muxer)) => (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)),
-        futures::future::Either::Right((peer_id, muxer)) => (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)),
-    });
+    let transport = libp2p::dns::tokio::Transport::system(tcp_transport.or_transport(quic))
+        .map_err(|e| NetworkError::Transport(format!("Failed to create DNS transport: {}", e)))?
+        .map(|either, _| match either {
+            futures::future::Either::Left((peer_id, muxer)) => {
+                (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer))
+            }
+            futures::future::Either::Right((peer_id, muxer)) => {
+                (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer))
+            }
+        });
 
     Ok(transport.boxed())
 }

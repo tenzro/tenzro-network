@@ -9,7 +9,7 @@
 //! - `ProviderManager::get_reputation` — read path on every routing decision
 //!   under `RoutingStrategy::Reputation` / `Cortex` / `Weighted`.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use tenzro_model::{PricingEngine, ProviderManager};
 use tenzro_types::model::{
@@ -66,7 +66,11 @@ fn bench_calculate_cost(c: &mut Criterion) {
     group.bench_function("per_token_512in_256out", |b| {
         b.iter(|| {
             let cost = engine
-                .calculate_cost(black_box("qwen3-7b"), black_box(&pricing), black_box(&metadata))
+                .calculate_cost(
+                    black_box("qwen3-7b"),
+                    black_box(&pricing),
+                    black_box(&metadata),
+                )
                 .expect("calculate_cost");
             black_box(cost);
         });

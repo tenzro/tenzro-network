@@ -146,9 +146,7 @@ mod backend {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod macos {
-    use super::{
-        Attestation, DeviceKey, DeviceKeyError, DevicePublicKey, DeviceSignature, Result,
-    };
+    use super::{Attestation, DeviceKey, DeviceKeyError, DevicePublicKey, DeviceSignature, Result};
     use security_framework::access_control::{ProtectionMode, SecAccessControl};
     use security_framework::item::{
         ItemClass, ItemSearchOptions, Limit, Location, Reference, SearchResult,
@@ -238,8 +236,16 @@ mod macos {
             let (r, rest) = read_int(body)?;
             let (s, _) = read_int(rest)?;
             let mut out = [0u8; 64];
-            let r_strip = if r.len() == 33 && r[0] == 0 { &r[1..] } else { r };
-            let s_strip = if s.len() == 33 && s[0] == 0 { &s[1..] } else { s };
+            let r_strip = if r.len() == 33 && r[0] == 0 {
+                &r[1..]
+            } else {
+                r
+            };
+            let s_strip = if s.len() == 33 && s[0] == 0 {
+                &s[1..]
+            } else {
+                s
+            };
             if r_strip.len() > 32 || s_strip.len() > 32 {
                 return Err(DeviceKeyError::Enclave("ECDSA scalar > 32 bytes".into()));
             }

@@ -5,16 +5,17 @@ and returns a plain-text or JSON response string by calling the Tenzro JSON-RPC
 or Web API.
 """
 
-from .rpc_client import rpc_call, api_call
 import base64
 import binascii
 import json
 import re
 
+from .rpc_client import api_call, rpc_call
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_address(text: str) -> str | None:
     """Extract a hex address from text."""
@@ -54,7 +55,8 @@ def _extract_id(text: str, prefix: str = "") -> str | None:
 # Wallet & Blockchain
 # ---------------------------------------------------------------------------
 
-async def handle_wallet(text: str, metadata: dict = None) -> str:
+
+async def handle_wallet(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     addr = _extract_address(text)
 
@@ -81,8 +83,14 @@ async def handle_wallet(text: str, metadata: dict = None) -> str:
         # hashed with SHA-256. `timestamp` (ms epoch) MUST match signing time.
         md = metadata or {}
         required = (
-            "from", "to", "value", "signature", "public_key",
-            "pq_signature", "pq_public_key", "timestamp",
+            "from",
+            "to",
+            "value",
+            "signature",
+            "public_key",
+            "pq_signature",
+            "pq_public_key",
+            "timestamp",
         )
         if not all(md.get(k) is not None and md.get(k) != "" for k in required):
             return (
@@ -105,20 +113,23 @@ async def handle_wallet(text: str, metadata: dict = None) -> str:
         if chain_id is None:
             chain_id_hex = await rpc_call("eth_chainId", [])
             chain_id = int(chain_id_hex, 16) if chain_id_hex else 1337
-        result = await rpc_call("eth_sendRawTransaction", {
-            "from": from_addr,
-            "to": md["to"],
-            "value": str(md["value"]),
-            "gas_limit": md.get("gas_limit", 21000),
-            "gas_price": md.get("gas_price", 10**9),
-            "nonce": nonce,
-            "chain_id": chain_id,
-            "timestamp": md["timestamp"],
-            "public_key": md["public_key"],
-            "signature": md["signature"],
-            "pq_public_key": md["pq_public_key"],
-            "pq_signature": md["pq_signature"],
-        })
+        result = await rpc_call(
+            "eth_sendRawTransaction",
+            {
+                "from": from_addr,
+                "to": md["to"],
+                "value": str(md["value"]),
+                "gas_limit": md.get("gas_limit", 21000),
+                "gas_price": md.get("gas_price", 10**9),
+                "nonce": nonce,
+                "chain_id": chain_id,
+                "timestamp": md["timestamp"],
+                "public_key": md["public_key"],
+                "signature": md["signature"],
+                "pq_public_key": md["pq_public_key"],
+                "pq_signature": md["pq_signature"],
+            },
+        )
         return (
             f"Self-custody transaction submitted.\n"
             f"  Hash: {result}\n"
@@ -144,17 +155,20 @@ async def handle_wallet(text: str, metadata: dict = None) -> str:
             # canonical Transaction::hash() preimage including the PQ
             # public key, signs both Ed25519 and ML-DSA-65 legs, and
             # submits. Private keys never travel over the wire.
-            result = await rpc_call("tenzro_signAndSendTransaction", {
-                "from": from_addr,
-                "to": to_addr,
-                # Decimal string carries the full u128 range — JSON numbers
-                # clamp to u64 in the handler's numeric path.
-                "value": str(wei),
-                "gas_limit": 21000,
-                "gas_price": 10**9,
-                "nonce": nonce,
-                "chain_id": chain_id,
-            })
+            result = await rpc_call(
+                "tenzro_signAndSendTransaction",
+                {
+                    "from": from_addr,
+                    "to": to_addr,
+                    # Decimal string carries the full u128 range — JSON numbers
+                    # clamp to u64 in the handler's numeric path.
+                    "value": str(wei),
+                    "gas_limit": 21000,
+                    "gas_price": 10**9,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                },
+            )
             return f"Transaction sent.\n  Hash: {result}\n  From: {from_addr}\n  To: {to_addr}\n  Amount: {amount} TNZO"
         return (
             "To send TNZO, provide: from address, to address, and amount.\n"
@@ -175,7 +189,7 @@ async def handle_wallet(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_block(text: str, metadata: dict = None) -> str:
+async def handle_block(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "transaction" in t:
@@ -188,7 +202,9 @@ async def handle_block(text: str, metadata: dict = None) -> str:
     # Batch-fetch block range for catch-up sync.
     # Triggered by "range", "sync from", "catch up", or any message containing
     # two numbers (interpreted as start..end heights).
-    if any(k in t for k in ["range", "catch up", "catch-up", "sync from", "block range"]):
+    if any(
+        k in t for k in ["range", "catch up", "catch-up", "sync from", "block range"]
+    ):
         nums = re.findall(r"\d+", text)
         if len(nums) >= 2:
             start = int(nums[0])
@@ -218,7 +234,7 @@ async def handle_block(text: str, metadata: dict = None) -> str:
     return f"Current block height: {height}"
 
 
-async def handle_fee_market(text: str, metadata: dict = None) -> str:
+async def handle_fee_market(text: str, metadata: dict | None = None) -> str:
     """Inspect the EIP-1559 fee market: current effective gas price, suggested
     priority tip, and recent base-fee history. Useful for sizing
     `maxFeePerGas` / `maxPriorityFeePerGas` on Type-2 transactions.
@@ -256,7 +272,7 @@ async def handle_fee_market(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_status(text: str, metadata: dict = None) -> str:
+async def handle_status(text: str, metadata: dict | None = None) -> str:
     result = await rpc_call("tenzro_nodeInfo", [])
     lines = [
         "Node Status:",
@@ -278,17 +294,13 @@ async def handle_status(text: str, metadata: dict = None) -> str:
     return "\n".join(lines)
 
 
-async def handle_network(text: str, metadata: dict = None) -> str:
+async def handle_network(text: str, metadata: dict | None = None) -> str:
     peer_count = await rpc_call("tenzro_peerCount", [])
     listening = await rpc_call("net_listening", [])
-    return (
-        f"Network Info:\n"
-        f"  Peers: {peer_count}\n"
-        f"  Listening: {listening}"
-    )
+    return f"Network Info:\n  Peers: {peer_count}\n  Listening: {listening}"
 
 
-async def handle_faucet(text: str, metadata: dict = None) -> str:
+async def handle_faucet(text: str, metadata: dict | None = None) -> str:
     addr = _extract_address(text)
     if not addr:
         return "Provide an address to receive testnet TNZO.\nExample: 'Request faucet tokens for 0xabc...'"
@@ -309,7 +321,8 @@ async def handle_faucet(text: str, metadata: dict = None) -> str:
 # Identity
 # ---------------------------------------------------------------------------
 
-async def handle_identity(text: str, metadata: dict = None) -> str:
+
+async def handle_identity(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     did = _extract_did(text)
 
@@ -324,8 +337,19 @@ async def handle_identity(text: str, metadata: dict = None) -> str:
         )
 
     if did and ("revoke" in t or "cancel" in t):
-        reason = metadata.get("reason", "revoked via A2A") if metadata else "revoked via A2A"
-        result = await rpc_call("tenzro_revokeDid", {"did": did, "reason": reason})
+        reason = (
+            metadata.get("reason", "revoked via A2A") if metadata else "revoked via A2A"
+        )
+        # The node requires a signed envelope proving control of the DID (or
+        # of its controller) on top of the operator admin token — a revocation
+        # gossips network-wide, so neither party makes that call alone. The
+        # caller supplies it in metadata; absent it the node refuses, which is
+        # the correct outcome rather than something to paper over here.
+        did_envelope = metadata.get("did_envelope", "") if metadata else ""
+        result = await rpc_call(
+            "tenzro_revokeDid",
+            {"did": did, "did_envelope": did_envelope, "reason": reason},
+        )
         return (
             f"Identity revoked:\n"
             f"  DID: {did}\n"
@@ -376,7 +400,8 @@ async def handle_identity(text: str, metadata: dict = None) -> str:
 # AI Inference
 # ---------------------------------------------------------------------------
 
-def _build_route_intent_params(text: str, metadata: dict = None) -> dict:
+
+def _build_route_intent_params(text: str, metadata: dict | None = None) -> dict:
     """Assembles tenzro_routeIntent params from metadata, defaulting use_case.
 
     metadata["payer_did"] enables the per-DID rolling-window budget gate;
@@ -397,15 +422,22 @@ def _build_route_intent_params(text: str, metadata: dict = None) -> dict:
                 use_case = candidate
                 break
     params["use_case"] = use_case or "chat"
-    for key in ("budget", "optimize", "quality_floor",
-                "est_input_tokens", "est_output_tokens", "payer_did",
-                "payer_address", "prompt"):
+    for key in (
+        "budget",
+        "optimize",
+        "quality_floor",
+        "est_input_tokens",
+        "est_output_tokens",
+        "payer_did",
+        "payer_address",
+        "prompt",
+    ):
         if metadata.get(key) is not None:
             params[key] = metadata[key]
     return params
 
 
-def _apply_jurisdiction_params(params: dict, metadata: dict = None) -> None:
+def _apply_jurisdiction_params(params: dict, metadata: dict | None = None) -> None:
     """Forwards the caller's jurisdiction pin and receipt-strictness flag.
 
     metadata["jurisdiction"] is a comma-separated pin of ISO 3166-1 alpha-2
@@ -439,7 +471,7 @@ def _sniff_image_media_type(raw: bytes) -> str | None:
     return None
 
 
-def _chat_image_blocks(metadata: dict = None) -> list[dict]:
+def _chat_image_blocks(metadata: dict | None = None) -> list[dict]:
     """Builds the image content blocks for a chat turn from the caller's metadata.
 
     metadata["images"] is a list of base64-encoded images, or
@@ -470,14 +502,16 @@ def _chat_image_blocks(metadata: dict = None) -> list[dict]:
         media_type = _sniff_image_media_type(raw)
         if media_type is None:
             continue
-        blocks.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": media_type,
-                "data": payload,
-            },
-        })
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": payload,
+                },
+            }
+        )
     return blocks
 
 
@@ -516,14 +550,22 @@ def _chat_result_text(result: dict) -> dict:
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
     }
-    for key in ("model", "stop_reason", "cost_wei", "settlement", "location",
-                "commitment", "tenzro_jurisdiction", "load"):
+    for key in (
+        "model",
+        "stop_reason",
+        "cost_wei",
+        "settlement",
+        "location",
+        "commitment",
+        "tenzro_jurisdiction",
+        "load",
+    ):
         if result.get(key) is not None:
             flattened[key] = result[key]
     return flattened
 
 
-async def handle_inference(text: str, metadata: dict = None) -> str:
+async def handle_inference(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "list" in t and "model" in t:
@@ -546,13 +588,15 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
         md = metadata or {}
         missing = [k for k in ("model_id", "cluster", "outcome") if md.get(k) is None]
         if missing:
-            return ("Reporting a route outcome needs metadata: "
-                    + ", ".join(missing))
-        result = await rpc_call("tenzro_recordRouteOutcome", {
-            "model_id": md["model_id"],
-            "cluster": md["cluster"],
-            "outcome": md["outcome"],
-        })
+            return "Reporting a route outcome needs metadata: " + ", ".join(missing)
+        result = await rpc_call(
+            "tenzro_recordRouteOutcome",
+            {
+                "model_id": md["model_id"],
+                "cluster": md["cluster"],
+                "outcome": md["outcome"],
+            },
+        )
         return json.dumps(result, indent=2)
 
     # Difficulty index: how many prompt clusters the node has discovered and
@@ -571,21 +615,26 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
     # Intent routing: discover the best model for a use case + budget without
     # naming one. "route"/"intent"/"best model", or a use_case in metadata,
     # triggers tenzro_routeIntent (discovery only — nothing is dispatched).
-    if ("route" in t or "intent" in t or "best model" in t
-            or (metadata and metadata.get("use_case"))) and "chat" not in t:
+    if (
+        "route" in t
+        or "intent" in t
+        or "best model" in t
+        or (metadata and metadata.get("use_case"))
+    ) and "chat" not in t:
         params = _build_route_intent_params(text, metadata)
         result = await rpc_call("tenzro_routeIntent", params)
         return json.dumps(result, indent=2)
 
     # Chat by intent: "chat by intent" or metadata use_case with a chat verb
     # discovers a model then dispatches in one call via tenzro_chatByIntent.
-    if ("chat" in t and ("intent" in t or "use case" in t
-                         or (metadata and metadata.get("use_case")))):
+    if "chat" in t and (
+        "intent" in t or "use case" in t or (metadata and metadata.get("use_case"))
+    ):
         prompt = text
         for kw in ["chat", "ask", "complete", "say"]:
             idx = t.find(kw)
             if idx >= 0:
-                prompt = text[idx + len(kw):].strip().lstrip(":").strip()
+                prompt = text[idx + len(kw) :].strip().lstrip(":").strip()
                 break
         params = _build_route_intent_params(text, metadata)
         params.update(_chat_turn_params(prompt, _chat_image_blocks(metadata)))
@@ -600,10 +649,12 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
         for kw in ["chat", "ask", "complete", "say"]:
             idx = t.find(kw)
             if idx >= 0:
-                prompt = text[idx + len(kw):].strip().lstrip(":").strip()
+                prompt = text[idx + len(kw) :].strip().lstrip(":").strip()
                 break
-        params = {"model_id": (metadata or {}).get("model_id", "default"),
-                  "max_tokens": (metadata or {}).get("max_tokens", 100)}
+        params = {
+            "model_id": (metadata or {}).get("model_id", "default"),
+            "max_tokens": (metadata or {}).get("max_tokens", 100),
+        }
         params.update(_chat_turn_params(prompt, _chat_image_blocks(metadata)))
         _apply_jurisdiction_params(params, metadata)
         result = await rpc_call("tenzro_chat", params)
@@ -614,12 +665,9 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
     # record (metadata.model_id) or lists every recorded hash.
     if "hash" in t and "model" in t:
         model_id = (metadata or {}).get("model_id")
-        if model_id or "get" in t or "record" in t:
-            if model_id:
-                result = await rpc_call(
-                    "tenzro_getModelHash", [{"model_id": model_id}]
-                )
-                return json.dumps(result, indent=2)
+        if (model_id or "get" in t or "record" in t) and model_id:
+            result = await rpc_call("tenzro_getModelHash", [{"model_id": model_id}])
+            return json.dumps(result, indent=2)
         result = await rpc_call("tenzro_listModelHashes", [])
         return json.dumps(result, indent=2)
 
@@ -665,7 +713,8 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
 # Staking & Provider
 # ---------------------------------------------------------------------------
 
-async def handle_staking(text: str, metadata: dict = None) -> str:
+
+async def handle_staking(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     addr = _extract_address(text)
     amount = _extract_amount(text)
@@ -697,7 +746,7 @@ async def handle_staking(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_validator_lifecycle(text: str, metadata: dict = None) -> str:
+async def handle_validator_lifecycle(text: str, metadata: dict | None = None) -> str:
     """Read + key-rotation operations on the validator registry.
 
     Read paths trigger on conversational input; the rotation path
@@ -723,16 +772,19 @@ async def handle_validator_lifecycle(text: str, metadata: dict = None) -> str:
         md = metadata or {}
         # Allow text-extracted address to fill in if metadata omits it.
         address = md.get("address") or addr
-        if not all(
-            md.get(k)
-            for k in (
-                "new_consensus_pubkey",
-                "new_pq_pubkey",
-                "new_bls_pubkey",
-                "nonce",
-                "signature",
+        if (
+            not all(
+                md.get(k)
+                for k in (
+                    "new_consensus_pubkey",
+                    "new_pq_pubkey",
+                    "new_bls_pubkey",
+                    "nonce",
+                    "signature",
+                )
             )
-        ) or not address:
+            or not address
+        ):
             return (
                 "Validator key rotation requires a structured metadata "
                 "payload with: address, new_consensus_pubkey, "
@@ -778,7 +830,7 @@ async def handle_validator_lifecycle(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_provider(text: str, metadata: dict = None) -> str:
+async def handle_provider(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     addr = _extract_address(text)
 
@@ -806,7 +858,8 @@ async def handle_provider(text: str, metadata: dict = None) -> str:
 # Payments
 # ---------------------------------------------------------------------------
 
-async def handle_payment(text: str, metadata: dict = None) -> str:
+
+async def handle_payment(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     md = metadata or {}
 
@@ -848,14 +901,19 @@ async def handle_payment(text: str, metadata: dict = None) -> str:
         return f"x402 resources:\n{json.dumps(result, indent=2)}"
 
     if "x402" in t and ("deregister" in t or "remove" in t) and md.get("listingId"):
-        result = await rpc_call("tenzro_x402DeregisterResource", {
-            "listingId": md["listingId"],
-            "sellerDid": md.get("sellerDid"),
-        })
+        result = await rpc_call(
+            "tenzro_x402DeregisterResource",
+            {
+                "listingId": md["listingId"],
+                "sellerDid": md.get("sellerDid"),
+            },
+        )
         return f"x402 resource deregistered:\n{json.dumps(result, indent=2)}"
 
     if "x402" in t and "verify" in t and md.get("requirement"):
-        result = await rpc_call("tenzro_x402VerifyOffer", {"requirement": md["requirement"]})
+        result = await rpc_call(
+            "tenzro_x402VerifyOffer", {"requirement": md["requirement"]}
+        )
         return f"x402 offer verification:\n{json.dumps(result, indent=2)}"
 
     if "x402" in t and ("payment id" in t or "paymentid" in t) and md.get("payerDid"):
@@ -875,8 +933,12 @@ async def handle_payment(text: str, metadata: dict = None) -> str:
         protocol = "mpp"
         if "x402" in t:
             protocol = "x402"
-        result = await rpc_call("tenzro_createPaymentChallenge", [protocol, "/resource"])
-        return f"Payment challenge created ({protocol}):\n{json.dumps(result, indent=2)}"
+        result = await rpc_call(
+            "tenzro_createPaymentChallenge", [protocol, "/resource"]
+        )
+        return (
+            f"Payment challenge created ({protocol}):\n{json.dumps(result, indent=2)}"
+        )
 
     if "ap2" in t:
         # The AP2 v0.2 lifecycle (sessions, mandate sign/verify/validate) is
@@ -914,7 +976,8 @@ async def handle_payment(text: str, metadata: dict = None) -> str:
 # Verification
 # ---------------------------------------------------------------------------
 
-async def handle_verification(text: str, metadata: dict = None) -> str:
+
+async def handle_verification(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "tee" in t or "attestation" in t:
@@ -923,21 +986,29 @@ async def handle_verification(text: str, metadata: dict = None) -> str:
         if not provider or not quote:
             return (
                 "TEE attestation verification requires a real provider and quote.\n"
-                "Pass via metadata: {\"provider\": \"tdx|sev-snp|nitro|nvidia-gpu\", \"quote\": \"<base64>\"}\n"
+                'Pass via metadata: {"provider": "tdx|sev-snp|nitro|nvidia-gpu", "quote": "<base64>"}\n'
                 "Supported providers: tdx, sev-snp, nitro, nvidia-gpu"
             )
-        result = await api_call("/verify/tee-attestation", method="POST", body={
-            "provider": provider,
-            "quote": quote,
-        })
+        result = await api_call(
+            "/verify/tee-attestation",
+            method="POST",
+            body={
+                "provider": provider,
+                "quote": quote,
+            },
+        )
         return f"TEE attestation verification:\n{json.dumps(result, indent=2)}"
 
     if "transaction" in t or "signature" in t:
         tx_hash = _extract_address(text)
         if tx_hash:
-            result = await api_call("/verify/transaction", method="POST", body={
-                "tx_hash": tx_hash,
-            })
+            result = await api_call(
+                "/verify/transaction",
+                method="POST",
+                body={
+                    "tx_hash": tx_hash,
+                },
+            )
             return f"Transaction verification:\n{json.dumps(result, indent=2)}"
         return "Provide a transaction hash to verify its signature."
 
@@ -949,15 +1020,19 @@ async def handle_verification(text: str, metadata: dict = None) -> str:
         if not proof or public_inputs is None or not circuit_id:
             return (
                 "ZK proof verification requires a Plonky3 STARK proof, public inputs, and circuit_id.\n"
-                "Pass via metadata: {\"circuit_id\": \"inference|settlement|identity\", "
-                "\"proof_bytes\": \"<hex>\", \"public_inputs\": [\"<hex>\", ...]}\n"
+                'Pass via metadata: {"circuit_id": "inference|settlement|identity", '
+                '"proof_bytes": "<hex>", "public_inputs": ["<hex>", ...]}\n'
                 "public_inputs entries are 4-byte little-endian KoalaBear field-element chunks."
             )
-        result = await api_call("/verify/zk-proof", method="POST", body={
-            "circuit_id": circuit_id,
-            "proof_bytes": proof,
-            "public_inputs": public_inputs,
-        })
+        result = await api_call(
+            "/verify/zk-proof",
+            method="POST",
+            body={
+                "circuit_id": circuit_id,
+                "proof_bytes": proof,
+                "public_inputs": public_inputs,
+            },
+        )
         return f"ZK proof verification:\n{json.dumps(result, indent=2)}"
 
     if "provenance" in t or "synthetic" in t:
@@ -966,11 +1041,9 @@ async def handle_verification(text: str, metadata: dict = None) -> str:
         if not content_hash:
             return (
                 "Provenance lookup requires a 32-byte hex content_hash.\n"
-                "Pass via metadata: {\"content_hash\": \"0x...\"}"
+                'Pass via metadata: {"content_hash": "0x..."}'
             )
-        result = await rpc_call(
-            "tenzro_getProvenance", {"content_hash": content_hash}
-        )
+        result = await rpc_call("tenzro_getProvenance", {"content_hash": content_hash})
         return f"Provenance manifest:\n{json.dumps(result, indent=2)}"
 
     return (
@@ -986,7 +1059,8 @@ async def handle_verification(text: str, metadata: dict = None) -> str:
 # Bridge
 # ---------------------------------------------------------------------------
 
-async def handle_bridge(text: str, metadata: dict = None) -> str:
+
+async def handle_bridge(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "route" in t:
@@ -1040,7 +1114,8 @@ async def handle_bridge(text: str, metadata: dict = None) -> str:
 # Join / Onboarding
 # ---------------------------------------------------------------------------
 
-async def handle_join(text: str, metadata: dict = None) -> str:
+
+async def handle_join(text: str, metadata: dict | None = None) -> str:
     name = _extract_name(text)
     if name.lower() in ("network", "tenzro", "micronode", "join", "node"):
         name = "Anonymous"
@@ -1051,7 +1126,11 @@ async def handle_join(text: str, metadata: dict = None) -> str:
     address = result.get("address", "unknown")
     capabilities = result.get("capabilities", [])
 
-    cap_lines = "\n".join(f"    - {c}" for c in capabilities) if capabilities else "    (default capabilities)"
+    cap_lines = (
+        "\n".join(f"    - {c}" for c in capabilities)
+        if capabilities
+        else "    (default capabilities)"
+    )
 
     return (
         f"Welcome to the Tenzro Network!\n"
@@ -1071,7 +1150,8 @@ async def handle_join(text: str, metadata: dict = None) -> str:
 # Tokens
 # ---------------------------------------------------------------------------
 
-async def handle_list_tokens(text: str, metadata: dict = None) -> str:
+
+async def handle_list_tokens(text: str, metadata: dict | None = None) -> str:
     result = await rpc_call("tenzro_listTokens", [])
     if not result:
         return "No tokens registered in the unified token registry."
@@ -1088,7 +1168,7 @@ async def handle_list_tokens(text: str, metadata: dict = None) -> str:
     return "\n".join(lines)
 
 
-async def handle_create_token(text: str, metadata: dict = None) -> str:
+async def handle_create_token(text: str, metadata: dict | None = None) -> str:
     # Try to extract token details from text
     # Pattern: "Create token MyToken (MTK) with 1000000 supply"
     name_match = re.search(r"(?:called|named|token)\s+(\w+)", text, re.IGNORECASE)
@@ -1098,7 +1178,9 @@ async def handle_create_token(text: str, metadata: dict = None) -> str:
     if name_match and symbol_match and supply:
         name = name_match.group(1)
         symbol = symbol_match.group(1)
-        result = await rpc_call("tenzro_createToken", [name, symbol, str(int(supply)), "18"])
+        result = await rpc_call(
+            "tenzro_createToken", [name, symbol, str(int(supply)), "18"]
+        )
         return f"Token created:\n{json.dumps(result, indent=2)}"
 
     return (
@@ -1109,7 +1191,7 @@ async def handle_create_token(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_token_info(text: str, metadata: dict = None) -> str:
+async def handle_token_info(text: str, metadata: dict | None = None) -> str:
     # Extract symbol or address
     addr = _extract_address(text)
     if addr:
@@ -1125,7 +1207,7 @@ async def handle_token_info(text: str, metadata: dict = None) -> str:
     return "Provide a token symbol or address.\nExample: 'Get token info for TNZO'"
 
 
-async def handle_token_balance(text: str, metadata: dict = None) -> str:
+async def handle_token_balance(text: str, metadata: dict | None = None) -> str:
     addr = _extract_address(text)
     if addr:
         result = await rpc_call("tenzro_getTokenBalance", [addr])
@@ -1133,7 +1215,7 @@ async def handle_token_balance(text: str, metadata: dict = None) -> str:
     return "Provide an address to check token balance.\nExample: 'Get token balance for 0xabc...'"
 
 
-async def handle_cross_vm_transfer(text: str, metadata: dict = None) -> str:
+async def handle_cross_vm_transfer(text: str, metadata: dict | None = None) -> str:
     # Surface SVM-native program info when the question is about constructing
     # an SVM-side instruction (program id, discriminator, etc.).
     t = text.lower()
@@ -1167,14 +1249,14 @@ async def handle_cross_vm_transfer(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_svm_cross_vm_info(text: str, metadata: dict = None) -> str:
+async def handle_svm_cross_vm_info(text: str, metadata: dict | None = None) -> str:
     """Return the canonical Tenzro Cross-VM SVM-native program ID and the four
     Anchor-style instruction discriminators for SVM clients."""
     return (
         "Tenzro Cross-VM SVM-native program:\n"
         "  Program ID (base58):  7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC\n"
         "  Program ID (hex):     5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695\n"
-        "  Derivation:           SHA-256(\"tenzro/svm/program/cross_vm\")\n"
+        '  Derivation:           SHA-256("tenzro/svm/program/cross_vm")\n'
         "\n"
         "Instruction discriminators (Anchor-style, 8 bytes):\n"
         "  bridge_to_evm           92a8a45c33225f25  (68-byte payload)\n"
@@ -1187,14 +1269,14 @@ async def handle_svm_cross_vm_info(text: str, metadata: dict = None) -> str:
         "\n"
         "Use the SDK encoders for byte-correct payloads:\n"
         "  TypeScript: encodeBridgeToEvm / encodeBridgeFromEvm / "
-        "encodeRegisterTokenPointer / encodeTransferCrossVm from \"tenzro\"\n"
+        'encodeRegisterTokenPointer / encodeTransferCrossVm from "tenzro"\n'
         "  Python:     encode_bridge_to_evm / encode_bridge_from_evm / "
         "encode_register_token_pointer / encode_transfer_cross_vm\n"
         "  Rust:       tenzro_sdk::svm_cross_vm::encode_*"
     )
 
 
-async def handle_wrap_tnzo(text: str, metadata: dict = None) -> str:
+async def handle_wrap_tnzo(text: str, metadata: dict | None = None) -> str:
     addr = _extract_address(text)
     amount = _extract_amount(text)
     if addr and amount:
@@ -1217,7 +1299,8 @@ async def handle_wrap_tnzo(text: str, metadata: dict = None) -> str:
 # Contract
 # ---------------------------------------------------------------------------
 
-async def handle_contract(text: str, metadata: dict = None) -> str:
+
+async def handle_contract(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "vm" in t or "supported" in t:
@@ -1251,7 +1334,8 @@ async def handle_contract(text: str, metadata: dict = None) -> str:
 # NFT
 # ---------------------------------------------------------------------------
 
-async def handle_nft(text: str, metadata: dict = None) -> str:
+
+async def handle_nft(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     addr = _extract_address(text)
 
@@ -1284,11 +1368,7 @@ async def handle_nft(text: str, metadata: dict = None) -> str:
         )
 
     if "owner" in t or "query" in t:
-        return (
-            "To query NFT ownership, provide:\n"
-            "  - Collection address\n"
-            "  - Token ID"
-        )
+        return "To query NFT ownership, provide:\n  - Collection address\n  - Token ID"
 
     return (
         "NFT operations:\n"
@@ -1303,7 +1383,8 @@ async def handle_nft(text: str, metadata: dict = None) -> str:
 # Compliance
 # ---------------------------------------------------------------------------
 
-async def handle_compliance(text: str, metadata: dict = None) -> str:
+
+async def handle_compliance(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     addr = _extract_address(text)
 
@@ -1354,7 +1435,8 @@ async def handle_compliance(text: str, metadata: dict = None) -> str:
 # Cross-Chain Token Standard (ERC-7802)
 # ---------------------------------------------------------------------------
 
-async def handle_crosschain(text: str, metadata: dict = None) -> str:
+
+async def handle_crosschain(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     addr = _extract_address(text)
 
@@ -1398,7 +1480,8 @@ async def handle_crosschain(text: str, metadata: dict = None) -> str:
 # Events
 # ---------------------------------------------------------------------------
 
-async def handle_events(text: str, metadata: dict = None) -> str:
+
+async def handle_events(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "websocket" in t or "subscribe" in t:
@@ -1441,7 +1524,8 @@ async def handle_events(text: str, metadata: dict = None) -> str:
 # Canton / DAML
 # ---------------------------------------------------------------------------
 
-async def handle_canton(text: str, metadata: dict = None) -> str:
+
+async def handle_canton(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     # ── Live read-side methods (Canton 3.5+ JSON Ledger API) ──
@@ -1458,11 +1542,21 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
         result = await rpc_call("tenzro_canton_getMyUser", {})
         return f"Canton user record:\n{json.dumps(result, indent=2)}"
 
-    if "list party" in t or "list parties" in t or "known party" in t or "known parties" in t:
+    if (
+        "list party" in t
+        or "list parties" in t
+        or "known party" in t
+        or "known parties" in t
+    ):
         result = await rpc_call("tenzro_canton_listParties", {})
         return f"Canton parties:\n{json.dumps(result, indent=2)}"
 
-    if "list package" in t or "list packages" in t or "installed package" in t or "dar list" in t:
+    if (
+        "list package" in t
+        or "list packages" in t
+        or "installed package" in t
+        or "dar list" in t
+    ):
         result = await rpc_call("tenzro_canton_listPackages", {})
         return f"Canton installed packages:\n{json.dumps(result, indent=2)}"
 
@@ -1474,7 +1568,11 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
         result = await rpc_call("tenzro_canton_feeSchedule", {})
         return f"Canton fee schedule:\n{json.dumps(result, indent=2)}"
 
-    if "connected synchronizer" in t or "synchronizer subscription" in t or "connected domain" in t:
+    if (
+        "connected synchronizer" in t
+        or "synchronizer subscription" in t
+        or "connected domain" in t
+    ):
         result = await rpc_call("tenzro_canton_connectedSynchronizers", {})
         return f"Connected synchronizers:\n{json.dumps(result, indent=2)}"
 
@@ -1621,7 +1719,8 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
 # Task Marketplace
 # ---------------------------------------------------------------------------
 
-async def handle_task_marketplace(text: str, metadata: dict = None) -> str:
+
+async def handle_task_marketplace(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     task_id = _extract_id(text)
 
@@ -1669,7 +1768,8 @@ async def handle_task_marketplace(text: str, metadata: dict = None) -> str:
 # Agent Marketplace
 # ---------------------------------------------------------------------------
 
-async def handle_agent_marketplace(text: str, metadata: dict = None) -> str:
+
+async def handle_agent_marketplace(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     template_id = _extract_id(text)
 
@@ -1707,11 +1807,17 @@ async def handle_agent_marketplace(text: str, metadata: dict = None) -> str:
         return f"Agent template:\n{json.dumps(result, indent=2)}"
 
     if "search" in t:
-        query = text.split("search")[-1].strip().rstrip("?.!,;") if "search" in t else ""
+        query = (
+            text.split("search")[-1].strip().rstrip("?.!,;") if "search" in t else ""
+        )
         result = await rpc_call("tenzro_listAgentTemplates", [])
         if not result:
             return "No agent templates found."
-        lines = [f"Agent templates matching '{query}':"] if query else ["Available agent templates:"]
+        lines = (
+            [f"Agent templates matching '{query}':"]
+            if query
+            else ["Available agent templates:"]
+        )
         for tmpl in result:
             lines.append(
                 f"  - {tmpl.get('name', 'Unnamed')} | "
@@ -1738,7 +1844,8 @@ async def handle_agent_marketplace(text: str, metadata: dict = None) -> str:
 # Agent Spawning
 # ---------------------------------------------------------------------------
 
-async def handle_agent_spawning(text: str, metadata: dict = None) -> str:
+
+async def handle_agent_spawning(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "list" in t and ("child" in t or "agent" in t):
@@ -1747,11 +1854,17 @@ async def handle_agent_spawning(text: str, metadata: dict = None) -> str:
 
     if "spawn" in t:
         # Try to extract agent name
-        name_match = re.search(r"(?:named?|called)\s+['\"]?(\w+)['\"]?", text, re.IGNORECASE)
+        name_match = re.search(
+            r"(?:named?|called)\s+['\"]?(\w+)['\"]?", text, re.IGNORECASE
+        )
         name = name_match.group(1) if name_match else "sub-agent"
         # Try to extract capabilities
-        cap_match = re.search(r"(?:with|capability|capabilities)\s+(.+?)(?:\.|$)", text, re.IGNORECASE)
-        capabilities = cap_match.group(1).strip().rstrip("?.!,;") if cap_match else "general"
+        cap_match = re.search(
+            r"(?:with|capability|capabilities)\s+(.+?)(?:\.|$)", text, re.IGNORECASE
+        )
+        capabilities = (
+            cap_match.group(1).strip().rstrip("?.!,;") if cap_match else "general"
+        )
 
         return (
             f"Agent spawn request:\n"
@@ -1836,7 +1949,7 @@ def _extract_capability_agent_id(text: str) -> str | None:
     return None if candidate.lower() in ("for", "id") else candidate
 
 
-async def handle_capability_registry(text: str, metadata: dict = None) -> str:
+async def handle_capability_registry(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "best" in t or "pick" in t or "tee-backed agent" in t:
@@ -1920,7 +2033,8 @@ async def handle_capability_registry(text: str, metadata: dict = None) -> str:
 # Swarm Orchestration
 # ---------------------------------------------------------------------------
 
-async def handle_swarm(text: str, metadata: dict = None) -> str:
+
+async def handle_swarm(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     swarm_id = _extract_id(text)
 
@@ -1971,7 +2085,8 @@ async def handle_swarm(text: str, metadata: dict = None) -> str:
 # deBridge
 # ---------------------------------------------------------------------------
 
-async def handle_debridge(text: str, metadata: dict = None) -> str:
+
+async def handle_debridge(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "chain" in t or "supported" in t or "network" in t:
         result = await rpc_call("tenzro_debridgeGetChains", {})
@@ -1995,19 +2110,22 @@ async def handle_debridge(text: str, metadata: dict = None) -> str:
         return json.dumps(result, indent=2)
     if "swap" in t and "same" in t:
         return "To do a same-chain swap via deBridge, provide: chain_id, token_in address, token_out address, and amount."
-    return ("deBridge DLN cross-chain operations:\n"
-            "  - 'debridge chains' — list supported networks\n"
-            "  - 'debridge search USDC' — find token addresses\n"
-            "  - 'debridge instructions' — operational guidance\n"
-            "  - 'debridge create tx' — create cross-chain transfer\n"
-            "  - 'debridge same chain swap' — swap on same chain")
+    return (
+        "deBridge DLN cross-chain operations:\n"
+        "  - 'debridge chains' — list supported networks\n"
+        "  - 'debridge search USDC' — find token addresses\n"
+        "  - 'debridge instructions' — operational guidance\n"
+        "  - 'debridge create tx' — create cross-chain transfer\n"
+        "  - 'debridge same chain swap' — swap on same chain"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Crypto
 # ---------------------------------------------------------------------------
 
-async def handle_crypto(text: str, metadata: dict = None) -> str:
+
+async def handle_crypto(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "sign" in t:
@@ -2081,7 +2199,8 @@ async def handle_crypto(text: str, metadata: dict = None) -> str:
 # TEE
 # ---------------------------------------------------------------------------
 
-async def handle_tee(text: str, metadata: dict = None) -> str:
+
+async def handle_tee(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "detect" in t:
@@ -2136,7 +2255,8 @@ async def handle_tee(text: str, metadata: dict = None) -> str:
 # Passkey-first custody
 # ---------------------------------------------------------------------------
 
-async def handle_passkey(text: str, metadata: dict = None) -> str:
+
+async def handle_passkey(text: str, metadata: dict | None = None) -> str:
     """Passkey-bound ERC-4337 smart-account onboarding and custody.
 
     Query and session-launch operations dispatch to real RPCs. Ceremonies that
@@ -2164,13 +2284,18 @@ async def handle_passkey(text: str, metadata: dict = None) -> str:
                 if any(k in t for k in ["two", "2fa", "dual"])
                 else "single_credential"
             )
-            result = await rpc_call("tenzro_setPasskeyPolicy", {
-                "account_address": addr,
-                "second_factor": factor,
-            })
+            result = await rpc_call(
+                "tenzro_setPasskeyPolicy",
+                {
+                    "account_address": addr,
+                    "second_factor": factor,
+                },
+            )
             return f"Passkey policy for {addr} set to {factor}:\n{json.dumps(result, indent=2)}"
         if addr:
-            result = await rpc_call("tenzro_getPasskeyPolicy", {"account_address": addr})
+            result = await rpc_call(
+                "tenzro_getPasskeyPolicy", {"account_address": addr}
+            )
             return f"Passkey policy for {addr}:\n{json.dumps(result, indent=2)}"
         return "Provide an account address. Example: 'Get passkey policy for 0xabc...'"
 
@@ -2181,7 +2306,9 @@ async def handle_passkey(text: str, metadata: dict = None) -> str:
             if rid:
                 result = await rpc_call("tenzro_finalizeRecovery", {"recovery_id": rid})
                 return f"Recovery {rid} finalized:\n{json.dumps(result, indent=2)}"
-            return "Provide a recovery id to finalize. Example: 'Finalize recovery <uuid>'"
+            return (
+                "Provide a recovery id to finalize. Example: 'Finalize recovery <uuid>'"
+            )
         if "list" in t or "pending" in t or "status" in t:
             if addr:
                 result = await rpc_call(
@@ -2246,16 +2373,22 @@ async def handle_passkey(text: str, metadata: dict = None) -> str:
     # Browser-launch WebAuthn ceremony (gcloud-style device flow).
     if "browser" in t or "launch" in t or "open" in t:
         if "add" in t and addr:
-            result = await rpc_call("tenzro_createPasskeySession", {
-                "kind": "add",
-                "account_address": addr,
-                "salt": 0,
-            })
+            result = await rpc_call(
+                "tenzro_createPasskeySession",
+                {
+                    "kind": "add",
+                    "account_address": addr,
+                    "salt": 0,
+                },
+            )
         else:
-            result = await rpc_call("tenzro_createPasskeySession", {
-                "kind": "enroll",
-                "salt": 0,
-            })
+            result = await rpc_call(
+                "tenzro_createPasskeySession",
+                {
+                    "kind": "enroll",
+                    "salt": 0,
+                },
+            )
         return (
             "Passkey ceremony session created. Open the returned auth URL in a "
             "browser to run the WebAuthn ceremony, then poll "
@@ -2263,7 +2396,11 @@ async def handle_passkey(text: str, metadata: dict = None) -> str:
         )
 
     # Enroll a new passkey-bound smart account.
-    if "enroll" in t or ("new" in t and ("account" in t or "passkey" in t)) or "onboard" in t:
+    if (
+        "enroll" in t
+        or ("new" in t and ("account" in t or "passkey" in t))
+        or "onboard" in t
+    ):
         return (
             "To enroll a passkey-bound ERC-4337 smart account, register a "
             "WebAuthn credential in the browser, then either:\n"
@@ -2294,12 +2431,17 @@ async def handle_passkey(text: str, metadata: dict = None) -> str:
 # Custody
 # ---------------------------------------------------------------------------
 
-async def handle_custody(text: str, metadata: dict = None) -> str:
+
+async def handle_custody(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "create" in t or "new" in t:
-        result = await rpc_call("tenzro_createMpcWallet", {"threshold": 2, "total_shares": 3})
-        return f"FROST-Ed25519 threshold wallet created:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call(
+            "tenzro_createMpcWallet", {"threshold": 2, "total_shares": 3}
+        )
+        return (
+            f"FROST-Ed25519 threshold wallet created:\n{json.dumps(result, indent=2)}"
+        )
 
     if "export" in t:
         addr = _extract_address(text)
@@ -2342,9 +2484,7 @@ async def handle_custody(text: str, metadata: dict = None) -> str:
     if "session" in t:
         if "revoke" in t or "cancel" in t:
             return (
-                "To revoke a session key, provide:\n"
-                "  - Wallet address\n"
-                "  - Session ID"
+                "To revoke a session key, provide:\n  - Wallet address\n  - Session ID"
             )
         return (
             "To create a session key, provide:\n"
@@ -2378,13 +2518,14 @@ async def handle_custody(text: str, metadata: dict = None) -> str:
 # ZK Proofs
 # ---------------------------------------------------------------------------
 
-async def handle_zk(text: str, metadata: dict = None) -> str:
+
+async def handle_zk(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
 
     if "create" in t or "prove" in t or "generate proof" in t:
         return (
             "To create a Plonky3 STARK proof, provide:\n"
-            "  - circuit_id: one of \"inference\", \"settlement\", \"identity\"\n"
+            '  - circuit_id: one of "inference", "settlement", "identity"\n'
             "  - witness fields specific to the circuit (numeric values).\n"
             "Tenzro uses Plonky3 STARKs over the KoalaBear field — no trusted setup, "
             "no proving keys, post-quantum-conjectured soundness."
@@ -2397,8 +2538,8 @@ async def handle_zk(text: str, metadata: dict = None) -> str:
     if "verify" in t:
         return (
             "To verify a ZK proof, pass via metadata:\n"
-            "  {\"circuit_id\": \"inference|settlement|identity\", "
-            "\"proof_bytes\": \"<hex>\", \"public_inputs\": [\"<hex>\", ...]}\n"
+            '  {"circuit_id": "inference|settlement|identity", '
+            '"proof_bytes": "<hex>", "public_inputs": ["<hex>", ...]}\n'
             "public_inputs entries are 4-byte little-endian KoalaBear field-element chunks."
         )
 
@@ -2415,7 +2556,8 @@ async def handle_zk(text: str, metadata: dict = None) -> str:
 # AP2 Mandate Verification (Google AP2 spec)
 # ---------------------------------------------------------------------------
 
-async def handle_ap2(text: str, metadata: dict = None) -> str:
+
+async def handle_ap2(text: str, metadata: dict | None = None) -> str:
     """AP2 v0.2 session lifecycle + mandate verification (Checkout/Payment VDCs)."""
     t = text.lower()
 
@@ -2425,12 +2567,18 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
         return f"AP2 protocol info:\n{json.dumps(result, indent=2)}"
 
     # Sign a Checkout or Payment mandate via the auth-bound wallet
-    if "sign" in t and ("mandate" in t or "vdc" in t or "checkout" in t or "payment" in t):
+    if "sign" in t and (
+        "mandate" in t or "vdc" in t or "checkout" in t or "payment" in t
+    ):
         md = metadata or {}
         mandate_kind = md.get("mandate_kind")
         mandate = md.get("mandate")
         signer_did = md.get("signer_did") or _extract_did(text)
-        if mandate_kind not in ("checkout", "payment") or mandate is None or not signer_did:
+        if (
+            mandate_kind not in ("checkout", "payment")
+            or mandate is None
+            or not signer_did
+        ):
             return (
                 "To sign an AP2 v0.2 mandate, provide:\n"
                 "  metadata.mandate_kind  ('checkout' | 'payment')\n"
@@ -2440,7 +2588,13 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
             )
         result = await rpc_call(
             "tenzro_ap2SignMandate",
-            [{"mandate_kind": mandate_kind, "mandate": mandate, "signer_did": signer_did}],
+            [
+                {
+                    "mandate_kind": mandate_kind,
+                    "mandate": mandate,
+                    "signer_did": signer_did,
+                }
+            ],
         )
         return f"AP2 mandate signed:\n{json.dumps(result, indent=2)}"
 
@@ -2475,11 +2629,13 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
             )
         result = await rpc_call(
             "tenzro_ap2ValidateMandatePair",
-            [{
-                "checkout_vdc": checkout_vdc,
-                "payment_vdc": payment_vdc,
-                "enforce_delegation": enforce_delegation,
-            }],
+            [
+                {
+                    "checkout_vdc": checkout_vdc,
+                    "payment_vdc": payment_vdc,
+                    "enforce_delegation": enforce_delegation,
+                }
+            ],
         )
         return f"AP2 Checkout/Payment pair validation:\n{json.dumps(result, indent=2)}"
 
@@ -2496,13 +2652,15 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
         if agent_did and provider_did and amount is not None:
             result = await rpc_call(
                 "tenzro_ap2CreateSession",
-                [{
-                    "agent_did": agent_did,
-                    "provider_did": provider_did,
-                    "service": service,
-                    "max_amount": str(amount),
-                    "asset": asset,
-                }],
+                [
+                    {
+                        "agent_did": agent_did,
+                        "provider_did": provider_did,
+                        "service": service,
+                        "max_amount": str(amount),
+                        "asset": asset,
+                    }
+                ],
             )
             return f"AP2 session created:\n{json.dumps(result, indent=2)}"
         return (
@@ -2532,15 +2690,11 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
         return f"AP2 execution receipt:\n{json.dumps(result, indent=2)}"
 
     if "cancel" in t and session_id:
-        result = await rpc_call(
-            "tenzro_ap2CancelSession", [{"session_id": session_id}]
-        )
+        result = await rpc_call("tenzro_ap2CancelSession", [{"session_id": session_id}])
         return f"AP2 session cancelled:\n{json.dumps(result, indent=2)}"
 
     if session_id:
-        result = await rpc_call(
-            "tenzro_ap2GetSession", [{"session_id": session_id}]
-        )
+        result = await rpc_call("tenzro_ap2GetSession", [{"session_id": session_id}])
         return f"AP2 session:\n{json.dumps(result, indent=2)}"
 
     if "list" in t and "mandate" in t:
@@ -2577,7 +2731,8 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
 # ERC-8004 Trustless Agents Registry
 # ---------------------------------------------------------------------------
 
-async def handle_erc8004(text: str, metadata: dict = None) -> str:
+
+async def handle_erc8004(text: str, metadata: dict | None = None) -> str:
     """ERC-8004 Trustless Agents Registry — full v0.6+ calldata surface (Identity / Reputation / Validation)."""
     t = text.lower()
     md = metadata or {}
@@ -2598,7 +2753,9 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
                 "tenzro_erc8004EncodeRegisterWithUri",
                 [{"agent_uri": agent_uri}],
             )
-            return f"ERC-8004 register(string) calldata:\n{json.dumps(result, indent=2)}"
+            return (
+                f"ERC-8004 register(string) calldata:\n{json.dumps(result, indent=2)}"
+            )
         result = await rpc_call("tenzro_erc8004EncodeRegister", [{}])
         return f"ERC-8004 register() calldata:\n{json.dumps(result, indent=2)}"
 
@@ -2621,12 +2778,14 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
         if agent_id and new_wallet and deadline is not None and signature:
             result = await rpc_call(
                 "tenzro_erc8004EncodeSetAgentWallet",
-                [{
-                    "agent_id": agent_id,
-                    "new_wallet": new_wallet,
-                    "deadline": int(deadline),
-                    "signature": signature,
-                }],
+                [
+                    {
+                        "agent_id": agent_id,
+                        "new_wallet": new_wallet,
+                        "deadline": int(deadline),
+                        "signature": signature,
+                    }
+                ],
             )
             return f"ERC-8004 setAgentWallet calldata:\n{json.dumps(result, indent=2)}"
         return (
@@ -2721,11 +2880,13 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
         if agent_id and feedback_id and response_uri:
             result = await rpc_call(
                 "tenzro_erc8004EncodeAppendResponse",
-                [{
-                    "agent_id": agent_id,
-                    "feedback_id": feedback_id,
-                    "response_uri": response_uri,
-                }],
+                [
+                    {
+                        "agent_id": agent_id,
+                        "feedback_id": feedback_id,
+                        "response_uri": response_uri,
+                    }
+                ],
             )
             return f"ERC-8004 appendResponse calldata:\n{json.dumps(result, indent=2)}"
         return "Encode appendResponse() with: metadata.agent_id, metadata.feedback_id, metadata.response_uri"
@@ -2738,8 +2899,12 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
                 "tenzro_erc8004EncodeIsFeedbackRevoked",
                 [{"agent_id": agent_id, "feedback_id": feedback_id}],
             )
-            return f"ERC-8004 isFeedbackRevoked calldata:\n{json.dumps(result, indent=2)}"
-        return "Encode isFeedbackRevoked() with: metadata.agent_id, metadata.feedback_id"
+            return (
+                f"ERC-8004 isFeedbackRevoked calldata:\n{json.dumps(result, indent=2)}"
+            )
+        return (
+            "Encode isFeedbackRevoked() with: metadata.agent_id, metadata.feedback_id"
+        )
 
     if "feedback" in t and "responses" in t:
         agent_id = md.get("agent_id")
@@ -2759,7 +2924,9 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
                 "tenzro_erc8004EncodeGetFeedbackCount",
                 [{"subject_agent_id": subject}],
             )
-            return f"ERC-8004 getFeedbackCount calldata:\n{json.dumps(result, indent=2)}"
+            return (
+                f"ERC-8004 getFeedbackCount calldata:\n{json.dumps(result, indent=2)}"
+            )
         return "Encode getFeedbackCount() with: metadata.subject_agent_id"
 
     if "get feedback" in t:
@@ -2780,11 +2947,13 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
         if subject and rating is not None and context_uri:
             result = await rpc_call(
                 "tenzro_erc8004EncodeFeedback",
-                [{
-                    "subject_agent_id": subject,
-                    "rating": int(rating),
-                    "context_uri": context_uri,
-                }],
+                [
+                    {
+                        "subject_agent_id": subject,
+                        "rating": int(rating),
+                        "context_uri": context_uri,
+                    }
+                ],
             )
             return f"ERC-8004 submitFeedback calldata:\n{json.dumps(result, indent=2)}"
         return (
@@ -2802,14 +2971,18 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
         if validator_address and agent_id and request_uri and request_hash:
             result = await rpc_call(
                 "tenzro_erc8004EncodeValidationRequest",
-                [{
-                    "validator_address": validator_address,
-                    "agent_id": agent_id,
-                    "request_uri": request_uri,
-                    "request_hash": request_hash,
-                }],
+                [
+                    {
+                        "validator_address": validator_address,
+                        "agent_id": agent_id,
+                        "request_uri": request_uri,
+                        "request_hash": request_hash,
+                    }
+                ],
             )
-            return f"ERC-8004 validationRequest calldata:\n{json.dumps(result, indent=2)}"
+            return (
+                f"ERC-8004 validationRequest calldata:\n{json.dumps(result, indent=2)}"
+            )
         return (
             "Encode validationRequest() with:\n"
             "  metadata.validator_address, metadata.agent_id, metadata.request_uri, metadata.request_hash"
@@ -2831,18 +3004,28 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
         response_uri = md.get("response_uri") or md.get("uri")
         response_hash = md.get("response_hash")
         tag = md.get("tag")
-        if request_hash and response is not None and response_uri and response_hash and tag:
+        if (
+            request_hash
+            and response is not None
+            and response_uri
+            and response_hash
+            and tag
+        ):
             result = await rpc_call(
                 "tenzro_erc8004EncodeValidationResponse",
-                [{
-                    "request_hash": request_hash,
-                    "response": response,
-                    "response_uri": response_uri,
-                    "response_hash": response_hash,
-                    "tag": tag,
-                }],
+                [
+                    {
+                        "request_hash": request_hash,
+                        "response": response,
+                        "response_uri": response_uri,
+                        "response_hash": response_hash,
+                        "tag": tag,
+                    }
+                ],
             )
-            return f"ERC-8004 validationResponse calldata:\n{json.dumps(result, indent=2)}"
+            return (
+                f"ERC-8004 validationResponse calldata:\n{json.dumps(result, indent=2)}"
+            )
         return (
             "Encode validationResponse() with:\n"
             "  metadata.request_hash, metadata.response (0..=100), metadata.response_uri,\n"
@@ -2872,7 +3055,8 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
 # Wormhole Cross-Chain Bridge
 # ---------------------------------------------------------------------------
 
-async def handle_wormhole(text: str, metadata: dict = None) -> str:
+
+async def handle_wormhole(text: str, metadata: dict | None = None) -> str:
     """Wormhole chain id lookup, VAA parsing, and token bridging."""
     t = text.lower()
     md = metadata or {}
@@ -2894,9 +3078,7 @@ async def handle_wormhole(text: str, metadata: dict = None) -> str:
             if m:
                 vaa_id = m.group(0)
         if vaa_id:
-            result = await rpc_call(
-                "tenzro_wormholeParseVaaId", [{"vaa_id": vaa_id}]
-            )
+            result = await rpc_call("tenzro_wormholeParseVaaId", [{"vaa_id": vaa_id}])
             return f"Parsed VAA {vaa_id}:\n{json.dumps(result, indent=2)}"
         return (
             "Parse a Wormhole VAA id of the form `<chain>/<emitter>/<sequence>`.\n"
@@ -2913,14 +3095,16 @@ async def handle_wormhole(text: str, metadata: dict = None) -> str:
         if source_chain and dest_chain and amount is not None and sender and recipient:
             result = await rpc_call(
                 "tenzro_wormholeBridge",
-                [{
-                    "source_chain": source_chain,
-                    "dest_chain": dest_chain,
-                    "asset": asset,
-                    "amount": str(amount),
-                    "sender": sender,
-                    "recipient": recipient,
-                }],
+                [
+                    {
+                        "source_chain": source_chain,
+                        "dest_chain": dest_chain,
+                        "asset": asset,
+                        "amount": str(amount),
+                        "sender": sender,
+                        "recipient": recipient,
+                    }
+                ],
             )
             return f"Wormhole transfer:\n{json.dumps(result, indent=2)}"
         return (
@@ -2941,7 +3125,8 @@ async def handle_wormhole(text: str, metadata: dict = None) -> str:
 # CCT (Chainlink Cross-Chain Token)
 # ---------------------------------------------------------------------------
 
-async def handle_cct(text: str, metadata: dict = None) -> str:
+
+async def handle_cct(text: str, metadata: dict | None = None) -> str:
     """TNZO CCT pool registry — Ethereum LockRelease + BurnMint on L2s and Solana."""
     t = text.lower()
     md = metadata or {}
@@ -2986,7 +3171,8 @@ async def handle_cct(text: str, metadata: dict = None) -> str:
 # Authentication (OAuth 2.1 + DPoP onboarding, refresh, link wallet)
 # ---------------------------------------------------------------------------
 
-async def handle_auth(text: str, metadata: dict = None) -> str:
+
+async def handle_auth(text: str, metadata: dict | None = None) -> str:
     """OAuth 2.1 + DPoP auth flows: onboard human/agent, refresh access tokens,
     link an existing FROST-Ed25519 threshold wallet to a new auth session.
 
@@ -3098,9 +3284,7 @@ async def handle_auth(text: str, metadata: dict = None) -> str:
             "child_bearer_did": child_bearer_did,
             "child_dpop_jkt": child_dpop_jkt,
             "requested_rar": md.get("requested_rar", {}),
-            "requested_aap_capabilities": md.get(
-                "requested_aap_capabilities", []
-            ),
+            "requested_aap_capabilities": md.get("requested_aap_capabilities", []),
         }
         if md.get("requested_ttl_secs"):
             params["requested_ttl_secs"] = md["requested_ttl_secs"]
@@ -3141,7 +3325,7 @@ async def handle_auth(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_approval(text: str, metadata: dict = None) -> str:
+async def handle_approval(text: str, metadata: dict | None = None) -> str:
     """Out-of-band approval loop for actions the controller put on the
     always-ask list.
 
@@ -3210,7 +3394,7 @@ async def handle_approval(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_help(text: str, metadata: dict = None) -> str:
+async def handle_help(text: str, metadata: dict | None = None) -> str:
     return (
         "Tenzro Network Agent -- 70 skills available. Highlights:\n"
         "\n"
@@ -3262,7 +3446,8 @@ async def handle_help(text: str, metadata: dict = None) -> str:
 # Lifecycle (kill-switch)
 # ---------------------------------------------------------------------------
 
-async def handle_lifecycle(text: str, metadata: dict = None) -> str:
+
+async def handle_lifecycle(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     agent_did = _extract_id(text)
 
@@ -3318,7 +3503,7 @@ async def handle_lifecycle(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_capital(text: str, metadata: dict = None) -> str:
+async def handle_capital(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "open" in t or "create" in t:
         return (
@@ -3389,7 +3574,7 @@ async def handle_capital(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_workflow(text: str, metadata: dict = None) -> str:
+async def handle_workflow(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "open" in t or "start" in t or "create" in t:
         return (
@@ -3417,7 +3602,9 @@ async def handle_workflow(text: str, metadata: dict = None) -> str:
         return "Read the lifecycle record: tenzro_getWorkflowLifecycle { workflow_id }"
     if "receipt" in t:
         if "list" in t:
-            return "List recent workflow receipts: tenzro_listWorkflowReceipts { limit? }"
+            return (
+                "List recent workflow receipts: tenzro_listWorkflowReceipts { limit? }"
+            )
         return "Read the workflow receipt: tenzro_getWorkflowReceipt { workflow_id }"
     if "metric" in t:
         return "Read operational metrics: tenzro_getWorkflowOperationalMetrics { workflow_id }"
@@ -3446,7 +3633,7 @@ async def handle_workflow(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_eip7702(text: str, metadata: dict = None) -> str:
+async def handle_eip7702(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "signing" in t or "signing hash" in t:
         return (
@@ -3467,8 +3654,7 @@ async def handle_eip7702(text: str, metadata: dict = None) -> str:
         )
     if "protocol" in t or "info" in t:
         return (
-            "Read EIP-7702 static protocol metadata:\n"
-            "  RPC: tenzro_eip7702ProtocolInfo"
+            "Read EIP-7702 static protocol metadata:\n  RPC: tenzro_eip7702ProtocolInfo"
         )
     return (
         "EIP-7702 (Set EOA Account Code) helpers — Pectra Type-4 delegation registry.\n"
@@ -3479,7 +3665,7 @@ async def handle_eip7702(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_permit2(text: str, metadata: dict = None) -> str:
+async def handle_permit2(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "domain" in t and "separator" in t:
         return (
@@ -3512,7 +3698,7 @@ async def handle_permit2(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_secure_mint(text: str, metadata: dict = None) -> str:
+async def handle_secure_mint(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "pause" in t and "global" in t:
         return (
@@ -3560,40 +3746,50 @@ async def handle_secure_mint(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_treasury(text: str, metadata: dict = None) -> str:
+async def handle_treasury(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     md = metadata or {}
 
     if "approve" in t:
         required = [
-            "withdrawal_id", "asset_id", "amount",
-            "approver", "public_key", "signature",
+            "withdrawal_id",
+            "asset_id",
+            "amount",
+            "approver",
+            "public_key",
+            "signature",
         ]
         if all(k in md for k in required):
-            result = await rpc_call("tenzro_treasuryApproveWithdrawal", {
-                "withdrawal_id": md["withdrawal_id"],
-                "asset_id": md["asset_id"],
-                "amount": str(md["amount"]),
-                "approver": md["approver"],
-                "key_type": md.get("key_type", "ed25519"),
-                "public_key": md["public_key"],
-                "signature": md["signature"],
-            })
+            result = await rpc_call(
+                "tenzro_treasuryApproveWithdrawal",
+                {
+                    "withdrawal_id": md["withdrawal_id"],
+                    "asset_id": md["asset_id"],
+                    "amount": str(md["amount"]),
+                    "approver": md["approver"],
+                    "key_type": md.get("key_type", "ed25519"),
+                    "public_key": md["public_key"],
+                    "signature": md["signature"],
+                },
+            )
             return f"Treasury withdrawal approval:\n{json.dumps(result, indent=2)}"
         return (
             "Approve a treasury withdrawal with a signed approval:\n"
             "  RPC: tenzro_treasuryApproveWithdrawal { withdrawal_id, asset_id, amount, approver, key_type?, public_key, signature }\n"
-            "  Signature preimage: \"tenzro/treasury/withdrawal-approval\" || withdrawal_id || asset_id || amount (u128 LE)\n"
+            '  Signature preimage: "tenzro/treasury/withdrawal-approval" || withdrawal_id || asset_id || amount (u128 LE)\n'
             "  Pass the fields via message metadata to submit directly."
         )
 
     if "execute" in t:
         if all(k in md for k in ["withdrawal_id", "asset_id", "amount"]):
-            result = await rpc_call("tenzro_treasuryExecuteWithdrawal", {
-                "withdrawal_id": md["withdrawal_id"],
-                "asset_id": md["asset_id"],
-                "amount": str(md["amount"]),
-            })
+            result = await rpc_call(
+                "tenzro_treasuryExecuteWithdrawal",
+                {
+                    "withdrawal_id": md["withdrawal_id"],
+                    "asset_id": md["asset_id"],
+                    "amount": str(md["amount"]),
+                },
+            )
             return f"Treasury withdrawal execution:\n{json.dumps(result, indent=2)}"
         return (
             "Execute a treasury withdrawal once approvals reach the threshold:\n"
@@ -3624,7 +3820,7 @@ async def handle_treasury(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_stable_asset(text: str, metadata: dict = None) -> str:
+async def handle_stable_asset(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "register" in t:
         return (
@@ -3653,7 +3849,7 @@ async def handle_stable_asset(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_hyperlane(text: str, metadata: dict = None) -> str:
+async def handle_hyperlane(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "list" in t and "chain" in t:
         return "List supported Hyperlane chains: tenzro_hyperlaneListChains"
@@ -3678,7 +3874,7 @@ async def handle_hyperlane(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_axelar(text: str, metadata: dict = None) -> str:
+async def handle_axelar(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "list" in t and "chain" in t:
         return (
@@ -3706,7 +3902,7 @@ async def handle_axelar(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_babylon(text: str, metadata: dict = None) -> str:
+async def handle_babylon(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "register" in t and "finality" in t:
         return (
@@ -3737,7 +3933,7 @@ async def handle_babylon(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_caip(text: str, metadata: dict = None) -> str:
+async def handle_caip(text: str, metadata: dict | None = None) -> str:
     t = text.lower()
     if "caip-2" in t or "caip2" in t or "chain id" in t:
         return (
@@ -3767,7 +3963,8 @@ async def handle_caip(text: str, metadata: dict = None) -> str:
 # Storage Market
 # ---------------------------------------------------------------------------
 
-async def handle_storage(text: str, metadata: dict = None) -> str:
+
+async def handle_storage(text: str, metadata: dict | None = None) -> str:
     """Storage-market reads and provider operations.
 
     Deals, objects, charge epochs, and pricing carry structured fields
@@ -3789,12 +3986,15 @@ async def handle_storage(text: str, metadata: dict = None) -> str:
         return f"Object stored:\n{json.dumps(result, indent=2)}"
 
     if ("open" in t or "deal" in t) and md.get("object_id") and md.get("renter"):
-        result = await rpc_call("tenzro_storageOpenDeal", {
-            "object_id": md["object_id"],
-            "renter": md["renter"],
-            "size_bytes": md.get("size_bytes", 0),
-            "total_epochs": md.get("total_epochs", 0),
-        })
+        result = await rpc_call(
+            "tenzro_storageOpenDeal",
+            {
+                "object_id": md["object_id"],
+                "renter": md["renter"],
+                "size_bytes": md.get("size_bytes", 0),
+                "total_epochs": md.get("total_epochs", 0),
+            },
+        )
         return f"Storage deal opened:\n{json.dumps(result, indent=2)}"
 
     if ("charge" in t or "epoch" in t) and md.get("deal_id"):
@@ -3833,7 +4033,8 @@ async def handle_storage(text: str, metadata: dict = None) -> str:
 # Compute Rental
 # ---------------------------------------------------------------------------
 
-async def handle_compute(text: str, metadata: dict = None) -> str:
+
+async def handle_compute(text: str, metadata: dict | None = None) -> str:
     """Compute-rental reads and provider operations.
 
     Rental bookings and settlements carry structured fields, so they read
@@ -3843,21 +4044,29 @@ async def handle_compute(text: str, metadata: dict = None) -> str:
     md = metadata or {}
 
     if "book" in t and md.get("renter"):
-        result = await rpc_call("tenzro_computeBookRental", {
-            "renter": md["renter"],
-            "total_epochs": md.get("total_epochs", 0),
-        })
+        result = await rpc_call(
+            "tenzro_computeBookRental",
+            {
+                "renter": md["renter"],
+                "total_epochs": md.get("total_epochs", 0),
+            },
+        )
         return f"Compute rental booked:\n{json.dumps(result, indent=2)}"
 
     if "settle" in t and md.get("rental_id"):
-        result = await rpc_call("tenzro_computeSettleEpoch", {
-            "rental_id": md["rental_id"],
-            "proof_valid": md.get("proof_valid", True),
-        })
+        result = await rpc_call(
+            "tenzro_computeSettleEpoch",
+            {
+                "rental_id": md["rental_id"],
+                "proof_valid": md.get("proof_valid", True),
+            },
+        )
         return f"Compute settle epoch:\n{json.dumps(result, indent=2)}"
 
     if md.get("rental_id"):
-        result = await rpc_call("tenzro_computeGetRental", {"rental_id": md["rental_id"]})
+        result = await rpc_call(
+            "tenzro_computeGetRental", {"rental_id": md["rental_id"]}
+        )
         return f"Compute rental:\n{json.dumps(result, indent=2)}"
 
     if "pricing" in t and md.get("capacity"):
@@ -3887,7 +4096,8 @@ async def handle_compute(text: str, metadata: dict = None) -> str:
 # MoE Expert Sharding
 # ---------------------------------------------------------------------------
 
-async def handle_moe(text: str, metadata: dict = None) -> str:
+
+async def handle_moe(text: str, metadata: dict | None = None) -> str:
     """MoE expert-shard map, dispatch planning, replication policy, catalog
     topology, expert/gate weight loading, runtime status, and distributed
     layer forwards. The model id reads from `metadata` or free text; blob
@@ -3908,12 +4118,7 @@ async def handle_moe(text: str, metadata: dict = None) -> str:
         result = await rpc_call("tenzro_moeReplicationPolicy", [])
         return f"MoE replication policy:\n{json.dumps(result, indent=2)}"
 
-    if (
-        "load" in t
-        and "unload" not in t
-        and model_id
-        and md.get("layer") is not None
-    ):
+    if "load" in t and "unload" not in t and model_id and md.get("layer") is not None:
         params = {"model_id": model_id, "layer": md["layer"]}
         if md.get("blob_base64"):
             params["blob_base64"] = md["blob_base64"]
@@ -3947,11 +4152,14 @@ async def handle_moe(text: str, metadata: dict = None) -> str:
         return f"MoE distributed forward:\n{json.dumps(result, indent=2)}"
 
     if ("dispatch" in t or "plan" in t) and model_id and md.get("routings"):
-        result = await rpc_call("tenzro_moePlanDispatch", {
-            "model_id": model_id,
-            "routings": md["routings"],
-            "allow_cold": md.get("allow_cold", False),
-        })
+        result = await rpc_call(
+            "tenzro_moePlanDispatch",
+            {
+                "model_id": model_id,
+                "routings": md["routings"],
+                "allow_cold": md.get("allow_cold", False),
+            },
+        )
         return f"MoE dispatch plan:\n{json.dumps(result, indent=2)}"
 
     if ("shape" in t or "topology" in t or "catalog" in t) and model_id:
@@ -3979,7 +4187,8 @@ async def handle_moe(text: str, metadata: dict = None) -> str:
 # Generative Image & Video
 # ---------------------------------------------------------------------------
 
-async def handle_media_gen(text: str, metadata: dict = None) -> str:
+
+async def handle_media_gen(text: str, metadata: dict | None = None) -> str:
     """Generative image and video: the curated diffusers catalog, a
     pixel-step price quote, the job queue, the worker registry, a job's
     signed receipt, and posting or cancelling a job. Job ids, task specs,
@@ -4022,10 +4231,13 @@ async def handle_media_gen(text: str, metadata: dict = None) -> str:
         return f"Media-gen job posted:\n{json.dumps(result, indent=2)}"
 
     if "cancel" in t and job_id and md.get("requester_did"):
-        result = await rpc_call("tenzro_mediaGen_cancelJob", {
-            "job_id": job_id,
-            "requester_did": md["requester_did"],
-        })
+        result = await rpc_call(
+            "tenzro_mediaGen_cancelJob",
+            {
+                "job_id": job_id,
+                "requester_did": md["requester_did"],
+            },
+        )
         return f"Media-gen job cancelled:\n{json.dumps(result, indent=2)}"
 
     if job_id:
@@ -4041,7 +4253,8 @@ async def handle_media_gen(text: str, metadata: dict = None) -> str:
 # Operability Inspection
 # ---------------------------------------------------------------------------
 
-async def handle_operability(text: str, metadata: dict = None) -> str:
+
+async def handle_operability(text: str, metadata: dict | None = None) -> str:
     """Read-only operability surface: Tenzro Train run/receipt/manifest
     inspection, SLA fault-detector parameters and probes, and state-sync
     snapshot inspection. Validator-registry reads route to the
@@ -4063,12 +4276,15 @@ async def handle_operability(text: str, metadata: dict = None) -> str:
             and md.get("epoch") is not None
             and md.get("round") is not None
         ):
-            result = await rpc_call("tenzro_slaIssueProbe", {
-                "provider_did": md["provider_did"],
-                "epoch": md["epoch"],
-                "round": md["round"],
-                "deadline_ms": md.get("deadline_ms", 5000),
-            })
+            result = await rpc_call(
+                "tenzro_slaIssueProbe",
+                {
+                    "provider_did": md["provider_did"],
+                    "epoch": md["epoch"],
+                    "round": md["round"],
+                    "deadline_ms": md.get("deadline_ms", 5000),
+                },
+            )
             return f"SLA probe issued:\n{json.dumps(result, indent=2)}"
         result = await rpc_call("tenzro_slaListOutstandingProbes", [])
         return f"Outstanding SLA probes:\n{json.dumps(result, indent=2)}"
@@ -4080,10 +4296,13 @@ async def handle_operability(text: str, metadata: dict = None) -> str:
     # --- state-sync snapshots ---
     if "snapshot" in t or "state-sync" in t:
         if "chunk" in t and md.get("height") is not None:
-            result = await rpc_call("tenzro_getSnapshotChunk", {
-                "height": md["height"],
-                "chunk_index": md.get("chunk_index", 0),
-            })
+            result = await rpc_call(
+                "tenzro_getSnapshotChunk",
+                {
+                    "height": md["height"],
+                    "chunk_index": md.get("chunk_index", 0),
+                },
+            )
             return f"Snapshot chunk:\n{json.dumps(result, indent=2)}"
         if "manifest" in t and md.get("height") is not None:
             result = await rpc_call(
@@ -4138,7 +4357,8 @@ async def handle_operability(text: str, metadata: dict = None) -> str:
 # Local Discovery & Cluster
 # ---------------------------------------------------------------------------
 
-async def handle_discovery(text: str, metadata: dict = None) -> str:
+
+async def handle_discovery(text: str, metadata: dict | None = None) -> str:
     """Local mDNS peers, reachability tier, hardware self-profile, and
     deterministic cluster placement. The cluster plan reads its model and
     members from `metadata`.
@@ -4147,19 +4367,25 @@ async def handle_discovery(text: str, metadata: dict = None) -> str:
     md = metadata or {}
 
     if "preview" in t and md.get("model_id"):
-        result = await rpc_call("tenzro_clusterPreview", {
-            "model_id": md["model_id"],
-            "user_forced": md.get("user_forced", False),
-            "force_single": md.get("force_single", False),
-        })
+        result = await rpc_call(
+            "tenzro_clusterPreview",
+            {
+                "model_id": md["model_id"],
+                "user_forced": md.get("user_forced", False),
+                "force_single": md.get("force_single", False),
+            },
+        )
         return f"Cluster preview:\n{json.dumps(result, indent=2)}"
 
     if "cluster" in t and md.get("model") and md.get("members"):
-        result = await rpc_call("tenzro_clusterPlan", {
-            "model": md["model"],
-            "members": md["members"],
-            "user_forced": md.get("user_forced", False),
-        })
+        result = await rpc_call(
+            "tenzro_clusterPlan",
+            {
+                "model": md["model"],
+                "members": md["members"],
+                "user_forced": md.get("user_forced", False),
+            },
+        )
         return f"Cluster plan:\n{json.dumps(result, indent=2)}"
 
     if "reachability" in t or "reachable" in t or "tier" in t:
@@ -4188,6 +4414,7 @@ async def handle_discovery(text: str, metadata: dict = None) -> str:
 # Decentralized app hosting (static sites / functions / machines)
 # ---------------------------------------------------------------------------
 
+
 def _with_env(params: dict, md: dict) -> dict:
     """Attach a signed DID envelope to mutation params when present in
     metadata. The node verifies env.did == owner_did before mutating."""
@@ -4198,7 +4425,7 @@ def _with_env(params: dict, md: dict) -> dict:
     return params
 
 
-async def handle_hosting(text: str, metadata: dict = None) -> str:
+async def handle_hosting(text: str, metadata: dict | None = None) -> str:
     """Publish and serve apps under *.apps.tenzro.xyz: static sites,
     wasi:http functions, and Firecracker machines. Route maps, capability
     manifests, resource requests, and sealed env vars carry structured
@@ -4215,16 +4442,27 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
 
     if "machine" in t:
         machine_id = md.get("id") or _extract_id(text, "machine-")
-        if "deploy" in t and md.get("name") and md.get("owner_did") and md.get("artifact_caid"):
+        if (
+            "deploy" in t
+            and md.get("name")
+            and md.get("owner_did")
+            and md.get("artifact_caid")
+        ):
             params = {
                 "name": md["name"],
                 "owner_did": md["owner_did"],
                 "artifact_caid": md["artifact_caid"],
                 "internal_port": md.get("internal_port", 8080),
             }
-            for k in ("resources", "sealed_env", "tee_required",
-                      "price_per_request", "replicas", "region_hint",
-                      "max_price_per_hour"):
+            for k in (
+                "resources",
+                "sealed_env",
+                "tee_required",
+                "price_per_request",
+                "replicas",
+                "region_hint",
+                "max_price_per_hour",
+            ):
                 if md.get(k) is not None:
                     params[k] = md[k]
             result = await rpc_call("tenzro_machineDeploy", _with_env(params, md))
@@ -4247,15 +4485,26 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
     # ── Functions (wasi:http components) ──
     if "function" in t:
         fn_id = md.get("id") or _extract_id(text, "function-")
-        if "deploy" in t and md.get("name") and md.get("owner_did") and md.get("wasm_blob_hash"):
+        if (
+            "deploy" in t
+            and md.get("name")
+            and md.get("owner_did")
+            and md.get("wasm_blob_hash")
+        ):
             params = {
                 "name": md["name"],
                 "owner_did": md["owner_did"],
                 "wasm_blob_hash": md["wasm_blob_hash"],
             }
-            for k in ("capabilities", "fuel_limit", "deadline_ms",
-                      "price_per_request", "replicas", "region_hint",
-                      "max_price_per_hour"):
+            for k in (
+                "capabilities",
+                "fuel_limit",
+                "deadline_ms",
+                "price_per_request",
+                "replicas",
+                "region_hint",
+                "max_price_per_hour",
+            ):
                 if md.get(k) is not None:
                     params[k] = md[k]
             result = await rpc_call("tenzro_functionDeploy", _with_env(params, md))
@@ -4284,8 +4533,11 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
     if "domain" in t:
         hostname = md.get("hostname")
         if "claim" in t and hostname and md.get("site_id") and md.get("owner_did"):
-            params = {"hostname": hostname, "site_id": md["site_id"],
-                      "owner_did": md["owner_did"]}
+            params = {
+                "hostname": hostname,
+                "site_id": md["site_id"],
+                "owner_did": md["owner_did"],
+            }
             result = await rpc_call("tenzro_siteClaimDomain", _with_env(params, md))
             return f"Domain claimed (publish the DNS TXT proof, then verify):\n{json.dumps(result, indent=2)}"
         if "verify" in t and hostname and md.get("owner_did"):
@@ -4306,9 +4558,17 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
     # ── Hostname aliases ──
     if "alias" in t or "hostname" in t:
         hostname = md.get("hostname")
-        if ("set" in t or "map" in t) and hostname and md.get("site_id") and md.get("owner_did"):
-            params = {"hostname": hostname, "site_id": md["site_id"],
-                      "owner_did": md["owner_did"]}
+        if (
+            ("set" in t or "map" in t)
+            and hostname
+            and md.get("site_id")
+            and md.get("owner_did")
+        ):
+            params = {
+                "hostname": hostname,
+                "site_id": md["site_id"],
+                "owner_did": md["owner_did"],
+            }
             result = await rpc_call("tenzro_siteSetAlias", _with_env(params, md))
             return f"Alias set:\n{json.dumps(result, indent=2)}"
         if "remove" in t and hostname and md.get("owner_did"):
@@ -4325,7 +4585,11 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
     # ── Placement ──
     if "placement" in t or ("pin" in t and "site" in t):
         site_id = md.get("site_id") or _extract_id(text, "site-")
-        if ("set" in t or "pin" in t) and site_id and md.get("serving_nodes") is not None:
+        if (
+            ("set" in t or "pin" in t)
+            and site_id
+            and md.get("serving_nodes") is not None
+        ):
             params = {"site_id": site_id, "serving_nodes": md["serving_nodes"]}
             result = await rpc_call("tenzro_siteSetPlacement", _with_env(params, md))
             return f"Placement set:\n{json.dumps(result, indent=2)}"
@@ -4342,15 +4606,26 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
 
     # ── Static sites ──
     site_id = md.get("site_id") or _extract_id(text, "site-")
-    if ("publish" in t or "deploy" in t) and md.get("name") and md.get("owner_did") and md.get("routes"):
+    if (
+        ("publish" in t or "deploy" in t)
+        and md.get("name")
+        and md.get("owner_did")
+        and md.get("routes")
+    ):
         params = {
             "name": md["name"],
             "owner_did": md["owner_did"],
             "routes": md["routes"],
         }
-        for k in ("index_path", "not_found_path", "spa",
-                  "price_per_request", "replicas", "region_hint",
-                  "max_price_per_hour"):
+        for k in (
+            "index_path",
+            "not_found_path",
+            "spa",
+            "price_per_request",
+            "replicas",
+            "region_hint",
+            "max_price_per_hour",
+        ):
             if md.get(k) is not None:
                 params[k] = md[k]
         result = await rpc_call("tenzro_sitePublish", _with_env(params, md))
@@ -4379,7 +4654,7 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
         "  - 'Deploy function' (metadata: name, owner_did, wasm_blob_hash, capabilities?, fuel_limit?, deadline_ms?, did_envelope)\n"
         "  - 'Get function function-…' / 'List functions' / 'Remove function function-…'\n"
         "Machines (Firecracker microVM):\n"
-        "  - 'Fetch machine sealing key' → wrap env ciphertext to it (x25519-envelope-aes-256-gcm)\n"
+        "  - 'Fetch machine sealing key' → wrap env ciphertext to it (x25519-hkdf-sha256-envelope-aes-256-gcm)\n"
         "  - 'Deploy machine' (metadata: name, owner_did, artifact_caid, internal_port, resources?, sealed_env?, tee_required?, did_envelope)\n"
         "  - 'Get/Status/Remove machine machine-…' / 'List machines'\n"
         "Leases:\n"
@@ -4391,7 +4666,8 @@ async def handle_hosting(text: str, metadata: dict = None) -> str:
 # Managed databases
 # ---------------------------------------------------------------------------
 
-async def handle_database(text: str, metadata: dict = None) -> str:
+
+async def handle_database(text: str, metadata: dict | None = None) -> str:
     """Managed-database catalog, partition placement, access control, and
     engine-dialect query. Database descriptors, engine config, and query
     bodies carry structured fields, so they read from `metadata`.
@@ -4411,7 +4687,10 @@ async def handle_database(text: str, metadata: dict = None) -> str:
             "placement": md.get("placement", "local"),
             "partitions": md.get("partitions", 1),
         }
-        if md.get("min_replication") is not None or md.get("max_replication") is not None:
+        if (
+            md.get("min_replication") is not None
+            or md.get("max_replication") is not None
+        ):
             params["replication"] = {
                 "min_replication": md.get("min_replication", 2),
                 "max_replication": md.get("max_replication", 4),
@@ -4442,7 +4721,12 @@ async def handle_database(text: str, metadata: dict = None) -> str:
         result = await rpc_call("tenzro_issueDatabaseConnection", params)
         return f"Database connection issued:\n{json.dumps(result, indent=2)}"
 
-    if "query" in t and database_id and md.get("caller_did") and md.get("body") is not None:
+    if (
+        "query" in t
+        and database_id
+        and md.get("caller_did")
+        and md.get("body") is not None
+    ):
         params = {
             "database_id": database_id,
             "caller_did": md["caller_did"],
@@ -4472,7 +4756,10 @@ async def handle_database(text: str, metadata: dict = None) -> str:
         }
         if md.get("partitions") is not None:
             params["partitions"] = md["partitions"]
-        if md.get("min_replication") is not None and md.get("max_replication") is not None:
+        if (
+            md.get("min_replication") is not None
+            and md.get("max_replication") is not None
+        ):
             params["replication"] = {
                 "min_replication": md["min_replication"],
                 "max_replication": md["max_replication"],
@@ -4487,14 +4774,19 @@ async def handle_database(text: str, metadata: dict = None) -> str:
         return f"Database dropped:\n{json.dumps(result, indent=2)}"
 
     if "partition" in t and database_id and md.get("partition_index") is not None:
-        result = await rpc_call("tenzro_getDatabasePartition", {
-            "database_id": database_id,
-            "partition_index": md["partition_index"],
-        })
+        result = await rpc_call(
+            "tenzro_getDatabasePartition",
+            {
+                "database_id": database_id,
+                "partition_index": md["partition_index"],
+            },
+        )
         return f"Database partition:\n{json.dumps(result, indent=2)}"
 
     if "partition" in t and database_id:
-        result = await rpc_call("tenzro_listDatabasePartitions", {"database_id": database_id})
+        result = await rpc_call(
+            "tenzro_listDatabasePartitions", {"database_id": database_id}
+        )
         return f"Database partitions:\n{json.dumps(result, indent=2)}"
 
     if database_id:
@@ -4525,7 +4817,7 @@ async def handle_database(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_oracle(text: str, metadata: dict = None) -> str:
+async def handle_oracle(text: str, metadata: dict | None = None) -> str:
     """Read asset prices from the node's price oracle (tenzro_getPrice).
 
     `price_usd_8dp` is the USD price as an integer scaled by 1e8. Symbols with
@@ -4551,7 +4843,7 @@ async def handle_oracle(text: str, metadata: dict = None) -> str:
     return f"Asset prices:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_cortex(text: str, metadata: dict = None) -> str:
+async def handle_cortex(text: str, metadata: dict | None = None) -> str:
     """Run Cortex reasoning loops and inspect the Cortex worker pool.
 
     `tenzro_cortexReason` runs an iterative reasoning loop against a served
@@ -4571,8 +4863,15 @@ async def handle_cortex(text: str, metadata: dict = None) -> str:
             )
         params = {"model_id": md["model_id"]}
         for key in (
-            "sidecar_url", "bearer_token", "arch", "max_loops", "moe_experts",
-            "experts_per_token", "attn_type", "pricing", "worker_did",
+            "sidecar_url",
+            "bearer_token",
+            "arch",
+            "max_loops",
+            "moe_experts",
+            "experts_per_token",
+            "attn_type",
+            "pricing",
+            "worker_did",
             "timeout_secs",
         ):
             if md.get(key) is not None:
@@ -4596,8 +4895,15 @@ async def handle_cortex(text: str, metadata: dict = None) -> str:
             "input": reason_input,
             "tier": md.get("tier", "standard"),
         }
-        for key in ("min_loops", "max_loops", "max_cost_wei", "deadline_ms",
-                    "attestation", "requester", "request_id"):
+        for key in (
+            "min_loops",
+            "max_loops",
+            "max_cost_wei",
+            "deadline_ms",
+            "attestation",
+            "requester",
+            "request_id",
+        ):
             if md.get(key) is not None:
                 params[key] = md[key]
         result = await rpc_call("tenzro_cortexReason", params)
@@ -4616,7 +4922,7 @@ async def handle_cortex(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_settlement(text: str, metadata: dict = None) -> str:
+async def handle_settlement(text: str, metadata: dict | None = None) -> str:
     """Settle service payments, read receipts, and drive payment channels.
 
     Covers immediate settlement (`tenzro_settle`), receipt reads, escrow
@@ -4636,30 +4942,43 @@ async def handle_settlement(text: str, metadata: dict = None) -> str:
                     "(hex address), counterparty (hex address), deposit "
                     "(decimal string)."
                 )
-            result = await rpc_call("tenzro_openPaymentChannel", {
-                "sender": md["sender"],
-                "counterparty": md["counterparty"],
-                "deposit": str(md["deposit"]),
-            })
+            result = await rpc_call(
+                "tenzro_openPaymentChannel",
+                {
+                    "sender": md["sender"],
+                    "counterparty": md["counterparty"],
+                    "deposit": str(md["deposit"]),
+                },
+            )
             return f"Payment channel opened:\n{json.dumps(result, indent=2)}"
         if "update" in t or "pay" in t:
-            if not channel_id or md.get("payment_amount") is None or not md.get("signature"):
+            if (
+                not channel_id
+                or md.get("payment_amount") is None
+                or not md.get("signature")
+            ):
                 return (
                     "Updating a payment channel requires metadata: "
                     "channel_id, payment_amount (decimal string), signature "
                     "(hex Ed25519 over nonce || payer_balance || "
                     "payee_balance of the next state, little-endian)."
                 )
-            result = await rpc_call("tenzro_updatePaymentChannel", {
-                "channel_id": channel_id,
-                "payment_amount": str(md["payment_amount"]),
-                "signature": md["signature"],
-            })
+            result = await rpc_call(
+                "tenzro_updatePaymentChannel",
+                {
+                    "channel_id": channel_id,
+                    "payment_amount": str(md["payment_amount"]),
+                    "signature": md["signature"],
+                },
+            )
             return f"Payment channel updated:\n{json.dumps(result, indent=2)}"
         if "close" in t and channel_id:
-            result = await rpc_call("tenzro_closePaymentChannel", {
-                "channel_id": channel_id,
-            })
+            result = await rpc_call(
+                "tenzro_closePaymentChannel",
+                {
+                    "channel_id": channel_id,
+                },
+            )
             return f"Payment channel closed:\n{json.dumps(result, indent=2)}"
         return (
             "Payment channel operations:\n"
@@ -4728,8 +5047,15 @@ async def handle_settlement(text: str, metadata: dict = None) -> str:
             "amount": str(md["amount"]),
             "service_type": md["service_type"],
         }
-        for key in ("model_id", "tokens", "computation_id", "compute_units",
-                    "agent_id", "task_id", "proof"):
+        for key in (
+            "model_id",
+            "tokens",
+            "computation_id",
+            "compute_units",
+            "agent_id",
+            "task_id",
+            "proof",
+        ):
             if md.get(key) is not None:
                 params[key] = md[key]
         result = await rpc_call("tenzro_settle", params)
@@ -4748,7 +5074,7 @@ async def handle_settlement(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_dvp_netting(text: str, metadata: dict = None) -> str:
+async def handle_dvp_netting(text: str, metadata: dict | None = None) -> str:
     """Run delivery-versus-payment sagas and multilateral netting batches.
 
     A DvP saga binds N legs so they settle atomically or not at all. Netting
@@ -4762,9 +5088,12 @@ async def handle_dvp_netting(text: str, metadata: dict = None) -> str:
     if "netting" in t or "obligation" in t or "batch" in t:
         batch_id = md.get("batch_id")
         if "compute" in t and md.get("obligations"):
-            result = await rpc_call("tenzro_nettingCompute", {
-                "obligations": md["obligations"],
-            })
+            result = await rpc_call(
+                "tenzro_nettingCompute",
+                {
+                    "obligations": md["obligations"],
+                },
+            )
             return f"Netting batch computed:\n{json.dumps(result, indent=2)}"
         if "settle" in t and batch_id:
             result = await rpc_call("tenzro_nettingSettle", {"batch_id": batch_id})
@@ -4793,12 +5122,15 @@ async def handle_dvp_netting(text: str, metadata: dict = None) -> str:
                 "Opening a DvP saga requires metadata: creator (hex "
                 "address), nonce (integer), legs, expires_at_ms (ms epoch)."
             )
-        result = await rpc_call("tenzro_dvpOpenSaga", {
-            "creator": md["creator"],
-            "nonce": md["nonce"],
-            "legs": md["legs"],
-            "expires_at_ms": md["expires_at_ms"],
-        })
+        result = await rpc_call(
+            "tenzro_dvpOpenSaga",
+            {
+                "creator": md["creator"],
+                "nonce": md["nonce"],
+                "legs": md["legs"],
+                "expires_at_ms": md["expires_at_ms"],
+            },
+        )
         return f"DvP saga opened:\n{json.dumps(result, indent=2)}"
 
     if "execute" in t and saga_id:
@@ -4837,7 +5169,7 @@ async def handle_dvp_netting(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_bond_insurance(text: str, metadata: dict = None) -> str:
+async def handle_bond_insurance(text: str, metadata: dict | None = None) -> str:
     """Read agent bonds and file or inspect insurance claims.
 
     An agent bond is TNZO an agent's controller posts as recourse for
@@ -4855,8 +5187,12 @@ async def handle_bond_insurance(text: str, metadata: dict = None) -> str:
             return f"Insurance claim:\n{json.dumps(result, indent=2)}"
         if "file" in t or "submit" in t:
             required = (
-                "claimant_did", "claimant_address", "against_agent_did",
-                "amount_requested", "narrative", "nonce",
+                "claimant_did",
+                "claimant_address",
+                "against_agent_did",
+                "amount_requested",
+                "narrative",
+                "nonce",
             )
             missing = [k for k in required if md.get(k) is None]
             if missing:
@@ -4887,9 +5223,12 @@ async def handle_bond_insurance(text: str, metadata: dict = None) -> str:
 
     controller_did = md.get("controller_did")
     if controller_did:
-        result = await rpc_call("tenzro_listAgentBondsByController", {
-            "controller_did": controller_did,
-        })
+        result = await rpc_call(
+            "tenzro_listAgentBondsByController",
+            {
+                "controller_did": controller_did,
+            },
+        )
         return f"Agent bonds by controller:\n{json.dumps(result, indent=2)}"
 
     agent_did = md.get("agent_did") or _extract_did(text)
@@ -4912,7 +5251,7 @@ async def handle_bond_insurance(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_ccip(text: str, metadata: dict = None) -> str:
+async def handle_ccip(text: str, metadata: dict | None = None) -> str:
     """Quote, send, and track Chainlink CCIP messages from the node.
 
     Fees are quoted live from `Router.getFee()`; `tenzro_ccipSend` returns the
@@ -4938,10 +5277,7 @@ async def handle_ccip(text: str, metadata: dict = None) -> str:
 
     if "rate limit" in t or "ratelimit" in t:
         if not md.get("chain") or not md.get("pool_address"):
-            return (
-                "CCIP rate limits need metadata: chain, pool_address, "
-                "remote_chain?."
-            )
+            return "CCIP rate limits need metadata: chain, pool_address, remote_chain?."
         params = {"chain": md["chain"], "pool_address": md["pool_address"]}
         if md.get("remote_chain"):
             params["remote_chain"] = md["remote_chain"]
@@ -4951,10 +5287,13 @@ async def handle_ccip(text: str, metadata: dict = None) -> str:
     if "pool" in t:
         if not md.get("chain") or not md.get("pool_address"):
             return "CCIP token pool inspection needs metadata: chain, pool_address."
-        result = await rpc_call("tenzro_ccipTokenPool", {
-            "chain": md["chain"],
-            "pool_address": md["pool_address"],
-        })
+        result = await rpc_call(
+            "tenzro_ccipTokenPool",
+            {
+                "chain": md["chain"],
+                "pool_address": md["pool_address"],
+            },
+        )
         return f"CCIP token pool:\n{json.dumps(result, indent=2)}"
 
     if "lane" in t:
@@ -4991,21 +5330,31 @@ async def handle_ccip(text: str, metadata: dict = None) -> str:
         return f"CCIP message status:\n{json.dumps(result, indent=2)}"
 
     if "bridge" in t or "transfer" in t:
-        required = ("source_chain", "dest_chain", "sender", "recipient", "asset", "amount")
+        required = (
+            "source_chain",
+            "dest_chain",
+            "sender",
+            "recipient",
+            "asset",
+            "amount",
+        )
         missing = [k for k in required if md.get(k) is None]
         if missing:
             return (
                 "Bridging over CCIP needs metadata: "
                 f"{', '.join(required)} (missing: {', '.join(missing)})."
             )
-        result = await rpc_call("tenzro_ccipBridge", {
-            "source_chain": md["source_chain"],
-            "dest_chain": md["dest_chain"],
-            "sender": md["sender"],
-            "recipient": md["recipient"],
-            "asset": md["asset"],
-            "amount": str(md["amount"]),
-        })
+        result = await rpc_call(
+            "tenzro_ccipBridge",
+            {
+                "source_chain": md["source_chain"],
+                "dest_chain": md["dest_chain"],
+                "sender": md["sender"],
+                "recipient": md["recipient"],
+                "asset": md["asset"],
+                "amount": str(md["amount"]),
+            },
+        )
         return f"CCIP bridge:\n{json.dumps(result, indent=2)}"
 
     if "send" in t:
@@ -5057,7 +5406,7 @@ def _modality_catalog_help(modality: str, run_hint: str) -> str:
     )
 
 
-async def handle_forecast(text: str, metadata: dict = None) -> str:
+async def handle_forecast(text: str, metadata: dict | None = None) -> str:
     """Run timeseries forecasts against a loaded forecast model.
 
     `history` is the observed series; `horizon` is how many steps ahead to
@@ -5095,7 +5444,7 @@ async def handle_forecast(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_vision_embed(text: str, metadata: dict = None) -> str:
+async def handle_vision_embed(text: str, metadata: dict | None = None) -> str:
     """Embed images and compare image embeddings against text embeddings.
 
     `image_base64` is the raw image (PNG / JPEG / WebP) base64-encoded.
@@ -5110,10 +5459,13 @@ async def handle_vision_embed(text: str, metadata: dict = None) -> str:
         return f"Vision catalog:\n{json.dumps(result, indent=2)}"
 
     if md.get("image_embedding") and md.get("text_embedding"):
-        result = await rpc_call("tenzro_imageTextSimilarity", {
-            "image_embedding": md["image_embedding"],
-            "text_embedding": md["text_embedding"],
-        })
+        result = await rpc_call(
+            "tenzro_imageTextSimilarity",
+            {
+                "image_embedding": md["image_embedding"],
+                "text_embedding": md["text_embedding"],
+            },
+        )
         return f"Image-text similarity:\n{json.dumps(result, indent=2)}"
 
     if md.get("model_id") and md.get("image_base64"):
@@ -5138,7 +5490,7 @@ async def handle_vision_embed(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_text_embed(text: str, metadata: dict = None) -> str:
+async def handle_text_embed(text: str, metadata: dict | None = None) -> str:
     """Embed text with a loaded text-embedding model.
 
     `inputs` is a non-empty list of strings. Matryoshka models accept
@@ -5172,7 +5524,7 @@ async def handle_text_embed(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_segmentation(text: str, metadata: dict = None) -> str:
+async def handle_segmentation(text: str, metadata: dict | None = None) -> str:
     """Segment an image from point and box prompts (SAM 2, EdgeSAM, MobileSAM).
 
     Prompts anchor the mask: a point marks a pixel as foreground or
@@ -5187,11 +5539,14 @@ async def handle_segmentation(text: str, metadata: dict = None) -> str:
         return f"Segmentation catalog:\n{json.dumps(result, indent=2)}"
 
     if md.get("model_id") and md.get("image_base64") and md.get("prompts"):
-        result = await rpc_call("tenzro_segment", {
-            "model_id": md["model_id"],
-            "image_base64": md["image_base64"],
-            "prompts": md["prompts"],
-        })
+        result = await rpc_call(
+            "tenzro_segment",
+            {
+                "model_id": md["model_id"],
+                "image_base64": md["image_base64"],
+                "prompts": md["prompts"],
+            },
+        )
         return f"Segmentation:\n{json.dumps(result, indent=2)}"
 
     if "list" in t or "model" in t:
@@ -5207,7 +5562,7 @@ async def handle_segmentation(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_text_segmentation(text: str, metadata: dict = None) -> str:
+async def handle_text_segmentation(text: str, metadata: dict | None = None) -> str:
     """Segment an image from a natural-language prompt (SAM 3 / SAM 3.1).
 
     Open-vocabulary: `text_prompt` names what to segment. An optional
@@ -5245,7 +5600,7 @@ async def handle_text_segmentation(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_detection(text: str, metadata: dict = None) -> str:
+async def handle_detection(text: str, metadata: dict | None = None) -> str:
     """Detect objects in an image (RF-DETR, D-FINE).
 
     Both families are NMS-free. `score_threshold` filters weak detections;
@@ -5279,7 +5634,7 @@ async def handle_detection(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_audio_transcribe(text: str, metadata: dict = None) -> str:
+async def handle_audio_transcribe(text: str, metadata: dict | None = None) -> str:
     """Transcribe speech to text (Moonshine, Distil-Whisper, Parakeet, Canary).
 
     `audio_base64` is the raw audio file base64-encoded. `language` pins the
@@ -5315,7 +5670,7 @@ async def handle_audio_transcribe(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_video_embed(text: str, metadata: dict = None) -> str:
+async def handle_video_embed(text: str, metadata: dict | None = None) -> str:
     """Embed a video by mean-pooling frame embeddings.
 
     Frames are extracted evenly across the clip — or at fixed `frame_stride`
@@ -5346,12 +5701,11 @@ async def handle_video_embed(text: str, metadata: dict = None) -> str:
 
     return _modality_catalog_help(
         "Video embedding",
-        "'Embed video' (metadata: model_id, video_base64, frame_stride?, "
-        "normalize?)",
+        "'Embed video' (metadata: model_id, video_base64, frame_stride?, normalize?)",
     )
 
 
-async def handle_agent_memory(text: str, metadata: dict = None) -> str:
+async def handle_agent_memory(text: str, metadata: dict | None = None) -> str:
     """Grant, recall, archive and list persistent agent memory records.
 
     Recall runs over a Lance vector index and a Tantivy BM25 index; `mode` is
@@ -5414,7 +5768,7 @@ async def handle_agent_memory(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_adaptive_burn(text: str, metadata: dict = None) -> str:
+async def handle_adaptive_burn(text: str, metadata: dict | None = None) -> str:
     """Read the adaptive burn dial: config, supply metrics, recommendation.
 
     The dial compares the rolling supply delta against the governance-set
@@ -5439,7 +5793,7 @@ async def handle_adaptive_burn(text: str, metadata: dict = None) -> str:
     return f"Burn rate config:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_seed_agent(text: str, metadata: dict = None) -> str:
+async def handle_seed_agent(text: str, metadata: dict | None = None) -> str:
     """Read the SeedAgent treasury earmark, charters, registry and activity.
 
     The earmark funds protocol-owned bootstrap agents on a decaying schedule.
@@ -5480,7 +5834,7 @@ async def handle_seed_agent(text: str, metadata: dict = None) -> str:
     return f"Seed agents:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_erc7683(text: str, metadata: dict = None) -> str:
+async def handle_erc7683(text: str, metadata: dict | None = None) -> str:
     """Read ERC-7683 cross-chain orders and record destination-side fills.
 
     Orders are opened by the swapper through a signed origin-settler
@@ -5535,7 +5889,7 @@ async def handle_erc7683(text: str, metadata: dict = None) -> str:
     return f"Orders:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_urwa(text: str, metadata: dict = None) -> str:
+async def handle_urwa(text: str, metadata: dict | None = None) -> str:
     """ERC-7943 regulated-asset controls: frozen amounts and kill switch.
 
     `token_id_hex` is 32 bytes, `account_hex` is 20 bytes, both with or
@@ -5555,7 +5909,9 @@ async def handle_urwa(text: str, metadata: dict = None) -> str:
                 if md.get(key) is not None:
                     params[key] = md[key]
             result = await rpc_call("tenzro_urwaTriggerKillSwitch", params)
-            return f"Kill switch triggered (admin-gated):\n{json.dumps(result, indent=2)}"
+            return (
+                f"Kill switch triggered (admin-gated):\n{json.dumps(result, indent=2)}"
+            )
         if "clear" in t or "release" in t or "lift" in t:
             result = await rpc_call(
                 "tenzro_urwaClearKillSwitch", {"token_id_hex": token_id}
@@ -5598,7 +5954,7 @@ async def handle_urwa(text: str, metadata: dict = None) -> str:
     )
 
 
-async def handle_ivms101(text: str, metadata: dict = None) -> str:
+async def handle_ivms101(text: str, metadata: dict | None = None) -> str:
     """Compute the canonical hash of an IVMS101 travel-rule envelope.
 
     Pass the envelope as `metadata.envelope`, or put the envelope fields at
@@ -5616,7 +5972,7 @@ async def handle_ivms101(text: str, metadata: dict = None) -> str:
     return f"IVMS101 envelope hash:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_attested_clock(text: str, metadata: dict = None) -> str:
+async def handle_attested_clock(text: str, metadata: dict | None = None) -> str:
     """Read the node's attested-clock envelope.
 
     Returns wall-clock milliseconds plus a monotonic reading. `tee_vendor`
@@ -5627,7 +5983,7 @@ async def handle_attested_clock(text: str, metadata: dict = None) -> str:
     return f"Attested clock:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_signed_agent_card(text: str, metadata: dict = None) -> str:
+async def handle_signed_agent_card(text: str, metadata: dict | None = None) -> str:
     """Compute the canonical hash of an A2A Signed Agent Card.
 
     Pass the card as `metadata.card`, or put the card fields at the top level
@@ -5645,7 +6001,7 @@ async def handle_signed_agent_card(text: str, metadata: dict = None) -> str:
     return f"Canonical agent card hash:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_stripe_spt(text: str, metadata: dict = None) -> str:
+async def handle_stripe_spt(text: str, metadata: dict | None = None) -> str:
     """Read the Stripe SharedPaymentToken surface, or dispatch a webhook event.
 
     With no metadata this returns the protocol description: the four ceilings
@@ -5692,13 +6048,13 @@ async def handle_stripe_spt(text: str, metadata: dict = None) -> str:
     return f"SPT settlement outcome:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_wormhole_ntt(text: str, metadata: dict = None) -> str:
+async def handle_wormhole_ntt(text: str, metadata: dict | None = None) -> str:
     """List the Wormhole chain IDs carrying NTT manager metadata."""
     result = await rpc_call("tenzro_wormholeNttListChains", [])
     return f"Wormhole NTT chains:\n{json.dumps(result, indent=2)}"
 
 
-async def handle_bridge_fee(text: str, metadata: dict = None) -> str:
+async def handle_bridge_fee(text: str, metadata: dict | None = None) -> str:
     """Quote a destination-native bridge fee in TNZO, and list sponsorship pools.
 
     A quote converts the destination chain's native fee into TNZO at the

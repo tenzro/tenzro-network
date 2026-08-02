@@ -42,7 +42,7 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            db_path: PathBuf::from("./data/tenzro-db"),
+            db_path: tenzro_types::paths::default_data_dir().join("db"),
             cache_size: 512 * 1024 * 1024, // 512 MB
             compression: true,
             max_open_files: 1000,

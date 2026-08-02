@@ -10,7 +10,7 @@
 //! module only translates HTTP wire shapes.
 
 use crate::x402::coinbase::{SettleRequest, SettleResponse, VerifyRequest, VerifyResponse};
-use crate::x402::{X402Facilitator, X402PaymentPayload, X402PaymentRequired, X402_WIRE_VERSION};
+use crate::x402::{X402_WIRE_VERSION, X402Facilitator, X402PaymentPayload, X402PaymentRequired};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -69,8 +69,8 @@ fn decode_pair(
     let payload_bytes =
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload_b64)
             .map_err(|e| format!("invalid payload base64: {}", e))?;
-    let payload: X402PaymentPayload =
-        serde_json::from_slice(&payload_bytes).map_err(|e| format!("invalid payload JSON: {}", e))?;
+    let payload: X402PaymentPayload = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| format!("invalid payload JSON: {}", e))?;
 
     Ok((requirements, payload))
 }
@@ -79,18 +79,18 @@ async fn handle_verify(
     State(state): State<FacilitatorServerState>,
     Json(request): Json<VerifyRequest>,
 ) -> Json<VerifyResponse> {
-    let (requirements, payload) =
-        match decode_pair(&request.payload, &request.payment_requirements) {
-            Ok(pair) => pair,
-            Err(e) => {
-                debug!("x402 facilitator verify: malformed request: {}", e);
-                return Json(VerifyResponse {
-                    is_valid: false,
-                    error: Some(e),
-                    invalidation_reason: Some("malformed_request".to_string()),
-                });
-            }
-        };
+    let (requirements, payload) = match decode_pair(&request.payload, &request.payment_requirements)
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            debug!("x402 facilitator verify: malformed request: {}", e);
+            return Json(VerifyResponse {
+                is_valid: false,
+                error: Some(e),
+                invalidation_reason: Some("malformed_request".to_string()),
+            });
+        }
+    };
 
     match state.facilitator.verify(&requirements, &payload).await {
         Ok(true) => Json(VerifyResponse {
@@ -118,19 +118,19 @@ async fn handle_settle(
     State(state): State<FacilitatorServerState>,
     Json(request): Json<SettleRequest>,
 ) -> Json<SettleResponse> {
-    let (requirements, payload) =
-        match decode_pair(&request.payload, &request.payment_requirements) {
-            Ok(pair) => pair,
-            Err(e) => {
-                debug!("x402 facilitator settle: malformed request: {}", e);
-                return Json(SettleResponse {
-                    success: false,
-                    tx_hash: String::new(),
-                    network: None,
-                    error: Some(e),
-                });
-            }
-        };
+    let (requirements, payload) = match decode_pair(&request.payload, &request.payment_requirements)
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            debug!("x402 facilitator settle: malformed request: {}", e);
+            return Json(SettleResponse {
+                success: false,
+                tx_hash: String::new(),
+                network: None,
+                error: Some(e),
+            });
+        }
+    };
 
     // Re-verify before settling — the settle endpoint must not trust that
     // the caller ran /verify first.
@@ -174,9 +174,7 @@ async fn handle_settle(
     }
 }
 
-async fn handle_supported(
-    State(state): State<FacilitatorServerState>,
-) -> Json<SupportedResponse> {
+async fn handle_supported(State(state): State<FacilitatorServerState>) -> Json<SupportedResponse> {
     let mut kinds = Vec::new();
     for scheme in state.facilitator.scheme_registry().ids() {
         for network in state.facilitator.supported_chains() {
@@ -193,8 +191,8 @@ async fn handle_supported(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::x402::payment_payload::{ExactAuthorization, ExactSchemePayload};
     use crate::x402::X402PaymentRequirement;
+    use crate::x402::payment_payload::{ExactAuthorization, ExactSchemePayload};
 
     fn encode_payload(payload: &X402PaymentPayload) -> String {
         base64::Engine::encode(
@@ -308,9 +306,11 @@ mod tests {
         let kinds = &response.0.kinds;
 
         assert!(!kinds.is_empty());
-        assert!(kinds
-            .iter()
-            .all(|k| k.network == "tenzro-mainnet" && k.x402_version == X402_WIRE_VERSION));
+        assert!(
+            kinds
+                .iter()
+                .all(|k| k.network == "tenzro-mainnet" && k.x402_version == X402_WIRE_VERSION)
+        );
         assert!(kinds.iter().any(|k| k.scheme == "tenzro-hybrid"));
         assert!(kinds.iter().any(|k| k.scheme == "erc7710"));
     }

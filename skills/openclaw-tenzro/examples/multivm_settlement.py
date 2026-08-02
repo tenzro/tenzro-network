@@ -36,7 +36,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 
-import tenzro_rpc  # noqa: E402
+import tenzro_rpc
 
 TRANSFER_AMOUNT_WEI = 1_000_000_000_000_000_000  # 1 TNZO
 FAUCET_POLL_SECS = 180

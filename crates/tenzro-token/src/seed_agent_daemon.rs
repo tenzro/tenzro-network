@@ -61,9 +61,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::error::{Result, TokenError};
-use crate::seed_agent::{
-    SeedAgentEarmarkManager, SeedAgentStatus, MONTH_MILLIS,
-};
+use crate::seed_agent::{MONTH_MILLIS, SeedAgentEarmarkManager, SeedAgentStatus};
 use crate::seed_agent_gossip::SeedAgentGossipMessage;
 use tenzro_types::primitives::Timestamp;
 
@@ -81,8 +79,7 @@ pub const DEFAULT_MIN_REFILL_INTERVAL_MS: i64 = MONTH_MILLIS;
 /// [`SeedAgentEarmarkManager::sunset_wind_down_sweep`]. Re-exports
 /// [`crate::seed_agent::DEFAULT_QUARANTINE_GRACE_MS`] so callers can tune
 /// the daemon and the sweep together.
-pub const DEFAULT_DAEMON_QUARANTINE_GRACE_MS: i64 =
-    crate::seed_agent::DEFAULT_QUARANTINE_GRACE_MS;
+pub const DEFAULT_DAEMON_QUARANTINE_GRACE_MS: i64 = crate::seed_agent::DEFAULT_QUARANTINE_GRACE_MS;
 
 /// Tick authority callback: returns `true` when this node should drive the
 /// next tick (one-leader gate). `None` callback = always authorised.
@@ -140,9 +137,8 @@ pub struct TickOutcome {
 /// burn `disposition.burn_wei` from `TnzoToken` and deposit
 /// `disposition.treasury_wei` to the general `NetworkTreasury`. Failures
 /// are logged but do not abort the tick.
-pub type SurplusDispositionFn = Arc<
-    dyn Fn(&crate::seed_agent::SurplusDisposition) -> Result<()> + Send + Sync + 'static,
->;
+pub type SurplusDispositionFn =
+    Arc<dyn Fn(&crate::seed_agent::SurplusDisposition) -> Result<()> + Send + Sync + 'static>;
 
 /// Background daemon that drives the SeedAgent per-month refill loop.
 pub struct SeedAgentDaemon {
@@ -181,10 +177,7 @@ impl SeedAgentDaemon {
     /// no live agents). Production wiring: burn + treasury-deposit. `None`
     /// callback is fine for tests — the manager still zeroes the surplus
     /// internally; the callback only enacts the on-chain effect.
-    pub fn with_surplus_disposition(
-        mut self,
-        cb: SurplusDispositionFn,
-    ) -> Self {
+    pub fn with_surplus_disposition(mut self, cb: SurplusDispositionFn) -> Self {
         self.surplus_disposition = Some(cb);
         self
     }
@@ -192,10 +185,7 @@ impl SeedAgentDaemon {
     /// Attach a gossip broadcast channel. The channel receiver is drained
     /// by the node-level forwarder task that encodes each message and
     /// publishes it on `SEED_AGENTS_TOPIC`.
-    pub fn with_gossip(
-        mut self,
-        gossip_tx: UnboundedSender<SeedAgentGossipMessage>,
-    ) -> Self {
+    pub fn with_gossip(mut self, gossip_tx: UnboundedSender<SeedAgentGossipMessage>) -> Self {
         self.gossip_tx = Some(gossip_tx);
         self
     }
@@ -337,12 +327,14 @@ impl SeedAgentDaemon {
             if requested == 0 {
                 continue;
             }
-            match self.manager.refill_agent_monthly(&agent.agent_did, requested, now) {
+            match self
+                .manager
+                .refill_agent_monthly(&agent.agent_did, requested, now)
+            {
                 Ok(result) if result.granted_wei > 0 => {
                     outcome.refilled_count = outcome.refilled_count.saturating_add(1);
-                    outcome.total_granted_wei = outcome
-                        .total_granted_wei
-                        .saturating_add(result.granted_wei);
+                    outcome.total_granted_wei =
+                        outcome.total_granted_wei.saturating_add(result.granted_wei);
                     self.broadcast_refill_completed(
                         &agent.agent_did,
                         result.granted_wei,
@@ -375,7 +367,10 @@ impl SeedAgentDaemon {
         //    live agents remain. The manager zeroes the surplus
         //    internally; the optional `surplus_disposition` callback
         //    enacts the burn + treasury-deposit on-chain.
-        match self.manager.sunset_wind_down_sweep(now, self.config.quarantine_grace_ms) {
+        match self
+            .manager
+            .sunset_wind_down_sweep(now, self.config.quarantine_grace_ms)
+        {
             Ok(report) => {
                 outcome.quarantined_count = report.quarantined.len() as u32;
                 outcome.terminated_count = report.terminated.len() as u32;
@@ -422,12 +417,7 @@ impl SeedAgentDaemon {
 
     /// Best-effort broadcast — drops the message silently if the channel is
     /// closed. The forwarder reattaches on node restart.
-    fn broadcast_refill_completed(
-        &self,
-        agent_did: &str,
-        granted_wei: u128,
-        month: u8,
-    ) {
+    fn broadcast_refill_completed(&self, agent_did: &str, granted_wei: u128, month: u8) {
         let Some(tx) = &self.gossip_tx else { return };
         let snapshot = self.manager.earmark();
         let msg = SeedAgentGossipMessage::MonthlyRefillCompleted {
@@ -456,10 +446,7 @@ impl SeedAgentDaemon {
 /// A charter is past sunset if `sunset != 0` AND `now >= sunset`.
 /// A `sunset == 0` value means "no sunset configured" (used in tests and
 /// indefinite charters).
-fn is_charter_past_sunset(
-    charter: &crate::seed_agent::Charter,
-    now: Timestamp,
-) -> bool {
+fn is_charter_past_sunset(charter: &crate::seed_agent::Charter, now: Timestamp) -> bool {
     let sunset_ms = charter.sunset.as_millis();
     sunset_ms != 0 && now.as_millis() >= sunset_ms
 }
@@ -491,8 +478,8 @@ impl SeedAgentDaemonConfig {
 mod tests {
     use super::*;
     use crate::seed_agent::{
-        Charter, CounterpartyFilter, DecaySchedule, OperationKind,
-        SeedAgentRecord, SpendCaps, TreasuryEarmark, DEFAULT_SURPLUS_BURN_BPS,
+        Charter, CounterpartyFilter, DEFAULT_SURPLUS_BURN_BPS, DecaySchedule, OperationKind,
+        SeedAgentRecord, SpendCaps, TreasuryEarmark,
     };
     use tenzro_types::primitives::Hash;
     use tokio::sync::mpsc;
@@ -570,8 +557,7 @@ mod tests {
     fn tick_skips_when_authority_returns_false() {
         let now = Timestamp::new(0);
         let mgr = seeded_manager(now);
-        let daemon = SeedAgentDaemon::new(mgr.clone())
-            .with_tick_authority(Arc::new(|| false));
+        let daemon = SeedAgentDaemon::new(mgr.clone()).with_tick_authority(Arc::new(|| false));
         let later = Timestamp::new(MONTH_MILLIS + 1);
         let outcome = daemon.tick_once(later).unwrap();
         assert!(outcome.authority_skipped);

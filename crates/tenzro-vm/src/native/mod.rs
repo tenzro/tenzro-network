@@ -62,7 +62,7 @@
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use tenzro_settlement::escrow::{verify_release_conditions, EscrowAccount, EscrowStatus};
+use tenzro_settlement::escrow::{EscrowAccount, EscrowStatus, verify_release_conditions};
 use tenzro_types::asset::AssetId;
 use tenzro_types::kill_switch::{KillSwitchAction, KillSwitchReceipt};
 use tenzro_types::primitives::{Address, BlockHeight, Timestamp};
@@ -73,7 +73,10 @@ use crate::{
     error::{Result, VmError},
     gas::GasMeter,
     traits::{VmExecutor, VmState, VmType},
-    types::{CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log, StateChange, VmTransaction},
+    types::{
+        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log,
+        StateChange, VmTransaction,
+    },
 };
 
 // Function selectors (4 bytes)
@@ -279,12 +282,15 @@ impl NativeExecutor {
         // Consume gas for transfer
         gas_meter.consume(GAS_TRANSFER)?;
 
-        let to = tx.to.as_ref()
-            .ok_or_else(|| VmError::InvalidTransaction("Transfer requires recipient address".to_string()))?;
+        let to = tx.to.as_ref().ok_or_else(|| {
+            VmError::InvalidTransaction("Transfer requires recipient address".to_string())
+        })?;
 
         // Calculate total cost (value + gas cost)
         let gas_cost = tx.gas_price.saturating_mul(GAS_TRANSFER as u128);
-        let total_cost = tx.value.checked_add(gas_cost)
+        let total_cost = tx
+            .value
+            .checked_add(gas_cost)
             .ok_or_else(|| VmError::Internal("Transfer amount overflow".to_string()))?;
 
         // Check sender balance
@@ -306,7 +312,8 @@ impl NativeExecutor {
         state.set_balance(&tx.from, new_sender_balance);
 
         // Credit receiver (value only)
-        let new_receiver_balance = old_receiver_balance.checked_add(tx.value)
+        let new_receiver_balance = old_receiver_balance
+            .checked_add(tx.value)
             .ok_or_else(|| VmError::Internal("Receiver balance overflow".to_string()))?;
         state.set_balance(to, new_receiver_balance);
 
@@ -365,13 +372,15 @@ impl NativeExecutor {
             ));
         }
 
-        let amount_bytes: [u8; 8] = tx.data[4..12].try_into()
-            .map_err(|_| VmError::InvalidTransaction("Invalid stake amount encoding".to_string()))?;
+        let amount_bytes: [u8; 8] = tx.data[4..12].try_into().map_err(|_| {
+            VmError::InvalidTransaction("Invalid stake amount encoding".to_string())
+        })?;
         let stake_amount = u64::from_le_bytes(amount_bytes) as u128;
 
         // Calculate total cost (stake amount + gas cost)
         let gas_cost = tx.gas_price.saturating_mul(GAS_STAKE as u128);
-        let total_cost = stake_amount.checked_add(gas_cost)
+        let total_cost = stake_amount
+            .checked_add(gas_cost)
             .ok_or_else(|| VmError::Internal("Stake cost overflow".to_string()))?;
 
         // Check sender balance
@@ -402,7 +411,8 @@ impl NativeExecutor {
             .unwrap_or(0);
 
         // Update stake
-        let new_stake = existing_stake.checked_add(stake_amount)
+        let new_stake = existing_stake
+            .checked_add(stake_amount)
             .ok_or_else(|| VmError::Internal("Stake amount overflow".to_string()))?;
 
         // Store new stake (as u64 for compatibility with token amounts)
@@ -467,8 +477,9 @@ impl NativeExecutor {
             ));
         }
 
-        let amount_bytes: [u8; 8] = tx.data[4..12].try_into()
-            .map_err(|_| VmError::InvalidTransaction("Invalid unstake amount encoding".to_string()))?;
+        let amount_bytes: [u8; 8] = tx.data[4..12].try_into().map_err(|_| {
+            VmError::InvalidTransaction("Invalid unstake amount encoding".to_string())
+        })?;
         let unstake_amount = u64::from_le_bytes(amount_bytes) as u128;
 
         // Load existing stake
@@ -562,7 +573,10 @@ impl NativeExecutor {
         state: &mut dyn VmState,
         gas_meter: &mut GasMeter,
     ) -> Result<ExecutionResult> {
-        tracing::debug!("Executing governance proposal: from={}", hex::encode(&tx.from));
+        tracing::debug!(
+            "Executing governance proposal: from={}",
+            hex::encode(&tx.from)
+        );
 
         // Consume gas for proposal
         gas_meter.consume(GAS_PROPOSE)?;
@@ -684,7 +698,8 @@ impl NativeExecutor {
         // Extract proposal ID (32 bytes) and vote (1 byte)
         if tx.data.len() < 37 {
             return Err(VmError::InvalidTransaction(
-                "Vote transaction requires selector + proposal_id (32 bytes) + vote (1 byte)".to_string(),
+                "Vote transaction requires selector + proposal_id (32 bytes) + vote (1 byte)"
+                    .to_string(),
             ));
         }
 
@@ -725,11 +740,7 @@ impl NativeExecutor {
         // Store vote
         let vote_key = format!("vote:{}:{}", proposal_id, hex::encode(&tx.from));
         let old_vote = state.get_storage(&SYSTEM_ADDRESS, vote_key.as_bytes());
-        state.set_storage(
-            &SYSTEM_ADDRESS,
-            vote_key.as_bytes(),
-            vec![vote_byte],
-        );
+        state.set_storage(&SYSTEM_ADDRESS, vote_key.as_bytes(), vec![vote_byte]);
 
         // Increment sender nonce
         let old_nonce = state.get_nonce(&tx.from);
@@ -789,8 +800,9 @@ impl NativeExecutor {
         gas_meter.consume(GAS_ESCROW_CREATE)?;
 
         let payload_bytes = &tx.data[4..];
-        let payload: CreateEscrowPayload = serde_json::from_slice(payload_bytes)
-            .map_err(|e| VmError::InvalidTransaction(format!("Invalid CreateEscrow payload: {}", e)))?;
+        let payload: CreateEscrowPayload = serde_json::from_slice(payload_bytes).map_err(|e| {
+            VmError::InvalidTransaction(format!("Invalid CreateEscrow payload: {}", e))
+        })?;
 
         if payload.amount == 0 {
             return Err(VmError::InvalidTransaction(
@@ -820,9 +832,10 @@ impl NativeExecutor {
 
         // Total cost = gas + escrowed amount. Must come from payer balance.
         let gas_cost = tx.gas_price.saturating_mul(GAS_ESCROW_CREATE as u128);
-        let total_cost = payload.amount.checked_add(gas_cost).ok_or_else(|| {
-            VmError::Internal("Escrow create cost overflow".to_string())
-        })?;
+        let total_cost = payload
+            .amount
+            .checked_add(gas_cost)
+            .ok_or_else(|| VmError::Internal("Escrow create cost overflow".to_string()))?;
 
         let payer_balance = state.get_balance(&tx.from);
         if payer_balance < total_cost {
@@ -839,9 +852,9 @@ impl NativeExecutor {
         // VM helper, `vault_payout`, may move funds in or out of vaults.
         let vault_bytes = vault_addr.as_bytes().to_vec();
         let old_vault_balance = state.get_balance(&vault_bytes);
-        let new_vault_balance = old_vault_balance.checked_add(payload.amount).ok_or_else(|| {
-            VmError::Internal("Vault balance overflow".to_string())
-        })?;
+        let new_vault_balance = old_vault_balance
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("Vault balance overflow".to_string()))?;
         state.set_balance(&vault_bytes, new_vault_balance);
 
         // Build and persist the escrow record.
@@ -860,9 +873,8 @@ impl NativeExecutor {
             status: EscrowStatus::Funded,
             release_conditions: payload.release_conditions.clone(),
         };
-        let escrow_blob = serde_json::to_vec(&escrow).map_err(|e| {
-            VmError::Internal(format!("Failed to serialize escrow record: {}", e))
-        })?;
+        let escrow_blob = serde_json::to_vec(&escrow)
+            .map_err(|e| VmError::Internal(format!("Failed to serialize escrow record: {}", e)))?;
         state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), escrow_blob.clone());
 
         // Increment payer nonce.
@@ -924,8 +936,9 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_ESCROW_RELEASE)?;
 
-        let payload: ReleaseEscrowPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| VmError::InvalidTransaction(format!("Invalid ReleaseEscrow payload: {}", e)))?;
+        let payload: ReleaseEscrowPayload = serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+            VmError::InvalidTransaction(format!("Invalid ReleaseEscrow payload: {}", e))
+        })?;
 
         let escrow_id_hex = hex::encode(payload.escrow_id);
         let storage_key = escrow_storage_key(&escrow_id_hex);
@@ -935,7 +948,10 @@ impl NativeExecutor {
                 VmError::InvalidTransaction(format!("Escrow {} not found", escrow_id_hex))
             })?;
         let mut escrow: EscrowAccount = serde_json::from_slice(&escrow_blob).map_err(|e| {
-            VmError::Internal(format!("Failed to decode escrow record {}: {}", escrow_id_hex, e))
+            VmError::Internal(format!(
+                "Failed to decode escrow record {}: {}",
+                escrow_id_hex, e
+            ))
         })?;
 
         // Authorization: only the original payer may release.
@@ -991,16 +1007,15 @@ impl NativeExecutor {
 
         let payee_bytes = escrow.payee.as_bytes().to_vec();
         let old_payee_balance = state.get_balance(&payee_bytes);
-        let new_payee_balance = old_payee_balance.checked_add(escrow.amount).ok_or_else(|| {
-            VmError::Internal("Payee balance overflow".to_string())
-        })?;
+        let new_payee_balance = old_payee_balance
+            .checked_add(escrow.amount)
+            .ok_or_else(|| VmError::Internal("Payee balance overflow".to_string()))?;
         state.set_balance(&payee_bytes, new_payee_balance);
 
         // Update escrow record.
         escrow.status = EscrowStatus::Released;
-        let new_blob = serde_json::to_vec(&escrow).map_err(|e| {
-            VmError::Internal(format!("Failed to serialize escrow record: {}", e))
-        })?;
+        let new_blob = serde_json::to_vec(&escrow)
+            .map_err(|e| VmError::Internal(format!("Failed to serialize escrow record: {}", e)))?;
         state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), new_blob.clone());
 
         let old_nonce = state.get_nonce(&tx.from);
@@ -1071,8 +1086,9 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_ESCROW_REFUND)?;
 
-        let payload: RefundEscrowPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| VmError::InvalidTransaction(format!("Invalid RefundEscrow payload: {}", e)))?;
+        let payload: RefundEscrowPayload = serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+            VmError::InvalidTransaction(format!("Invalid RefundEscrow payload: {}", e))
+        })?;
 
         let escrow_id_hex = hex::encode(payload.escrow_id);
         let storage_key = escrow_storage_key(&escrow_id_hex);
@@ -1082,7 +1098,10 @@ impl NativeExecutor {
                 VmError::InvalidTransaction(format!("Escrow {} not found", escrow_id_hex))
             })?;
         let mut escrow: EscrowAccount = serde_json::from_slice(&escrow_blob).map_err(|e| {
-            VmError::Internal(format!("Failed to decode escrow record {}: {}", escrow_id_hex, e))
+            VmError::Internal(format!(
+                "Failed to decode escrow record {}: {}",
+                escrow_id_hex, e
+            ))
         })?;
 
         // Authorization: only the original payer may refund.
@@ -1146,9 +1165,8 @@ impl NativeExecutor {
 
         // Update escrow record.
         escrow.status = EscrowStatus::Refunded;
-        let new_blob = serde_json::to_vec(&escrow).map_err(|e| {
-            VmError::Internal(format!("Failed to serialize escrow record: {}", e))
-        })?;
+        let new_blob = serde_json::to_vec(&escrow)
+            .map_err(|e| VmError::Internal(format!("Failed to serialize escrow record: {}", e)))?;
         state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), new_blob.clone());
 
         let old_nonce = state.get_nonce(&tx.from);
@@ -1325,12 +1343,9 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_KILLSWITCH_QUARANTINE)?;
 
-        let payload: QuarantineAgentPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| {
-                VmError::InvalidTransaction(format!(
-                    "Invalid QuarantineAgent payload: {}",
-                    e
-                ))
+        let payload: QuarantineAgentPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid QuarantineAgent payload: {}", e))
             })?;
 
         validate_killswitch_dids(&payload.agent_did, &payload.controller_did)?;
@@ -1339,7 +1354,9 @@ impl NativeExecutor {
             validate_evidence_hash(hash)?;
         }
 
-        let gas_cost = tx.gas_price.saturating_mul(GAS_KILLSWITCH_QUARANTINE as u128);
+        let gas_cost = tx
+            .gas_price
+            .saturating_mul(GAS_KILLSWITCH_QUARANTINE as u128);
         let sender_balance = state.get_balance(&tx.from);
         if sender_balance < gas_cost {
             return Err(VmError::InsufficientBalance {
@@ -1424,12 +1441,9 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_KILLSWITCH_TERMINATE)?;
 
-        let payload: TerminateAgentPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| {
-                VmError::InvalidTransaction(format!(
-                    "Invalid TerminateAgent payload: {}",
-                    e
-                ))
+        let payload: TerminateAgentPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid TerminateAgent payload: {}", e))
             })?;
 
         validate_killswitch_dids(&payload.agent_did, &payload.controller_did)?;
@@ -1440,7 +1454,9 @@ impl NativeExecutor {
             )));
         }
 
-        let gas_cost = tx.gas_price.saturating_mul(GAS_KILLSWITCH_TERMINATE as u128);
+        let gas_cost = tx
+            .gas_price
+            .saturating_mul(GAS_KILLSWITCH_TERMINATE as u128);
         let sender_balance = state.get_balance(&tx.from);
         if sender_balance < gas_cost {
             return Err(VmError::InsufficientBalance {
@@ -1521,9 +1537,7 @@ impl NativeExecutor {
                 state.get_storage(&SYSTEM_ADDRESS, bond_storage_key_str.as_bytes())
             {
                 let mut marker: serde_json::Value = serde_json::from_slice(&prior_blob)
-                    .map_err(|e| {
-                        VmError::Internal(format!("decode bond marker: {}", e))
-                    })?;
+                    .map_err(|e| VmError::Internal(format!("decode bond marker: {}", e)))?;
                 let prior_op = marker
                     .get("op")
                     .and_then(|v| v.as_str())
@@ -1537,38 +1551,27 @@ impl NativeExecutor {
                         .and_then(|v| v.as_str())
                         .and_then(|s| s.parse::<u128>().ok())
                         .ok_or_else(|| {
-                            VmError::Internal(
-                                "bond marker missing amount".to_string(),
-                            )
+                            VmError::Internal("bond marker missing amount".to_string())
                         })?;
-                    let slashed = compute_slash_amount(
-                        prior_amount,
-                        payload.slash_bps,
-                        BOND_MIN_RESIDUAL,
-                    );
+                    let slashed =
+                        compute_slash_amount(prior_amount, payload.slash_bps, BOND_MIN_RESIDUAL);
                     if slashed > 0 {
-                        let bond_vault_addr =
-                            derive_bond_vault_address(&payload.agent_did);
+                        let bond_vault_addr = derive_bond_vault_address(&payload.agent_did);
                         let bond_vault_bytes = bond_vault_addr.as_bytes().to_vec();
                         let pool_addr = derive_insurance_pool_address();
                         let pool_bytes = pool_addr.as_bytes().to_vec();
 
-                        let old_bond_vault_balance =
-                            state.get_balance(&bond_vault_bytes);
+                        let old_bond_vault_balance = state.get_balance(&bond_vault_bytes);
                         // Defensive — the vault should never hold less than
                         // the marker says, but use saturating math anyway so
                         // a state divergence doesn't underflow.
-                        let new_bond_vault_balance =
-                            old_bond_vault_balance.saturating_sub(slashed);
+                        let new_bond_vault_balance = old_bond_vault_balance.saturating_sub(slashed);
                         state.set_balance(&bond_vault_bytes, new_bond_vault_balance);
 
                         let old_pool_balance = state.get_balance(&pool_bytes);
-                        let new_pool_balance = old_pool_balance
-                            .checked_add(slashed)
-                            .ok_or_else(|| {
-                                VmError::Internal(
-                                    "InsurancePool balance overflow".to_string(),
-                                )
+                        let new_pool_balance =
+                            old_pool_balance.checked_add(slashed).ok_or_else(|| {
+                                VmError::Internal("InsurancePool balance overflow".to_string())
                             })?;
                         state.set_balance(&pool_bytes, new_pool_balance);
 
@@ -1577,20 +1580,13 @@ impl NativeExecutor {
                         marker["amount"] = serde_json::Value::String(
                             (if terminal { 0u128 } else { new_amount }).to_string(),
                         );
-                        marker["op"] = serde_json::Value::String(
-                            if terminal {
-                                "Slashed".to_string()
-                            } else {
-                                "PartiallySlashed".to_string()
-                            },
-                        );
+                        marker["op"] = serde_json::Value::String(if terminal {
+                            "Slashed".to_string()
+                        } else {
+                            "PartiallySlashed".to_string()
+                        });
                         let new_marker_blob = serde_json::to_vec(&marker)
-                            .map_err(|e| {
-                                VmError::Internal(format!(
-                                    "encode bond marker: {}",
-                                    e
-                                ))
-                            })?;
+                            .map_err(|e| VmError::Internal(format!("encode bond marker: {}", e)))?;
                         state.set_storage(
                             &SYSTEM_ADDRESS,
                             bond_storage_key_str.as_bytes(),
@@ -1633,20 +1629,13 @@ impl NativeExecutor {
                             .unwrap_or("")
                             .to_string();
                         let mut bond_log_data = Vec::with_capacity(
-                            4 + payload.agent_did.len()
-                                + 4
-                                + controller_for_log.len()
-                                + 16
-                                + 2
-                                + 1,
+                            4 + payload.agent_did.len() + 4 + controller_for_log.len() + 16 + 2 + 1,
                         );
-                        bond_log_data.extend_from_slice(
-                            &(payload.agent_did.len() as u32).to_le_bytes(),
-                        );
+                        bond_log_data
+                            .extend_from_slice(&(payload.agent_did.len() as u32).to_le_bytes());
                         bond_log_data.extend_from_slice(payload.agent_did.as_bytes());
-                        bond_log_data.extend_from_slice(
-                            &(controller_for_log.len() as u32).to_le_bytes(),
-                        );
+                        bond_log_data
+                            .extend_from_slice(&(controller_for_log.len() as u32).to_le_bytes());
                         bond_log_data.extend_from_slice(controller_for_log.as_bytes());
                         bond_log_data.extend_from_slice(&slashed.to_le_bytes());
                         bond_log_data.extend_from_slice(&payload.slash_bps.to_le_bytes());
@@ -1696,8 +1685,9 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_BOND_POST)?;
 
-        let payload: PostAgentBondPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| VmError::InvalidTransaction(format!("Invalid PostAgentBond payload: {}", e)))?;
+        let payload: PostAgentBondPayload = serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+            VmError::InvalidTransaction(format!("Invalid PostAgentBond payload: {}", e))
+        })?;
 
         validate_bond_agent_did(&payload.agent_did)?;
         if payload.controller_did.is_empty() || payload.controller_did.len() > 256 {
@@ -1726,9 +1716,10 @@ impl NativeExecutor {
         // Cost = gas + bond amount, debited from the controller's wallet
         // (tx.from is the signer, which is the controller's address).
         let gas_cost = tx.gas_price.saturating_mul(GAS_BOND_POST as u128);
-        let total_cost = payload.amount.checked_add(gas_cost).ok_or_else(|| {
-            VmError::Internal("AgentBond post cost overflow".to_string())
-        })?;
+        let total_cost = payload
+            .amount
+            .checked_add(gas_cost)
+            .ok_or_else(|| VmError::Internal("AgentBond post cost overflow".to_string()))?;
 
         let payer_balance = state.get_balance(&tx.from);
         if payer_balance < total_cost {
@@ -1744,9 +1735,9 @@ impl NativeExecutor {
         let vault_addr = derive_bond_vault_address(&payload.agent_did);
         let vault_bytes = vault_addr.as_bytes().to_vec();
         let old_vault_balance = state.get_balance(&vault_bytes);
-        let new_vault_balance = old_vault_balance.checked_add(payload.amount).ok_or_else(|| {
-            VmError::Internal("AgentBond vault overflow".to_string())
-        })?;
+        let new_vault_balance = old_vault_balance
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("AgentBond vault overflow".to_string()))?;
         state.set_balance(&vault_bytes, new_vault_balance);
 
         // Persist a JSON marker record. The node-side post-execute scan
@@ -1825,8 +1816,10 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_BOND_INCREASE)?;
 
-        let payload: IncreaseAgentBondPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| VmError::InvalidTransaction(format!("Invalid IncreaseAgentBond payload: {}", e)))?;
+        let payload: IncreaseAgentBondPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid IncreaseAgentBond payload: {}", e))
+            })?;
 
         validate_bond_agent_did(&payload.agent_did)?;
         if payload.amount == 0 {
@@ -1859,15 +1852,16 @@ impl NativeExecutor {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<u128>().ok())
             .ok_or_else(|| VmError::Internal("bond marker missing amount".to_string()))?;
-        let new_amount = prior_amount.checked_add(payload.amount).ok_or_else(|| {
-            VmError::Internal("AgentBond amount overflow".to_string())
-        })?;
+        let new_amount = prior_amount
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("AgentBond amount overflow".to_string()))?;
 
         // Cost = gas + delta. Debit from controller wallet.
         let gas_cost = tx.gas_price.saturating_mul(GAS_BOND_INCREASE as u128);
-        let total_cost = payload.amount.checked_add(gas_cost).ok_or_else(|| {
-            VmError::Internal("AgentBond increase cost overflow".to_string())
-        })?;
+        let total_cost = payload
+            .amount
+            .checked_add(gas_cost)
+            .ok_or_else(|| VmError::Internal("AgentBond increase cost overflow".to_string()))?;
         let payer_balance = state.get_balance(&tx.from);
         if payer_balance < total_cost {
             return Err(VmError::InsufficientBalance {
@@ -1882,9 +1876,9 @@ impl NativeExecutor {
         let vault_addr = derive_bond_vault_address(&payload.agent_did);
         let vault_bytes = vault_addr.as_bytes().to_vec();
         let old_vault_balance = state.get_balance(&vault_bytes);
-        let new_vault_balance = old_vault_balance.checked_add(payload.amount).ok_or_else(|| {
-            VmError::Internal("AgentBond vault overflow".to_string())
-        })?;
+        let new_vault_balance = old_vault_balance
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("AgentBond vault overflow".to_string()))?;
         state.set_balance(&vault_bytes, new_vault_balance);
 
         // Update marker.
@@ -1964,8 +1958,10 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_BOND_WITHDRAW)?;
 
-        let payload: WithdrawAgentBondPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| VmError::InvalidTransaction(format!("Invalid WithdrawAgentBond payload: {}", e)))?;
+        let payload: WithdrawAgentBondPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid WithdrawAgentBond payload: {}", e))
+            })?;
 
         validate_bond_agent_did(&payload.agent_did)?;
 
@@ -1983,10 +1979,7 @@ impl NativeExecutor {
 
         // Bond must be in `Posted` or `Increased` (i.e. lifecycle == Active)
         // to initiate withdrawal. Cooldown / Frozen / Slashed reject.
-        let prior_op = marker
-            .get("op")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let prior_op = marker.get("op").and_then(|v| v.as_str()).unwrap_or("");
         if !matches!(prior_op, "Posted" | "Increased") {
             return Err(VmError::InvalidTransaction(format!(
                 "cannot withdraw bond in {} state",
@@ -2392,8 +2385,7 @@ impl NativeExecutor {
         // The deadline is derived from the block timestamp so every
         // replica computes the same value; `FinalizeComputeBondWithdrawal`
         // reads it back rather than consulting a local clock.
-        let cooldown_until_ms =
-            deterministic_now_ms(tx).saturating_add(COMPUTE_BOND_COOLDOWN_MS);
+        let cooldown_until_ms = deterministic_now_ms(tx).saturating_add(COMPUTE_BOND_COOLDOWN_MS);
         marker["op"] = serde_json::Value::String("WithdrawInitiated".to_string());
         marker["cooldown_until_ms"] = serde_json::Value::String(cooldown_until_ms.to_string());
         let marker_blob = serde_json::to_vec(&marker)
@@ -2465,11 +2457,11 @@ impl NativeExecutor {
 
         let payload: FinalizeComputeBondWithdrawalPayload = serde_json::from_slice(&tx.data[4..])
             .map_err(|e| {
-                VmError::InvalidTransaction(format!(
-                    "Invalid FinalizeComputeBondWithdrawal payload: {}",
-                    e
-                ))
-            })?;
+            VmError::InvalidTransaction(format!(
+                "Invalid FinalizeComputeBondWithdrawal payload: {}",
+                e
+            ))
+        })?;
 
         validate_compute_bond_provider_did(&payload.provider_did)?;
 
@@ -2500,9 +2492,7 @@ impl NativeExecutor {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i64>().ok())
             .ok_or_else(|| {
-                VmError::Internal(
-                    "compute bond marker is missing cooldown_until_ms".to_string(),
-                )
+                VmError::Internal("compute bond marker is missing cooldown_until_ms".to_string())
             })?;
         let now_ms = deterministic_now_ms(tx);
         if now_ms < cooldown_until_ms {
@@ -2614,12 +2604,9 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_PAY_INSURANCE_CLAIM)?;
 
-        let payload: PayInsuranceClaimPayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| {
-                VmError::InvalidTransaction(format!(
-                    "Invalid PayInsuranceClaim payload: {}",
-                    e
-                ))
+        let payload: PayInsuranceClaimPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid PayInsuranceClaim payload: {}", e))
             })?;
 
         if payload.claim_id_hex.is_empty() || payload.claim_id_hex.len() > 128 {
@@ -2761,10 +2748,9 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_X402_SETTLE)?;
 
-        let payload: X402SettlePayload = serde_json::from_slice(&tx.data[4..])
-            .map_err(|e| {
-                VmError::InvalidTransaction(format!("Invalid X402Settle payload: {}", e))
-            })?;
+        let payload: X402SettlePayload = serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+            VmError::InvalidTransaction(format!("Invalid X402Settle payload: {}", e))
+        })?;
 
         if payload.payment_id.is_empty() || payload.payment_id.len() > 128 {
             return Err(VmError::InvalidTransaction(
@@ -3199,8 +3185,7 @@ impl NativeExecutor {
         // Log layout: `from(32) || metadata_uri_len_le(4) || metadata_uri ||
         //              tee_hash_present(1) || [tee_hash(32)]`
         let uri_str = payload.metadata_uri.unwrap_or_default();
-        let mut log_data =
-            Vec::with_capacity(32 + 4 + uri_str.len() + 1 + 32);
+        let mut log_data = Vec::with_capacity(32 + 4 + uri_str.len() + 1 + 32);
         log_data.extend_from_slice(&tx.from);
         log_data.extend_from_slice(&(uri_str.len() as u32).to_le_bytes());
         log_data.extend_from_slice(uri_str.as_bytes());
@@ -3324,8 +3309,7 @@ impl NativeExecutor {
         // Log layout: `from(32) || marker_key_len_le(4) || marker_key ||
         //              payload_len_le(4) || payload`. The node-side scan
         // matches on `topic == op_topic` and decodes the typed payload.
-        let mut log_data =
-            Vec::with_capacity(32 + 4 + marker_key.len() + 4 + payload.len());
+        let mut log_data = Vec::with_capacity(32 + 4 + marker_key.len() + 4 + payload.len());
         log_data.extend_from_slice(&tx.from);
         log_data.extend_from_slice(&(marker_key.len() as u32).to_le_bytes());
         log_data.extend_from_slice(marker_key.as_bytes());
@@ -3605,15 +3589,12 @@ impl NativeExecutor {
 fn workflow_extract_field(payload: &[u8], field: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_slice(payload)
         .map_err(|e| VmError::InvalidTransaction(format!("Invalid workflow JSON: {}", e)))?;
-    let s = v
-        .get(field)
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| {
-            VmError::InvalidTransaction(format!(
-                "Workflow payload missing required string field `{}`",
-                field
-            ))
-        })?;
+    let s = v.get(field).and_then(|x| x.as_str()).ok_or_else(|| {
+        VmError::InvalidTransaction(format!(
+            "Workflow payload missing required string field `{}`",
+            field
+        ))
+    })?;
     if s.is_empty() {
         return Err(VmError::InvalidTransaction(format!(
             "Workflow payload field `{}` must not be empty",
@@ -4092,8 +4073,7 @@ fn encode_killswitch_log_data(
     controller_did: &str,
     receipt_id: &[u8; 32],
 ) -> Vec<u8> {
-    let mut out =
-        Vec::with_capacity(4 + agent_did.len() + 4 + controller_did.len() + 32);
+    let mut out = Vec::with_capacity(4 + agent_did.len() + 4 + controller_did.len() + 32);
     out.extend_from_slice(&(agent_did.len() as u32).to_le_bytes());
     out.extend_from_slice(agent_did.as_bytes());
     out.extend_from_slice(&(controller_did.len() as u32).to_le_bytes());
@@ -4286,86 +4266,103 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_ESCROW_RELEASE => self.execute_escrow_release(tx, state, &mut gas_meter).await,
             SELECTOR_ESCROW_REFUND => self.execute_escrow_refund(tx, state, &mut gas_meter).await,
             SELECTOR_KILLSWITCH_PAUSE => {
-                self.execute_killswitch_pause(tx, state, &mut gas_meter).await
+                self.execute_killswitch_pause(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_KILLSWITCH_QUARANTINE => {
-                self.execute_killswitch_quarantine(tx, state, &mut gas_meter).await
+                self.execute_killswitch_quarantine(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_KILLSWITCH_TERMINATE => {
-                self.execute_killswitch_terminate(tx, state, &mut gas_meter).await
+                self.execute_killswitch_terminate(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_POST_AGENT_BOND => {
-                self.execute_post_agent_bond(tx, state, &mut gas_meter).await
+                self.execute_post_agent_bond(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_INCREASE_AGENT_BOND => {
-                self.execute_increase_agent_bond(tx, state, &mut gas_meter).await
+                self.execute_increase_agent_bond(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WITHDRAW_AGENT_BOND => {
-                self.execute_withdraw_agent_bond(tx, state, &mut gas_meter).await
+                self.execute_withdraw_agent_bond(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_POST_COMPUTE_BOND => {
-                self.execute_post_compute_bond(tx, state, &mut gas_meter).await
+                self.execute_post_compute_bond(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_INCREASE_COMPUTE_BOND => {
-                self.execute_increase_compute_bond(tx, state, &mut gas_meter).await
+                self.execute_increase_compute_bond(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WITHDRAW_COMPUTE_BOND => {
-                self.execute_withdraw_compute_bond(tx, state, &mut gas_meter).await
+                self.execute_withdraw_compute_bond(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL => {
                 self.execute_finalize_compute_bond_withdrawal(tx, state, &mut gas_meter)
                     .await
             }
             SELECTOR_PAY_INSURANCE_CLAIM => {
-                self.execute_pay_insurance_claim(tx, state, &mut gas_meter).await
+                self.execute_pay_insurance_claim(tx, state, &mut gas_meter)
+                    .await
             }
-            SELECTOR_X402_SETTLE => {
-                self.execute_x402_settle(tx, state, &mut gas_meter).await
-            }
+            SELECTOR_X402_SETTLE => self.execute_x402_settle(tx, state, &mut gas_meter).await,
             SELECTOR_VALIDATOR_REGISTER => {
-                self.execute_validator_register(tx, state, &mut gas_meter).await
+                self.execute_validator_register(tx, state, &mut gas_meter)
+                    .await
             }
-            SELECTOR_VALIDATOR_EXIT => {
-                self.execute_validator_exit(tx, state, &mut gas_meter).await
-            }
+            SELECTOR_VALIDATOR_EXIT => self.execute_validator_exit(tx, state, &mut gas_meter).await,
             SELECTOR_VALIDATOR_UPDATE_METADATA => {
-                self.execute_validator_update_metadata(tx, state, &mut gas_meter).await
+                self.execute_validator_update_metadata(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_CREATE => {
-                self.execute_workflow_create(tx, state, &mut gas_meter).await
+                self.execute_workflow_create(tx, state, &mut gas_meter)
+                    .await
             }
-            SELECTOR_WORKFLOW_SIGN => {
-                self.execute_workflow_sign(tx, state, &mut gas_meter).await
-            }
+            SELECTOR_WORKFLOW_SIGN => self.execute_workflow_sign(tx, state, &mut gas_meter).await,
             SELECTOR_WORKFLOW_TRANSITION => {
-                self.execute_workflow_transition(tx, state, &mut gas_meter).await
+                self.execute_workflow_transition(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_REGISTER_OBLIGATION => {
-                self.execute_workflow_register_obligation(tx, state, &mut gas_meter).await
+                self.execute_workflow_register_obligation(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_DISCHARGE_OBLIGATION => {
-                self.execute_workflow_discharge_obligation(tx, state, &mut gas_meter).await
+                self.execute_workflow_discharge_obligation(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_DEFAULT_OBLIGATION => {
-                self.execute_workflow_default_obligation(tx, state, &mut gas_meter).await
+                self.execute_workflow_default_obligation(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_REGISTER_GATE => {
-                self.execute_workflow_register_gate(tx, state, &mut gas_meter).await
+                self.execute_workflow_register_gate(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_OPEN_APPROVAL => {
-                self.execute_workflow_open_approval(tx, state, &mut gas_meter).await
+                self.execute_workflow_open_approval(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_SUBMIT_DECISION => {
-                self.execute_workflow_submit_decision(tx, state, &mut gas_meter).await
+                self.execute_workflow_submit_decision(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_KILL_SWITCH => {
-                self.execute_workflow_kill_switch(tx, state, &mut gas_meter).await
+                self.execute_workflow_kill_switch(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN => {
-                self.execute_workflow_register_privacy_domain(tx, state, &mut gas_meter).await
+                self.execute_workflow_register_privacy_domain(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN => {
-                self.execute_workflow_freeze_privacy_domain(tx, state, &mut gas_meter).await
+                self.execute_workflow_freeze_privacy_domain(tx, state, &mut gas_meter)
+                    .await
             }
             _ => Err(VmError::InvalidTransaction(format!(
                 "Unknown native function selector: {:?}",
@@ -4815,9 +4812,7 @@ mod tests {
 
         // Escrow record updated to Released.
         let key = escrow_storage_key(&hex::encode(escrow_id));
-        let blob = state
-            .get_storage(&SYSTEM_ADDRESS, key.as_bytes())
-            .unwrap();
+        let blob = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes()).unwrap();
         let stored: EscrowAccount = serde_json::from_slice(&blob).unwrap();
         assert_eq!(stored.status, EscrowStatus::Released);
         assert_eq!(stored.payer, payer_addr);
@@ -4960,8 +4955,8 @@ mod tests {
 
         // Payer's net change = 0 minus 2x gas (create + refund).
         let final_payer = state.get_balance(&payer_bytes);
-        let total_gas_paid = (GAS_ESCROW_CREATE as u128 + GAS_ESCROW_REFUND as u128)
-            .saturating_mul(1_000_000_000);
+        let total_gas_paid =
+            (GAS_ESCROW_CREATE as u128 + GAS_ESCROW_REFUND as u128).saturating_mul(1_000_000_000);
         assert_eq!(
             final_payer,
             payer_balance_before_create - total_gas_paid,
@@ -5055,7 +5050,8 @@ mod tests {
         let from = vec![7u8; 20];
         state.set_balance(&from, 10_000_000_000_000_000_000u128);
 
-        let payload = r#"{"workflow_id":"wf123","creator":"did:tenzro:human:alice:1","title":"swap"}"#;
+        let payload =
+            r#"{"workflow_id":"wf123","creator":"did:tenzro:human:alice:1","title":"swap"}"#;
         let tx = make_workflow_tx(SELECTOR_WORKFLOW_CREATE, from.clone(), payload);
 
         let res = executor.execute_transaction(&tx, &mut state).await.unwrap();
@@ -5087,10 +5083,7 @@ mod tests {
         assert!(res.success);
         assert_eq!(res.logs[0].topics[0], b"WorkflowSign");
 
-        let marker = state.get_storage(
-            &SYSTEM_ADDRESS,
-            b"wf:sign:wf42:did:tenzro:human:bob:1",
-        );
+        let marker = state.get_storage(&SYSTEM_ADDRESS, b"wf:sign:wf42:did:tenzro:human:bob:1");
         assert!(marker.is_some(), "composite-key marker must be persisted");
     }
 
@@ -5187,7 +5180,10 @@ mod tests {
             ),
             (SELECTOR_WORKFLOW_REGISTER_GATE, GAS_WORKFLOW_REGISTER_GATE),
             (SELECTOR_WORKFLOW_OPEN_APPROVAL, GAS_WORKFLOW_OPEN_APPROVAL),
-            (SELECTOR_WORKFLOW_SUBMIT_DECISION, GAS_WORKFLOW_SUBMIT_DECISION),
+            (
+                SELECTOR_WORKFLOW_SUBMIT_DECISION,
+                GAS_WORKFLOW_SUBMIT_DECISION,
+            ),
             (SELECTOR_WORKFLOW_KILL_SWITCH, GAS_WORKFLOW_KILL_SWITCH),
             (
                 SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN,

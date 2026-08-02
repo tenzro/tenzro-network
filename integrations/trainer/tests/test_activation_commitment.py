@@ -76,17 +76,17 @@ def test_build_commitment_rejects_empty_delta():
 
 
 def test_signing_preimage_binds_commitment_hash():
-    kwargs = dict(
-        task_id="task-A",
-        round_index=1,
-        fragment=0,
-        trainer_did="did:tenzro:machine:trainer-1",
-        safetensors_hash=bytes([1] * 32),
-        payload_bytes=64,
-        quantization=GradientQuantization.none(),
-        inner_step_count=3,
-        submitted_at=1_000_000,
-    )
+    kwargs = {
+        "task_id": "task-A",
+        "round_index": 1,
+        "fragment": 0,
+        "trainer_did": "did:tenzro:machine:trainer-1",
+        "safetensors_hash": bytes([1] * 32),
+        "payload_bytes": 64,
+        "quantization": GradientQuantization.none(),
+        "inner_step_count": 3,
+        "submitted_at": 1_000_000,
+    }
     without = gradient_signing_bytes(**kwargs)
     assert without[-1] == 0
 

@@ -5,9 +5,9 @@
 //! wallet's Ed25519 key on the node — no raw private keys leave the
 //! caller's environment beyond the DPoP+JWT bearer.
 
-use clap::{Parser, Subcommand};
-use anyhow::{Context, Result};
 use crate::output;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 
 /// AP2 (Agent Payments Protocol) v0.2 operations
 #[derive(Debug, Subcommand)]
@@ -70,8 +70,8 @@ impl Ap2SignMandateCmd {
         output::print_header("Sign AP2 Mandate");
         let mandate_str = std::fs::read_to_string(&self.mandate_file)
             .with_context(|| format!("reading {}", self.mandate_file))?;
-        let mandate: serde_json::Value = serde_json::from_str(&mandate_str)
-            .context("parsing mandate JSON")?;
+        let mandate: serde_json::Value =
+            serde_json::from_str(&mandate_str).context("parsing mandate JSON")?;
 
         let spinner = output::create_spinner("Signing via auth-bound wallet...");
         let rpc = RpcClient::new(&self.rpc);
@@ -89,8 +89,7 @@ impl Ap2SignMandateCmd {
 
         let pretty = serde_json::to_string_pretty(&vdc)?;
         if let Some(path) = &self.out {
-            std::fs::write(path, &pretty)
-                .with_context(|| format!("writing {}", path))?;
+            std::fs::write(path, &pretty).with_context(|| format!("writing {}", path))?;
             output::print_success(&format!("VDC written to {}", path));
             output::print_field(
                 "Mandate ID",
@@ -129,8 +128,7 @@ impl Ap2VerifyMandateCmd {
         output::print_header("Verify AP2 Mandate");
         let vdc_str = std::fs::read_to_string(&self.vdc_file)
             .with_context(|| format!("reading {}", self.vdc_file))?;
-        let vdc: serde_json::Value = serde_json::from_str(&vdc_str)
-            .context("parsing Vdc JSON")?;
+        let vdc: serde_json::Value = serde_json::from_str(&vdc_str).context("parsing Vdc JSON")?;
 
         let spinner = output::create_spinner("Verifying signature...");
         let rpc = RpcClient::new(&self.rpc);
@@ -139,12 +137,18 @@ impl Ap2VerifyMandateCmd {
             .await?;
         spinner.finish_and_clear();
 
-        let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        let valid = result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if valid {
             output::print_success("Mandate signature is valid");
             output::print_field(
                 "Mandate ID",
-                result.get("mandate_id").and_then(|v| v.as_str()).unwrap_or(""),
+                result
+                    .get("mandate_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
             output::print_field(
                 "Kind",
@@ -152,7 +156,10 @@ impl Ap2VerifyMandateCmd {
             );
             output::print_field(
                 "Signer DID",
-                result.get("signer_did").and_then(|v| v.as_str()).unwrap_or(""),
+                result
+                    .get("signer_did")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
             output::print_field(
                 "Algorithm",
@@ -161,7 +168,10 @@ impl Ap2VerifyMandateCmd {
         } else {
             output::print_error(&format!(
                 "Mandate INVALID: {}",
-                result.get("error").and_then(|v| v.as_str()).unwrap_or("unknown")
+                result
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
             ));
         }
         Ok(())
@@ -206,29 +216,47 @@ impl Ap2ValidatePairCmd {
             .await?;
         spinner.finish_and_clear();
 
-        let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        let valid = result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if valid {
             output::print_success("Mandate pair is valid");
             output::print_field(
                 "Checkout ID",
-                result.get("checkout_mandate_id").and_then(|v| v.as_str()).unwrap_or(""),
+                result
+                    .get("checkout_mandate_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
             output::print_field(
                 "Payment ID",
-                result.get("payment_mandate_id").and_then(|v| v.as_str()).unwrap_or(""),
+                result
+                    .get("payment_mandate_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
             output::print_field(
                 "Principal DID",
-                result.get("principal_did").and_then(|v| v.as_str()).unwrap_or(""),
+                result
+                    .get("principal_did")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
             output::print_field(
                 "Agent DID",
-                result.get("agent_did").and_then(|v| v.as_str()).unwrap_or(""),
+                result
+                    .get("agent_did")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
         } else {
             output::print_error(&format!(
                 "Mandate pair INVALID: {}",
-                result.get("error").and_then(|v| v.as_str()).unwrap_or("unknown")
+                result
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
             ));
         }
         Ok(())
@@ -293,7 +321,10 @@ impl Ap2InfoCmd {
         );
         output::print_field(
             "Signing Algorithm",
-            result.get("signing_alg").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("signing_alg")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         if let Some(kinds) = result.get("mandate_kinds").and_then(|v| v.as_array()) {
             let joined: Vec<&str> = kinds.iter().filter_map(|v| v.as_str()).collect();
@@ -305,7 +336,10 @@ impl Ap2InfoCmd {
         }
         output::print_field(
             "Position",
-            result.get("position").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("position")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }

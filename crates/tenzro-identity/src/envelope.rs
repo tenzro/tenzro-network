@@ -26,7 +26,7 @@
 use crate::registry::IdentityRegistry;
 use sha2::{Digest, Sha256};
 use tenzro_crypto::keys::{KeyType, PublicKey};
-use tenzro_crypto::signatures::{verify, Signature};
+use tenzro_crypto::signatures::{Signature, verify};
 
 /// Domain-separation tag for the canonical preimage. Bumping the `:v1`
 /// suffix invalidates every previously-signed envelope, so it doubles as a
@@ -91,7 +91,8 @@ impl TenzroDidEnvelope {
     /// Returns a description string on any malformation (caller maps it to its
     /// own transport error).
     pub fn from_header_value(s: &str) -> Result<Self, String> {
-        let buf = hex::decode(s.trim()).map_err(|_| "envelope header is not valid hex".to_string())?;
+        let buf =
+            hex::decode(s.trim()).map_err(|_| "envelope header is not valid hex".to_string())?;
         let mut o = 0usize;
         fn take_u32(buf: &[u8], o: &mut usize) -> Result<u32, String> {
             if *o + 4 > buf.len() {
@@ -131,7 +132,14 @@ impl TenzroDidEnvelope {
         if o != buf.len() {
             return Err("trailing bytes after envelope".to_string());
         }
-        Ok(Self { did, method, params_hash, timestamp, nonce, signature })
+        Ok(Self {
+            did,
+            method,
+            params_hash,
+            timestamp,
+            nonce,
+            signature,
+        })
     }
 }
 
@@ -164,7 +172,10 @@ impl std::fmt::Display for EnvelopeError {
                 write!(f, "no Ed25519 verification key for DID: {did}")
             }
             Self::StaleOrFuture { skew_ms } => {
-                write!(f, "envelope timestamp out of window (skew {skew_ms} ms, max ±{MAX_SKEW_MS} ms)")
+                write!(
+                    f,
+                    "envelope timestamp out of window (skew {skew_ms} ms, max ±{MAX_SKEW_MS} ms)"
+                )
             }
             Self::EmptyNonce => write!(f, "envelope nonce is empty (all-zero)"),
             Self::InvalidSignature => write!(f, "envelope signature did not verify"),
@@ -386,8 +397,8 @@ fn check_envelope_sig_ethr(env: &TenzroDidEnvelope) -> Result<(), EnvelopeError>
     use k256::ecdsa::{RecoveryId, Signature as K256Sig, VerifyingKey};
     use sha3::{Digest, Keccak256};
 
-    let want = ethr_address(&env.did)
-        .ok_or_else(|| EnvelopeError::NoVerificationKey(env.did.clone()))?;
+    let want =
+        ethr_address(&env.did).ok_or_else(|| EnvelopeError::NoVerificationKey(env.did.clone()))?;
     if env.signature.len() != 65 {
         return Err(EnvelopeError::InvalidSignature);
     }
@@ -397,7 +408,8 @@ fn check_envelope_sig_ethr(env: &TenzroDidEnvelope) -> Result<(), EnvelopeError>
         RecoveryId::try_from(y_parity).map_err(|_| EnvelopeError::InvalidSignature)?;
     let mut sig_bytes = [0u8; 64];
     sig_bytes.copy_from_slice(&env.signature[..64]);
-    let sig = K256Sig::from_bytes(&sig_bytes.into()).map_err(|_| EnvelopeError::InvalidSignature)?;
+    let sig =
+        K256Sig::from_bytes(&sig_bytes.into()).map_err(|_| EnvelopeError::InvalidSignature)?;
     let prehash = Keccak256::digest(canonical_preimage(env));
     let vk = VerifyingKey::recover_from_prehash(&prehash, &sig, recovery_id)
         .map_err(|_| EnvelopeError::InvalidSignature)?;
@@ -479,7 +491,11 @@ mod tests {
     /// public registration path with an explicit key.
     async fn register_with_key(registry: &IdentityRegistry, pk: Vec<u8>) -> String {
         registry
-            .register_human_with_fee(pk, "Tester".to_string(), tenzro_types::identity::KycTier::Basic)
+            .register_human_with_fee(
+                pk,
+                "Tester".to_string(),
+                tenzro_types::identity::KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity
@@ -743,6 +759,9 @@ mod tests {
         let mut s2 = sig2.to_bytes().to_vec();
         s2.push(rid2.to_byte());
         bad.signature = s2;
-        assert_eq!(verify_envelope_ethr(&bad), Err(EnvelopeError::InvalidSignature));
+        assert_eq!(
+            verify_envelope_ethr(&bad),
+            Err(EnvelopeError::InvalidSignature)
+        );
     }
 }

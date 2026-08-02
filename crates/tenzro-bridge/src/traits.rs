@@ -235,6 +235,9 @@ impl TransferStatus {
 
     /// Returns true if the transfer is still in progress
     pub fn is_in_progress(&self) -> bool {
-        matches!(self, Self::Pending | Self::SourceConfirmed | Self::InTransit)
+        matches!(
+            self,
+            Self::Pending | Self::SourceConfirmed | Self::InTransit
+        )
     }
 }

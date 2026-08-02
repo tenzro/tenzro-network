@@ -423,11 +423,7 @@ mod tests {
         sender: Vec<u8>,
         vendor: TeeVendor,
         measurement: &[u8],
-    ) -> (
-        InMemoryTeeKeyOracle,
-        Ed25519SignerImpl,
-        TeeBoundAccountKey,
-    ) {
+    ) -> (InMemoryTeeKeyOracle, Ed25519SignerImpl, TeeBoundAccountKey) {
         let signer = Ed25519SignerImpl::generate().unwrap();
         let pk_bytes: [u8; 32] = signer.public_key().as_bytes().try_into().unwrap();
         let key = TeeBoundAccountKey::new(vendor, measurement, pk_bytes);
@@ -459,11 +455,7 @@ mod tests {
         let (oracle, signer, _) =
             enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        );
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier());
 
         let op_hash = [0xCD; 32];
         let envelope = make_envelope(
@@ -493,14 +485,9 @@ mod tests {
     fn rejects_malformed_signature_envelope() {
         let sender = vec![0x11; 20];
         let measurement = vec![0xAA; 48];
-        let (oracle, _, _) =
-            enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
+        let (oracle, _, _) = enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        );
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier());
 
         let op = make_user_op(sender, vec![0xFF; 5]); // not bincode
         let result = validator.validate_user_op(&op, &[0u8; 32]).unwrap();
@@ -514,11 +501,7 @@ mod tests {
         let (oracle, signer, _) =
             enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        );
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier());
 
         let op_hash = [0xCD; 32];
         // Envelope vendor = IntelTdx, enrollment vendor = AmdSevSnp.
@@ -542,11 +525,7 @@ mod tests {
         let (oracle, signer, _) =
             enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &enrolled_measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        );
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier());
 
         let op_hash = [0xCD; 32];
         let other_measurement = vec![0xBB; 48];
@@ -570,11 +549,7 @@ mod tests {
         let (oracle, signer, _) =
             enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        );
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier());
 
         let real_op_hash = [0xCD; 32];
         let stale_op_hash = [0xEF; 32]; // attestation captured for a different op
@@ -598,12 +573,8 @@ mod tests {
         let (oracle, signer, _) =
             enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        )
-        .with_max_age_secs(60);
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier())
+            .with_max_age_secs(60);
 
         let op_hash = [0xCD; 32];
         // Report is 10 minutes old.
@@ -628,11 +599,7 @@ mod tests {
         let (oracle, _enrolled_signer, _) =
             enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        );
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier());
 
         let op_hash = [0xCD; 32];
         // Build the envelope with a *different* signer (attacker key).
@@ -705,17 +672,21 @@ mod tests {
         );
         let op = make_user_op(sender.clone(), envelope.encode().unwrap());
 
-        assert!(!validator
-            .validate_user_op(&op, &op_hash)
-            .unwrap()
-            .is_failure());
+        assert!(
+            !validator
+                .validate_user_op(&op, &op_hash)
+                .unwrap()
+                .is_failure()
+        );
 
         // Revoke and try again.
         oracle.revoke(&sender);
-        assert!(validator
-            .validate_user_op(&op, &op_hash)
-            .unwrap()
-            .is_failure());
+        assert!(
+            validator
+                .validate_user_op(&op, &op_hash)
+                .unwrap()
+                .is_failure()
+        );
     }
 
     #[test]
@@ -725,11 +696,7 @@ mod tests {
         let (oracle, signer, _) =
             enrolled_account(sender.clone(), TeeVendor::AmdSevSnp, &measurement);
 
-        let validator = TeeBoundValidator::new(
-            [0x42; 20],
-            Arc::new(oracle),
-            lenient_verifier(),
-        );
+        let validator = TeeBoundValidator::new([0x42; 20], Arc::new(oracle), lenient_verifier());
 
         let hash = [0xCD; 32];
         let envelope = make_envelope(

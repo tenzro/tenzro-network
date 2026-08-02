@@ -6,6 +6,123 @@
 use crate::primitives::{Address, Timestamp};
 use serde::{Deserialize, Serialize};
 
+/// What class of hardware assurance a node can actually offer.
+///
+/// # Why this exists
+///
+/// A TPM and a TEE are not the same guarantee, and the difference decides
+/// whether a workload can safely run on a machine:
+///
+/// > **Measured boot proves what was *loaded*. A TEE proves what is *running*
+/// > and protects it while it runs.**
+///
+/// Conflating them is the failure this type prevents. A TPM-only host —
+/// which includes most prosumer hardware and, notably, every DGX Spark, whose
+/// GB10 has no CPU TEE at all — can attest its boot chain but cannot keep a
+/// model's weights or a user's prompt away from anyone with root. Advertising
+/// that as confidential compute is a false claim of hardware trust.
+///
+/// The ordering is deliberate and load-bearing: [`Ord`] is what makes
+/// [`satisfies`](Self::satisfies) a simple comparison, and it runs from no
+/// assurance to the strongest.
+///
+/// # What each class can back
+///
+/// | Class | Attests | Protects a running workload | Can serve confidential compute |
+/// |---|---|---|---|
+/// | [`None`](Self::None) | nothing | no | no |
+/// | [`MeasuredBoot`](Self::MeasuredBoot) | the boot chain (TPM PCR quote) | **no** | **no** |
+/// | [`ConfidentialCompute`](Self::ConfidentialCompute) | the running environment | yes | yes |
+/// | [`ConfidentialComputeGpu`](Self::ConfidentialComputeGpu) | environment **and** admitted GPU | yes, incl. VRAM | yes |
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum AttestationClass {
+    /// No hardware assurance. Results are signed by a software key, which
+    /// proves *which node* produced them and nothing about the environment.
+    #[default]
+    None,
+    /// Boot-chain integrity: a TPM 2.0 PCR quote over firmware, bootloader,
+    /// kernel and initrd, optionally alongside UEFI Secure Boot.
+    ///
+    /// Genuinely useful — it gives a hardware-rooted machine identity, remote
+    /// proof that the node runs the software it claims, and key sealing to
+    /// boot state. It does **not** protect memory from the host OS, so it can
+    /// never satisfy a confidentiality requirement.
+    MeasuredBoot,
+    /// A CPU confidential VM — Intel TDX, AMD SEV-SNP, or AWS Nitro. Memory is
+    /// encrypted by the hardware and isolated from the hypervisor and root.
+    ConfidentialCompute,
+    /// A CPU confidential VM with an NVIDIA GPU admitted into it over an
+    /// SPDM-authenticated link, so VRAM is protected too.
+    ///
+    /// Strictly stronger than [`ConfidentialCompute`], and never reachable
+    /// without it: GPU CC extends a CPU TEE and does not replace one.
+    ConfidentialComputeGpu,
+}
+
+impl AttestationClass {
+    /// Whether a node of this class may take work that requires `required`.
+    ///
+    /// A plain `>=`, which is the point of the ordering. The case that matters:
+    /// `MeasuredBoot` does **not** satisfy `ConfidentialCompute`, so a
+    /// TPM-only node can never be scheduled a workload whose weights or
+    /// prompts must stay private from the operator.
+    pub fn satisfies(self, required: AttestationClass) -> bool {
+        self >= required
+    }
+
+    /// Whether this class can protect a workload while it runs.
+    ///
+    /// The gate for anything confidentiality-bearing: sealed-model install,
+    /// confidential-tier training, custodial key operations. Deliberately
+    /// false for [`MeasuredBoot`].
+    pub fn protects_running_workload(self) -> bool {
+        matches!(
+            self,
+            AttestationClass::ConfidentialCompute | AttestationClass::ConfidentialComputeGpu
+        )
+    }
+
+    /// Stable wire/label form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttestationClass::None => "none",
+            AttestationClass::MeasuredBoot => "measured_boot",
+            AttestationClass::ConfidentialCompute => "confidential_compute",
+            AttestationClass::ConfidentialComputeGpu => "confidential_compute_gpu",
+        }
+    }
+
+    /// The class a given TEE vendor provides.
+    ///
+    /// Every vendor here establishes a real trust boundary, so none maps to
+    /// [`MeasuredBoot`] — a TPM is not a `TeeVendor` precisely because it is
+    /// not a TEE, and that absence is the design, not an omission.
+    pub fn for_vendor(vendor: TeeVendor) -> Self {
+        match vendor {
+            // GPU CC is only ever presented as the composite (the detection
+            // layer refuses a bare GPU provider), so seeing this vendor means
+            // a CPU anchor is present underneath it.
+            TeeVendor::NvidiaGpu => AttestationClass::ConfidentialComputeGpu,
+            TeeVendor::IntelTdx
+            | TeeVendor::IntelSGX
+            | TeeVendor::AMDSEV
+            | TeeVendor::AmdSevSnp
+            | TeeVendor::ARMTrustZone
+            | TeeVendor::AWSNitro
+            | TeeVendor::AwsNitro => AttestationClass::ConfidentialCompute,
+            TeeVendor::Generic => AttestationClass::None,
+        }
+    }
+}
+
+impl std::fmt::Display for AttestationClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Supported TEE vendors on Tenzro Network
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
@@ -69,13 +186,13 @@ pub struct AttestationReport {
     pub timestamp: Timestamp,
     /// Additional vendor-specific metadata
     pub metadata: std::collections::HashMap<String, String>,
-    /// Quote/evidence from the TEE    #[serde(default)]
+    /// Quote/evidence from the TEE
     pub quote: Vec<u8>,
-    /// Measurement/hash of the running code    #[serde(default)]
+    /// Measurement/hash of the running code
     pub measurement: Vec<u8>,
-    /// Report signature    #[serde(default)]
+    /// Report signature
     pub signature: Vec<u8>,
-    /// Additional vendor-specific data    #[serde(default)]
+    /// Additional vendor-specific data
     pub vendor_data: Vec<u8>,
 }
 
@@ -145,9 +262,11 @@ pub struct Measurement {
     /// Measurement value (hash)
     #[serde(default)]
     pub value: Vec<u8>,
-    /// Measurement type/register    #[serde(default)]
+    /// Measurement type/register
+    #[serde(default)]
     pub register: String,
-    /// Measurement description    #[serde(default)]
+    /// Measurement description
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -175,11 +294,14 @@ pub struct AttestationResult {
     /// Additional verification details
     #[serde(default)]
     pub details: std::collections::HashMap<String, String>,
-    /// Code measurement that was verified    #[serde(default)]
+    /// Code measurement that was verified
+    #[serde(default)]
     pub verified_measurement: Vec<u8>,
-    /// Error message if verification failed    #[serde(default)]
+    /// Error message if verification failed
+    #[serde(default)]
     pub error: Option<String>,
-    /// Additional verification metadata    #[serde(default)]
+    /// Additional verification metadata
+    #[serde(default)]
     pub metadata: AttestationMetadata,
 }
 
@@ -324,15 +446,15 @@ pub struct TeeProviderInfo {
     pub capacity: TeeCapacity,
     /// Provider status
     pub status: TeeProviderStatus,
-    /// Attestation verification result    #[serde(default)]
+    /// Attestation verification result
     pub attestation_result: Option<AttestationResult>,
-    /// Pricing configuration    #[serde(default)]
+    /// Pricing configuration
     pub pricing: TeeProviderPricing,
-    /// Provider reputation    #[serde(default)]
+    /// Provider reputation
     pub reputation: u64,
-    /// Total jobs completed    #[serde(default)]
+    /// Total jobs completed
     pub total_jobs_completed: u64,
-    /// Last attestation update    #[serde(default)]
+    /// Last attestation update
     pub last_attestation_update: Timestamp,
 }
 
@@ -494,4 +616,88 @@ pub struct EnclaveKeyHandle {
     pub created_at: Timestamp,
     /// Optional attestation proving the key was generated in a TEE
     pub attestation: Option<AttestationReport>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- AttestationClass: measured boot is not a TEE --------------------
+
+    /// The rule the whole type exists for. A TPM-only node must never be
+    /// handed a workload whose weights or prompts have to stay private from
+    /// the operator — measured boot cannot protect memory from root.
+    #[test]
+    fn measured_boot_never_satisfies_confidential_compute() {
+        assert!(!AttestationClass::MeasuredBoot.satisfies(AttestationClass::ConfidentialCompute));
+        assert!(
+            !AttestationClass::MeasuredBoot.satisfies(AttestationClass::ConfidentialComputeGpu)
+        );
+        assert!(!AttestationClass::MeasuredBoot.protects_running_workload());
+    }
+
+    /// …but it is still worth something, and must satisfy its own tier.
+    #[test]
+    fn measured_boot_satisfies_measured_boot_and_none() {
+        assert!(AttestationClass::MeasuredBoot.satisfies(AttestationClass::MeasuredBoot));
+        assert!(AttestationClass::MeasuredBoot.satisfies(AttestationClass::None));
+    }
+
+    #[test]
+    fn no_assurance_satisfies_only_no_requirement() {
+        assert!(AttestationClass::None.satisfies(AttestationClass::None));
+        assert!(!AttestationClass::None.satisfies(AttestationClass::MeasuredBoot));
+        assert!(!AttestationClass::None.protects_running_workload());
+    }
+
+    /// GPU CC extends a CPU TEE, so it must satisfy everything a CPU TEE does.
+    #[test]
+    fn gpu_confidential_compute_is_strictly_stronger() {
+        let gpu = AttestationClass::ConfidentialComputeGpu;
+        assert!(gpu.satisfies(AttestationClass::ConfidentialCompute));
+        assert!(gpu.satisfies(AttestationClass::MeasuredBoot));
+        assert!(gpu.protects_running_workload());
+
+        // …and a CPU TEE alone does not reach the GPU tier.
+        assert!(
+            !AttestationClass::ConfidentialCompute
+                .satisfies(AttestationClass::ConfidentialComputeGpu)
+        );
+        assert!(AttestationClass::ConfidentialCompute.protects_running_workload());
+    }
+
+    /// The ordering is load-bearing — `satisfies` is a `>=` over it.
+    #[test]
+    fn classes_order_from_weakest_to_strongest() {
+        assert!(AttestationClass::None < AttestationClass::MeasuredBoot);
+        assert!(AttestationClass::MeasuredBoot < AttestationClass::ConfidentialCompute);
+        assert!(AttestationClass::ConfidentialCompute < AttestationClass::ConfidentialComputeGpu);
+    }
+
+    #[test]
+    fn vendor_mapping_matches_what_each_vendor_actually_provides() {
+        assert_eq!(
+            AttestationClass::for_vendor(TeeVendor::IntelTdx),
+            AttestationClass::ConfidentialCompute
+        );
+        assert_eq!(
+            AttestationClass::for_vendor(TeeVendor::AmdSevSnp),
+            AttestationClass::ConfidentialCompute
+        );
+        // Only ever presented as the composite, so a CPU anchor is implied.
+        assert_eq!(
+            AttestationClass::for_vendor(TeeVendor::NvidiaGpu),
+            AttestationClass::ConfidentialComputeGpu
+        );
+        assert_eq!(
+            AttestationClass::for_vendor(TeeVendor::Generic),
+            AttestationClass::None
+        );
+    }
+
+    /// A default-constructed class must not accidentally grant anything.
+    #[test]
+    fn default_class_is_no_assurance() {
+        assert_eq!(AttestationClass::default(), AttestationClass::None);
+    }
 }

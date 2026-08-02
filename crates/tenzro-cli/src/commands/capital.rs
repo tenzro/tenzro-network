@@ -47,7 +47,10 @@ impl CapitalCommand {
             Self::Execute(c) => c.execute().await,
             Self::Verify(c) => c.execute("tenzro_capitalIntentVerify", "Verify").await,
             Self::Settle(c) => c.execute().await,
-            Self::Compensate(c) => c.execute("tenzro_capitalIntentCompensate", "Compensate").await,
+            Self::Compensate(c) => {
+                c.execute("tenzro_capitalIntentCompensate", "Compensate")
+                    .await
+            }
             Self::Get(c) => c.execute("tenzro_getCapitalIntent", "Capital Intent").await,
             Self::ReserveSubmit(c) => c.execute().await,
             Self::Mint(c) => c.execute().await,
@@ -79,7 +82,10 @@ impl CapitalOpenCmd {
         output::print_header("Capital Intent: Open");
         let intent = read_json_arg(&self.intent)?;
         let result: serde_json::Value = RpcClient::new(&self.rpc)
-            .call("tenzro_capitalIntentOpen", serde_json::json!({ "intent": intent }))
+            .call(
+                "tenzro_capitalIntentOpen",
+                serde_json::json!({ "intent": intent }),
+            )
             .await
             .context("calling tenzro_capitalIntentOpen")?;
         output::print_json(&result)?;
@@ -176,7 +182,10 @@ impl CapitalExecuteCmd {
         output::print_header("Capital Intent: Execute Leg");
         let leg = read_json_arg(&self.leg)?;
         let result: serde_json::Value = RpcClient::new(&self.rpc)
-            .call("tenzro_capitalIntentExecute", serde_json::json!({ "intent_id": self.intent_id, "leg": leg }))
+            .call(
+                "tenzro_capitalIntentExecute",
+                serde_json::json!({ "intent_id": self.intent_id, "leg": leg }),
+            )
             .await
             .context("calling tenzro_capitalIntentExecute")?;
         output::print_json(&result)?;
@@ -198,7 +207,10 @@ impl CapitalSettleCmd {
         output::print_header("Capital Intent: Settle");
         let mut params = serde_json::json!({ "intent_id": self.intent_id });
         if let Some(p) = &self.payee {
-            params.as_object_mut().unwrap().insert("payee".into(), serde_json::json!(p));
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert("payee".into(), serde_json::json!(p));
         }
         let result: serde_json::Value = RpcClient::new(&self.rpc)
             .call("tenzro_capitalIntentSettle", params)
@@ -242,7 +254,10 @@ impl CapitalReserveSubmitCmd {
         output::print_header("Reserve: Submit Attestation");
         let att = read_json_arg(&self.attestation)?;
         let result: serde_json::Value = RpcClient::new(&self.rpc)
-            .call("tenzro_submitReserveAttestation", serde_json::json!({ "attestation": att }))
+            .call(
+                "tenzro_submitReserveAttestation",
+                serde_json::json!({ "attestation": att }),
+            )
             .await
             .context("calling tenzro_submitReserveAttestation")?;
         output::print_json(&result)?;
@@ -294,7 +309,10 @@ impl CapitalGetReserveCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Reserve: Get");
         let result: serde_json::Value = RpcClient::new(&self.rpc)
-            .call("tenzro_getReserve", serde_json::json!({ "asset_id": self.asset_id }))
+            .call(
+                "tenzro_getReserve",
+                serde_json::json!({ "asset_id": self.asset_id }),
+            )
             .await
             .context("calling tenzro_getReserve")?;
         output::print_json(&result)?;

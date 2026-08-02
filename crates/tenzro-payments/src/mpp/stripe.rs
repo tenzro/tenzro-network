@@ -38,7 +38,7 @@
 
 use crate::error::{PaymentError, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 /// Stripe API base URL
@@ -154,20 +154,16 @@ impl StripeClient {
             .post(format!("{}/v1/payment_intents", self.api_base))
             .basic_auth(&self.api_key, Option::<&str>::None)
             .header("Stripe-Version", STRIPE_API_VERSION)
-            .header(
-                "Idempotency-Key",
-                uuid::Uuid::new_v4().to_string(),
-            )
+            .header("Idempotency-Key", uuid::Uuid::new_v4().to_string())
             .form(&form)
             .send()
             .await
             .map_err(|e| PaymentError::NetworkError(format!("Stripe API request failed: {}", e)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e)))?;
+        let body = response.text().await.map_err(|e| {
+            PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e))
+        })?;
 
         if !status.is_success() {
             let error = Self::parse_stripe_error(&body);
@@ -178,10 +174,7 @@ impl StripeClient {
         }
 
         let intent: PaymentIntent = serde_json::from_str(&body).map_err(|e| {
-            PaymentError::SerializationError(format!(
-                "Failed to parse Stripe PaymentIntent: {}",
-                e
-            ))
+            PaymentError::SerializationError(format!("Failed to parse Stripe PaymentIntent: {}", e))
         })?;
 
         debug!(
@@ -210,10 +203,7 @@ impl StripeClient {
             ("amount", amount.to_string()),
             ("currency", currency.to_string()),
             ("automatic_payment_methods[enabled]", "true".to_string()),
-            (
-                "description",
-                format!("MPP payment for {}", resource),
-            ),
+            ("description", format!("MPP payment for {}", resource)),
             ("metadata[protocol]", "mpp".to_string()),
             ("metadata[challenge_id]", challenge_id.to_string()),
             ("metadata[payer_did]", payer_did.to_string()),
@@ -232,10 +222,9 @@ impl StripeClient {
             .map_err(|e| PaymentError::NetworkError(format!("Stripe API request failed: {}", e)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e)))?;
+        let body = response.text().await.map_err(|e| {
+            PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e))
+        })?;
 
         if !status.is_success() {
             let error = Self::parse_stripe_error(&body);
@@ -246,10 +235,7 @@ impl StripeClient {
         }
 
         serde_json::from_str(&body).map_err(|e| {
-            PaymentError::SerializationError(format!(
-                "Failed to parse Stripe PaymentIntent: {}",
-                e
-            ))
+            PaymentError::SerializationError(format!("Failed to parse Stripe PaymentIntent: {}", e))
         })
     }
 
@@ -259,7 +245,10 @@ impl StripeClient {
 
         let response = self
             .http_client
-            .get(format!("{}/v1/payment_intents/{}", self.api_base, intent_id))
+            .get(format!(
+                "{}/v1/payment_intents/{}",
+                self.api_base, intent_id
+            ))
             .basic_auth(&self.api_key, Option::<&str>::None)
             .header("Stripe-Version", STRIPE_API_VERSION)
             .send()
@@ -267,10 +256,9 @@ impl StripeClient {
             .map_err(|e| PaymentError::NetworkError(format!("Stripe API request failed: {}", e)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e)))?;
+        let body = response.text().await.map_err(|e| {
+            PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e))
+        })?;
 
         if !status.is_success() {
             let error = Self::parse_stripe_error(&body);
@@ -281,10 +269,7 @@ impl StripeClient {
         }
 
         serde_json::from_str(&body).map_err(|e| {
-            PaymentError::SerializationError(format!(
-                "Failed to parse Stripe PaymentIntent: {}",
-                e
-            ))
+            PaymentError::SerializationError(format!("Failed to parse Stripe PaymentIntent: {}", e))
         })
     }
 
@@ -315,10 +300,9 @@ impl StripeClient {
             .map_err(|e| PaymentError::NetworkError(format!("Stripe API request failed: {}", e)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e)))?;
+        let body = response.text().await.map_err(|e| {
+            PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e))
+        })?;
 
         if !status.is_success() {
             let error = Self::parse_stripe_error(&body);
@@ -329,10 +313,7 @@ impl StripeClient {
         }
 
         serde_json::from_str(&body).map_err(|e| {
-            PaymentError::SerializationError(format!(
-                "Failed to parse Stripe PaymentIntent: {}",
-                e
-            ))
+            PaymentError::SerializationError(format!("Failed to parse Stripe PaymentIntent: {}", e))
         })
     }
 
@@ -353,10 +334,9 @@ impl StripeClient {
             .map_err(|e| PaymentError::NetworkError(format!("Stripe API request failed: {}", e)))?;
 
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e)))?;
+        let body = response.text().await.map_err(|e| {
+            PaymentError::NetworkError(format!("Failed to read Stripe response: {}", e))
+        })?;
 
         if !status.is_success() {
             let error = Self::parse_stripe_error(&body);
@@ -367,10 +347,7 @@ impl StripeClient {
         }
 
         serde_json::from_str(&body).map_err(|e| {
-            PaymentError::SerializationError(format!(
-                "Failed to parse Stripe PaymentIntent: {}",
-                e
-            ))
+            PaymentError::SerializationError(format!("Failed to parse Stripe PaymentIntent: {}", e))
         })
     }
 
@@ -490,11 +467,7 @@ impl StripeClient {
         }
 
         // Compute expected signature: HMAC-SHA256(key=secret, msg="<timestamp>.<body>")
-        let signed_payload = format!(
-            "{}.{}",
-            timestamp,
-            String::from_utf8_lossy(payload)
-        );
+        let signed_payload = format!("{}.{}", timestamp, String::from_utf8_lossy(payload));
 
         let expected = hex::encode(hmac_sha256(
             webhook_secret.as_bytes(),
@@ -541,7 +514,11 @@ impl StripeClient {
     /// Returns the API key (masked for logging)
     pub fn masked_key(&self) -> String {
         if self.api_key.len() > 12 {
-            format!("{}...{}", &self.api_key[..8], &self.api_key[self.api_key.len() - 4..])
+            format!(
+                "{}...{}",
+                &self.api_key[..8],
+                &self.api_key[self.api_key.len() - 4..]
+            )
         } else {
             "***".to_string()
         }
@@ -704,10 +681,7 @@ mod tests {
         let header = format!("t={},v1={}", timestamp, sig);
 
         assert!(StripeClient::verify_webhook_signature(
-            payload,
-            &header,
-            secret,
-            300,
+            payload, &header, secret, 300,
         ));
     }
 
@@ -720,10 +694,7 @@ mod tests {
         let header = format!("t={},v1=deadbeef", timestamp);
 
         assert!(!StripeClient::verify_webhook_signature(
-            payload,
-            &header,
-            secret,
-            300,
+            payload, &header, secret, 300,
         ));
     }
 
@@ -740,10 +711,7 @@ mod tests {
 
         // Tolerance of 300 seconds should reject 600-second-old timestamp
         assert!(!StripeClient::verify_webhook_signature(
-            payload,
-            &header,
-            secret,
-            300,
+            payload, &header, secret, 300,
         ));
     }
 
@@ -762,10 +730,7 @@ mod tests {
         let timestamp = chrono::Utc::now().timestamp();
         let header = format!("t={}", timestamp);
         assert!(!StripeClient::verify_webhook_signature(
-            b"payload",
-            &header,
-            "secret",
-            300,
+            b"payload", &header, "secret", 300,
         ));
     }
 
@@ -884,10 +849,7 @@ mod tests {
         let header = format!("t={},v1=deadbeef,v1={}", timestamp, sig);
 
         assert!(StripeClient::verify_webhook_signature(
-            payload,
-            &header,
-            secret,
-            300,
+            payload, &header, secret, 300,
         ));
     }
 }

@@ -241,7 +241,9 @@ impl Bucket {
     /// admission, `Err(retry_after_ms)` on rejection.
     fn try_admit(&mut self) -> std::result::Result<(), u64> {
         let now = Instant::now();
-        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity as f64);
         self.last_refill = now;
 
@@ -260,7 +262,9 @@ impl Bucket {
     fn snapshot(&mut self) -> BucketSnapshot {
         // Refill first so the snapshot reflects the current logical state.
         let now = Instant::now();
-        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity as f64);
         self.last_refill = now;
         BucketSnapshot {
@@ -301,7 +305,9 @@ pub struct LaneStats {
 }
 
 impl LaneStats {
-    pub fn admitted(&self, lane: Lane) -> u64 { self.admitted[lane as usize] }
+    pub fn admitted(&self, lane: Lane) -> u64 {
+        self.admitted[lane as usize]
+    }
     pub fn rejected_rate_limited(&self, lane: Lane) -> u64 {
         self.rejected_rate_limited[lane as usize]
     }
@@ -476,10 +482,7 @@ impl AdmissionController {
         )));
         // `entry().or_insert_with` to handle the racy case where two
         // threads admit the same controller simultaneously.
-        self.buckets
-            .entry(*key)
-            .or_insert_with(|| bucket)
-            .clone()
+        self.buckets.entry(*key).or_insert_with(|| bucket).clone()
     }
 
     /// Drop buckets that have been idle for at least `idle_for`. Call
@@ -522,7 +525,11 @@ mod tests {
             memo: None,
             pq_public_key: pq.verifying_key_bytes().to_vec(),
         };
-        SignedTransaction::new(tx, Signature::new(vec![0u8; 64], vec![0u8; 32]), vec![0u8; 3309])
+        SignedTransaction::new(
+            tx,
+            Signature::new(vec![0u8; 64], vec![0u8; 32]),
+            vec![0u8; 3309],
+        )
     }
 
     #[test]
@@ -537,11 +544,18 @@ mod tests {
 
         // First three admit (burst).
         for _ in 0..3 {
-            assert!(matches!(ctrl.try_admit(&tx), AdmissionDecision::Admit { lane: Lane::Open }));
+            assert!(matches!(
+                ctrl.try_admit(&tx),
+                AdmissionDecision::Admit { lane: Lane::Open }
+            ));
         }
         // Fourth should be rate-limited.
         match ctrl.try_admit(&tx) {
-            AdmissionDecision::RateLimited { lane, retry_after_ms, .. } => {
+            AdmissionDecision::RateLimited {
+                lane,
+                retry_after_ms,
+                ..
+            } => {
                 assert_eq!(lane, Lane::Open);
                 assert!(retry_after_ms > 0);
             }
@@ -565,11 +579,20 @@ mod tests {
         let tx_a = dummy_tx(1);
         let tx_b = dummy_tx(2);
 
-        assert!(matches!(ctrl.try_admit(&tx_a), AdmissionDecision::Admit { .. }));
+        assert!(matches!(
+            ctrl.try_admit(&tx_a),
+            AdmissionDecision::Admit { .. }
+        ));
         // A's bucket is now empty.
-        assert!(matches!(ctrl.try_admit(&tx_a), AdmissionDecision::RateLimited { .. }));
+        assert!(matches!(
+            ctrl.try_admit(&tx_a),
+            AdmissionDecision::RateLimited { .. }
+        ));
         // B has its own full bucket.
-        assert!(matches!(ctrl.try_admit(&tx_b), AdmissionDecision::Admit { .. }));
+        assert!(matches!(
+            ctrl.try_admit(&tx_b),
+            AdmissionDecision::Admit { .. }
+        ));
     }
 
     #[test]
@@ -600,9 +623,18 @@ mod tests {
         let tx = dummy_tx(1);
 
         // First admit: Open lane, burst=1.
-        assert!(matches!(ctrl.try_admit(&tx), AdmissionDecision::Admit { lane: Lane::Open }));
+        assert!(matches!(
+            ctrl.try_admit(&tx),
+            AdmissionDecision::Admit { lane: Lane::Open }
+        ));
         // Second: Open exhausted.
-        assert!(matches!(ctrl.try_admit(&tx), AdmissionDecision::RateLimited { lane: Lane::Open, .. }));
+        assert!(matches!(
+            ctrl.try_admit(&tx),
+            AdmissionDecision::RateLimited {
+                lane: Lane::Open,
+                ..
+            }
+        ));
         // Third: resolver flips to Verified — bucket should resize and
         // accept immediately since the verified bucket has fresh capacity.
         match ctrl.try_admit(&tx) {
@@ -617,6 +649,10 @@ mod tests {
             lane_weights: (10, 5, 0), // attempt to starve Open
             ..AdmissionConfig::default()
         };
-        assert_eq!(cfg.weight(Lane::Open), 1, "Open weight must be clamped to >= 1");
+        assert_eq!(
+            cfg.weight(Lane::Open),
+            1,
+            "Open weight must be clamped to >= 1"
+        );
     }
 }

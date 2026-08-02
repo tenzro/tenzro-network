@@ -50,15 +50,15 @@ use crate::error::{AgentError, Result};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tenzro_crypto::hash::sha256;
 use tenzro_identity::registry::IdentityRegistry;
 use tenzro_types::{
+    AgentIdentity,
     agent::Capability,
     primitives::{Address, BlockHeight},
-    principal_chain::{anonymous_chain_for_did, PrincipalChain},
-    AgentIdentity,
+    principal_chain::{PrincipalChain, anonymous_chain_for_did},
 };
 use tenzro_wallet::WalletProvisioner;
 use tracing::{debug, info, warn};
@@ -90,8 +90,7 @@ pub enum AgentStatus {
 /// the node/transaction level. This policy only gates whether the binding is
 /// allowed to proceed and surfaces the resulting fee to the caller via
 /// `RegisteredAgent.registration_fee`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GasPolicy {
     /// Pay any fee the registry asks for. The actual fee will be reported on
     /// `RegisteredAgent.registration_fee` for downstream collection.
@@ -120,7 +119,6 @@ impl GasPolicy {
         }
     }
 }
-
 
 impl AgentStatus {
     /// Returns the status as a string
@@ -251,10 +249,8 @@ impl RegisteredAgent {
         // Default to a tombstoned anonymous chain rooted at the agent_id —
         // callers that bind to TDIP overwrite this via `set_principal_chain`
         // once the controller chain is resolvable.
-        let principal_chain = anonymous_chain_for_did(
-            identity.agent_id.clone(),
-            BlockHeight::new(0),
-        );
+        let principal_chain =
+            anonymous_chain_for_did(identity.agent_id.clone(), BlockHeight::new(0));
         Self {
             identity,
             wallet_address,
@@ -379,8 +375,9 @@ impl AgentIdentityManager {
 
         // Create storage directory if it doesn't exist
         if let Some(parent) = storage_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AgentError::StorageError(format!("Failed to create storage directory: {}", e)))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AgentError::StorageError(format!("Failed to create storage directory: {}", e))
+            })?;
         }
 
         Ok(Self {
@@ -564,10 +561,7 @@ impl AgentIdentityManager {
             let public_key = classical_public_key.clone();
 
             // Convert typed agent capabilities to string labels for TDIP.
-            let cap_strings: Vec<String> = capabilities
-                .iter()
-                .map(capability_label)
-                .collect();
+            let cap_strings: Vec<String> = capabilities.iter().map(capability_label).collect();
 
             // Agents in this manager are autonomous from TDIP's perspective:
             // they have a creator Address but not a controlling DID. Use the
@@ -576,10 +570,12 @@ impl AgentIdentityManager {
             let registration = registry
                 .register_autonomous_machine_with_fee(public_key, cap_strings)
                 .await
-                .map_err(|e| AgentError::BlockchainBindingFailed(format!(
-                    "TDIP registration failed for agent {}: {}",
-                    agent_id, e
-                )))?;
+                .map_err(|e| {
+                    AgentError::BlockchainBindingFailed(format!(
+                        "TDIP registration failed for agent {}: {}",
+                        agent_id, e
+                    ))
+                })?;
 
             let fee_required = registration.fee_required;
             let machine_identity = registration.identity;
@@ -623,10 +619,7 @@ impl AgentIdentityManager {
             // registry walks controller DIDs and snapshots the controller's
             // KYC tier; from this point onward the receipt's chain is
             // immutable, even if intermediate links are revoked later.
-            let frozen_chain = registry.resolve_principal_chain(
-                &machine_did,
-                BlockHeight::new(0),
-            );
+            let frozen_chain = registry.resolve_principal_chain(&machine_did, BlockHeight::new(0));
             agent.set_principal_chain(frozen_chain);
 
             info!(
@@ -752,10 +745,12 @@ impl AgentIdentityManager {
                     cap_strings,
                 )
                 .await
-                .map_err(|e| AgentError::BlockchainBindingFailed(format!(
-                    "TDIP BYOK registration failed for agent {}: {}",
-                    agent.identity.agent_id, e
-                )))?;
+                .map_err(|e| {
+                    AgentError::BlockchainBindingFailed(format!(
+                        "TDIP BYOK registration failed for agent {}: {}",
+                        agent.identity.agent_id, e
+                    ))
+                })?;
 
             let fee_required = registration.fee_required;
             let machine_identity = registration.identity;
@@ -777,7 +772,9 @@ impl AgentIdentityManager {
 
             let machine_did = machine_identity.did_string();
 
-            if let Err(e) = registry.link_tenzro_agent(&machine_did, agent.identity.agent_id.clone()) {
+            if let Err(e) =
+                registry.link_tenzro_agent(&machine_did, agent.identity.agent_id.clone())
+            {
                 return Err(AgentError::BlockchainBindingFailed(format!(
                     "Failed to link BYOK agent {} to TDIP DID {}: {}",
                     agent.identity.agent_id, machine_did, e
@@ -787,18 +784,12 @@ impl AgentIdentityManager {
             agent.tenzro_did = Some(machine_did.clone());
             agent.registration_fee = fee_required;
 
-            let frozen_chain = registry.resolve_principal_chain(
-                &machine_did,
-                BlockHeight::new(0),
-            );
+            let frozen_chain = registry.resolve_principal_chain(&machine_did, BlockHeight::new(0));
             agent.set_principal_chain(frozen_chain);
 
             info!(
                 "BYOK agent {} bound to TDIP DID {} (wallet_address {}, fee {} smallest TNZO)",
-                agent.identity.agent_id,
-                machine_did,
-                agent.wallet_address,
-                fee_required
+                agent.identity.agent_id, machine_did, agent.wallet_address, fee_required
             );
         } else {
             debug!(
@@ -851,7 +842,11 @@ impl AgentIdentityManager {
     }
 
     /// Updates an existing agent
-    pub fn update_agent(&self, agent_id: &str, update_fn: impl FnOnce(&mut RegisteredAgent)) -> Result<()> {
+    pub fn update_agent(
+        &self,
+        agent_id: &str,
+        update_fn: impl FnOnce(&mut RegisteredAgent),
+    ) -> Result<()> {
         self.agents
             .get_mut(agent_id)
             .map(|mut entry| update_fn(entry.value_mut()))
@@ -912,7 +907,11 @@ impl AgentIdentityManager {
     /// Verifies an agent's identity
     ///
     /// Checks that the agent exists and matches expected parameters
-    pub fn verify_agent_identity(&self, agent_id: &str, expected_creator: &Address) -> Result<bool> {
+    pub fn verify_agent_identity(
+        &self,
+        agent_id: &str,
+        expected_creator: &Address,
+    ) -> Result<bool> {
         let agent = self.get_agent(agent_id)?;
         Ok(agent.identity.creator == *expected_creator && agent.is_active())
     }
@@ -988,7 +987,10 @@ impl AgentIdentityManager {
         // Store in memory
         self.agents.insert(agent_id.to_string(), agent.clone());
 
-        info!("Loaded identity for agent {} from {:?}", agent_id, file_path);
+        info!(
+            "Loaded identity for agent {} from {:?}",
+            agent_id, file_path
+        );
         Ok(agent)
     }
 
@@ -1011,7 +1013,8 @@ impl AgentIdentityManager {
             .map_err(|e| AgentError::StorageError(format!("Failed to read directory: {}", e)))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| AgentError::StorageError(format!("Failed to read entry: {}", e)))?;
+            let entry = entry
+                .map_err(|e| AgentError::StorageError(format!("Failed to read entry: {}", e)))?;
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("json")
@@ -1076,7 +1079,13 @@ mod tests {
         let capabilities = vec![Capability::MultiAgentCoordination];
 
         manager
-            .register_agent("Agent1".to_string(), creator, capabilities.clone(), false, 0)
+            .register_agent(
+                "Agent1".to_string(),
+                creator,
+                capabilities.clone(),
+                false,
+                0,
+            )
             .await
             .unwrap();
 
@@ -1138,12 +1147,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(agent.tenzro_did.is_none(), "local-only agent must not have a DID");
-        assert!(!agent.is_blockchain_bound());
-        assert_eq!(
-            agent.registration_fee, 0,
-            "local-only agents owe zero gas"
+        assert!(
+            agent.tenzro_did.is_none(),
+            "local-only agent must not have a DID"
         );
+        assert!(!agent.is_blockchain_bound());
+        assert_eq!(agent.registration_fee, 0, "local-only agents owe zero gas");
     }
 
     #[tokio::test]
@@ -1210,7 +1219,12 @@ mod tests {
 
         match result {
             Err(AgentError::InsufficientGas { required, supplied }) => {
-                assert!(required > supplied, "required {} should exceed supplied {}", required, supplied);
+                assert!(
+                    required > supplied,
+                    "required {} should exceed supplied {}",
+                    required,
+                    supplied
+                );
                 assert_eq!(supplied, 1);
             }
             other => panic!("expected InsufficientGas, got {:?}", other),

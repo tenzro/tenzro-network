@@ -45,7 +45,7 @@ use crate::obligations::{ObligationSource, ProviderObligations};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
@@ -144,13 +144,15 @@ pub struct RentalAgreement {
 impl RentalAgreement {
     /// Total term value = `price_per_epoch * total_epochs`.
     pub fn total_value(&self) -> u128 {
-        self.price_per_epoch.saturating_mul(self.total_epochs as u128)
+        self.price_per_epoch
+            .saturating_mul(self.total_epochs as u128)
     }
 
     /// Value still locked in the renter's deposit for undelivered epochs.
     pub fn locked_remaining(&self) -> u128 {
         let remaining_epochs = self.total_epochs.saturating_sub(self.epochs_settled);
-        self.price_per_epoch.saturating_mul(remaining_epochs as u128)
+        self.price_per_epoch
+            .saturating_mul(remaining_epochs as u128)
     }
 
     /// This rental's contribution to the provider's concurrent-exposure window:
@@ -219,7 +221,10 @@ impl std::fmt::Debug for RentalManager {
             .field("rentals_by_renter", &self.rentals_by_renter.len())
             .field("rentals_by_provider", &self.rentals_by_provider.len())
             .field("miss_threshold", &self.miss_threshold)
-            .field("storage", &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"))
+            .field(
+                "storage",
+                &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"),
+            )
             .finish()
     }
 }
@@ -284,7 +289,11 @@ impl RentalManager {
     /// tracker, if one is attached. No-op otherwise.
     fn publish_exposure(&self, provider: &Address) {
         if let Some(obs) = &self.obligations {
-            obs.set(provider, ObligationSource::Rental, self.active_exposure(provider));
+            obs.set(
+                provider,
+                ObligationSource::Rental,
+                self.active_exposure(provider),
+            );
         }
     }
 
@@ -294,11 +303,7 @@ impl RentalManager {
         if self.obligations.is_none() {
             return;
         }
-        let providers: Vec<Address> = self
-            .rentals_by_provider
-            .iter()
-            .map(|e| *e.key())
-            .collect();
+        let providers: Vec<Address> = self.rentals_by_provider.iter().map(|e| *e.key()).collect();
         for provider in providers {
             self.publish_exposure(&provider);
         }
@@ -309,11 +314,19 @@ impl RentalManager {
     }
 
     fn renter_index_key(addr: &Address) -> Vec<u8> {
-        [RENTAL_RENTER_KEY_PREFIX, hex::encode(addr.as_bytes()).as_bytes()].concat()
+        [
+            RENTAL_RENTER_KEY_PREFIX,
+            hex::encode(addr.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     fn provider_index_key(addr: &Address) -> Vec<u8> {
-        [RENTAL_PROVIDER_KEY_PREFIX, hex::encode(addr.as_bytes()).as_bytes()].concat()
+        [
+            RENTAL_PROVIDER_KEY_PREFIX,
+            hex::encode(addr.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     fn hydrate(&self) {
@@ -358,7 +371,10 @@ impl RentalManager {
         }
 
         if hydrated > 0 {
-            info!("Hydrated {} rental(s) from RocksDB CF_SETTLEMENTS", hydrated);
+            info!(
+                "Hydrated {} rental(s) from RocksDB CF_SETTLEMENTS",
+                hydrated
+            );
         }
     }
 
@@ -459,9 +475,12 @@ impl RentalManager {
             .saturating_add(price_per_epoch);
         let stake = self.stake_ledger.available_stake(&provider);
         let admitted = match &self.obligations {
-            Some(obs) => {
-                obs.can_admit(&provider, ObligationSource::Rental, new_rental_exposure, stake)
-            }
+            Some(obs) => obs.can_admit(
+                &provider,
+                ObligationSource::Rental,
+                new_rental_exposure,
+                stake,
+            ),
             None => stake >= new_rental_exposure,
         };
         if !admitted {
@@ -488,9 +507,9 @@ impl RentalManager {
         }
         {
             let mut entry = self.balances.entry(key).or_insert(0);
-            *entry = entry
-                .checked_sub(total_value)
-                .ok_or_else(|| SettlementError::ArithmeticOverflow("Deposit lock overflow".to_string()))?;
+            *entry = entry.checked_sub(total_value).ok_or_else(|| {
+                SettlementError::ArithmeticOverflow("Deposit lock overflow".to_string())
+            })?;
         }
 
         let rental = RentalAgreement {
@@ -547,7 +566,9 @@ impl RentalManager {
             let rental = entry.value_mut();
 
             if rental.status != RentalStatus::Active {
-                return Err(SettlementError::EscrowAlreadyReleased(rental_id.to_string()));
+                return Err(SettlementError::EscrowAlreadyReleased(
+                    rental_id.to_string(),
+                ));
             }
 
             if proof_valid {
@@ -589,7 +610,9 @@ impl RentalManager {
                 {
                     let mut bal = self.balances.entry(renter_key).or_insert(0);
                     *bal = bal.checked_add(credit).ok_or_else(|| {
-                        SettlementError::ArithmeticOverflow("Renter make-whole overflow".to_string())
+                        SettlementError::ArithmeticOverflow(
+                            "Renter make-whole overflow".to_string(),
+                        )
                     })?;
                 }
 
@@ -599,11 +622,7 @@ impl RentalManager {
                 if rental.consecutive_misses >= self.miss_threshold {
                     self.close_in_place(rental, TerminationReason::MissThreshold);
                     let snap = rental.clone();
-                    (
-                        EpochOutcome::Missed { made_whole },
-                        snap,
-                        false,
-                    )
+                    (EpochOutcome::Missed { made_whole }, snap, false)
                 } else if rental.is_term_complete() {
                     self.close_in_place(rental, TerminationReason::TermComplete);
                     let snap = rental.clone();
@@ -725,11 +744,7 @@ impl RentalManager {
         }
 
         // Shed newest-first: by timestamp desc, then by index position desc.
-        active.sort_by(|a, b| {
-            b.2.as_millis()
-                .cmp(&a.2.as_millis())
-                .then(b.0.cmp(&a.0))
-        });
+        active.sort_by(|a, b| b.2.as_millis().cmp(&a.2.as_millis()).then(b.0.cmp(&a.0)));
 
         let mut shed = Vec::new();
         for (_, id, _, exposure) in active {
@@ -923,7 +938,10 @@ mod tests {
         }
         let done = mgr.get_rental(&rental.rental_id).unwrap();
         assert_eq!(done.status, RentalStatus::Completed);
-        assert_eq!(done.termination_reason, Some(TerminationReason::TermComplete));
+        assert_eq!(
+            done.termination_reason,
+            Some(TerminationReason::TermComplete)
+        );
         // Provider got the full term; nothing left locked; renter spent exactly 3000.
         assert_eq!(*balances.get(&(provider, AssetId::tnzo())).unwrap(), 3_000);
         assert_eq!(*balances.get(&(renter, AssetId::tnzo())).unwrap(), 7_000);
@@ -998,7 +1016,10 @@ mod tests {
 
         let r = mgr.get_rental(&rental.rental_id).unwrap();
         assert_eq!(r.status, RentalStatus::Terminated);
-        assert_eq!(r.termination_reason, Some(TerminationReason::RenterUnderfunded));
+        assert_eq!(
+            r.termination_reason,
+            Some(TerminationReason::RenterUnderfunded)
+        );
         // Provider keeps 1 epoch (1000). 4 unearned epochs (4000) returned.
         assert_eq!(*balances.get(&(provider, AssetId::tnzo())).unwrap(), 1_000);
         // Renter: post-lock 5000 + 4000 refund = 9000.
@@ -1035,7 +1056,10 @@ mod tests {
         assert!(shed.contains(&r3.rental_id));
         assert!(shed.contains(&r2.rental_id));
 
-        assert_eq!(mgr.get_rental(&r1.rental_id).unwrap().status, RentalStatus::Active);
+        assert_eq!(
+            mgr.get_rental(&r1.rental_id).unwrap().status,
+            RentalStatus::Active
+        );
         assert_eq!(
             mgr.get_rental(&r2.rental_id).unwrap().status,
             RentalStatus::Terminated
@@ -1071,7 +1095,10 @@ mod tests {
         let ok = mgr.book_rental(renter, provider, AssetId::tnzo(), 400, 5);
         assert!(ok.is_ok());
         // Rental exposure is now published into the shared tracker.
-        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Rental), 400);
+        assert_eq!(
+            obligations.exposure_for(&provider, ObligationSource::Rental),
+            400
+        );
         assert_eq!(obligations.total_exposure(&provider), 1_400);
     }
 
@@ -1088,9 +1115,15 @@ mod tests {
         let r = mgr
             .book_rental(renter, provider, AssetId::tnzo(), 1_000, 1)
             .unwrap();
-        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Rental), 1_000);
+        assert_eq!(
+            obligations.exposure_for(&provider, ObligationSource::Rental),
+            1_000
+        );
         mgr.settle_epoch(&r.rental_id, true).unwrap(); // completes term
-        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Rental), 0);
+        assert_eq!(
+            obligations.exposure_for(&provider, ObligationSource::Rental),
+            0
+        );
     }
 
     #[test]

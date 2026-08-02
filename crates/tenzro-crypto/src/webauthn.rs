@@ -29,7 +29,7 @@
 //! the WebAuthn-mandated leading-zero stripping for short integers.
 
 use crate::error::{CryptoError, Result};
-use crate::p256::{P256Signature, P256Verifier, P256_SIGNATURE_LEN};
+use crate::p256::{P256_SIGNATURE_LEN, P256Signature, P256Verifier};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -344,12 +344,11 @@ mod tests {
     #[test]
     fn unwrap_round_trips_real_der_signature() {
         // Use the p256 crate's DER export to round-trip a real signature.
-        use p256::ecdsa::signature::hazmat::PrehashSigner;
         use p256::ecdsa::Signature;
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
 
         let kp = P256KeyPair::generate();
-        let signing_key =
-            p256::ecdsa::SigningKey::from_slice(&kp.secret_bytes()).unwrap();
+        let signing_key = p256::ecdsa::SigningKey::from_slice(&kp.secret_bytes()).unwrap();
         let sig: Signature = signing_key.sign_prehash(&[1u8; 32]).unwrap();
         let der = sig.to_der();
         let unwrapped = unwrap_der_signature(der.as_bytes()).unwrap();
@@ -360,7 +359,9 @@ mod tests {
     #[test]
     fn signed_hash_matches_payload_then_sha256() {
         let auth_data = vec![0xAAu8; 37];
-        let cdj = br#"{"type":"webauthn.get","challenge":"abc","origin":"https://keys.tenzro.xyz"}"#.to_vec();
+        let cdj =
+            br#"{"type":"webauthn.get","challenge":"abc","origin":"https://keys.tenzro.xyz"}"#
+                .to_vec();
         let payload = webauthn_signed_payload(&auth_data, &cdj);
         let direct_hash: [u8; 32] = Sha256::digest(&payload).into();
         let helper_hash = webauthn_signed_hash(&auth_data, &cdj);

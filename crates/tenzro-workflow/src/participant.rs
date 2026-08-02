@@ -60,10 +60,10 @@ mod tests {
 
     #[test]
     fn role_matching() {
-        let p = Participant::new("did:tenzro:human:alice:1", vec![
-            ParticipantRole::Initiator,
-            ParticipantRole::Treasurer,
-        ]);
+        let p = Participant::new(
+            "did:tenzro:human:alice:1",
+            vec![ParticipantRole::Initiator, ParticipantRole::Treasurer],
+        );
         assert!(p.has_role(&ParticipantRole::Initiator));
         assert!(p.has_role(&ParticipantRole::Treasurer));
         assert!(!p.has_role(&ParticipantRole::Auditor));

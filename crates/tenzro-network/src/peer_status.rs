@@ -342,13 +342,7 @@ mod tests {
     fn network_tip_capped_returns_median_of_fresh_peers() {
         let tracker = PeerStatusTracker::new(1337);
         for (i, h) in [100u64, 101, 102, 103, 104].iter().enumerate() {
-            tracker.record(
-                PeerId::random(),
-                *h,
-                1337,
-                false,
-                None,
-            );
+            tracker.record(PeerId::random(), *h, 1337, false, None);
             let _ = i;
         }
         // local_tip below all peer heights, no cap binding

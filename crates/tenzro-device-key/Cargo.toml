@@ -48,3 +48,6 @@ security-framework = { version = "3", features = ["OSX_10_15"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 security-framework = { version = "3", features = ["OSX_10_15"] }
+
+[lints]
+workspace = true

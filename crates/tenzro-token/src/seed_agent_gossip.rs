@@ -69,39 +69,32 @@ pub enum SeedAgentGossipMessage {
 /// Bincode-encode a [`SeedAgentGossipMessage::CharterUpserted`] payload.
 pub fn encode_charter_upserted(charter: &Charter) -> Result<Vec<u8>> {
     let msg = SeedAgentGossipMessage::CharterUpserted(charter.clone());
-    bincode::serialize(&msg).map_err(|e| {
-        TokenError::InvalidParameter(format!("encode CharterUpserted: {}", e))
-    })
+    bincode::serialize(&msg)
+        .map_err(|e| TokenError::InvalidParameter(format!("encode CharterUpserted: {}", e)))
 }
 
 /// Bincode-encode a [`SeedAgentGossipMessage::EarmarkUpdated`] payload.
 pub fn encode_earmark_updated(earmark: &TreasuryEarmark) -> Result<Vec<u8>> {
     let msg = SeedAgentGossipMessage::EarmarkUpdated(earmark.clone());
-    bincode::serialize(&msg).map_err(|e| {
-        TokenError::InvalidParameter(format!("encode EarmarkUpdated: {}", e))
-    })
+    bincode::serialize(&msg)
+        .map_err(|e| TokenError::InvalidParameter(format!("encode EarmarkUpdated: {}", e)))
 }
 
 /// Bincode-encode a [`SeedAgentGossipMessage::AgentRegistered`] payload.
 pub fn encode_agent_registered(record: &SeedAgentRecord) -> Result<Vec<u8>> {
     let msg = SeedAgentGossipMessage::AgentRegistered(record.clone());
-    bincode::serialize(&msg).map_err(|e| {
-        TokenError::InvalidParameter(format!("encode AgentRegistered: {}", e))
-    })
+    bincode::serialize(&msg)
+        .map_err(|e| TokenError::InvalidParameter(format!("encode AgentRegistered: {}", e)))
 }
 
 /// Bincode-encode a [`SeedAgentGossipMessage::AgentStatusChanged`] payload.
-pub fn encode_agent_status_changed(
-    agent_did: &str,
-    status: SeedAgentStatus,
-) -> Result<Vec<u8>> {
+pub fn encode_agent_status_changed(agent_did: &str, status: SeedAgentStatus) -> Result<Vec<u8>> {
     let msg = SeedAgentGossipMessage::AgentStatusChanged {
         agent_did: agent_did.to_string(),
         status,
     };
-    bincode::serialize(&msg).map_err(|e| {
-        TokenError::InvalidParameter(format!("encode AgentStatusChanged: {}", e))
-    })
+    bincode::serialize(&msg)
+        .map_err(|e| TokenError::InvalidParameter(format!("encode AgentStatusChanged: {}", e)))
 }
 
 /// Bincode-encode a [`SeedAgentGossipMessage::MonthlyRefillCompleted`] payload.
@@ -117,20 +110,15 @@ pub fn encode_monthly_refill_completed(
         month,
         earmark_snapshot: earmark_snapshot.clone(),
     };
-    bincode::serialize(&msg).map_err(|e| {
-        TokenError::InvalidParameter(format!(
-            "encode MonthlyRefillCompleted: {}",
-            e
-        ))
-    })
+    bincode::serialize(&msg)
+        .map_err(|e| TokenError::InvalidParameter(format!("encode MonthlyRefillCompleted: {}", e)))
 }
 
 /// Decode an inbound gossip payload and reject any message that does not
 /// match the topic it arrived on. Returns the typed variant on success.
 pub fn decode_for_topic(topic: &str, bytes: &[u8]) -> Result<SeedAgentGossipMessage> {
-    let msg: SeedAgentGossipMessage = bincode::deserialize(bytes).map_err(|e| {
-        TokenError::InvalidParameter(format!("decode SeedAgent gossip: {}", e))
-    })?;
+    let msg: SeedAgentGossipMessage = bincode::deserialize(bytes)
+        .map_err(|e| TokenError::InvalidParameter(format!("decode SeedAgent gossip: {}", e)))?;
     if topic != SEED_AGENTS_TOPIC {
         return Err(TokenError::InvalidParameter(format!(
             "unexpected SeedAgent gossip topic '{}'",
@@ -144,8 +132,8 @@ pub fn decode_for_topic(topic: &str, bytes: &[u8]) -> Result<SeedAgentGossipMess
 mod tests {
     use super::*;
     use crate::seed_agent::{
-        CounterpartyFilter, DecaySchedule, OperationKind, SpendCaps, TreasuryEarmark,
-        DEFAULT_SURPLUS_BURN_BPS,
+        CounterpartyFilter, DEFAULT_SURPLUS_BURN_BPS, DecaySchedule, OperationKind, SpendCaps,
+        TreasuryEarmark,
     };
     use tenzro_types::primitives::{Hash, Timestamp};
 
@@ -256,13 +244,8 @@ mod tests {
     #[test]
     fn roundtrip_monthly_refill_completed() {
         let e = sample_earmark();
-        let bytes = encode_monthly_refill_completed(
-            "did:tenzro:machine:seed:001",
-            123,
-            0,
-            &e,
-        )
-        .unwrap();
+        let bytes =
+            encode_monthly_refill_completed("did:tenzro:machine:seed:001", 123, 0, &e).unwrap();
         let decoded = decode_for_topic(SEED_AGENTS_TOPIC, &bytes).unwrap();
         match decoded {
             SeedAgentGossipMessage::MonthlyRefillCompleted {

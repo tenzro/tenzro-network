@@ -23,8 +23,8 @@ import pytest
 torch = pytest.importorskip("torch")
 pd = pytest.importorskip("pandas")
 
-from tenzro_trainer.adapters.timeseries import build_adapter  # noqa: E402
-from tenzro_trainer.gradient import (  # noqa: E402
+from tenzro_trainer.adapters.timeseries import build_adapter
+from tenzro_trainer.gradient import (
     TrainerKey,
     build_outer_gradient,
     compute_outer_delta,
@@ -32,13 +32,12 @@ from tenzro_trainer.gradient import (  # noqa: E402
     partition_state_dict,
     serialize_fragment,
 )
-from tenzro_trainer.inner_loop import (  # noqa: E402
+from tenzro_trainer.inner_loop import (
     load_partial_state,
     run_inner_loop,
     snapshot_state,
 )
-from tenzro_trainer.types import GradientQuantization  # noqa: E402
-
+from tenzro_trainer.types import GradientQuantization
 
 ARCHITECTURE = {"metadata": {"d_model": 64, "num_layers": 2, "num_heads": 4}}
 HYPERPARAMS = {"batch_size": 8}
@@ -60,7 +59,7 @@ def _write_shard(tmp_path, seed: int, n_points: int = 4096) -> str:
     return f"file://{path}"
 
 
-def _round_start_state() -> dict[str, "torch.Tensor"]:
+def _round_start_state() -> dict[str, torch.Tensor]:
     """The θ⁽⁰⁾ the syncer broadcasts to every trainer at round start.
 
     In decoupled outer aggregation the trainers do not independently re-initialize — they all
@@ -71,8 +70,8 @@ def _round_start_state() -> dict[str, "torch.Tensor"]:
 
 
 def _trainer_delta(
-    shard_uri: str, start_state: dict[str, "torch.Tensor"]
-) -> dict[str, "torch.Tensor"]:
+    shard_uri: str, start_state: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
     """Run one real inner loop from the broadcast θ⁽⁰⁾, return the outer delta.
 
     Fresh adapter → fresh optimizer state, but its trainable params are first
@@ -141,10 +140,10 @@ def test_decentralized_round_aggregate_is_mean_of_deltas(tmp_path, n_trainers):
     #
     # Per trainer: partition the delta into fragments, serialize + sign each,
     # then decode back exactly as the syncer would off the wire.
-    decoded_per_trainer: list[dict[str, "torch.Tensor"]] = []
+    decoded_per_trainer: list[dict[str, torch.Tensor]] = []
     for t_idx, delta in enumerate(deltas):
         fragments = partition_state_dict(delta, FRAGMENT_COUNT)
-        decoded: dict[str, "torch.Tensor"] = {}
+        decoded: dict[str, torch.Tensor] = {}
         for f_idx, frag in enumerate(fragments):
             blob = serialize_fragment(f_idx, frag, quant)
             gradient = build_outer_gradient(

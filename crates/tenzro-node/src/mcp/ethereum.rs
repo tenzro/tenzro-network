@@ -14,10 +14,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router, Json, ServerHandler,
+    Json, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 
@@ -29,9 +27,13 @@ use super::server::RpcPassthroughOutput;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EthGetPriceParams {
-    #[schemars(description = "Chainlink AggregatorV3Interface data feed address (default: ETH/USD 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419)")]
+    #[schemars(
+        description = "Chainlink AggregatorV3Interface data feed address (default: ETH/USD 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419)"
+    )]
     pub feed_address: Option<String>,
-    #[schemars(description = "Chain ID — 1 for mainnet (default), 8453 for Base, 42161 for Arbitrum. Selects the dRPC chain-specific URL for the feed read.")]
+    #[schemars(
+        description = "Chain ID — 1 for mainnet (default), 8453 for Base, 42161 for Arbitrum. Selects the dRPC chain-specific URL for the feed read."
+    )]
     pub chain_id: Option<u64>,
 }
 
@@ -58,7 +60,9 @@ pub struct EthGetFeeHistoryParams {
     pub block_count: Option<String>,
     #[schemars(description = "Newest block ('latest' by default, or hex block number)")]
     pub newest_block: Option<String>,
-    #[schemars(description = "Reward percentiles as JSON array of floats (e.g. [25.0, 50.0, 75.0])")]
+    #[schemars(
+        description = "Reward percentiles as JSON array of floats (e.g. [25.0, 50.0, 75.0])"
+    )]
     pub reward_percentiles: Option<Vec<f64>>,
 }
 
@@ -68,7 +72,9 @@ pub struct EthGetFeeHistoryParams {
 pub struct EthGetBalanceParams {
     #[schemars(description = "Ethereum address (hex, with or without 0x prefix)")]
     pub address: String,
-    #[schemars(description = "Block parameter ('latest', 'earliest', 'pending', or hex block number). Default: 'latest'")]
+    #[schemars(
+        description = "Block parameter ('latest', 'earliest', 'pending', or hex block number). Default: 'latest'"
+    )]
     pub block: Option<String>,
 }
 
@@ -76,7 +82,9 @@ pub struct EthGetBalanceParams {
 pub struct EthGetTokenBalanceParams {
     #[schemars(description = "ERC-20 token contract address (hex, with or without 0x prefix)")]
     pub token_address: String,
-    #[schemars(description = "Owner address to check balance for (hex, with or without 0x prefix)")]
+    #[schemars(
+        description = "Owner address to check balance for (hex, with or without 0x prefix)"
+    )]
     pub owner_address: String,
 }
 
@@ -88,9 +96,13 @@ pub struct EthGetTransactionParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EthGetBlockParams {
-    #[schemars(description = "Block number as hex string (e.g. '0x10d4f') or tag ('latest', 'earliest', 'pending'). Default: 'latest'")]
+    #[schemars(
+        description = "Block number as hex string (e.g. '0x10d4f') or tag ('latest', 'earliest', 'pending'). Default: 'latest'"
+    )]
     pub block_number: Option<String>,
-    #[schemars(description = "If true, return full transaction objects instead of just hashes. Default: false")]
+    #[schemars(
+        description = "If true, return full transaction objects instead of just hashes. Default: false"
+    )]
     pub full_transactions: Option<bool>,
 }
 
@@ -110,7 +122,9 @@ pub struct EthResolveEnsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EthLookupEnsParams {
-    #[schemars(description = "Ethereum address to reverse-lookup (hex, with or without 0x prefix)")]
+    #[schemars(
+        description = "Ethereum address to reverse-lookup (hex, with or without 0x prefix)"
+    )]
     pub address: String,
 }
 
@@ -122,15 +136,21 @@ pub struct EthCallContractParams {
     pub to: String,
     #[schemars(description = "Hex-encoded calldata (with or without 0x prefix)")]
     pub data: String,
-    #[schemars(description = "Block parameter ('latest', 'earliest', 'pending', or hex block number). Default: 'latest'")]
+    #[schemars(
+        description = "Block parameter ('latest', 'earliest', 'pending', or hex block number). Default: 'latest'"
+    )]
     pub block: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EthEncodeFunctionParams {
-    #[schemars(description = "Canonical function signature (e.g. 'transfer(address,uint256)', 'approve(address,uint256)', 'balanceOf(address)')")]
+    #[schemars(
+        description = "Canonical function signature (e.g. 'transfer(address,uint256)', 'approve(address,uint256)', 'balanceOf(address)')"
+    )]
     pub function_sig: String,
-    #[schemars(description = "Arguments as JSON array of hex-encoded values (each will be left-padded to 32 bytes). E.g. ['0xRecipientAddress', '0xde0b6b3a7640000']")]
+    #[schemars(
+        description = "Arguments as JSON array of hex-encoded values (each will be left-padded to 32 bytes). E.g. ['0xRecipientAddress', '0xde0b6b3a7640000']"
+    )]
     pub args: Vec<String>,
 }
 
@@ -140,7 +160,9 @@ pub struct EthEncodeFunctionParams {
 pub struct EthRegisterAgent8004Params {
     #[schemars(description = "Human-readable agent name")]
     pub agent_name: String,
-    #[schemars(description = "List of capability strings (e.g. ['nlp', 'code-generation', 'web-search'])")]
+    #[schemars(
+        description = "List of capability strings (e.g. ['nlp', 'code-generation', 'web-search'])"
+    )]
     pub capabilities: Vec<String>,
     #[schemars(description = "IPFS or HTTPS URI pointing to full agent metadata JSON")]
     pub metadata_uri: String,
@@ -162,7 +184,9 @@ pub struct EthGetAttestationParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EthSendRawTransactionParams {
-    #[schemars(description = "Signed RLP-encoded transaction as hex (0x-prefixed). Build with the tenzro_signTransaction helper or any EIP-1559/legacy signer.")]
+    #[schemars(
+        description = "Signed RLP-encoded transaction as hex (0x-prefixed). Build with the tenzro_signTransaction helper or any EIP-1559/legacy signer."
+    )]
     pub raw_tx: String,
 }
 
@@ -180,7 +204,9 @@ fn err_invalid_params(msg: impl Into<String>) -> ErrorData {
     }
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn json_result(
+    value: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
@@ -188,7 +214,9 @@ fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthro
 ///
 /// Used by tools that return a single textual value (e.g. transaction hash,
 /// confirmation message) rather than a structured JSON envelope.
-fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn text_result(
+    text: impl Into<String>,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput {
         result: serde_json::json!({ "message": text.into() }),
     }))
@@ -268,10 +296,14 @@ fn hex_to_i128(hex: &str) -> Result<i128, String> {
         return Ok(0);
     }
     // Handle two's complement for negative values in 256-bit words
-    if clean.len() == 64 && clean.starts_with(['8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', 'F']) {
+    if clean.len() == 64
+        && clean.starts_with([
+            '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', 'F',
+        ])
+    {
         // Negative value — parse as unsigned then convert
-        let unsigned = u128::from_str_radix(clean, 16)
-            .map_err(|e| format!("Invalid hex '{}': {}", hex, e))?;
+        let unsigned =
+            u128::from_str_radix(clean, 16).map_err(|e| format!("Invalid hex '{}': {}", hex, e))?;
         Ok(unsigned as i128)
     } else {
         i128::from_str_radix(clean, 16).map_err(|e| format!("Invalid hex '{}': {}", hex, e))
@@ -427,7 +459,8 @@ fn extract_string_from_resolver(hex_str: &str) -> Option<String> {
                 && let Ok(bytes) = hex::decode(&hex_str[data_start..data_end])
                 && let Ok(s) = String::from_utf8(bytes)
                 && s.contains('.')
-                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
             {
                 return Some(s);
             }
@@ -588,7 +621,9 @@ impl EthereumMcpServer {
     //  1. DeFi Tools
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Get token price from a Chainlink AggregatorV3Interface data feed via eth_call to latestRoundData(). Default feed: ETH/USD on mainnet (0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419). Returns price with 8 decimal precision, round ID, and update timestamps.")]
+    #[tool(
+        description = "Get token price from a Chainlink AggregatorV3Interface data feed via eth_call to latestRoundData(). Default feed: ETH/USD on mainnet (0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419). Returns price with 8 decimal precision, round ID, and update timestamps."
+    )]
     async fn eth_get_price(
         &self,
         Parameters(params): Parameters<EthGetPriceParams>,
@@ -653,7 +688,9 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "Get the current gas price from the Ethereum network via eth_gasPrice JSON-RPC. Returns the gas price in wei, Gwei, and hex.")]
+    #[tool(
+        description = "Get the current gas price from the Ethereum network via eth_gasPrice JSON-RPC. Returns the gas price in wei, Gwei, and hex."
+    )]
     async fn eth_get_gas_price(
         &self,
         Parameters(_params): Parameters<EthGetGasPriceParams>,
@@ -672,7 +709,9 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "Estimate gas required for a transaction via eth_estimateGas. Params: to (required), from/data/value (optional). Returns estimated gas in decimal and hex.")]
+    #[tool(
+        description = "Estimate gas required for a transaction via eth_estimateGas. Params: to (required), from/data/value (optional). Returns estimated gas in decimal and hex."
+    )]
     async fn eth_estimate_gas(
         &self,
         Parameters(params): Parameters<EthEstimateGasParams>,
@@ -706,14 +745,18 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "Get fee history for recent blocks via eth_feeHistory. Returns base fees per gas, gas used ratios, and reward percentiles for EIP-1559 gas estimation.")]
+    #[tool(
+        description = "Get fee history for recent blocks via eth_feeHistory. Returns base fees per gas, gas used ratios, and reward percentiles for EIP-1559 gas estimation."
+    )]
     async fn eth_get_fee_history(
         &self,
         Parameters(params): Parameters<EthGetFeeHistoryParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let block_count = params.block_count.unwrap_or_else(|| "5".to_string());
         let newest_block = params.newest_block.unwrap_or_else(|| "latest".to_string());
-        let percentiles = params.reward_percentiles.unwrap_or_else(|| vec![25.0, 50.0, 75.0]);
+        let percentiles = params
+            .reward_percentiles
+            .unwrap_or_else(|| vec![25.0, 50.0, 75.0]);
 
         // eth_feeHistory expects block_count as hex
         let block_count_num: u64 = block_count
@@ -735,7 +778,9 @@ impl EthereumMcpServer {
     //  2. Account Tools
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Get the ETH balance of an address via eth_getBalance. Returns balance in wei, Gwei, and ETH.")]
+    #[tool(
+        description = "Get the ETH balance of an address via eth_getBalance. Returns balance in wei, Gwei, and ETH."
+    )]
     async fn eth_get_balance(
         &self,
         Parameters(params): Parameters<EthGetBalanceParams>,
@@ -761,7 +806,9 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "Get ERC-20 token balance for an address via eth_call to balanceOf(address). Params: token_address (ERC-20 contract), owner_address. Returns raw balance (caller must divide by 10^decimals for human-readable amount).")]
+    #[tool(
+        description = "Get ERC-20 token balance for an address via eth_call to balanceOf(address). Params: token_address (ERC-20 contract), owner_address. Returns raw balance (caller must divide by 10^decimals for human-readable amount)."
+    )]
     async fn eth_get_token_balance(
         &self,
         Parameters(params): Parameters<EthGetTokenBalanceParams>,
@@ -791,7 +838,9 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "Get transaction details by hash via eth_getTransactionByHash. Returns sender, recipient, value, gas, input data, block number, and nonce.")]
+    #[tool(
+        description = "Get transaction details by hash via eth_getTransactionByHash. Returns sender, recipient, value, gas, input data, block number, and nonce."
+    )]
     async fn eth_get_transaction(
         &self,
         Parameters(params): Parameters<EthGetTransactionParams>,
@@ -799,10 +848,7 @@ impl EthereumMcpServer {
         let tx_hash = normalize_hex(&params.tx_hash);
 
         let result = self
-            .rpc_call(
-                "eth_getTransactionByHash",
-                serde_json::json!([tx_hash]),
-            )
+            .rpc_call("eth_getTransactionByHash", serde_json::json!([tx_hash]))
             .await?;
 
         if result.is_null() {
@@ -815,14 +861,14 @@ impl EthereumMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get block by number via eth_getBlockByNumber. Params: block_number (hex or 'latest'), full_transactions (bool, default false). Returns block header, transactions, and metadata.")]
+    #[tool(
+        description = "Get block by number via eth_getBlockByNumber. Params: block_number (hex or 'latest'), full_transactions (bool, default false). Returns block header, transactions, and metadata."
+    )]
     async fn eth_get_block(
         &self,
         Parameters(params): Parameters<EthGetBlockParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let block_number = params
-            .block_number
-            .unwrap_or_else(|| "latest".to_string());
+        let block_number = params.block_number.unwrap_or_else(|| "latest".to_string());
         let full_txs = params.full_transactions.unwrap_or(false);
 
         let result = self
@@ -842,7 +888,9 @@ impl EthereumMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get transaction receipt by hash via eth_getTransactionReceipt. Returns status (0x0=failure, 0x1=success), gas used, logs, contract address (if deployment), and block info.")]
+    #[tool(
+        description = "Get transaction receipt by hash via eth_getTransactionReceipt. Returns status (0x0=failure, 0x1=success), gas used, logs, contract address (if deployment), and block info."
+    )]
     async fn eth_get_transaction_receipt(
         &self,
         Parameters(params): Parameters<EthGetTransactionReceiptParams>,
@@ -850,10 +898,7 @@ impl EthereumMcpServer {
         let tx_hash = normalize_hex(&params.tx_hash);
 
         let result = self
-            .rpc_call(
-                "eth_getTransactionReceipt",
-                serde_json::json!([tx_hash]),
-            )
+            .rpc_call("eth_getTransactionReceipt", serde_json::json!([tx_hash]))
             .await?;
 
         if result.is_null() {
@@ -870,7 +915,9 @@ impl EthereumMcpServer {
     //  3. ENS Tools
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Resolve an ENS name to an Ethereum address. Tries the ENS Universal Resolver on-chain via eth_call (resolve(bytes,bytes) at 0xc0497E381f536Be9ce14B0dD3817cBcAe57d2F62). Falls back to the OnchainKit ENS API as a secondary source. Params: name (e.g. 'vitalik.eth').")]
+    #[tool(
+        description = "Resolve an ENS name to an Ethereum address. Tries the ENS Universal Resolver on-chain via eth_call (resolve(bytes,bytes) at 0xc0497E381f536Be9ce14B0dD3817cBcAe57d2F62). Falls back to the OnchainKit ENS API as a secondary source. Params: name (e.g. 'vitalik.eth')."
+    )]
     async fn eth_resolve_ens(
         &self,
         Parameters(params): Parameters<EthResolveEnsParams>,
@@ -911,10 +958,7 @@ impl EthereumMcpServer {
 
         // Fallback: OnchainKit ENS resolution API
         // ENS names are ASCII-safe so no percent-encoding needed
-        let api_url = format!(
-            "https://ens.api.onchainkit.com/api/resolve?name={}",
-            name
-        );
+        let api_url = format!("https://ens.api.onchainkit.com/api/resolve?name={}", name);
 
         if let Ok(resp) = self.http.get(&api_url).send().await
             && resp.status().is_success()
@@ -941,7 +985,9 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "Reverse-lookup an Ethereum address to its ENS name via the Universal Resolver on-chain. Constructs <address>.addr.reverse and calls resolve(). Falls back to OnchainKit ENS API. Params: address (hex).")]
+    #[tool(
+        description = "Reverse-lookup an Ethereum address to its ENS name via the Universal Resolver on-chain. Constructs <address>.addr.reverse and calls resolve(). Falls back to OnchainKit ENS API. Params: address (hex)."
+    )]
     async fn eth_lookup_ens(
         &self,
         Parameters(params): Parameters<EthLookupEnsParams>,
@@ -987,20 +1033,20 @@ impl EthereumMcpServer {
 
         if let Ok(resp) = self.http.get(&api_url).send().await
             && resp.status().is_success()
-                && let Ok(body) = resp.text().await
-                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
-                        && let Some(ens_name) = json
-                            .get("name")
-                            .or_else(|| json.get("ens"))
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                        {
-                            return json_result(serde_json::json!({
-                                "address": address,
-                                "name": ens_name,
-                                "source": "onchainkit-ens-api",
-                            }));
-                        }
+            && let Ok(body) = resp.text().await
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+            && let Some(ens_name) = json
+                .get("name")
+                .or_else(|| json.get("ens"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        {
+            return json_result(serde_json::json!({
+                "address": address,
+                "name": ens_name,
+                "source": "onchainkit-ens-api",
+            }));
+        }
 
         json_result(serde_json::json!({
             "address": address,
@@ -1013,7 +1059,9 @@ impl EthereumMcpServer {
     //  4. Smart Contract Tools
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Execute a read-only eth_call against a smart contract. Params: to (contract address), data (hex-encoded calldata), block (default 'latest'). Returns the raw hex result. Use eth_encode_function to build calldata from a function signature and arguments.")]
+    #[tool(
+        description = "Execute a read-only eth_call against a smart contract. Params: to (contract address), data (hex-encoded calldata), block (default 'latest'). Returns the raw hex result. Use eth_encode_function to build calldata from a function signature and arguments."
+    )]
     async fn eth_call_contract(
         &self,
         Parameters(params): Parameters<EthCallContractParams>,
@@ -1032,7 +1080,9 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "ABI-encode a function call. Computes the 4-byte selector from the canonical function signature via Keccak-256, then left-pads each argument to 32 bytes. Returns the complete hex-encoded calldata ready for eth_call or a transaction. Example: function_sig='transfer(address,uint256)', args=['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', '0xde0b6b3a7640000'].")]
+    #[tool(
+        description = "ABI-encode a function call. Computes the 4-byte selector from the canonical function signature via Keccak-256, then left-pads each argument to 32 bytes. Returns the complete hex-encoded calldata ready for eth_call or a transaction. Example: function_sig='transfer(address,uint256)', args=['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', '0xde0b6b3a7640000']."
+    )]
     async fn eth_encode_function(
         &self,
         Parameters(params): Parameters<EthEncodeFunctionParams>,
@@ -1053,10 +1103,7 @@ impl EthereumMcpServer {
         for (i, arg) in params.args.iter().enumerate() {
             let clean = strip_0x(arg.trim());
             if clean.is_empty() {
-                return Err(err_invalid_params(format!(
-                    "Argument {} is empty",
-                    i
-                )));
+                return Err(err_invalid_params(format!("Argument {} is empty", i)));
             }
             if clean.len() > 64 {
                 return Err(err_invalid_params(format!(
@@ -1083,7 +1130,9 @@ impl EthereumMcpServer {
     //  5. ERC-8004 Agent Registry
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Build transaction data for registering an AI agent via ERC-8004 Agent Registry. ERC-8004 defines an on-chain registry for autonomous AI agents with capabilities, metadata URI, and owner tracking. Returns the ABI-encoded function selector and parameter breakdown for registerAgent(string,string[],string). The caller must sign and submit the transaction to the registry contract.")]
+    #[tool(
+        description = "Build transaction data for registering an AI agent via ERC-8004 Agent Registry. ERC-8004 defines an on-chain registry for autonomous AI agents with capabilities, metadata URI, and owner tracking. Returns the ABI-encoded function selector and parameter breakdown for registerAgent(string,string[],string). The caller must sign and submit the transaction to the registry contract."
+    )]
     async fn eth_register_agent_8004(
         &self,
         Parameters(params): Parameters<EthRegisterAgent8004Params>,
@@ -1117,21 +1166,20 @@ impl EthereumMcpServer {
         }))
     }
 
-    #[tool(description = "Look up an AI agent in the ERC-8004 Agent Registry by agent ID (uint256) or owner address. Builds the calldata for getAgent(uint256) or getAgentsByOwner(address) that can be used with eth_call_contract against a deployed ERC-8004 registry.")]
+    #[tool(
+        description = "Look up an AI agent in the ERC-8004 Agent Registry by agent ID (uint256) or owner address. Builds the calldata for getAgent(uint256) or getAgentsByOwner(address) that can be used with eth_call_contract against a deployed ERC-8004 registry."
+    )]
     async fn eth_lookup_agent_8004(
         &self,
         Parameters(params): Parameters<EthLookupAgent8004Params>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let input = params.agent_id_or_address.trim();
         if input.is_empty() {
-            return Err(err_invalid_params(
-                "agent_id_or_address cannot be empty",
-            ));
+            return Err(err_invalid_params("agent_id_or_address cannot be empty"));
         }
 
         let clean = strip_0x(input);
-        let is_address = clean.len() == 40
-            && clean.chars().all(|c| c.is_ascii_hexdigit());
+        let is_address = clean.len() == 40 && clean.chars().all(|c| c.is_ascii_hexdigit());
 
         if is_address {
             // getAgentsByOwner(address)
@@ -1159,9 +1207,9 @@ impl EthereumMcpServer {
             let agent_id_hex = if input.starts_with("0x") || input.starts_with("0X") {
                 pad_to_32_bytes(clean)
             } else {
-                let id: u128 = input
-                    .parse()
-                    .map_err(|_| err_invalid_params("agent_id must be a decimal number or hex value"))?;
+                let id: u128 = input.parse().map_err(|_| {
+                    err_invalid_params("agent_id must be a decimal number or hex value")
+                })?;
                 format!("{:064x}", id)
             };
 
@@ -1183,7 +1231,9 @@ impl EthereumMcpServer {
     //  6. EAS (Ethereum Attestation Service)
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Query an attestation from Ethereum Attestation Service (EAS) by UID. Posts a GraphQL query to the EAS indexer at easscan.org. Returns attester, recipient, schema, data, timestamp, revocation status, and decoded data when available.")]
+    #[tool(
+        description = "Query an attestation from Ethereum Attestation Service (EAS) by UID. Posts a GraphQL query to the EAS indexer at easscan.org. Returns attester, recipient, schema, data, timestamp, revocation status, and decoded data when available."
+    )]
     async fn eth_get_attestation(
         &self,
         Parameters(params): Parameters<EthGetAttestationParams>,
@@ -1246,10 +1296,7 @@ impl EthereumMcpServer {
         let json: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| err_internal(format!("Failed to parse EAS response: {}", e)))?;
 
-        if let Some(attestation) = json
-            .pointer("/data/attestation")
-            .filter(|v| !v.is_null())
-        {
+        if let Some(attestation) = json.pointer("/data/attestation").filter(|v| !v.is_null()) {
             json_result(serde_json::json!({
                 "uid": uid,
                 "attestation": attestation,
@@ -1271,7 +1318,9 @@ impl EthereumMcpServer {
     //  7. Transaction submission
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Broadcast a pre-signed Ethereum transaction via eth_sendRawTransaction. Params: raw_tx (hex-encoded RLP-signed transaction, with or without 0x prefix). Returns the resulting transaction hash as plain text. Use eth_encode_function + eth_estimate_gas + an external signer (or tenzro_signTransaction with chain_id matching the target EVM chain) to build the raw_tx.")]
+    #[tool(
+        description = "Broadcast a pre-signed Ethereum transaction via eth_sendRawTransaction. Params: raw_tx (hex-encoded RLP-signed transaction, with or without 0x prefix). Returns the resulting transaction hash as plain text. Use eth_encode_function + eth_estimate_gas + an external signer (or tenzro_signTransaction with chain_id matching the target EVM chain) to build the raw_tx."
+    )]
     async fn eth_send_raw_transaction(
         &self,
         Parameters(params): Parameters<EthSendRawTransactionParams>,
@@ -1284,10 +1333,12 @@ impl EthereumMcpServer {
 
         let tx_hash = resp_value
             .as_str()
-            .ok_or_else(|| err_internal(format!(
-                "eth_sendRawTransaction returned non-string result: {}",
-                resp_value
-            )))?
+            .ok_or_else(|| {
+                err_internal(format!(
+                    "eth_sendRawTransaction returned non-string result: {}",
+                    resp_value
+                ))
+            })?
             .to_string();
 
         text_result(tx_hash)
@@ -1359,7 +1410,7 @@ pub async fn start_ethereum_mcp_server_with_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> crate::error::Result<()> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     // If `ETHEREUM_RPC_URL` is set, scope the per-session server to it via
@@ -1393,12 +1444,11 @@ pub async fn start_ethereum_mcp_server_with_shutdown(
 
     let app = axum::Router::new()
         .nest_service("/mcp", service)
-        .route(
-            "/health",
-            axum::routing::get(|| async { "ok" }),
-        )
+        .route("/health", axum::routing::get(|| async { "ok" }))
         .layer(tower::limit::ConcurrencyLimitLayer::new(100))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            2 * 1024 * 1024,
+        ));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
@@ -1468,14 +1518,20 @@ mod tests {
     fn test_hex_to_u128() {
         assert_eq!(hex_to_u128("0x1").unwrap(), 1);
         assert_eq!(hex_to_u128("0xff").unwrap(), 255);
-        assert_eq!(hex_to_u128("0xde0b6b3a7640000").unwrap(), 1_000_000_000_000_000_000);
+        assert_eq!(
+            hex_to_u128("0xde0b6b3a7640000").unwrap(),
+            1_000_000_000_000_000_000
+        );
         assert_eq!(hex_to_u128("").unwrap(), 0);
         assert!(hex_to_u128("0xZZZ").is_err());
     }
 
     #[test]
     fn test_wei_to_eth() {
-        assert_eq!(wei_to_eth(1_000_000_000_000_000_000), "1.000000000000000000");
+        assert_eq!(
+            wei_to_eth(1_000_000_000_000_000_000),
+            "1.000000000000000000"
+        );
         assert_eq!(wei_to_eth(0), "0.000000000000000000");
         assert_eq!(wei_to_eth(500_000_000_000_000_000), "0.500000000000000000");
     }

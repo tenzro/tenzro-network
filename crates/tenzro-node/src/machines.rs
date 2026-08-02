@@ -186,9 +186,7 @@ fn validate_caid(caid: &str) -> Result<(), MachineError> {
 
 fn validate_resources(r: &MachineResources) -> Result<(), MachineError> {
     if r.vcpus == 0 || r.vcpus > 32 {
-        return Err(MachineError::InvalidDeployment(
-            "vcpus must be 1-32".into(),
-        ));
+        return Err(MachineError::InvalidDeployment("vcpus must be 1-32".into()));
     }
     if r.mem_mib < 64 || r.mem_mib > 131_072 {
         return Err(MachineError::InvalidDeployment(
@@ -567,7 +565,10 @@ mod supervisor {
                 let plaintext =
                     tenzro_crypto::encryption::envelope_decrypt(&self.sealing_key, &envelope)
                         .map_err(|e| {
-                            MachineError::Supervisor(format!("sealed env {}: unseal: {e}", var.name))
+                            MachineError::Supervisor(format!(
+                                "sealed env {}: unseal: {e}",
+                                var.name
+                            ))
                         })?;
                 let value = String::from_utf8(plaintext).map_err(|e| {
                     MachineError::Supervisor(format!("sealed env {}: non-utf8: {e}", var.name))
@@ -585,12 +586,11 @@ mod supervisor {
             &self,
             deployment: &MachineDeployment,
         ) -> Result<std::net::SocketAddr, MachineError> {
-            if let Some(existing) = self.running.get(&deployment.id) {
-                if existing.version == deployment.version
-                    && existing.state == MachineRunState::Running
-                {
-                    return Ok(existing.guest_addr);
-                }
+            if let Some(existing) = self.running.get(&deployment.id)
+                && existing.version == deployment.version
+                && existing.state == MachineRunState::Running
+            {
+                return Ok(existing.guest_addr);
             }
             self.launch(deployment).await
         }
@@ -674,9 +674,9 @@ mod supervisor {
             let inst = format!("{}-v{}", deployment.id, deployment.version);
             let chroot = self.chroot_base.join(&inst);
             let root = chroot.join("root");
-            tokio::fs::create_dir_all(&root).await.map_err(|e| {
-                MachineError::Supervisor(format!("chroot {}: {e}", root.display()))
-            })?;
+            tokio::fs::create_dir_all(&root)
+                .await
+                .map_err(|e| MachineError::Supervisor(format!("chroot {}: {e}", root.display())))?;
 
             // Stage kernel + rootfs into the chroot. Firecracker (under the
             // jailer) resolves paths relative to the chroot root.
@@ -781,12 +781,8 @@ mod supervisor {
                     }),
                 )
                 .await?;
-                self.api_put(
-                    &api_sock,
-                    "/mmds",
-                    &serde_json::json!({ "env": env_obj }),
-                )
-                .await?;
+                self.api_put(&api_sock, "/mmds", &serde_json::json!({ "env": env_obj }))
+                    .await?;
             }
 
             self.api_put(
@@ -796,10 +792,8 @@ mod supervisor {
             )
             .await?;
 
-            let guest_addr = std::net::SocketAddr::new(
-                std::net::IpAddr::V4(guest_ip),
-                deployment.internal_port,
-            );
+            let guest_addr =
+                std::net::SocketAddr::new(std::net::IpAddr::V4(guest_ip), deployment.internal_port);
             self.wait_for_guest(guest_addr).await?;
             Ok(Booted {
                 guest_addr,
@@ -818,11 +812,7 @@ mod supervisor {
             host_ip: std::net::Ipv4Addr,
         ) -> Result<(), MachineError> {
             run_ok("ip", &["tuntap", "add", tap, "mode", "tap"]).await?;
-            run_ok(
-                "ip",
-                &["addr", "add", &format!("{host_ip}/30"), "dev", tap],
-            )
-            .await?;
+            run_ok("ip", &["addr", "add", &format!("{host_ip}/30"), "dev", tap]).await?;
             run_ok("ip", &["link", "set", tap, "up"]).await?;
             Ok(())
         }

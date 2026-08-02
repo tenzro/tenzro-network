@@ -8,9 +8,12 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use tenzro_types::tee::{TeeProviderInfo, TeeProviderStatus, TeeVendor, TeeCapacity, AttestationReport, TeeProviderPricing, AttestationResult};
 use crate::error::{Result, TeeError};
 use crate::traits::TeeProvider;
+use tenzro_types::tee::{
+    AttestationReport, AttestationResult, TeeCapacity, TeeProviderInfo, TeeProviderPricing,
+    TeeProviderStatus, TeeVendor,
+};
 
 /// Registry for tracking TEE providers on the Tenzro Network.
 ///
@@ -170,7 +173,10 @@ impl TeeRegistry {
 
     /// Gets all registered providers.
     pub fn get_all_providers(&self) -> Vec<TeeProviderInfo> {
-        self.providers.iter().map(|entry| entry.value().clone()).collect()
+        self.providers
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     /// Gets all providers of a specific vendor.
@@ -289,7 +295,10 @@ impl TeeRegistry {
                 }
             }
 
-            *stats.providers_by_vendor.entry(provider.vendor).or_insert(0) += 1;
+            *stats
+                .providers_by_vendor
+                .entry(provider.vendor)
+                .or_insert(0) += 1;
         }
 
         stats
@@ -433,7 +442,9 @@ mod tests {
             )
             .unwrap();
 
-        registry.update_status(&id2, TeeProviderStatus::Offline).unwrap();
+        registry
+            .update_status(&id2, TeeProviderStatus::Offline)
+            .unwrap();
 
         let active = registry.get_active_providers();
         assert_eq!(active.len(), 1);

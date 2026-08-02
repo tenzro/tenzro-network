@@ -44,17 +44,17 @@
 //! # }
 //! ```
 
-pub mod types;
-pub mod server;
 pub mod client;
-pub mod token_service;
 pub mod kya;
+pub mod server;
+pub mod token_service;
+pub mod types;
 
-pub use types::{
-    AgenticToken, AgenticTokenType, AgentPayChallenge, PurchaseIntent, PurchaseItem,
-    KyaVerification, KyaLevel, AgentPayDomainEvent,
-};
-pub use server::MastercardAgentPayServer;
 pub use client::MastercardAgentPayClient;
-pub use token_service::AgenticTokenService;
 pub use kya::KyaVerifier;
+pub use server::MastercardAgentPayServer;
+pub use token_service::AgenticTokenService;
+pub use types::{
+    AgentPayChallenge, AgentPayDomainEvent, AgenticToken, AgenticTokenType, KyaLevel,
+    KyaVerification, PurchaseIntent, PurchaseItem,
+};

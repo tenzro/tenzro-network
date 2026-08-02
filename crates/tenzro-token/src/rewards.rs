@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -539,8 +539,8 @@ impl RewardEngine {
             (RoleBucket::Provider, provider_bps),
             (RoleBucket::Ecosystem, ecosystem_bps),
         ] {
-            let bucket_rights = rights / 10_000 * share_bps as u128
-                + rights % 10_000 * share_bps as u128 / 10_000;
+            let bucket_rights =
+                rights / 10_000 * share_bps as u128 + rights % 10_000 * share_bps as u128 / 10_000;
             let total_weight = bucket_totals.get(&bucket).copied().unwrap_or(0);
             if bucket_rights == 0 || total_weight == 0 {
                 continue; // Unmatched share lapses.
@@ -590,7 +590,11 @@ impl RewardEngine {
                 if self.storage.is_some() {
                     ops.push(WriteOp::Put {
                         cf: CF_TOKENS.to_string(),
-                        key: RewardCoupon::storage_key(coupon.epoch, coupon.bucket, &coupon.address),
+                        key: RewardCoupon::storage_key(
+                            coupon.epoch,
+                            coupon.bucket,
+                            &coupon.address,
+                        ),
                         value: serde_json::to_vec(&*coupon)
                             .map_err(|e| TokenError::StorageError(format!("encode coupon: {e}")))?,
                     });
@@ -1143,7 +1147,9 @@ mod tests {
         engine.close_epoch(0).unwrap();
         let issued = engine.coupons_for(&provider)[0].amount;
         // Claim attempted far past the window → coupon expires.
-        let err = engine.claim(&provider, CLAIM_WINDOW_EPOCHS + 2).unwrap_err();
+        let err = engine
+            .claim(&provider, CLAIM_WINDOW_EPOCHS + 2)
+            .unwrap_err();
         assert!(matches!(err, TokenError::NotFound(_)));
         let coupons = engine.coupons_for(&provider);
         assert_eq!(coupons[0].status, CouponStatus::Expired);

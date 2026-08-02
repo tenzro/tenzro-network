@@ -58,9 +58,9 @@ impl EscrowResolver for EscrowManagerResolver {
                 if msg.contains("not found") || msg.contains("Not found") {
                     return Ok(None);
                 }
-                return Err(tenzro_payments::PaymentError::VerificationFailed(
-                    format!("EscrowManager::get_escrow failed: {e}"),
-                ));
+                return Err(tenzro_payments::PaymentError::VerificationFailed(format!(
+                    "EscrowManager::get_escrow failed: {e}"
+                )));
             }
         };
 

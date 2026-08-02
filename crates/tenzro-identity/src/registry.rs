@@ -19,13 +19,13 @@ use std::sync::Arc;
 use tenzro_crypto::composite::{
     CompositePublicKey, CompositeSignature, HybridSigner, HybridVerifier, StandardHybridVerifier,
 };
-use tenzro_storage::kv::{KvStore, CF_CREDENTIALS, CF_IDENTITIES};
+use tenzro_storage::kv::{CF_CREDENTIALS, CF_IDENTITIES, KvStore};
 use tenzro_types::fees::ServiceFeeSchedule;
 use tenzro_types::identity::{IdentityType as TenzroIdentityType, KycTier};
 use tenzro_types::primitives::{Address, BlockHeight};
 use tenzro_types::principal_chain::{
-    anonymous_chain_for_address, BondLookup, PrincipalChain, PrincipalChainResolver,
-    PrincipalLink, PrincipalRole, MAX_DELEGATION_DEPTH,
+    BondLookup, MAX_DELEGATION_DEPTH, PrincipalChain, PrincipalChainResolver, PrincipalLink,
+    PrincipalRole, anonymous_chain_for_address,
 };
 use tracing::{debug, info, warn};
 
@@ -204,8 +204,7 @@ pub struct IdentityRegistry {
     /// choice (see `vendor/erc8004-daml/`). Best-effort, same semantics
     /// as the EVM and SVM mirrors: failures are logged but never fail
     /// the TDIP registration.
-    on_chain_agent_daml_registry:
-        Option<Arc<dyn crate::erc8004_daml::OnChainAgentDamlRegistry>>,
+    on_chain_agent_daml_registry: Option<Arc<dyn crate::erc8004_daml::OnChainAgentDamlRegistry>>,
     /// Optional AgentBond lookup (Spec 9). When wired, the principal-chain
     /// resolver populates `actor_bond` and `controller_bond_aggregate` on
     /// every receipt. Implemented by `tenzro_token::bond::BondManager` at
@@ -304,7 +303,10 @@ impl IdentityRegistry {
                     }
                 }
                 if loaded_revocations > 0 {
-                    info!("Loaded {} revocation records from storage", loaded_revocations);
+                    info!(
+                        "Loaded {} revocation records from storage",
+                        loaded_revocations
+                    );
                 }
             }
             Err(e) => {
@@ -324,12 +326,15 @@ impl IdentityRegistry {
                         if identity.status == IdentityStatus::Revoked
                             && !revocations.contains_key(&did_string)
                         {
-                            revocations.insert(did_string.clone(), RevocationEntry {
-                                did: did_string.clone(),
-                                revoked_at: identity.updated_at,
-                                reason: "loaded from storage".to_string(),
-                                revoked_by: "system".to_string(),
-                            });
+                            revocations.insert(
+                                did_string.clone(),
+                                RevocationEntry {
+                                    did: did_string.clone(),
+                                    revoked_at: identity.updated_at,
+                                    reason: "loaded from storage".to_string(),
+                                    revoked_by: "system".to_string(),
+                                },
+                            );
                         }
                         identities.insert(did_string, identity);
                         loaded += 1;
@@ -453,7 +458,10 @@ impl IdentityRegistry {
     /// When `revoke()` is called, the registry will publish the revocation
     /// event through this broadcaster after the local cascade completes so
     /// peer nodes can update their caches.
-    pub fn with_revocation_broadcaster(mut self, broadcaster: Arc<dyn RevocationBroadcaster>) -> Self {
+    pub fn with_revocation_broadcaster(
+        mut self,
+        broadcaster: Arc<dyn RevocationBroadcaster>,
+    ) -> Self {
         self.revocation_broadcaster = Some(broadcaster);
         self
     }
@@ -538,11 +546,7 @@ impl IdentityRegistry {
     ///
     /// Idempotent — re-applying the same event is a no-op write of the
     /// same value.
-    pub fn apply_erc8004_registered_event(
-        &self,
-        did: &str,
-        agent_id: u64,
-    ) -> Result<bool> {
+    pub fn apply_erc8004_registered_event(&self, did: &str, agent_id: u64) -> Result<bool> {
         let Some(mut entry) = self.identities.get_mut(did) else {
             return Ok(false);
         };
@@ -724,7 +728,10 @@ impl IdentityRegistry {
 
         info!(
             "Registered human identity: {} (name: {}, kyc: {:?}, fee: {} TNZO)",
-            did_string, display_name, kyc_tier, fee_required / 1_000_000_000_000_000_000
+            did_string,
+            display_name,
+            kyc_tier,
+            fee_required / 1_000_000_000_000_000_000
         );
 
         self.persist_identity(&did_string, &identity);
@@ -760,9 +767,10 @@ impl IdentityRegistry {
         let did = TenzroDid::new_human();
         let did_string = did.to_string();
 
-        let binder = self.wallet_binder.as_ref().ok_or_else(|| {
-            IdentityError::WalletError("no wallet binder configured".to_string())
-        })?;
+        let binder = self
+            .wallet_binder
+            .as_ref()
+            .ok_or_else(|| IdentityError::WalletError("no wallet binder configured".to_string()))?;
         let binding = binder.provision_wallet(&did_string).await?;
 
         let identity = TenzroIdentity {
@@ -928,9 +936,10 @@ impl IdentityRegistry {
         };
         let did_string = did.to_string();
 
-        let binder = self.wallet_binder.as_ref().ok_or_else(|| {
-            IdentityError::WalletError("no wallet binder configured".to_string())
-        })?;
+        let binder = self
+            .wallet_binder
+            .as_ref()
+            .ok_or_else(|| IdentityError::WalletError("no wallet binder configured".to_string()))?;
         let binding = binder.provision_wallet(&did_string).await?;
 
         let identity = TenzroIdentity {
@@ -1079,7 +1088,10 @@ impl IdentityRegistry {
 
         info!(
             "Registered machine identity: {} under controller: {} with capabilities: {:?}, fee: {} TNZO",
-            did_string, controller_did, capabilities, fee_required / 1_000_000_000_000_000_000
+            did_string,
+            controller_did,
+            capabilities,
+            fee_required / 1_000_000_000_000_000_000
         );
 
         // Add machine to controller's list
@@ -1119,7 +1131,9 @@ impl IdentityRegistry {
         public_key: Vec<u8>,
         capabilities: Vec<String>,
     ) -> Result<TenzroIdentity> {
-        let result = self.register_autonomous_machine_with_fee(public_key, capabilities).await?;
+        let result = self
+            .register_autonomous_machine_with_fee(public_key, capabilities)
+            .await?;
         Ok(result.identity)
     }
 
@@ -1169,7 +1183,9 @@ impl IdentityRegistry {
 
         info!(
             "Registered autonomous machine identity: {} with capabilities: {:?}, fee: {} TNZO",
-            did_string, capabilities, fee_required / 1_000_000_000_000_000_000
+            did_string,
+            capabilities,
+            fee_required / 1_000_000_000_000_000_000
         );
 
         // Dispatch the ERC-8004 mirror as a detached signed-tx submission.
@@ -1253,7 +1269,10 @@ impl IdentityRegistry {
 
         // Self-custodial wallets have no node-side wallet_id; use a stable,
         // public marker derived from the DID so audit logs can correlate.
-        let wallet_id = format!("byok-{}", &did_string[did_string.len().saturating_sub(12)..]);
+        let wallet_id = format!(
+            "byok-{}",
+            &did_string[did_string.len().saturating_sub(12)..]
+        );
 
         let identity = TenzroIdentity {
             did,
@@ -1323,11 +1342,18 @@ impl IdentityRegistry {
     ///
     /// `did_seed` is the DID the sealed handle was derived against, so the
     /// registered identity's DID matches the handle's `agent_did`.
+    ///
+    /// `metadata` carries the machine-identity evidence the caller collected
+    /// alongside the sealed handle — the hardware root the attestation
+    /// commits to, the identifier sources that produced it, and the
+    /// attestation report itself. Storing it here is what lets a later
+    /// resolver re-run the binding check against a DID it did not mint.
     pub async fn register_autonomous_machine_with_binding(
         &self,
         did: TenzroDid,
         binding: WalletBinding,
         capabilities: Vec<String>,
+        metadata: HashMap<String, String>,
     ) -> Result<RegistrationResult> {
         let did_string = did.to_string();
 
@@ -1357,7 +1383,7 @@ impl IdentityRegistry {
             services: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            metadata: HashMap::new(),
+            metadata,
             username: None,
         };
 
@@ -1411,9 +1437,7 @@ impl IdentityRegistry {
         // Metadata URI = the canonical DID URL. Future: route through a
         // gateway that resolves to the W3C DID document JSON.
         let metadata_uri = format!("did:{}", did_string.trim_start_matches("did:"));
-        if let Err(e) =
-            registry.mirror_register_agent(did_string, &agent_address, &metadata_uri)
-        {
+        if let Err(e) = registry.mirror_register_agent(did_string, &agent_address, &metadata_uri) {
             tracing::warn!(
                 "ERC-8004 mirror dispatch failed for {}: {} (TDIP registration unaffected)",
                 did_string,
@@ -1533,6 +1557,26 @@ impl IdentityRegistry {
         Ok(self.resolve(did)?.wallet_id)
     }
 
+    /// Reverse-lookup: find the local DID whose auto-provisioned MPC wallet
+    /// is `wallet_id`.
+    ///
+    /// The inverse of [`Self::find_wallet_id_for_did`]. Records that key on a
+    /// wallet rather than a DID — a custody session, a spending limit — need
+    /// this to answer "who owns this wallet?" before authorizing a mutation
+    /// against it. Without it such a record has no owner to check, and the
+    /// caller-supplied `wallet_id` ends up being both the subject and the
+    /// whole of the authorization.
+    ///
+    /// Linear scan, with the same caveat as [`Self::find_did_by_address`]:
+    /// fine at testnet sizes, wants a maintained reverse index past ~10⁵
+    /// identities.
+    pub fn find_did_by_wallet_id(&self, wallet_id: &str) -> Option<String> {
+        self.identities
+            .iter()
+            .find(|entry| entry.value().wallet_id == wallet_id)
+            .map(|entry| entry.key().clone())
+    }
+
     /// Finds the local identity owning the given raw public key, if any.
     ///
     /// Used by `tenzro_linkWalletForAuth` to bind a fresh OAuth session
@@ -1606,10 +1650,7 @@ impl IdentityRegistry {
         let frozen_at_block: BlockHeight = frozen_at_block.into();
         // Spec 9 bond lookup helper — resolves actor_bond + controller_bond
         // (singular, on the controller's own DID) + controller aggregate.
-        let actor_bond = self
-            .bond_lookup
-            .as_ref()
-            .and_then(|b| b.actor_bond(did));
+        let actor_bond = self.bond_lookup.as_ref().and_then(|b| b.actor_bond(did));
 
         // Resolve the actor itself; if unresolvable, return a synthetic
         // tombstoned chain rooted at the supplied DID.
@@ -1648,15 +1689,9 @@ impl IdentityRegistry {
                 .bond_lookup
                 .as_ref()
                 .and_then(|b| b.controller_aggregate(&actor_did));
-            return PrincipalChain::direct(
-                actor_did,
-                actor_type,
-                kyc,
-                actor_bond,
-                frozen_at_block,
-            )
-            .with_actor_bond(actor_bond)
-            .with_controller_bond_aggregate(controller_aggregate);
+            return PrincipalChain::direct(actor_did, actor_type, kyc, actor_bond, frozen_at_block)
+                .with_actor_bond(actor_bond)
+                .with_controller_bond_aggregate(controller_aggregate);
         }
 
         // Walk up the controller chain. We accumulate links top-down; the
@@ -1724,8 +1759,7 @@ impl IdentityRegistry {
                             parent_type,
                             TenzroIdentityType::Human | TenzroIdentityType::Institution
                         ) {
-                            controller_kyc_tier =
-                                parent.kyc_tier().map(|t| t.level()).unwrap_or(0);
+                            controller_kyc_tier = parent.kyc_tier().map(|t| t.level()).unwrap_or(0);
                         }
                     }
                     current_controller_did = next;
@@ -1805,11 +1839,7 @@ impl IdentityRegistry {
     /// Issues a credential to an identity.
     ///
     /// Rejects duplicate credential IDs (MEDIUM #129 replay protection).
-    pub fn issue_credential(
-        &self,
-        did: &str,
-        credential: VerifiableCredential,
-    ) -> Result<()> {
+    pub fn issue_credential(&self, did: &str, credential: VerifiableCredential) -> Result<()> {
         // Replay protection: reject duplicate credential IDs (MEDIUM #129)
         self.record_credential_id(&credential.id)?;
 
@@ -1825,10 +1855,7 @@ impl IdentityRegistry {
             )));
         }
 
-        info!(
-            "Issuing credential {:?} to {}",
-            credential.tenzro_type, did
-        );
+        info!("Issuing credential {:?} to {}", credential.tenzro_type, did);
 
         identity.credentials.push(credential);
         identity.updated_at = Utc::now();
@@ -1917,17 +1944,17 @@ impl IdentityRegistry {
             }
 
             match &machine.identity_data {
-                IdentityData::Machine { controller_did, .. } => controller_did
-                    .clone()
-                    .ok_or_else(|| {
+                IdentityData::Machine { controller_did, .. } => {
+                    controller_did.clone().ok_or_else(|| {
                         IdentityError::PermissionDenied(
                             "autonomous machines cannot inherit credentials".to_string(),
                         )
-                    })?,
+                    })?
+                }
                 _ => {
                     return Err(IdentityError::PermissionDenied(
                         "only machine identities can inherit credentials".to_string(),
-                    ))
+                    ));
                 }
             }
         };
@@ -2268,7 +2295,11 @@ impl IdentityRegistry {
                 controller_did,
                 reputation,
                 ..
-            } => (delegation_scope.clone(), controller_did.clone(), *reputation),
+            } => (
+                delegation_scope.clone(),
+                controller_did.clone(),
+                *reputation,
+            ),
             IdentityData::Human { .. } | IdentityData::Institution { .. } => {
                 // Humans and institutions bypass delegation enforcement entirely.
                 return Ok(());
@@ -2325,11 +2356,10 @@ impl IdentityRegistry {
             .ok_or_else(|| IdentityError::NotFound(did.to_string()))?;
 
         match &mut identity.identity_data {
-            IdentityData::Machine { delegation_scope, .. } => {
-                info!(
-                    "Updating delegation scope for machine identity: {}",
-                    did
-                );
+            IdentityData::Machine {
+                delegation_scope, ..
+            } => {
+                info!("Updating delegation scope for machine identity: {}", did);
                 *delegation_scope = new_scope;
                 identity.updated_at = Utc::now();
                 self.persist_identity(did, &identity);
@@ -2360,7 +2390,7 @@ impl IdentityRegistry {
             _ => {
                 return Err(IdentityError::PermissionDenied(
                     "only human / institution identities have controlled machines".to_string(),
-                ))
+                ));
             }
         };
         drop(identity);
@@ -2397,7 +2427,12 @@ impl IdentityRegistry {
     pub fn institution_count(&self) -> usize {
         self.identities
             .iter()
-            .filter(|entry| matches!(entry.value().identity_data, IdentityData::Institution { .. }))
+            .filter(|entry| {
+                matches!(
+                    entry.value().identity_data,
+                    IdentityData::Institution { .. }
+                )
+            })
             .count()
     }
 
@@ -2423,14 +2458,12 @@ impl IdentityRegistry {
         let issuer = self.resolve(&credential.issuer)?;
 
         // Get the first public key for verification
-        let pubkey = issuer
-            .public_keys
-            .first()
-            .ok_or_else(|| IdentityError::VerificationFailed("issuer has no public keys".to_string()))?;
+        let pubkey = issuer.public_keys.first().ok_or_else(|| {
+            IdentityError::VerificationFailed("issuer has no public keys".to_string())
+        })?;
 
         // Verify the credential proof
-        credential
-            .verify_proof(&pubkey.public_key)
+        credential.verify_proof(&pubkey.public_key)
     }
 
     /// Test-only helper that overwrites (or installs) an identity record by DID.
@@ -2607,10 +2640,7 @@ impl IdentityRegistry {
     /// When a `WalletBinder` is configured, the key comes from the wallet's
     /// keystore; otherwise we generate an ephemeral one so the identity still
     /// satisfies the structural invariant (test/no-binder paths only).
-    async fn provision_or_default(
-        &self,
-        did: &str,
-    ) -> Result<(Address, String, Vec<u8>, Vec<u8>)> {
+    async fn provision_or_default(&self, did: &str) -> Result<(Address, String, Vec<u8>, Vec<u8>)> {
         if let Some(ref binder) = self.wallet_binder {
             let binding = binder.provision_wallet(did).await?;
             Ok((
@@ -2755,14 +2785,13 @@ mod tests {
 
         assert!(machine.is_machine());
         assert!(machine.is_active());
-        assert_eq!(
-            machine.controller_did(),
-            Some(human.did_string().as_str())
-        );
+        assert_eq!(machine.controller_did(), Some(human.did_string().as_str()));
         assert_eq!(registry.total_count(), 2);
 
         // Verify controller's machine list was updated
-        let machines = registry.get_controlled_machines(&human.did_string()).unwrap();
+        let machines = registry
+            .get_controlled_machines(&human.did_string())
+            .unwrap();
         assert_eq!(machines.len(), 1);
         assert_eq!(machines[0].did_string(), machine.did_string());
     }
@@ -2968,13 +2997,25 @@ mod tests {
 
         // Verify ALL machines are cascaded revoked
         let revoked_machine1 = registry.resolve(&machine1.did_string()).unwrap();
-        assert_eq!(revoked_machine1.status, IdentityStatus::Revoked, "Machine 1 should be revoked");
+        assert_eq!(
+            revoked_machine1.status,
+            IdentityStatus::Revoked,
+            "Machine 1 should be revoked"
+        );
 
         let revoked_machine2 = registry.resolve(&machine2.did_string()).unwrap();
-        assert_eq!(revoked_machine2.status, IdentityStatus::Revoked, "Machine 2 should be revoked");
+        assert_eq!(
+            revoked_machine2.status,
+            IdentityStatus::Revoked,
+            "Machine 2 should be revoked"
+        );
 
         let revoked_machine3 = registry.resolve(&machine3.did_string()).unwrap();
-        assert_eq!(revoked_machine3.status, IdentityStatus::Revoked, "Machine 3 should be revoked");
+        assert_eq!(
+            revoked_machine3.status,
+            IdentityStatus::Revoked,
+            "Machine 3 should be revoked"
+        );
     }
 
     #[tokio::test]
@@ -3014,7 +3055,11 @@ mod tests {
 
         // Verify human is still active
         let active_human = registry.resolve(&human.did_string()).unwrap();
-        assert_eq!(active_human.status, IdentityStatus::Active, "Human should remain active");
+        assert_eq!(
+            active_human.status,
+            IdentityStatus::Active,
+            "Human should remain active"
+        );
     }
 
     #[tokio::test]
@@ -3121,9 +3166,18 @@ mod tests {
         let registry = IdentityRegistry::new();
 
         // Check default fees
-        assert_eq!(registry.human_registration_fee(), 10_000_000_000_000_000_000); // 10 TNZO
-        assert_eq!(registry.machine_registration_fee(), 5_000_000_000_000_000_000); // 5 TNZO
-        assert_eq!(registry.credential_issuance_fee(), 2_000_000_000_000_000_000); // 2 TNZO
+        assert_eq!(
+            registry.human_registration_fee(),
+            10_000_000_000_000_000_000
+        ); // 10 TNZO
+        assert_eq!(
+            registry.machine_registration_fee(),
+            5_000_000_000_000_000_000
+        ); // 5 TNZO
+        assert_eq!(
+            registry.credential_issuance_fee(),
+            2_000_000_000_000_000_000
+        ); // 2 TNZO
 
         // Register with fee info
         let result = registry
@@ -3150,9 +3204,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_credential_via_registry() {
-        use tenzro_crypto::{KeyPair, KeyType};
-        use tenzro_crypto::signatures::{Signer, Ed25519SignerImpl};
         use crate::credential::{CredentialProof, TenzroCredentialType, VerifiableCredential};
+        use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
         let registry = IdentityRegistry::new();
 
@@ -3197,7 +3251,10 @@ mod tests {
 
         // Verify via registry (resolves issuer, checks proof)
         let result = registry.verify_credential(&cred).unwrap();
-        assert!(result, "Credential signed by registered issuer should verify");
+        assert!(
+            result,
+            "Credential signed by registered issuer should verify"
+        );
 
         // Credential with wrong issuer DID should fail
         let mut bad_cred = cred.clone();
@@ -3207,9 +3264,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_credential_tampered_fails() {
-        use tenzro_crypto::{KeyPair, KeyType};
-        use tenzro_crypto::signatures::{Signer, Ed25519SignerImpl};
         use crate::credential::{CredentialProof, TenzroCredentialType, VerifiableCredential};
+        use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
         let registry = IdentityRegistry::new();
 
@@ -3246,10 +3303,9 @@ mod tests {
         ));
 
         // Tamper with the credential after signing
-        cred.credential_subject.claims.insert(
-            "status".to_string(),
-            serde_json::json!("premium"),
-        );
+        cred.credential_subject
+            .claims
+            .insert("status".to_string(), serde_json::json!("premium"));
 
         // Verify should fail — message was tampered
         let result = registry.verify_credential(&cred).unwrap();
@@ -3297,10 +3353,7 @@ mod tests {
     }
 
     impl DidResolutionBackend for MockResolutionBackend {
-        fn resolve_remote(
-            &self,
-            did: &str,
-        ) -> crate::error::Result<Option<TenzroIdentity>> {
+        fn resolve_remote(&self, did: &str) -> crate::error::Result<Option<TenzroIdentity>> {
             Ok(self.records.lock().unwrap().get(did).cloned())
         }
     }
@@ -3573,10 +3626,7 @@ mod tests {
         }
     }
     impl RevocationBroadcaster for MockBroadcaster {
-        fn broadcast_revocation(
-            &self,
-            entry: &SignedRevocationEntry,
-        ) -> crate::error::Result<()> {
+        fn broadcast_revocation(&self, entry: &SignedRevocationEntry) -> crate::error::Result<()> {
             self.sent.lock().unwrap().push(entry.clone());
             Ok(())
         }
@@ -3585,8 +3635,7 @@ mod tests {
     #[tokio::test]
     async fn test_revoke_invokes_broadcaster_for_human_and_cascade() {
         let broadcaster = Arc::new(MockBroadcaster::new());
-        let registry =
-            IdentityRegistry::new().with_revocation_broadcaster(broadcaster.clone());
+        let registry = IdentityRegistry::new().with_revocation_broadcaster(broadcaster.clone());
 
         let human = registry
             .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
@@ -3732,8 +3781,12 @@ mod tests {
         );
 
         // Both should succeed (different IDs)
-        registry.issue_credential(&identity.did_string(), cred1).unwrap();
-        registry.issue_credential(&identity.did_string(), cred2).unwrap();
+        registry
+            .issue_credential(&identity.did_string(), cred1)
+            .unwrap();
+        registry
+            .issue_credential(&identity.did_string(), cred2)
+            .unwrap();
     }
 
     // ----- Principal-chain resolver tests (Agent-Swarm Spec 5) -----
@@ -3888,8 +3941,8 @@ mod tests {
         let aggregate_amount = 25_000_000_000_000_000_000u128;
 
         let lookup = Arc::new(FakeBondLookup::new());
-        let registry = IdentityRegistry::new()
-            .with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
+        let registry =
+            IdentityRegistry::new().with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
 
         let alice = registry
             .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
@@ -3957,8 +4010,8 @@ mod tests {
         let amount = 10_000_000_000_000_000_000u128;
 
         let lookup = Arc::new(FakeBondLookup::new());
-        let registry = IdentityRegistry::new()
-            .with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
+        let registry =
+            IdentityRegistry::new().with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
         let bot = registry
             .register_autonomous_machine(test_pubkey(7), vec!["monitoring".to_string()])
             .await

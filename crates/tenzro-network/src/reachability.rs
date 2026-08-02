@@ -22,8 +22,8 @@
 //! the service roles can gate on.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// How many corroborating direct-reachability observations it takes before a
 /// node is trusted as durably reachable, and the floor a contrary observation
@@ -133,20 +133,20 @@ impl ReachabilityTracker {
             ReachabilityEvent::DirectConfirmed => {
                 // Saturating increment toward the threshold. Repeated
                 // confirmation is what earns trust.
-                let _ = self.direct_confidence.fetch_update(
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                    |c| Some((c + 1).min(CONFIDENCE_THRESHOLD)),
-                );
+                let _ =
+                    self.direct_confidence
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
+                            Some((c + 1).min(CONFIDENCE_THRESHOLD))
+                        });
             }
             ReachabilityEvent::DirectLost => {
                 // Decrement, don't flip. One lapse shouldn't drop a long-stable
                 // node out of the Direct tier; only sustained loss does.
-                let _ = self.direct_confidence.fetch_update(
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                    |c| Some(c.saturating_sub(1)),
-                );
+                let _ =
+                    self.direct_confidence
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
+                            Some(c.saturating_sub(1))
+                        });
             }
             ReachabilityEvent::RelayReserved => {
                 self.relay_reserved.store(1, Ordering::SeqCst);

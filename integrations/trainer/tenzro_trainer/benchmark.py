@@ -40,8 +40,8 @@ from typing import Any
 
 
 def _write_synthetic_shard(path: Path, n_points: int) -> str:
-    import torch  # deferred: keep import cost out of --help
     import pandas as pd
+    import torch  # deferred: keep import cost out of --help
 
     t = torch.arange(n_points, dtype=torch.float32)
     series = torch.sin(t * 0.05) + 0.1 * torch.randn(
@@ -61,9 +61,7 @@ def _write_synthetic_text_shard(path: Path, n_chars: int) -> str:
     import random
 
     words = (
-        "the network trains a model over shards each trainer packages an outer "
-        "gradient the syncer aggregates a coordinate wise mean of adapter deltas "
-        "low rank matrices carry the update while the base stays frozen".split()
+        ["the", "network", "trains", "a", "model", "over", "shards", "each", "trainer", "packages", "an", "outer", "gradient", "the", "syncer", "aggregates", "a", "coordinate", "wise", "mean", "of", "adapter", "deltas", "low", "rank", "matrices", "carry", "the", "update", "while", "the", "base", "stays", "frozen"]
     )
     rng = random.Random(0)
     out: list[str] = []
@@ -182,8 +180,8 @@ def _build_lora_language_adapter(
     trainable and only their delta is snapshotted.
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from tenzro_trainer.adapters.language import LanguageAdapter, lora_factor_names
     from tenzro_trainer.muon import build_inner_optimizer
@@ -265,9 +263,12 @@ def run_lora_benchmark(
     hf_repo: str | None,
     n_chars: int,
 ) -> dict[str, Any]:
-    import torch
 
-    from tenzro_trainer.gradient import compute_outer_delta, partition_state_dict, serialize_fragment
+    from tenzro_trainer.gradient import (
+        compute_outer_delta,
+        partition_state_dict,
+        serialize_fragment,
+    )
     from tenzro_trainer.inner_loop import run_inner_loop
     from tenzro_trainer.types import GradientQuantization
 

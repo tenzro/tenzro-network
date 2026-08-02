@@ -2,21 +2,19 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router, Json, ServerHandler,
+    Json, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::error::{NodeError, Result as NodeResult};
 use crate::node::TenzroNode;
 use crate::web::handlers::WebState;
-use tenzro_model::{get_model_catalog, get_model_by_id};
+use tenzro_model::{get_model_by_id, get_model_catalog};
 use tenzro_network::NetworkService;
-use tenzro_types::primitives::{Address, Timestamp};
-use tenzro_types::settlement::{SettlementRequest, ServiceType, ServiceProof, ProofType};
 use tenzro_types::asset::AssetId;
+use tenzro_types::primitives::{Address, Timestamp};
+use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType, SettlementRequest};
 
 // ─── Tool parameter structs ───
 
@@ -42,17 +40,27 @@ pub struct SendTransactionParams {
     pub nonce: Option<u64>,
     #[schemars(description = "Chain ID (default 1337)")]
     pub chain_id: Option<u64>,
-    #[schemars(description = "Either (a) omit all of signature/public_key/timestamp and rely on ambient OAuth/DPoP auth — the server will look up the wallet bound to the bearer DID and sign on its behalf — or (b) supply all three for a pre-signed transaction.")]
+    #[schemars(
+        description = "Either (a) omit all of signature/public_key/timestamp and rely on ambient OAuth/DPoP auth — the server will look up the wallet bound to the bearer DID and sign on its behalf — or (b) supply all three for a pre-signed transaction."
+    )]
     pub signature: Option<String>,
     #[schemars(description = "Hex-encoded 32-byte Ed25519 public key (required if pre-signing)")]
     pub public_key: Option<String>,
-    #[schemars(description = "Hex-encoded ML-DSA-65 signature (3309 bytes) over the same Transaction::hash() (required if pre-signing — self-custody submits are hybrid)")]
+    #[schemars(
+        description = "Hex-encoded ML-DSA-65 signature (3309 bytes) over the same Transaction::hash() (required if pre-signing — self-custody submits are hybrid)"
+    )]
     pub pq_signature: Option<String>,
-    #[schemars(description = "Hex-encoded ML-DSA-65 verifying key (1952 bytes), included in the signed hash preimage (required if pre-signing)")]
+    #[schemars(
+        description = "Hex-encoded ML-DSA-65 verifying key (1952 bytes), included in the signed hash preimage (required if pre-signing)"
+    )]
     pub pq_public_key: Option<String>,
-    #[schemars(description = "Transaction timestamp in ms since Unix epoch — MUST match the timestamp used when computing the signed hash (required if pre-signing)")]
+    #[schemars(
+        description = "Transaction timestamp in ms since Unix epoch — MUST match the timestamp used when computing the signed hash (required if pre-signing)"
+    )]
     pub timestamp: Option<u64>,
-    #[schemars(description = "An approval granted out-of-band after a prior attempt returned -32002 with data.approval_id. Pass it back to execute the approved transfer; a denial returns the approver's reason.")]
+    #[schemars(
+        description = "An approval granted out-of-band after a prior attempt returned -32002 with data.approval_id. Pass it back to execute the approved transfer; a denial returns the approver's reason."
+    )]
     pub approval_id: Option<String>,
 }
 
@@ -98,15 +106,21 @@ pub struct CreateApiKeyParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RevokeApiKeyParams {
-    #[schemars(description = "Non-secret `key_id` (returned by `create_api_key` / `list_api_keys`)")]
+    #[schemars(
+        description = "Non-secret `key_id` (returned by `create_api_key` / `list_api_keys`)"
+    )]
     pub key_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetFeeMarketParams {
-    #[schemars(description = "Number of recent blocks to summarize in fee history (1..=1024, default 10)")]
+    #[schemars(
+        description = "Number of recent blocks to summarize in fee history (1..=1024, default 10)"
+    )]
     pub blocks: Option<u64>,
-    #[schemars(description = "Tip percentiles to request, e.g. [25.0, 50.0, 75.0]; pass [] or omit to skip percentile sampling")]
+    #[schemars(
+        description = "Tip percentiles to request, e.g. [25.0, 50.0, 75.0]; pass [] or omit to skip percentile sampling"
+    )]
     pub reward_percentiles: Option<Vec<f64>>,
 }
 
@@ -116,19 +130,25 @@ pub struct RegisterIdentityParams {
     pub identity_type: String,
     #[schemars(description = "Display name for the identity")]
     pub display_name: String,
-    #[schemars(description = "Controller DID (required for machine identities, e.g. did:tenzro:human:uuid)")]
+    #[schemars(
+        description = "Controller DID (required for machine identities, e.g. did:tenzro:human:uuid)"
+    )]
     pub controller_did: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ResolveDidParams {
-    #[schemars(description = "DID to resolve (e.g. did:tenzro:human:uuid or did:tenzro:machine:controller:uuid)")]
+    #[schemars(
+        description = "DID to resolve (e.g. did:tenzro:human:uuid or did:tenzro:machine:controller:uuid)"
+    )]
     pub did: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetAgentJwkParams {
-    #[schemars(description = "RFC 9421 keyid — `did:tenzro:...` (first compatible key) or `did:tenzro:...#fragment` (specific key)")]
+    #[schemars(
+        description = "RFC 9421 keyid — `did:tenzro:...` (first compatible key) or `did:tenzro:...#fragment` (specific key)"
+    )]
     pub keyid: String,
 }
 
@@ -142,7 +162,9 @@ pub struct GetTransactionParams {
 pub struct VerifyZkProofParams {
     #[schemars(description = "Hex-encoded proof bytes — bincode-encoded p3_uni_stark::Proof")]
     pub proof: String,
-    #[schemars(description = "Public inputs as JSON array of hex strings (4-byte LE KoalaBear chunks)")]
+    #[schemars(
+        description = "Public inputs as JSON array of hex strings (4-byte LE KoalaBear chunks)"
+    )]
     pub public_inputs: Vec<String>,
     #[schemars(description = "Circuit identifier — one of 'inference', 'settlement', 'identity'")]
     pub circuit_id: String,
@@ -150,7 +172,9 @@ pub struct VerifyZkProofParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FileZkFraudProofParams {
-    #[schemars(description = "Hex-encoded 32-byte ZK commitment hash (with or without 0x prefix) to challenge")]
+    #[schemars(
+        description = "Hex-encoded 32-byte ZK commitment hash (with or without 0x prefix) to challenge"
+    )]
     pub commitment: String,
 }
 
@@ -164,9 +188,13 @@ pub struct GetZkAttestationParams {
 pub struct VerifyVrfProofParams {
     #[schemars(description = "Hex-encoded 32-byte VRF public key (Edwards25519 compressed point)")]
     pub pubkey: String,
-    #[schemars(description = "Hex-encoded 80-byte VRF proof: Gamma(32) || c(16) || s(32) per RFC 9381")]
+    #[schemars(
+        description = "Hex-encoded 80-byte VRF proof: Gamma(32) || c(16) || s(32) per RFC 9381"
+    )]
     pub proof: String,
-    #[schemars(description = "Hex-encoded input message (alpha). Public inputs like block hash, request ID, or NFT mint nonce")]
+    #[schemars(
+        description = "Hex-encoded input message (alpha). Public inputs like block hash, request ID, or NFT mint nonce"
+    )]
     pub alpha: String,
 }
 
@@ -174,13 +202,17 @@ pub struct VerifyVrfProofParams {
 pub struct GenerateVrfProofParams {
     #[schemars(description = "Hex-encoded 32-byte VRF secret key (Ed25519-compatible seed)")]
     pub secret_key: String,
-    #[schemars(description = "Hex-encoded input message (alpha). Use public data: block hash, request ID, NFT mint nonce")]
+    #[schemars(
+        description = "Hex-encoded input message (alpha). Use public data: block hash, request ID, NFT mint nonce"
+    )]
     pub alpha: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListModelsParams {
-    #[schemars(description = "Filter by model category/modality: 'text', 'image', 'audio', 'video', 'text_image', 'text_audio', 'multimodal' (optional)")]
+    #[schemars(
+        description = "Filter by model category/modality: 'text', 'image', 'audio', 'video', 'text_image', 'text_audio', 'multimodal' (optional)"
+    )]
     pub category: Option<String>,
     #[schemars(description = "Filter by name substring (optional)")]
     pub name: Option<String>,
@@ -188,20 +220,29 @@ pub struct ListModelsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CortexReasonParams {
-    #[schemars(description = "Cortex model ID (e.g. 'mythos-3b'). Must be registered via tenzro_registerCortexWorker")]
+    #[schemars(
+        description = "Cortex model ID (e.g. 'mythos-3b'). Must be registered via tenzro_registerCortexWorker"
+    )]
     pub model_id: String,
     #[schemars(description = "Input prompt / problem statement")]
     pub input: String,
-    #[schemars(description = "Reasoning tier: 'fast' (2-4 loops), 'standard' (8), 'deep' (16-32), 'institutional' (TEE + optional ZK). Default 'standard'")]
+    #[schemars(
+        description = "Reasoning tier: 'fast' (2-4 loops), 'standard' (8), 'deep' (16-32), 'institutional' (TEE + optional ZK). Default 'standard'"
+    )]
     pub tier: Option<String>,
     #[schemars(description = "Minimum recurrent loops (overrides tier). Optional")]
     pub min_loops: Option<u32>,
     #[schemars(description = "Maximum recurrent loops (overrides tier). Optional")]
     pub max_loops: Option<u32>,
-    #[schemars(description = "Maximum cost in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string. Rejects if pricing exceeds. Optional", with = "Option<String>")]
+    #[schemars(
+        description = "Maximum cost in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string. Rejects if pricing exceeds. Optional",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub max_cost_wei: Option<u128>,
-    #[schemars(description = "Attestation requirement: 'none', 'tee', 'tee_and_zk'. Default inferred from tier")]
+    #[schemars(
+        description = "Attestation requirement: 'none', 'tee', 'tee_and_zk'. Default inferred from tier"
+    )]
     pub attestation: Option<String>,
     #[schemars(description = "Caller address (20- or 32-byte hex). Optional")]
     pub requester: Option<String>,
@@ -213,7 +254,9 @@ pub struct ChatCompletionParams {
     /// (Tenzro RPC-style). Either key is valid in the JSON payload. Optional:
     /// when absent, `use_case` selects a model via the intent router.
     #[serde(default, alias = "model_id")]
-    #[schemars(description = "Model ID or service instance UUID (alias: model_id). Omit to select a model from use_case + budget")]
+    #[schemars(
+        description = "Model ID or service instance UUID (alias: model_id). Omit to select a model from use_case + budget"
+    )]
     pub model: Option<String>,
     #[schemars(description = "The user message to send")]
     pub message: String,
@@ -231,18 +274,29 @@ pub struct ChatCompletionParams {
     pub temperature: Option<f64>,
     #[schemars(description = "Maximum tokens to generate (default 512)")]
     pub max_tokens: Option<u32>,
-    #[schemars(description = "Intent use case when 'model' is omitted: chat|code|reasoning|research|summarize|extract|embed. Ignored when 'model' is set")]
+    #[schemars(
+        description = "Intent use case when 'model' is omitted: chat|code|reasoning|research|summarize|extract|embed. Ignored when 'model' is set"
+    )]
     pub use_case: Option<String>,
-    #[schemars(description = "Per-request cost cap in smallest TNZO unit for intent selection. Accepts number or decimal string. Optional", with = "Option<String>")]
+    #[schemars(
+        description = "Per-request cost cap in smallest TNZO unit for intent selection. Accepts number or decimal string. Optional",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub budget: Option<u128>,
     #[schemars(description = "Cost-quality knob in [0.0, 1.0] for intent selection. Optional")]
     pub optimize: Option<f64>,
-    #[schemars(description = "Reject models below this tier during intent selection: 'cheap' or 'strong'. Optional")]
+    #[schemars(
+        description = "Reject models below this tier during intent selection: 'cheap' or 'strong'. Optional"
+    )]
     pub quality_floor: Option<String>,
-    #[schemars(description = "Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. 'DE,EU'), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Optional")]
+    #[schemars(
+        description = "Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. 'DE,EU'), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Optional"
+    )]
     pub jurisdiction: Option<String>,
-    #[schemars(description = "Set to 'required' to fail the request unless the response carries a verifiable signed jurisdiction receipt. Optional")]
+    #[schemars(
+        description = "Set to 'required' to fail the request unless the response carries a verifiable signed jurisdiction receipt. Optional"
+    )]
     pub jurisdiction_receipt: Option<String>,
 }
 
@@ -260,12 +314,19 @@ pub struct GetModelHashParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RouteByIntentParams {
-    #[schemars(description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering")]
+    #[schemars(
+        description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering"
+    )]
     pub use_case: String,
-    #[schemars(description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional", with = "Option<String>")]
+    #[schemars(
+        description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub budget: Option<u128>,
-    #[schemars(description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional")]
+    #[schemars(
+        description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional"
+    )]
     pub optimize: Option<f64>,
     #[schemars(description = "Reject any model below this tier: 'cheap' or 'strong'. Optional")]
     pub quality_floor: Option<String>,
@@ -273,26 +334,43 @@ pub struct RouteByIntentParams {
     pub est_input_tokens: Option<u64>,
     #[schemars(description = "Estimated output tokens for cost estimation. Optional")]
     pub est_output_tokens: Option<u64>,
-    #[schemars(description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional")]
+    #[schemars(
+        description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional"
+    )]
     pub payer_did: Option<String>,
-    #[schemars(description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling: unaffordable models are dropped. Optional")]
+    #[schemars(
+        description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling: unaffordable models are dropped. Optional"
+    )]
     pub payer_address: Option<String>,
-    #[schemars(description = "The text the model would answer. Used only to place the request in a difficulty cluster so selection accounts for how hard the prompt is; it is not sent to any provider. Without it the decision rests on declared metadata alone. Optional")]
+    #[schemars(
+        description = "The text the model would answer. Used only to place the request in a difficulty cluster so selection accounts for how hard the prompt is; it is not sent to any provider. Without it the decision rests on declared metadata alone. Optional"
+    )]
     pub prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ChatByIntentParams {
-    #[schemars(description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering")]
+    #[schemars(
+        description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering"
+    )]
     pub use_case: String,
-    #[schemars(description = "The user message (simple single-turn shape). Provide this or 'messages'")]
+    #[schemars(
+        description = "The user message (simple single-turn shape). Provide this or 'messages'"
+    )]
     pub message: Option<String>,
-    #[schemars(description = "Chat turns as [{role, content}] (rich multi-turn shape). The last user turn is what difficulty scoring reads. Provide this or 'message'")]
+    #[schemars(
+        description = "Chat turns as [{role, content}] (rich multi-turn shape). The last user turn is what difficulty scoring reads. Provide this or 'message'"
+    )]
     pub messages: Option<Vec<serde_json::Value>>,
-    #[schemars(description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional", with = "Option<String>")]
+    #[schemars(
+        description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub budget: Option<u128>,
-    #[schemars(description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional")]
+    #[schemars(
+        description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional"
+    )]
     pub optimize: Option<f64>,
     #[schemars(description = "Reject any model below this tier: 'cheap' or 'strong'. Optional")]
     pub quality_floor: Option<String>,
@@ -300,66 +378,103 @@ pub struct ChatByIntentParams {
     pub est_input_tokens: Option<u64>,
     #[schemars(description = "Estimated output tokens for cost estimation. Optional")]
     pub est_output_tokens: Option<u64>,
-    #[schemars(description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional")]
+    #[schemars(
+        description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional"
+    )]
     pub payer_did: Option<String>,
-    #[schemars(description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling and the call bills to it. Optional")]
+    #[schemars(
+        description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling and the call bills to it. Optional"
+    )]
     pub payer_address: Option<String>,
     #[schemars(description = "Temperature (0.0-2.0). Optional")]
     pub temperature: Option<f64>,
     #[schemars(description = "Maximum tokens to generate. Optional")]
     pub max_tokens: Option<u32>,
-    #[schemars(description = "Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. 'DE,EU'), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Optional")]
+    #[schemars(
+        description = "Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. 'DE,EU'), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Optional"
+    )]
     pub jurisdiction: Option<String>,
-    #[schemars(description = "Set to 'required' to fail the request unless the response carries a verifiable signed jurisdiction receipt. Optional")]
+    #[schemars(
+        description = "Set to 'required' to fail the request unless the response carries a verifiable signed jurisdiction receipt. Optional"
+    )]
     pub jurisdiction_receipt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RecordRouteOutcomeParams {
-    #[schemars(description = "The model that served the call. Take it from the routing decision's model_id")]
+    #[schemars(
+        description = "The model that served the call. Take it from the routing decision's model_id"
+    )]
     pub model_id: String,
-    #[schemars(description = "The difficulty cluster the request landed in. Take it from the routing decision's 'cluster'")]
+    #[schemars(
+        description = "The difficulty cluster the request landed in. Take it from the routing decision's 'cluster'"
+    )]
     pub cluster: u32,
-    #[schemars(description = "How the call turned out: 'resolved' (answered acceptably), 'escalated' (you took the answer to a stronger model), or 'failed' (no usable answer)")]
+    #[schemars(
+        description = "How the call turned out: 'resolved' (answered acceptably), 'escalated' (you took the answer to a stronger model), or 'failed' (no usable answer)"
+    )]
     pub outcome: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RouteDifficultyStatsParams {
-    #[schemars(description = "Model to report per-cluster outcome counters and error rate for. Omit for the cluster map alone. Optional")]
+    #[schemars(
+        description = "Model to report per-cluster outcome counters and error rate for. Omit for the cluster map alone. Optional"
+    )]
     pub model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct OrchestrateParams {
-    #[schemars(description = "Natural-language goal to satisfy. The planner decomposes it into an ordered set of capability steps (models, registered skills, registered tools, agent/swarm delegation)")]
+    #[schemars(
+        description = "Natural-language goal to satisfy. The planner decomposes it into an ordered set of capability steps (models, registered skills, registered tools, agent/swarm delegation)"
+    )]
     pub intent: String,
-    #[schemars(description = "Primary use case hint: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Defaults to 'chat'. Optional")]
+    #[schemars(
+        description = "Primary use case hint: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Defaults to 'chat'. Optional"
+    )]
     pub use_case: Option<String>,
-    #[schemars(description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional", with = "Option<String>")]
+    #[schemars(
+        description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub budget: Option<u128>,
-    #[schemars(description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced on model steps. Optional")]
+    #[schemars(
+        description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced on model steps. Optional"
+    )]
     pub payer_did: Option<String>,
-    #[schemars(description = "Payer wallet address (hex). When set, the plan's aggregate estimated cost is checked against the payer's on-chain TNZO balance before any step runs; an over-budget plan is rejected. Optional")]
+    #[schemars(
+        description = "Payer wallet address (hex). When set, the plan's aggregate estimated cost is checked against the payer's on-chain TNZO balance before any step runs; an over-budget plan is rejected. Optional"
+    )]
     pub payer_address: Option<String>,
-    #[schemars(description = "Max re-plan iterations, clamped to [1, 6]. 1 = single-shot. Optional")]
+    #[schemars(
+        description = "Max re-plan iterations, clamped to [1, 6]. 1 = single-shot. Optional"
+    )]
     pub max_iterations: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreatePaymentChallengeParams {
-    #[schemars(description = "Payment protocol: 'mpp' (Machine Payments Protocol — session-based streaming), 'x402' (Coinbase HTTP 402 — stateless one-shot), or 'native' (direct TNZO transfer)")]
+    #[schemars(
+        description = "Payment protocol: 'mpp' (Machine Payments Protocol — session-based streaming), 'x402' (Coinbase HTTP 402 — stateless one-shot), or 'native' (direct TNZO transfer)"
+    )]
     pub protocol: String,
-    #[schemars(description = "Resource URL or identifier being paid for (e.g. /api/inference, /api/data/query)")]
+    #[schemars(
+        description = "Resource URL or identifier being paid for (e.g. /api/inference, /api/data/query)"
+    )]
     pub resource: String,
-    #[schemars(description = "Payment amount in smallest unit (e.g. 100 = 0.000100 USDC for x402, or TNZO base units for native)")]
+    #[schemars(
+        description = "Payment amount in smallest unit (e.g. 100 = 0.000100 USDC for x402, or TNZO base units for native)"
+    )]
     pub amount: u128,
     #[schemars(description = "Payment asset: 'USDC', 'USDT', or 'TNZO'")]
     pub asset: String,
     #[schemars(description = "Hex-encoded recipient address")]
     pub recipient: String,
-    #[schemars(description = "Registered app_id for developer-margin attribution. The amount is marked up by the app's margin and the margin is carved out to the app wallet at settlement.")]
+    #[schemars(
+        description = "Registered app_id for developer-margin attribution. The amount is marked up by the app's margin and the margin is carved out to the app wallet at settlement."
+    )]
     pub app_id: Option<String>,
 }
 
@@ -369,7 +484,9 @@ pub struct VerifyPaymentParams {
     pub challenge_id: String,
     #[schemars(description = "Payment protocol used: 'mpp', 'x402', or 'native'")]
     pub protocol: String,
-    #[schemars(description = "Payer DID (e.g. did:tenzro:human:uuid or did:tenzro:machine:controller:uuid)")]
+    #[schemars(
+        description = "Payer DID (e.g. did:tenzro:human:uuid or did:tenzro:machine:controller:uuid)"
+    )]
     pub payer_did: String,
     #[schemars(description = "Payer wallet address (hex-encoded)")]
     pub payer_address: String,
@@ -379,9 +496,13 @@ pub struct VerifyPaymentParams {
     pub asset: String,
     #[schemars(description = "Hex-encoded classical (Ed25519) signature proving payment")]
     pub signature: String,
-    #[schemars(description = "Hex-encoded post-quantum (ML-DSA-65, FIPS 204) signature — 3309 bytes — required for internal Tenzro mpp/x402/native protocols; pass empty string for external passthroughs (visa-tap, mastercard-agent-pay) that don't yet have a hybrid signing scheme")]
+    #[schemars(
+        description = "Hex-encoded post-quantum (ML-DSA-65, FIPS 204) signature — 3309 bytes — required for internal Tenzro mpp/x402/native protocols; pass empty string for external passthroughs (visa-tap, mastercard-agent-pay) that don't yet have a hybrid signing scheme"
+    )]
     pub pq_signature: String,
-    #[schemars(description = "Hex-encoded ML-DSA-65 verifying key — 1952 bytes — required for internal Tenzro mpp/x402/native protocols; pass empty string for external passthroughs")]
+    #[schemars(
+        description = "Hex-encoded ML-DSA-65 verifying key — 1952 bytes — required for internal Tenzro mpp/x402/native protocols; pass empty string for external passthroughs"
+    )]
     pub pq_public_key: String,
 }
 
@@ -389,11 +510,15 @@ pub struct VerifyPaymentParams {
 pub struct SetDelegationScopeParams {
     #[schemars(description = "Machine DID to set delegation scope for")]
     pub machine_did: String,
-    #[schemars(description = "Maximum transaction value (in smallest unit, e.g. 10000000 = $10 USDC)")]
+    #[schemars(
+        description = "Maximum transaction value (in smallest unit, e.g. 10000000 = $10 USDC)"
+    )]
     pub max_transaction_value: Option<u128>,
     #[schemars(description = "Maximum daily spend across all transactions")]
     pub max_daily_spend: Option<u128>,
-    #[schemars(description = "Allowed operations (e.g. ['InferenceRequest', 'Transfer', 'Stake'])")]
+    #[schemars(
+        description = "Allowed operations (e.g. ['InferenceRequest', 'Transfer', 'Stake'])"
+    )]
     pub allowed_operations: Option<Vec<String>>,
     #[schemars(description = "Allowed payment protocols (e.g. ['mpp', 'x402', 'native'])")]
     pub allowed_payment_protocols: Option<Vec<String>>,
@@ -409,7 +534,9 @@ pub struct X402RegisterResourceParams {
     pub seller_did: String,
     #[schemars(description = "Resource URI the buyer pays to access")]
     pub resource: String,
-    #[schemars(description = "x402 scheme id: 'tenzro-hybrid', 'exact-eip3009', 'permit2', or 'erc7710'")]
+    #[schemars(
+        description = "x402 scheme id: 'tenzro-hybrid', 'exact-eip3009', 'permit2', or 'erc7710'"
+    )]
     pub scheme: String,
     #[schemars(description = "Settlement network (e.g. 'tenzro', 'base', 'ethereum')")]
     pub network: String,
@@ -417,17 +544,23 @@ pub struct X402RegisterResourceParams {
     pub asset: String,
     #[schemars(description = "Recipient address the payment settles to")]
     pub pay_to: String,
-    #[schemars(description = "Maximum amount required, as a decimal string in the asset's smallest unit")]
+    #[schemars(
+        description = "Maximum amount required, as a decimal string in the asset's smallest unit"
+    )]
     pub max_amount_required: String,
     #[schemars(description = "Human-readable description of the resource")]
     pub description: Option<String>,
     #[schemars(description = "MIME type of the resource (default application/json)")]
     pub mime_type: Option<String>,
-    #[schemars(description = "Max seconds a buyer may take to settle after receiving the 402 (default 300)")]
+    #[schemars(
+        description = "Max seconds a buyer may take to settle after receiving the 402 (default 300)"
+    )]
     pub max_timeout_seconds: Option<u64>,
     #[schemars(description = "Free-form tags for discovery filtering")]
     pub tags: Option<Vec<String>>,
-    #[schemars(description = "Optional extra fields carried verbatim in the x402 PaymentRequirement")]
+    #[schemars(
+        description = "Optional extra fields carried verbatim in the x402 PaymentRequirement"
+    )]
     pub extra: Option<serde_json::Value>,
 }
 
@@ -443,7 +576,9 @@ pub struct X402DiscoverResourcesParams {
     pub seller_did: Option<String>,
     #[schemars(description = "Filter by tags (all must match)")]
     pub tags: Option<Vec<String>>,
-    #[schemars(description = "Minimum seller reputation floor; unscored sellers are excluded when set")]
+    #[schemars(
+        description = "Minimum seller reputation floor; unscored sellers are excluded when set"
+    )]
     pub min_reputation: Option<u64>,
     #[schemars(description = "Cap the number of results; 0 = unlimited")]
     pub limit: Option<u64>,
@@ -459,7 +594,9 @@ pub struct X402DeregisterResourceParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct X402VerifyOfferParams {
-    #[schemars(description = "Full X402PaymentRequirement JSON exactly as it appeared in the 402 body")]
+    #[schemars(
+        description = "Full X402PaymentRequirement JSON exactly as it appeared in the 402 body"
+    )]
     pub requirement: serde_json::Value,
 }
 
@@ -467,7 +604,9 @@ pub struct X402VerifyOfferParams {
 pub struct X402PaymentIdParams {
     #[schemars(description = "Payer DID")]
     pub payer_did: String,
-    #[schemars(description = "Full requirement JSON (node recomputes the commitment); pass this or offer_commitment")]
+    #[schemars(
+        description = "Full requirement JSON (node recomputes the commitment); pass this or offer_commitment"
+    )]
     pub requirement: Option<serde_json::Value>,
     #[schemars(description = "Pre-computed 64-hex offer commitment; pass this or requirement")]
     pub offer_commitment: Option<String>,
@@ -489,11 +628,15 @@ pub struct CreateDatabaseParams {
     pub partitions: Option<usize>,
     #[schemars(description = "Minimum holders per partition — writes below this fail (default 2)")]
     pub min_replication: Option<u8>,
-    #[schemars(description = "Maximum holders per partition — repair never grows past this (default 4)")]
+    #[schemars(
+        description = "Maximum holders per partition — repair never grows past this (default 4)"
+    )]
     pub max_replication: Option<u8>,
     #[schemars(description = "Per-engine configuration passed opaque to the driver")]
     pub engine_config: Option<serde_json::Value>,
-    #[schemars(description = "Price a non-owner caller pays per query, in the pricing asset's base units, as a decimal string (omit for a free database)")]
+    #[schemars(
+        description = "Price a non-owner caller pays per query, in the pricing asset's base units, as a decimal string (omit for a free database)"
+    )]
     pub price_per_query: Option<String>,
     #[schemars(description = "Asset the per-query price is denominated in (default 'TNZO')")]
     pub pricing_asset: Option<String>,
@@ -537,7 +680,9 @@ pub struct DatabaseQueryParams {
     pub database_id: String,
     #[schemars(description = "Caller DID, authorized against the access policy")]
     pub caller_did: String,
-    #[schemars(description = "Engine-dialect body: SQL {sql, params} for Postgres, {op, ...} for Qdrant/Lance/Tantivy, {command: [...]} for Valkey")]
+    #[schemars(
+        description = "Engine-dialect body: SQL {sql, params} for Postgres, {op, ...} for Qdrant/Lance/Tantivy, {command: [...]} for Valkey"
+    )]
     pub body: serde_json::Value,
     #[schemars(description = "Target partition index (default 0)")]
     pub partition_index: Option<usize>,
@@ -549,7 +694,9 @@ pub struct DatabaseQueryParams {
     pub capability: Option<String>,
     #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
     pub envelope: Option<String>,
-    #[schemars(description = "Payment credential answering a prior 402 challenge (paid databases only)")]
+    #[schemars(
+        description = "Payment credential answering a prior 402 challenge (paid databases only)"
+    )]
     pub payment_credential: Option<serde_json::Value>,
 }
 
@@ -613,23 +760,37 @@ pub struct DatabaseUsageParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExchangeTokenParams {
-    #[schemars(description = "Parent JWT (the `subject_token` per RFC 8693). The AS validates its signature, exp, and revocation state before issuing the child token.")]
+    #[schemars(
+        description = "Parent JWT (the `subject_token` per RFC 8693). The AS validates its signature, exp, and revocation state before issuing the child token."
+    )]
     pub subject_token: String,
-    #[schemars(description = "DID that will be the `sub` of the new child JWT — typically a delegated agent or sub-agent in the act-chain")]
+    #[schemars(
+        description = "DID that will be the `sub` of the new child JWT — typically a delegated agent or sub-agent in the act-chain"
+    )]
     pub child_bearer_did: String,
-    #[schemars(description = "RFC 7638 JWK thumbprint of the child holder's Ed25519 public key. The child token is DPoP-bound to this key.")]
+    #[schemars(
+        description = "RFC 7638 JWK thumbprint of the child holder's Ed25519 public key. The child token is DPoP-bound to this key."
+    )]
     pub child_dpop_jkt: String,
-    #[schemars(description = "RFC 9396 typed scope envelope the child should carry. Must be a strict subset of the parent's authorization_details. JSON object with `authorization_details: [...]` field.")]
+    #[schemars(
+        description = "RFC 9396 typed scope envelope the child should carry. Must be a strict subset of the parent's authorization_details. JSON object with `authorization_details: [...]` field."
+    )]
     pub requested_rar: serde_json::Value,
-    #[schemars(description = "AAP `aap_capabilities` claim list — per-action constraints layered over RAR. Must be a subset of the parent's capabilities.")]
+    #[schemars(
+        description = "AAP `aap_capabilities` claim list — per-action constraints layered over RAR. Must be a subset of the parent's capabilities."
+    )]
     pub requested_aap_capabilities: Vec<serde_json::Value>,
-    #[schemars(description = "Optional TTL override for the child token in seconds. Clamped to the engine's max_ttl_secs and the parent's remaining lifetime.")]
+    #[schemars(
+        description = "Optional TTL override for the child token in seconds. Clamped to the engine's max_ttl_secs and the parent's remaining lifetime."
+    )]
     pub requested_ttl_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IntrospectTokenParams {
-    #[schemars(description = "JWT to introspect. The AS returns `{active: true, ...claims}` on success or `{active: false}` per RFC 7662 §2.2 if the token is unknown, expired, or revoked.")]
+    #[schemars(
+        description = "JWT to introspect. The AS returns `{active: true, ...claims}` on success or `{active: false}` per RFC 7662 §2.2 if the token is unknown, expired, or revoked."
+    )]
     pub token: String,
 }
 
@@ -639,7 +800,9 @@ pub struct IntrospectTokenParams {
 pub struct DebridgeSearchTokensParams {
     #[schemars(description = "Token name, symbol, or address to search for")]
     pub query: String,
-    #[schemars(description = "Optional chain ID to filter results (e.g. 1 for Ethereum, 56 for BSC)")]
+    #[schemars(
+        description = "Optional chain ID to filter results (e.g. 1 for Ethereum, 56 for BSC)"
+    )]
     pub chain_id: Option<u64>,
 }
 
@@ -701,21 +864,31 @@ pub struct GetBridgeRoutesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateWalletParams {
-    #[schemars(description = "Key type: 'ed25519' (default, Tenzro native) or 'secp256k1' (EVM-compatible)")]
+    #[schemars(
+        description = "Key type: 'ed25519' (default, Tenzro native) or 'secp256k1' (EVM-compatible)"
+    )]
     pub key_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StakeTokensParams {
-    #[schemars(description = "Amount to stake in wei as a decimal string (1 TNZO = 10^18 wei). Example: '1000000000000000000000' for 1000 TNZO.")]
+    #[schemars(
+        description = "Amount to stake in wei as a decimal string (1 TNZO = 10^18 wei). Example: '1000000000000000000000' for 1000 TNZO."
+    )]
     pub amount: String,
-    #[schemars(description = "Provider type to stake for: 'validator', 'rpc', 'tee', 'model', 'compute', 'storage', 'cloud', 'trainer', or 'syncer'")]
+    #[schemars(
+        description = "Provider type to stake for: 'validator', 'rpc', 'tee', 'model', 'compute', 'storage', 'cloud', 'trainer', or 'syncer'"
+    )]
     pub provider_type: String,
-    #[schemars(description = "Accelerator classes pledged, for compute providers: 'integrated', 'consumer', 'workstation', or 'datacentre'")]
+    #[schemars(
+        description = "Accelerator classes pledged, for compute providers: 'integrated', 'consumer', 'workstation', or 'datacentre'"
+    )]
     pub accelerators: Option<Vec<String>>,
     #[schemars(description = "Whole terabytes pledged, for storage providers")]
     pub terabytes: Option<u32>,
-    #[schemars(description = "Highest cloud service class offered, for cloud operators: 'functions', 'databases', or 'machines'")]
+    #[schemars(
+        description = "Highest cloud service class offered, for cloud operators: 'functions', 'databases', or 'machines'"
+    )]
     pub cloud_tier: Option<String>,
 }
 
@@ -727,31 +900,43 @@ pub struct UnstakeTokensParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RegisterProviderParams {
-    #[schemars(description = "Provider type: 'validator', 'rpc', 'tee', 'model', 'compute', 'storage', 'cloud', 'trainer', or 'syncer'")]
+    #[schemars(
+        description = "Provider type: 'validator', 'rpc', 'tee', 'model', 'compute', 'storage', 'cloud', 'trainer', or 'syncer'"
+    )]
     pub provider_type: String,
     #[schemars(description = "Provider display name")]
     pub name: String,
-    #[schemars(description = "Optional initial stake in wei as a decimal string (1 TNZO = 10^18 wei). Example: '10000000000000000000000' for 10,000 TNZO. Omit or '0' to register without staking.")]
+    #[schemars(
+        description = "Optional initial stake in wei as a decimal string (1 TNZO = 10^18 wei). Example: '10000000000000000000000' for 10,000 TNZO. Omit or '0' to register without staking."
+    )]
     pub stake: Option<String>,
     #[schemars(description = "Maximum concurrent requests to handle (default 10)")]
     pub max_concurrent: Option<u32>,
-    #[schemars(description = "Accelerator classes pledged, for compute providers: 'integrated', 'consumer', 'workstation', or 'datacentre'")]
+    #[schemars(
+        description = "Accelerator classes pledged, for compute providers: 'integrated', 'consumer', 'workstation', or 'datacentre'"
+    )]
     pub accelerators: Option<Vec<String>>,
     #[schemars(description = "Whole terabytes pledged, for storage providers")]
     pub terabytes: Option<u32>,
-    #[schemars(description = "Highest cloud service class offered, for cloud operators: 'functions', 'databases', or 'machines'")]
+    #[schemars(
+        description = "Highest cloud service class offered, for cloud operators: 'functions', 'databases', or 'machines'"
+    )]
     pub cloud_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetProviderStatsParams {
-    #[schemars(description = "Hex-encoded provider address (with or without 0x prefix). If omitted, returns stats for the local node")]
+    #[schemars(
+        description = "Hex-encoded provider address (with or without 0x prefix). If omitted, returns stats for the local node"
+    )]
     pub address: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetComputeBondParams {
-    #[schemars(description = "Provider DID the bond is posted against (e.g. did:tenzro:machine:...). If omitted, lists every compute bond on the node")]
+    #[schemars(
+        description = "Provider DID the bond is posted against (e.g. did:tenzro:machine:...). If omitted, lists every compute bond on the node"
+    )]
     pub provider_did: Option<String>,
 }
 
@@ -763,11 +948,16 @@ pub struct PostTaskParams {
     pub title: String,
     #[schemars(description = "Detailed description of the task and expected output")]
     pub description: String,
-    #[schemars(description = "Task type: inference, code_review, data_analysis, content_generation, agent_execution, translation, research, or custom:<value>")]
+    #[schemars(
+        description = "Task type: inference, code_review, data_analysis, content_generation, agent_execution, translation, research, or custom:<value>"
+    )]
     pub task_type: String,
     #[schemars(description = "Hex-encoded address of the task poster")]
     pub poster_address: String,
-    #[schemars(description = "Maximum price willing to pay in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[schemars(
+        description = "Maximum price willing to pay in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.",
+        with = "String"
+    )]
     #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub max_price_wei: u128,
     #[schemars(description = "Input data or prompt for the task")]
@@ -784,11 +974,16 @@ pub struct PostTaskParams {
 pub struct ListTasksParams {
     #[schemars(description = "Filter by task type (optional)")]
     pub task_type: Option<String>,
-    #[schemars(description = "Filter by status: open, assigned, in_progress, completed, cancelled, expired, disputed (optional, default: open)")]
+    #[schemars(
+        description = "Filter by status: open, assigned, in_progress, completed, cancelled, expired, disputed (optional, default: open)"
+    )]
     pub status: Option<String>,
     #[schemars(description = "Filter by poster address (optional)")]
     pub poster: Option<String>,
-    #[schemars(description = "Maximum price filter in wei (only show tasks at or below this price). Accepts u64 number or decimal string.", with = "Option<String>")]
+    #[schemars(
+        description = "Maximum price filter in wei (only show tasks at or below this price). Accepts u64 number or decimal string.",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub max_price_wei: Option<u128>,
     #[schemars(description = "Maximum number of results (default 20, max 100)")]
@@ -803,7 +998,10 @@ pub struct QuoteTaskParams {
     pub task_id: String,
     #[schemars(description = "Hex-encoded address of the provider submitting the quote")]
     pub provider_address: String,
-    #[schemars(description = "Quoted price in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[schemars(
+        description = "Quoted price in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.",
+        with = "String"
+    )]
     #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub price_wei: u128,
     #[schemars(description = "Model ID the provider will use to complete the task")]
@@ -824,23 +1022,33 @@ pub struct RegisterAgentTemplateParams {
     pub name: String,
     #[schemars(description = "Detailed description of what the agent does")]
     pub description: String,
-    #[schemars(description = "Template type: autonomous, tool_agent, orchestrator, specialist, multi_modal, or custom:<value>")]
+    #[schemars(
+        description = "Template type: autonomous, tool_agent, orchestrator, specialist, multi_modal, or custom:<value>"
+    )]
     pub template_type: String,
     #[schemars(description = "Hex-encoded address of the template creator")]
     pub creator_address: String,
     #[schemars(description = "System prompt / agent instructions")]
     pub system_prompt: String,
-    #[schemars(description = "Comma-separated tags for discoverability (e.g. 'coding,rust,debugging')")]
+    #[schemars(
+        description = "Comma-separated tags for discoverability (e.g. 'coding,rust,debugging')"
+    )]
     pub tags: Option<String>,
     #[schemars(description = "Version string in semver format (default: 1.0.0)")]
     pub version: Option<String>,
-    #[schemars(description = "Pricing model: free, per_execution:<price>, per_token:<price>, subscription:<monthly>, revenue_share:<bps>")]
+    #[schemars(
+        description = "Pricing model: free, per_execution:<price>, per_token:<price>, subscription:<monthly>, revenue_share:<bps>"
+    )]
     pub pricing: Option<String>,
     #[schemars(description = "URL to documentation or repository")]
     pub docs_url: Option<String>,
-    #[schemars(description = "Optional creator DID binding (e.g. 'did:tenzro:human:uuid' or 'did:tenzro:machine:uuid'). If provided, the template is publicly attributed to this identity.")]
+    #[schemars(
+        description = "Optional creator DID binding (e.g. 'did:tenzro:human:uuid' or 'did:tenzro:machine:uuid'). If provided, the template is publicly attributed to this identity."
+    )]
     pub creator_did: Option<String>,
-    #[schemars(description = "Optional hex-encoded payout wallet address for creator revenue. REQUIRED when pricing is not 'free' — paid templates without a payout wallet will be rejected.")]
+    #[schemars(
+        description = "Optional hex-encoded payout wallet address for creator revenue. REQUIRED when pricing is not 'free' — paid templates without a payout wallet will be rejected."
+    )]
     pub creator_wallet: Option<String>,
 }
 
@@ -862,17 +1070,29 @@ pub struct ListAgentTemplatesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RunAgentTemplateParams {
-    #[schemars(description = "UUID of the spawned agent to run (must have been created via spawn_agent_template first)")]
+    #[schemars(
+        description = "UUID of the spawned agent to run (must have been created via spawn_agent_template first)"
+    )]
     pub agent_id: String,
-    #[schemars(description = "Maximum iterations through the template's execution steps (default 1)")]
+    #[schemars(
+        description = "Maximum iterations through the template's execution steps (default 1)"
+    )]
     pub max_iterations: Option<u64>,
-    #[schemars(description = "If true, simulate execution without dispatching real transactions or charging fees (default false)")]
+    #[schemars(
+        description = "If true, simulate execution without dispatching real transactions or charging fees (default false)"
+    )]
     pub dry_run: Option<bool>,
-    #[schemars(description = "Hex-encoded payer wallet address. REQUIRED for paid templates — will be charged the network commission (to treasury) and creator payout.")]
+    #[schemars(
+        description = "Hex-encoded payer wallet address. REQUIRED for paid templates — will be charged the network commission (to treasury) and creator payout."
+    )]
     pub payer_wallet: Option<String>,
-    #[schemars(description = "Estimated token usage for per-token pricing. Ignored for free/per_execution/subscription pricing. Default 0.")]
+    #[schemars(
+        description = "Estimated token usage for per-token pricing. Ignored for free/per_execution/subscription pricing. Default 0."
+    )]
     pub tokens_estimate: Option<u64>,
-    #[schemars(description = "Registered app_id for developer-margin attribution. The payer is additionally charged the app's margin, routed to the app wallet in the same settlement.")]
+    #[schemars(
+        description = "Registered app_id for developer-margin attribution. The payer is additionally charged the app's margin, routed to the app wallet in the same settlement."
+    )]
     pub app_id: Option<String>,
 }
 
@@ -882,7 +1102,9 @@ pub struct RunAgentTemplateParams {
 pub struct JoinAsMicroNodeParams {
     #[schemars(description = "Display name for this participant (human-readable, optional)")]
     pub display_name: Option<String>,
-    #[schemars(description = "Entry point: 'mcp' | 'claude' | 'clawbot' | 'a2a' | 'sdk' | 'api' | 'cli' | 'app'")]
+    #[schemars(
+        description = "Entry point: 'mcp' | 'claude' | 'clawbot' | 'a2a' | 'sdk' | 'api' | 'cli' | 'app'"
+    )]
     pub origin: Option<String>,
     #[schemars(description = "Participant type: 'human' | 'agent' | 'bot'")]
     pub participant_type: Option<String>,
@@ -894,7 +1116,9 @@ pub struct JoinAsMicroNodeParams {
 pub struct SetUsernameParams {
     #[schemars(description = "DID to associate the username with (e.g. did:tenzro:human:uuid)")]
     pub did: String,
-    #[schemars(description = "Globally unique username to register (alphanumeric, underscores, hyphens)")]
+    #[schemars(
+        description = "Globally unique username to register (alphanumeric, underscores, hyphens)"
+    )]
     pub username: String,
 }
 
@@ -908,13 +1132,17 @@ pub struct ResolveUsernameParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetSkillUsageParams {
-    #[schemars(description = "Skill ID to get usage stats for (e.g. 'openclaw-tenzro', 'solana-defi')")]
+    #[schemars(
+        description = "Skill ID to get usage stats for (e.g. 'openclaw-tenzro', 'solana-defi')"
+    )]
     pub skill_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetToolUsageParams {
-    #[schemars(description = "Tool ID to get usage stats for (e.g. 'tenzro-solana-mcp', 'tenzro-ethereum-mcp')")]
+    #[schemars(
+        description = "Tool ID to get usage stats for (e.g. 'tenzro-solana-mcp', 'tenzro-ethereum-mcp')"
+    )]
     pub tool_id: String,
 }
 
@@ -926,7 +1154,9 @@ pub struct SpawnAgentFromTemplateParams {
     pub template_id: String,
     #[schemars(description = "Display name for the spawned agent")]
     pub name: String,
-    #[schemars(description = "Optional parent machine DID. When set, the spawned agent's delegation scope is the strict intersection of the parent's scope and the template's spec — the child can never be broader than its parent on any axis.")]
+    #[schemars(
+        description = "Optional parent machine DID. When set, the spawned agent's delegation scope is the strict intersection of the parent's scope and the template's spec — the child can never be broader than its parent on any axis."
+    )]
     #[serde(default)]
     pub parent_machine_did: Option<String>,
 }
@@ -968,7 +1198,7 @@ pub struct GetAgentTemplateStatsParams {
 ///   - Bridge: bridge_tokens, get_bridge_routes, list_bridge_adapters
 ///   - Staking & Providers: stake_tokens, unstake_tokens, register_provider, get_provider_stats,
 ///     get_compute_bond
-///   - Network: get_node_status, get_block, get_block_range, get_transaction, get_fee_market, get_svm_cross_vm_program_info
+///   - Network: get_node_status, get_node_did_document, get_block, get_block_range, get_transaction, get_fee_market, get_svm_cross_vm_program_info
 ///   - Verification: verify_zk_proof
 ///   - Agent Spawning & Swarms: spawn_agent, run_agent_task, create_swarm, get_swarm_status, terminate_swarm
 
@@ -998,7 +1228,9 @@ pub struct RunAgentTaskParams {
 pub struct CreateSwarmParams {
     #[schemars(description = "Orchestrator agent ID")]
     pub orchestrator_id: String,
-    #[schemars(description = "JSON array of member specs: [{\"name\":\"analyst\",\"capabilities\":[\"data\"]}]")]
+    #[schemars(
+        description = "JSON array of member specs: [{\"name\":\"analyst\",\"capabilities\":[\"data\"]}]"
+    )]
     pub members: serde_json::Value,
     #[schemars(description = "Max number of swarm members (default 10)")]
     pub max_members: Option<usize>,
@@ -1022,7 +1254,9 @@ pub struct TerminateSwarmParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListProvidersParams {
-    #[schemars(description = "Optional filter by provider type: 'llm', 'tee', or 'general'. If omitted, all providers are returned.")]
+    #[schemars(
+        description = "Optional filter by provider type: 'llm', 'tee', or 'general'. If omitted, all providers are returned."
+    )]
     pub provider_type: Option<String>,
 }
 
@@ -1030,7 +1264,9 @@ pub struct ListProvidersParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListProposalsParams {
-    #[schemars(description = "Filter by status: 'active', 'passed', 'rejected', 'pending'. If omitted, returns all.")]
+    #[schemars(
+        description = "Filter by status: 'active', 'passed', 'rejected', 'pending'. If omitted, returns all."
+    )]
     pub status: Option<String>,
     #[schemars(description = "Maximum number of results (default 20)")]
     pub limit: Option<usize>,
@@ -1074,7 +1310,9 @@ pub struct DelegateVotingPowerParams {
     pub from_address: String,
     #[schemars(description = "Hex-encoded delegate address to receive voting power")]
     pub to_address: String,
-    #[schemars(description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '100000000000000000000' for 100 TNZO. If omitted, delegates the full staked balance.")]
+    #[schemars(
+        description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '100000000000000000000' for 100 TNZO. If omitted, delegates the full staked balance."
+    )]
     pub amount_wei: Option<String>,
 }
 
@@ -1134,7 +1372,9 @@ pub struct SettlePaymentParams {
     pub payer: String,
     #[schemars(description = "Hex-encoded payee address")]
     pub payee: String,
-    #[schemars(description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '1500000000000000000' for 1.5 TNZO.")]
+    #[schemars(
+        description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '1500000000000000000' for 1.5 TNZO."
+    )]
     pub amount_wei: String,
     #[schemars(description = "Service type: 'inference', 'tee', 'storage', 'general'")]
     pub service_type: String,
@@ -1148,9 +1388,13 @@ pub struct CreateEscrowParams {
     pub payer: String,
     #[schemars(description = "Hex-encoded payee address (receives funds on release)")]
     pub payee: String,
-    #[schemars(description = "Amount in wei to hold in escrow as a decimal string (1 TNZO = 10^18 wei).")]
+    #[schemars(
+        description = "Amount in wei to hold in escrow as a decimal string (1 TNZO = 10^18 wei)."
+    )]
     pub amount_wei: String,
-    #[schemars(description = "Release condition: 'provider_signature' | 'consumer_signature' | 'both_signatures' | 'verifier_signature' | 'timeout' | 'custom'")]
+    #[schemars(
+        description = "Release condition: 'provider_signature' | 'consumer_signature' | 'both_signatures' | 'verifier_signature' | 'timeout' | 'custom'"
+    )]
     pub release_condition: String,
     #[schemars(description = "Timeout duration in seconds (for timeout-based release)")]
     pub timeout_secs: Option<u64>,
@@ -1160,7 +1404,9 @@ pub struct CreateEscrowParams {
 pub struct ReleaseEscrowParams {
     #[schemars(description = "32-byte escrow ID (hex, with or without 0x prefix)")]
     pub escrow_id: String,
-    #[schemars(description = "Hex-encoded payer address (must match the bearer's wallet — only the payer can release)")]
+    #[schemars(
+        description = "Hex-encoded payer address (must match the bearer's wallet — only the payer can release)"
+    )]
     pub payer: String,
     #[schemars(description = "Optional hex-encoded proof bytes")]
     pub proof_data_hex: Option<String>,
@@ -1180,10 +1426,15 @@ pub struct OpenPaymentChannelParams {
     pub sender: String,
     #[schemars(description = "Hex-encoded recipient address")]
     pub recipient: String,
-    #[schemars(description = "Initial deposit amount in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[schemars(
+        description = "Initial deposit amount in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.",
+        with = "String"
+    )]
     #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub deposit_wei: u128,
-    #[schemars(description = "Registered app_id for developer-margin attribution. The channel snapshots the app's wallet and margin at open; the margin is carved out of the payee credit at channel finalize.")]
+    #[schemars(
+        description = "Registered app_id for developer-margin attribution. The channel snapshots the app's wallet and margin at open; the margin is carved out of the payee credit at channel finalize."
+    )]
     pub app_id: Option<String>,
 }
 
@@ -1191,10 +1442,15 @@ pub struct OpenPaymentChannelParams {
 pub struct ClosePaymentChannelParams {
     #[schemars(description = "Payment channel ID to close")]
     pub channel_id: String,
-    #[schemars(description = "Final balance owed to recipient in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[schemars(
+        description = "Final balance owed to recipient in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.",
+        with = "String"
+    )]
     #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub final_balance_wei: u128,
-    #[schemars(description = "Hex-encoded signature from the channel sender authorizing the final balance")]
+    #[schemars(
+        description = "Hex-encoded signature from the channel sender authorizing the final balance"
+    )]
     pub sender_signature_hex: String,
 }
 
@@ -1213,18 +1469,98 @@ pub struct DownloadModelParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ServeModelMcpParams {
-    #[schemars(description = "Model ID to start serving (must be downloaded first, unless fronting an external engine)")]
+    #[schemars(
+        description = "Model ID to start serving (must be downloaded first, unless fronting an external engine)"
+    )]
     pub model_id: String,
     #[schemars(description = "Optional maximum number of concurrent inference requests")]
     pub max_concurrent: Option<u32>,
-    #[schemars(description = "Front an external OpenAI-compatible serving engine instead of loading weights in-process: vllm, sglang, llama-server, or external. Requires base_url.")]
+    #[schemars(
+        description = "Front an external OpenAI-compatible serving engine instead of loading weights in-process: vllm, sglang, llama-server, or external. Requires base_url."
+    )]
     pub engine: Option<String>,
     #[schemars(description = "Base URL of the external engine (e.g. http://127.0.0.1:8000)")]
     pub base_url: Option<String>,
-    #[schemars(description = "Model name the external engine was launched with, when it differs from the catalog id")]
+    #[schemars(
+        description = "Model name the external engine was launched with, when it differs from the catalog id"
+    )]
     pub upstream_model: Option<String>,
     #[schemars(description = "Bearer token when the external engine was launched with an API key")]
     pub api_key: Option<String>,
+}
+
+// ─── Object storage (`/v1/files`) parameter structs ───
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UploadFileParams {
+    #[schemars(
+        description = "Original filename, e.g. `corpus.jsonl`. Required — a file with no name cannot be found again by the tenant who stored it"
+    )]
+    pub filename: String,
+    #[schemars(
+        description = "File contents, base64-encoded. Base64 inflates by a third and the whole envelope is buffered as one JSON value, so this path suits documents and datasets rather than large media"
+    )]
+    pub data: String,
+    #[schemars(
+        description = "What the file is for: assistants | batch | fine_tune | vision | user_data. Defaults to user_data — a tenant who says nothing has not said it is training data"
+    )]
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ListFilesParams {
+    #[schemars(
+        description = "Narrow to one purpose: assistants | batch | fine_tune | vision | user_data"
+    )]
+    pub purpose: Option<String>,
+    #[schemars(description = "How many to return, newest first. Clamped to 1000")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FileIdParams {
+    #[schemars(description = "File id as returned by upload_file (`file-<uuid>`)")]
+    pub file_id: String,
+}
+
+// ─── Universal RPC gateway parameter structs ───
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CustodyChallengeParams {
+    #[schemars(description = "Smart account being changed (0x-prefixed 20-byte address)")]
+    pub account_address: String,
+    #[schemars(
+        description = "One of: add_passkey, remove_passkey, set_passkey_policy, grant_session_key, revoke_session_key, set_spending_limit, add_hardware_signer, add_guardian"
+    )]
+    pub operation: String,
+    #[schemars(
+        description = "The operation's subject, hex — the credential being revoked, the session key being withdrawn. Omit for add_passkey: the device does not exist yet at challenge time"
+    )]
+    pub target_hex: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ListRpcMethodsParams {
+    #[schemars(
+        description = "Restrict to one namespace, e.g. `eth`, `canton`, `list`. Omit to search across all"
+    )]
+    pub namespace: Option<String>,
+    #[schemars(
+        description = "Case-insensitive substring of the method name, e.g. `database`, `stake`, `Forecast`"
+    )]
+    pub contains: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CallRpcParams {
+    #[schemars(
+        description = "Exact JSON-RPC method name as returned by list_rpc_methods, e.g. `tenzro_previewServe`"
+    )]
+    pub method: String,
+    #[schemars(
+        description = "The method's parameters as a JSON object. Omit for methods that take none"
+    )]
+    pub params: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1251,7 +1587,9 @@ pub struct GetDownloadProgressParams {
 pub struct SetProviderScheduleParams {
     #[schemars(description = "Hex-encoded provider address")]
     pub provider_address: String,
-    #[schemars(description = "Availability schedule as JSON (e.g. {\"timezone\": \"UTC\", \"hours\": \"0-23\", \"days\": \"mon-sun\"})")]
+    #[schemars(
+        description = "Availability schedule as JSON (e.g. {\"timezone\": \"UTC\", \"hours\": \"0-23\", \"days\": \"mon-sun\"})"
+    )]
     pub schedule: serde_json::Value,
 }
 
@@ -1269,25 +1607,43 @@ pub struct SetProviderPricingParams {
     pub input_price_per_token_wei: String,
     #[schemars(description = "Wei per output token (decimal string; 1 TNZO = 10^18 wei)")]
     pub output_price_per_token_wei: String,
-    #[schemars(description = "Wei per request, charged as a floor on a metered quote and as the whole quote under per-request pricing. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per request, charged as a floor on a metered quote and as the whole quote under per-request pricing. Omit to keep the current rate."
+    )]
     pub price_per_request_wei: Option<u64>,
-    #[schemars(description = "Wei per millisecond of compute, read under per-compute-time pricing. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per millisecond of compute, read under per-compute-time pricing. Omit to keep the current rate."
+    )]
     pub price_per_compute_ms_wei: Option<u64>,
-    #[schemars(description = "Wei per prompt token served from cache, normally well under a fresh input token. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per prompt token served from cache, normally well under a fresh input token. Omit to keep the current rate."
+    )]
     pub price_per_cached_read_token_wei: Option<u64>,
-    #[schemars(description = "Wei per prompt token written into cache, charged on top of the fresh prefill. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per prompt token written into cache, charged on top of the fresh prefill. Omit to keep the current rate."
+    )]
     pub price_per_cached_write_token_wei: Option<u64>,
-    #[schemars(description = "Wei per reasoning loop on a recurrent-depth model. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per reasoning loop on a recurrent-depth model. Omit to keep the current rate."
+    )]
     pub price_per_reasoning_loop_wei: Option<u64>,
-    #[schemars(description = "Wei per image token derived from image geometry. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per image token derived from image geometry. Omit to keep the current rate."
+    )]
     pub price_per_image_token_wei: Option<u64>,
-    #[schemars(description = "Wei per second of audio transcribed or generated. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per second of audio transcribed or generated. Omit to keep the current rate."
+    )]
     pub price_per_audio_second_wei: Option<u64>,
     #[schemars(description = "Wei per second of video. Omit to keep the current rate.")]
     pub price_per_video_second_wei: Option<u64>,
-    #[schemars(description = "Wei per pixel-step of denoising work, where a pixel-step is width x height x steps x frames. Prices frames the provider generates. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per pixel-step of denoising work, where a pixel-step is width x height x steps x frames. Prices frames the provider generates. Omit to keep the current rate."
+    )]
     pub price_per_pixel_step_wei: Option<u64>,
-    #[schemars(description = "Wei per frame the provider consumes, as when sampling a clip for embedding. Omit to keep the current rate.")]
+    #[schemars(
+        description = "Wei per frame the provider consumes, as when sampling a clip for embedding. Omit to keep the current rate."
+    )]
     pub price_per_frame_wei: Option<u64>,
 }
 
@@ -1303,40 +1659,62 @@ pub struct GetProviderPricingParams {
 pub struct RegisterAgentParams {
     #[schemars(description = "Human-readable agent name")]
     pub name: String,
-    #[schemars(description = "Hex-encoded creator address (the human/machine address that owns this agent). 20- or 32-byte hex, with or without 0x prefix.")]
+    #[schemars(
+        description = "Hex-encoded creator address (the human/machine address that owns this agent). 20- or 32-byte hex, with or without 0x prefix."
+    )]
     pub creator: String,
-    #[schemars(description = "Capability short names: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination'. Anything else is treated as a Custom capability with that name. Defaults to a single 'general' capability when omitted.")]
+    #[schemars(
+        description = "Capability short names: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination'. Anything else is treated as a Custom capability with that name. Defaults to a single 'general' capability when omitted."
+    )]
     #[serde(default)]
     pub capabilities: Vec<String>,
-    #[schemars(description = "BYOK: optional 32-byte Ed25519 verifying key (hex). If supplied, `pq_public_key` and `bls_public_key` MUST also be supplied. When all three are present, no server-side wallet is provisioned and the agent is registered self-custodially with the caller's keys. When all three are absent, the node provisions a server-side hybrid (FROST Ed25519 + ML-DSA-65 + BLS12-381) wallet.")]
+    #[schemars(
+        description = "BYOK: optional 32-byte Ed25519 verifying key (hex). If supplied, `pq_public_key` and `bls_public_key` MUST also be supplied. When all three are present, no server-side wallet is provisioned and the agent is registered self-custodially with the caller's keys. When all three are absent, the node provisions a server-side hybrid (FROST Ed25519 + ML-DSA-65 + BLS12-381) wallet."
+    )]
     #[serde(default)]
     pub public_key: Option<String>,
-    #[schemars(description = "BYOK: optional 1952-byte ML-DSA-65 verifying key (hex). Required iff `public_key` is supplied.")]
+    #[schemars(
+        description = "BYOK: optional 1952-byte ML-DSA-65 verifying key (hex). Required iff `public_key` is supplied."
+    )]
     #[serde(default)]
     pub pq_public_key: Option<String>,
-    #[schemars(description = "BYOK: optional 48-byte BLS12-381 G1-compressed verifying key (`min_pk` scheme, hex). Required iff `public_key` is supplied. Used for HotStuff-2 vote aggregation if the agent later stakes as a validator.")]
+    #[schemars(
+        description = "BYOK: optional 48-byte BLS12-381 G1-compressed verifying key (`min_pk` scheme, hex). Required iff `public_key` is supplied. Used for HotStuff-2 vote aggregation if the agent later stakes as a validator."
+    )]
     #[serde(default)]
     pub bls_public_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendAgentMessageParams {
-    #[schemars(description = "Sender agent_id (16-byte hex, as returned by register_agent). Must already be registered with the local node's AgentRuntime.")]
+    #[schemars(
+        description = "Sender agent_id (16-byte hex, as returned by register_agent). Must already be registered with the local node's AgentRuntime."
+    )]
     pub from: String,
-    #[schemars(description = "Recipient agent_id (same format). Must be registered with the local node's MessageRouter.")]
+    #[schemars(
+        description = "Recipient agent_id (same format). Must be registered with the local node's MessageRouter."
+    )]
     pub to: String,
     #[schemars(description = "UTF-8 message body. Becomes AgentMessage.payload.")]
     pub message: String,
-    #[schemars(description = "Optional message type: 'task_request' (default), 'task_response', 'query', 'query_response', 'notification', 'coordination', 'error'.")]
+    #[schemars(
+        description = "Optional message type: 'task_request' (default), 'task_response', 'query', 'query_response', 'notification', 'coordination', 'error'."
+    )]
     #[serde(default)]
     pub message_type: Option<String>,
-    #[schemars(description = "Optional message_id of a prior message this is a reply to. Changes the canonical hash, so callers must include it BEFORE signing.")]
+    #[schemars(
+        description = "Optional message_id of a prior message this is a reply to. Changes the canonical hash, so callers must include it BEFORE signing."
+    )]
     #[serde(default)]
     pub reply_to: Option<String>,
-    #[schemars(description = "Hybrid signing: 64-byte Ed25519 signature (hex) over SHA-256(AgentMessage::signing_data()). Required (with pq_signature) when the router enforces signing.")]
+    #[schemars(
+        description = "Hybrid signing: 64-byte Ed25519 signature (hex) over SHA-256(AgentMessage::signing_data()). Required (with pq_signature) when the router enforces signing."
+    )]
     #[serde(default)]
     pub signature: Option<String>,
-    #[schemars(description = "Hybrid signing: 3309-byte ML-DSA-65 signature (hex) over the same hash. Required (with signature) when the router enforces signing.")]
+    #[schemars(
+        description = "Hybrid signing: 3309-byte ML-DSA-65 signature (hex) over the same hash. Required (with signature) when the router enforces signing."
+    )]
     #[serde(default)]
     pub pq_signature: Option<String>,
 }
@@ -1349,7 +1727,10 @@ pub struct DelegateTaskParams {
     pub delegate_did: String,
     #[schemars(description = "Task description or task ID to delegate")]
     pub task: String,
-    #[schemars(description = "Optional maximum budget for the delegated task in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "Option<String>")]
+    #[schemars(
+        description = "Optional maximum budget for the delegated task in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub max_budget_wei: Option<u128>,
 }
@@ -1360,7 +1741,9 @@ pub struct DelegateTaskParams {
 pub struct PauseAgentParams {
     #[schemars(description = "DID of the agent to pause")]
     pub agent_did: String,
-    #[schemars(description = "DID of the controller authorizing the pause (must match controller_did on the agent identity)")]
+    #[schemars(
+        description = "DID of the controller authorizing the pause (must match controller_did on the agent identity)"
+    )]
     pub controller_did: String,
     #[schemars(description = "Free-text reason recorded on the kill-switch receipt")]
     pub reason: String,
@@ -1368,29 +1751,39 @@ pub struct PauseAgentParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct QuarantineAgentParams {
-    #[schemars(description = "DID of the agent to quarantine (freezes stake, blocks all messaging)")]
+    #[schemars(
+        description = "DID of the agent to quarantine (freezes stake, blocks all messaging)"
+    )]
     pub agent_did: String,
     #[schemars(description = "DID of the controller authorizing the quarantine")]
     pub controller_did: String,
     #[schemars(description = "Free-text reason recorded on the kill-switch receipt")]
     pub reason: String,
-    #[schemars(description = "Optional 32-byte evidence hash (hex-encoded, with or without 0x prefix)")]
+    #[schemars(
+        description = "Optional 32-byte evidence hash (hex-encoded, with or without 0x prefix)"
+    )]
     pub evidence_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TerminateAgentParams {
-    #[schemars(description = "DID of the agent to terminate (terminal state, optionally cascades to spawned children)")]
+    #[schemars(
+        description = "DID of the agent to terminate (terminal state, optionally cascades to spawned children)"
+    )]
     pub agent_did: String,
     #[schemars(description = "DID of the controller authorizing the termination")]
     pub controller_did: String,
     #[schemars(description = "Free-text reason recorded on the kill-switch receipt")]
     pub reason: String,
-    #[schemars(description = "Optional 32-byte evidence hash (hex-encoded, with or without 0x prefix)")]
+    #[schemars(
+        description = "Optional 32-byte evidence hash (hex-encoded, with or without 0x prefix)"
+    )]
     pub evidence_hash: Option<String>,
     #[schemars(description = "Slash basis points 0-10000 (10000 = 100%). Default 0.")]
     pub slash_bps: Option<u16>,
-    #[schemars(description = "If true, recursively terminate all descendant agents in the spawn tree")]
+    #[schemars(
+        description = "If true, recursively terminate all descendant agents in the spawn tree"
+    )]
     pub cascade: Option<bool>,
 }
 
@@ -1400,7 +1793,9 @@ pub struct TerminateAgentParams {
 pub struct PostAgentBondParams {
     #[schemars(description = "Controller wallet address (hex). Must match the signing key.")]
     pub from: String,
-    #[schemars(description = "DID of the agent the bond is posted against (e.g. did:tenzro:machine:...)")]
+    #[schemars(
+        description = "DID of the agent the bond is posted against (e.g. did:tenzro:machine:...)"
+    )]
     pub agent_did: String,
     #[schemars(description = "Controller DID (e.g. did:tenzro:human:...) authorizing the bond")]
     pub controller_did: String,
@@ -1436,9 +1831,13 @@ pub struct FileInsuranceClaimParams {
 pub struct MemoryGrantParams {
     #[schemars(description = "Agent DID the memory belongs to (e.g. 'did:tenzro:machine:...')")]
     pub agent_did: String,
-    #[schemars(description = "The text payload to remember. Indexed for both vector and BM25 recall.")]
+    #[schemars(
+        description = "The text payload to remember. Indexed for both vector and BM25 recall."
+    )]
     pub text: String,
-    #[schemars(description = "Memory kind: 'granted' (default), 'recalled', 'self_noted', or 'archived'.")]
+    #[schemars(
+        description = "Memory kind: 'granted' (default), 'recalled', 'self_noted', or 'archived'."
+    )]
     pub kind: Option<String>,
     #[schemars(description = "Memory source: 'controller' (default), 'tool', 'peer', or 'self'.")]
     pub source: Option<String>,
@@ -1450,7 +1849,9 @@ pub struct MemoryGrantParams {
 pub struct MemoryRecallParams {
     #[schemars(description = "Agent DID whose memory tier should be searched.")]
     pub agent_did: String,
-    #[schemars(description = "Natural-language query. Embedded for vector recall, parsed for BM25.")]
+    #[schemars(
+        description = "Natural-language query. Embedded for vector recall, parsed for BM25."
+    )]
     pub query: String,
     #[schemars(description = "Top-k results to return per backend (default 10).")]
     pub k: Option<u32>,
@@ -1474,7 +1875,9 @@ pub struct IrohPublishBlobParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IrohFetchBlobParams {
-    #[schemars(description = "Content-addressed tenzro:// URI to fetch (blob / model / gradient / shard / receipt).")]
+    #[schemars(
+        description = "Content-addressed tenzro:// URI to fetch (blob / model / gradient / shard / receipt)."
+    )]
     pub tenzro_uri: String,
 }
 
@@ -1493,7 +1896,9 @@ pub struct SeedAgentCharterParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SeedAgentListParams {
-    #[schemars(description = "Optional 32-byte charter id filter (hex). Omit to list every seed agent.")]
+    #[schemars(
+        description = "Optional 32-byte charter id filter (hex). Omit to list every seed agent."
+    )]
     pub charter_id: Option<String>,
 }
 
@@ -1501,7 +1906,9 @@ pub struct SeedAgentListParams {
 pub struct SeedAgentActivityParams {
     #[schemars(description = "Time window — '1h', '24h', '7d', or '30d'. Default '24h'.")]
     pub window: Option<String>,
-    #[schemars(description = "Skip transactions where either side is a registered seed agent. Default false.")]
+    #[schemars(
+        description = "Skip transactions where either side is a registered seed agent. Default false."
+    )]
     pub exclude_seed: Option<bool>,
 }
 
@@ -1515,7 +1922,9 @@ pub struct Erc7683OrderIdParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc7683ListOrdersParams {
-    #[schemars(description = "Optional state filter — one of: open, awaiting_proof, settled, refunded, force_refund_eligible.")]
+    #[schemars(
+        description = "Optional state filter — one of: open, awaiting_proof, settled, refunded, force_refund_eligible."
+    )]
     pub state: Option<String>,
     #[schemars(description = "Optional CAIP-2 numeric destination chain id filter.")]
     pub dest_chain: Option<u32>,
@@ -1541,7 +1950,9 @@ pub struct Erc7683RecordFillParams {
     pub filled_at_ms: i64,
     #[schemars(description = "Proof route — one of: layerzero, wormhole, debridge, hyperlane.")]
     pub proof_route: String,
-    #[schemars(description = "Outputs array (each entry: { token, amount, recipient, chain_id }).")]
+    #[schemars(
+        description = "Outputs array (each entry: { token, amount, recipient, chain_id })."
+    )]
     pub outputs: serde_json::Value,
 }
 
@@ -1555,11 +1966,16 @@ pub struct Erc7683GetFillParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiscoverModelsParams {
-    #[schemars(description = "Optional model category filter: 'text', 'image', 'audio', 'multimodal'")]
+    #[schemars(
+        description = "Optional model category filter: 'text', 'image', 'audio', 'multimodal'"
+    )]
     pub category: Option<String>,
     #[schemars(description = "Only return models currently being served")]
     pub serving_only: Option<bool>,
-    #[schemars(description = "Maximum price per 1k tokens in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "Option<String>")]
+    #[schemars(
+        description = "Maximum price per 1k tokens in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.",
+        with = "Option<String>"
+    )]
     #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
     pub max_price_wei: Option<u128>,
 }
@@ -1568,7 +1984,9 @@ pub struct DiscoverModelsParams {
 pub struct DiscoverAgentsParams {
     #[schemars(description = "Filter by capability (e.g. 'inference', 'settlement', 'bridge')")]
     pub capability: Option<String>,
-    #[schemars(description = "Filter by agent type: 'autonomous', 'assistant', 'validator', 'oracle'")]
+    #[schemars(
+        description = "Filter by agent type: 'autonomous', 'assistant', 'validator', 'oracle'"
+    )]
     pub agent_type: Option<String>,
     #[schemars(description = "Maximum number of agents to return (default 20)")]
     pub limit: Option<usize>,
@@ -1578,9 +1996,13 @@ pub struct DiscoverAgentsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetCapabilityAttestationsParams {
-    #[schemars(description = "Capability short-form name: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination', or any custom-capability name registered by an agent.")]
+    #[schemars(
+        description = "Capability short-form name: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination', or any custom-capability name registered by an agent."
+    )]
     pub capability: String,
-    #[schemars(description = "If true, run query-time signature/expiry checks before returning. Default false: registry already verifies signatures eagerly at submit time per #52.")]
+    #[schemars(
+        description = "If true, run query-time signature/expiry checks before returning. Default false: registry already verifies signatures eagerly at submit time per #52."
+    )]
     pub verified_only: Option<bool>,
 }
 
@@ -1592,7 +2014,9 @@ pub struct GetAgentCapabilityAttestationsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindBestAgentForCapabilityParams {
-    #[schemars(description = "Capability short-form name: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination', or any custom-capability name. Returns the agent with the most recent TEE-backed attestation (preferred), falling back to any agent with the capability.")]
+    #[schemars(
+        description = "Capability short-form name: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination', or any custom-capability name. Returns the agent with the most recent TEE-backed attestation (preferred), falling back to any agent with the capability."
+    )]
     pub capability: String,
 }
 
@@ -1684,7 +2108,9 @@ pub struct CreateTokenParams {
     pub permissions: Option<Vec<String>>,
     #[schemars(description = "Optional token description")]
     pub description: Option<String>,
-    #[schemars(description = "Optional hex-encoded signature over 'tenzro:create_token:{name}:{symbol}:{supply}' proving creator ownership (min 64 bytes)")]
+    #[schemars(
+        description = "Optional hex-encoded signature over 'tenzro:create_token:{name}:{symbol}:{supply}' proving creator ownership (min 64 bytes)"
+    )]
     pub signature: Option<String>,
 }
 
@@ -1718,7 +2144,9 @@ pub struct DeployContractParams {
     pub constructor_args: Option<String>,
     #[schemars(description = "Gas limit for deployment (default: 3000000)")]
     pub gas_limit: Option<u64>,
-    #[schemars(description = "Optional hex-encoded signature over 'tenzro:deploy_contract:{vm_type}:{deployer}' proving deployer ownership (min 64 bytes)")]
+    #[schemars(
+        description = "Optional hex-encoded signature over 'tenzro:deploy_contract:{vm_type}:{deployer}' proving deployer ownership (min 64 bytes)"
+    )]
     pub signature: Option<String>,
 }
 
@@ -1770,7 +2198,9 @@ pub struct CreateNftCollectionParams {
     pub standard: String,
     #[schemars(description = "Optional collection description")]
     pub description: Option<String>,
-    #[schemars(description = "Optional base URI for token metadata (e.g. 'https://metadata.tenzro.com/collection/')")]
+    #[schemars(
+        description = "Optional base URI for token metadata (e.g. 'https://metadata.tenzro.com/collection/')"
+    )]
     pub base_uri: Option<String>,
 }
 
@@ -1782,7 +2212,9 @@ pub struct MintNftParams {
     pub to: String,
     #[schemars(description = "Token ID within the collection (numeric string, e.g. '1')")]
     pub token_id: String,
-    #[schemars(description = "Token metadata URI (e.g. 'https://metadata.tenzro.com/collection/1.json')")]
+    #[schemars(
+        description = "Token metadata URI (e.g. 'https://metadata.tenzro.com/collection/1.json')"
+    )]
     pub uri: String,
     #[schemars(description = "Amount to mint (only for ERC-1155, default 1)")]
     pub amount: Option<u64>,
@@ -1806,7 +2238,9 @@ pub struct TransferNftParams {
 pub struct GetNftInfoParams {
     #[schemars(description = "Collection ID (UUID)")]
     pub collection_id: String,
-    #[schemars(description = "Token ID within the collection (optional — if omitted, returns collection-level info)")]
+    #[schemars(
+        description = "Token ID within the collection (optional — if omitted, returns collection-level info)"
+    )]
     pub token_id: Option<String>,
 }
 
@@ -1842,7 +2276,9 @@ pub struct BridgeQuoteParams {
     pub token: String,
     #[schemars(description = "Amount in base units")]
     pub amount: u128,
-    #[schemars(description = "Preferred bridge protocol: 'layerzero', 'ccip', 'debridge' (optional — auto-selects best route if omitted)")]
+    #[schemars(
+        description = "Preferred bridge protocol: 'layerzero', 'ccip', 'debridge' (optional — auto-selects best route if omitted)"
+    )]
     pub protocol: Option<String>,
 }
 
@@ -1858,9 +2294,13 @@ pub struct BridgeWithHookParams {
     pub amount: u128,
     #[schemars(description = "Hex-encoded sender address on source chain")]
     pub sender: String,
-    #[schemars(description = "Hex-encoded target contract address for the post-fulfillment hook on destination chain")]
+    #[schemars(
+        description = "Hex-encoded target contract address for the post-fulfillment hook on destination chain"
+    )]
     pub hook_target: String,
-    #[schemars(description = "Hex-encoded calldata to execute on hook_target after bridge fulfillment")]
+    #[schemars(
+        description = "Hex-encoded calldata to execute on hook_target after bridge fulfillment"
+    )]
     pub hook_calldata: String,
 }
 
@@ -1870,15 +2310,23 @@ pub struct BridgeWithHookParams {
 pub struct CrosschainMintParams {
     #[schemars(description = "Hex-encoded authorized bridge address")]
     pub bridge: String,
-    #[schemars(description = "Bridge router adapter name that verifies the inbound payload (e.g. wormhole, hyperlane, axelar)")]
+    #[schemars(
+        description = "Bridge router adapter name that verifies the inbound payload (e.g. wormhole, hyperlane, axelar)"
+    )]
     pub adapter: String,
     #[schemars(description = "Source chain identifier the payload arrived from")]
     pub source_chain: String,
-    #[schemars(description = "Hex-encoded inbound bridge payload; the quorum-verified TenzroMessage inside is the sole authority for recipient and amount")]
+    #[schemars(
+        description = "Hex-encoded inbound bridge payload; the quorum-verified TenzroMessage inside is the sole authority for recipient and amount"
+    )]
     pub payload: String,
-    #[schemars(description = "Expected recipient address (hex) — cross-checked against the verified message")]
+    #[schemars(
+        description = "Expected recipient address (hex) — cross-checked against the verified message"
+    )]
     pub to: Option<String>,
-    #[schemars(description = "Expected amount in base units — cross-checked against the verified message")]
+    #[schemars(
+        description = "Expected amount in base units — cross-checked against the verified message"
+    )]
     pub amount: Option<u128>,
 }
 
@@ -1900,7 +2348,9 @@ pub struct AuthorizeCrosschainBridgeParams {
     pub bridge: String,
     #[schemars(description = "Human-readable bridge name (e.g. 'LayerZero V2', 'Chainlink CCIP')")]
     pub name: String,
-    #[schemars(description = "Daily mint limit in base units (e.g. 1000000000000000000000 for 1000 TNZO)")]
+    #[schemars(
+        description = "Daily mint limit in base units (e.g. 1000000000000000000000 for 1000 TNZO)"
+    )]
     pub daily_mint_limit: u128,
     #[schemars(description = "Daily burn limit in base units")]
     pub daily_burn_limit: u128,
@@ -1926,15 +2376,21 @@ pub struct RegisterComplianceParams {
     pub token_id: String,
     #[schemars(description = "Require KYC verification for all holders")]
     pub require_kyc: bool,
-    #[schemars(description = "Minimum KYC tier: 0 (unverified), 1 (basic), 2 (enhanced), 3 (full)")]
+    #[schemars(
+        description = "Minimum KYC tier: 0 (unverified), 1 (basic), 2 (enhanced), 3 (full)"
+    )]
     pub min_kyc_tier: u8,
     #[schemars(description = "Maximum number of token holders (0 for unlimited)")]
     pub max_holders: Option<u64>,
-    #[schemars(description = "Allowed country codes (ISO 3166-1 alpha-2, e.g. ['US', 'GB', 'DE']). Empty array means all allowed.")]
+    #[schemars(
+        description = "Allowed country codes (ISO 3166-1 alpha-2, e.g. ['US', 'GB', 'DE']). Empty array means all allowed."
+    )]
     pub allowed_countries: Option<Vec<String>>,
     #[schemars(description = "Blocked country codes")]
     pub blocked_countries: Option<Vec<String>>,
-    #[schemars(description = "Maximum amount a single address can hold (base units, 0 for unlimited)")]
+    #[schemars(
+        description = "Maximum amount a single address can hold (base units, 0 for unlimited)"
+    )]
     pub max_balance_per_holder: Option<u128>,
 }
 
@@ -1958,13 +2414,17 @@ pub struct TreasuryApproveWithdrawalParams {
     pub asset_id: String,
     #[schemars(description = "Amount in base units (decimal string)")]
     pub amount: String,
-    #[schemars(description = "Approver address (0x-prefixed hex) — must be an authorized withdrawer")]
+    #[schemars(
+        description = "Approver address (0x-prefixed hex) — must be an authorized withdrawer"
+    )]
     pub approver: String,
     #[schemars(description = "Signature key type: 'ed25519' (default) or 'secp256k1'")]
     pub key_type: Option<String>,
     #[schemars(description = "Approver public key (hex)")]
     pub public_key: String,
-    #[schemars(description = "Hex signature over 'tenzro/treasury/withdrawal-approval' || withdrawal_id || asset_id || amount_le")]
+    #[schemars(
+        description = "Hex signature over 'tenzro/treasury/withdrawal-approval' || withdrawal_id || asset_id || amount_le"
+    )]
     pub signature: String,
 }
 
@@ -1974,7 +2434,9 @@ pub struct TreasuryExecuteWithdrawalParams {
     pub withdrawal_id: String,
     #[schemars(description = "Asset identifier (e.g. 'TNZO')")]
     pub asset_id: String,
-    #[schemars(description = "Amount in base units (decimal string) — must match the approved amount")]
+    #[schemars(
+        description = "Amount in base units (decimal string) — must match the approved amount"
+    )]
     pub amount: String,
 }
 
@@ -1992,11 +2454,15 @@ pub struct GetEventsParams {
     pub from_block: Option<u64>,
     #[schemars(description = "Maximum block height (optional)")]
     pub to_block: Option<u64>,
-    #[schemars(description = "Event types to filter: 'transfer', 'mint', 'burn', 'stake', 'bridge', 'settlement', 'nft_transfer', 'compliance' (optional, returns all if omitted)")]
+    #[schemars(
+        description = "Event types to filter: 'transfer', 'mint', 'burn', 'stake', 'bridge', 'settlement', 'nft_transfer', 'compliance' (optional, returns all if omitted)"
+    )]
     pub event_types: Option<Vec<String>>,
     #[schemars(description = "Filter by involved addresses (hex, optional)")]
     pub addresses: Option<Vec<String>>,
-    #[schemars(description = "Start from a specific event sequence number for cursor-based pagination")]
+    #[schemars(
+        description = "Start from a specific event sequence number for cursor-based pagination"
+    )]
     pub from_sequence: Option<u64>,
     #[schemars(description = "Maximum number of events to return (default 50, max 200)")]
     pub limit: Option<usize>,
@@ -2004,7 +2470,9 @@ pub struct GetEventsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SubscribeEventsParams {
-    #[schemars(description = "Event types to subscribe to: 'transfer', 'mint', 'burn', 'stake', 'bridge', 'settlement', 'nft_transfer', 'compliance'")]
+    #[schemars(
+        description = "Event types to subscribe to: 'transfer', 'mint', 'burn', 'stake', 'bridge', 'settlement', 'nft_transfer', 'compliance'"
+    )]
     pub event_types: Option<Vec<String>>,
     #[schemars(description = "Filter by involved addresses (hex, optional)")]
     pub addresses: Option<Vec<String>>,
@@ -2014,11 +2482,23 @@ pub struct SubscribeEventsParams {
 pub struct RegisterWebhookParams {
     #[schemars(description = "HTTPS URL to receive webhook POST notifications")]
     pub url: String,
-    #[schemars(description = "Event types to subscribe to: 'transfer', 'mint', 'burn', 'stake', 'bridge', 'settlement', 'nft_transfer', 'compliance'")]
+    #[schemars(
+        description = "DID that owns this webhook. Only this DID can list or delete it."
+    )]
+    pub owner_did: String,
+    #[schemars(
+        description = "Hex DID envelope proving control of owner_did, bound to method tenzro_registerWebhook with the url as the params hash. Without it the owner field would be a claim rather than a fact."
+    )]
+    pub did_envelope: String,
+    #[schemars(
+        description = "Event types to subscribe to: 'transfer', 'mint', 'burn', 'stake', 'bridge', 'settlement', 'nft_transfer', 'compliance'"
+    )]
     pub event_types: Option<Vec<String>>,
     #[schemars(description = "Filter by involved addresses (hex, optional)")]
     pub addresses: Option<Vec<String>>,
-    #[schemars(description = "Shared secret for HMAC-SHA256 webhook signature verification (must be at least 16 characters)")]
+    #[schemars(
+        description = "Shared secret for HMAC-SHA256 webhook signature verification (must be at least 16 characters)"
+    )]
     pub secret: String,
 }
 
@@ -2026,6 +2506,20 @@ pub struct RegisterWebhookParams {
 pub struct DeleteWebhookParams {
     #[schemars(description = "Webhook id returned by register_webhook / list_webhooks")]
     pub webhook_id: String,
+    #[schemars(
+        description = "Hex DID envelope proving control of the webhook's recorded owner_did, bound to method tenzro_deleteWebhook with the webhook id as the params hash."
+    )]
+    pub did_envelope: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListWebhooksParams {
+    #[schemars(description = "DID whose webhooks to list.")]
+    pub owner_did: String,
+    #[schemars(
+        description = "Hex DID envelope proving control of owner_did, bound to method tenzro_listWebhooks with the DID string as the params hash."
+    )]
+    pub did_envelope: String,
 }
 
 // ─── SLA Fault Detector Params ───
@@ -2038,7 +2532,9 @@ pub struct SlaIssueProbeParams {
     pub epoch: u64,
     #[schemars(description = "Probe round within the epoch")]
     pub round: u64,
-    #[schemars(description = "Unix-millisecond deadline by which the provider must respond before the probe is considered missed")]
+    #[schemars(
+        description = "Unix-millisecond deadline by which the provider must respond before the probe is considered missed"
+    )]
     pub deadline_ms: i64,
 }
 
@@ -2058,32 +2554,6 @@ pub struct SnapshotChunkParams {
     pub chunk_index: u32,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct OfferSnapshotParams {
-    #[schemars(description = "Block height of the snapshot being offered")]
-    pub height: u64,
-    #[schemars(description = "Hex-encoded state root committed at `height`. Caller MUST have verified this against a trusted QC at the same height before invoking this RPC.")]
-    pub state_root_hex: String,
-    #[schemars(description = "Number of chunks. Chunk indices are 0..num_chunks.")]
-    pub num_chunks: u32,
-    #[schemars(description = "Per-chunk SHA-256 hash (hex), indexed by chunk number. Length must equal num_chunks.")]
-    pub chunk_hashes_hex: Vec<String>,
-    #[schemars(description = "Wall-clock time the snapshot was produced (ISO 8601, UTC)")]
-    pub created_at: String,
-    #[schemars(description = "Manifest format version (current: 1)")]
-    pub format: u32,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ApplySnapshotChunkParams {
-    #[schemars(description = "Block height of the snapshot the chunk belongs to")]
-    pub height: u64,
-    #[schemars(description = "Index of the chunk being applied (0..manifest.num_chunks)")]
-    pub chunk_index: u32,
-    #[schemars(description = "Base64-encoded chunk bytes. SHA-256 will be verified against manifest.chunk_hashes_hex[chunk_index] before disk write.")]
-    pub data_b64: String,
-}
-
 // ─── EIP-7702 Params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2092,19 +2562,25 @@ pub struct Eip7702SigningHashParams {
     pub chain_id: u64,
     #[schemars(description = "20-byte delegate contract address (0x-prefixed hex)")]
     pub delegate_address: String,
-    #[schemars(description = "EOA authorization nonce (separate from the EOA's transaction nonce)")]
+    #[schemars(
+        description = "EOA authorization nonce (separate from the EOA's transaction nonce)"
+    )]
     pub nonce: u64,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Eip7702BuildDesignatorParams {
-    #[schemars(description = "20-byte delegate contract address (0x-prefixed hex). Embedded into the 23-byte designator after the 0xef0100 prefix.")]
+    #[schemars(
+        description = "20-byte delegate contract address (0x-prefixed hex). Embedded into the 23-byte designator after the 0xef0100 prefix."
+    )]
     pub delegate_address: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Eip7702ParseDesignatorParams {
-    #[schemars(description = "Account code bytes as hex (with or without 0x prefix). Returns is_designator=true only if exactly 23 bytes and starts with 0xef0100.")]
+    #[schemars(
+        description = "Account code bytes as hex (with or without 0x prefix). Returns is_designator=true only if exactly 23 bytes and starts with 0xef0100."
+    )]
     pub code: String,
 }
 
@@ -2131,9 +2607,13 @@ pub struct Permit2DigestParams {
     pub nonce: String,
     #[schemars(description = "Unix-seconds deadline")]
     pub deadline: u64,
-    #[schemars(description = "Optional 32-byte witness (0x-prefixed hex). When present, binds the permit to the witness — used by ERC-7683 origin opens.")]
+    #[schemars(
+        description = "Optional 32-byte witness (0x-prefixed hex). When present, binds the permit to the witness — used by ERC-7683 origin opens."
+    )]
     pub witness: Option<String>,
-    #[schemars(description = "Optional EIP-712 witness type string. Required when `witness` is present.")]
+    #[schemars(
+        description = "Optional EIP-712 witness type string. Required when `witness` is present."
+    )]
     pub witness_type_string: Option<String>,
 }
 
@@ -2200,7 +2680,9 @@ pub struct RegisterStableAssetParams {
     )]
     pub reserve_source: serde_json::Value,
     pub por_feed_id: String,
-    #[schemars(description = "Allowed rails: x402 ap2 mpp visa_tap mastercard tempo open_standard native")]
+    #[schemars(
+        description = "Allowed rails: x402 ap2 mpp visa_tap mastercard tempo open_standard native"
+    )]
     pub allowed_rails: Vec<String>,
     #[schemars(description = "Settlement destination address, 32-byte hex")]
     pub settlement_dst: String,
@@ -2297,7 +2779,9 @@ pub struct BabylonSubmitFinalitySignatureParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Caip10Params {
-    #[schemars(description = "Tenzro account address — accepts hex or base58btc on input; normalised to canonical 64-hex.")]
+    #[schemars(
+        description = "Tenzro account address — accepts hex or base58btc on input; normalised to canonical 64-hex."
+    )]
     pub address: String,
 }
 
@@ -2305,7 +2789,9 @@ pub struct Caip10Params {
 pub struct Caip19Params {
     #[schemars(description = "Asset namespace: 'slip44', 'token', or 'nft'.")]
     pub kind: String,
-    #[schemars(description = "32-byte token id (hex) — required for kind='token' or as the collection id for kind='nft'.")]
+    #[schemars(
+        description = "32-byte token id (hex) — required for kind='token' or as the collection id for kind='nft'."
+    )]
     pub token_id: Option<String>,
     #[schemars(description = "Alias for `token_id` when used with kind='nft'.")]
     pub collection_id: Option<String>,
@@ -2317,13 +2803,17 @@ pub struct Caip19Params {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListPendingApprovalsParams {
-    #[schemars(description = "Approver DID (e.g. 'did:tenzro:human:alice'). Returns every approval in `Pending` status whose approver_did matches. Lazy-expires stale records server-side before returning.")]
+    #[schemars(
+        description = "Approver DID (e.g. 'did:tenzro:human:alice'). Returns every approval in `Pending` status whose approver_did matches. Lazy-expires stale records server-side before returning."
+    )]
     pub approver_did: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetApprovalParams {
-    #[schemars(description = "Engine-assigned approval id. A returned `Pending` record is guaranteed to still be live (lazy expiry runs on this read path). Returns -32000 if id is unknown.")]
+    #[schemars(
+        description = "Engine-assigned approval id. A returned `Pending` record is guaranteed to still be live (lazy expiry runs on this read path). Returns -32000 if id is unknown."
+    )]
     pub approval_id: String,
 }
 
@@ -2333,9 +2823,13 @@ pub struct DecideApprovalParams {
     pub approval_id: String,
     #[schemars(description = "Decision: 'approved' or 'denied'")]
     pub decision: String,
-    #[schemars(description = "Optional but recommended: the deciding approver's DID. When supplied, the engine refuses the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns -32001 (forbidden).")]
+    #[schemars(
+        description = "Optional but recommended: the deciding approver's DID. When supplied, the engine refuses the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns -32001 (forbidden)."
+    )]
     pub approver_did: Option<String>,
-    #[schemars(description = "Why the request was refused. Recorded on a 'denied' decision and returned to the requesting agent when it retries, so the agent can act on the reason ('wrong counterparty, use the escrow address') rather than just the refusal. Ignored for 'approved'.")]
+    #[schemars(
+        description = "Why the request was refused. Recorded on a 'denied' decision and returned to the requesting agent when it retries, so the agent can act on the reason ('wrong counterparty, use the escrow address') rather than just the refusal. Ignored for 'approved'."
+    )]
     pub deny_reason: Option<String>,
 }
 
@@ -2343,45 +2837,65 @@ pub struct DecideApprovalParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetEscrowParams {
-    #[schemars(description = "Escrow id — 32-byte SHA-256 digest derived by the VM during CreateEscrow. Accepts both 0x-prefixed and bare hex.")]
+    #[schemars(
+        description = "Escrow id — 32-byte SHA-256 digest derived by the VM during CreateEscrow. Accepts both 0x-prefixed and bare hex."
+    )]
     pub escrow_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEscrowsByPayerParams {
-    #[schemars(description = "Payer address (the wallet that created the escrow). Returns {payer, count, escrows: [...]} from the `escrow_payer:` secondary index in CF_SETTLEMENTS.")]
+    #[schemars(
+        description = "Payer address (the wallet that created the escrow). Returns {payer, count, escrows: [...]} from the `escrow_payer:` secondary index in CF_SETTLEMENTS."
+    )]
     pub payer: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEscrowsByPayeeParams {
-    #[schemars(description = "Payee address (the recipient on successful release). Returns {payee, count, escrows: [...]} from the `escrow_payee:` secondary index in CF_SETTLEMENTS.")]
+    #[schemars(
+        description = "Payee address (the recipient on successful release). Returns {payee, count, escrows: [...]} from the `escrow_payee:` secondary index in CF_SETTLEMENTS."
+    )]
     pub payee: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PrepaidDepositParams {
-    #[schemars(description = "Renter address (hex, with or without 0x prefix). The amount is locked out of this account's on-chain TNZO balance.")]
+    #[schemars(
+        description = "Renter address (hex, with or without 0x prefix). The amount is locked out of this account's on-chain TNZO balance."
+    )]
     pub renter: String,
-    #[schemars(description = "Amount in base units (wei). Decimal string preferred; a JSON integer is accepted for small values.")]
+    #[schemars(
+        description = "Amount in base units (wei). Decimal string preferred; a JSON integer is accepted for small values."
+    )]
     pub amount: String,
-    #[schemars(description = "Asset id. Only TNZO is streamable today; defaults to TNZO when omitted.")]
+    #[schemars(
+        description = "Asset id. Only TNZO is streamable today; defaults to TNZO when omitted."
+    )]
     pub asset: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PrepaidWithdrawParams {
-    #[schemars(description = "Renter address (hex). The withdrawn amount returns to this account's on-chain TNZO balance.")]
+    #[schemars(
+        description = "Renter address (hex). The withdrawn amount returns to this account's on-chain TNZO balance."
+    )]
     pub renter: String,
-    #[schemars(description = "Amount in base units (wei) to withdraw. Capped at the available prepaid balance.")]
+    #[schemars(
+        description = "Amount in base units (wei) to withdraw. Capped at the available prepaid balance."
+    )]
     pub amount: String,
-    #[schemars(description = "Asset id. Only TNZO is streamable today; defaults to TNZO when omitted.")]
+    #[schemars(
+        description = "Asset id. Only TNZO is streamable today; defaults to TNZO when omitted."
+    )]
     pub asset: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PrepaidBalanceParams {
-    #[schemars(description = "Renter address (hex). Returns the current prepaid balance for this account.")]
+    #[schemars(
+        description = "Renter address (hex). Returns the current prepaid balance for this account."
+    )]
     pub renter: String,
     #[schemars(description = "Asset id. Defaults to TNZO when omitted.")]
     pub asset: Option<String>,
@@ -2389,19 +2903,25 @@ pub struct PrepaidBalanceParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetDisputeParams {
-    #[schemars(description = "Dispute id. Returns the full ChannelDispute record (challenger, evidence blobs, status, opened_at/timeout_at/resolved_at, resolution). Returns -32004 if no dispute with that id exists.")]
+    #[schemars(
+        description = "Dispute id. Returns the full ChannelDispute record (challenger, evidence blobs, status, opened_at/timeout_at/resolved_at, resolution). Returns -32004 if no dispute with that id exists."
+    )]
     pub dispute_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListDisputesByChannelParams {
-    #[schemars(description = "Channel id. Returns {channel_id, count, disputes: [...]} — every dispute (open or historical) attached to the channel. Empty list is not an error (count: 0).")]
+    #[schemars(
+        description = "Channel id. Returns {channel_id, count, disputes: [...]} — every dispute (open or historical) attached to the channel. Empty list is not an error (count: 0)."
+    )]
     pub channel_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetAgentDailySpendParams {
-    #[schemars(description = "Agent DID (`did:tenzro:machine:...`). The wire RPC triggers a UTC-midnight window reset before reading, so this value reflects only the current calendar day. Returns {agent_did, current_daily_spend, max_daily_spend, remaining, last_reset}.")]
+    #[schemars(
+        description = "Agent DID (`did:tenzro:machine:...`). The wire RPC triggers a UTC-midnight window reset before reading, so this value reflects only the current calendar day. Returns {agent_did, current_daily_spend, max_daily_spend, remaining, last_reset}."
+    )]
     pub agent_did: String,
 }
 
@@ -2409,23 +2929,33 @@ pub struct GetAgentDailySpendParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetInferenceCommitmentParams {
-    #[schemars(description = "Commitment hash (hex, with or without 0x prefix) returned alongside a verifiable chat response. Returns the stored envelope {commitment_hash, model_id, provider, created_at, commitment: {k, prompt_tokens, steps}} or null when unknown.")]
+    #[schemars(
+        description = "Commitment hash (hex, with or without 0x prefix) returned alongside a verifiable chat response. Returns the stored envelope {commitment_hash, model_id, provider, created_at, commitment: {k, prompt_tokens, steps}} or null when unknown."
+    )]
     pub commitment_hash: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct VerifyInferenceCommitmentParams {
-    #[schemars(description = "Commitment hash (hex, with or without 0x prefix) of the stored commitment to verify.")]
+    #[schemars(
+        description = "Commitment hash (hex, with or without 0x prefix) of the stored commitment to verify."
+    )]
     pub commitment_hash: String,
-    #[schemars(description = "The exact prompt the committed response was generated from. Prompts are never stored with commitments — the verifier supplies it at verification time. The node re-executes prompt+output as a single prefill and compares per-step top-k logits.")]
+    #[schemars(
+        description = "The exact prompt the committed response was generated from. Prompts are never stored with commitments — the verifier supplies it at verification time. The node re-executes prompt+output as a single prefill and compares per-step top-k logits."
+    )]
     pub prompt: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FileInferenceChallengeParams {
-    #[schemars(description = "Commitment hash (hex, with or without 0x prefix) being disputed. Unknown hashes are rejected.")]
+    #[schemars(
+        description = "Commitment hash (hex, with or without 0x prefix) being disputed. Unknown hashes are rejected."
+    )]
     pub commitment_hash: String,
-    #[schemars(description = "Challenger identity (DID or address). Recorded verbatim on the challenge.")]
+    #[schemars(
+        description = "Challenger identity (DID or address). Recorded verbatim on the challenge."
+    )]
     pub challenger: String,
     #[serde(default)]
     #[schemars(description = "Optional free-text reason for the dispute.")]
@@ -2434,14 +2964,18 @@ pub struct FileInferenceChallengeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetInferenceChallengeParams {
-    #[schemars(description = "Challenge id (UUID) returned by file_inference_challenge. Returns the full challenge record or null when unknown.")]
+    #[schemars(
+        description = "Challenge id (UUID) returned by file_inference_challenge. Returns the full challenge record or null when unknown."
+    )]
     pub challenge_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListInferenceChallengesParams {
     #[serde(default)]
-    #[schemars(description = "Optional status filter: voting_commit, voting_reveal, upheld, or dismissed.")]
+    #[schemars(
+        description = "Optional status filter: voting_commit, voting_reveal, upheld, or dismissed."
+    )]
     pub status: Option<String>,
     #[serde(default)]
     #[schemars(description = "Optional provider filter (announce-signer pubkey hex).")]
@@ -2452,9 +2986,13 @@ pub struct ListInferenceChallengesParams {
 pub struct CommitChallengeVoteParams {
     #[schemars(description = "Challenge id (UUID) being voted on.")]
     pub challenge_id: String,
-    #[schemars(description = "Committee-member identity (validator address, hex). Must be a drawn committee seat.")]
+    #[schemars(
+        description = "Committee-member identity (validator address, hex). Must be a drawn committee seat."
+    )]
     pub voter: String,
-    #[schemars(description = "Vote commitment hash (hex) = compute_vote_commit(verdict, salt, challenge_id, voter).")]
+    #[schemars(
+        description = "Vote commitment hash (hex) = compute_vote_commit(verdict, salt, challenge_id, voter)."
+    )]
     pub commit_hash: String,
 }
 
@@ -2462,9 +3000,13 @@ pub struct CommitChallengeVoteParams {
 pub struct RevealChallengeVoteParams {
     #[schemars(description = "Challenge id (UUID) being revealed.")]
     pub challenge_id: String,
-    #[schemars(description = "Committee-member identity (validator address, hex). Must match the earlier commit.")]
+    #[schemars(
+        description = "Committee-member identity (validator address, hex). Must match the earlier commit."
+    )]
     pub voter: String,
-    #[schemars(description = "Revealed verdict: true = commitment did not verify (upholds), false = dismisses.")]
+    #[schemars(
+        description = "Revealed verdict: true = commitment did not verify (upholds), false = dismisses."
+    )]
     pub verdict: bool,
     #[schemars(description = "Reveal salt (hex) — must reproduce the earlier commit hash.")]
     pub salt: String,
@@ -2472,10 +3014,14 @@ pub struct RevealChallengeVoteParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FinalizeChallengeParams {
-    #[schemars(description = "Challenge id (UUID) to finalize by tallying revealed committee votes.")]
+    #[schemars(
+        description = "Challenge id (UUID) to finalize by tallying revealed committee votes."
+    )]
     pub challenge_id: String,
     #[serde(default)]
-    #[schemars(description = "Close the challenge after the reveal window even without an uphold quorum (provider prevails). Default false.")]
+    #[schemars(
+        description = "Close the challenge after the reveal window even without an uphold quorum (provider prevails). Default false."
+    )]
     pub force: Option<bool>,
 }
 
@@ -2560,7 +3106,9 @@ pub struct DetectTeeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetTeeAttestationParams {
-    #[schemars(description = "TEE type: 'tdx', 'sev-snp', 'nitro', 'nvidia-gpu', or 'auto' (detect best available)")]
+    #[schemars(
+        description = "TEE type: 'tdx', 'sev-snp', 'nitro', 'nvidia-gpu', or 'auto' (detect best available)"
+    )]
     pub tee_type: Option<String>,
 }
 
@@ -2599,10 +3147,12 @@ pub struct ListTeeProvidersParams {
 pub struct CreateZkProofParams {
     #[schemars(description = "Circuit identifier — one of 'inference', 'settlement', 'identity'")]
     pub circuit_id: String,
-    #[schemars(description = "Witness fields as a JSON object of u64 field-element values. Per circuit: \
+    #[schemars(
+        description = "Witness fields as a JSON object of u64 field-element values. Per circuit: \
         inference={model_checksum,input_checksum,computed_output}; \
         settlement={service_proof,amount}; \
-        identity={private_key,capabilities,capability_blinding}")]
+        identity={private_key,capabilities,capability_blinding}"
+    )]
     pub witness: serde_json::Value,
 }
 
@@ -2671,9 +3221,15 @@ pub struct GetSpendingLimitsParams {
 pub struct AuthorizeSessionParams {
     #[schemars(description = "Wallet ID (UUID) to create a session for")]
     pub wallet_id: String,
+    #[schemars(
+        description = "Hex DID envelope proving control of the DID that owns wallet_id, bound to method tenzro_authorizeSession with the wallet id as the params hash. The node resolves the owner through the identity registry; a wallet id names the subject and proves nothing about the caller."
+    )]
+    pub did_envelope: String,
     #[schemars(description = "Session duration in seconds (e.g. 3600 for 1 hour)")]
     pub duration_secs: u64,
-    #[schemars(description = "Allowed operations during the session (e.g. ['transfer', 'stake', 'inference'])")]
+    #[schemars(
+        description = "Allowed operations during the session (e.g. ['transfer', 'stake', 'inference'])"
+    )]
     pub operations: Vec<String>,
 }
 
@@ -2681,6 +3237,10 @@ pub struct AuthorizeSessionParams {
 pub struct RevokeSessionParams {
     #[schemars(description = "Session ID (UUID) to revoke")]
     pub session_id: String,
+    #[schemars(
+        description = "Hex DID envelope proving control of the DID that owns the session's wallet, bound to method tenzro_revokeSession with the session id as the params hash. A session id is a handle the node hands back, not a credential."
+    )]
+    pub did_envelope: String,
 }
 
 // ─── App registry + settlement-authorization params ───
@@ -2689,19 +3249,29 @@ pub struct RevokeSessionParams {
 pub struct RegisterAppParams {
     #[schemars(description = "App identifier, unique network-wide (1-128 bytes)")]
     pub app_id: String,
-    #[schemars(description = "Developer DID that owns the app (e.g. did:tenzro:... or did:key:z6Mk...)")]
+    #[schemars(
+        description = "Developer DID that owns the app (e.g. did:tenzro:... or did:key:z6Mk...)"
+    )]
     pub developer_did: String,
-    #[schemars(description = "Hex-encoded app wallet address — the developer's own TNZO treasury for this app")]
+    #[schemars(
+        description = "Hex-encoded app wallet address — the developer's own TNZO treasury for this app"
+    )]
     pub app_wallet: String,
-    #[schemars(description = "Settlement signing keys. Each: {key_id, public_key (hex Ed25519), daily_limit_tnzo (optional decimal string)}.")]
+    #[schemars(
+        description = "Settlement signing keys. Each: {key_id, public_key (hex Ed25519), daily_limit_tnzo (optional decimal string)}."
+    )]
     pub signing_pubkeys: Vec<serde_json::Value>,
     #[schemars(description = "Developer margin in basis points (max 2000)")]
     pub margin_bps: u32,
-    #[schemars(description = "Optional minimum app-wallet balance hint in smallest TNZO units (decimal string)")]
+    #[schemars(
+        description = "Optional minimum app-wallet balance hint in smallest TNZO units (decimal string)"
+    )]
     pub min_balance: Option<String>,
     #[schemars(description = "Whether the app is active on registration (default true)")]
     pub active: Option<bool>,
-    #[schemars(description = "Developer-signed DID envelope (hex header value) authorizing tenzro_registerApp over the canonical registration params")]
+    #[schemars(
+        description = "Developer-signed DID envelope (hex header value) authorizing tenzro_registerApp over the canonical registration params"
+    )]
     pub envelope: String,
 }
 
@@ -2711,7 +3281,9 @@ pub struct SetAppStatusParams {
     pub app_id: String,
     #[schemars(description = "New active status")]
     pub active: bool,
-    #[schemars(description = "Developer-signed DID envelope (hex header value) authorizing tenzro_setAppStatus over the canonical status params of (app_id, active)")]
+    #[schemars(
+        description = "Developer-signed DID envelope (hex header value) authorizing tenzro_setAppStatus over the canonical status params of (app_id, active)"
+    )]
     pub envelope: String,
 }
 
@@ -2776,27 +3348,41 @@ pub struct DecodeResultParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Ap2SignMandateParams {
-    #[schemars(description = "Mandate kind (AP2 v0.2): 'checkout' (principal-signed pre-authorization) or 'payment' (agent-signed final-offer commit)")]
+    #[schemars(
+        description = "Mandate kind (AP2 v0.2): 'checkout' (principal-signed pre-authorization) or 'payment' (agent-signed final-offer commit)"
+    )]
     pub mandate_kind: String,
-    #[schemars(description = "The mandate object — CheckoutMandate or PaymentMandate, matching mandate_kind. Auth-bound wallet's Ed25519 key signs the canonical preimage.")]
+    #[schemars(
+        description = "The mandate object — CheckoutMandate or PaymentMandate, matching mandate_kind. Auth-bound wallet's Ed25519 key signs the canonical preimage."
+    )]
     pub mandate: serde_json::Value,
-    #[schemars(description = "Signer DID — must match the controller of the auth-bound wallet (principal for checkout, agent for payment).")]
+    #[schemars(
+        description = "Signer DID — must match the controller of the auth-bound wallet (principal for checkout, agent for payment)."
+    )]
     pub signer_did: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Ap2VerifyMandateParams {
-    #[schemars(description = "Verifiable Digital Credential (VDC) mandate object — the full JSON-LD VC envelope with proof")]
+    #[schemars(
+        description = "Verifiable Digital Credential (VDC) mandate object — the full JSON-LD VC envelope with proof"
+    )]
     pub vdc: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Ap2ValidateMandatePairParams {
-    #[schemars(description = "AP2 v0.2 CheckoutMandate VDC (principal-to-agent pre-authorization) as JSON-LD VC envelope")]
+    #[schemars(
+        description = "AP2 v0.2 CheckoutMandate VDC (principal-to-agent pre-authorization) as JSON-LD VC envelope"
+    )]
     pub checkout_vdc: serde_json::Value,
-    #[schemars(description = "AP2 v0.2 PaymentMandate VDC (agent-to-merchant final-offer commit) as JSON-LD VC envelope")]
+    #[schemars(
+        description = "AP2 v0.2 PaymentMandate VDC (agent-to-merchant final-offer commit) as JSON-LD VC envelope"
+    )]
     pub payment_vdc: serde_json::Value,
-    #[schemars(description = "If true, also enforce the agent's TDIP DelegationScope against the payment total via IdentityRegistry::enforce_operation. Default: false (AP2-only validation).")]
+    #[schemars(
+        description = "If true, also enforce the agent's TDIP DelegationScope against the payment total via IdentityRegistry::enforce_operation. Default: false (AP2-only validation)."
+    )]
     #[serde(default)]
     pub enforce_delegation: bool,
 }
@@ -2805,7 +3391,9 @@ pub struct Ap2ValidateMandatePairParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeRegisterWithUriParams {
-    #[schemars(description = "Off-chain metadata URI (ipfs:// or https:// link to agent metadata JSON). Pass an empty string to register without a URI.")]
+    #[schemars(
+        description = "Off-chain metadata URI (ipfs:// or https:// link to agent metadata JSON). Pass an empty string to register without a URI."
+    )]
     pub agent_uri: String,
 }
 
@@ -2819,15 +3407,21 @@ pub struct Erc8004MetadataEntryParam {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeRegisterWithMetadataParams {
-    #[schemars(description = "Off-chain metadata URI bound atomically with the agentId allocation")]
+    #[schemars(
+        description = "Off-chain metadata URI bound atomically with the agentId allocation"
+    )]
     pub agent_uri: String,
-    #[schemars(description = "Initial metadata batch — array of {key, value} entries written atomically with the agentId allocation")]
+    #[schemars(
+        description = "Initial metadata batch — array of {key, value} entries written atomically with the agentId allocation"
+    )]
     pub metadata: Vec<Erc8004MetadataEntryParam>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetAgentParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
 }
 
@@ -2839,7 +3433,9 @@ pub struct Erc8004DecodeGetAgentParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeSetAgentUriParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Updated off-chain metadata URI")]
     pub metadata_uri: String,
@@ -2847,19 +3443,25 @@ pub struct Erc8004EncodeSetAgentUriParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeSetAgentWalletParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "New wallet / controller EVM address (0x-prefixed hex)")]
     pub new_wallet: String,
     #[schemars(description = "Unix-seconds deadline after which the signature is invalid")]
     pub deadline: u64,
-    #[schemars(description = "Hex-encoded EIP-712 signature (0x-prefixed) authorizing the wallet rotation")]
+    #[schemars(
+        description = "Hex-encoded EIP-712 signature (0x-prefixed) authorizing the wallet rotation"
+    )]
     pub signature: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeSetMetadataParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Metadata key string (free-form ASCII identifier)")]
     pub metadata_key: String,
@@ -2869,7 +3471,9 @@ pub struct Erc8004EncodeSetMetadataParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetMetadataParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Metadata key string")]
     pub metadata_key: String,
@@ -2877,25 +3481,33 @@ pub struct Erc8004EncodeGetMetadataParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004DecodeGetMetadataParams {
-    #[schemars(description = "Hex-encoded return data from a getMetadata(uint256,string) eth_call")]
+    #[schemars(
+        description = "Hex-encoded return data from a getMetadata(uint256,string) eth_call"
+    )]
     pub return_data: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetAgentUriParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetAgentWalletParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeFeedbackParams {
-    #[schemars(description = "Subject agent ID — uint256 of the agent being rated. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Subject agent ID — uint256 of the agent being rated. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub subject_agent_id: serde_json::Value,
     #[schemars(description = "Rating in the range -100..=100 (Tenzro convention)")]
     pub rating: i8,
@@ -2905,7 +3517,9 @@ pub struct Erc8004EncodeFeedbackParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetFeedbackParams {
-    #[schemars(description = "Subject agent ID — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Subject agent ID — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub subject_agent_id: serde_json::Value,
     #[schemars(description = "Index into the subject's feedback array")]
     pub index: u64,
@@ -2913,13 +3527,17 @@ pub struct Erc8004EncodeGetFeedbackParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetFeedbackCountParams {
-    #[schemars(description = "Subject agent ID — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Subject agent ID — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub subject_agent_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeRevokeFeedbackParams {
-    #[schemars(description = "Agent ID owning the feedback — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID owning the feedback — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID to revoke (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
@@ -2927,7 +3545,9 @@ pub struct Erc8004EncodeRevokeFeedbackParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeAppendResponseParams {
-    #[schemars(description = "Agent ID (uint256) — must own the feedback. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID (uint256) — must own the feedback. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID being responded to (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
@@ -2937,7 +3557,9 @@ pub struct Erc8004EncodeAppendResponseParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeIsFeedbackRevokedParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID to check (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
@@ -2945,7 +3567,9 @@ pub struct Erc8004EncodeIsFeedbackRevokedParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetFeedbackResponsesParams {
-    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
@@ -2955,23 +3579,35 @@ pub struct Erc8004EncodeGetFeedbackResponsesParams {
 pub struct Erc8004EncodeValidationRequestParams {
     #[schemars(description = "Validator address (20-byte EVM address, 0x-prefixed)")]
     pub validator_address: String,
-    #[schemars(description = "Agent ID of the subject being validated — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    #[schemars(
+        description = "Agent ID of the subject being validated — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex."
+    )]
     pub agent_id: serde_json::Value,
     #[schemars(description = "Resolvable URI to the work being validated")]
     pub request_uri: String,
-    #[schemars(description = "32-byte commitment over the work (bytes32 hex, 0x-prefixed) — storage key for the matching response")]
+    #[schemars(
+        description = "32-byte commitment over the work (bytes32 hex, 0x-prefixed) — storage key for the matching response"
+    )]
     pub request_hash: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeValidationResponseParams {
-    #[schemars(description = "Request hash from the matching validationRequest (bytes32 hex, 0x-prefixed)")]
+    #[schemars(
+        description = "Request hash from the matching validationRequest (bytes32 hex, 0x-prefixed)"
+    )]
     pub request_hash: String,
-    #[schemars(description = "Quality score 0..=100 (Tenzro convention: 0..=49 invalid, 50..=79 partial, 80..=100 valid)")]
+    #[schemars(
+        description = "Quality score 0..=100 (Tenzro convention: 0..=49 invalid, 50..=79 partial, 80..=100 valid)"
+    )]
     pub response: u8,
-    #[schemars(description = "Resolvable URI to proof material (ZK proof CID, TEE quote CID, etc.)")]
+    #[schemars(
+        description = "Resolvable URI to proof material (ZK proof CID, TEE quote CID, etc.)"
+    )]
     pub response_uri: String,
-    #[schemars(description = "32-byte commitment over the response payload (bytes32 hex, 0x-prefixed)")]
+    #[schemars(
+        description = "32-byte commitment over the response payload (bytes32 hex, 0x-prefixed)"
+    )]
     pub response_hash: String,
     #[schemars(description = "Short categorical label (e.g. 'valid', 'invalid', 'abstain')")]
     pub tag: String,
@@ -2979,7 +3615,9 @@ pub struct Erc8004EncodeValidationResponseParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetValidationParams {
-    #[schemars(description = "Request hash from the original validationRequest (bytes32 hex, 0x-prefixed)")]
+    #[schemars(
+        description = "Request hash from the original validationRequest (bytes32 hex, 0x-prefixed)"
+    )]
     pub request_hash: String,
 }
 
@@ -3126,7 +3764,10 @@ pub struct CctGetPoolParams {
 }
 
 /// Call a tool on the official deBridge MCP server at agents.debridge.com/mcp
-async fn debridge_mcp_call(tool_name: &str, arguments: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
+async fn debridge_mcp_call(
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
     let client = crate::http_client::shared();
     let debridge_url = std::env::var("DEBRIDGE_MCP_URL")
         .unwrap_or_else(|_| "https://agents.debridge.com/mcp".to_string());
@@ -3181,20 +3822,26 @@ async fn debridge_mcp_call(tool_name: &str, arguments: serde_json::Value) -> std
         .await
         .map_err(|e| format!("deBridge MCP call failed: {}", e))?;
 
-    let body = resp.text().await.map_err(|e| format!("deBridge response read failed: {}", e))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("deBridge response read failed: {}", e))?;
 
     // Parse SSE response (event: message\ndata: {json})
     for line in body.lines() {
         if let Some(data) = line.strip_prefix("data: ")
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(data)
-                && let Some(result) = json.get("result") {
-                    if let Some(content) = result.get("content").and_then(|c| c.as_array())
-                        && let Some(first) = content.first()
-                            && let Some(text) = first.get("text").and_then(|t| t.as_str()) {
-                                return serde_json::from_str(text).or_else(|_| Ok(serde_json::json!({"text": text})));
-                            }
-                    return Ok(result.clone());
-                }
+            && let Some(result) = json.get("result")
+        {
+            if let Some(content) = result.get("content").and_then(|c| c.as_array())
+                && let Some(first) = content.first()
+                && let Some(text) = first.get("text").and_then(|t| t.as_str())
+            {
+                return serde_json::from_str(text)
+                    .or_else(|_| Ok(serde_json::json!({"text": text})));
+            }
+            return Ok(result.clone());
+        }
     }
 
     // Try parsing as direct JSON
@@ -3222,9 +3869,13 @@ pub struct ForecastParams {
     pub history: Vec<f32>,
     #[schemars(description = "Forecast horizon (steps ahead). Must be > 0.")]
     pub horizon: u32,
-    #[schemars(description = "Optional output quantile levels in (0,1) (e.g. [0.1, 0.5, 0.9]). Defaults to model-native quantiles.")]
+    #[schemars(
+        description = "Optional output quantile levels in (0,1) (e.g. [0.1, 0.5, 0.9]). Defaults to model-native quantiles."
+    )]
     pub quantiles: Option<Vec<f32>>,
-    #[schemars(description = "Optional sampling frequency in seconds (used by frequency-aware models)")]
+    #[schemars(
+        description = "Optional sampling frequency in seconds (used by frequency-aware models)"
+    )]
     pub frequency_seconds: Option<u64>,
 }
 
@@ -3242,17 +3893,23 @@ pub struct VisionEmbedParams {
 pub struct VisionSimilarityParams {
     #[schemars(description = "Image embedding (typically from vision_embed)")]
     pub image_embedding: Vec<f32>,
-    #[schemars(description = "Text embedding (typically from text_embed against a CLIP/SigLIP text tower of matching dimension)")]
+    #[schemars(
+        description = "Text embedding (typically from text_embed against a CLIP/SigLIP text tower of matching dimension)"
+    )]
     pub text_embedding: Vec<f32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TextEmbedParams {
-    #[schemars(description = "Registered text-embedding model id (e.g. 'qwen3-embedding-0.6b', 'embeddinggemma-300m', 'bge-m3')")]
+    #[schemars(
+        description = "Registered text-embedding model id (e.g. 'qwen3-embedding-0.6b', 'embeddinggemma-300m', 'bge-m3')"
+    )]
     pub model_id: String,
     #[schemars(description = "Strings to embed. Non-empty.")]
     pub inputs: Vec<String>,
-    #[schemars(description = "Matryoshka truncation target dimension (e.g. 128/256/512). If omitted, returns the model-native dim.")]
+    #[schemars(
+        description = "Matryoshka truncation target dimension (e.g. 128/256/512). If omitted, returns the model-native dim."
+    )]
     pub requested_dim: Option<u32>,
     #[schemars(description = "L2-normalize each row before returning (default false)")]
     pub normalize: Option<bool>,
@@ -3260,33 +3917,47 @@ pub struct TextEmbedParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SegmentParams {
-    #[schemars(description = "Registered segmenter id (e.g. 'sam2-base', 'sam2-large', 'edgesam', 'mobilesam')")]
+    #[schemars(
+        description = "Registered segmenter id (e.g. 'sam2-base', 'sam2-large', 'edgesam', 'mobilesam')"
+    )]
     pub model_id: String,
     #[schemars(description = "Base64-encoded image bytes")]
     pub image_base64: String,
-    #[schemars(description = "Prompts: array of `{type:'point', x, y, is_foreground}` (is_foreground true marks a point inside the object, false marks background) or `{type:'box', x0, y0, x1, y1}` objects. Coordinates are original-image pixels.")]
+    #[schemars(
+        description = "Prompts: array of `{type:'point', x, y, is_foreground}` (is_foreground true marks a point inside the object, false marks background) or `{type:'box', x0, y0, x1, y1}` objects. Coordinates are original-image pixels."
+    )]
     pub prompts: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DetectParams {
-    #[schemars(description = "Registered detector id (e.g. 'rf-detr-base', 'rf-detr-nano', 'd-fine-l')")]
+    #[schemars(
+        description = "Registered detector id (e.g. 'rf-detr-base', 'rf-detr-nano', 'd-fine-l')"
+    )]
     pub model_id: String,
     #[schemars(description = "Base64-encoded image bytes")]
     pub image_base64: String,
-    #[schemars(description = "Score threshold (0.0–1.0). Detections below this are dropped. Default 0.25.")]
+    #[schemars(
+        description = "Score threshold (0.0–1.0). Detections below this are dropped. Default 0.25."
+    )]
     pub score_threshold: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TranscribeParams {
-    #[schemars(description = "Registered ASR model id (e.g. 'whisper-large-v3-turbo', 'distil-whisper-small.en', 'moonshine-base-v2', 'parakeet-tdt-0.6b-v3', 'canary-1b-flash')")]
+    #[schemars(
+        description = "Registered ASR model id (e.g. 'whisper-large-v3-turbo', 'distil-whisper-small.en', 'moonshine-base-v2', 'parakeet-tdt-0.6b-v3', 'canary-1b-flash')"
+    )]
     pub model_id: String,
     #[schemars(description = "Base64-encoded audio bytes (WAV/MP3/FLAC)")]
     pub audio_base64: String,
-    #[schemars(description = "Optional ISO language hint (e.g. 'en', 'es', 'fr'). Many models auto-detect.")]
+    #[schemars(
+        description = "Optional ISO language hint (e.g. 'en', 'es', 'fr'). Many models auto-detect."
+    )]
     pub language: Option<String>,
-    #[schemars(description = "Emit per-segment / per-word timestamps in the result (default false)")]
+    #[schemars(
+        description = "Emit per-segment / per-word timestamps in the result (default false)"
+    )]
     pub timestamps: Option<bool>,
     #[schemars(description = "Decoding temperature (default 0.0)")]
     pub temperature: Option<f32>,
@@ -3294,7 +3965,9 @@ pub struct TranscribeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct VideoEmbedParams {
-    #[schemars(description = "Registered video encoder id — the id passed to load_video_model, not a catalog id.")]
+    #[schemars(
+        description = "Registered video encoder id — the id passed to load_video_model, not a catalog id."
+    )]
     pub model_id: String,
     #[schemars(description = "Base64-encoded video bytes")]
     pub video_base64: String,
@@ -3314,15 +3987,25 @@ pub struct LoadForecastModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the ONNX file")]
     pub path: String,
-    #[schemars(description = "Optional catalog id (e.g. 'tirex-35m'). If set, context_length/max_horizon/output_name/batch_size are read from the catalog, the explicit params below may be omitted, and the entry's license tier is enforced.")]
+    #[schemars(
+        description = "Optional catalog id (e.g. 'tirex-35m'). If set, context_length/max_horizon/output_name/batch_size are read from the catalog, the explicit params below may be omitted, and the entry's license tier is enforced."
+    )]
     pub catalog_id: Option<String>,
-    #[schemars(description = "Context length (number of input timesteps the encoder accepts). Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Context length (number of input timesteps the encoder accepts). Required if catalog_id is not provided."
+    )]
     pub context_length: Option<u32>,
-    #[schemars(description = "Maximum forecast horizon supported by this export. Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Maximum forecast horizon supported by this export. Required if catalog_id is not provided."
+    )]
     pub max_horizon: Option<u32>,
-    #[schemars(description = "Optional explicit prediction output tensor name. Required for multi-output ONNX graphs where the first output is not the forecast (e.g. TimesFM transformers export).")]
+    #[schemars(
+        description = "Optional explicit prediction output tensor name. Required for multi-output ONNX graphs where the first output is not the forecast (e.g. TimesFM transformers export)."
+    )]
     pub output_name: Option<String>,
-    #[schemars(description = "Optional fixed leading batch dim. Defaults to 1. TimesFM 2.5 transformers ONNX requires 2 (flip-invariance averaging).")]
+    #[schemars(
+        description = "Optional fixed leading batch dim. Defaults to 1. TimesFM 2.5 transformers ONNX requires 2 (flip-invariance averaging)."
+    )]
     pub batch_size: Option<u32>,
 }
 
@@ -3332,31 +4015,53 @@ pub struct LoadVisionModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the ONNX file")]
     pub path: String,
-    #[schemars(description = "Optional catalog id. If set, input_size/embedding_dim/normalization are read from the catalog and the explicit params below may be omitted.")]
+    #[schemars(
+        description = "Optional catalog id. If set, input_size/embedding_dim/normalization are read from the catalog and the explicit params below may be omitted."
+    )]
     pub catalog_id: Option<String>,
-    #[schemars(description = "Image input edge in pixels (square). Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Image input edge in pixels (square). Required if catalog_id is not provided."
+    )]
     pub input_size: Option<u32>,
-    #[schemars(description = "Output embedding dimension. Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Output embedding dimension. Required if catalog_id is not provided."
+    )]
     pub embedding_dim: Option<u32>,
-    #[schemars(description = "Normalization preset ('clip', 'imagenet', 'siglip'). Optional override of catalog default.")]
+    #[schemars(
+        description = "Normalization preset ('clip', 'imagenet', 'siglip'). Optional override of catalog default."
+    )]
     pub normalization: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LoadTextEmbeddingModelParams {
-    #[schemars(description = "Model id to register under. When `path` is omitted and this names a catalog entry (e.g. 'qwen3-embedding-0.6b'), the node fetches the ONNX graph and tokenizer from HuggingFace onto its models directory and registers the encoder under this same id.")]
+    #[schemars(
+        description = "Model id to register under. When `path` is omitted and this names a catalog entry (e.g. 'qwen3-embedding-0.6b'), the node fetches the ONNX graph and tokenizer from HuggingFace onto its models directory and registers the encoder under this same id."
+    )]
     pub model_id: String,
-    #[schemars(description = "Filesystem path to the ONNX file on the node. Omit to take the catalog-download path described under model_id.")]
+    #[schemars(
+        description = "Filesystem path to the ONNX file on the node. Omit to take the catalog-download path described under model_id."
+    )]
     pub path: Option<String>,
-    #[schemars(description = "Filesystem path to tokenizer.json. Required whenever `path` is set.")]
+    #[schemars(
+        description = "Filesystem path to tokenizer.json. Required whenever `path` is set."
+    )]
     pub tokenizer_path: Option<String>,
-    #[schemars(description = "Pooling family: 'qwen3', 'cls', 'mean', or 'sentence_embedding'. Required whenever `path` is set.")]
+    #[schemars(
+        description = "Pooling family: 'qwen3', 'cls', 'mean', or 'sentence_embedding'. Required whenever `path` is set."
+    )]
     pub family: Option<String>,
-    #[schemars(description = "Optional catalog id (e.g. 'embeddinggemma-300m'). With `path` set, this supplies embedding_dim and max_sequence_length from the catalog and enforces the entry's license tier (-32010 when the node operator has not accepted it).")]
+    #[schemars(
+        description = "Optional catalog id (e.g. 'embeddinggemma-300m'). With `path` set, this supplies embedding_dim and max_sequence_length from the catalog and enforces the entry's license tier (-32010 when the node operator has not accepted it)."
+    )]
     pub catalog_id: Option<String>,
-    #[schemars(description = "Native output embedding dimension. Required when `path` is set and catalog_id is not.")]
+    #[schemars(
+        description = "Native output embedding dimension. Required when `path` is set and catalog_id is not."
+    )]
     pub embedding_dim: Option<u32>,
-    #[schemars(description = "Maximum token sequence length the encoder accepts. Required when `path` is set and catalog_id is not.")]
+    #[schemars(
+        description = "Maximum token sequence length the encoder accepts. Required when `path` is set and catalog_id is not."
+    )]
     pub max_sequence_length: Option<u32>,
 }
 
@@ -3368,11 +4073,17 @@ pub struct LoadSegmentationModelParams {
     pub encoder_path: String,
     #[schemars(description = "Path to the decoder ONNX")]
     pub decoder_path: String,
-    #[schemars(description = "SAM family: 'sam1' (EdgeSAM, MobileSAM — 6-input decoder) or 'sam2' (7-input decoder with high-res feature taps). Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "SAM family: 'sam1' (EdgeSAM, MobileSAM — 6-input decoder) or 'sam2' (7-input decoder with high-res feature taps). Required if catalog_id is not provided."
+    )]
     pub family: Option<String>,
-    #[schemars(description = "Image input edge in pixels (square). Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Image input edge in pixels (square). Required if catalog_id is not provided."
+    )]
     pub input_size: Option<u32>,
-    #[schemars(description = "Optional catalog id (e.g. 'sam2-base'). If set, family and input_size are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it).")]
+    #[schemars(
+        description = "Optional catalog id (e.g. 'sam2-base'). If set, family and input_size are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it)."
+    )]
     pub catalog_id: Option<String>,
 }
 
@@ -3386,7 +4097,9 @@ pub struct TextSegmentParams {
     pub text_prompt: String,
     #[schemars(description = "Optional normalized cxcywh box prompt {cx, cy, w, h} in [0,1]")]
     pub box_prompt: Option<serde_json::Value>,
-    #[schemars(description = "Score threshold in [0, 1]; detections below are dropped (default 0.5)")]
+    #[schemars(
+        description = "Score threshold in [0, 1]; detections below are dropped (default 0.5)"
+    )]
     pub score_threshold: Option<f32>,
 }
 
@@ -3396,13 +4109,21 @@ pub struct LoadDetectionModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the ONNX file")]
     pub path: String,
-    #[schemars(description = "Detector family: 'rf_detr' or 'd_fine'. Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Detector family: 'rf_detr' or 'd_fine'. Required if catalog_id is not provided."
+    )]
     pub family: Option<String>,
-    #[schemars(description = "Image input edge in pixels (square). Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Image input edge in pixels (square). Required if catalog_id is not provided."
+    )]
     pub input_size: Option<u32>,
-    #[schemars(description = "Class count of the label head — 90 for RF-DETR (COCO indexing with gaps), 80 for D-FINE. Required if catalog_id is not provided.")]
+    #[schemars(
+        description = "Class count of the label head — 90 for RF-DETR (COCO indexing with gaps), 80 for D-FINE. Required if catalog_id is not provided."
+    )]
     pub num_classes: Option<u32>,
-    #[schemars(description = "Optional catalog id (e.g. 'rf-detr-base'). If set, family, input_size and num_classes are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it).")]
+    #[schemars(
+        description = "Optional catalog id (e.g. 'rf-detr-base'). If set, family, input_size and num_classes are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it)."
+    )]
     pub catalog_id: Option<String>,
 }
 
@@ -3412,25 +4133,43 @@ pub struct LoadAudioModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the encoder ONNX")]
     pub encoder_path: String,
-    #[schemars(description = "Filesystem path to the decoder ONNX (decoder_model_merged.onnx for KV-cache)")]
+    #[schemars(
+        description = "Filesystem path to the decoder ONNX (decoder_model_merged.onnx for KV-cache)"
+    )]
     pub decoder_path: String,
-    #[schemars(description = "Filesystem path to the tokenizer (tokenizer.json). Required for family 'moonshine' and 'whisper'.")]
+    #[schemars(
+        description = "Filesystem path to the tokenizer (tokenizer.json). Required for family 'moonshine' and 'whisper'."
+    )]
     pub tokenizer_path: Option<String>,
-    #[schemars(description = "Filesystem path to the mel-spectrogram preprocessor ONNX. Required for family 'parakeet' and 'canary'.")]
+    #[schemars(
+        description = "Filesystem path to the mel-spectrogram preprocessor ONNX. Required for family 'parakeet' and 'canary'."
+    )]
     pub preprocessor_path: Option<String>,
-    #[schemars(description = "Filesystem path to the vocabulary file. Required for family 'parakeet' and 'canary'.")]
+    #[schemars(
+        description = "Filesystem path to the vocabulary file. Required for family 'parakeet' and 'canary'."
+    )]
     pub vocab_path: Option<String>,
-    #[schemars(description = "Optional catalog id. If set, family / max_audio_seconds / whisper_variant are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it).")]
+    #[schemars(
+        description = "Optional catalog id. If set, family / max_audio_seconds / whisper_variant are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it)."
+    )]
     pub catalog_id: Option<String>,
-    #[schemars(description = "Required if catalog_id is not provided. One of: 'moonshine', 'whisper', 'parakeet', 'canary'")]
+    #[schemars(
+        description = "Required if catalog_id is not provided. One of: 'moonshine', 'whisper', 'parakeet', 'canary'"
+    )]
     pub family: Option<String>,
     #[schemars(description = "Max audio duration the encoder accepts (default 30s)")]
     pub max_audio_seconds: Option<u32>,
-    #[schemars(description = "Required for family='whisper'. One of: 'distil-en', 'distil-large-v3', 'large-v3-turbo'")]
+    #[schemars(
+        description = "Required for family='whisper'. One of: 'distil-en', 'distil-large-v3', 'large-v3-turbo'"
+    )]
     pub whisper_variant: Option<String>,
-    #[schemars(description = "Source language for family='canary', used to build the decoder prefix. Defaults to 'en'. One of: en, de, es, fr.")]
+    #[schemars(
+        description = "Source language for family='canary', used to build the decoder prefix. Defaults to 'en'. One of: en, de, es, fr."
+    )]
     pub source_lang: Option<String>,
-    #[schemars(description = "Target language for family='canary' — set it different from source_lang to translate rather than transcribe. Defaults to 'en'. One of: en, de, es, fr.")]
+    #[schemars(
+        description = "Target language for family='canary' — set it different from source_lang to translate rather than transcribe. Defaults to 'en'. One of: en, de, es, fr."
+    )]
     pub target_lang: Option<String>,
 }
 
@@ -3438,9 +4177,13 @@ pub struct LoadAudioModelParams {
 pub struct LoadVideoModelParams {
     #[schemars(description = "Model id to register the clip-level encoder under")]
     pub model_id: String,
-    #[schemars(description = "Id of an image encoder already loaded via load_vision_model. Video embedding is frame-based: the node extracts frames, embeds each through this encoder, and mean-pools. An unloaded id is refused with -32004.")]
+    #[schemars(
+        description = "Id of an image encoder already loaded via load_vision_model. Video embedding is frame-based: the node extracts frames, embeds each through this encoder, and mean-pools. An unloaded id is refused with -32004."
+    )]
     pub vision_model_id: String,
-    #[schemars(description = "Frames to extract per clip, evenly spaced (default 8, clamped to 1..128)")]
+    #[schemars(
+        description = "Frames to extract per clip, evenly spaced (default 8, clamped to 1..128)"
+    )]
     pub num_frames: Option<u32>,
 }
 
@@ -3450,7 +4193,9 @@ pub struct ListMemoryRecordsParams {
     pub agent_did: String,
     #[schemars(description = "Max records to return (default 50)")]
     pub limit: Option<u32>,
-    #[schemars(description = "Filter by record kind: 'granted' | 'recalled' | 'self_noted' | 'archived'")]
+    #[schemars(
+        description = "Filter by record kind: 'granted' | 'recalled' | 'self_noted' | 'archived'"
+    )]
     pub kind: Option<String>,
 }
 
@@ -3458,7 +4203,9 @@ pub struct ListMemoryRecordsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DaChallengeParams {
-    #[schemars(description = "0x-prefixed 32-byte blob commitment whose sliver custody should be challenged")]
+    #[schemars(
+        description = "0x-prefixed 32-byte blob commitment whose sliver custody should be challenged"
+    )]
     pub commitment: String,
     #[schemars(description = "Committee index of the member to challenge")]
     pub target_index: u64,
@@ -3472,7 +4219,9 @@ pub struct DaListChallengesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DaAvailabilityParams {
-    #[schemars(description = "Optional 0x-prefixed member address. Omit to list every scored member, lowest score first")]
+    #[schemars(
+        description = "Optional 0x-prefixed member address. Omit to list every scored member, lowest score first"
+    )]
     pub address: Option<String>,
 }
 
@@ -3486,7 +4235,9 @@ pub struct GetValidatorStateParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListValidatorsParams {
-    #[schemars(description = "Optional status filter: 'Active' | 'Candidate' | 'PendingActive' | 'PendingExit' | 'Exited' | 'Jailed'")]
+    #[schemars(
+        description = "Optional status filter: 'Active' | 'Candidate' | 'PendingActive' | 'PendingExit' | 'Exited' | 'Jailed'"
+    )]
     pub status: Option<String>,
 }
 
@@ -3550,7 +4301,9 @@ pub struct DidParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WorkflowStatusParams {
-    #[schemars(description = "Workflow status: draft | awaiting_signatures | active | suspended | settling | completed | failed | disputed | cancelled")]
+    #[schemars(
+        description = "Workflow status: draft | awaiting_signatures | active | suspended | settling | completed | failed | disputed | cancelled"
+    )]
     pub status: String,
 }
 
@@ -3620,7 +4373,9 @@ pub struct StorageStoreObjectParams {
     pub data_shards: Option<u32>,
     #[schemars(description = "Erasure-code parity shard count (default 2)")]
     pub parity_shards: Option<u32>,
-    #[schemars(description = "DID that may retrieve the object (owner-only gate). Defaults to the owner address when unset.")]
+    #[schemars(
+        description = "DID that may retrieve the object (owner-only gate). Defaults to the owner address when unset."
+    )]
     pub owner_did: Option<String>,
 }
 
@@ -3650,7 +4405,9 @@ pub struct StorageGetDealParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StorageSetPricingParams {
-    #[schemars(description = "Pricing mode; set to \"dynamic\" (fixed-rate is the immutable spawn default)")]
+    #[schemars(
+        description = "Pricing mode; set to \"dynamic\" (fixed-rate is the immutable spawn default)"
+    )]
     pub mode: String,
     #[schemars(description = "Byte-epoch capacity for dynamic pricing (decimal string — u128)")]
     pub capacity: Option<String>,
@@ -3686,7 +4443,9 @@ pub struct ComputeGetRentalParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ComputeSetPricingParams {
-    #[schemars(description = "Pricing mode; set to \"dynamic\" (fixed-rate is the immutable spawn default)")]
+    #[schemars(
+        description = "Pricing mode; set to \"dynamic\" (fixed-rate is the immutable spawn default)"
+    )]
     pub mode: String,
     #[schemars(description = "Epoch-slot capacity for dynamic pricing (decimal string — u128)")]
     pub capacity: Option<String>,
@@ -3726,7 +4485,9 @@ pub struct MoePlanDispatchParams {
     pub model_id: String,
     #[schemars(description = "Per-token top-k routing decisions")]
     pub routings: Vec<MoeTokenRouting>,
-    #[schemars(description = "Allow routing to experts that are not warm-resident (default false)")]
+    #[schemars(
+        description = "Allow routing to experts that are not warm-resident (default false)"
+    )]
     pub allow_cold: Option<bool>,
 }
 
@@ -3738,9 +4499,13 @@ pub struct MoeExpertLoadParams {
     pub layer: u32,
     #[schemars(description = "Expert index within the layer")]
     pub expert: u32,
-    #[schemars(description = "Base64 safetensors blob with gate_proj/up_proj/down_proj weights (alternative to uri)")]
+    #[schemars(
+        description = "Base64 safetensors blob with gate_proj/up_proj/down_proj weights (alternative to uri)"
+    )]
     pub blob_base64: Option<String>,
-    #[schemars(description = "Content-addressed tenzro://blob/<hash> URI to fetch the blob from (alternative to blob_base64)")]
+    #[schemars(
+        description = "Content-addressed tenzro://blob/<hash> URI to fetch the blob from (alternative to blob_base64)"
+    )]
     pub uri: Option<String>,
 }
 
@@ -3752,7 +4517,9 @@ pub struct MoeGateLoadParams {
     pub layer: u32,
     #[schemars(description = "Base64 safetensors blob with router.weight (alternative to uri)")]
     pub blob_base64: Option<String>,
-    #[schemars(description = "Content-addressed tenzro://blob/<hash> URI to fetch the blob from (alternative to blob_base64)")]
+    #[schemars(
+        description = "Content-addressed tenzro://blob/<hash> URI to fetch the blob from (alternative to blob_base64)"
+    )]
     pub uri: Option<String>,
 }
 
@@ -3762,11 +4529,17 @@ pub struct MoePrepareExpertsParams {
     pub model_id: String,
     #[schemars(description = "Layer index to prepare experts for")]
     pub layer: u32,
-    #[schemars(description = "Expert indices to prepare; omit or empty to prepare every expert in the layer")]
+    #[schemars(
+        description = "Expert indices to prepare; omit or empty to prepare every expert in the layer"
+    )]
     pub experts: Option<Vec<u32>>,
-    #[schemars(description = "Publish the layer's gating-network blob alongside the experts (default true)")]
+    #[schemars(
+        description = "Publish the layer's gating-network blob alongside the experts (default true)"
+    )]
     pub include_gate: Option<bool>,
-    #[schemars(description = "Block-quantization: a preset string (q4_k_m / q8_0 / q4_k / q6_k) or a per-projection object like {\"gate\":\"q4_k\",\"up\":\"q4_k\",\"down\":\"q6_k\"}. Omit for dense f32 blobs.")]
+    #[schemars(
+        description = "Block-quantization: a preset string (q4_k_m / q8_0 / q4_k / q6_k) or a per-projection object like {\"gate\":\"q4_k\",\"up\":\"q4_k\",\"down\":\"q6_k\"}. Omit for dense f32 blobs."
+    )]
     pub quant: Option<serde_json::Value>,
 }
 
@@ -3786,9 +4559,13 @@ pub struct MoeForwardParams {
     pub d_model: u32,
     #[schemars(description = "Base64 of little-endian f32 hidden states, n_tokens x d_model")]
     pub hidden_states: String,
-    #[schemars(description = "Experts per token; defaults to the catalog experts_per_token for the model")]
+    #[schemars(
+        description = "Experts per token; defaults to the catalog experts_per_token for the model"
+    )]
     pub top_k: Option<u32>,
-    #[schemars(description = "Allow dispatch to experts that are not warm-resident (default false)")]
+    #[schemars(
+        description = "Allow dispatch to experts that are not warm-resident (default false)"
+    )]
     pub allow_cold: Option<bool>,
 }
 
@@ -3810,7 +4587,9 @@ pub struct ClusterPlanParams {
     pub model: ClusterPlanModel,
     #[schemars(description = "Candidate cluster members")]
     pub members: Vec<serde_json::Value>,
-    #[schemars(description = "Force cluster formation even when a single member could run the model (default false)")]
+    #[schemars(
+        description = "Force cluster formation even when a single member could run the model (default false)"
+    )]
     pub user_forced: Option<bool>,
 }
 
@@ -3958,7 +4737,10 @@ fn parse_vm_type(s: &str) -> std::result::Result<tenzro_token::TokenVmType, Erro
         "daml" => Ok(tenzro_token::TokenVmType::Daml),
         "native" => Ok(tenzro_token::TokenVmType::Native),
         "tempo-tip20" | "tempo" | "tip20" => Ok(tenzro_token::TokenVmType::TempoTip20),
-        other => Err(err_internal_data(format!("Unknown VM type: '{}'. Use 'evm', 'svm', 'daml', 'native', or 'tempo-tip20'.", other))),
+        other => Err(err_internal_data(format!(
+            "Unknown VM type: '{}'. Use 'evm', 'svm', 'daml', 'native', or 'tempo-tip20'.",
+            other
+        ))),
     }
 }
 
@@ -4078,7 +4860,11 @@ fn current_request_headers() -> McpRequestHeaders {
         .unwrap_or_default()
 }
 
-async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::Value) -> std::result::Result<serde_json::Value, ErrorData> {
+async fn rpc_dispatch(
+    node: &Arc<TenzroNode>,
+    method: &str,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, ErrorData> {
     let request = crate::rpc::JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: method.to_string(),
@@ -4092,12 +4878,8 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
     // operator-gated tenzro_* methods can be invoked from MCP tools
     // with the same authorization model the direct JSON-RPC path uses.
     let h = current_request_headers();
-    let auth_ctx = crate::rpc::AuthContext::from_mcp(
-        h.authorization,
-        h.dpop,
-        h.http_method,
-        h.http_uri,
-    );
+    let auth_ctx =
+        crate::rpc::AuthContext::from_mcp(h.authorization, h.dpop, h.http_method, h.http_uri);
 
     // Mirror the JSON-RPC layer's gate ordering: admin first, then
     // subject. Either gate may short-circuit with a typed JSON-RPC
@@ -4105,7 +4887,8 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
     // gate's error message verbatim to MCP callers via
     // `ErrorData::internal_error` so tool consumers can react to the
     // same failure modes (missing/wrong header, fail-closed operator).
-    if let Some(err) = crate::rpc::gate_admin_token(node, &request, h.x_tenzro_admin_token.as_deref())
+    if let Some(err) =
+        crate::rpc::gate_admin_token(node, &request, h.x_tenzro_admin_token.as_deref())
         && let Some(e) = err.error
     {
         return Err(ErrorData::internal_error(e.message, None));
@@ -4129,7 +4912,10 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
     } else if let Some(error) = response.error {
         Err(ErrorData::internal_error(error.message, None))
     } else {
-        Err(ErrorData::internal_error("No result or error in RPC response".to_string(), None))
+        Err(ErrorData::internal_error(
+            "No result or error in RPC response".to_string(),
+            None,
+        ))
     }
 }
 
@@ -4138,7 +4924,9 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
 /// (typed) and `content[0]: text` (stringified summary) per the MCP
 /// 2025-06-18 spec. Used by tools whose underlying RPC/API returns
 /// arbitrary JSON.
-fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn json_result(
+    value: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
@@ -4146,7 +4934,9 @@ fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthro
 /// envelope under a `{"message": ...}` field. Used for short
 /// human-readable notices ("not found", error summaries) where the
 /// tool has no structured payload to return.
-fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn text_result(
+    text: impl Into<String>,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput {
         result: serde_json::json!({ "message": text.into() }),
     }))
@@ -4185,7 +4975,12 @@ async fn dispatch_rpc(
             data: None,
         });
     }
-    json_result(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    json_result(
+        response
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )
 }
 
 /// Map a short-form capability name (matching the JSON-RPC and CLI
@@ -4196,15 +4991,21 @@ async fn dispatch_rpc(
 fn parse_capability_short(name: &str) -> tenzro_types::agent::Capability {
     use tenzro_types::agent::Capability;
     match name {
-        "nlp" => Capability::NaturalLanguageProcessing { languages: vec!["en".to_string()] },
-        "vision" => Capability::ComputerVision { tasks: vec!["detection".to_string()] },
+        "nlp" => Capability::NaturalLanguageProcessing {
+            languages: vec!["en".to_string()],
+        },
+        "vision" => Capability::ComputerVision {
+            tasks: vec!["detection".to_string()],
+        },
         "code" => Capability::CodeGeneration {
             languages: vec!["rust".to_string(), "python".to_string()],
         },
         "data" => Capability::DataAnalysis {
             formats: vec!["json".to_string(), "csv".to_string()],
         },
-        "blockchain" => Capability::BlockchainInteraction { chains: vec!["tenzro".to_string()] },
+        "blockchain" => Capability::BlockchainInteraction {
+            chains: vec!["tenzro".to_string()],
+        },
         "smart_contract" => Capability::SmartContractExecution,
         "api_integration" => Capability::ExternalAPIIntegration { apis: vec![] },
         "coordination" => Capability::MultiAgentCoordination,
@@ -4218,7 +5019,9 @@ fn parse_capability_short(name: &str) -> tenzro_types::agent::Capability {
 /// Convert a `CapabilityAttestation` to an MCP-friendly JSON envelope.
 /// All raw byte fields are emitted as hex so they survive transport
 /// across language boundaries identically to the JSON-RPC surface.
-fn attestation_to_mcp_json(att: &tenzro_agent::capabilities::CapabilityAttestation) -> serde_json::Value {
+fn attestation_to_mcp_json(
+    att: &tenzro_agent::capabilities::CapabilityAttestation,
+) -> serde_json::Value {
     serde_json::json!({
         "agent_id": att.agent_id,
         "capability": att.capability,
@@ -4292,7 +5095,9 @@ pub struct WorkflowStepCompensateParams {
     #[schemars(description = "Zero-based index of the step to compensate")]
     pub step_idx: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "If true, also compensate every lower-index executed/verified step in reverse order")]
+    #[schemars(
+        description = "If true, also compensate every lower-index executed/verified step in reverse order"
+    )]
     pub cascade: Option<bool>,
 }
 
@@ -4325,7 +5130,9 @@ pub struct HostingSiteRoute {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct SitePublishParams {
-    #[schemars(description = "Site name (unique per owner; site_id derives from owner_did + name)")]
+    #[schemars(
+        description = "Site name (unique per owner; site_id derives from owner_did + name)"
+    )]
     pub name: String,
     #[schemars(description = "Owner DID; mutations require a matching signed did_envelope")]
     pub owner_did: String,
@@ -4338,7 +5145,9 @@ pub struct SitePublishParams {
     #[schemars(description = "Route served for unmatched paths (custom 404 page)")]
     pub not_found_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Serve the index for unmatched non-asset paths (single-page-app routing)")]
+    #[schemars(
+        description = "Serve the index for unmatched non-asset paths (single-page-app routing)"
+    )]
     pub spa: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(description = "x402 price per request in base TNZO units (stringified integer)")]
@@ -4350,10 +5159,14 @@ pub struct SitePublishParams {
     #[schemars(description = "Preferred region for placement")]
     pub region_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Maximum price per hour a serving node may charge (stringified integer)")]
+    #[schemars(
+        description = "Maximum price per hour a serving node may charge (stringified integer)"
+    )]
     pub max_price_per_hour: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Signed DID envelope authorizing the mutation (env.did must equal owner_did)")]
+    #[schemars(
+        description = "Signed DID envelope authorizing the mutation (env.did must equal owner_did)"
+    )]
     pub did_envelope: Option<String>,
 }
 
@@ -4415,7 +5228,9 @@ pub struct SiteRemoveAliasParams {
 pub struct SiteSetPlacementParams {
     #[schemars(description = "Site id")]
     pub site_id: String,
-    #[schemars(description = "Serving nodes (iroh EndpointId strings) that answer tenzro/http forwards; empty list serves locally")]
+    #[schemars(
+        description = "Serving nodes (iroh EndpointId strings) that answer tenzro/http forwards; empty list serves locally"
+    )]
     pub serving_nodes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Signed DID envelope authorizing the mutation")]
@@ -4493,7 +5308,9 @@ pub struct FunctionDeployParams {
     #[schemars(description = "Preferred region for placement")]
     pub region_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Maximum price per hour a serving node may charge (stringified integer)")]
+    #[schemars(
+        description = "Maximum price per hour a serving node may charge (stringified integer)"
+    )]
     pub max_price_per_hour: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Signed DID envelope authorizing the mutation")]
@@ -4538,7 +5355,9 @@ pub struct MachineDeployParams {
     #[schemars(description = "Resource request: {vcpus, mem_mib, disk_mib}")]
     pub resources: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Sealed env vars, each ciphertext wrapped to the node's X25519 sealing key (see machine_sealing_key)")]
+    #[schemars(
+        description = "Sealed env vars, each ciphertext wrapped to the node's X25519 sealing key (see machine_sealing_key)"
+    )]
     pub sealed_env: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Require a TEE-capable serving node")]
@@ -4553,7 +5372,9 @@ pub struct MachineDeployParams {
     #[schemars(description = "Preferred region for placement")]
     pub region_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Maximum price per hour a serving node may charge (stringified integer)")]
+    #[schemars(
+        description = "Maximum price per hour a serving node may charge (stringified integer)"
+    )]
     pub max_price_per_hour: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Signed DID envelope authorizing the mutation")]
@@ -4568,11 +5389,17 @@ pub struct GetLeasesForAppParams {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct DvpOpenSagaParams {
-    #[schemars(description = "Creator address (hex). Saga id = SHA-256('tenzro/saga/id' || creator || nonce_le).")]
+    #[schemars(
+        description = "Creator address (hex). Saga id = SHA-256('tenzro/saga/id' || creator || nonce_le)."
+    )]
     pub creator: String,
-    #[schemars(description = "Idempotency nonce — re-opening with the same (creator, nonce) returns the existing saga.")]
+    #[schemars(
+        description = "Idempotency nonce — re-opening with the same (creator, nonce) returns the existing saga."
+    )]
     pub nonce: u64,
-    #[schemars(description = "Ordered legs; each an object {leg_id, payer(hex), payee(hex), asset, amount(decimal string), venue}. venue is one of \"native\", {\"escrow\":{\"escrow_id\":\"0x..\"}}, {\"channel\":{\"channel_id\":\"..\"}}, {\"external\":{\"reference\":\"..\"}}. Only escrow legs are saga-executable.")]
+    #[schemars(
+        description = "Ordered legs; each an object {leg_id, payer(hex), payee(hex), asset, amount(decimal string), venue}. venue is one of \"native\", {\"escrow\":{\"escrow_id\":\"0x..\"}}, {\"channel\":{\"channel_id\":\"..\"}}, {\"external\":{\"reference\":\"..\"}}. Only escrow legs are saga-executable."
+    )]
     pub legs: Vec<serde_json::Value>,
     #[schemars(description = "Expiry as a Unix timestamp in milliseconds.")]
     pub expires_at_ms: i64,
@@ -4583,7 +5410,9 @@ pub struct DvpExecuteSagaParams {
     #[schemars(description = "Saga id (hex).")]
     pub saga_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Optional per-leg release proofs keyed by leg_id: {\"<leg_id>\":{\"proof_type\":\"cryptographic|tee|multi_party|merkle|zk|oracle\",\"proof_data_hex\":\"0x..\"}}. Signature-gated / custom-condition escrow legs require a proof here.")]
+    #[schemars(
+        description = "Optional per-leg release proofs keyed by leg_id: {\"<leg_id>\":{\"proof_type\":\"cryptographic|tee|multi_party|merkle|zk|oracle\",\"proof_data_hex\":\"0x..\"}}. Signature-gated / custom-condition escrow legs require a proof here."
+    )]
     pub proofs: Option<serde_json::Value>,
 }
 
@@ -4607,7 +5436,9 @@ pub struct DvpListSagasByCreatorParams {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct NettingComputeParams {
-    #[schemars(description = "Obligations to net; each an object {debtor(hex), creditor(hex), asset, amount(decimal string)}. Multilateral greedy netting is deterministic and idempotent by batch id.")]
+    #[schemars(
+        description = "Obligations to net; each an object {debtor(hex), creditor(hex), asset, amount(decimal string)}. Multilateral greedy netting is deterministic and idempotent by batch id."
+    )]
     pub obligations: Vec<serde_json::Value>,
 }
 
@@ -4628,7 +5459,9 @@ pub struct NettingListBatchesParams {}
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct VerifyDidEnvelopeParams {
-    #[schemars(description = "Hex-encoded Tenzro DID envelope (the X-Tenzro-DID-Envelope header value / TenzroDidEnvelope::to_header_value output)")]
+    #[schemars(
+        description = "Hex-encoded Tenzro DID envelope (the X-Tenzro-DID-Envelope header value / TenzroDidEnvelope::to_header_value output)"
+    )]
     pub envelope: String,
 }
 
@@ -4636,7 +5469,9 @@ pub struct VerifyDidEnvelopeParams {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CapitalIntentOpenParams {
-    #[schemars(description = "CapitalIntent object: {intent_id, principal_did, objective{kind,...}, constraints, compliance{reg_regime,min_kyc_tier,accredited_only}, authorization{max_total_notional,...}, settlement, signature?}")]
+    #[schemars(
+        description = "CapitalIntent object: {intent_id, principal_did, objective{kind,...}, constraints, compliance{reg_regime,min_kyc_tier,accredited_only}, authorization{max_total_notional,...}, settlement, signature?}"
+    )]
     pub intent: serde_json::Value,
 }
 
@@ -4669,7 +5504,9 @@ pub struct CapitalIntentAssignParams {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct ReserveAttestationParams {
-    #[schemars(description = "ReserveAttestation: {asset_id, reserves, source(issuer|tee|chainlink_por|oracle), attestor_did, attested_at, signature?}")]
+    #[schemars(
+        description = "ReserveAttestation: {asset_id, reserves, source(issuer|tee|chainlink_por|oracle), attestor_did, attested_at, signature?}"
+    )]
     pub attestation: serde_json::Value,
 }
 
@@ -4691,7 +5528,9 @@ pub struct GetReserveParams {
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CapitalIntentExecuteParams {
     pub intent_id: String,
-    #[schemars(description = "Leg: {venue, asset_id, side(buy|sell), quantity, unit_price, settlement_ref?, proof?}")]
+    #[schemars(
+        description = "Leg: {venue, asset_id, side(buy|sell), quantity, unit_price, settlement_ref?, proof?}"
+    )]
     pub leg: serde_json::Value,
 }
 
@@ -4728,7 +5567,9 @@ pub struct PasskeySignParams {
     pub credential_id_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ml_dsa_signature_hex: Option<String>,
-    #[schemars(description = "Second passkey assertion — required when the account policy is two_credentials")]
+    #[schemars(
+        description = "Second passkey assertion — required when the account policy is two_credentials"
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_assertion: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4839,12 +5680,16 @@ pub struct PasskeyListPendingRecoveriesParams {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CreatePasskeySessionParams {
-    #[schemars(description = "Ceremony kind: \"enroll\" (new account), \"add\" (device credential on an existing account), or \"sign\" (verify an assertion over an op hash).")]
+    #[schemars(
+        description = "Ceremony kind: \"enroll\" (new account), \"add\" (device credential on an existing account), or \"sign\" (verify an assertion over an op hash)."
+    )]
     pub kind: String,
     #[schemars(description = "Enroll: optional display name for the new identity.")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    #[schemars(description = "Enroll: ML-DSA-65 verifying key (hex) for the hybrid PQ leg. Add sessions omit this — the node mints the new credential's PQ leg itself.")]
+    #[schemars(
+        description = "Enroll: ML-DSA-65 verifying key (hex) for the hybrid PQ leg. Add sessions omit this — the node mints the new credential's PQ leg itself."
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ml_dsa_public_key_hex: Option<String>,
     #[schemars(description = "Enroll: CREATE2 salt (defaults to 0).")]
@@ -4859,22 +5704,30 @@ pub struct CreatePasskeySessionParams {
     #[schemars(description = "Sign: 32-byte op hash (hex) the assertion must attest to.")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op_hash_hex: Option<String>,
-    #[schemars(description = "Sign: ML-DSA-65 signature (hex) over the op-hash bytes, pre-signed client-side for accounts with a hybrid PQ leg.")]
+    #[schemars(
+        description = "Sign: ML-DSA-65 signature (hex) over the op-hash bytes, pre-signed client-side for accounts with a hybrid PQ leg."
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ml_dsa_signature_hex: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct GetPasskeySessionParams {
-    #[schemars(description = "Session id returned by create_passkey_session. Poll until status is completed/failed/expired.")]
+    #[schemars(
+        description = "Session id returned by create_passkey_session. Poll until status is completed/failed/expired."
+    )]
     pub session_id: String,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct AddPasskeyParams {
-    #[schemars(description = "Hex-encoded 20-byte smart-account address to add the credential to.")]
+    #[schemars(
+        description = "Hex-encoded 20-byte smart-account address to add the credential to."
+    )]
     pub account_address: String,
-    #[schemars(description = "Hex-encoded P-256 public key of the new credential (raw 64-byte X||Y, SEC1 65-byte, or COSE_Key CBOR).")]
+    #[schemars(
+        description = "Hex-encoded P-256 public key of the new credential (raw 64-byte X||Y, SEC1 65-byte, or COSE_Key CBOR)."
+    )]
     pub new_passkey_public_key_hex: String,
     #[schemars(description = "WebAuthn credential id (hex) of the new credential.")]
     pub new_credential_id_hex: String,
@@ -4893,7 +5746,9 @@ pub struct ListPasskeysParams {
 pub struct RemovePasskeyParams {
     #[schemars(description = "Hex-encoded 20-byte smart-account address.")]
     pub account_address: String,
-    #[schemars(description = "Credential id (hex) to revoke. Removing the last credential leaves the account recoverable-only.")]
+    #[schemars(
+        description = "Credential id (hex) to revoke. Removing the last credential leaves the account recoverable-only."
+    )]
     pub credential_id_hex: String,
 }
 
@@ -4903,22 +5758,30 @@ pub struct RemovePasskeyParams {
 pub struct McpKeygenParams {
     #[schemars(description = "This participant's DID. Must also appear in participant_dids.")]
     pub local_did: String,
-    #[schemars(description = "Every participant DID in the group (including local_did). The node sorts + dedups; every party must pass the identical set so the derived InstanceId matches byte-for-byte.")]
+    #[schemars(
+        description = "Every participant DID in the group (including local_did). The node sorts + dedups; every party must pass the identical set so the derived InstanceId matches byte-for-byte."
+    )]
     pub participant_dids: Vec<String>,
     #[schemars(description = "Signing threshold t (2 <= t <= n <= 32).")]
     pub threshold: u8,
-    #[schemars(description = "32-byte finalized HotStuff-2 block hash (hex) anchoring the InstanceId. All parties pass the same value.")]
+    #[schemars(
+        description = "32-byte finalized HotStuff-2 block hash (hex) anchoring the InstanceId. All parties pass the same value."
+    )]
     pub finalized_block_hash: String,
     #[schemars(description = "32-byte per-ceremony nonce (hex). All parties pass the same value.")]
     pub session_nonce: String,
-    #[schemars(description = "DID -> libp2p PeerId bindings, one entry per remote participant. Fail-closed: a missing binding for any remote DID is rejected.")]
+    #[schemars(
+        description = "DID -> libp2p PeerId bindings, one entry per remote participant. Fail-closed: a missing binding for any remote DID is rejected."
+    )]
     #[serde(default)]
     pub peer_bindings: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct McpKeygenStatusParams {
-    #[schemars(description = "Instance id (hex) of a specific keygen session. Omit to list all sessions on this node.")]
+    #[schemars(
+        description = "Instance id (hex) of a specific keygen session. Omit to list all sessions on this node."
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
 }
@@ -4929,6 +5792,10 @@ pub struct McpKeygenStatusParams {
 pub struct RevokeJwtParams {
     #[schemars(description = "JWT id (jti) to revoke. Cascades to any tokens minted from it.")]
     pub jti: String,
+    #[schemars(
+        description = "Hex DID envelope proving control of the token's bearer DID or of the controller DID that authorized it, bound to method tenzro_revokeJwt with the jti as the params hash. A jti is an identifier, not a credential."
+    )]
+    pub did_envelope: String,
     #[schemars(description = "Optional human-readable revocation reason.")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -4941,7 +5808,9 @@ pub struct AddTrustedIssuerParams {
     #[schemars(description = "Free-form label for the issuer.")]
     #[serde(default)]
     pub name: String,
-    #[schemars(description = "Gossip topic ids the issuer is trusted for. Empty means trusted for all topics.")]
+    #[schemars(
+        description = "Gossip topic ids the issuer is trusted for. Empty means trusted for all topics."
+    )]
     #[serde(default)]
     pub topics: Vec<u64>,
 }
@@ -4958,7 +5827,9 @@ pub struct UrwaTokenIdParams {
 pub struct UrwaFrozenLookupParams {
     #[schemars(description = "32-byte hex-encoded token_id (with or without 0x prefix)")]
     pub token_id_hex: String,
-    #[schemars(description = "20-byte hex-encoded EVM account address (with or without 0x prefix)")]
+    #[schemars(
+        description = "20-byte hex-encoded EVM account address (with or without 0x prefix)"
+    )]
     pub account_hex: String,
 }
 
@@ -4976,11 +5847,17 @@ pub struct SignedAgentCardHashParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct QuoteBridgeFeeParams {
-    #[schemars(description = "Bridge adapter identifier: layerzero | ccip | wormhole | debridge | hyperlane | axelar | lifi | canton")]
+    #[schemars(
+        description = "Bridge adapter identifier: layerzero | ccip | wormhole | debridge | hyperlane | axelar | lifi | canton"
+    )]
     pub adapter: String,
-    #[schemars(description = "Destination chain identifier (prefer CAIP-2 form, e.g. eip155:1, solana:mainnet-beta)")]
+    #[schemars(
+        description = "Destination chain identifier (prefer CAIP-2 form, e.g. eip155:1, solana:mainnet-beta)"
+    )]
     pub dest_chain: String,
-    #[schemars(description = "Destination-native fee in the destination chain's smallest unit, as a u128 decimal string")]
+    #[schemars(
+        description = "Destination-native fee in the destination chain's smallest unit, as a u128 decimal string"
+    )]
     pub native_fee_smallest_unit: String,
 }
 
@@ -5017,7 +5894,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Create a new cryptographic keypair for use as a Tenzro wallet. Supports Ed25519 (Tenzro native) and Secp256k1 (EVM-compatible)")]
+    #[tool(
+        description = "Create a new cryptographic keypair for use as a Tenzro wallet. Supports Ed25519 (Tenzro native) and Secp256k1 (EVM-compatible)"
+    )]
     async fn create_wallet(
         &self,
         Parameters(params): Parameters<CreateWalletParams>,
@@ -5027,11 +5906,16 @@ impl TenzroMcpServer {
         let key_type = match params.key_type.as_deref().unwrap_or("ed25519") {
             "ed25519" | "Ed25519" => KeyType::Ed25519,
             "secp256k1" | "Secp256k1" => KeyType::Secp256k1,
-            other => return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Unsupported key type '{}'. Use 'ed25519' or 'secp256k1'.", other)),
-                data: None,
-            }),
+            other => {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Unsupported key type '{}'. Use 'ed25519' or 'secp256k1'.",
+                        other
+                    )),
+                    data: None,
+                });
+            }
         };
 
         let keypair = KeyPair::generate(key_type).map_err(|e| ErrorData {
@@ -5057,7 +5941,9 @@ impl TenzroMcpServer {
 
     // ─── Transactions ───
 
-    #[tool(description = "Send a TNZO transfer transaction on the Tenzro ledger. Two supported paths: (a) ambient OAuth/DPoP (server-custodial) — omit the signature fields; the server looks up the wallet bound to the bearer DID and signs; (b) self-custody / pre-signed — the caller signs both legs locally and supplies signature (Ed25519) + public_key (Ed25519) + pq_signature (ML-DSA-65) + pq_public_key (ML-DSA-65 verifying key) + timestamp matching the signed Transaction::hash(). The node verifies both legs and rejects a raw send that omits either. On the ambient path, when the controller has put transfers on the always-ask list the first call returns -32002 with data.approval_id; once the controller approves it, retry the same transfer with approval_id set and it executes. A denial returns -32001 carrying the approver's reason.")]
+    #[tool(
+        description = "Send a TNZO transfer transaction on the Tenzro ledger. Two supported paths: (a) ambient OAuth/DPoP (server-custodial) — omit the signature fields; the server looks up the wallet bound to the bearer DID and signs; (b) self-custody / pre-signed — the caller signs both legs locally and supplies signature (Ed25519) + public_key (Ed25519) + pq_signature (ML-DSA-65) + pq_public_key (ML-DSA-65 verifying key) + timestamp matching the signed Transaction::hash(). The node verifies both legs and rejects a raw send that omits either. On the ambient path, when the controller has put transfers on the always-ask list the first call returns -32002 with data.approval_id; once the controller approves it, retry the same transfer with approval_id set and it executes. A denial returns -32001 carrying the approver's reason."
+    )]
     async fn send_transaction(
         &self,
         Parameters(params): Parameters<SendTransactionParams>,
@@ -5126,7 +6012,9 @@ impl TenzroMcpServer {
         })?;
         let pq_pk_hex = params.pq_public_key.as_deref().ok_or_else(|| ErrorData {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from("Missing 'pq_public_key' — ML-DSA-65 verifying key is mandatory".to_string()),
+            message: Cow::from(
+                "Missing 'pq_public_key' — ML-DSA-65 verifying key is mandatory".to_string(),
+            ),
             data: None,
         })?;
 
@@ -5152,7 +6040,9 @@ impl TenzroMcpServer {
         Ok(Json(SendTransactionOutput { result }))
     }
 
-    #[tool(description = "Request testnet TNZO tokens from the faucet. The per-request amount and cooldown come from the node's genesis faucet config; the response reports the amount dispensed.")]
+    #[tool(
+        description = "Request testnet TNZO tokens from the faucet. The per-request amount and cooldown come from the node's genesis faucet config; the response reports the amount dispensed."
+    )]
     async fn request_faucet(
         &self,
         Parameters(params): Parameters<RequestFaucetParams>,
@@ -5186,10 +6076,7 @@ impl TenzroMcpServer {
                         tx_hash: String::new(),
                         amount: String::new(),
                         recipient: format!("0x{}", addr_hex),
-                        error: Some(format!(
-                            "Rate limited. Try again in {} seconds.",
-                            remaining
-                        )),
+                        error: Some(format!("Rate limited. Try again in {} seconds.", remaining)),
                     }));
                 }
             }
@@ -5233,7 +6120,7 @@ impl TenzroMcpServer {
         match token.transfer(&from_addr, &to_addr, amount_wei) {
             Ok(_) => {
                 // Generate tx hash from transfer details
-                use sha2::{Sha256, Digest};
+                use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(b"faucet_transfer:");
                 hasher.update(from_addr.as_bytes());
@@ -5275,21 +6162,21 @@ impl TenzroMcpServer {
                     error: None,
                 }))
             }
-            Err(e) => {
-                Ok(Json(RequestFaucetOutput {
-                    success: false,
-                    tx_hash: String::new(),
-                    amount: String::new(),
-                    recipient: format!("0x{}", addr_hex),
-                    error: Some(format!("Faucet transfer failed: {}", e)),
-                }))
-            }
+            Err(e) => Ok(Json(RequestFaucetOutput {
+                success: false,
+                tx_hash: String::new(),
+                amount: String::new(),
+                recipient: format!("0x{}", addr_hex),
+                error: Some(format!("Faucet transfer failed: {}", e)),
+            })),
         }
     }
 
     // ─── Identity (TDIP) ───
 
-    #[tool(description = "Register a human or machine identity on the Tenzro Decentralized Identity Protocol (TDIP). Human identities are self-sovereign; machine identities require a controller DID and receive a delegation scope")]
+    #[tool(
+        description = "Register a human or machine identity on the Tenzro Decentralized Identity Protocol (TDIP). Human identities are self-sovereign; machine identities require a controller DID and receive a delegation scope"
+    )]
     async fn register_identity(
         &self,
         Parameters(params): Parameters<RegisterIdentityParams>,
@@ -5379,7 +6266,9 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Resolve a DID to its identity information, including display name, type, status, and delegation scope for machine identities")]
+    #[tool(
+        description = "Resolve a DID to its identity information, including display name, type, status, and delegation scope for machine identities"
+    )]
     async fn resolve_did(
         &self,
         Parameters(params): Parameters<ResolveDidParams>,
@@ -5411,20 +6300,20 @@ impl TenzroMcpServer {
                         });
                     }
                     if let Some(controller) = identity.controller_did() {
-                        result["controller_did"] = serde_json::Value::String(controller.to_string());
+                        result["controller_did"] =
+                            serde_json::Value::String(controller.to_string());
                     }
                 }
 
                 json_result(result)
             }
-            Err(_) => text_result(format!(
-                "DID '{}' not found in registry",
-                params.did
-            )),
+            Err(_) => text_result(format!("DID '{}' not found in registry", params.did)),
         }
     }
 
-    #[tool(description = "TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously revoked identity from the registry and persistent storage. The DID must already be in `Revoked` status — call `revoke_did` (RPC) first, allow cascading revocation to propagate, then call this. Distinct from revoke (logical delete). Operator-only: requires X-Tenzro-Admin-Token.")]
+    #[tool(
+        description = "TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously revoked identity from the registry and persistent storage. The DID must already be in `Revoked` status — call `revoke_did` (RPC) first, allow cascading revocation to propagate, then call this. Distinct from revoke (logical delete). Operator-only: requires X-Tenzro-Admin-Token."
+    )]
     async fn forget_identity(
         &self,
         Parameters(params): Parameters<ResolveDidParams>,
@@ -5440,17 +6329,16 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List all Tenzro agent public signing keys as an RFC 7517 JWK Set. Mirrors GET /.well-known/jwks.json. External RFC 9421 verifiers (Visa TAP, Mastercard, Stripe MPP, AP2, x402) use this to resolve `keyid` parameters.")]
-    async fn list_agent_jwks(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List all Tenzro agent public signing keys as an RFC 7517 JWK Set. Mirrors GET /.well-known/jwks.json. External RFC 9421 verifiers (Visa TAP, Mastercard, Stripe MPP, AP2, x402) use this to resolve `keyid` parameters."
+    )]
+    async fn list_agent_jwks(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self
             .node
             .identity_registry()
             .ok_or_else(|| err_internal("Identity registry not initialized"))?;
 
-        let agent_registry =
-            tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
+        let agent_registry = tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
         let agents = agent_registry.list_all_agents();
         let set = tenzro_payments::rfc9421::JwkSet::from_agents(&agents);
 
@@ -5459,7 +6347,9 @@ impl TenzroMcpServer {
         json_result(value)
     }
 
-    #[tool(description = "Resolve a single agent JWK by RFC 9421 keyid. Accepts `did:tenzro:...` (first compatible key) or `did:tenzro:...#fragment` (specific key). Mirrors GET /.well-known/jwks.json/:keyid.")]
+    #[tool(
+        description = "Resolve a single agent JWK by RFC 9421 keyid. Accepts `did:tenzro:...` (first compatible key) or `did:tenzro:...#fragment` (specific key). Mirrors GET /.well-known/jwks.json/:keyid."
+    )]
     async fn get_agent_jwk(
         &self,
         Parameters(params): Parameters<GetAgentJwkParams>,
@@ -5471,8 +6361,7 @@ impl TenzroMcpServer {
             .identity_registry()
             .ok_or_else(|| err_internal("Identity registry not initialized"))?;
 
-        let agent_registry =
-            tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
+        let agent_registry = tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
 
         let agent = agent_registry
             .get_public_key(&params.keyid)
@@ -5491,7 +6380,9 @@ impl TenzroMcpServer {
         json_result(value)
     }
 
-    #[tool(description = "Read the current UTC-day spend window for a machine agent. Mirrors `tenzro_getAgentDailySpend`: the handler resets the window if the last_reset crossed UTC midnight before returning. Returns {agent_did, current_daily_spend, max_daily_spend, remaining, last_reset}. Use to enforce the runtime SpendingPolicy ceiling (defence-in-depth on top of the on-chain ERC-7579 spending-limit validator).")]
+    #[tool(
+        description = "Read the current UTC-day spend window for a machine agent. Mirrors `tenzro_getAgentDailySpend`: the handler resets the window if the last_reset crossed UTC midnight before returning. Returns {agent_did, current_daily_spend, max_daily_spend, remaining, last_reset}. Use to enforce the runtime SpendingPolicy ceiling (defence-in-depth on top of the on-chain ERC-7579 spending-limit validator)."
+    )]
     async fn get_agent_daily_spend(
         &self,
         Parameters(params): Parameters<GetAgentDailySpendParams>,
@@ -5505,7 +6396,9 @@ impl TenzroMcpServer {
 
     // ─── Saga Workflow Coordination ───
 
-    #[tool(description = "Open a multi-agent saga workflow: declare ordered steps (each with an Execute→Verify→Compensate lifecycle) plus optional per-step escrow. Returns the opened saga. Mirrors tenzro_workflowOpen.")]
+    #[tool(
+        description = "Open a multi-agent saga workflow: declare ordered steps (each with an Execute→Verify→Compensate lifecycle) plus optional per-step escrow. Returns the opened saga. Mirrors tenzro_workflowOpen."
+    )]
     async fn workflow_open(
         &self,
         Parameters(params): Parameters<WorkflowOpenParams>,
@@ -5518,7 +6411,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Execute a saga step: transition it Pending→Executing and, if escrow_amount is set, lock a per-step escrow (payer→vault). Mirrors tenzro_workflowStepExecute.")]
+    #[tool(
+        description = "Execute a saga step: transition it Pending→Executing and, if escrow_amount is set, lock a per-step escrow (payer→vault). Mirrors tenzro_workflowStepExecute."
+    )]
     async fn workflow_step_execute(
         &self,
         Parameters(params): Parameters<WorkflowStepExecuteParams>,
@@ -5531,7 +6426,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Verify a saga step: transition it Executing→Verified, release any per-step escrow (vault→payee), and emit ERC-8004 reputation feedback for the step executor. Mirrors tenzro_workflowStepVerify.")]
+    #[tool(
+        description = "Verify a saga step: transition it Executing→Verified, release any per-step escrow (vault→payee), and emit ERC-8004 reputation feedback for the step executor. Mirrors tenzro_workflowStepVerify."
+    )]
     async fn workflow_step_verify(
         &self,
         Parameters(params): Parameters<WorkflowStepVerifyParams>,
@@ -5544,7 +6441,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Compensate a saga step (and, with cascade=true, every lower-index executed/verified step in reverse order), refunding still-funded per-step escrow (vault→payer). Mirrors tenzro_workflowStepCompensate.")]
+    #[tool(
+        description = "Compensate a saga step (and, with cascade=true, every lower-index executed/verified step in reverse order), refunding still-funded per-step escrow (vault→payer). Mirrors tenzro_workflowStepCompensate."
+    )]
     async fn workflow_step_compensate(
         &self,
         Parameters(params): Parameters<WorkflowStepCompensateParams>,
@@ -5557,7 +6456,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Finalize a saga workflow once all steps are Verified: compute the receipt hash and mark it Completed. Mirrors tenzro_workflowFinalize.")]
+    #[tool(
+        description = "Finalize a saga workflow once all steps are Verified: compute the receipt hash and mark it Completed. Mirrors tenzro_workflowFinalize."
+    )]
     async fn workflow_finalize(
         &self,
         Parameters(params): Parameters<WorkflowFinalizeParams>,
@@ -5570,7 +6471,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read the current state of a saga workflow (steps, statuses, escrows, receipt). Mirrors tenzro_getWorkflowSaga.")]
+    #[tool(
+        description = "Read the current state of a saga workflow (steps, statuses, escrows, receipt). Mirrors tenzro_getWorkflowSaga."
+    )]
     async fn get_workflow_saga(
         &self,
         Parameters(params): Parameters<GetWorkflowSagaParams>,
@@ -5583,7 +6486,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Open a delivery-versus-payment saga: bundle two or more legs (delivery + payment) into an all-or-compensate unit. Only escrow-venue legs are saga-executable (the payer pre-funds and authorizes the escrow, so release/refund needs no fresh signature); native/channel/external legs are rejected. Returns the opened saga. Mirrors tenzro_dvpOpenSaga.")]
+    #[tool(
+        description = "Open a delivery-versus-payment saga: bundle two or more legs (delivery + payment) into an all-or-compensate unit. Only escrow-venue legs are saga-executable (the payer pre-funds and authorizes the escrow, so release/refund needs no fresh signature); native/channel/external legs are rejected. Returns the opened saga. Mirrors tenzro_dvpOpenSaga."
+    )]
     async fn dvp_open_saga(
         &self,
         Parameters(params): Parameters<DvpOpenSagaParams>,
@@ -5596,7 +6501,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Execute a DvP saga: run each escrow leg forward (release vault→payee). Signature-gated / custom-condition escrows require a per-leg release proof supplied via `proofs`. Any leg failure triggers automatic compensation (refund vault→payer) of already-executed legs. Mirrors tenzro_dvpExecuteSaga.")]
+    #[tool(
+        description = "Execute a DvP saga: run each escrow leg forward (release vault→payee). Signature-gated / custom-condition escrows require a per-leg release proof supplied via `proofs`. Any leg failure triggers automatic compensation (refund vault→payer) of already-executed legs. Mirrors tenzro_dvpExecuteSaga."
+    )]
     async fn dvp_execute_saga(
         &self,
         Parameters(params): Parameters<DvpExecuteSagaParams>,
@@ -5609,7 +6516,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Finalize a DvP saga once every leg has executed: compute the receipt and mark it Completed. Mirrors tenzro_dvpFinalizeSaga.")]
+    #[tool(
+        description = "Finalize a DvP saga once every leg has executed: compute the receipt and mark it Completed. Mirrors tenzro_dvpFinalizeSaga."
+    )]
     async fn dvp_finalize_saga(
         &self,
         Parameters(params): Parameters<DvpFinalizeSagaParams>,
@@ -5622,7 +6531,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read the current state of a DvP saga (legs, per-leg outcomes, escrows, receipt). Mirrors tenzro_dvpGetSaga.")]
+    #[tool(
+        description = "Read the current state of a DvP saga (legs, per-leg outcomes, escrows, receipt). Mirrors tenzro_dvpGetSaga."
+    )]
     async fn dvp_get_saga(
         &self,
         Parameters(params): Parameters<DvpGetSagaParams>,
@@ -5635,7 +6546,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List DvP sagas opened by a creator address. Returns {creator, count, sagas: [...]}. Mirrors tenzro_dvpListSagasByCreator.")]
+    #[tool(
+        description = "List DvP sagas opened by a creator address. Returns {creator, count, sagas: [...]}. Mirrors tenzro_dvpListSagasByCreator."
+    )]
     async fn dvp_list_sagas_by_creator(
         &self,
         Parameters(params): Parameters<DvpListSagasByCreatorParams>,
@@ -5648,7 +6561,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Compute a multilateral netting batch over a set of bilateral obligations: greedy netting collapses the gross obligation graph into a minimal set of net settlement instructions. Deterministic and idempotent by batch id. Mirrors tenzro_nettingCompute.")]
+    #[tool(
+        description = "Compute a multilateral netting batch over a set of bilateral obligations: greedy netting collapses the gross obligation graph into a minimal set of net settlement instructions. Deterministic and idempotent by batch id. Mirrors tenzro_nettingCompute."
+    )]
     async fn netting_compute(
         &self,
         Parameters(params): Parameters<NettingComputeParams>,
@@ -5661,7 +6576,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Mark a computed netting batch as settled once its net settlement instructions have been executed. Mirrors tenzro_nettingSettle.")]
+    #[tool(
+        description = "Mark a computed netting batch as settled once its net settlement instructions have been executed. Mirrors tenzro_nettingSettle."
+    )]
     async fn netting_settle(
         &self,
         Parameters(params): Parameters<NettingSettleParams>,
@@ -5674,7 +6591,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read a netting batch (gross obligations, net settlement instructions, status). Mirrors tenzro_nettingGetBatch.")]
+    #[tool(
+        description = "Read a netting batch (gross obligations, net settlement instructions, status). Mirrors tenzro_nettingGetBatch."
+    )]
     async fn netting_get_batch(
         &self,
         Parameters(params): Parameters<NettingGetBatchParams>,
@@ -5687,7 +6606,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List all netting batches. Returns {count, batches: [...]}. Mirrors tenzro_nettingListBatches.")]
+    #[tool(
+        description = "List all netting batches. Returns {count, batches: [...]}. Mirrors tenzro_nettingListBatches."
+    )]
     async fn netting_list_batches(
         &self,
         Parameters(params): Parameters<NettingListBatchesParams>,
@@ -5700,7 +6621,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Verify a Tenzro DID envelope carried as a tool argument (the hex X-Tenzro-DID-Envelope value). Supports did:tenzro (registry), did:key, did:ethr (recoverable secp256k1), and did:web (resolved over HTTPS). Returns {valid, did, method} or {valid:false, error}. MCP-native carriage: tool calls expose no HTTP headers, so the envelope rides as an argument.")]
+    #[tool(
+        description = "Verify a Tenzro DID envelope carried as a tool argument (the hex X-Tenzro-DID-Envelope value). Supports did:tenzro (registry), did:key, did:ethr (recoverable secp256k1), and did:web (resolved over HTTPS). Returns {valid, did, method} or {valid:false, error}. MCP-native carriage: tool calls expose no HTTP headers, so the envelope rides as an argument."
+    )]
     async fn verify_did_envelope(
         &self,
         Parameters(params): Parameters<VerifyDidEnvelopeParams>,
@@ -5709,8 +6632,8 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("malformed envelope: {e}")))?;
         if env.did.starts_with("did:web:") {
             let resp = crate::web::handlers::verify_did_web_envelope(&env).await;
-            let v = serde_json::to_value(&resp)
-                .map_err(|e| err_internal(format!("serialize: {e}")))?;
+            let v =
+                serde_json::to_value(&resp).map_err(|e| err_internal(format!("serialize: {e}")))?;
             return json_result(v);
         }
         let registry = self
@@ -5726,130 +6649,176 @@ impl TenzroMcpServer {
 
     // ─── Capital Intent (agentic capital allocation over tokenized assets) ───
 
-    #[tool(description = "Open a signed Capital Intent — regulated capital allocation over tokenized assets (the capital-markets analog of an AP2 Intent Mandate; objective = acquire/exit/rebalance/hedge/yield, with reg regime + KYC + ceilings). Mirrors tenzro_capitalIntentOpen.")]
+    #[tool(
+        description = "Open a signed Capital Intent — regulated capital allocation over tokenized assets (the capital-markets analog of an AP2 Intent Mandate; objective = acquire/exit/rebalance/hedge/yield, with reg regime + KYC + ceilings). Mirrors tenzro_capitalIntentOpen."
+    )]
     async fn capital_intent_open(
         &self,
         Parameters(params): Parameters<CapitalIntentOpenParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_capitalIntentOpen", req)
-            .await.map_err(|e| err_internal(format!("capitalIntentOpen failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("capitalIntentOpen failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Submit a solver bid to fulfil a capital intent (ranked by ERC-8004 + KYA). Mirrors tenzro_capitalIntentQuote.")]
+    #[tool(
+        description = "Submit a solver bid to fulfil a capital intent (ranked by ERC-8004 + KYA). Mirrors tenzro_capitalIntentQuote."
+    )]
     async fn capital_intent_quote(
         &self,
         Parameters(params): Parameters<CapitalIntentQuoteParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_capitalIntentQuote", req)
-            .await.map_err(|e| err_internal(format!("capitalIntentQuote failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("capitalIntentQuote failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Assign a solver to a capital intent; if `payer` is set, lock the principal escrow up to the authorized ceiling. Mirrors tenzro_capitalIntentAssign.")]
+    #[tool(
+        description = "Assign a solver to a capital intent; if `payer` is set, lock the principal escrow up to the authorized ceiling. Mirrors tenzro_capitalIntentAssign."
+    )]
     async fn capital_intent_assign(
         &self,
         Parameters(params): Parameters<CapitalIntentAssignParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_capitalIntentAssign", req)
-            .await.map_err(|e| err_internal(format!("capitalIntentAssign failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("capitalIntentAssign failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Record one executed settlement leg of a capital intent. Mirrors tenzro_capitalIntentExecute.")]
+    #[tool(
+        description = "Record one executed settlement leg of a capital intent. Mirrors tenzro_capitalIntentExecute."
+    )]
     async fn capital_intent_execute(
         &self,
         Parameters(params): Parameters<CapitalIntentExecuteParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_capitalIntentExecute", req)
-            .await.map_err(|e| err_internal(format!("capitalIntentExecute failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("capitalIntentExecute failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Verify a capital intent's proofs (requires all legs settled). Mirrors tenzro_capitalIntentVerify.")]
+    #[tool(
+        description = "Verify a capital intent's proofs (requires all legs settled). Mirrors tenzro_capitalIntentVerify."
+    )]
     async fn capital_intent_verify(
         &self,
         Parameters(params): Parameters<CapitalIntentIdParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_capitalIntentVerify", req)
-            .await.map_err(|e| err_internal(format!("capitalIntentVerify failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("capitalIntentVerify failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Settle a capital intent: release escrow to the solver, write ERC-8004 feedback, finalize with a receipt. Mirrors tenzro_capitalIntentSettle.")]
+    #[tool(
+        description = "Settle a capital intent: release escrow to the solver, write ERC-8004 feedback, finalize with a receipt. Mirrors tenzro_capitalIntentSettle."
+    )]
     async fn capital_intent_settle(
         &self,
         Parameters(params): Parameters<CapitalIntentSettleParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_capitalIntentSettle", req)
-            .await.map_err(|e| err_internal(format!("capitalIntentSettle failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("capitalIntentSettle failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Compensate (refund the principal escrow and fail) a capital intent. Mirrors tenzro_capitalIntentCompensate.")]
+    #[tool(
+        description = "Compensate (refund the principal escrow and fail) a capital intent. Mirrors tenzro_capitalIntentCompensate."
+    )]
     async fn capital_intent_compensate(
         &self,
         Parameters(params): Parameters<CapitalIntentIdParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_capitalIntentCompensate", req)
-            .await.map_err(|e| err_internal(format!("capitalIntentCompensate failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("capitalIntentCompensate failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Read a capital intent record (status, quotes, legs, escrow, receipt). Mirrors tenzro_getCapitalIntent.")]
+    #[tool(
+        description = "Read a capital intent record (status, quotes, legs, escrow, receipt). Mirrors tenzro_getCapitalIntent."
+    )]
     async fn get_capital_intent(
         &self,
         Parameters(params): Parameters<CapitalIntentIdParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_getCapitalIntent", req)
-            .await.map_err(|e| err_internal(format!("getCapitalIntent failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("getCapitalIntent failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── Proof-of-Reserve + attested-mint (1:1 backing invariant) ───
 
-    #[tool(description = "Record a signed Proof-of-Reserve attestation backing a tokenized asset, so attested-mint can enforce 1:1 backing. Mirrors tenzro_submitReserveAttestation.")]
+    #[tool(
+        description = "Record a signed Proof-of-Reserve attestation backing a tokenized asset, so attested-mint can enforce 1:1 backing. Mirrors tenzro_submitReserveAttestation."
+    )]
     async fn submit_reserve_attestation(
         &self,
         Parameters(params): Parameters<ReserveAttestationParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_submitReserveAttestation", req)
-            .await.map_err(|e| err_internal(format!("submitReserveAttestation failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("submitReserveAttestation failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Mint a tokenized asset ONLY if post-mint supply <= attested reserves (1:1 backing as a protocol invariant). Rejects with no/insufficient reserves. Mirrors tenzro_attestedMint.")]
+    #[tool(
+        description = "Mint a tokenized asset ONLY if post-mint supply <= attested reserves (1:1 backing as a protocol invariant). Rejects with no/insufficient reserves. Mirrors tenzro_attestedMint."
+    )]
     async fn attested_mint(
         &self,
         Parameters(params): Parameters<AttestedMintParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_attestedMint", req)
-            .await.map_err(|e| err_internal(format!("attestedMint failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("attestedMint failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Read the current reserve attestation for a tokenized asset. Mirrors tenzro_getReserve.")]
+    #[tool(
+        description = "Read the current reserve attestation for a tokenized asset. Mirrors tenzro_getReserve."
+    )]
     async fn get_reserve(
         &self,
         Parameters(params): Parameters<GetReserveParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_getReserve", req)
-            .await.map_err(|e| err_internal(format!("getReserve failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("getReserve failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Set the delegation scope for a machine identity, defining spending limits, allowed operations, payment protocols, and chains the agent may use")]
+    #[tool(
+        description = "Set the delegation scope for a machine identity, defining spending limits, allowed operations, payment protocols, and chains the agent may use"
+    )]
     async fn set_delegation_scope(
         &self,
         Parameters(params): Parameters<SetDelegationScopeParams>,
@@ -5860,17 +6829,23 @@ impl TenzroMcpServer {
             .ok_or_else(|| err_internal("Identity registry not initialized"))?;
 
         // Resolve the machine identity first
-        let identity = registry.resolve(&params.machine_did)
+        let identity = registry
+            .resolve(&params.machine_did)
             .map_err(|_| ErrorData {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Machine DID '{}' not found in registry", params.machine_did)),
+                message: Cow::from(format!(
+                    "Machine DID '{}' not found in registry",
+                    params.machine_did
+                )),
                 data: None,
             })?;
 
         if identity.is_human() {
             return Err(ErrorData {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Cannot set delegation scope on a human identity. Only machine identities have delegation scopes."),
+                message: Cow::from(
+                    "Cannot set delegation scope on a human identity. Only machine identities have delegation scopes.",
+                ),
                 data: None,
             });
         }
@@ -5893,7 +6868,8 @@ impl TenzroMcpServer {
             "allowed_chains": scope.allowed_chains,
         });
 
-        registry.update_delegation_scope(&params.machine_did, scope)
+        registry
+            .update_delegation_scope(&params.machine_did, scope)
             .map_err(|e| err_internal(format!("Failed to update delegation scope: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -5905,7 +6881,9 @@ impl TenzroMcpServer {
 
     // ─── OAuth 2.1 — Token Exchange / Introspection / Discovery ───
 
-    #[tool(description = "RFC 8693 OAuth 2.0 Token Exchange. Mint a narrower child JWT from a parent JWT, bound to a different DPoP key with a strict subset of the parent's RAR grants and AAP capabilities. The child token's controller_did is set to the parent's sub, extending the act-chain by one hop. Subset enforcement is performed by the AS; over-scoped requests are rejected.")]
+    #[tool(
+        description = "RFC 8693 OAuth 2.0 Token Exchange. Mint a narrower child JWT from a parent JWT, bound to a different DPoP key with a strict subset of the parent's RAR grants and AAP capabilities. The child token's controller_did is set to the parent's sub, extending the act-chain by one hop. Subset enforcement is performed by the AS; over-scoped requests are rejected."
+    )]
     async fn exchange_token(
         &self,
         Parameters(params): Parameters<ExchangeTokenParams>,
@@ -5948,7 +6926,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "RFC 7662 OAuth 2.0 Token Introspection. Ask the AS whether a token is currently active and, if so, return its full claim set (RAR authorization_details, AAP aap_* claims, cnf, controller_did, etc.). Per RFC 7662 §2.2 a failed validation returns `{active: false}` with no other fields — the AS does not leak why the token is inactive.")]
+    #[tool(
+        description = "RFC 7662 OAuth 2.0 Token Introspection. Ask the AS whether a token is currently active and, if so, return its full claim set (RAR authorization_details, AAP aap_* claims, cnf, controller_did, etc.). Per RFC 7662 §2.2 a failed validation returns `{active: false}` with no other fields — the AS does not leak why the token is inactive."
+    )]
     async fn introspect_token(
         &self,
         Parameters(params): Parameters<IntrospectTokenParams>,
@@ -5968,10 +6948,10 @@ impl TenzroMcpServer {
         json_result(value)
     }
 
-    #[tool(description = "RFC 8414 / RFC 9728 OAuth Authorization Server / Protected Resource Metadata. Returns the same metadata document the AS publishes at `GET /.well-known/openid-configuration`, augmented with AAP-specific extensions (authorization_details_types_supported, aap_claims_supported, dpop_signing_alg_values_supported).")]
-    async fn oauth_discovery(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "RFC 8414 / RFC 9728 OAuth Authorization Server / Protected Resource Metadata. Returns the same metadata document the AS publishes at `GET /.well-known/openid-configuration`, augmented with AAP-specific extensions (authorization_details_types_supported, aap_claims_supported, dpop_signing_alg_values_supported)."
+    )]
+    async fn oauth_discovery(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let engine = self
             .node
             .auth_engine()
@@ -6006,51 +6986,76 @@ impl TenzroMcpServer {
 
     // ─── MicroNode Join ───
 
-    #[tool(description = "Join the Tenzro Network as a MicroNode — a zero-install full participant. \
+    #[tool(
+        description = "Join the Tenzro Network as a MicroNode — a zero-install full participant. \
         Auto-provisions a TDIP decentralized identity (DID) and MPC wallet. \
         Grants access to all 10 network capabilities: inference, payments, agent collaboration, \
         MCP tools, task execution, chain queries, smart contracts, TEE services, cross-chain bridge, \
         and governance. Works from any entry point: Claude, ClawBot, MCP, A2A, SDK, API, CLI, or app. \
-        No hardware, no binary installation required.")]
+        No hardware, no binary installation required."
+    )]
     async fn join_as_participant(
         &self,
         Parameters(params): Parameters<JoinAsMicroNodeParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let display_name = params.display_name
+        let display_name = params
+            .display_name
             .unwrap_or_else(|| "Tenzro Participant".to_string());
         let origin = params.origin.unwrap_or_else(|| "mcp".to_string());
-        let participant_type_str = params.participant_type.unwrap_or_else(|| "human".to_string());
+        let participant_type_str = params
+            .participant_type
+            .unwrap_or_else(|| "human".to_string());
 
         // Auto-provision MPC wallet
-        let wallet_service = self.node.wallet_service()
+        let wallet_service = self
+            .node
+            .wallet_service()
             .ok_or_else(|| err_internal("Wallet service not initialized"))?;
 
         use tenzro_wallet::WalletService;
-        let wallet = wallet_service.provision_wallet().await
+        let wallet = wallet_service
+            .provision_wallet()
+            .await
             .map_err(|e| err_internal(format!("Wallet provisioning failed: {}", e)))?;
 
         // Register human identity with TDIP
-        let registry = self.node.identity_registry()
+        let registry = self
+            .node
+            .identity_registry()
             .ok_or_else(|| err_internal("Identity registry not initialized"))?;
 
-        let mut identity = registry.register_human_with_fee(
-            wallet.public_key.to_bytes(),
-            display_name.clone(),
-            tenzro_types::identity::KycTier::Unverified,
-        ).await.map_err(|e| err_internal(format!("Identity registration failed: {}", e)))?.identity;
+        let mut identity = registry
+            .register_human_with_fee(
+                wallet.public_key.to_bytes(),
+                display_name.clone(),
+                tenzro_types::identity::KycTier::Unverified,
+            )
+            .await
+            .map_err(|e| err_internal(format!("Identity registration failed: {}", e)))?
+            .identity;
 
         // Attach MicroNode metadata
-        identity.metadata.insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
-        identity.metadata.insert("wallet_address".to_string(), format!("{}", wallet.address));
-        identity.metadata.insert("network_role".to_string(), "micro_node".to_string());
-        identity.metadata.insert("origin".to_string(), origin.clone());
-        identity.metadata.insert("participant_type".to_string(), participant_type_str.clone());
+        identity
+            .metadata
+            .insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
+        identity
+            .metadata
+            .insert("wallet_address".to_string(), format!("{}", wallet.address));
+        identity
+            .metadata
+            .insert("network_role".to_string(), "micro_node".to_string());
+        identity
+            .metadata
+            .insert("origin".to_string(), origin.clone());
+        identity
+            .metadata
+            .insert("participant_type".to_string(), participant_type_str.clone());
 
         // Persist to RocksDB. bincode is the canonical CF_IDENTITIES format —
         // the registry's write-through and startup hydration both use it; a
         // serde_json record here would be silently dropped at hydration.
         if let Some(storage) = self.node.storage() {
-            use tenzro_storage::{KvStore, CF_IDENTITIES};
+            use tenzro_storage::{CF_IDENTITIES, KvStore};
             if let Ok(bytes) = bincode::serialize(&identity) {
                 let _ = storage.put(CF_IDENTITIES, identity.did_string().as_bytes(), &bytes);
             }
@@ -6061,24 +7066,19 @@ impl TenzroMcpServer {
         let mut agent_id_str = None;
         if let Some(runtime) = self.node.agent_runtime() {
             let did = identity.did_string();
-            let caps = vec![
-                tenzro_types::agent::Capability::Custom {
-                    name: "micro_node".to_string(),
-                    parameters: std::collections::HashMap::new(),
-                },
-            ];
+            let caps = vec![tenzro_types::agent::Capability::Custom {
+                name: "micro_node".to_string(),
+                parameters: std::collections::HashMap::new(),
+            }];
             // Use the DID hash as a deterministic nonce for agent ID generation
             let nonce = {
                 let hash = tenzro_crypto::hash::sha256(did.as_bytes());
                 u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]))
             };
-            match runtime.register_agent(
-                display_name.clone(),
-                wallet.address,
-                caps,
-                false,
-                nonce,
-            ).await {
+            match runtime
+                .register_agent(display_name.clone(), wallet.address, caps, false, nonce)
+                .await
+            {
                 Ok(agent) => {
                     let aid = agent.identity.agent_id.clone();
                     tracing::info!(did = %did, agent_id = %aid, "Participant registered as agent in runtime");
@@ -6134,7 +7134,9 @@ impl TenzroMcpServer {
 
     // ─── Payments (MPP, x402, Native) ───
 
-    #[tool(description = "Create a payment challenge for a protected resource. Supports five protocols:\n- 'mpp' (Machine Payments Protocol): Session-based streaming payments, ideal for per-token AI inference billing\n- 'x402' (Coinbase HTTP 402): Stateless one-shot payments, ideal for API calls and data downloads\n- 'visa-tap' (Visa Trusted Agent Protocol): RFC 9421 agent-verified payments for agentic commerce\n- 'mastercard-agent-pay' (Mastercard Agent Pay): KYA-verified payments with agentic tokens\n- 'native': Direct TNZO transfer on the Tenzro ledger")]
+    #[tool(
+        description = "Create a payment challenge for a protected resource. Supports five protocols:\n- 'mpp' (Machine Payments Protocol): Session-based streaming payments, ideal for per-token AI inference billing\n- 'x402' (Coinbase HTTP 402): Stateless one-shot payments, ideal for API calls and data downloads\n- 'visa-tap' (Visa Trusted Agent Protocol): RFC 9421 agent-verified payments for agentic commerce\n- 'mastercard-agent-pay' (Mastercard Agent Pay): KYA-verified payments with agentic tokens\n- 'native': Direct TNZO transfer on the Tenzro ledger"
+    )]
     async fn create_payment_challenge(
         &self,
         Parameters(params): Parameters<CreatePaymentChallengeParams>,
@@ -6173,15 +7175,16 @@ impl TenzroMcpServer {
             }
         };
         let amount = match &app {
-            Some(record) => {
-                tenzro_types::fees::apply_developer_margin(params.amount, record.margin_bps)
-                    .ok_or_else(|| {
-                        err_internal(format!(
-                            "App '{}' has an invalid margin_bps ({}) or the marked-up amount overflows",
-                            record.app_id, record.margin_bps
-                        ))
-                    })?
-            }
+            Some(record) => tenzro_types::fees::apply_developer_margin(
+                params.amount,
+                record.margin_bps,
+            )
+            .ok_or_else(|| {
+                err_internal(format!(
+                    "App '{}' has an invalid margin_bps ({}) or the marked-up amount overflows",
+                    record.app_id, record.margin_bps
+                ))
+            })?,
             None => params.amount,
         };
 
@@ -6205,9 +7208,10 @@ impl TenzroMcpServer {
                 "app_wallet".to_string(),
                 serde_json::Value::String(format!("0x{}", hex::encode(record.app_wallet.0))),
             );
-            challenge
-                .extra
-                .insert("margin_bps".to_string(), serde_json::json!(record.margin_bps));
+            challenge.extra.insert(
+                "margin_bps".to_string(),
+                serde_json::json!(record.margin_bps),
+            );
         }
 
         // Store the challenge in the gateway's challenge store for later verification
@@ -6233,7 +7237,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Verify a payment credential against a previously created challenge and settle the payment on-chain")]
+    #[tool(
+        description = "Verify a payment credential against a previously created challenge and settle the payment on-chain"
+    )]
     async fn verify_payment(
         &self,
         Parameters(params): Parameters<VerifyPaymentParams>,
@@ -6247,8 +7253,12 @@ impl TenzroMcpServer {
         use tenzro_payments::types::PaymentCredential;
 
         let sig_bytes = hex::decode(
-            params.signature.strip_prefix("0x").unwrap_or(&params.signature)
-        ).map_err(|e| ErrorData {
+            params
+                .signature
+                .strip_prefix("0x")
+                .unwrap_or(&params.signature),
+        )
+        .map_err(|e| ErrorData {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Invalid signature hex: {}", e)),
             data: None,
@@ -6258,8 +7268,12 @@ impl TenzroMcpServer {
             Vec::new()
         } else {
             hex::decode(
-                params.pq_signature.strip_prefix("0x").unwrap_or(&params.pq_signature)
-            ).map_err(|e| ErrorData {
+                params
+                    .pq_signature
+                    .strip_prefix("0x")
+                    .unwrap_or(&params.pq_signature),
+            )
+            .map_err(|e| ErrorData {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!("Invalid pq_signature hex: {}", e)),
                 data: None,
@@ -6270,8 +7284,12 @@ impl TenzroMcpServer {
             Vec::new()
         } else {
             hex::decode(
-                params.pq_public_key.strip_prefix("0x").unwrap_or(&params.pq_public_key)
-            ).map_err(|e| ErrorData {
+                params
+                    .pq_public_key
+                    .strip_prefix("0x")
+                    .unwrap_or(&params.pq_public_key),
+            )
+            .map_err(|e| ErrorData {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!("Invalid pq_public_key hex: {}", e)),
                 data: None,
@@ -6312,8 +7330,12 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "List the payment protocols supported by this Tenzro node, including MPP (session-based streaming), x402 (stateless one-shot), and native TNZO transfers")]
-    async fn list_payment_protocols(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List the payment protocols supported by this Tenzro node, including MPP (session-based streaming), x402 (stateless one-shot), and native TNZO transfers"
+    )]
+    async fn list_payment_protocols(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let gateway = self.node.payment_gateway();
 
         let registered = if let Some(gw) = gateway {
@@ -6374,8 +7396,12 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "List the x402 scheme backends registered on this node. Each scheme corresponds to a different verification path under the x402 protocol: 'tenzro-hybrid' (Ed25519 hybrid sig over canonical preimage), 'exact-eip3009' (USDC EIP-3009 meta-tx via CDP facilitator), 'permit2' (Uniswap Permit2 via CDP facilitator), 'erc7710' (delegation redemption). Use the returned ids in the 'extra.scheme' field of an x402 PaymentRequirement.")]
-    async fn list_x402_schemes(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List the x402 scheme backends registered on this node. Each scheme corresponds to a different verification path under the x402 protocol: 'tenzro-hybrid' (Ed25519 hybrid sig over canonical preimage), 'exact-eip3009' (USDC EIP-3009 meta-tx via CDP facilitator), 'permit2' (Uniswap Permit2 via CDP facilitator), 'erc7710' (delegation redemption). Use the returned ids in the 'extra.scheme' field of an x402 PaymentRequirement."
+    )]
+    async fn list_x402_schemes(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let server = match self.node.x402_server() {
             Some(s) => s,
             None => {
@@ -6415,12 +7441,18 @@ impl TenzroMcpServer {
 
     // ─── x402 Bazaar ───
 
-    #[tool(description = "Describe the x402 protocol surface this node exposes: registered schemes, supported networks/assets, and the Bazaar discovery endpoints.")]
-    async fn x402_protocol_info(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Describe the x402 protocol surface this node exposes: registered schemes, supported networks/assets, and the Bazaar discovery endpoints."
+    )]
+    async fn x402_protocol_info(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         dispatch_rpc(&self.node, "tenzro_x402ProtocolInfo", serde_json::json!({})).await
     }
 
-    #[tool(description = "List a paid HTTP resource in the x402 Bazaar so buyers can discover it. scheme is an x402 scheme id ('tenzro-hybrid', 'exact-eip3009', 'permit2', 'erc7710'). Returns the assigned listingId.")]
+    #[tool(
+        description = "List a paid HTTP resource in the x402 Bazaar so buyers can discover it. scheme is an x402 scheme id ('tenzro-hybrid', 'exact-eip3009', 'permit2', 'erc7710'). Returns the assigned listingId."
+    )]
     async fn x402_register_resource(
         &self,
         Parameters(p): Parameters<X402RegisterResourceParams>,
@@ -6444,7 +7476,9 @@ impl TenzroMcpServer {
         dispatch_rpc(&self.node, "tenzro_x402RegisterResource", params).await
     }
 
-    #[tool(description = "Query the x402 Bazaar for paid resources. All set filters are ANDed; unset filters match everything. Each listing carries seller_reputation joined from the provider-reputation ledger (settled payments are the only score-up path). Results are highest-reputation-first (unscored last), freshest within the same score, capped by limit when non-zero. Returns {listings, count}.")]
+    #[tool(
+        description = "Query the x402 Bazaar for paid resources. All set filters are ANDed; unset filters match everything. Each listing carries seller_reputation joined from the provider-reputation ledger (settled payments are the only score-up path). Results are highest-reputation-first (unscored last), freshest within the same score, capped by limit when non-zero. Returns {listings, count}."
+    )]
     async fn x402_discover_resources(
         &self,
         Parameters(p): Parameters<X402DiscoverResourcesParams>,
@@ -6453,15 +7487,27 @@ impl TenzroMcpServer {
             "tags": p.tags.unwrap_or_default(),
             "limit": p.limit.unwrap_or(0),
         });
-        if let Some(v) = p.scheme { params["scheme"] = serde_json::json!(v); }
-        if let Some(v) = p.network { params["network"] = serde_json::json!(v); }
-        if let Some(v) = p.asset { params["asset"] = serde_json::json!(v); }
-        if let Some(v) = p.seller_did { params["sellerDid"] = serde_json::json!(v); }
-        if let Some(v) = p.min_reputation { params["minReputation"] = serde_json::json!(v); }
+        if let Some(v) = p.scheme {
+            params["scheme"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.network {
+            params["network"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.asset {
+            params["asset"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.seller_did {
+            params["sellerDid"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.min_reputation {
+            params["minReputation"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_x402DiscoverResources", params).await
     }
 
-    #[tool(description = "Remove a Bazaar listing. Refused unless seller_did owns the listing. Returns {removed}.")]
+    #[tool(
+        description = "Remove a Bazaar listing. Refused unless seller_did owns the listing. Returns {removed}."
+    )]
     async fn x402_deregister_resource(
         &self,
         Parameters(p): Parameters<X402DeregisterResourceParams>,
@@ -6474,7 +7520,9 @@ impl TenzroMcpServer {
         .await
     }
 
-    #[tool(description = "Verify a server-signed x402 offer before paying. Pass the full X402PaymentRequirement JSON exactly as it appeared in the 402 body. The node recomputes the commitment and verifies the Ed25519 signature under the carried signer key. Returns {valid, offerCommitment, offerSigner}.")]
+    #[tool(
+        description = "Verify a server-signed x402 offer before paying. Pass the full X402PaymentRequirement JSON exactly as it appeared in the 402 body. The node recomputes the commitment and verifies the Ed25519 signature under the carried signer key. Returns {valid, offerCommitment, offerSigner}."
+    )]
     async fn x402_verify_offer(
         &self,
         Parameters(p): Parameters<X402VerifyOfferParams>,
@@ -6487,7 +7535,9 @@ impl TenzroMcpServer {
         .await
     }
 
-    #[tool(description = "Derive the deterministic pay_<hex> idempotency id for an (offer, payer) pair so a buyer can detect and skip a retry client-side. Pass either the full requirement (node recomputes the commitment) or a 64-hex offer_commitment, plus payer_did.")]
+    #[tool(
+        description = "Derive the deterministic pay_<hex> idempotency id for an (offer, payer) pair so a buyer can detect and skip a retry client-side. Pass either the full requirement (node recomputes the commitment) or a 64-hex offer_commitment, plus payer_did."
+    )]
     async fn x402_payment_id(
         &self,
         Parameters(p): Parameters<X402PaymentIdParams>,
@@ -6503,12 +7553,23 @@ impl TenzroMcpServer {
 
     // ─── Managed databases ───
 
-    #[tool(description = "List the database engines this node can serve — each with its data models, license, sharding model, and native-cluster topology. Engines are operator-run externals (PostgreSQL, Qdrant, Valkey) and in-process embedded engines (Lance, Tantivy).")]
-    async fn list_database_engines(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        dispatch_rpc(&self.node, "tenzro_listDatabaseEngines", serde_json::json!([])).await
+    #[tool(
+        description = "List the database engines this node can serve — each with its data models, license, sharding model, and native-cluster topology. Engines are operator-run externals (PostgreSQL, Qdrant, Valkey) and in-process embedded engines (Lance, Tantivy)."
+    )]
+    async fn list_database_engines(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_listDatabaseEngines",
+            serde_json::json!([]),
+        )
+        .await
     }
 
-    #[tool(description = "Register a database this node serves, computing and persisting its partition placement over the live cluster. owner_did becomes the admin authority (owner-only access policy). placement is 'local', 'lan_cluster', or 'network'. Returns {database, partitions}.")]
+    #[tool(
+        description = "Register a database this node serves, computing and persisting its partition placement over the live cluster. owner_did becomes the admin authority (owner-only access policy). placement is 'local', 'lan_cluster', or 'network'. Returns {database, partitions}."
+    )]
     async fn create_database(
         &self,
         Parameters(p): Parameters<CreateDatabaseParams>,
@@ -6583,7 +7644,9 @@ impl TenzroMcpServer {
         .await
     }
 
-    #[tool(description = "Mint a managed-database connection credential bound to bearer_did, scoped to this one database. The owner (caller_did) — or a caller holding the write-action capability — issues it. When write is true the token also carries the admin action. Returns the credential a developer presents on every query.")]
+    #[tool(
+        description = "Mint a managed-database connection credential bound to bearer_did, scoped to this one database. The owner (caller_did) — or a caller holding the write-action capability — issues it. When write is true the token also carries the admin action. Returns the credential a developer presents on every query."
+    )]
     async fn issue_database_connection(
         &self,
         Parameters(p): Parameters<IssueDatabaseConnectionParams>,
@@ -6593,14 +7656,24 @@ impl TenzroMcpServer {
             "caller_did": p.caller_did,
             "write": p.write.unwrap_or(false),
         });
-        if let Some(v) = p.bearer_did { params["bearer_did"] = serde_json::json!(v); }
-        if let Some(v) = p.ttl_secs { params["ttl_secs"] = serde_json::json!(v); }
-        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
-        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        if let Some(v) = p.bearer_did {
+            params["bearer_did"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.ttl_secs {
+            params["ttl_secs"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.capability {
+            params["capability"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.envelope {
+            params["envelope"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_issueDatabaseConnection", params).await
     }
 
-    #[tool(description = "Run an engine-dialect query against a database partition. caller_did is authorized against the access policy (writes require the admin action, reads the read action) before any engine is touched. When this node holds the target partition the result carries served_here=true and the engine result; otherwise it carries holder endpoints.")]
+    #[tool(
+        description = "Run an engine-dialect query against a database partition. caller_did is authorized against the access policy (writes require the admin action, reads the read action) before any engine is touched. When this node holds the target partition the result carries served_here=true and the engine result; otherwise it carries holder endpoints."
+    )]
     async fn database_query(
         &self,
         Parameters(p): Parameters<DatabaseQueryParams>,
@@ -6612,14 +7685,24 @@ impl TenzroMcpServer {
             "partition_index": p.partition_index.unwrap_or(0),
             "write": p.write.unwrap_or(false),
         });
-        if let Some(v) = p.consistency { params["consistency"] = serde_json::json!(v); }
-        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
-        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
-        if let Some(v) = p.payment_credential { params["payment_credential"] = v; }
+        if let Some(v) = p.consistency {
+            params["consistency"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.capability {
+            params["capability"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.envelope {
+            params["envelope"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.payment_credential {
+            params["payment_credential"] = v;
+        }
         dispatch_rpc(&self.node, "tenzro_databaseQuery", params).await
     }
 
-    #[tool(description = "Check — without side effects — whether caller_did may read the database. Returns {authorized, reason}.")]
+    #[tool(
+        description = "Check — without side effects — whether caller_did may read the database. Returns {authorized, reason}."
+    )]
     async fn authorize_database_read(
         &self,
         Parameters(p): Parameters<AuthorizeDatabaseReadParams>,
@@ -6628,12 +7711,18 @@ impl TenzroMcpServer {
             "database_id": p.database_id,
             "caller_did": p.caller_did,
         });
-        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
-        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        if let Some(v) = p.capability {
+            params["capability"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.envelope {
+            params["envelope"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_authorizeDatabaseRead", params).await
     }
 
-    #[tool(description = "Grow or shrink a database along the local → lan_cluster → network continuum in place. Administrative — gated on the write action. partitions and the replication bounds default to the database's current values when omitted; min_replication and max_replication must be supplied together.")]
+    #[tool(
+        description = "Grow or shrink a database along the local → lan_cluster → network continuum in place. Administrative — gated on the write action. partitions and the replication bounds default to the database's current values when omitted; min_replication and max_replication must be supplied together."
+    )]
     async fn rescale_database(
         &self,
         Parameters(p): Parameters<RescaleDatabaseParams>,
@@ -6643,7 +7732,9 @@ impl TenzroMcpServer {
             "caller_did": p.caller_did,
             "placement": p.placement,
         });
-        if let Some(v) = p.partitions { params["partitions"] = serde_json::json!(v); }
+        if let Some(v) = p.partitions {
+            params["partitions"] = serde_json::json!(v);
+        }
         match (p.min_replication, p.max_replication) {
             (Some(min), Some(max)) => {
                 params["replication"] = serde_json::json!({
@@ -6659,15 +7750,21 @@ impl TenzroMcpServer {
                         "min_replication and max_replication must be supplied together",
                     ),
                     data: None,
-                })
+                });
             }
         }
-        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
-        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        if let Some(v) = p.capability {
+            params["capability"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.envelope {
+            params["envelope"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_rescaleDatabase", params).await
     }
 
-    #[tool(description = "Remove a database and all its partition placements, tearing down the engine backing for every partition this node holds. Administrative — caller_did is gated on the admin (write) action and its usage counters are removed with it.")]
+    #[tool(
+        description = "Remove a database and all its partition placements, tearing down the engine backing for every partition this node holds. Administrative — caller_did is gated on the admin (write) action and its usage counters are removed with it."
+    )]
     async fn drop_database(
         &self,
         Parameters(p): Parameters<DropDatabaseParams>,
@@ -6676,12 +7773,18 @@ impl TenzroMcpServer {
             "database_id": p.database_id,
             "caller_did": p.caller_did,
         });
-        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
-        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        if let Some(v) = p.capability {
+            params["capability"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.envelope {
+            params["envelope"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_dropDatabase", params).await
     }
 
-    #[tool(description = "Read per-query pricing and cumulative usage counters (queries, writes, bytes in/out, total billed) for a database. Administrative — caller_did is gated on the admin (write) action.")]
+    #[tool(
+        description = "Read per-query pricing and cumulative usage counters (queries, writes, bytes in/out, total billed) for a database. Administrative — caller_did is gated on the admin (write) action."
+    )]
     async fn database_usage(
         &self,
         Parameters(p): Parameters<DatabaseUsageParams>,
@@ -6690,12 +7793,18 @@ impl TenzroMcpServer {
             "database_id": p.database_id,
             "caller_did": p.caller_did,
         });
-        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
-        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        if let Some(v) = p.capability {
+            params["capability"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.envelope {
+            params["envelope"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_databaseUsage", params).await
     }
 
-    #[tool(description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'llm', 'tee', or 'general'.")]
+    #[tool(
+        description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'llm', 'tee', or 'general'."
+    )]
     async fn list_providers(
         &self,
         Parameters(params): Parameters<ListProvidersParams>,
@@ -6704,7 +7813,9 @@ impl TenzroMcpServer {
         let mut result: Vec<serde_json::Value> = Vec::new();
 
         // Include local node if it is serving models
-        let served: Vec<String> = self.node.served_models
+        let served: Vec<String> = self
+            .node
+            .served_models
             .iter()
             .filter(|e| e.value().is_network())
             .map(|e| e.key().clone())
@@ -6731,9 +7842,11 @@ impl TenzroMcpServer {
             if !seen_ids.contains(&peer_id) {
                 // Apply optional provider_type filter
                 if let Some(ref pt) = params.provider_type
-                    && !pt.is_empty() && entry.announcement.provider_type != *pt {
-                        continue;
-                    }
+                    && !pt.is_empty()
+                    && entry.announcement.provider_type != *pt
+                {
+                    continue;
+                }
                 seen_ids.insert(peer_id.clone());
                 result.push(serde_json::json!({
                     "peer_id": peer_id,
@@ -6751,19 +7864,27 @@ impl TenzroMcpServer {
         json_result(serde_json::to_value(result).map_err(|e| err_internal(e.to_string()))?)
     }
 
-    #[tool(description = "List providers with published capacity across the Tenzro network. For each provider returns both the advertised capacity (its own claim: max concurrent requests, requests/sec, batch size, MTP support) and the measured throughput this node has observed (tokens/sec, p95 latency, reputation, and a reputation-discounted throughput figure). Includes this node's local providers (source=local) and gossip-discovered peers (source=network). Mirrors tenzro_listProviderCapacity.")]
+    #[tool(
+        description = "List providers with published capacity across the Tenzro network. For each provider returns both the advertised capacity (its own claim: max concurrent requests, requests/sec, batch size, MTP support) and the measured throughput this node has observed (tokens/sec, p95 latency, reputation, and a reputation-discounted throughput figure). Includes this node's local providers (source=local) and gossip-discovered peers (source=network). Mirrors tenzro_listProviderCapacity."
+    )]
     async fn list_provider_capacity(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listProviderCapacity", serde_json::json!([]))
-            .await
-            .map_err(|e| err_internal(format!("listProviderCapacity failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listProviderCapacity",
+            serde_json::json!([]),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listProviderCapacity failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── Models & Inference ───
 
-    #[tool(description = "List AI models available on the Tenzro network. Shows all models with availability: 'local' (served on this node, free), 'network' (available from remote providers, costs TNZO), or 'downloadable' (in catalog but not yet available). Filter by category or search by name")]
+    #[tool(
+        description = "List AI models available on the Tenzro network. Shows all models with availability: 'local' (served on this node, free), 'network' (available from remote providers, costs TNZO), or 'downloadable' (in catalog but not yet available). Filter by category or search by name"
+    )]
     async fn list_models(
         &self,
         Parameters(params): Parameters<ListModelsParams>,
@@ -6772,12 +7893,17 @@ impl TenzroMcpServer {
         let hf_downloader = self.node.hf_downloader.as_ref();
 
         // Get network models from model registry (registered by remote providers)
-        let network_model_ids: std::collections::HashSet<String> = if let Some(registry) = self.node.model_registry() {
-            let filter = tenzro_model::ModelFilter::new();
-            registry.search_models(&filter).iter().map(|m| m.model_id.clone()).collect()
-        } else {
-            std::collections::HashSet::new()
-        };
+        let network_model_ids: std::collections::HashSet<String> =
+            if let Some(registry) = self.node.model_registry() {
+                let filter = tenzro_model::ModelFilter::new();
+                registry
+                    .search_models(&filter)
+                    .iter()
+                    .map(|m| m.model_id.clone())
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
 
         // Get network models from model services (remote endpoints)
         let network_services = self.node.list_model_services();
@@ -6850,24 +7976,35 @@ impl TenzroMcpServer {
         if let Some(ref name) = params.name {
             let name_lower = name.to_lowercase();
             model_list.retain(|m| {
-                m["name"].as_str().map(|n| n.to_lowercase().contains(&name_lower)).unwrap_or(false)
-                || m["model_id"].as_str().map(|id| id.to_lowercase().contains(&name_lower)).unwrap_or(false)
-                || m["family"].as_str().map(|f| f.to_lowercase().contains(&name_lower)).unwrap_or(false)
+                m["name"]
+                    .as_str()
+                    .map(|n| n.to_lowercase().contains(&name_lower))
+                    .unwrap_or(false)
+                    || m["model_id"]
+                        .as_str()
+                        .map(|id| id.to_lowercase().contains(&name_lower))
+                        .unwrap_or(false)
+                    || m["family"]
+                        .as_str()
+                        .map(|f| f.to_lowercase().contains(&name_lower))
+                        .unwrap_or(false)
             });
         }
 
         // Apply category filter if provided
         if let Some(ref cat) = params.category
-            && let Ok(modality) = parse_modality(cat) {
-                let modality_str = format!("{:?}", modality).to_lowercase();
-                model_list.retain(|m| {
-                    // Catalog models are text-generation; keep them only if category is "text"
-                    m["architecture"].as_str()
-                        .map(|a| a.to_lowercase().contains(&modality_str))
-                        .unwrap_or(false)
+            && let Ok(modality) = parse_modality(cat)
+        {
+            let modality_str = format!("{:?}", modality).to_lowercase();
+            model_list.retain(|m| {
+                // Catalog models are text-generation; keep them only if category is "text"
+                m["architecture"]
+                    .as_str()
+                    .map(|a| a.to_lowercase().contains(&modality_str))
+                    .unwrap_or(false)
                     || modality_str == "text"
-                });
-            }
+            });
+        }
 
         json_result(serde_json::json!({
             "models": model_list,
@@ -6875,7 +8012,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Invoke Tenzro Cortex recurrent-depth reasoning. Executes a recurrent-depth transformer (OpenMythos-style) through a registered Cortex worker, charging TNZO based on tokens_in, tokens_out, and loops_used. Returns the reasoning output along with a signed CortexReceipt binding input/output commitments, weights hash, runtime hash, loops_used, and worker DID. Use tier='fast|standard|deep|institutional' to select the reasoning depth budget.")]
+    #[tool(
+        description = "Invoke Tenzro Cortex recurrent-depth reasoning. Executes a recurrent-depth transformer (OpenMythos-style) through a registered Cortex worker, charging TNZO based on tokens_in, tokens_out, and loops_used. Returns the reasoning output along with a signed CortexReceipt binding input/output commitments, weights hash, runtime hash, loops_used, and worker DID. Use tier='fast|standard|deep|institutional' to select the reasoning depth budget."
+    )]
     async fn cortex_reason(
         &self,
         Parameters(params): Parameters<CortexReasonParams>,
@@ -6961,12 +8100,10 @@ impl TenzroMcpServer {
         self.node.metrics().record_inference();
 
         // Best-effort wei settlement: requester → worker.
-        let settled = if resp.price_wei > 0
-            && requester != tenzro_types::primitives::Address::default()
-        {
-            match self.node.token() {
-                Some(token) => {
-                    match token.transfer(&requester, &resp.worker, resp.price_wei) {
+        let settled =
+            if resp.price_wei > 0 && requester != tenzro_types::primitives::Address::default() {
+                match self.node.token() {
+                    Some(token) => match token.transfer(&requester, &resp.worker, resp.price_wei) {
                         Ok(_) => {
                             tracing::info!(
                                 amount_wei = resp.price_wei,
@@ -6979,13 +8116,12 @@ impl TenzroMcpServer {
                             tracing::warn!("Cortex MCP settlement failed: {}", e);
                             false
                         }
-                    }
+                    },
+                    None => false,
                 }
-                None => false,
-            }
-        } else {
-            resp.price_wei == 0
-        };
+            } else {
+                resp.price_wei == 0
+            };
 
         // The output is arbitrary model-produced bytes. Emit a best-effort
         // UTF-8 string alongside a hex copy so text-based workflows work
@@ -7003,7 +8139,9 @@ impl TenzroMcpServer {
         json_result(value)
     }
 
-    #[tool(description = "Send a chat completion request to a named AI model served on the Tenzro network. Use list_models or list_model_endpoints to discover available models. Omitting 'model' and giving 'use_case' selects one, but the offer is resolved at dispatch rather than pinned to the scored price — chat_by_intent is the path that pins price and payee")]
+    #[tool(
+        description = "Send a chat completion request to a named AI model served on the Tenzro network. Use list_models or list_model_endpoints to discover available models. Omitting 'model' and giving 'use_case' selects one, but the offer is resolved at dispatch rather than pinned to the scored price — chat_by_intent is the path that pins price and payee"
+    )]
     async fn chat_completion(
         &self,
         Parameters(params): Parameters<ChatCompletionParams>,
@@ -7096,7 +8234,9 @@ impl TenzroMcpServer {
         };
 
         // Find the model service by model_id or instance_id
-        let service = self.node.find_model_service_by_model_id(&model)
+        let service = self
+            .node
+            .find_model_service_by_model_id(&model)
             .or_else(|| self.node.get_model_service(&model));
 
         if service.is_none() {
@@ -7152,21 +8292,25 @@ impl TenzroMcpServer {
             })?;
 
             // Acquire load slot (RAII guard auto-decrements on drop)
-            let _load_guard = self.node.load_tracker.try_acquire(&svc.model_id).map_err(|_| {
-                let msg = if let Some(snap) = self.node.load_tracker.snapshot(&svc.model_id) {
-                    format!(
-                        "Model '{}' is at capacity ({}/{} active). Try again later.",
-                        svc.model_id, snap.active_requests, snap.max_concurrent
-                    )
-                } else {
-                    format!("Model '{}' is at capacity. Try again later.", svc.model_id)
-                };
-                ErrorData {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(msg),
-                    data: None,
-                }
-            })?;
+            let _load_guard = self
+                .node
+                .load_tracker
+                .try_acquire(&svc.model_id)
+                .map_err(|_| {
+                    let msg = if let Some(snap) = self.node.load_tracker.snapshot(&svc.model_id) {
+                        format!(
+                            "Model '{}' is at capacity ({}/{} active). Try again later.",
+                            svc.model_id, snap.active_requests, snap.max_concurrent
+                        )
+                    } else {
+                        format!("Model '{}' is at capacity. Try again later.", svc.model_id)
+                    };
+                    ErrorData {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(msg),
+                        data: None,
+                    }
+                })?;
 
             if !media.is_empty() && !model_runtime.supports_media(&svc.model_id) {
                 return Err(ErrorData {
@@ -7364,24 +8508,44 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Discover the best model for an intent (use case + budget + quality floor + cost-quality knob) without naming a model. Returns the selected model_id, tier, estimated cost, fallback chain, the difficulty cluster the prompt landed in, that model's observed error rate in the cluster, and the winning provider's address and endpoint when the offer came from another operator. Discovery only — dispatches nothing and records no spend, though the per-DID budget gate and the wallet-balance ceiling still apply, so an unaffordable request is refused here. Use chat_by_intent to select and run in one call")]
+    #[tool(
+        description = "Discover the best model for an intent (use case + budget + quality floor + cost-quality knob) without naming a model. Returns the selected model_id, tier, estimated cost, fallback chain, the difficulty cluster the prompt landed in, that model's observed error rate in the cluster, and the winning provider's address and endpoint when the offer came from another operator. Discovery only — dispatches nothing and records no spend, though the per-DID budget gate and the wallet-balance ceiling still apply, so an unaffordable request is refused here. Use chat_by_intent to select and run in one call"
+    )]
     async fn route_by_intent(
         &self,
         Parameters(p): Parameters<RouteByIntentParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut params = serde_json::json!({ "use_case": p.use_case });
-        if let Some(v) = p.budget { params["budget"] = serde_json::json!(v.to_string()); }
-        if let Some(v) = p.optimize { params["optimize"] = serde_json::json!(v); }
-        if let Some(v) = p.quality_floor { params["quality_floor"] = serde_json::json!(v); }
-        if let Some(v) = p.est_input_tokens { params["est_input_tokens"] = serde_json::json!(v); }
-        if let Some(v) = p.est_output_tokens { params["est_output_tokens"] = serde_json::json!(v); }
-        if let Some(v) = p.payer_did { params["payer_did"] = serde_json::json!(v); }
-        if let Some(v) = p.payer_address { params["payer_address"] = serde_json::json!(v); }
-        if let Some(v) = p.prompt { params["prompt"] = serde_json::json!(v); }
+        if let Some(v) = p.budget {
+            params["budget"] = serde_json::json!(v.to_string());
+        }
+        if let Some(v) = p.optimize {
+            params["optimize"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.quality_floor {
+            params["quality_floor"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.est_input_tokens {
+            params["est_input_tokens"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.est_output_tokens {
+            params["est_output_tokens"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.payer_did {
+            params["payer_did"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.payer_address {
+            params["payer_address"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.prompt {
+            params["prompt"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_routeIntent", params).await
     }
 
-    #[tool(description = "Resolve an intent to a model and run the chat in one call. Selection walks the cross-model fallback chain, so the intent resolves as long as any model that satisfies it has a live offer, and dispatch is pinned to the offer that was scored — the price quoted is the price settled and the provider share goes to the address that offer named. The chosen decision is attached to the response under 'route'. Difficulty feedback for resolved and failed calls is recorded from the dispatch itself; report an escalation with record_route_outcome")]
+    #[tool(
+        description = "Resolve an intent to a model and run the chat in one call. Selection walks the cross-model fallback chain, so the intent resolves as long as any model that satisfies it has a live offer, and dispatch is pinned to the offer that was scored — the price quoted is the price settled and the provider share goes to the address that offer named. The chosen decision is attached to the response under 'route'. Difficulty feedback for resolved and failed calls is recorded from the dispatch itself; report an escalation with record_route_outcome"
+    )]
     async fn chat_by_intent(
         &self,
         Parameters(p): Parameters<ChatByIntentParams>,
@@ -7394,25 +8558,51 @@ impl TenzroMcpServer {
             });
         }
         let mut params = serde_json::json!({ "use_case": p.use_case });
-        if let Some(v) = p.message { params["message"] = serde_json::json!(v); }
-        if let Some(v) = p.messages { params["messages"] = serde_json::json!(v); }
-        if let Some(v) = p.budget { params["budget"] = serde_json::json!(v.to_string()); }
-        if let Some(v) = p.optimize { params["optimize"] = serde_json::json!(v); }
-        if let Some(v) = p.quality_floor { params["quality_floor"] = serde_json::json!(v); }
-        if let Some(v) = p.est_input_tokens { params["est_input_tokens"] = serde_json::json!(v); }
-        if let Some(v) = p.est_output_tokens { params["est_output_tokens"] = serde_json::json!(v); }
-        if let Some(v) = p.payer_did { params["payer_did"] = serde_json::json!(v); }
-        if let Some(v) = p.payer_address { params["payer_address"] = serde_json::json!(v); }
-        if let Some(v) = p.temperature { params["temperature"] = serde_json::json!(v); }
-        if let Some(v) = p.max_tokens { params["max_tokens"] = serde_json::json!(v); }
-        if let Some(v) = p.jurisdiction { params["jurisdiction"] = serde_json::json!(v); }
+        if let Some(v) = p.message {
+            params["message"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.messages {
+            params["messages"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.budget {
+            params["budget"] = serde_json::json!(v.to_string());
+        }
+        if let Some(v) = p.optimize {
+            params["optimize"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.quality_floor {
+            params["quality_floor"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.est_input_tokens {
+            params["est_input_tokens"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.est_output_tokens {
+            params["est_output_tokens"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.payer_did {
+            params["payer_did"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.payer_address {
+            params["payer_address"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.temperature {
+            params["temperature"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.max_tokens {
+            params["max_tokens"] = serde_json::json!(v);
+        }
+        if let Some(v) = p.jurisdiction {
+            params["jurisdiction"] = serde_json::json!(v);
+        }
         if let Some(v) = p.jurisdiction_receipt {
             params["jurisdiction_receipt"] = serde_json::json!(v);
         }
         dispatch_rpc(&self.node, "tenzro_chatByIntent", params).await
     }
 
-    #[tool(description = "Report how a routed call turned out so per-cluster error rates reflect what happened rather than only what the catalog declares. In practice this carries 'escalated' — the outcome only the caller knows, because it means you took the answer to a stronger model; 'resolved' and 'failed' are already recorded by chat_by_intent from the dispatch itself. Reporting is advisory: retained=false means the node has no difficulty index wired, so the feedback was accepted and discarded")]
+    #[tool(
+        description = "Report how a routed call turned out so per-cluster error rates reflect what happened rather than only what the catalog declares. In practice this carries 'escalated' — the outcome only the caller knows, because it means you took the answer to a stronger model; 'resolved' and 'failed' are already recorded by chat_by_intent from the dispatch itself. Reporting is advisory: retained=false means the node has no difficulty index wired, so the feedback was accepted and discarded"
+    )]
     async fn record_route_outcome(
         &self,
         Parameters(p): Parameters<RecordRouteOutcomeParams>,
@@ -7429,17 +8619,23 @@ impl TenzroMcpServer {
         .await
     }
 
-    #[tool(description = "Read the node's difficulty index: how many prompt clusters it has discovered and how many prompts landed in each. With model_id, also returns that model's per-cluster outcome counters and error rate. An operator diagnostic — routing does not depend on it. enabled=false means the node has no embedding model loaded and routes on declared metadata alone")]
+    #[tool(
+        description = "Read the node's difficulty index: how many prompt clusters it has discovered and how many prompts landed in each. With model_id, also returns that model's per-cluster outcome counters and error rate. An operator diagnostic — routing does not depend on it. enabled=false means the node has no embedding model loaded and routes on declared metadata alone"
+    )]
     async fn route_difficulty_stats(
         &self,
         Parameters(p): Parameters<RouteDifficultyStatsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut params = serde_json::json!({});
-        if let Some(v) = p.model_id { params["model_id"] = serde_json::json!(v); }
+        if let Some(v) = p.model_id {
+            params["model_id"] = serde_json::json!(v);
+        }
         dispatch_rpc(&self.node, "tenzro_routeDifficultyStats", params).await
     }
 
-    #[tool(description = "Satisfy a natural-language intent by planning and running an ordered set of capabilities — models, registered skills, registered tools, and agent/swarm delegation. One layer above route_by_intent: that resolves a single model, this composes models with the skill/tool registries and the swarm runtime. The plan's aggregate estimated cost is checked against the payer's wallet balance before any step runs. Returns the plan, per-step outputs, aggregate estimated cost, and the number of re-plan iterations")]
+    #[tool(
+        description = "Satisfy a natural-language intent by planning and running an ordered set of capabilities — models, registered skills, registered tools, and agent/swarm delegation. One layer above route_by_intent: that resolves a single model, this composes models with the skill/tool registries and the swarm runtime. The plan's aggregate estimated cost is checked against the payer's wallet balance before any step runs. Returns the plan, per-step outputs, aggregate estimated cost, and the number of re-plan iterations"
+    )]
     async fn orchestrate(
         &self,
         Parameters(params): Parameters<OrchestrateParams>,
@@ -7518,46 +8714,53 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "List all model service endpoints with their API and MCP URLs, model details, and status")]
-    async fn list_model_endpoints(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List all model service endpoints with their API and MCP URLs, model details, and status"
+    )]
+    async fn list_model_endpoints(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let services = self.node.list_model_services();
 
         if services.is_empty() {
             return text_result(
-                "No model services currently running. Use 'tenzro-cli provider serve' to start serving models."
+                "No model services currently running. Use 'tenzro-cli provider serve' to start serving models.",
             );
         }
 
-        let endpoints: Vec<serde_json::Value> = services.iter().map(|svc| {
-            let mut entry = serde_json::json!({
-                "instance_id": svc.instance_id,
-                "model_id": svc.model_id,
-                "model_name": svc.model_name,
-                "provider": svc.provider_name,
-                "location": format!("{}", svc.location),
-                "status": format!("{}", svc.status),
-                "api_endpoint": svc.api_endpoint,
-                "mcp_endpoint": svc.mcp_endpoint,
-            });
-            if let Some(snap) = self.node.load_tracker.snapshot(&svc.model_id) {
-                entry["load"] = serde_json::json!({
-                    "active_requests": snap.active_requests,
-                    "max_concurrent": snap.max_concurrent,
-                    "utilization_percent": snap.utilization_percent,
-                    "load_level": snap.load_level.to_string(),
+        let endpoints: Vec<serde_json::Value> = services
+            .iter()
+            .map(|svc| {
+                let mut entry = serde_json::json!({
+                    "instance_id": svc.instance_id,
+                    "model_id": svc.model_id,
+                    "model_name": svc.model_name,
+                    "provider": svc.provider_name,
+                    "location": format!("{}", svc.location),
+                    "status": format!("{}", svc.status),
+                    "api_endpoint": svc.api_endpoint,
+                    "mcp_endpoint": svc.mcp_endpoint,
                 });
-            }
-            // Whether this endpoint takes image attachments alongside text.
-            // Reported only for models this node serves itself — a remote
-            // provider's projector state isn't visible from here.
-            if matches!(svc.location, tenzro_types::model::ModelLocation::Local)
-                && let Some(runtime) = self.node.model_runtime.as_ref()
-            {
-                entry["accepts_media"] =
-                    serde_json::json!(runtime.supports_media(&svc.model_id));
-            }
-            entry
-        }).collect();
+                if let Some(snap) = self.node.load_tracker.snapshot(&svc.model_id) {
+                    entry["load"] = serde_json::json!({
+                        "active_requests": snap.active_requests,
+                        "max_concurrent": snap.max_concurrent,
+                        "utilization_percent": snap.utilization_percent,
+                        "load_level": snap.load_level.to_string(),
+                    });
+                }
+                // Whether this endpoint takes image attachments alongside text.
+                // Reported only for models this node serves itself — a remote
+                // provider's projector state isn't visible from here.
+                if matches!(svc.location, tenzro_types::model::ModelLocation::Local)
+                    && let Some(runtime) = self.node.model_runtime.as_ref()
+                {
+                    entry["accepts_media"] =
+                        serde_json::json!(runtime.supports_media(&svc.model_id));
+                }
+                entry
+            })
+            .collect();
 
         json_result(serde_json::json!({
             "endpoints": endpoints,
@@ -7565,13 +8768,152 @@ impl TenzroMcpServer {
         }))
     }
 
+    // ─── Universal RPC gateway ───
+    //
+    // The node serves ~900 methods; the tools above cover the ones worth a
+    // dedicated, documented signature. These two cover the rest, so nothing
+    // the node can do is unreachable from MCP.
+    //
+    // Writing a tool per method instead would make this server worse, not
+    // better: tool-selection accuracy falls as the list grows, so 500 more
+    // near-identical entries would cost an agent accuracy on the tools it
+    // actually wanted. Discovery plus a gateway keeps the curated list small
+    // and the surface complete.
+
+    #[tool(
+        description = "Enumerate the JSON-RPC methods this node serves, with how each is gated (admin token vs open) and which API-key scope it needs. Use this to discover capability beyond the named tools, then invoke what you find with call_rpc. Filter with `namespace` or `contains` — the unfiltered directory is ~900 entries."
+    )]
+    async fn list_rpc_methods(
+        &self,
+        Parameters(params): Parameters<ListRpcMethodsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listRpcMethods", payload)
+            .await
+            .map_err(|e| err_internal(format!("listRpcMethods failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Invoke any JSON-RPC method this node serves, by name. The escape hatch for everything without a dedicated tool — discover names with list_rpc_methods first. Authorization is unchanged: the call runs behind the same admin-token gate, API-key scope gate, and default-deny classification as a direct JSON-RPC request, so this reaches exactly what your credentials already allow and nothing more."
+    )]
+    async fn call_rpc(
+        &self,
+        Parameters(params): Parameters<CallRpcParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let inner = params.params.unwrap_or_else(|| serde_json::json!({}));
+        let result = rpc_dispatch(&self.node, &params.method, inner)
+            .await
+            .map_err(|e| err_internal(format!("{} failed: {}", params.method, e)))?;
+        json_result(result)
+    }
+
+    // ─── Object storage (the `/v1/files` surface) ───
+    // Every tool here is subject-gated: the presented `X-Tenzro-Api-Key`
+    // must carry the `storage` scope, and its subject becomes the file's
+    // owner. There is no unauthenticated path, including for reads — a
+    // file with no owner is one nobody can list, retrieve, or be billed
+    // for, sitting on an operator's disk.
+
+    #[tool(
+        description = "Store a file on this node, owned by the caller's own subject. The bytes are erasure-coded (4 data + 2 parity shards, surviving two simultaneous provider losses) and published across independent providers, and a storage deal is opened to pay for the shards. Requires an `X-Tenzro-Api-Key` carrying the `storage` scope. Returns the file record, including the `deal_id` that funds it — a null `deal_id` means the bytes are stored but unbilled, which the operator is carrying and the tenant should not assume is durable indefinitely."
+    )]
+    async fn upload_file(
+        &self,
+        Parameters(params): Parameters<UploadFileParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_uploadFile", payload)
+            .await
+            .map_err(|e| err_internal(format!("uploadFile failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "List the caller's own stored files, newest first, with the tenant's total stored bytes. Never returns another tenant's files: the listing is scoped to the subject on the presented `X-Tenzro-Api-Key`."
+    )]
+    async fn list_files(
+        &self,
+        Parameters(params): Parameters<ListFilesParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listFiles", payload)
+            .await
+            .map_err(|e| err_internal(format!("listFiles failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Fetch one file's record — size, filename, purpose, creation time, and the storage deal funding it. A file belonging to another tenant reports the same \"no such file\" as one that does not exist, so ownership cannot be probed by guessing ids."
+    )]
+    async fn get_file(
+        &self,
+        Parameters(params): Parameters<FileIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getFile", payload)
+            .await
+            .map_err(|e| err_internal(format!("getFile failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Retrieve a stored file's contents, rebuilt from its erasure-coded shards and returned base64-encoded. Only the owning subject can read it."
+    )]
+    async fn download_file(
+        &self,
+        Parameters(params): Parameters<FileIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_downloadFile", payload)
+            .await
+            .map_err(|e| err_internal(format!("downloadFile failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Unlink a file from the caller's account and stop its storage deal. This is NOT erasure: objects are content-addressed and erasure-coded across independent providers, so deletion cannot reach into every provider holding a shard. Shards expire when the deal stops paying for them. Do not treat deletion as redaction — the response repeats this on every call."
+    )]
+    async fn delete_file(
+        &self,
+        Parameters(params): Parameters<FileIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_deleteFile", payload)
+            .await
+            .map_err(|e| err_internal(format!("deleteFile failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "What the caller is storing on this node: file count, total bytes, how many files have an open storage deal (and how many do not — those are stored but unbilled), and the derived billing address their deals settle against."
+    )]
+    async fn file_storage_usage(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_fileStorageUsage", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("fileStorageUsage failed: {}", e)))?;
+        json_result(result)
+    }
+
     // ─── Sealed Models (private encrypted distribution) ───
     // Read/discovery surface only: sealing and installing are operator
     // actions gated by the admin token on the RPC surface
     // (tenzro_sealModel / tenzro_installSealedModel).
 
-    #[tool(description = "List sealed-model manifests stored on this node. Sealed models are distributed as encrypted shards with per-recipient wrapped content keys (x25519-envelope-aes-256-gcm); only named recipients can decrypt. Returns summaries — use get_sealed_model for a full manifest")]
-    async fn list_sealed_models(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List sealed-model manifests stored on this node. Sealed models are distributed as encrypted shards with per-recipient wrapped content keys (x25519-hkdf-sha256-envelope-aes-256-gcm); only named recipients can decrypt. Returns summaries — use get_sealed_model for a full manifest"
+    )]
+    async fn list_sealed_models(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let store = self
             .node
             .sealed_model_store()
@@ -7600,7 +8942,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Fetch a full sealed-model manifest by model ID. The manifest carries only ciphertext hashes, blob URIs, and wrapped (encrypted) content keys — safe to share; recipients use it to install the model on their own node")]
+    #[tool(
+        description = "Fetch a full sealed-model manifest by model ID. The manifest carries only ciphertext hashes, blob URIs, and wrapped (encrypted) content keys — safe to share; recipients use it to install the model on their own node"
+    )]
     async fn get_sealed_model(
         &self,
         Parameters(params): Parameters<GetSealedModelParams>,
@@ -7622,8 +8966,12 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Get this node's X25519 public key for sealed-model distribution. A publisher includes this key in a recipients entry when sealing a model addressed to this node")]
-    async fn model_recipient_key(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Get this node's X25519 public key for sealed-model distribution. A publisher includes this key in a recipients entry when sealing a model addressed to this node"
+    )]
+    async fn model_recipient_key(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let keypair = self
             .node
             .model_recipient_key()
@@ -7634,7 +8982,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Read the canonical content-hash record for a model from the transparency log: the BLAKE3 + SHA-256 over the canonical weight bytes plus the per-file manifest hash, the recorder DID, and the record epoch. This is the trust root a fetcher verifies downloaded weights against before load. Open — no auth")]
+    #[tool(
+        description = "Read the canonical content-hash record for a model from the transparency log: the BLAKE3 + SHA-256 over the canonical weight bytes plus the per-file manifest hash, the recorder DID, and the record epoch. This is the trust root a fetcher verifies downloaded weights against before load. Open — no auth"
+    )]
     async fn get_model_hash(
         &self,
         Parameters(params): Parameters<GetModelHashParams>,
@@ -7648,16 +8998,22 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List every recorded canonical model hash on this node. Each entry carries the model ID, BLAKE3, SHA-256, manifest hash, recorder DID, and record epoch. Open — no auth")]
-    async fn list_model_hashes(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listModelHashes", serde_json::json!([]))
-            .await?;
+    #[tool(
+        description = "List every recorded canonical model hash on this node. Each entry carries the model ID, BLAKE3, SHA-256, manifest hash, recorder DID, and record epoch. Open — no auth"
+    )]
+    async fn list_model_hashes(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result =
+            rpc_dispatch(&self.node, "tenzro_listModelHashes", serde_json::json!([])).await?;
         json_result(result)
     }
 
     // ─── Bridge (Cross-Chain) ───
 
-    #[tool(description = "Bridge tokens between blockchains. Supports routes between Tenzro, Ethereum, Solana, and Base via LayerZero, Chainlink CCIP, and deBridge adapters")]
+    #[tool(
+        description = "Bridge tokens between blockchains. Supports routes between Tenzro, Ethereum, Solana, and Base via LayerZero, Chainlink CCIP, and deBridge adapters"
+    )]
     async fn bridge_tokens(
         &self,
         Parameters(params): Parameters<BridgeTokensParams>,
@@ -7698,7 +9054,9 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Get available bridge routes between two chains, including estimated fees, time, and which adapter handles the route")]
+    #[tool(
+        description = "Get available bridge routes between two chains, including estimated fees, time, and which adapter handles the route"
+    )]
     async fn get_bridge_routes(
         &self,
         Parameters(params): Parameters<GetBridgeRoutesParams>,
@@ -7708,17 +9066,23 @@ impl TenzroMcpServer {
             .bridge_router()
             .ok_or_else(|| err_internal("Bridge router not initialized"))?;
 
-        match router.get_available_routes(&params.source_chain, &params.dest_chain).await {
+        match router
+            .get_available_routes(&params.source_chain, &params.dest_chain)
+            .await
+        {
             Ok(routes) => {
-                let route_list: Vec<serde_json::Value> = routes.iter().map(|r| {
-                    serde_json::json!({
-                        "adapter": r.adapter_name,
-                        "source_chain": r.source_chain,
-                        "dest_chain": r.dest_chain,
-                        "estimated_fee": r.estimated_fee.to_string(),
-                        "estimated_time_secs": r.estimated_time_secs,
+                let route_list: Vec<serde_json::Value> = routes
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "adapter": r.adapter_name,
+                            "source_chain": r.source_chain,
+                            "dest_chain": r.dest_chain,
+                            "estimated_fee": r.estimated_fee.to_string(),
+                            "estimated_time_secs": r.estimated_time_secs,
+                        })
                     })
-                }).collect();
+                    .collect();
 
                 json_result(serde_json::json!({
                     "routes": route_list,
@@ -7733,8 +9097,12 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "List all registered bridge adapters (LayerZero, Chainlink CCIP, deBridge, Canton)")]
-    async fn list_bridge_adapters(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List all registered bridge adapters (LayerZero, Chainlink CCIP, deBridge, Canton)"
+    )]
+    async fn list_bridge_adapters(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let router = self.node.bridge_router();
 
         if let Some(r) = router {
@@ -7754,7 +9122,9 @@ impl TenzroMcpServer {
 
     // ─── deBridge MCP Proxy ───
 
-    #[tool(description = "Search for tokens available on deBridge DLN. Returns token addresses, symbols, and supported chains.")]
+    #[tool(
+        description = "Search for tokens available on deBridge DLN. Returns token addresses, symbols, and supported chains."
+    )]
     async fn debridge_search_tokens(
         &self,
         Parameters(params): Parameters<DebridgeSearchTokensParams>,
@@ -7767,27 +9137,43 @@ impl TenzroMcpServer {
         }
         match debridge_mcp_call("search_tokens", args).await {
             Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
-            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
+            Err(e) => Ok(Json(RpcPassthroughOutput {
+                result: serde_json::json!({ "error": e }),
+            })),
         }
     }
 
-    #[tool(description = "Get all blockchain networks supported by deBridge DLN for cross-chain transfers.")]
-    async fn debridge_get_chains(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Get all blockchain networks supported by deBridge DLN for cross-chain transfers."
+    )]
+    async fn debridge_get_chains(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         match debridge_mcp_call("get_supported_chains", serde_json::json!({})).await {
             Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
-            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
+            Err(e) => Ok(Json(RpcPassthroughOutput {
+                result: serde_json::json!({ "error": e }),
+            })),
         }
     }
 
-    #[tool(description = "Get deBridge operational instructions and guidance for cross-chain transfers.")]
-    async fn debridge_get_instructions(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Get deBridge operational instructions and guidance for cross-chain transfers."
+    )]
+    async fn debridge_get_instructions(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         match debridge_mcp_call("get_instructions", serde_json::json!({})).await {
             Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
-            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
+            Err(e) => Ok(Json(RpcPassthroughOutput {
+                result: serde_json::json!({ "error": e }),
+            })),
         }
     }
 
-    #[tool(description = "Create a cross-chain transaction via deBridge DLN. Returns transaction data ready for signing and submission.")]
+    #[tool(
+        description = "Create a cross-chain transaction via deBridge DLN. Returns transaction data ready for signing and submission."
+    )]
     async fn debridge_create_tx(
         &self,
         Parameters(params): Parameters<DebridgeCreateTxParams>,
@@ -7805,11 +9191,15 @@ impl TenzroMcpServer {
         }
         match debridge_mcp_call("create_tx", args).await {
             Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
-            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
+            Err(e) => Ok(Json(RpcPassthroughOutput {
+                result: serde_json::json!({ "error": e }),
+            })),
         }
     }
 
-    #[tool(description = "Execute a same-chain token swap via deBridge. Swaps tokens on the same blockchain without cross-chain bridging.")]
+    #[tool(
+        description = "Execute a same-chain token swap via deBridge. Swaps tokens on the same blockchain without cross-chain bridging."
+    )]
     async fn debridge_same_chain_swap(
         &self,
         Parameters(params): Parameters<DebridgeSameChainSwapParams>,
@@ -7825,13 +9215,34 @@ impl TenzroMcpServer {
         }
         match debridge_mcp_call("transaction_same_chain_swap", args).await {
             Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
-            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
+            Err(e) => Ok(Json(RpcPassthroughOutput {
+                result: serde_json::json!({ "error": e }),
+            })),
         }
     }
 
     // ─── Network & Blocks ───
 
-    #[tool(description = "Get the current status of the Tenzro node including health, block height, peer count, uptime, and role")]
+    #[tool(
+        description = "Get this node's DID Document — every way of reaching it in one place. A node is addressed five ways (TDIP DID, Ed25519 public key, iroh EndpointId, libp2p PeerId, Pkarr record) plus its JSON-RPC/MCP/A2A/web service URLs; resolving the DID yields all of them. Unroutable bind addresses are omitted rather than advertised, and an ALPN appears only when a handler is actually installed. Returns an error when the node has no provisioned identity."
+    )]
+    async fn get_node_did_document(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let addressing = self.node.self_addressing().await;
+        match crate::node_did_document::build_node_did_document(&addressing) {
+            Some(doc) => json_result(serde_json::to_value(doc).unwrap_or_default()),
+            None => Ok(Json(RpcPassthroughOutput {
+                result: serde_json::json!({
+                    "error": "this node has no provisioned identity, so it has no DID Document"
+                }),
+            })),
+        }
+    }
+
+    #[tool(
+        description = "Get the current status of the Tenzro node including health, block height, peer count, uptime, and role"
+    )]
     async fn get_node_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let status = self.node.status().await;
         json_result(serde_json::json!({
@@ -7844,8 +9255,12 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get a snapshot of libp2p network metrics: connection counts, gossipsub publish/accept/reject counters, Kademlia routing table size, gossipsub mesh size, and peer_address_migrations_total (QUIC path migration / mobile network switch / NAT rebinding observability)")]
-    async fn get_network_stats(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Get a snapshot of libp2p network metrics: connection counts, gossipsub publish/accept/reject counters, Kademlia routing table size, gossipsub mesh size, and peer_address_migrations_total (QUIC path migration / mobile network switch / NAT rebinding observability)"
+    )]
+    async fn get_network_stats(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let Some(net) = self.node.network() else {
             return json_result(serde_json::json!({
                 "available": false,
@@ -7874,7 +9289,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get a block by height from the Tenzro ledger, including transactions and metadata")]
+    #[tool(
+        description = "Get a block by height from the Tenzro ledger, including transactions and metadata"
+    )]
     async fn get_block(
         &self,
         Parameters(params): Parameters<GetBlockParams>,
@@ -7902,7 +9319,9 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Fetch a contiguous range of blocks by height (default 64, max 256). Returns block summaries plus `next_height` and `more_available` so a lagging client can paginate forward until caught up.")]
+    #[tool(
+        description = "Fetch a contiguous range of blocks by height (default 64, max 256). Returns block summaries plus `next_height` and `more_available` so a lagging client can paginate forward until caught up."
+    )]
     async fn get_block_range(
         &self,
         Parameters(params): Parameters<GetBlockRangeParams>,
@@ -7998,7 +9417,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Inspect the EIP-1559 fee market: current effective gas price (base fee + suggested tip), suggested priority tip, and recent base-fee history. Use this to size maxFeePerGas / maxPriorityFeePerGas on Type-2 transactions. Base fee adjusts ±12.5% per block based on parent gas usage vs. the 15M target.")]
+    #[tool(
+        description = "Inspect the EIP-1559 fee market: current effective gas price (base fee + suggested tip), suggested priority tip, and recent base-fee history. Use this to size maxFeePerGas / maxPriorityFeePerGas on Type-2 transactions. Base fee adjusts ±12.5% per block based on parent gas usage vs. the 15M target."
+    )]
     async fn get_fee_market(
         &self,
         Parameters(params): Parameters<GetFeeMarketParams>,
@@ -8049,7 +9470,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Return the canonical Tenzro Cross-VM SVM-native program ID and 4 instruction discriminators (bridge_to_evm, bridge_from_evm, register_token_pointer, transfer_cross_vm). Use this to construct SVM Instructions targeting the Tenzro Cross-VM native program from any SVM client.")]
+    #[tool(
+        description = "Return the canonical Tenzro Cross-VM SVM-native program ID and 4 instruction discriminators (bridge_to_evm, bridge_from_evm, register_token_pointer, transfer_cross_vm). Use this to construct SVM Instructions targeting the Tenzro Cross-VM native program from any SVM client."
+    )]
     async fn get_svm_cross_vm_program_info(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -8085,7 +9508,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Look up a transaction by its hash on the Tenzro ledger, returning type, sender, recipient, amount, status, and block height")]
+    #[tool(
+        description = "Look up a transaction by its hash on the Tenzro ledger, returning type, sender, recipient, amount, status, and block height"
+    )]
     async fn get_transaction(
         &self,
         Parameters(params): Parameters<GetTransactionParams>,
@@ -8126,7 +9551,9 @@ impl TenzroMcpServer {
 
     // ─── Verification ───
 
-    #[tool(description = "Verify a Plonky3 STARK proof (over KoalaBear) on the Tenzro ledger. Requires a circuit_id ('inference', 'settlement', or 'identity').")]
+    #[tool(
+        description = "Verify a Plonky3 STARK proof (over KoalaBear) on the Tenzro ledger. Requires a circuit_id ('inference', 'settlement', or 'identity')."
+    )]
     async fn verify_zk_proof(
         &self,
         Parameters(params): Parameters<VerifyZkProofParams>,
@@ -8170,11 +9597,7 @@ impl TenzroMcpServer {
         // Build a wire-format Proof envelope and run the Plonky3 verifier on a
         // blocking thread — the verifier is CPU-bound and would otherwise stall
         // the tokio executor on large proofs.
-        let envelope = tenzro_zk::Proof::new(
-            proof_bytes,
-            public_inputs,
-            circuit_id.clone(),
-        );
+        let envelope = tenzro_zk::Proof::new(proof_bytes, public_inputs, circuit_id.clone());
         // Commitment hash bound to (circuit_id, proof_bytes, public_inputs).
         // Attest on success so EVM ZK_VERIFY precompile can answer for
         // this exact (proof, inputs) tuple without re-running Plonky3.
@@ -8259,12 +9682,13 @@ impl TenzroMcpServer {
                         newly_attested=false with valid=true means this node \
                         verified the proof but quorum is still being collected.",
                 }))
-            },
+            }
             Err(e) => {
                 let (status, error) = match &e {
-                    tenzro_zk::VerifyEnvelopeError::UnknownCircuit(id) => {
-                        ("unknown_circuit", format!("no AIR registered for circuit_id={id}"))
-                    }
+                    tenzro_zk::VerifyEnvelopeError::UnknownCircuit(id) => (
+                        "unknown_circuit",
+                        format!("no AIR registered for circuit_id={id}"),
+                    ),
                     tenzro_zk::VerifyEnvelopeError::EnvelopeDecode(zk_err) => {
                         ("envelope_decode_failed", zk_err.to_string())
                     }
@@ -8285,17 +9709,24 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "File a fraud proof against an attested ZK commitment inside its fraud window. This node fetches the proof from the commitment's DA locator, re-runs the Plonky3 verifier deterministically, and adjudicates: 'unfounded' (proof re-verified, commitment stands, challenger bond forfeit) or 'upheld' (proof failed, commitment retracted from the ZK_VERIFY registry, every co-signer on the certificate slashed for a consensus offence). Any staked party may file.")]
+    #[tool(
+        description = "File a fraud proof against an attested ZK commitment inside its fraud window. This node fetches the proof from the commitment's DA locator, re-runs the Plonky3 verifier deterministically, and adjudicates: 'unfounded' (proof re-verified, commitment stands, challenger bond forfeit) or 'upheld' (proof failed, commitment retracted from the ZK_VERIFY registry, every co-signer on the certificate slashed for a consensus offence). Any staked party may file."
+    )]
     async fn file_zk_fraud_proof(
         &self,
         Parameters(params): Parameters<FileZkFraudProofParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let hex_str = params.commitment.strip_prefix("0x").unwrap_or(&params.commitment);
+        let hex_str = params
+            .commitment
+            .strip_prefix("0x")
+            .unwrap_or(&params.commitment);
         let raw = match hex::decode(hex_str) {
             Ok(b) => b,
-            Err(e) => return json_result(serde_json::json!({
-                "error": format!("Invalid commitment hex: {}", e),
-            })),
+            Err(e) => {
+                return json_result(serde_json::json!({
+                    "error": format!("Invalid commitment hex: {}", e),
+                }));
+            }
         };
         if raw.len() != 32 {
             return json_result(serde_json::json!({
@@ -8331,17 +9762,24 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Read the fraud-window record for a ZK commitment: certificate voting power, the DA locator co-signers use to re-verify, the height the fraud window opened at, whether that window is still open at the current finalized height, and whether the commitment is admitted to the on-chain ZK_VERIFY registry.")]
+    #[tool(
+        description = "Read the fraud-window record for a ZK commitment: certificate voting power, the DA locator co-signers use to re-verify, the height the fraud window opened at, whether that window is still open at the current finalized height, and whether the commitment is admitted to the on-chain ZK_VERIFY registry."
+    )]
     async fn get_zk_attestation(
         &self,
         Parameters(params): Parameters<GetZkAttestationParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let hex_str = params.commitment.strip_prefix("0x").unwrap_or(&params.commitment);
+        let hex_str = params
+            .commitment
+            .strip_prefix("0x")
+            .unwrap_or(&params.commitment);
         let raw = match hex::decode(hex_str) {
             Ok(b) => b,
-            Err(e) => return json_result(serde_json::json!({
-                "error": format!("Invalid commitment hex: {}", e),
-            })),
+            Err(e) => {
+                return json_result(serde_json::json!({
+                    "error": format!("Invalid commitment hex: {}", e),
+                }));
+            }
         };
         if raw.len() != 32 {
             return json_result(serde_json::json!({
@@ -8353,9 +9791,11 @@ impl TenzroMcpServer {
 
         let store = match self.node.zk_quorum_store() {
             Some(s) => s,
-            None => return json_result(serde_json::json!({
-                "error": "node holds no ZK quorum store",
-            })),
+            None => {
+                return json_result(serde_json::json!({
+                    "error": "node holds no ZK quorum store",
+                }));
+            }
         };
         let on_chain = self.node.zk_commitment_registry().is_attested(&commitment);
         match store.attested(&commitment) {
@@ -8388,19 +9828,24 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Verify a Tenzro VRF proof (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI). Returns the deterministic 64-byte VRF output if the proof is valid. Used for provably-fair NFT reveals, lotteries, and randomized trait assignment.")]
+    #[tool(
+        description = "Verify a Tenzro VRF proof (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI). Returns the deterministic 64-byte VRF output if the proof is valid. Used for provably-fair NFT reveals, lotteries, and randomized trait assignment."
+    )]
     async fn verify_vrf_proof(
         &self,
         Parameters(params): Parameters<VerifyVrfProofParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_crypto::vrf;
 
-        let pk_bytes = match hex::decode(params.pubkey.strip_prefix("0x").unwrap_or(&params.pubkey)) {
+        let pk_bytes = match hex::decode(params.pubkey.strip_prefix("0x").unwrap_or(&params.pubkey))
+        {
             Ok(b) => b,
-            Err(e) => return json_result(serde_json::json!({
-                "valid": false,
-                "error": format!("Invalid pubkey hex: {}", e),
-            })),
+            Err(e) => {
+                return json_result(serde_json::json!({
+                    "valid": false,
+                    "error": format!("Invalid pubkey hex: {}", e),
+                }));
+            }
         };
         if pk_bytes.len() != 32 {
             return json_result(serde_json::json!({
@@ -8408,13 +9853,16 @@ impl TenzroMcpServer {
                 "error": format!("pubkey must be 32 bytes, got {}", pk_bytes.len()),
             }));
         }
-        let proof_bytes = match hex::decode(params.proof.strip_prefix("0x").unwrap_or(&params.proof)) {
-            Ok(b) => b,
-            Err(e) => return json_result(serde_json::json!({
-                "valid": false,
-                "error": format!("Invalid proof hex: {}", e),
-            })),
-        };
+        let proof_bytes =
+            match hex::decode(params.proof.strip_prefix("0x").unwrap_or(&params.proof)) {
+                Ok(b) => b,
+                Err(e) => {
+                    return json_result(serde_json::json!({
+                        "valid": false,
+                        "error": format!("Invalid proof hex: {}", e),
+                    }));
+                }
+            };
         if proof_bytes.len() != vrf::PROOF_LEN {
             return json_result(serde_json::json!({
                 "valid": false,
@@ -8423,10 +9871,12 @@ impl TenzroMcpServer {
         }
         let alpha = match hex::decode(params.alpha.strip_prefix("0x").unwrap_or(&params.alpha)) {
             Ok(b) => b,
-            Err(e) => return json_result(serde_json::json!({
-                "valid": false,
-                "error": format!("Invalid alpha hex: {}", e),
-            })),
+            Err(e) => {
+                return json_result(serde_json::json!({
+                    "valid": false,
+                    "error": format!("Invalid alpha hex: {}", e),
+                }));
+            }
         };
 
         let mut pk_arr = [0u8; 32];
@@ -8452,35 +9902,49 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Generate a Tenzro VRF proof (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI). Returns the public key, 80-byte proof, and 64-byte deterministic output. Do not use with secret inputs — the try-and-increment encoding is data-dependent.")]
+    #[tool(
+        description = "Generate a Tenzro VRF proof (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI). Returns the public key, 80-byte proof, and 64-byte deterministic output. Do not use with secret inputs — the try-and-increment encoding is data-dependent."
+    )]
     async fn generate_vrf_proof(
         &self,
         Parameters(params): Parameters<GenerateVrfProofParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_crypto::vrf;
 
-        let sk_bytes = match hex::decode(params.secret_key.strip_prefix("0x").unwrap_or(&params.secret_key)) {
+        let sk_bytes = match hex::decode(
+            params
+                .secret_key
+                .strip_prefix("0x")
+                .unwrap_or(&params.secret_key),
+        ) {
             Ok(b) => b,
-            Err(e) => return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Invalid secret_key hex: {}", e)),
-                data: None,
-            }),
+            Err(e) => {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Invalid secret_key hex: {}", e)),
+                    data: None,
+                });
+            }
         };
         if sk_bytes.len() != 32 {
             return Err(ErrorData {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("secret_key must be 32 bytes, got {}", sk_bytes.len())),
+                message: Cow::from(format!(
+                    "secret_key must be 32 bytes, got {}",
+                    sk_bytes.len()
+                )),
                 data: None,
             });
         }
         let alpha = match hex::decode(params.alpha.strip_prefix("0x").unwrap_or(&params.alpha)) {
             Ok(b) => b,
-            Err(e) => return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Invalid alpha hex: {}", e)),
-                data: None,
-            }),
+            Err(e) => {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Invalid alpha hex: {}", e)),
+                    data: None,
+                });
+            }
         };
 
         let mut sk_arr = [0u8; 32];
@@ -8489,7 +9953,8 @@ impl TenzroMcpServer {
         let pk = sk.public_key();
 
         let proof = vrf::prove(&sk, &alpha).map_err(|e| err_internal(format!("prove: {}", e)))?;
-        let output = vrf::proof_output(&proof).map_err(|e| err_internal(format!("proof_output: {}", e)))?;
+        let output =
+            vrf::proof_output(&proof).map_err(|e| err_internal(format!("proof_output: {}", e)))?;
 
         json_result(serde_json::json!({
             "pubkey": format!("0x{}", hex::encode(pk.0)),
@@ -8502,12 +9967,17 @@ impl TenzroMcpServer {
 
     // ─── Staking & Provider Management ───
 
-    #[tool(description = "Stake TNZO tokens to take a role on the network: validator, RPC operator, TEE provider, model provider, compute provider, storage provider, cloud operator, trainer, or syncer. The bond required depends on the role and, for compute, storage and cloud, on the capacity pledged. Staked tokens earn rewards and increase network weight.")]
+    #[tool(
+        description = "Stake TNZO tokens to take a role on the network: validator, RPC operator, TEE provider, model provider, compute provider, storage provider, cloud operator, trainer, or syncer. The bond required depends on the role and, for compute, storage and cloud, on the capacity pledged. Staked tokens earn rewards and increase network weight."
+    )]
     async fn stake_tokens(
         &self,
         Parameters(params): Parameters<StakeTokensParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let staking = self.node.staking().ok_or_else(|| err_internal("Staking not initialized"))?;
+        let staking = self
+            .node
+            .staking()
+            .ok_or_else(|| err_internal("Staking not initialized"))?;
 
         let provider_type = parse_provider_type(&params.provider_type)?;
         let capacity = parse_stake_capacity(
@@ -8533,37 +10003,40 @@ impl TenzroMcpServer {
         // Use the first identity's address as the staker
         let staker_address = if let Some(registry) = self.node.identity_registry() {
             let identities = registry.list_all();
-            identities.first().map(|(_, id)| id.wallet_address)
+            identities
+                .first()
+                .map(|(_, id)| id.wallet_address)
                 .unwrap_or_else(Address::zero)
         } else {
             Address::zero()
         };
 
         match staking.stake_with_capacity(staker_address, amount_wei, provider_type, capacity) {
-            Ok(_) => {
-                json_result(serde_json::json!({
-                    "status": "staked",
-                    "amount_wei": amount_wei.to_string(),
-                    "provider_type": provider_type.to_string(),
-                    "staker": format!("0x{}", hex::encode(&staker_address.as_bytes()[..20])),
-                    "message": "Successfully staked tokens. Rewards will accrue each epoch.",
-                }))
-            }
-            Err(e) => {
-                json_result(serde_json::json!({
-                    "status": "failed",
-                    "error": format!("{}", e),
-                }))
-            }
+            Ok(_) => json_result(serde_json::json!({
+                "status": "staked",
+                "amount_wei": amount_wei.to_string(),
+                "provider_type": provider_type.to_string(),
+                "staker": format!("0x{}", hex::encode(&staker_address.as_bytes()[..20])),
+                "message": "Successfully staked tokens. Rewards will accrue each epoch.",
+            })),
+            Err(e) => json_result(serde_json::json!({
+                "status": "failed",
+                "error": format!("{}", e),
+            })),
         }
     }
 
-    #[tool(description = "Unstake TNZO tokens and begin the unbonding period. After the unbonding period (typically 7 days), tokens can be withdrawn.")]
+    #[tool(
+        description = "Unstake TNZO tokens and begin the unbonding period. After the unbonding period (typically 7 days), tokens can be withdrawn."
+    )]
     async fn unstake_tokens(
         &self,
         Parameters(params): Parameters<UnstakeTokensParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let staking = self.node.staking().ok_or_else(|| err_internal("Staking not initialized"))?;
+        let staking = self
+            .node
+            .staking()
+            .ok_or_else(|| err_internal("Staking not initialized"))?;
         let address = parse_address(&params.address)?;
 
         // Check current stake
@@ -8580,16 +10053,16 @@ impl TenzroMcpServer {
                     "message": "Unstaking initiated. Tokens will be available after the unbonding period.",
                 }))
             }
-            Err(e) => {
-                json_result(serde_json::json!({
-                    "status": "failed",
-                    "error": format!("{}", e),
-                }))
-            }
+            Err(e) => json_result(serde_json::json!({
+                "status": "failed",
+                "error": format!("{}", e),
+            })),
         }
     }
 
-    #[tool(description = "Register as a service provider on the Tenzro Network. Providers earn TNZO by validating blocks, carrying RPC traffic, providing TEE enclaves, serving AI models, renting accelerators, providing storage, operating cloud services, or training and syncing models.")]
+    #[tool(
+        description = "Register as a service provider on the Tenzro Network. Providers earn TNZO by validating blocks, carrying RPC traffic, providing TEE enclaves, serving AI models, renting accelerators, providing storage, operating cloud services, or training and syncing models."
+    )]
     async fn register_provider(
         &self,
         Parameters(params): Parameters<RegisterProviderParams>,
@@ -8622,12 +10095,15 @@ impl TenzroMcpServer {
             })?;
             let staker_address = if let Some(registry) = self.node.identity_registry() {
                 let identities = registry.list_all();
-                identities.first().map(|(_, id)| id.wallet_address)
+                identities
+                    .first()
+                    .map(|(_, id)| id.wallet_address)
                     .unwrap_or_else(Address::zero)
             } else {
                 Address::zero()
             };
-            staking.stake_with_capacity(staker_address, stake_wei, provider_type, capacity)
+            staking
+                .stake_with_capacity(staker_address, stake_wei, provider_type, capacity)
                 .map_err(|e| ErrorData {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!("Provider stake failed: {}", e)),
@@ -8646,7 +10122,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get provider statistics including served models, inference count, staking info, and earnings. Omit address to get stats for the local node.")]
+    #[tool(
+        description = "Get provider statistics including served models, inference count, staking info, and earnings. Omit address to get stats for the local node."
+    )]
     async fn get_provider_stats(
         &self,
         Parameters(params): Parameters<GetProviderStatsParams>,
@@ -8660,7 +10138,8 @@ impl TenzroMcpServer {
             let all_stakes = staking.get_all_stakes();
             let filtered: Vec<_> = if let Some(ref addr_str) = params.address {
                 let addr_norm = addr_str.trim_start_matches("0x").to_lowercase();
-                all_stakes.iter()
+                all_stakes
+                    .iter()
                     .filter(|(addr, _)| hex::encode(addr.as_bytes()) == addr_norm.as_str())
                     .collect()
             } else {
@@ -8698,7 +10177,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Read compute bonds — the admission collateral a provider must post before register_provider will accept it. Pass provider_did for one bond, or omit it to list every bond on the node. Always returns the node's minimum bond and withdrawal cooldown so a caller can see what admission requires.")]
+    #[tool(
+        description = "Read compute bonds — the admission collateral a provider must post before register_provider will accept it. Pass provider_did for one bond, or omit it to list every bond on the node. Always returns the node's minimum bond and withdrawal cooldown so a caller can see what admission requires."
+    )]
     async fn get_compute_bond(
         &self,
         Parameters(params): Parameters<GetComputeBondParams>,
@@ -8731,15 +10212,20 @@ impl TenzroMcpServer {
 
     // ─── Task Marketplace ───
 
-    #[tool(description = "Post a new task to the Tenzro Network task marketplace. Returns the created task with its UUID. Tasks can request AI inference, code review, data analysis, content generation, agent execution, translation, or research.")]
+    #[tool(
+        description = "Post a new task to the Tenzro Network task marketplace. Returns the created task with its UUID. Tasks can request AI inference, code review, data analysis, content generation, agent execution, translation, or research."
+    )]
     async fn post_task(
         &self,
         Parameters(params): Parameters<PostTaskParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_types::{TaskInfo, TaskType, TaskPriority};
         use tenzro_storage::{CF_TASKS, KvStore};
+        use tenzro_types::{TaskInfo, TaskPriority, TaskType};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         // Parse task type
         let task_type = match params.task_type.to_lowercase().as_str() {
@@ -8789,8 +10275,10 @@ impl TenzroMcpServer {
 
         // Persist to storage
         let key = format!("task:{}", task.task_id).into_bytes();
-        let value = serde_json::to_vec(&task).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_TASKS, &key, &value)
+        let value = serde_json::to_vec(&task)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_TASKS, &key, &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -8805,71 +10293,81 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "List tasks from the Tenzro Network task marketplace. Filter by type, status, poster address, or maximum price. Defaults to showing open tasks. Use this to discover tasks agents can fulfill.")]
+    #[tool(
+        description = "List tasks from the Tenzro Network task marketplace. Filter by type, status, poster address, or maximum price. Defaults to showing open tasks. Use this to discover tasks agents can fulfill."
+    )]
     async fn list_tasks(
         &self,
         Parameters(params): Parameters<ListTasksParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_types::TaskInfo;
         use tenzro_storage::{CF_TASKS, KvStore};
+        use tenzro_types::TaskInfo;
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let limit = params.limit.unwrap_or(20).min(100);
         let offset = params.offset.unwrap_or(0);
 
         // Fetch all task keys
-        let keys = storage.get_keys_with_prefix(CF_TASKS, b"task:")
+        let keys = storage
+            .get_keys_with_prefix(CF_TASKS, b"task:")
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         let mut tasks: Vec<serde_json::Value> = Vec::new();
 
         for key in keys {
             if let Ok(Some(raw)) = storage.get(CF_TASKS, &key)
-                && let Ok(task) = serde_json::from_slice::<TaskInfo>(&raw) {
-                    // Apply filters
-                    if let Some(ref filter_type) = params.task_type {
-                        let type_str = format!("{:?}", task.task_type).to_lowercase();
-                        if !type_str.contains(&filter_type.to_lowercase()) {
-                            continue;
-                        }
+                && let Ok(task) = serde_json::from_slice::<TaskInfo>(&raw)
+            {
+                // Apply filters
+                if let Some(ref filter_type) = params.task_type {
+                    let type_str = format!("{:?}", task.task_type).to_lowercase();
+                    if !type_str.contains(&filter_type.to_lowercase()) {
+                        continue;
                     }
-                    if let Some(ref filter_status) = params.status {
-                        let status_str = format!("{:?}", task.status).to_lowercase();
-                        if !status_str.contains(&filter_status.to_lowercase()) {
-                            continue;
-                        }
-                    } else {
-                        // Default to open tasks
-                        if format!("{:?}", task.status).to_lowercase() != "open" {
-                            continue;
-                        }
+                }
+                if let Some(ref filter_status) = params.status {
+                    let status_str = format!("{:?}", task.status).to_lowercase();
+                    if !status_str.contains(&filter_status.to_lowercase()) {
+                        continue;
                     }
-                    if let Some(ref poster_filter) = params.poster {
-                        let poster_str = format!("{}", task.poster);
-                        if !poster_str.to_lowercase().contains(&poster_filter.to_lowercase()) {
-                            continue;
-                        }
+                } else {
+                    // Default to open tasks
+                    if format!("{:?}", task.status).to_lowercase() != "open" {
+                        continue;
                     }
-                    if let Some(max_wei) = params.max_price_wei
-                        && task.max_price > max_wei
+                }
+                if let Some(ref poster_filter) = params.poster {
+                    let poster_str = format!("{}", task.poster);
+                    if !poster_str
+                        .to_lowercase()
+                        .contains(&poster_filter.to_lowercase())
                     {
                         continue;
                     }
-
-                    tasks.push(serde_json::json!({
-                        "task_id": task.task_id,
-                        "title": task.title,
-                        "task_type": format!("{:?}", task.task_type),
-                        "poster": format!("{}", task.poster),
-                        "max_price_wei": task.max_price.to_string(),
-                        "status": format!("{:?}", task.status),
-                        "priority": format!("{:?}", task.priority),
-                        "required_model": task.required_model,
-                        "created_at": task.created_at.0,
-                        "deadline": task.deadline,
-                    }));
                 }
+                if let Some(max_wei) = params.max_price_wei
+                    && task.max_price > max_wei
+                {
+                    continue;
+                }
+
+                tasks.push(serde_json::json!({
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "task_type": format!("{:?}", task.task_type),
+                    "poster": format!("{}", task.poster),
+                    "max_price_wei": task.max_price.to_string(),
+                    "status": format!("{:?}", task.status),
+                    "priority": format!("{:?}", task.priority),
+                    "required_model": task.required_model,
+                    "created_at": task.created_at.0,
+                    "deadline": task.deadline,
+                }));
+            }
         }
 
         let total = tasks.len();
@@ -8883,19 +10381,25 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Submit a price quote for a task in the Tenzro Network task marketplace. Providers call this to bid on open tasks. The quote includes price, model to use, and estimated completion time.")]
+    #[tool(
+        description = "Submit a price quote for a task in the Tenzro Network task marketplace. Providers call this to bid on open tasks. The quote includes price, model to use, and estimated completion time."
+    )]
     async fn quote_task(
         &self,
         Parameters(params): Parameters<QuoteTaskParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_types::TaskQuote;
         use tenzro_storage::{CF_TASKS, KvStore};
+        use tenzro_types::TaskQuote;
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         // Verify the task exists
         let task_key = format!("task:{}", params.task_id).into_bytes();
-        storage.get(CF_TASKS, &task_key)
+        storage
+            .get(CF_TASKS, &task_key)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?
             .ok_or_else(|| ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
@@ -8923,9 +10427,12 @@ impl TenzroMcpServer {
         };
 
         // Persist quote to storage
-        let quote_key = format!("quote:{}:{}", params.task_id, params.provider_address).into_bytes();
-        let value = serde_json::to_vec(&quote).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_TASKS, &quote_key, &value)
+        let quote_key =
+            format!("quote:{}:{}", params.task_id, params.provider_address).into_bytes();
+        let value = serde_json::to_vec(&quote)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_TASKS, &quote_key, &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -8943,15 +10450,20 @@ impl TenzroMcpServer {
 
     // ─── Agent Template Marketplace ───
 
-    #[tool(description = "Publish an agent template to the Tenzro Network agent marketplace. Templates define reusable AI agent configurations with system prompts, capabilities, and pricing. Others can discover and deploy your template.")]
+    #[tool(
+        description = "Publish an agent template to the Tenzro Network agent marketplace. Templates define reusable AI agent configurations with system prompts, capabilities, and pricing. Others can discover and deploy your template."
+    )]
     async fn register_agent_template(
         &self,
         Parameters(params): Parameters<RegisterAgentTemplateParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_types::{AgentTemplate, AgentTemplateType, AgentPricingModel};
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
+        use tenzro_types::{AgentPricingModel, AgentTemplate, AgentTemplateType};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         // Parse template type
         let template_type = match params.template_type.to_lowercase().as_str() {
@@ -8990,52 +10502,63 @@ impl TenzroMcpServer {
         // ── Marketplace monetization fields ──────────────────────────────
         // Optional creator DID binding (attribution).
         if let Some(did) = params.creator_did.as_deref()
-            && !did.is_empty() {
-                template.creator_did = Some(did.to_string());
-            }
+            && !did.is_empty()
+        {
+            template.creator_did = Some(did.to_string());
+        }
         // Optional creator payout wallet. Mandatory when pricing != Free (enforced below).
         if let Some(w) = params.creator_wallet.as_deref()
-            && !w.is_empty() {
-                template.creator_wallet = Some(parse_address(w)?);
-            }
+            && !w.is_empty()
+        {
+            template.creator_wallet = Some(parse_address(w)?);
+        }
 
         // Pricing: compact string like "free" | "per_execution:<u128>" |
         // "per_token:<u128>" | "subscription:<u128>" | "revenue_share:<bps>".
         // Integer parse failures are now hard errors (no silent zero-pricing).
         if let Some(pricing_str) = params.pricing.as_deref() {
             let s = pricing_str.trim();
-            template.pricing = if s.eq_ignore_ascii_case("free") {
-                AgentPricingModel::Free
-            } else if let Some(rest) = s.strip_prefix("per_execution:") {
-                let price: u128 = rest.trim().parse().map_err(|_|
-                    err_internal(format!("Invalid per_execution price: {}", rest)))?;
-                AgentPricingModel::PerExecution { price }
-            } else if let Some(rest) = s.strip_prefix("per_token:") {
-                let price_per_token: u128 = rest.trim().parse().map_err(|_|
-                    err_internal(format!("Invalid per_token price: {}", rest)))?;
-                AgentPricingModel::PerToken { price_per_token }
-            } else if let Some(rest) = s.strip_prefix("subscription:") {
-                let monthly_rate: u128 = rest.trim().parse().map_err(|_|
-                    err_internal(format!("Invalid subscription rate: {}", rest)))?;
-                AgentPricingModel::Subscription { monthly_rate }
-            } else if let Some(rest) = s.strip_prefix("revenue_share:") {
-                let creator_share_bps: u16 = rest.trim().parse().map_err(|_|
-                    err_internal(format!("Invalid revenue_share bps: {}", rest)))?;
-                AgentPricingModel::RevenueShare { creator_share_bps }
-            } else {
-                return Err(err_internal(format!("Unknown pricing string: {}", s)));
-            };
+            template.pricing =
+                if s.eq_ignore_ascii_case("free") {
+                    AgentPricingModel::Free
+                } else if let Some(rest) = s.strip_prefix("per_execution:") {
+                    let price: u128 = rest.trim().parse().map_err(|_| {
+                        err_internal(format!("Invalid per_execution price: {}", rest))
+                    })?;
+                    AgentPricingModel::PerExecution { price }
+                } else if let Some(rest) = s.strip_prefix("per_token:") {
+                    let price_per_token: u128 = rest
+                        .trim()
+                        .parse()
+                        .map_err(|_| err_internal(format!("Invalid per_token price: {}", rest)))?;
+                    AgentPricingModel::PerToken { price_per_token }
+                } else if let Some(rest) = s.strip_prefix("subscription:") {
+                    let monthly_rate: u128 = rest.trim().parse().map_err(|_| {
+                        err_internal(format!("Invalid subscription rate: {}", rest))
+                    })?;
+                    AgentPricingModel::Subscription { monthly_rate }
+                } else if let Some(rest) = s.strip_prefix("revenue_share:") {
+                    let creator_share_bps: u16 = rest.trim().parse().map_err(|_| {
+                        err_internal(format!("Invalid revenue_share bps: {}", rest))
+                    })?;
+                    AgentPricingModel::RevenueShare { creator_share_bps }
+                } else {
+                    return Err(err_internal(format!("Unknown pricing string: {}", s)));
+                };
         }
 
         // Enforce marketplace invariant: paid pricing requires a payout wallet.
-        template.validate_marketplace_invariants()
+        template
+            .validate_marketplace_invariants()
             .map_err(err_internal)?;
 
         // Persist with the SAME key scheme as the JSON-RPC handler
         // (`template_id.as_bytes()`, no `template:` prefix) so both
         // transports share a single marketplace view.
-        let value = serde_json::to_vec(&template).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_AGENT_TEMPLATES, template.template_id.as_bytes(), &value)
+        let value = serde_json::to_vec(&template)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_AGENT_TEMPLATES, template.template_id.as_bytes(), &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -9053,15 +10576,20 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "List agent templates from the Tenzro Network agent marketplace. Browse available AI agent configurations that can be deployed. Filter by type, tag, creator, or price.")]
+    #[tool(
+        description = "List agent templates from the Tenzro Network agent marketplace. Browse available AI agent configurations that can be deployed. Filter by type, tag, creator, or price."
+    )]
     async fn list_agent_templates(
         &self,
         Parameters(params): Parameters<ListAgentTemplatesParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_types::{AgentTemplate, AgentPricingModel};
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
+        use tenzro_types::{AgentPricingModel, AgentTemplate};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let limit = params.limit.unwrap_or(20).min(100);
         let offset = params.offset.unwrap_or(0);
@@ -9069,44 +10597,53 @@ impl TenzroMcpServer {
         // Unified marketplace view: read with empty prefix so we pick up both
         // RPC-registered templates (key = template_id) and any legacy
         // `template:`-prefixed entries.
-        let keys = storage.get_keys_with_prefix(CF_AGENT_TEMPLATES, b"")
+        let keys = storage
+            .get_keys_with_prefix(CF_AGENT_TEMPLATES, b"")
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         let mut templates: Vec<serde_json::Value> = Vec::new();
 
         for key in keys {
             if let Ok(Some(raw)) = storage.get(CF_AGENT_TEMPLATES, &key)
-                && let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&raw) {
-                    // Only show published templates
-                    if !tmpl.is_available() {
+                && let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&raw)
+            {
+                // Only show published templates
+                if !tmpl.is_available() {
+                    continue;
+                }
+
+                // Apply filters
+                if let Some(ref filter_type) = params.template_type {
+                    let type_str = format!("{:?}", tmpl.template_type).to_lowercase();
+                    if !type_str.contains(&filter_type.to_lowercase()) {
                         continue;
                     }
+                }
+                if let Some(ref filter_tag) = params.tag {
+                    let has_tag = tmpl
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&filter_tag.to_lowercase()));
+                    if !has_tag {
+                        continue;
+                    }
+                }
+                if let Some(ref creator_filter) = params.creator {
+                    let creator_str = format!("{}", tmpl.creator);
+                    if !creator_str
+                        .to_lowercase()
+                        .contains(&creator_filter.to_lowercase())
+                    {
+                        continue;
+                    }
+                }
+                if params.free_only.unwrap_or(false)
+                    && !matches!(tmpl.pricing, AgentPricingModel::Free)
+                {
+                    continue;
+                }
 
-                    // Apply filters
-                    if let Some(ref filter_type) = params.template_type {
-                        let type_str = format!("{:?}", tmpl.template_type).to_lowercase();
-                        if !type_str.contains(&filter_type.to_lowercase()) {
-                            continue;
-                        }
-                    }
-                    if let Some(ref filter_tag) = params.tag {
-                        let has_tag = tmpl.tags.iter().any(|t| t.to_lowercase().contains(&filter_tag.to_lowercase()));
-                        if !has_tag {
-                            continue;
-                        }
-                    }
-                    if let Some(ref creator_filter) = params.creator {
-                        let creator_str = format!("{}", tmpl.creator);
-                        if !creator_str.to_lowercase().contains(&creator_filter.to_lowercase()) {
-                            continue;
-                        }
-                    }
-                    if params.free_only.unwrap_or(false)
-                        && !matches!(tmpl.pricing, AgentPricingModel::Free) {
-                            continue;
-                        }
-
-                    templates.push(serde_json::json!({
+                templates.push(serde_json::json!({
                         "template_id": tmpl.template_id,
                         "name": tmpl.name,
                         "description": tmpl.description,
@@ -9125,7 +10662,7 @@ impl TenzroMcpServer {
                         "created_at": tmpl.created_at.0,
                         "updated_at": tmpl.updated_at.0,
                     }));
-                }
+            }
         }
 
         let total = templates.len();
@@ -9139,13 +10676,15 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Run (invoke) a spawned agent template. For paid templates, the `payer_wallet` is charged: the network commission (5%) goes to the treasury and the remainder is paid to the template's `creator_wallet`. `tokens_estimate` is used for per-token pricing. Set `dry_run=true` to simulate without charging fees or dispatching real transactions. Successful non-dry-run invocations are metered (invocation_count + total_revenue) and persisted.")]
+    #[tool(
+        description = "Run (invoke) a spawned agent template. For paid templates, the `payer_wallet` is charged: the network commission (5%) goes to the treasury and the remainder is paid to the template's `creator_wallet`. `tokens_estimate` is used for per-token pricing. Set `dry_run=true` to simulate without charging fees or dispatching real transactions. Successful non-dry-run invocations are metered (invocation_count + total_revenue) and persisted."
+    )]
     async fn run_agent_template(
         &self,
         Parameters(params): Parameters<RunAgentTemplateParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use crate::commission_policy::{settle_invocation_fee, CommissionError};
-        use tenzro_storage::{CF_AGENTS, CF_AGENT_TEMPLATES, KvStore};
+        use crate::commission_policy::{CommissionError, settle_invocation_fee};
+        use tenzro_storage::{CF_AGENT_TEMPLATES, CF_AGENTS, KvStore};
         use tenzro_types::agent_template::AgentTemplate;
         use tenzro_types::marketplace::MARKETPLACE_COMMISSION_BPS;
 
@@ -9175,9 +10714,8 @@ impl TenzroMcpServer {
                     params.agent_id
                 ))
             })?;
-        let spawned: tenzro_agent_kit::SpawnedAgent =
-            serde_json::from_slice(&spawned_bytes)
-                .map_err(|e| err_internal(format!("Deserialization error: {e}")))?;
+        let spawned: tenzro_agent_kit::SpawnedAgent = serde_json::from_slice(&spawned_bytes)
+            .map_err(|e| err_internal(format!("Deserialization error: {e}")))?;
 
         // Load underlying AgentTemplate for pricing + metering.
         let template_id = spawned.template.template_id.clone();
@@ -9330,15 +10868,20 @@ impl TenzroMcpServer {
 
     // === Agent Spawning & Swarm Orchestration ===
 
-    #[tool(description = "Spawn a child agent under a parent agent on the Tenzro Network. The child inherits the parent's controller DID and can be delegated tasks. Maximum 50 children per parent agent.")]
+    #[tool(
+        description = "Spawn a child agent under a parent agent on the Tenzro Network. The child inherits the parent's controller DID and can be delegated tasks. Maximum 50 children per parent agent."
+    )]
     async fn spawn_agent(
         &self,
         Parameters(params): Parameters<SpawnAgentParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let runtime = self.node.agent_runtime()
+        let runtime = self
+            .node
+            .agent_runtime()
             .ok_or_else(|| err_internal("Agent runtime not available"))?;
         let caps = params.capabilities.unwrap_or_default();
-        let child = runtime.spawn_agent(&params.parent_id, &params.name, caps)
+        let child = runtime
+            .spawn_agent(&params.parent_id, &params.name, caps)
             .await
             .map_err(|e| err_internal(format!("Spawn failed: {}", e)))?;
         json_result(serde_json::json!({
@@ -9349,17 +10892,23 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Run an agentic task loop for an agent. The agent calls an LLM with built-in tools (spawn_agent, delegate_task, collect_results, complete) and executes them iteratively until done or the maximum step limit is reached.")]
+    #[tool(
+        description = "Run an agentic task loop for an agent. The agent calls an LLM with built-in tools (spawn_agent, delegate_task, collect_results, complete) and executes them iteratively until done or the maximum step limit is reached."
+    )]
     async fn run_agent_task(
         &self,
         Parameters(params): Parameters<RunAgentTaskParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let runtime = self.node.agent_runtime()
+        let runtime = self
+            .node
+            .agent_runtime()
             .ok_or_else(|| err_internal("Agent runtime not available"))?;
-        let inference_url = params.inference_url
+        let inference_url = params
+            .inference_url
             .unwrap_or_else(|| "http://localhost:8080/v1/chat/completions".to_string());
         let exec_loop = tenzro_agent::AgentExecutionLoop::new(runtime.clone(), inference_url);
-        let result = exec_loop.run(&params.agent_id, &params.task)
+        let result = exec_loop
+            .run(&params.agent_id, &params.task)
             .await
             .map_err(|e| err_internal(format!("Task failed: {}", e)))?;
         json_result(serde_json::json!({
@@ -9368,21 +10917,32 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Create a swarm of coordinated agents under an orchestrator on the Tenzro Network. Each member spec spawns one child agent. Tasks can be dispatched to all members in parallel or sequentially.")]
+    #[tool(
+        description = "Create a swarm of coordinated agents under an orchestrator on the Tenzro Network. Each member spec spawns one child agent. Tasks can be dispatched to all members in parallel or sequentially."
+    )]
     async fn create_swarm(
         &self,
         Parameters(params): Parameters<CreateSwarmParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::agent::SwarmConfig;
-        let swarm_mgr = self.node.swarm_manager()
+        let swarm_mgr = self
+            .node
+            .swarm_manager()
             .ok_or_else(|| err_internal("Swarm manager not available"))?;
-        let members: Vec<(String, Vec<String>)> = params.members.as_array()
+        let members: Vec<(String, Vec<String>)> = params
+            .members
+            .as_array()
             .ok_or_else(|| err_internal("members must be a JSON array"))?
             .iter()
             .map(|m| {
                 let name = m["name"].as_str().unwrap_or("agent").to_string();
-                let caps = m["capabilities"].as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                let caps = m["capabilities"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 (name, caps)
             })
@@ -9392,7 +10952,8 @@ impl TenzroMcpServer {
             task_timeout_secs: params.task_timeout_secs.unwrap_or(300),
             parallel: params.parallel.unwrap_or(true),
         };
-        let swarm_id = swarm_mgr.create_swarm(&params.orchestrator_id, members, config)
+        let swarm_id = swarm_mgr
+            .create_swarm(&params.orchestrator_id, members, config)
             .await
             .map_err(|e| err_internal(format!("Create swarm failed: {}", e)))?;
         json_result(serde_json::json!({
@@ -9401,26 +10962,36 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get the current status of a Tenzro agent swarm including lifecycle status, member count, and per-member agent statuses, roles, and results.")]
+    #[tool(
+        description = "Get the current status of a Tenzro agent swarm including lifecycle status, member count, and per-member agent statuses, roles, and results."
+    )]
     async fn get_swarm_status(
         &self,
         Parameters(params): Parameters<GetSwarmStatusParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let swarm_mgr = self.node.swarm_manager()
+        let swarm_mgr = self
+            .node
+            .swarm_manager()
             .ok_or_else(|| err_internal("Swarm manager not available"))?;
-        let status = swarm_mgr.get_swarm_status(&params.swarm_id)
+        let status = swarm_mgr
+            .get_swarm_status(&params.swarm_id)
             .ok_or_else(|| err_internal(format!("Swarm not found: {}", params.swarm_id)))?;
         json_result(status)
     }
 
-    #[tool(description = "Terminate a Tenzro agent swarm and all its member agents. Attempts graceful shutdown of each member. Returns confirmation with swarm ID and terminated status.")]
+    #[tool(
+        description = "Terminate a Tenzro agent swarm and all its member agents. Attempts graceful shutdown of each member. Returns confirmation with swarm ID and terminated status."
+    )]
     async fn terminate_swarm(
         &self,
         Parameters(params): Parameters<TerminateSwarmParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let swarm_mgr = self.node.swarm_manager()
+        let swarm_mgr = self
+            .node
+            .swarm_manager()
             .ok_or_else(|| err_internal("Swarm manager not available"))?;
-        swarm_mgr.terminate_swarm(&params.swarm_id)
+        swarm_mgr
+            .terminate_swarm(&params.swarm_id)
             .await
             .map_err(|e| err_internal(format!("Terminate failed: {}", e)))?;
         json_result(serde_json::json!({
@@ -9431,12 +11002,16 @@ impl TenzroMcpServer {
 
     // ─── Governance Tools ───
 
-    #[tool(description = "List governance proposals on the Tenzro Network. Filter by status (active/passed/rejected/pending). Returns proposal IDs, titles, vote tallies, and deadlines.")]
+    #[tool(
+        description = "List governance proposals on the Tenzro Network. Filter by status (active/passed/rejected/pending). Returns proposal IDs, titles, vote tallies, and deadlines."
+    )]
     async fn list_proposals(
         &self,
         Parameters(params): Parameters<ListProposalsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let governance = self.node.governance()
+        let governance = self
+            .node
+            .governance()
             .ok_or_else(|| err_internal("Governance not available"))?;
         let proposals = if let Some(status_str) = params.status.as_deref() {
             use tenzro_types::token::ProposalStatus;
@@ -9459,14 +11034,18 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({ "proposals": page, "count": count }))
     }
 
-    #[tool(description = "Vote on an active Tenzro governance proposal. Cast yes, no, or abstain. Voting power is proportional to staked TNZO. Returns the recorded vote and current tally.")]
+    #[tool(
+        description = "Vote on an active Tenzro governance proposal. Cast yes, no, or abstain. Voting power is proportional to staked TNZO. Returns the recorded vote and current tally."
+    )]
     async fn vote_on_proposal(
         &self,
         Parameters(params): Parameters<VoteOnProposalParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.voter_address)
             .map_err(|e| err_internal(format!("Invalid voter address: {}", e)))?;
-        let governance = self.node.governance()
+        let governance = self
+            .node
+            .governance()
             .ok_or_else(|| err_internal("Governance not available"))?;
         use tenzro_types::governance::VoteType;
         let vote_type = match params.vote.as_str() {
@@ -9474,7 +11053,8 @@ impl TenzroMcpServer {
             "no" | "against" => VoteType::Against,
             _ => VoteType::Abstain,
         };
-        governance.vote(&params.proposal_id, addr, vote_type, 0u128)
+        governance
+            .vote(&params.proposal_id, addr, vote_type, 0u128)
             .map_err(|e| err_internal(format!("vote failed: {}", e)))?;
         let votes = governance.get_votes(&params.proposal_id);
         json_result(serde_json::json!({
@@ -9484,61 +11064,90 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Create a new governance proposal on the Tenzro Network. Requires a minimum staked balance to propose. Returns the new proposal ID and initial status.")]
+    #[tool(
+        description = "Create a new governance proposal on the Tenzro Network. Requires a minimum staked balance to propose. Returns the new proposal ID and initial status."
+    )]
     async fn create_proposal(
         &self,
         Parameters(params): Parameters<CreateProposalParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.proposer_address)
             .map_err(|e| err_internal(format!("Invalid proposer address: {}", e)))?;
-        let governance = self.node.governance()
+        let governance = self
+            .node
+            .governance()
             .ok_or_else(|| err_internal("Governance not available"))?;
         use tenzro_types::token::ProposalType;
         let payload = params.payload.unwrap_or(serde_json::Value::Null);
         let proposal_type = match params.proposal_type.as_str() {
             "parameter" => ProposalType::ParameterChange {
-                parameter: payload.get("parameter").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                new_value: payload.get("new_value").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                parameter: payload
+                    .get("parameter")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                new_value: payload
+                    .get("new_value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
             },
             "upgrade" => ProposalType::ProtocolUpgrade {
-                version: payload.get("version").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                code_hash: payload.get("code_hash").and_then(|v| v.as_str())
+                version: payload
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                code_hash: payload
+                    .get("code_hash")
+                    .and_then(|v| v.as_str())
                     .map(|h| hex::decode(h.strip_prefix("0x").unwrap_or(h)).unwrap_or_default())
                     .unwrap_or_default(),
             },
             "treasury" => ProposalType::TreasuryGrant {
                 recipient: addr,
                 // amount is wei (1 TNZO = 10^18 wei), as a decimal string or u64-range JSON number
-                amount: payload.get("amount")
-                    .and_then(|v| v.as_str().and_then(|s| s.parse::<u128>().ok())
-                        .or_else(|| v.as_u64().map(|n| n as u128)))
+                amount: payload
+                    .get("amount")
+                    .and_then(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse::<u128>().ok())
+                            .or_else(|| v.as_u64().map(|n| n as u128))
+                    })
                     .unwrap_or(0u128),
             },
             _ => ProposalType::Custom {
                 proposal_data: serde_json::to_vec(&payload).unwrap_or_default(),
             },
         };
-        let proposal_id = governance.create_proposal(
-            params.title.clone(),
-            params.description.clone(),
-            addr,
-            proposal_type,
-            604_800_000i64,
-            0u128,
-        ).map_err(|e| err_internal(format!("create_proposal failed: {}", e)))?;
+        let proposal_id = governance
+            .create_proposal(
+                params.title.clone(),
+                params.description.clone(),
+                addr,
+                proposal_type,
+                604_800_000i64,
+                0u128,
+            )
+            .map_err(|e| err_internal(format!("create_proposal failed: {}", e)))?;
         json_result(serde_json::json!({ "proposal_id": proposal_id }))
     }
 
-    #[tool(description = "Get the governance voting power of an address. Returns the staked TNZO balance used as voting weight. Delegated power is included.")]
+    #[tool(
+        description = "Get the governance voting power of an address. Returns the staked TNZO balance used as voting weight. Delegated power is included."
+    )]
     async fn get_voting_power(
         &self,
         Parameters(params): Parameters<GetVotingPowerParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.address)
             .map_err(|e| err_internal(format!("Invalid address: {}", e)))?;
-        let staking = self.node.staking()
+        let staking = self
+            .node
+            .staking()
             .ok_or_else(|| err_internal("Staking not available"))?;
-        let voting_power = staking.get_stake(&addr)
+        let voting_power = staking
+            .get_stake(&addr)
             .map(|info| info.amount)
             .unwrap_or(0u128);
         json_result(serde_json::json!({
@@ -9547,7 +11156,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Delegate governance voting power from one address to another. Delegated TNZO stake will count toward the delegate's votes. Returns the delegation record.")]
+    #[tool(
+        description = "Delegate governance voting power from one address to another. Delegated TNZO stake will count toward the delegate's votes. Returns the delegation record."
+    )]
     async fn delegate_voting_power(
         &self,
         Parameters(params): Parameters<DelegateVotingPowerParams>,
@@ -9562,9 +11173,12 @@ impl TenzroMcpServer {
                 "amount_wei must be a wei decimal string (e.g. '100000000000000000000' for 100 TNZO)"
             ))?,
         };
-        let governance = self.node.governance()
+        let governance = self
+            .node
+            .governance()
             .ok_or_else(|| err_internal("Governance not available"))?;
-        governance.delegate(from, to, amount_wei)
+        governance
+            .delegate(from, to, amount_wei)
             .map_err(|e| err_internal(format!("delegate_voting_power failed: {}", e)))?;
         json_result(serde_json::json!({
             "from": params.from_address,
@@ -9576,14 +11190,18 @@ impl TenzroMcpServer {
 
     // ─── Token Tools ───
 
-    #[tool(description = "Get the TNZO token balance for an address. Returns the balance in wei (1 TNZO = 10^18 wei) as a decimal string.")]
+    #[tool(
+        description = "Get the TNZO token balance for an address. Returns the balance in wei (1 TNZO = 10^18 wei) as a decimal string."
+    )]
     async fn token_balance(
         &self,
         Parameters(params): Parameters<TokenBalanceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.address)
             .map_err(|e| err_internal(format!("Invalid address: {}", e)))?;
-        let token = self.node.token()
+        let token = self
+            .node
+            .token()
             .ok_or_else(|| err_internal("Token not available"))?;
         let balance_wei = token.balance_of(&addr);
         json_result(serde_json::json!({
@@ -9592,12 +11210,16 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get the total TNZO token supply in wei (1 TNZO = 10^18 wei). Useful for inflation monitoring and economic analysis.")]
+    #[tool(
+        description = "Get the total TNZO token supply in wei (1 TNZO = 10^18 wei). Useful for inflation monitoring and economic analysis."
+    )]
     async fn total_supply(
         &self,
         Parameters(_params): Parameters<TotalSupplyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let token = self.node.token()
+        let token = self
+            .node
+            .token()
             .ok_or_else(|| err_internal("Token not available"))?;
         let supply_wei = token.total_supply();
         json_result(serde_json::json!({
@@ -9607,7 +11229,9 @@ impl TenzroMcpServer {
 
     // ─── Canton / DAML Tools ───
 
-    #[tool(description = "List Canton synchronizer domains configured on this node. Returns domain IDs, connection status, and participant info for enterprise DAML integration.")]
+    #[tool(
+        description = "List Canton synchronizer domains configured on this node. Returns domain IDs, connection status, and participant info for enterprise DAML integration."
+    )]
     async fn list_canton_domains(
         &self,
         Parameters(_params): Parameters<ListCantonDomainsParams>,
@@ -9619,7 +11243,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "List active DAML contracts on a Canton domain. Filter by template ID. Returns contract IDs, parties, and payload data for enterprise workflow automation.")]
+    #[tool(
+        description = "List active DAML contracts on a Canton domain. Filter by template ID. Returns contract IDs, parties, and payload data for enterprise workflow automation."
+    )]
     async fn list_daml_contracts(
         &self,
         Parameters(params): Parameters<ListDamlContractsParams>,
@@ -9634,7 +11260,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Submit a DAML command to a Canton domain. Supports create, exercise, and create_and_exercise commands. Returns the transaction ID and updated contract state.")]
+    #[tool(
+        description = "Submit a DAML command to a Canton domain. Supports create, exercise, and create_and_exercise commands. Returns the transaction ID and updated contract state."
+    )]
     async fn submit_daml_command(
         &self,
         Parameters(params): Parameters<SubmitDamlCommandParams>,
@@ -9654,7 +11282,9 @@ impl TenzroMcpServer {
 
     // ─── Settlement Tools ───
 
-    #[tool(description = "Execute an immediate settlement between two addresses on the Tenzro Network. Transfers TNZO from payer to payee for a specific service type. Returns the settlement receipt.")]
+    #[tool(
+        description = "Execute an immediate settlement between two addresses on the Tenzro Network. Transfers TNZO from payer to payee for a specific service type. Returns the settlement receipt."
+    )]
     async fn settle_payment(
         &self,
         Parameters(params): Parameters<SettlePaymentParams>,
@@ -9663,12 +11293,16 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let payee = parse_address(&params.payee)
             .map_err(|e| err_internal(format!("Invalid payee address: {}", e)))?;
-        let amount_wei_u128: u128 = params.amount_wei.parse().map_err(|_| err_internal(
-            "amount_wei must be a wei decimal string (e.g. '1500000000000000000' for 1.5 TNZO)"
-        ))?;
-        let amount_wei: u64 = amount_wei_u128.try_into().map_err(|_| err_internal(
-            "settle_payment amount overflows u64; use a smaller value or split the settlement"
-        ))?;
+        let amount_wei_u128: u128 = params.amount_wei.parse().map_err(|_| {
+            err_internal(
+                "amount_wei must be a wei decimal string (e.g. '1500000000000000000' for 1.5 TNZO)",
+            )
+        })?;
+        let amount_wei: u64 = amount_wei_u128.try_into().map_err(|_| {
+            err_internal(
+                "settle_payment amount overflows u64; use a smaller value or split the settlement",
+            )
+        })?;
         let service_type = match params.service_type.to_lowercase().as_str() {
             "inference" | "ai_inference" | "model_inference" => ServiceType::ModelInference {
                 model_id: String::new(),
@@ -9692,16 +11326,14 @@ impl TenzroMcpServer {
             },
         };
         let proof = ServiceProof::new(ProofType::Cryptographic, vec![]);
-        let request = SettlementRequest::new(
-            payer,
-            payee,
-            service_type,
-            amount_wei,
-            proof,
-        );
-        let settlement = self.node.settlement()
+        let request = SettlementRequest::new(payer, payee, service_type, amount_wei, proof);
+        let settlement = self
+            .node
+            .settlement()
             .ok_or_else(|| err_internal("Settlement engine not available"))?;
-        let receipt = settlement.settle(request).await
+        let receipt = settlement
+            .settle(request)
+            .await
             .map_err(|e| err_internal(format!("settle failed: {}", e)))?;
         json_result(serde_json::json!({
             "receipt_id": receipt.receipt_id,
@@ -9714,7 +11346,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Create an on-chain escrow via a signed CreateEscrow transaction. Funds are locked at a deterministic vault address derived from the escrow_id; only the original payer can later release or refund.")]
+    #[tool(
+        description = "Create an on-chain escrow via a signed CreateEscrow transaction. Funds are locked at a deterministic vault address derived from the escrow_id; only the original payer can later release or refund."
+    )]
     async fn create_escrow(
         &self,
         Parameters(params): Parameters<CreateEscrowParams>,
@@ -9723,9 +11357,9 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let _ = parse_address(&params.payee)
             .map_err(|e| err_internal(format!("Invalid payee address: {}", e)))?;
-        let amount_atto: u128 = params.amount_wei.parse().map_err(|_| err_internal(
-            "amount_wei must be a wei decimal string (1 TNZO = 10^18 wei)"
-        ))?;
+        let amount_atto: u128 = params.amount_wei.parse().map_err(|_| {
+            err_internal("amount_wei must be a wei decimal string (1 TNZO = 10^18 wei)")
+        })?;
         let release_conditions = match params.release_condition.to_lowercase().as_str() {
             "timeout" => serde_json::json!("Timeout"),
             "provider" | "provider_signature" => serde_json::json!("ProviderSignature"),
@@ -9733,9 +11367,12 @@ impl TenzroMcpServer {
             "both" | "both_signatures" => serde_json::json!("BothSignatures"),
             "verifier" | "verifier_signature" => serde_json::json!("VerifierSignature"),
             "custom" => serde_json::json!({ "Custom": { "condition": "" } }),
-            other => return Err(err_internal(format!(
-                "unsupported release_condition '{}'", other
-            ))),
+            other => {
+                return Err(err_internal(format!(
+                    "unsupported release_condition '{}'",
+                    other
+                )));
+            }
         };
         let expires_at_ms = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -9744,14 +11381,25 @@ impl TenzroMcpServer {
             + params.timeout_secs.unwrap_or(3600).saturating_mul(1000);
 
         // Best-effort nonce + chain_id lookup
-        let nonce = rpc_dispatch(&self.node, "eth_getTransactionCount",
-            serde_json::json!([params.payer, "latest"])).await
+        let nonce = rpc_dispatch(
+            &self.node,
+            "eth_getTransactionCount",
+            serde_json::json!([params.payer, "latest"]),
+        )
+        .await
+        .ok()
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        })
+        .unwrap_or(0);
+        let chain_id = rpc_dispatch(&self.node, "eth_chainId", serde_json::json!([]))
+            .await
             .ok()
-            .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
-            .unwrap_or(0);
-        let chain_id = rpc_dispatch(&self.node, "eth_chainId", serde_json::json!([])).await
-            .ok()
-            .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            })
             .unwrap_or(1337);
 
         let tx_type = serde_json::json!({
@@ -9774,8 +11422,11 @@ impl TenzroMcpServer {
             "tx_type": tx_type,
         });
         let result = rpc_dispatch(&self.node, "tenzro_signAndSendTransaction", send_params).await?;
-        let tx_hash = result.get("tx_hash").or_else(|| result.get("transaction_hash"))
-            .and_then(|v| v.as_str()).map(|s| s.to_string())
+        let tx_hash = result
+            .get("tx_hash")
+            .or_else(|| result.get("transaction_hash"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .or_else(|| result.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
         json_result(serde_json::json!({
@@ -9789,7 +11440,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Release escrowed funds to the payee via a signed ReleaseEscrow transaction. Only the original payer can release.")]
+    #[tool(
+        description = "Release escrowed funds to the payee via a signed ReleaseEscrow transaction. Only the original payer can release."
+    )]
     async fn release_escrow(
         &self,
         Parameters(params): Parameters<ReleaseEscrowParams>,
@@ -9800,7 +11453,8 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid escrow_id hex: {}", e)))?;
         if escrow_id_bytes.len() != 32 {
             return Err(err_internal(format!(
-                "escrow_id must be 32 bytes, got {}", escrow_id_bytes.len()
+                "escrow_id must be 32 bytes, got {}",
+                escrow_id_bytes.len()
             )));
         }
         let proof_bytes = match params.proof_data_hex.as_deref() {
@@ -9809,14 +11463,25 @@ impl TenzroMcpServer {
             None => Vec::new(),
         };
 
-        let nonce = rpc_dispatch(&self.node, "eth_getTransactionCount",
-            serde_json::json!([params.payer, "latest"])).await
+        let nonce = rpc_dispatch(
+            &self.node,
+            "eth_getTransactionCount",
+            serde_json::json!([params.payer, "latest"]),
+        )
+        .await
+        .ok()
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        })
+        .unwrap_or(0);
+        let chain_id = rpc_dispatch(&self.node, "eth_chainId", serde_json::json!([]))
+            .await
             .ok()
-            .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
-            .unwrap_or(0);
-        let chain_id = rpc_dispatch(&self.node, "eth_chainId", serde_json::json!([])).await
-            .ok()
-            .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            })
             .unwrap_or(1337);
 
         let tx_type = serde_json::json!({
@@ -9841,8 +11506,11 @@ impl TenzroMcpServer {
             "tx_type": tx_type,
         });
         let result = rpc_dispatch(&self.node, "tenzro_signAndSendTransaction", send_params).await?;
-        let tx_hash = result.get("tx_hash").or_else(|| result.get("transaction_hash"))
-            .and_then(|v| v.as_str()).map(|s| s.to_string())
+        let tx_hash = result
+            .get("tx_hash")
+            .or_else(|| result.get("transaction_hash"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .or_else(|| result.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
         json_result(serde_json::json!({
@@ -9852,7 +11520,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Refund escrowed funds back to the payer via a signed RefundEscrow transaction. Only the original payer can refund, AND the escrow must be expired (or use Timeout/Custom release conditions).")]
+    #[tool(
+        description = "Refund escrowed funds back to the payer via a signed RefundEscrow transaction. Only the original payer can refund, AND the escrow must be expired (or use Timeout/Custom release conditions)."
+    )]
     async fn refund_escrow(
         &self,
         Parameters(params): Parameters<RefundEscrowParams>,
@@ -9863,18 +11533,30 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid escrow_id hex: {}", e)))?;
         if escrow_id_bytes.len() != 32 {
             return Err(err_internal(format!(
-                "escrow_id must be 32 bytes, got {}", escrow_id_bytes.len()
+                "escrow_id must be 32 bytes, got {}",
+                escrow_id_bytes.len()
             )));
         }
 
-        let nonce = rpc_dispatch(&self.node, "eth_getTransactionCount",
-            serde_json::json!([params.payer, "latest"])).await
+        let nonce = rpc_dispatch(
+            &self.node,
+            "eth_getTransactionCount",
+            serde_json::json!([params.payer, "latest"]),
+        )
+        .await
+        .ok()
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        })
+        .unwrap_or(0);
+        let chain_id = rpc_dispatch(&self.node, "eth_chainId", serde_json::json!([]))
+            .await
             .ok()
-            .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
-            .unwrap_or(0);
-        let chain_id = rpc_dispatch(&self.node, "eth_chainId", serde_json::json!([])).await
-            .ok()
-            .and_then(|v| v.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            })
             .unwrap_or(1337);
 
         let tx_type = serde_json::json!({
@@ -9891,8 +11573,11 @@ impl TenzroMcpServer {
             "tx_type": tx_type,
         });
         let result = rpc_dispatch(&self.node, "tenzro_signAndSendTransaction", send_params).await?;
-        let tx_hash = result.get("tx_hash").or_else(|| result.get("transaction_hash"))
-            .and_then(|v| v.as_str()).map(|s| s.to_string())
+        let tx_hash = result
+            .get("tx_hash")
+            .or_else(|| result.get("transaction_hash"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .or_else(|| result.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
         json_result(serde_json::json!({
@@ -9902,7 +11587,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Open a micropayment channel for off-chain per-token billing. Sender deposits TNZO into the channel for streaming payments to the recipient. Returns the channel ID.")]
+    #[tool(
+        description = "Open a micropayment channel for off-chain per-token billing. Sender deposits TNZO into the channel for streaming payments to the recipient. Returns the channel ID."
+    )]
     async fn open_payment_channel(
         &self,
         Parameters(params): Parameters<OpenPaymentChannelParams>,
@@ -9912,7 +11599,9 @@ impl TenzroMcpServer {
         let recipient = parse_address(&params.recipient)
             .map_err(|e| err_internal(format!("Invalid recipient address: {}", e)))?;
         let deposit_wei = params.deposit_wei;
-        let chan_mgr = self.node.channel_manager()
+        let chan_mgr = self
+            .node
+            .channel_manager()
             .ok_or_else(|| err_internal("Channel manager not available"))?;
 
         // Developer-margin attribution: snapshot the app's wallet + margin
@@ -9946,8 +11635,20 @@ impl TenzroMcpServer {
         };
 
         let expires_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() + 86400;
-        let channel = chan_mgr.open_channel(sender, recipient, deposit_wei, AssetId::tnzo(), Timestamp(expires_at as i64), app_wallet, margin_bps)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + 86400;
+        let channel = chan_mgr
+            .open_channel(
+                sender,
+                recipient,
+                deposit_wei,
+                AssetId::tnzo(),
+                Timestamp(expires_at as i64),
+                app_wallet,
+                margin_bps,
+            )
             .map_err(|e| err_internal(format!("open_payment_channel failed: {}", e)))?;
         json_result(serde_json::json!({
             "channel_id": channel.channel_id,
@@ -9959,14 +11660,19 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Close a micropayment channel with the final balance. Requires sender signature on the final state. Settles remaining balance on-chain and returns any unused deposit.")]
+    #[tool(
+        description = "Close a micropayment channel with the final balance. Requires sender signature on the final state. Settles remaining balance on-chain and returns any unused deposit."
+    )]
     async fn close_payment_channel(
         &self,
         Parameters(params): Parameters<ClosePaymentChannelParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let chan_mgr = self.node.channel_manager()
+        let chan_mgr = self
+            .node
+            .channel_manager()
             .ok_or_else(|| err_internal("Channel manager not available"))?;
-        chan_mgr.close_channel(&params.channel_id)
+        chan_mgr
+            .close_channel(&params.channel_id)
             .map_err(|e| err_internal(format!("close_payment_channel failed: {}", e)))?;
         json_result(serde_json::json!({
             "channel_id": params.channel_id,
@@ -9978,7 +11684,9 @@ impl TenzroMcpServer {
 
     // ─── Model Lifecycle Tools ───
 
-    #[tool(description = "Download a model to this node's local storage. Fetch is peer-first: content-addressed weights are pulled from Tenzro peers over iroh blobs (BLAKE3-verified over the whole transfer), falling back to HuggingFace Hub when no peer holds them. Computes the weights' BLAKE3 and checks it against the canonical hash record (see get_model_hash) before load. Returns download status and progress.")]
+    #[tool(
+        description = "Download a model to this node's local storage. Fetch is peer-first: content-addressed weights are pulled from Tenzro peers over iroh blobs (BLAKE3-verified over the whole transfer), falling back to HuggingFace Hub when no peer holds them. Computes the weights' BLAKE3 and checks it against the canonical hash record (see get_model_hash) before load. Returns download status and progress."
+    )]
     async fn download_model(
         &self,
         Parameters(params): Parameters<DownloadModelParams>,
@@ -9986,10 +11694,15 @@ impl TenzroMcpServer {
         let model_id = params.model_id.clone();
         let entry = get_model_by_id(&model_id)
             .ok_or_else(|| err_internal(format!("Model '{}' not found in catalog", model_id)))?;
-        let hf_downloader = self.node.hf_downloader.as_ref()
+        let hf_downloader = self
+            .node
+            .hf_downloader
+            .as_ref()
             .ok_or_else(|| err_internal("HF downloader not available"))?;
         if hf_downloader.is_downloaded(&model_id) {
-            let size = hf_downloader.downloaded_size(&model_id).unwrap_or(entry.size_bytes);
+            let size = hf_downloader
+                .downloaded_size(&model_id)
+                .unwrap_or(entry.size_bytes);
             return json_result(serde_json::json!({
                 "model_id": model_id,
                 "status": "completed",
@@ -10017,15 +11730,14 @@ impl TenzroMcpServer {
         let entry_clone = entry.clone();
         let model_id_spawn = model_id.clone();
         tokio::spawn(async move {
-            let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(
-                tenzro_model::DownloadProgress {
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::watch::channel(tenzro_model::DownloadProgress {
                     model_id: model_id_spawn.clone(),
                     status: tenzro_model::DownloadState::Downloading,
                     progress_percent: 0.0,
                     downloaded_bytes: 0,
                     total_bytes: entry_clone.size_bytes,
-                }
-            );
+                });
             let downloads_inner = downloads.clone();
             let model_id_inner = model_id_spawn.clone();
             tokio::spawn(async move {
@@ -10039,7 +11751,10 @@ impl TenzroMcpServer {
                     }
                 }
             });
-            match hf_dl.download_model(&entry_clone, None, policy, progress_tx).await {
+            match hf_dl
+                .download_model(&entry_clone, None, policy, progress_tx)
+                .await
+            {
                 Ok(_path) => {
                     if let Some(mut e) = downloads.get_mut(&model_id_spawn) {
                         e.status = "completed".to_string();
@@ -10065,7 +11780,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Start serving a model for inference. Local mode loads downloaded GGUF weights in-process (the model must be downloaded first). External mode fronts an already-running OpenAI-compatible engine (vLLM, SGLang, llama-server) — pass engine + base_url. Returns the serving status and configuration.")]
+    #[tool(
+        description = "Start serving a model for inference. Local mode loads downloaded GGUF weights in-process (the model must be downloaded first). External mode fronts an already-running OpenAI-compatible engine (vLLM, SGLang, llama-server) — pass engine + base_url. Returns the serving status and configuration."
+    )]
     async fn serve_model_mcp(
         &self,
         Parameters(params): Parameters<ServeModelMcpParams>,
@@ -10086,17 +11803,27 @@ impl TenzroMcpServer {
             if let Some(api_key) = &params.api_key {
                 req.insert("api_key".into(), serde_json::json!(api_key));
             }
-            let result = rpc_dispatch(&self.node, "tenzro_serveModel", serde_json::Value::Object(req))
-                .await
-                .map_err(|e| err_internal(format!("serveModel failed: {}", e)))?;
+            let result = rpc_dispatch(
+                &self.node,
+                "tenzro_serveModel",
+                serde_json::Value::Object(req),
+            )
+            .await
+            .map_err(|e| err_internal(format!("serveModel failed: {}", e)))?;
             return json_result(result);
         }
         let model_id = &params.model_id;
         let entry = get_model_by_id(model_id)
             .ok_or_else(|| err_internal(format!("Model '{}' not found in catalog", model_id)))?;
-        let hf_downloader = self.node.hf_downloader.as_ref()
+        let hf_downloader = self
+            .node
+            .hf_downloader
+            .as_ref()
             .ok_or_else(|| err_internal("HF downloader not available"))?;
-        let model_runtime = self.node.model_runtime.as_ref()
+        let model_runtime = self
+            .node
+            .model_runtime
+            .as_ref()
             .ok_or_else(|| err_internal("Model runtime not available"))?;
         if model_runtime.is_loaded(model_id) {
             return json_result(serde_json::json!({
@@ -10107,26 +11834,42 @@ impl TenzroMcpServer {
         }
         if !hf_downloader.is_downloaded(model_id) {
             return Err(err_internal(format!(
-                "Model '{}' is not downloaded. Call download_model first.", model_id
+                "Model '{}' is not downloaded. Call download_model first.",
+                model_id
             )));
         }
         let gguf_path = hf_downloader.model_path(model_id);
-        model_runtime.load_model_with_context(model_id, &gguf_path, Some(entry.context_length))
+        model_runtime
+            .load_model_with_context(model_id, &gguf_path, Some(entry.context_length))
             .await
             .map_err(|e| err_internal(format!("Failed to load model: {}", e)))?;
-        self.node.served_models.insert(model_id.to_string(), tenzro_types::model::ModelVisibility::Network);
+        self.node.served_models.insert(
+            model_id.to_string(),
+            tenzro_types::model::ModelVisibility::Network,
+        );
         let max_concurrent = {
             let hw = self.node.hardware_profile.read();
             if let Some(ref profile) = *hw {
-                let gpu_vram = profile.gpus.first().map(|g| g.vram_gb as f64).unwrap_or(0.0);
+                let gpu_vram = profile
+                    .gpus
+                    .first()
+                    .map(|g| g.vram_gb as f64)
+                    .unwrap_or(0.0);
                 let has_gpu = !profile.gpus.is_empty() && gpu_vram > 0.0;
-                tenzro_model::estimate_max_concurrent(entry.min_ram_gb, profile.total_ram_gb, gpu_vram, has_gpu)
+                tenzro_model::estimate_max_concurrent(
+                    entry.min_ram_gb,
+                    profile.total_ram_gb,
+                    gpu_vram,
+                    has_gpu,
+                )
             } else {
                 tenzro_model::estimate_max_concurrent(entry.min_ram_gb, 4.0, 0.0, false)
             }
         };
         let max_concurrent = params.max_concurrent.unwrap_or(max_concurrent);
-        self.node.load_tracker.register_model(model_id, max_concurrent);
+        self.node
+            .load_tracker
+            .register_model(model_id, max_concurrent);
         json_result(serde_json::json!({
             "success": true,
             "model_id": model_id,
@@ -10135,14 +11878,17 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Stop serving a model on this node. The model remains downloaded but no longer accepts inference requests. Returns the stop confirmation.")]
+    #[tool(
+        description = "Stop serving a model on this node. The model remains downloaded but no longer accepts inference requests. Returns the stop confirmation."
+    )]
     async fn stop_model(
         &self,
         Parameters(params): Parameters<StopModelParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let model_id = &params.model_id;
         if let Some(runtime) = &self.node.model_runtime {
-            runtime.unload_model(model_id)
+            runtime
+                .unload_model(model_id)
                 .await
                 .map_err(|e| err_internal(format!("Failed to unload model: {}", e)))?;
         }
@@ -10156,18 +11902,22 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Delete a model from this node's local storage. The model must not be currently serving. Frees disk space. Returns deletion confirmation.")]
+    #[tool(
+        description = "Delete a model from this node's local storage. The model must not be currently serving. Frees disk space. Returns deletion confirmation."
+    )]
     async fn delete_model_mcp(
         &self,
         Parameters(params): Parameters<DeleteModelParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let model_id = &params.model_id;
         if let Some(runtime) = &self.node.model_runtime
-            && runtime.is_loaded(model_id) {
-                let _ = runtime.unload_model(model_id).await;
-            }
+            && runtime.is_loaded(model_id)
+        {
+            let _ = runtime.unload_model(model_id).await;
+        }
         if let Some(hf_dl) = &self.node.hf_downloader {
-            hf_dl.delete_model(model_id)
+            hf_dl
+                .delete_model(model_id)
                 .map_err(|e| err_internal(format!("Failed to delete model: {}", e)))?;
         }
         self.node.model_downloads.remove(model_id);
@@ -10180,31 +11930,33 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Check the download progress of a model. Returns bytes downloaded, total size, percentage complete, and estimated time remaining.")]
+    #[tool(
+        description = "Check the download progress of a model. Returns bytes downloaded, total size, percentage complete, and estimated time remaining."
+    )]
     async fn get_download_progress(
         &self,
         Parameters(params): Parameters<GetDownloadProgressParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         match self.node.model_downloads.get(&params.model_id) {
-            Some(status) => {
-                json_result(serde_json::json!({
-                    "model_id": params.model_id,
-                    "status": status.status,
-                    "progress_percent": status.progress_percent,
-                    "downloaded_bytes": status.downloaded_bytes,
-                    "total_bytes": status.total_bytes,
-                }))
-            }
+            Some(status) => json_result(serde_json::json!({
+                "model_id": params.model_id,
+                "status": status.status,
+                "progress_percent": status.progress_percent,
+                "downloaded_bytes": status.downloaded_bytes,
+                "total_bytes": status.total_bytes,
+            })),
             None => json_result(serde_json::json!({
                 "model_id": params.model_id,
                 "status": "not_downloading",
-            }))
+            })),
         }
     }
 
     // ─── Provider Config Tools ───
 
-    #[tool(description = "Set the availability schedule for a provider node. Define which hours and days the node will accept new inference requests. Returns the updated schedule.")]
+    #[tool(
+        description = "Set the availability schedule for a provider node. Define which hours and days the node will accept new inference requests. Returns the updated schedule."
+    )]
     async fn set_provider_schedule(
         &self,
         Parameters(params): Parameters<SetProviderScheduleParams>,
@@ -10230,7 +11982,9 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({ "success": true, "message": "Provider schedule updated" }))
     }
 
-    #[tool(description = "Get the availability schedule for a provider node. Returns the configured hours, days, and timezone when the provider accepts inference requests.")]
+    #[tool(
+        description = "Get the availability schedule for a provider node. Returns the configured hours, days, and timezone when the provider accepts inference requests."
+    )]
     async fn get_provider_schedule(
         &self,
         Parameters(params): Parameters<GetProviderScheduleParams>,
@@ -10238,11 +11992,15 @@ impl TenzroMcpServer {
         let _addr = parse_address(&params.provider_address)
             .map_err(|e| err_internal(format!("Invalid provider address: {}", e)))?;
         let schedule = self.node.provider_schedule.read();
-        json_result(serde_json::to_value(&*schedule)
-            .map_err(|e| err_internal(format!("Serialization failed: {}", e)))?)
+        json_result(
+            serde_json::to_value(&*schedule)
+                .map_err(|e| err_internal(format!("Serialization failed: {}", e)))?,
+        )
     }
 
-    #[tool(description = "Set the pricing configuration for a provider node. Token prices are wei per token (1 TNZO = 10^18 wei); the optional rates cover cached tokens, reasoning loops, image tokens, audio and video seconds, denoising pixel-steps and consumed frames. Every rate is held at or below the network per-unit ceiling. Returns the updated pricing config.")]
+    #[tool(
+        description = "Set the pricing configuration for a provider node. Token prices are wei per token (1 TNZO = 10^18 wei); the optional rates cover cached tokens, reasoning loops, image tokens, audio and video seconds, denoising pixel-steps and consumed frames. Every rate is held at or below the network per-unit ceiling. Returns the updated pricing config."
+    )]
     async fn set_provider_pricing(
         &self,
         Parameters(params): Parameters<SetProviderPricingParams>,
@@ -10271,7 +12029,10 @@ impl TenzroMcpServer {
         let rates = &mut pricing.modality_rates;
         for (slot, supplied) in [
             (&mut rates.price_per_request, params.price_per_request_wei),
-            (&mut rates.price_per_compute_ms, params.price_per_compute_ms_wei),
+            (
+                &mut rates.price_per_compute_ms,
+                params.price_per_compute_ms_wei,
+            ),
             (
                 &mut rates.price_per_cached_read_token,
                 params.price_per_cached_read_token_wei,
@@ -10284,7 +12045,10 @@ impl TenzroMcpServer {
                 &mut rates.price_per_reasoning_loop,
                 params.price_per_reasoning_loop_wei,
             ),
-            (&mut rates.price_per_image_token, params.price_per_image_token_wei),
+            (
+                &mut rates.price_per_image_token,
+                params.price_per_image_token_wei,
+            ),
             (
                 &mut rates.price_per_audio_second,
                 params.price_per_audio_second_wei,
@@ -10293,7 +12057,10 @@ impl TenzroMcpServer {
                 &mut rates.price_per_video_second,
                 params.price_per_video_second_wei,
             ),
-            (&mut rates.price_per_pixel_step, params.price_per_pixel_step_wei),
+            (
+                &mut rates.price_per_pixel_step,
+                params.price_per_pixel_step_wei,
+            ),
             (&mut rates.price_per_frame, params.price_per_frame_wei),
         ] {
             if let Some(value) = supplied {
@@ -10312,7 +12079,9 @@ impl TenzroMcpServer {
         )
     }
 
-    #[tool(description = "Get the current pricing configuration for a provider node. Returns the per-token rates, the per-unit rates for every other billable dimension, and the network ceilings.")]
+    #[tool(
+        description = "Get the current pricing configuration for a provider node. Returns the per-token rates, the per-unit rates for every other billable dimension, and the network ceilings."
+    )]
     async fn get_provider_pricing(
         &self,
         Parameters(params): Parameters<GetProviderPricingParams>,
@@ -10320,13 +12089,17 @@ impl TenzroMcpServer {
         let _addr = parse_address(&params.provider_address)
             .map_err(|e| err_internal(format!("Invalid provider address: {}", e)))?;
         let pricing = self.node.provider_pricing.read();
-        json_result(serde_json::to_value(&*pricing)
-            .map_err(|e| err_internal(format!("Serialization failed: {}", e)))?)
+        json_result(
+            serde_json::to_value(&*pricing)
+                .map_err(|e| err_internal(format!("Serialization failed: {}", e)))?,
+        )
     }
 
     // ─── Agent Advanced Tools ───
 
-    #[tool(description = "Register a new AI agent identity on the Tenzro Network. Two modes: (1) provisioner — node provisions a server-side hybrid wallet (FROST Ed25519 + ML-DSA-65 + BLS12-381), returns the classical_public_key + pq_verifying_key_len + bls_verifying_key_len; (2) BYOK — caller supplies `public_key` (32B Ed25519), `pq_public_key` (1952B ML-DSA-65), and `bls_public_key` (48B BLS12-381 G1) hex, registration is self-custodial. Returns agent_id, wallet_address, tenzro_did, registration_fee, and `byok` flag.")]
+    #[tool(
+        description = "Register a new AI agent identity on the Tenzro Network. Two modes: (1) provisioner — node provisions a server-side hybrid wallet (FROST Ed25519 + ML-DSA-65 + BLS12-381), returns the classical_public_key + pq_verifying_key_len + bls_verifying_key_len; (2) BYOK — caller supplies `public_key` (32B Ed25519), `pq_public_key` (1952B ML-DSA-65), and `bls_public_key` (48B BLS12-381 G1) hex, registration is self-custodial. Returns agent_id, wallet_address, tenzro_did, registration_fee, and `byok` flag."
+    )]
     async fn register_agent(
         &self,
         Parameters(params): Parameters<RegisterAgentParams>,
@@ -10336,24 +12109,45 @@ impl TenzroMcpServer {
         let creator = parse_address(&params.creator)?;
 
         let capabilities: Vec<Capability> = if params.capabilities.is_empty() {
-            vec![Capability::Custom { name: "general".to_string(), parameters: std::collections::HashMap::new() }]
+            vec![Capability::Custom {
+                name: "general".to_string(),
+                parameters: std::collections::HashMap::new(),
+            }]
         } else {
-            params.capabilities.iter().map(|s| match s.as_str() {
-                "nlp" => Capability::NaturalLanguageProcessing { languages: vec!["en".to_string()] },
-                "vision" => Capability::ComputerVision { tasks: vec!["detection".to_string()] },
-                "code" => Capability::CodeGeneration { languages: vec!["rust".to_string(), "python".to_string()] },
-                "data" => Capability::DataAnalysis { formats: vec!["json".to_string(), "csv".to_string()] },
-                "blockchain" => Capability::BlockchainInteraction { chains: vec!["tenzro".to_string()] },
-                "smart_contract" => Capability::SmartContractExecution,
-                "api_integration" => Capability::ExternalAPIIntegration { apis: vec![] },
-                "coordination" => Capability::MultiAgentCoordination,
-                other => Capability::Custom { name: other.to_string(), parameters: std::collections::HashMap::new() },
-            }).collect()
+            params
+                .capabilities
+                .iter()
+                .map(|s| match s.as_str() {
+                    "nlp" => Capability::NaturalLanguageProcessing {
+                        languages: vec!["en".to_string()],
+                    },
+                    "vision" => Capability::ComputerVision {
+                        tasks: vec!["detection".to_string()],
+                    },
+                    "code" => Capability::CodeGeneration {
+                        languages: vec!["rust".to_string(), "python".to_string()],
+                    },
+                    "data" => Capability::DataAnalysis {
+                        formats: vec!["json".to_string(), "csv".to_string()],
+                    },
+                    "blockchain" => Capability::BlockchainInteraction {
+                        chains: vec!["tenzro".to_string()],
+                    },
+                    "smart_contract" => Capability::SmartContractExecution,
+                    "api_integration" => Capability::ExternalAPIIntegration { apis: vec![] },
+                    "coordination" => Capability::MultiAgentCoordination,
+                    other => Capability::Custom {
+                        name: other.to_string(),
+                        parameters: std::collections::HashMap::new(),
+                    },
+                })
+                .collect()
         };
 
-        let agent_runtime = self.node.agent_runtime().ok_or_else(|| {
-            err_internal("Agent runtime not initialized")
-        })?;
+        let agent_runtime = self
+            .node
+            .agent_runtime()
+            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
 
         // BYOK path: all three keys supplied → no server-side wallet provisioning.
         // Partial-supply is rejected to avoid mixed custody.
@@ -10373,21 +12167,24 @@ impl TenzroMcpServer {
                 .map_err(|e| err_internal(format!("public_key is not valid hex: {}", e)))?;
             if pk_bytes.len() != 32 {
                 return Err(err_internal(format!(
-                    "public_key must be 32 bytes (Ed25519), got {}", pk_bytes.len()
+                    "public_key must be 32 bytes (Ed25519), got {}",
+                    pk_bytes.len()
                 )));
             }
             let pq_bytes = hex::decode(strip_0x(pq_hex))
                 .map_err(|e| err_internal(format!("pq_public_key is not valid hex: {}", e)))?;
             if pq_bytes.len() != 1952 {
                 return Err(err_internal(format!(
-                    "pq_public_key must be 1952 bytes (ML-DSA-65), got {}", pq_bytes.len()
+                    "pq_public_key must be 1952 bytes (ML-DSA-65), got {}",
+                    pq_bytes.len()
                 )));
             }
             let bls_bytes = hex::decode(strip_0x(bls_hex))
                 .map_err(|e| err_internal(format!("bls_public_key is not valid hex: {}", e)))?;
             if bls_bytes.len() != 48 {
                 return Err(err_internal(format!(
-                    "bls_public_key must be 48 bytes (BLS12-381 G1 compressed), got {}", bls_bytes.len()
+                    "bls_public_key must be 48 bytes (BLS12-381 G1 compressed), got {}",
+                    bls_bytes.len()
                 )));
             }
 
@@ -10440,20 +12237,25 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Submit a hybrid-signed (Ed25519 + ML-DSA-65) AgentMessage to a recipient agent's queue. Signing preimage: SHA-256(AgentMessage::signing_data()) — which includes both wallet addresses (resolved from registry, not wire). Both signature legs are required when the router enforces signing (production default); half-signed messages are rejected. Returns message_id, status, timestamp, and signed flag.")]
+    #[tool(
+        description = "Submit a hybrid-signed (Ed25519 + ML-DSA-65) AgentMessage to a recipient agent's queue. Signing preimage: SHA-256(AgentMessage::signing_data()) — which includes both wallet addresses (resolved from registry, not wire). Both signature legs are required when the router enforces signing (production default); half-signed messages are rejected. Returns message_id, status, timestamp, and signed flag."
+    )]
     async fn send_agent_message(
         &self,
         Parameters(params): Parameters<SendAgentMessageParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::agent::{AgentMessage, AgentMessageType};
 
-        let agent_runtime = self.node.agent_runtime().ok_or_else(|| {
-            err_internal("Agent runtime not initialized")
-        })?;
+        let agent_runtime = self
+            .node
+            .agent_runtime()
+            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
 
-        let from_agent = agent_runtime.get_agent(&params.from)
+        let from_agent = agent_runtime
+            .get_agent(&params.from)
             .map_err(|e| err_internal(format!("'from' agent not registered: {}", e)))?;
-        let to_agent = agent_runtime.get_agent(&params.to)
+        let to_agent = agent_runtime
+            .get_agent(&params.to)
             .map_err(|e| err_internal(format!("'to' agent not registered: {}", e)))?;
 
         let message_type = match params.message_type.as_deref() {
@@ -10464,10 +12266,12 @@ impl TenzroMcpServer {
             Some("notification") => AgentMessageType::Notification,
             Some("coordination") => AgentMessageType::Coordination,
             Some("error") => AgentMessageType::Error,
-            Some(other) => return Err(err_internal(format!(
-                "Unknown message_type '{}': use task_request|task_response|query|query_response|notification|coordination|error",
-                other
-            ))),
+            Some(other) => {
+                return Err(err_internal(format!(
+                    "Unknown message_type '{}': use task_request|task_response|query|query_response|notification|coordination|error",
+                    other
+                )));
+            }
         };
 
         let mut message = AgentMessage::new(
@@ -10490,14 +12294,16 @@ impl TenzroMcpServer {
                     .map_err(|e| err_internal(format!("Invalid hex in 'signature': {}", e)))?;
                 if classical.len() != 64 {
                     return Err(err_internal(format!(
-                        "'signature' must be 64 bytes (Ed25519), got {}", classical.len()
+                        "'signature' must be 64 bytes (Ed25519), got {}",
+                        classical.len()
                     )));
                 }
                 let pq = hex::decode(strip_0x(p))
                     .map_err(|e| err_internal(format!("Invalid hex in 'pq_signature': {}", e)))?;
                 if pq.len() != 3309 {
                     return Err(err_internal(format!(
-                        "'pq_signature' must be 3309 bytes (ML-DSA-65), got {}", pq.len()
+                        "'pq_signature' must be 3309 bytes (ML-DSA-65), got {}",
+                        pq.len()
                     )));
                 }
                 message = message.with_hybrid_signature(classical, pq);
@@ -10514,7 +12320,9 @@ impl TenzroMcpServer {
             }
         }
 
-        agent_runtime.send_message(message.clone()).await
+        agent_runtime
+            .send_message(message.clone())
+            .await
             .map_err(|e| err_internal(format!("Failed to send message: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -10527,7 +12335,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Delegate a task from one agent to another on the Tenzro Network. Optionally set a wei budget cap for the delegated task (1 TNZO = 10^18 wei). Returns the delegation record and task ID.")]
+    #[tool(
+        description = "Delegate a task from one agent to another on the Tenzro Network. Optionally set a wei budget cap for the delegated task (1 TNZO = 10^18 wei). Returns the delegation record and task ID."
+    )]
     async fn delegate_task(
         &self,
         Parameters(params): Parameters<DelegateTaskParams>,
@@ -10547,7 +12357,9 @@ impl TenzroMcpServer {
     // and the post-execute scan applies the FSM transition + stake freeze/slash +
     // cascade. MCP cannot sign on behalf of the controller — only describe the call.
 
-    #[tool(description = "Pause an agent (reversible). Halts all outbound A2A messaging and inference dispatch but preserves stake. Requires controller_did to match the agent's registered controller. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=PauseAgent.")]
+    #[tool(
+        description = "Pause an agent (reversible). Halts all outbound A2A messaging and inference dispatch but preserves stake. Requires controller_did to match the agent's registered controller. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=PauseAgent."
+    )]
     async fn pause_agent(
         &self,
         Parameters(params): Parameters<PauseAgentParams>,
@@ -10558,7 +12370,9 @@ impl TenzroMcpServer {
         )))
     }
 
-    #[tool(description = "Quarantine an agent (reversible). Halts messaging AND freezes all stake (blocks unstake/withdraw, allows slash). Requires controller_did to match the agent's registered controller. Optionally accepts a 32-byte evidence hash for off-chain audit linkage. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=QuarantineAgent.")]
+    #[tool(
+        description = "Quarantine an agent (reversible). Halts messaging AND freezes all stake (blocks unstake/withdraw, allows slash). Requires controller_did to match the agent's registered controller. Optionally accepts a 32-byte evidence hash for off-chain audit linkage. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=QuarantineAgent."
+    )]
     async fn quarantine_agent(
         &self,
         Parameters(params): Parameters<QuarantineAgentParams>,
@@ -10569,7 +12383,9 @@ impl TenzroMcpServer {
         )))
     }
 
-    #[tool(description = "Terminate an agent (TERMINAL — irreversible). Halts messaging, optionally slashes stake (slash_bps 0-10000), and optionally cascades to all descendant spawned agents. Requires controller_did to match. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=TerminateAgent.")]
+    #[tool(
+        description = "Terminate an agent (TERMINAL — irreversible). Halts messaging, optionally slashes stake (slash_bps 0-10000), and optionally cascades to all descendant spawned agents. Requires controller_did to match. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=TerminateAgent."
+    )]
     async fn terminate_agent(
         &self,
         Parameters(params): Parameters<TerminateAgentParams>,
@@ -10577,13 +12393,19 @@ impl TenzroMcpServer {
         let slash_bps = params.slash_bps.unwrap_or(0);
         if slash_bps > 10_000 {
             return Err(err_internal(format!(
-                "slash_bps must be 0..=10000 (got {})", slash_bps
+                "slash_bps must be 0..=10000 (got {})",
+                slash_bps
             )));
         }
         let cascade = params.cascade.unwrap_or(false);
         Err(err_internal(format!(
             "terminate_agent requires network consensus — sign and submit a TerminateAgent transaction via tenzro_signAndSendTransaction (agent={}, controller={}, reason={}, evidence={:?}, slash_bps={}, cascade={}). Gas: 120000.",
-            params.agent_did, params.controller_did, params.reason, params.evidence_hash, slash_bps, cascade
+            params.agent_did,
+            params.controller_did,
+            params.reason,
+            params.evidence_hash,
+            slash_bps,
+            cascade
         )))
     }
 
@@ -10594,28 +12416,34 @@ impl TenzroMcpServer {
     // Reads (get_agent_bond) and claim filing (file_insurance_claim) hit the
     // node's in-process BondManager directly — no signing required.
 
-    #[tool(description = "Post an AgentBond surety against an agent DID (Agent-Swarm Spec 9). An Active bond ≥ bond_min_for_promotion promotes a Machine identity into the Delegated admission lane even when its controller is unknown / sub-Enhanced KYC. NOTE: this MCP tool describes the operation only — sign and submit a PostAgentBond transaction via tenzro_signAndSendTransaction.")]
+    #[tool(
+        description = "Post an AgentBond surety against an agent DID (Agent-Swarm Spec 9). An Active bond ≥ bond_min_for_promotion promotes a Machine identity into the Delegated admission lane even when its controller is unknown / sub-Enhanced KYC. NOTE: this MCP tool describes the operation only — sign and submit a PostAgentBond transaction via tenzro_signAndSendTransaction."
+    )]
     async fn post_agent_bond(
         &self,
         Parameters(params): Parameters<PostAgentBondParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let _amount = params.amount.parse::<u128>().map_err(|e| {
-            err_internal(format!("invalid amount '{}': {}", params.amount, e))
-        })?;
+        let _amount = params
+            .amount
+            .parse::<u128>()
+            .map_err(|e| err_internal(format!("invalid amount '{}': {}", params.amount, e)))?;
         Err(err_internal(format!(
             "post_agent_bond requires network consensus — sign and submit a PostAgentBond transaction via tenzro_signAndSendTransaction (from={}, agent={}, controller={}, amount={} wei). Gas: 80000.",
             params.from, params.agent_did, params.controller_did, params.amount
         )))
     }
 
-    #[tool(description = "Inspect an AgentBond by agent DID. Returns lifecycle state (Active / Cooldown / Frozen / Slashed / Returned), amount, controller, cooldown_until, last_modified_block, and promotion eligibility. Returns null if no bond exists.")]
+    #[tool(
+        description = "Inspect an AgentBond by agent DID. Returns lifecycle state (Active / Cooldown / Frozen / Slashed / Returned), amount, controller, cooldown_until, last_modified_block, and promotion eligibility. Returns null if no bond exists."
+    )]
     async fn get_agent_bond(
         &self,
         Parameters(params): Parameters<GetAgentBondParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let bond_manager = self.node.bond_manager().ok_or_else(|| {
-            err_internal("BondManager not initialized on this node")
-        })?;
+        let bond_manager = self
+            .node
+            .bond_manager()
+            .ok_or_else(|| err_internal("BondManager not initialized on this node"))?;
         match bond_manager.get(&params.agent_did) {
             Some(state) => json_result(serde_json::json!({
                 "agent_did": state.agent_did,
@@ -10632,23 +12460,31 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "File an insurance claim against a bonded agent (Agent-Swarm Spec 9). The claim enters Open status awaiting governance adjudication; payout (if approved) is settled by a separate PayInsuranceClaim transaction. Returns the full ClaimRecord including the deterministic claim_id.")]
+    #[tool(
+        description = "File an insurance claim against a bonded agent (Agent-Swarm Spec 9). The claim enters Open status awaiting governance adjudication; payout (if approved) is settled by a separate PayInsuranceClaim transaction. Returns the full ClaimRecord including the deterministic claim_id."
+    )]
     async fn file_insurance_claim(
         &self,
         Parameters(params): Parameters<FileInsuranceClaimParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let amount_requested = params.amount_requested.parse::<u128>().map_err(|e| {
-            err_internal(format!("invalid amount_requested '{}': {}", params.amount_requested, e))
+            err_internal(format!(
+                "invalid amount_requested '{}': {}",
+                params.amount_requested, e
+            ))
         })?;
         let claimant_address = parse_address(&params.claimant_address)?;
 
-        let bond_manager = self.node.bond_manager().ok_or_else(|| {
-            err_internal("BondManager not initialized on this node")
-        })?;
+        let bond_manager = self
+            .node
+            .bond_manager()
+            .ok_or_else(|| err_internal("BondManager not initialized on this node"))?;
 
         // Cap narrative at 1024 bytes per spec.
         let narrative = params.narrative.map(|mut s| {
-            if s.len() > 1024 { s.truncate(1024); }
+            if s.len() > 1024 {
+                s.truncate(1024);
+            }
             s
         });
         let receipt_refs = params.receipt_refs.unwrap_or_default();
@@ -10680,7 +12516,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Grant a memory to an agent on the Tenzro Network. Embeds the text via the configured TextEmbeddingRuntime and writes to both the Lance vector index and the Tantivy BM25 index. Returns the persisted MemoryRecord including its UUID.")]
+    #[tool(
+        description = "Grant a memory to an agent on the Tenzro Network. Embeds the text via the configured TextEmbeddingRuntime and writes to both the Lance vector index and the Tantivy BM25 index. Returns the persisted MemoryRecord including its UUID."
+    )]
     async fn memory_grant(
         &self,
         Parameters(params): Parameters<MemoryGrantParams>,
@@ -10708,7 +12546,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Recall memories for an agent. Mode 'hybrid' (default) merges Lance vector kNN and Tantivy BM25 via Reciprocal Rank Fusion (k=60); 'vector' or 'text' restrict to one backend. Returns ranked MemoryRecord stubs (no embeddings).")]
+    #[tool(
+        description = "Recall memories for an agent. Mode 'hybrid' (default) merges Lance vector kNN and Tantivy BM25 via Reciprocal Rank Fusion (k=60); 'vector' or 'text' restrict to one backend. Returns ranked MemoryRecord stubs (no embeddings)."
+    )]
     async fn memory_recall(
         &self,
         Parameters(params): Parameters<MemoryRecallParams>,
@@ -10731,7 +12571,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Archive a memory record. Pushes the canonical payload to the configured DA backend, then rewrites the on-tier rows with kind='archived' and the resulting DaPointer attached. Frees hot search budget; payload is fetchable on demand via the pointer.")]
+    #[tool(
+        description = "Archive a memory record. Pushes the canonical payload to the configured DA backend, then rewrites the on-tier rows with kind='archived' and the resulting DaPointer attached. Frees hot search budget; payload is fetchable on demand via the pointer."
+    )]
     async fn memory_archive(
         &self,
         Parameters(params): Parameters<MemoryArchiveParams>,
@@ -10748,7 +12590,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List newest-first memories for an agent. Optional `kind` filter ('granted' | 'recalled' | 'self_noted' | 'archived'). Pure read against the on-tier text index. Use memory_recall for query-driven hybrid retrieval.")]
+    #[tool(
+        description = "List newest-first memories for an agent. Optional `kind` filter ('granted' | 'recalled' | 'self_noted' | 'archived'). Pure read against the on-tier text index. Use memory_recall for query-driven hybrid retrieval."
+    )]
     async fn list_memory_records(
         &self,
         Parameters(params): Parameters<ListMemoryRecordsParams>,
@@ -10766,7 +12610,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Challenge a DA committee member to prove current possession of its Red Stuff sliver for a blob commitment. The target must return the full sliver plus a nonce-bound Ed25519 signature; the challenger re-verifies the sliver against the commitment. The outcome (passed / failed_no_response / failed_not_held / failed_bad_proof) feeds the target's rolling availability score. Validator-only.")]
+    #[tool(
+        description = "Challenge a DA committee member to prove current possession of its Red Stuff sliver for a blob commitment. The target must return the full sliver plus a nonce-bound Ed25519 signature; the challenger re-verifies the sliver against the commitment. The outcome (passed / failed_no_response / failed_not_held / failed_bad_proof) feeds the target's rolling availability score. Validator-only."
+    )]
     async fn da_challenge(
         &self,
         Parameters(params): Parameters<DaChallengeParams>,
@@ -10781,7 +12627,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List resolved DA possession-challenge records, newest-first. Each record carries the blob commitment, target member index + address, nonce, timestamps, and outcome.")]
+    #[tool(
+        description = "List resolved DA possession-challenge records, newest-first. Each record carries the blob commitment, target member index + address, nonce, timestamps, and outcome."
+    )]
     async fn da_list_challenges(
         &self,
         Parameters(params): Parameters<DaListChallengesParams>,
@@ -10796,7 +12644,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read DA committee availability scores (0-1000, +1 per passed possession challenge, -5 silence or honest not-held, -25 bad proof). Pass an address for one member's score, omit for all scored members lowest-first.")]
+    #[tool(
+        description = "Read DA committee availability scores (0-1000, +1 per passed possession challenge, -5 silence or honest not-held, -25 bad proof). Pass an address for one member's score, omit for all scored members lowest-first."
+    )]
     async fn da_availability(
         &self,
         Parameters(params): Parameters<DaAvailabilityParams>,
@@ -10811,30 +12661,30 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Show the current DA committee roster: each member's index, address, whether it is the local node, and its availability score if it has ever been challenged.")]
-    async fn da_committee(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Show the current DA committee roster: each member's index, address, whether it is the local node, and its availability score if it has ever been challenged."
+    )]
+    async fn da_committee(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_daCommittee", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("daCommittee: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List blob commitments known to the local DA committee store, with the locally-held sliver index (if any) and the availability certificate (attesting member indices, quorum, root, timestamp) when one is held.")]
-    async fn da_list_blobs(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List blob commitments known to the local DA committee store, with the locally-held sliver index (if any) and the availability certificate (attesting member indices, quorum, root, timestamp) when one is held."
+    )]
+    async fn da_list_blobs(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_daListBlobs", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("daListBlobs: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Show the local iroh endpoint id, Pkarr relay URL, and ALPNs registered on the shared router. Returns an internal error iff the iroh transport failed to bind at startup.")]
-    async fn iroh_get_info(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Show the local iroh endpoint id, Pkarr relay URL, and ALPNs registered on the shared router. Returns an internal error iff the iroh transport failed to bind at startup."
+    )]
+    async fn iroh_get_info(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let resolver = self
             .node
             .iroh_resolver
@@ -10856,7 +12706,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Publish raw bytes to the shared iroh-blobs store. Returns a content-addressed `tenzro://blob/<blake3-hex>` URI that any iroh peer can fetch (subject to NAT/discovery reachability).")]
+    #[tool(
+        description = "Publish raw bytes to the shared iroh-blobs store. Returns a content-addressed `tenzro://blob/<blake3-hex>` URI that any iroh peer can fetch (subject to NAT/discovery reachability)."
+    )]
     async fn iroh_publish_blob(
         &self,
         Parameters(params): Parameters<IrohPublishBlobParams>,
@@ -10882,7 +12734,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Fetch a content-addressed `tenzro://blob|model|gradient|shard|receipt/...` URI from the local iroh-blobs store (auto-populates from peers as needed). Returns base64-encoded bytes plus the parsed URI and size.")]
+    #[tool(
+        description = "Fetch a content-addressed `tenzro://blob|model|gradient|shard|receipt/...` URI from the local iroh-blobs store (auto-populates from peers as needed). Returns base64-encoded bytes plus the parsed URI and size."
+    )]
     async fn iroh_fetch_blob(
         &self,
         Parameters(params): Parameters<IrohFetchBlobParams>,
@@ -10910,7 +12764,9 @@ impl TenzroMcpServer {
 
     // ---- Operability inspection surface (read-only) -------------------
 
-    #[tool(description = "Fetch a single validator's registry entry by hex-encoded 32-byte address (with or without 0x prefix). Returns null when the address is not registered. Read-only — validators self-register via the staking transaction path.")]
+    #[tool(
+        description = "Fetch a single validator's registry entry by hex-encoded 32-byte address (with or without 0x prefix). Returns null when the address is not registered. Read-only — validators self-register via the staking transaction path."
+    )]
     async fn get_validator_state(
         &self,
         Parameters(params): Parameters<GetValidatorStateParams>,
@@ -10922,7 +12778,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List validators in the on-chain registry, optionally filtered by status ('Active' | 'Candidate' | 'PendingActive' | 'PendingExit' | 'Exited' | 'Jailed'). Each entry carries base58 address, Ed25519 + ML-DSA-65 + BLS12-381 pubkeys, self_stake (u128 decimal string), and epoch lifecycle markers.")]
+    #[tool(
+        description = "List validators in the on-chain registry, optionally filtered by status ('Active' | 'Candidate' | 'PendingActive' | 'PendingExit' | 'Exited' | 'Jailed'). Each entry carries base58 address, Ed25519 + ML-DSA-65 + BLS12-381 pubkeys, self_stake (u128 decimal string), and epoch lifecycle markers."
+    )]
     async fn list_validators(
         &self,
         Parameters(params): Parameters<ListValidatorsParams>,
@@ -10937,27 +12795,41 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List only currently-Active validators. Convenience over list_validators with status='Active'. Useful for SRE dashboards that need the current committee size and stake distribution.")]
+    #[tool(
+        description = "List only currently-Active validators. Convenience over list_validators with status='Active'. Useful for SRE dashboards that need the current committee size and stake distribution."
+    )]
     async fn list_active_validators(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listActiveValidators", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("listActiveValidators failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listActiveValidators",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listActiveValidators failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List every active Tenzro Train run this node is syncing. Each run carries task_id, status (Pending/Active/Completed/Failed/Cancelled), current_round, state_root, enrolled_trainers, and (once terminal) the sealed receipt. Read-only — safe for monitoring agents.")]
+    #[tool(
+        description = "List every active Tenzro Train run this node is syncing. Each run carries task_id, status (Pending/Active/Completed/Failed/Cancelled), current_round, state_root, enrolled_trainers, and (once terminal) the sealed receipt. Read-only — safe for monitoring agents."
+    )]
     async fn training_list_runs(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_training_listRuns", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("training.listRuns failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_training_listRuns",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("training.listRuns failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Look up a single Tenzro Train run by task_id. Returns the full read-side view (task_spec, status, current_round, state_root, enrolled_trainers, metadata, receipt-if-terminal). Returns JSON-RPC -32602 when the run is unknown.")]
+    #[tool(
+        description = "Look up a single Tenzro Train run by task_id. Returns the full read-side view (task_spec, status, current_round, state_root, enrolled_trainers, metadata, receipt-if-terminal). Returns JSON-RPC -32602 when the run is unknown."
+    )]
     async fn training_get_run(
         &self,
         Parameters(params): Parameters<TrainingTaskIdParams>,
@@ -10969,7 +12841,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch the sealed receipt for a finalized Tenzro Train run. Returns null when the run is still active. Persisted under CF_TRAINING_RECEIPTS — carries final_state_root, rounds_completed, witness_committees, optional manifest_hash, sealed_at_ms.")]
+    #[tool(
+        description = "Fetch the sealed receipt for a finalized Tenzro Train run. Returns null when the run is still active. Persisted under CF_TRAINING_RECEIPTS — carries final_state_root, rounds_completed, witness_committees, optional manifest_hash, sealed_at_ms."
+    )]
     async fn training_get_receipt(
         &self,
         Parameters(params): Parameters<TrainingTaskIdParams>,
@@ -10981,7 +12855,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch the installed sealed-shard manifest for a Confidential-tier Tenzro Train task. Returns null when no manifest has been installed (Open and Verified tiers never have a manifest). Manifest binds each trainer's encrypted shard, HPKE-wrapped data key, and enclave attestation.")]
+    #[tool(
+        description = "Fetch the installed sealed-shard manifest for a Confidential-tier Tenzro Train task. Returns null when no manifest has been installed (Open and Verified tiers never have a manifest). Manifest binds each trainer's encrypted shard, HPKE-wrapped data key, and enclave attestation."
+    )]
     async fn training_get_sealed_manifest(
         &self,
         Parameters(params): Parameters<TrainingTaskIdParams>,
@@ -10993,7 +12869,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Ask the Tenzro Train syncer for its round decision. Returns `{decision: \"wait\", remaining_ms}` while the grace window is open, `{decision: \"finalize\", round}` once a witness quorum endorses the round, or `{decision: \"no_quorum\", round}` when the window elapses without a quorum (the run advances, carrying the prior state root forward). Returns JSON-RPC -32602 when the run is unknown. Read-only — safe for monitoring agents.")]
+    #[tool(
+        description = "Ask the Tenzro Train syncer for its round decision. Returns `{decision: \"wait\", remaining_ms}` while the grace window is open, `{decision: \"finalize\", round}` once a witness quorum endorses the round, or `{decision: \"no_quorum\", round}` when the window elapses without a quorum (the run advances, carrying the prior state root forward). Returns JSON-RPC -32602 when the run is unknown. Read-only — safe for monitoring agents."
+    )]
     async fn training_decide_round(
         &self,
         Parameters(params): Parameters<TrainingTaskIdParams>,
@@ -11007,7 +12885,9 @@ impl TenzroMcpServer {
 
     // ---- Tenzro Media Gen inspection surface (read-only) --------------
 
-    #[tool(description = "List the curated generative-media catalog: ungated diffusers pipelines serving text2image, image2image, text2video, or image2video. Each entry carries id, hf_repo, pipeline_class, kinds, default resolution and steps, min_vram_gb, license, and expert_pair. A non-null expert_pair means the denoising schedule splits across two workers, so a claim on that model needs a role.")]
+    #[tool(
+        description = "List the curated generative-media catalog: ungated diffusers pipelines serving text2image, image2image, text2video, or image2video. Each entry carries id, hf_repo, pipeline_class, kinds, default resolution and steps, min_vram_gb, license, and expert_pair. A non-null expert_pair means the denoising schedule splits across two workers, so a claim on that model needs a role."
+    )]
     async fn media_gen_list_catalog(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -11021,7 +12901,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Price a Tenzro Media Gen job before posting it. The work unit is the pixel-step (width x height x steps x frames). Returns kind, pixel_steps, per_pixel_step, base_fee, and quote as decimal attoTNZO strings. Read-only — nothing is queued.")]
+    #[tool(
+        description = "Price a Tenzro Media Gen job before posting it. The work unit is the pixel-step (width x height x steps x frames). Returns kind, pixel_steps, per_pixel_step, base_fee, and quote as decimal attoTNZO strings. Read-only — nothing is queued."
+    )]
     async fn media_gen_quote(
         &self,
         Parameters(params): Parameters<MediaGenQuoteParams>,
@@ -11033,7 +12915,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List the Tenzro Media Gen jobs this node holds, optionally filtered by status. Each job carries job_id, task_spec, status, required_roles, assignments, handoff-if-split, and receipt-if-complete. Read-only — safe for monitoring agents.")]
+    #[tool(
+        description = "List the Tenzro Media Gen jobs this node holds, optionally filtered by status. Each job carries job_id, task_spec, status, required_roles, assignments, handoff-if-split, and receipt-if-complete. Read-only — safe for monitoring agents."
+    )]
     async fn media_gen_list_jobs(
         &self,
         Parameters(params): Parameters<MediaGenListJobsParams>,
@@ -11048,7 +12932,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Look up a single Tenzro Media Gen job by id. Returns null when this node has never seen it. On a split job the assignments array shows which halves of the denoising schedule are already claimed.")]
+    #[tool(
+        description = "Look up a single Tenzro Media Gen job by id. Returns null when this node has never seen it. On a split job the assignments array shows which halves of the denoising schedule are already claimed."
+    )]
     async fn media_gen_get_job(
         &self,
         Parameters(params): Parameters<MediaGenJobIdParams>,
@@ -11060,7 +12946,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List the generative-media workers enrolled on this node. Each entry carries worker_did, supported_models, expert_holdings (the halves of a split model it has resident), max_resolution, max_frames, and gpu_vram_gb. Read-only.")]
+    #[tool(
+        description = "List the generative-media workers enrolled on this node. Each entry carries worker_did, supported_models, expert_holdings (the halves of a split model it has resident), max_resolution, max_frames, and gpu_vram_gb. Read-only."
+    )]
     async fn media_gen_list_workers(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -11074,7 +12962,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch the signed receipt sealing a completed Tenzro Media Gen job. Returns null while the job is still open. The receipt commits to output_hash, output_mime, output_bytes, the params actually rendered, and the worker's signature.")]
+    #[tool(
+        description = "Fetch the signed receipt sealing a completed Tenzro Media Gen job. Returns null while the job is still open. The receipt commits to output_hash, output_mime, output_bytes, the params actually rendered, and the worker's signature."
+    )]
     async fn media_gen_get_receipt(
         &self,
         Parameters(params): Parameters<MediaGenJobIdParams>,
@@ -11086,7 +12976,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read the inference router's live metrics snapshot: total requests routed, hedges dispatched, hedges won, and requests abandoned on the whole-request deadline. Read-only — safe for monitoring agents.")]
+    #[tool(
+        description = "Read the inference router's live metrics snapshot: total requests routed, hedges dispatched, hedges won, and requests abandoned on the whole-request deadline. Read-only — safe for monitoring agents."
+    )]
     async fn get_router_metrics(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -11097,7 +12989,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Report the trainer auto-provisioning daemon status. When the node has no [training] config section (or enabled=false), running is false. Otherwise returns {running, trainer_did, live_trainers, max_concurrent_trainers}. Read-only.")]
+    #[tool(
+        description = "Report the trainer auto-provisioning daemon status. When the node has no [training] config section (or enabled=false), running is false. Otherwise returns {running, trainer_did, live_trainers, max_concurrent_trainers}. Read-only."
+    )]
     async fn get_trainer_daemon_status(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -11112,7 +13006,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Look up the cached provenance manifest for generated content by its 32-byte hex content_hash (with or without 0x prefix). This is the machine-readable synthetic-content marker per EU AI Act Art. 50(2). Returns JSON-RPC -32004 when no manifest is cached for the hash. Read-only.")]
+    #[tool(
+        description = "Look up the cached provenance manifest for generated content by its 32-byte hex content_hash (with or without 0x prefix). This is the machine-readable synthetic-content marker per EU AI Act Art. 50(2). Returns JSON-RPC -32004 when no manifest is cached for the hash. Read-only."
+    )]
     async fn get_provenance(
         &self,
         Parameters(params): Parameters<GetProvenanceParams>,
@@ -11126,15 +13022,24 @@ impl TenzroMcpServer {
 
     // ---- Spec 7: adaptive burn-rate governance dial -------------------
 
-    #[tool(description = "Show the current adaptive burn-rate config — base/local/paymaster burn bps with their treasury complements. Paymaster is locked at 100% burn. The dial moves only via on-chain governance proposals (see adaptive_burn_get_recommendation).")]
+    #[tool(
+        description = "Show the current adaptive burn-rate config — base/local/paymaster burn bps with their treasury complements. Paymaster is locked at 100% burn. The dial moves only via on-chain governance proposals (see adaptive_burn_get_recommendation)."
+    )]
     async fn adaptive_burn_get_config(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let v = rpc_dispatch(&self.node, "tenzro_getBurnRateConfig", serde_json::json!({})).await?;
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getBurnRateConfig",
+            serde_json::json!({}),
+        )
+        .await?;
         json_result(v)
     }
 
-    #[tool(description = "Show the latest supply-side metrics snapshot — block height, circulating supply, rolling-window epoch delta, burn/emission breakdown. Drives the recommendation engine.")]
+    #[tool(
+        description = "Show the latest supply-side metrics snapshot — block height, circulating supply, rolling-window epoch delta, burn/emission breakdown. Drives the recommendation engine."
+    )]
     async fn adaptive_burn_get_metrics(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -11142,11 +13047,18 @@ impl TenzroMcpServer {
         json_result(v)
     }
 
-    #[tool(description = "Show the current adaptive-burn recommendation — action (NoChange / IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation / AlarmHighDeflation), magnitude bps, and whether it's above the auto-proposal floor. Pure function of metrics + targets, no side effects.")]
+    #[tool(
+        description = "Show the current adaptive-burn recommendation — action (NoChange / IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation / AlarmHighDeflation), magnitude bps, and whether it's above the auto-proposal floor. Pure function of metrics + targets, no side effects."
+    )]
     async fn adaptive_burn_get_recommendation(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let v = rpc_dispatch(&self.node, "tenzro_getBurnRateRecommendation", serde_json::json!({})).await?;
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getBurnRateRecommendation",
+            serde_json::json!({}),
+        )
+        .await?;
         json_result(v)
     }
 
@@ -11154,21 +13066,35 @@ impl TenzroMcpServer {
     async fn adaptive_burn_list_proposals(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let v = rpc_dispatch(&self.node, "tenzro_listAdaptiveBurnProposals", serde_json::json!({})).await?;
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_listAdaptiveBurnProposals",
+            serde_json::json!({}),
+        )
+        .await?;
         json_result(v)
     }
 
     // ---- Spec 10: SeedAgent treasury allocation -----------------------
 
-    #[tool(description = "Show the genesis SeedAgent treasury earmark — total TNZO allocation, draw-down to date, decay schedule, seed-agent count, surplus burn bps at sunset. The earmark funds protocol-owned bootstrap agents for the first 12 months.")]
+    #[tool(
+        description = "Show the genesis SeedAgent treasury earmark — total TNZO allocation, draw-down to date, decay schedule, seed-agent count, surplus burn bps at sunset. The earmark funds protocol-owned bootstrap agents for the first 12 months."
+    )]
     async fn seed_agent_get_earmark(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let v = rpc_dispatch(&self.node, "tenzro_getTreasuryEarmark", serde_json::json!({})).await?;
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getTreasuryEarmark",
+            serde_json::json!({}),
+        )
+        .await?;
         json_result(v)
     }
 
-    #[tool(description = "Fetch a SeedAgent governance charter by 32-byte id. Charter enumerates OperationKind (InferenceConsumer / TaskMarketplaceConsumer / etc.), spend caps, throughput target, counterparty filter, and sunset deadline.")]
+    #[tool(
+        description = "Fetch a SeedAgent governance charter by 32-byte id. Charter enumerates OperationKind (InferenceConsumer / TaskMarketplaceConsumer / etc.), spend caps, throughput target, counterparty filter, and sunset deadline."
+    )]
     async fn seed_agent_get_charter(
         &self,
         Parameters(params): Parameters<SeedAgentCharterParams>,
@@ -11177,7 +13103,8 @@ impl TenzroMcpServer {
             &self.node,
             "tenzro_getSeedAgentCharter",
             serde_json::json!({ "charter_id": params.charter_id }),
-        ).await?;
+        )
+        .await?;
         json_result(v)
     }
 
@@ -11185,11 +13112,18 @@ impl TenzroMcpServer {
     async fn seed_agent_list_charters(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let v = rpc_dispatch(&self.node, "tenzro_listSeedAgentCharters", serde_json::json!({})).await?;
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_listSeedAgentCharters",
+            serde_json::json!({}),
+        )
+        .await?;
         json_result(v)
     }
 
-    #[tool(description = "List provisioned SeedAgent records. Each record carries agent_did, controller_did, status (Active/Paused/Quarantined/Terminated), allocation drawn, and optional bond id. Filter by charter_id to scope to one charter's roster.")]
+    #[tool(
+        description = "List provisioned SeedAgent records. Each record carries agent_did, controller_did, status (Active/Paused/Quarantined/Terminated), allocation drawn, and optional bond id. Filter by charter_id to scope to one charter's roster."
+    )]
     async fn seed_agent_list(
         &self,
         Parameters(params): Parameters<SeedAgentListParams>,
@@ -11202,7 +13136,9 @@ impl TenzroMcpServer {
         json_result(v)
     }
 
-    #[tool(description = "Get network activity counters (inference / settlement / bridge / ERC-7683). exclude_seed=true filters out flows where either side `is_seed_agent`, isolating organic activity from protocol bootstrap traffic.")]
+    #[tool(
+        description = "Get network activity counters (inference / settlement / bridge / ERC-7683). exclude_seed=true filters out flows where either side `is_seed_agent`, isolating organic activity from protocol bootstrap traffic."
+    )]
     async fn seed_agent_get_network_activity(
         &self,
         Parameters(params): Parameters<SeedAgentActivityParams>,
@@ -11218,13 +13154,16 @@ impl TenzroMcpServer {
             &self.node,
             "tenzro_getNetworkActivity",
             serde_json::Value::Object(body),
-        ).await?;
+        )
+        .await?;
         json_result(v)
     }
 
     // ---- Spec 4: ERC-7683 cross-chain intent settler ------------------
 
-    #[tool(description = "Fetch a single Tenzro7683Order envelope by 32-byte order_id. Envelope is persisted in CF_SETTLEMENTS under the `7683_origin:` keyspace. Order state machine: Open → AwaitingProof → Settled / Refunded / ForceRefundEligible.")]
+    #[tool(
+        description = "Fetch a single Tenzro7683Order envelope by 32-byte order_id. Envelope is persisted in CF_SETTLEMENTS under the `7683_origin:` keyspace. Order state machine: Open → AwaitingProof → Settled / Refunded / ForceRefundEligible."
+    )]
     async fn erc7683_get_order(
         &self,
         Parameters(params): Parameters<Erc7683OrderIdParams>,
@@ -11233,11 +13172,14 @@ impl TenzroMcpServer {
             &self.node,
             "tenzro_get7683Order",
             serde_json::json!({ "order_id": params.order_id }),
-        ).await?;
+        )
+        .await?;
         json_result(v)
     }
 
-    #[tool(description = "Paginated scan over persisted ERC-7683 orders in the `7683_origin:` keyspace. Optional state filter (open / awaiting_proof / settled / refunded / force_refund_eligible) and CAIP-2 dest_chain filter.")]
+    #[tool(
+        description = "Paginated scan over persisted ERC-7683 orders in the `7683_origin:` keyspace. Optional state filter (open / awaiting_proof / settled / refunded / force_refund_eligible) and CAIP-2 dest_chain filter."
+    )]
     async fn erc7683_list_orders(
         &self,
         Parameters(params): Parameters<Erc7683ListOrdersParams>,
@@ -11256,11 +13198,14 @@ impl TenzroMcpServer {
             &self.node,
             "tenzro_list7683Orders",
             serde_json::Value::Object(body),
-        ).await?;
+        )
+        .await?;
         json_result(v)
     }
 
-    #[tool(description = "Destination-side commit of an ERC-7683 FillRecord (single-shot per order_id — re-submission returns -32010 OrderAlreadyFilled). Required fields: order_id, origin_chain_id, origin_settler, filler, recipient (32-byte), fill_tx_hash, filled_at_ms, proof_route, outputs[].")]
+    #[tool(
+        description = "Destination-side commit of an ERC-7683 FillRecord (single-shot per order_id — re-submission returns -32010 OrderAlreadyFilled). Required fields: order_id, origin_chain_id, origin_settler, filler, recipient (32-byte), fill_tx_hash, filled_at_ms, proof_route, outputs[]."
+    )]
     async fn erc7683_record_fill(
         &self,
         Parameters(params): Parameters<Erc7683RecordFillParams>,
@@ -11280,7 +13225,9 @@ impl TenzroMcpServer {
         json_result(v)
     }
 
-    #[tool(description = "Fetch a single ERC-7683 FillRecord by (order_id, origin_chain_id). Returns the record JSON, or -32000 if no fill has been recorded.")]
+    #[tool(
+        description = "Fetch a single ERC-7683 FillRecord by (order_id, origin_chain_id). Returns the record JSON, or -32000 if no fill has been recorded."
+    )]
     async fn erc7683_get_fill(
         &self,
         Parameters(params): Parameters<Erc7683GetFillParams>,
@@ -11292,11 +13239,14 @@ impl TenzroMcpServer {
                 "order_id": params.order_id,
                 "origin_chain_id": params.origin_chain_id,
             }),
-        ).await?;
+        )
+        .await?;
         json_result(v)
     }
 
-    #[tool(description = "List every recorded destination-side FillRecord on this node. Cardinality is bounded — registry holds at most one FillRecord per cross-chain order ever filled here.")]
+    #[tool(
+        description = "List every recorded destination-side FillRecord on this node. Cardinality is bounded — registry holds at most one FillRecord per cross-chain order ever filled here."
+    )]
     async fn erc7683_list_fills(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -11304,7 +13254,9 @@ impl TenzroMcpServer {
         json_result(v)
     }
 
-    #[tool(description = "Discover available AI models on the Tenzro Network. Filter by category, serving status, or max price. Returns model IDs, providers, pricing, and endpoints.")]
+    #[tool(
+        description = "Discover available AI models on the Tenzro Network. Filter by category, serving status, or max price. Returns model IDs, providers, pricing, and endpoints."
+    )]
     async fn discover_models(
         &self,
         Parameters(params): Parameters<DiscoverModelsParams>,
@@ -11315,7 +13267,9 @@ impl TenzroMcpServer {
         )))
     }
 
-    #[tool(description = "Discover registered AI agents on the Tenzro Network. Filter by capability or agent type. Returns agent DIDs, capabilities, endpoints, and reputation scores.")]
+    #[tool(
+        description = "Discover registered AI agents on the Tenzro Network. Filter by capability or agent type. Returns agent DIDs, capabilities, endpoints, and reputation scores."
+    )]
     async fn discover_agents(
         &self,
         Parameters(params): Parameters<DiscoverAgentsParams>,
@@ -11330,29 +13284,49 @@ impl TenzroMcpServer {
         // Local agents (registered on this node via AgentRuntime)
         if let Some(runtime) = self.node.agent_runtime() {
             for a in runtime.list_agents(None).iter() {
-                let cap_names: Vec<String> = a.capabilities.iter().map(|c| {
-                    match c {
-                        tenzro_types::agent::Capability::NaturalLanguageProcessing { .. } => "NaturalLanguageProcessing".to_string(),
-                        tenzro_types::agent::Capability::ComputerVision { .. } => "ComputerVision".to_string(),
-                        tenzro_types::agent::Capability::CodeGeneration { .. } => "CodeGeneration".to_string(),
-                        tenzro_types::agent::Capability::DataAnalysis { .. } => "DataAnalysis".to_string(),
-                        tenzro_types::agent::Capability::BlockchainInteraction { .. } => "BlockchainInteraction".to_string(),
-                        tenzro_types::agent::Capability::SmartContractExecution => "SmartContractExecution".to_string(),
-                        tenzro_types::agent::Capability::ExternalAPIIntegration { .. } => "ExternalAPIIntegration".to_string(),
-                        tenzro_types::agent::Capability::MultiAgentCoordination => "MultiAgentCoordination".to_string(),
+                let cap_names: Vec<String> = a
+                    .capabilities
+                    .iter()
+                    .map(|c| match c {
+                        tenzro_types::agent::Capability::NaturalLanguageProcessing { .. } => {
+                            "NaturalLanguageProcessing".to_string()
+                        }
+                        tenzro_types::agent::Capability::ComputerVision { .. } => {
+                            "ComputerVision".to_string()
+                        }
+                        tenzro_types::agent::Capability::CodeGeneration { .. } => {
+                            "CodeGeneration".to_string()
+                        }
+                        tenzro_types::agent::Capability::DataAnalysis { .. } => {
+                            "DataAnalysis".to_string()
+                        }
+                        tenzro_types::agent::Capability::BlockchainInteraction { .. } => {
+                            "BlockchainInteraction".to_string()
+                        }
+                        tenzro_types::agent::Capability::SmartContractExecution => {
+                            "SmartContractExecution".to_string()
+                        }
+                        tenzro_types::agent::Capability::ExternalAPIIntegration { .. } => {
+                            "ExternalAPIIntegration".to_string()
+                        }
+                        tenzro_types::agent::Capability::MultiAgentCoordination => {
+                            "MultiAgentCoordination".to_string()
+                        }
                         tenzro_types::agent::Capability::Custom { name, .. } => name.clone(),
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 if let Some(ref needle) = cap_filter
-                    && !cap_names.iter().any(|n| n.to_lowercase().contains(needle)) {
-                        continue;
-                    }
+                    && !cap_names.iter().any(|n| n.to_lowercase().contains(needle))
+                {
+                    continue;
+                }
                 // Local runtime-registered agents are "tenzroclaw" type
                 if let Some(ref needle) = type_filter
-                    && !"tenzroclaw".contains(needle.as_str()) {
-                        continue;
-                    }
+                    && !"tenzroclaw".contains(needle.as_str())
+                {
+                    continue;
+                }
 
                 seen_ids.insert(a.identity.agent_id.clone());
                 result.push(serde_json::json!({
@@ -11379,13 +13353,23 @@ impl TenzroMcpServer {
                     continue;
                 }
                 if let Some(ref needle) = cap_filter
-                    && !entry.announcement.capabilities.iter().any(|c| c.to_lowercase().contains(needle)) {
-                        continue;
-                    }
+                    && !entry
+                        .announcement
+                        .capabilities
+                        .iter()
+                        .any(|c| c.to_lowercase().contains(needle))
+                {
+                    continue;
+                }
                 if let Some(ref needle) = type_filter
-                    && !entry.announcement.agent_type.to_lowercase().contains(needle.as_str()) {
-                        continue;
-                    }
+                    && !entry
+                        .announcement
+                        .agent_type
+                        .to_lowercase()
+                        .contains(needle.as_str())
+                {
+                    continue;
+                }
                 seen_ids.insert(entry.announcement.agent_id.clone());
                 result.push(serde_json::json!({
                     "agent_id": entry.announcement.agent_id,
@@ -11420,8 +13404,12 @@ impl TenzroMcpServer {
     // RPCs, so callers reaching the node via MCP have feature-parity with
     // JSON-RPC for capability discovery and attestation inspection.
 
-    #[tool(description = "List all registered capabilities on this Tenzro node. Returns each capability with the count of agents that have it, the count of attestations, and the list of agent IDs supporting that capability. Use to discover what specialized work the local agent runtime can route.")]
-    async fn list_capabilities(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List all registered capabilities on this Tenzro node. Returns each capability with the count of agents that have it, the count of attestations, and the list of agent IDs supporting that capability. Use to discover what specialized work the local agent runtime can route."
+    )]
+    async fn list_capabilities(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let runtime = self.node.agent_runtime().ok_or_else(|| {
             err_internal("agent runtime not initialized — capabilities unavailable")
         })?;
@@ -11447,7 +13435,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Fetch all attestations registered for a given capability. Each attestation carries the agent ID, attestation timestamp, TEE-backed flag, attester address, attester public key, signature, and metadata. Set verified_only=true to filter for attestations that pass query-time signature/expiry verification.")]
+    #[tool(
+        description = "Fetch all attestations registered for a given capability. Each attestation carries the agent ID, attestation timestamp, TEE-backed flag, attester address, attester public key, signature, and metadata. Set verified_only=true to filter for attestations that pass query-time signature/expiry verification."
+    )]
     async fn get_capability_attestations(
         &self,
         Parameters(params): Parameters<GetCapabilityAttestationsParams>,
@@ -11466,10 +13456,8 @@ impl TenzroMcpServer {
             registry.get_attestations(&capability)
         };
 
-        let envelopes: Vec<serde_json::Value> = attestations
-            .iter()
-            .map(attestation_to_mcp_json)
-            .collect();
+        let envelopes: Vec<serde_json::Value> =
+            attestations.iter().map(attestation_to_mcp_json).collect();
 
         json_result(serde_json::json!({
             "capability": capability,
@@ -11479,7 +13467,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Fetch all capability attestations issued for a specific agent (by agent ID). Returns the agent's registered capabilities, every attestation that names the agent across all capabilities, and the agent's registered wallet address (used by the self-attestation guard).")]
+    #[tool(
+        description = "Fetch all capability attestations issued for a specific agent (by agent ID). Returns the agent's registered capabilities, every attestation that names the agent across all capabilities, and the agent's registered wallet address (used by the self-attestation guard)."
+    )]
     async fn get_agent_capability_attestations(
         &self,
         Parameters(params): Parameters<GetAgentCapabilityAttestationsParams>,
@@ -11494,10 +13484,8 @@ impl TenzroMcpServer {
             .unwrap_or_default();
         let registered_address = registry.agent_address(&params.agent_id);
 
-        let envelopes: Vec<serde_json::Value> = attestations
-            .iter()
-            .map(attestation_to_mcp_json)
-            .collect();
+        let envelopes: Vec<serde_json::Value> =
+            attestations.iter().map(attestation_to_mcp_json).collect();
 
         json_result(serde_json::json!({
             "agent_id": params.agent_id,
@@ -11508,7 +13496,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Find the best agent on this node for a given capability. Prefers TEE-backed attestations (most recent wins), falling back to any agent with the capability registered. Returns the chosen agent_id and the total candidate count.")]
+    #[tool(
+        description = "Find the best agent on this node for a given capability. Prefers TEE-backed attestations (most recent wins), falling back to any agent with the capability registered. Returns the chosen agent_id and the total candidate count."
+    )]
     async fn find_best_agent_for_capability(
         &self,
         Parameters(params): Parameters<FindBestAgentForCapabilityParams>,
@@ -11531,7 +13521,9 @@ impl TenzroMcpServer {
 
     // ─── Task Marketplace Tools ───
 
-    #[tool(description = "Get details about a specific task on the Tenzro Task Marketplace. Returns task description, status, requester, assigned agent, quotes, and completion data.")]
+    #[tool(
+        description = "Get details about a specific task on the Tenzro Task Marketplace. Returns task description, status, requester, assigned agent, quotes, and completion data."
+    )]
     async fn get_task(
         &self,
         Parameters(params): Parameters<GetTaskParams>,
@@ -11542,7 +13534,9 @@ impl TenzroMcpServer {
         )))
     }
 
-    #[tool(description = "Cancel a pending or active task on the Tenzro Task Marketplace. Only the original requester can cancel. Refunds any escrowed TNZO. Returns cancellation confirmation.")]
+    #[tool(
+        description = "Cancel a pending or active task on the Tenzro Task Marketplace. Only the original requester can cancel. Refunds any escrowed TNZO. Returns cancellation confirmation."
+    )]
     async fn cancel_task(
         &self,
         Parameters(params): Parameters<CancelTaskParams>,
@@ -11553,7 +13547,9 @@ impl TenzroMcpServer {
         )))
     }
 
-    #[tool(description = "Assign a task to a specific agent on the Tenzro Task Marketplace. Moves task from open to assigned state and notifies the agent. Returns the updated task record.")]
+    #[tool(
+        description = "Assign a task to a specific agent on the Tenzro Task Marketplace. Moves task from open to assigned state and notifies the agent. Returns the updated task record."
+    )]
     async fn assign_task(
         &self,
         Parameters(params): Parameters<AssignTaskParams>,
@@ -11564,31 +13560,44 @@ impl TenzroMcpServer {
         )))
     }
 
-    #[tool(description = "Mark a task as completed with a result payload. Optionally attach a proof of completion. Triggers settlement payment to the completing agent. Returns the completion receipt.")]
+    #[tool(
+        description = "Mark a task as completed with a result payload. Optionally attach a proof of completion. Triggers settlement payment to the completing agent. Returns the completion receipt."
+    )]
     async fn complete_task(
         &self,
         Parameters(params): Parameters<CompleteTaskParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "complete_task requires network consensus — not available on local node (task_id={}, agent_did={}, result_size={}, has_proof={})",
-            params.task_id, params.agent_did, params.result.to_string().len(), params.proof_hex.is_some()
+            params.task_id,
+            params.agent_did,
+            params.result.to_string().len(),
+            params.proof_hex.is_some()
         )))
     }
 
     // ─── Agent Template Tools ───
 
-    #[tool(description = "Get details about a specific agent template in the Tenzro Agent Marketplace. Returns template configuration, capabilities, pricing, and usage statistics.")]
+    #[tool(
+        description = "Get details about a specific agent template in the Tenzro Agent Marketplace. Returns template configuration, capabilities, pricing, and usage statistics."
+    )]
     async fn get_agent_template(
         &self,
         Parameters(params): Parameters<GetAgentTemplateParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
-        let bytes = storage.get(CF_AGENT_TEMPLATES, params.template_id.as_bytes())
+        let bytes = storage
+            .get(CF_AGENT_TEMPLATES, params.template_id.as_bytes())
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?
-            .ok_or_else(|| err_internal(format!("Agent template not found: {}", params.template_id)))?;
+            .ok_or_else(|| {
+                err_internal(format!("Agent template not found: {}", params.template_id))
+            })?;
 
         let tmpl: tenzro_types::AgentTemplate = serde_json::from_slice(&bytes)
             .map_err(|e| err_internal(format!("Deserialization error: {}", e)))?;
@@ -11615,18 +13624,24 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Download and instantiate an agent template. Creates a new agent identity from the template with optional configuration overrides. Returns the new agent DID and wallet.")]
+    #[tool(
+        description = "Download and instantiate an agent template. Creates a new agent identity from the template with optional configuration overrides. Returns the new agent DID and wallet."
+    )]
     async fn download_agent_template(
         &self,
         Parameters(params): Parameters<DownloadAgentTemplateParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "download_agent_template requires network consensus — not available on local node (template_id={}, controller={}, has_overrides={})",
-            params.template_id, params.controller_did, params.config_overrides.is_some()
+            params.template_id,
+            params.controller_did,
+            params.config_overrides.is_some()
         )))
     }
 
-    #[tool(description = "Update metadata for an agent template you own. Change description, version, status, or tags. Returns the updated template record.")]
+    #[tool(
+        description = "Update metadata for an agent template you own. Change description, version, status, or tags. Returns the updated template record."
+    )]
     async fn update_agent_template(
         &self,
         Parameters(params): Parameters<UpdateAgentTemplateParams>,
@@ -11639,17 +13654,26 @@ impl TenzroMcpServer {
 
     // ─── Token & Contract Tools ───
 
-    #[tool(description = "Create a new ERC-20 token via the Tenzro token factory. Returns the deployed token address and token ID. The token is registered in the unified token registry and discoverable across all VMs.")]
+    #[tool(
+        description = "Create a new ERC-20 token via the Tenzro token factory. Returns the deployed token address and token ID. The token is registered in the unified token registry and discoverable across all VMs."
+    )]
     async fn create_token(
         &self,
         Parameters(params): Parameters<CreateTokenParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_token::{TokenDefinition, TokenType, cross_vm::{VmAddresses, TokenPermissions, TokenMetadata, TokenId}};
+        use tenzro_token::{
+            TokenDefinition, TokenType,
+            cross_vm::{TokenId, TokenMetadata, TokenPermissions, VmAddresses},
+        };
 
-        let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
+        let registry = self
+            .node
+            .token_registry()
+            .ok_or_else(|| err_internal_data("Token registry not initialized"))?;
 
         let creator_hex = params.creator.strip_prefix("0x").unwrap_or(&params.creator);
-        let creator_bytes = hex::decode(creator_hex).map_err(|e| err_internal_data(format!("Invalid creator address: {}", e)))?;
+        let creator_bytes = hex::decode(creator_hex)
+            .map_err(|e| err_internal_data(format!("Invalid creator address: {}", e)))?;
         let mut creator = [0u8; 32];
         if creator_bytes.len() == 20 {
             creator[12..32].copy_from_slice(&creator_bytes);
@@ -11662,7 +13686,8 @@ impl TenzroMcpServer {
         // Verify creator signature if provided
         if let Some(ref sig_hex) = params.signature {
             let sig_clean = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
-            let sig_bytes = hex::decode(sig_clean).map_err(|_| err_internal_data("Invalid signature hex encoding"))?;
+            let sig_bytes = hex::decode(sig_clean)
+                .map_err(|_| err_internal_data("Invalid signature hex encoding"))?;
             if sig_bytes.len() < 64 {
                 return Err(err_internal_data("Signature too short (minimum 64 bytes)"));
             }
@@ -11678,7 +13703,10 @@ impl TenzroMcpServer {
             paused: false,
         };
 
-        let initial_supply = params.initial_supply.parse::<u128>().map_err(|e| err_internal_data(format!("Invalid initial_supply: {}", e)))?;
+        let initial_supply = params
+            .initial_supply
+            .parse::<u128>()
+            .map_err(|e| err_internal_data(format!("Invalid initial_supply: {}", e)))?;
 
         let evm_addr: Option<[u8; 20]> = {
             let mut data = Vec::new();
@@ -11697,7 +13725,11 @@ impl TenzroMcpServer {
             symbol: params.symbol.clone(),
             decimals,
             total_supply: initial_supply,
-            max_supply: if flags.mintable { None } else { Some(initial_supply) },
+            max_supply: if flags.mintable {
+                None
+            } else {
+                Some(initial_supply)
+            },
             creator,
             token_type: TokenType::Erc20,
             vm_addresses: VmAddresses {
@@ -11712,9 +13744,13 @@ impl TenzroMcpServer {
             },
         };
 
-        let token_id = registry.register_token(def).map_err(|e| err_internal_data(format!("Token creation failed: {}", e)))?;
+        let token_id = registry
+            .register_token(def)
+            .map_err(|e| err_internal_data(format!("Token creation failed: {}", e)))?;
 
-        let evm_hex = evm_addr.map(|a| format!("0x{}", hex::encode(a))).unwrap_or_default();
+        let evm_hex = evm_addr
+            .map(|a| format!("0x{}", hex::encode(a)))
+            .unwrap_or_default();
 
         json_result(serde_json::json!({
             "token_id": token_id.to_hex(),
@@ -11729,18 +13765,24 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get information about a token by symbol, token ID, or EVM address. Returns the full token definition including cross-VM addresses.")]
+    #[tool(
+        description = "Get information about a token by symbol, token ID, or EVM address. Returns the full token definition including cross-VM addresses."
+    )]
     async fn get_token_info(
         &self,
         Parameters(params): Parameters<GetTokenInfoParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
+        let registry = self
+            .node
+            .token_registry()
+            .ok_or_else(|| err_internal_data("Token registry not initialized"))?;
 
         let def = if let Some(ref symbol) = params.symbol {
             registry.get_by_symbol(symbol)
         } else if let Some(ref addr) = params.evm_address {
             let addr_hex = addr.strip_prefix("0x").unwrap_or(addr);
-            let bytes = hex::decode(addr_hex).map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
+            let bytes = hex::decode(addr_hex)
+                .map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
             if bytes.len() == 20 {
                 let mut arr = [0u8; 20];
                 arr.copy_from_slice(&bytes);
@@ -11749,7 +13791,8 @@ impl TenzroMcpServer {
                 None
             }
         } else if let Some(ref id_hex) = params.token_id {
-            let bytes = hex::decode(id_hex).map_err(|e| err_internal_data(format!("Invalid token ID: {}", e)))?;
+            let bytes = hex::decode(id_hex)
+                .map_err(|e| err_internal_data(format!("Invalid token ID: {}", e)))?;
             if bytes.len() == 32 {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
@@ -11790,39 +13833,50 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "List all registered tokens in the unified token registry. Optionally filter by VM type or creator address.")]
+    #[tool(
+        description = "List all registered tokens in the unified token registry. Optionally filter by VM type or creator address."
+    )]
     async fn list_tokens(
         &self,
         Parameters(params): Parameters<ListTokensParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
+        let registry = self
+            .node
+            .token_registry()
+            .ok_or_else(|| err_internal_data("Token registry not initialized"))?;
 
-        let vm_filter = params.vm_type.as_deref().and_then(|s| match s.to_lowercase().as_str() {
-            "evm" => Some(tenzro_token::TokenVmType::Evm),
-            "svm" => Some(tenzro_token::TokenVmType::Svm),
-            "daml" => Some(tenzro_token::TokenVmType::Daml),
-            "native" => Some(tenzro_token::TokenVmType::Native),
-            "tempo-tip20" | "tempo" | "tip20" => Some(tenzro_token::TokenVmType::TempoTip20),
-            _ => None,
-        });
+        let vm_filter = params
+            .vm_type
+            .as_deref()
+            .and_then(|s| match s.to_lowercase().as_str() {
+                "evm" => Some(tenzro_token::TokenVmType::Evm),
+                "svm" => Some(tenzro_token::TokenVmType::Svm),
+                "daml" => Some(tenzro_token::TokenVmType::Daml),
+                "native" => Some(tenzro_token::TokenVmType::Native),
+                "tempo-tip20" | "tempo" | "tip20" => Some(tenzro_token::TokenVmType::TempoTip20),
+                _ => None,
+            });
 
         let limit = params.limit.unwrap_or(50).min(100) as usize;
         let tokens = registry.list_tokens(vm_filter, None, limit);
 
-        let items: Vec<serde_json::Value> = tokens.iter().map(|d| {
-            serde_json::json!({
-                "token_id": d.token_id.to_hex(),
-                "name": d.name,
-                "symbol": d.symbol,
-                "decimals": d.decimals,
-                "total_supply": d.total_supply.to_string(),
-                "token_type": format!("{:?}", d.token_type),
-                "evm_address": d.vm_addresses.evm_hex(),
-                "svm_mint": d.vm_addresses.svm_hex(),
-                "daml_template_id": d.vm_addresses.daml_template_id.clone(),
-                "tempo_address": d.vm_addresses.tempo_hex(),
+        let items: Vec<serde_json::Value> = tokens
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "token_id": d.token_id.to_hex(),
+                    "name": d.name,
+                    "symbol": d.symbol,
+                    "decimals": d.decimals,
+                    "total_supply": d.total_supply.to_string(),
+                    "token_type": format!("{:?}", d.token_type),
+                    "evm_address": d.vm_addresses.evm_hex(),
+                    "svm_mint": d.vm_addresses.svm_hex(),
+                    "daml_template_id": d.vm_addresses.daml_template_id.clone(),
+                    "tempo_address": d.vm_addresses.tempo_hex(),
+                })
             })
-        }).collect();
+            .collect();
 
         json_result(serde_json::json!({
             "count": items.len(),
@@ -11830,7 +13884,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Deploy a smart contract to the Tenzro ledger. Supports EVM (Solidity bytecode), SVM (BPF programs), and DAML (DAR packages). Returns the deployed contract address.")]
+    #[tool(
+        description = "Deploy a smart contract to the Tenzro ledger. Supports EVM (Solidity bytecode), SVM (BPF programs), and DAML (DAR packages). Returns the deployed contract address."
+    )]
     async fn deploy_contract(
         &self,
         Parameters(params): Parameters<DeployContractParams>,
@@ -11841,19 +13897,33 @@ impl TenzroMcpServer {
             "evm" => VmType::Evm,
             "svm" => VmType::Svm,
             "daml" => VmType::Daml,
-            other => return Err(err_internal_data(format!("Unsupported VM type: {}. Use 'evm', 'svm', or 'daml'.", other))),
+            other => {
+                return Err(err_internal_data(format!(
+                    "Unsupported VM type: {}. Use 'evm', 'svm', or 'daml'.",
+                    other
+                )));
+            }
         };
 
-        let bytecode_hex = params.bytecode.strip_prefix("0x").unwrap_or(&params.bytecode);
-        let bytecode = hex::decode(bytecode_hex).map_err(|e| err_internal_data(format!("Invalid bytecode hex: {}", e)))?;
+        let bytecode_hex = params
+            .bytecode
+            .strip_prefix("0x")
+            .unwrap_or(&params.bytecode);
+        let bytecode = hex::decode(bytecode_hex)
+            .map_err(|e| err_internal_data(format!("Invalid bytecode hex: {}", e)))?;
 
-        let deployer_hex = params.deployer.strip_prefix("0x").unwrap_or(&params.deployer);
-        let deployer = hex::decode(deployer_hex).map_err(|e| err_internal_data(format!("Invalid deployer address: {}", e)))?;
+        let deployer_hex = params
+            .deployer
+            .strip_prefix("0x")
+            .unwrap_or(&params.deployer);
+        let deployer = hex::decode(deployer_hex)
+            .map_err(|e| err_internal_data(format!("Invalid deployer address: {}", e)))?;
 
         // Verify deployer signature if provided
         if let Some(ref sig_hex) = params.signature {
             let sig_clean = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
-            let sig_bytes = hex::decode(sig_clean).map_err(|_| err_internal_data("Invalid signature hex encoding"))?;
+            let sig_bytes = hex::decode(sig_clean)
+                .map_err(|_| err_internal_data("Invalid signature hex encoding"))?;
             if sig_bytes.len() < 64 {
                 return Err(err_internal_data("Signature too short (minimum 64 bytes)"));
             }
@@ -11861,7 +13931,8 @@ impl TenzroMcpServer {
 
         let constructor_args = if let Some(ref args) = params.constructor_args {
             let args_hex = args.strip_prefix("0x").unwrap_or(args);
-            hex::decode(args_hex).map_err(|e| err_internal_data(format!("Invalid constructor args: {}", e)))?
+            hex::decode(args_hex)
+                .map_err(|e| err_internal_data(format!("Invalid constructor args: {}", e)))?
         } else {
             Vec::new()
         };
@@ -11882,11 +13953,16 @@ impl TenzroMcpServer {
         // Execute deployment via the VM runtime
         if let Some(vm) = self.node.vm_runtime() {
             let mut state = if let Some(storage) = self.node.storage() {
-                tenzro_vm::StateAdapter::with_storage(storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>)
+                tenzro_vm::StateAdapter::with_storage(
+                    storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>
+                )
             } else {
                 tenzro_vm::StateAdapter::new()
             };
-            let result = vm.deploy_contract(&deployment, &mut state).await.map_err(|e| err_internal_data(format!("Deployment failed: {}", e)))?;
+            let result = vm
+                .deploy_contract(&deployment, &mut state)
+                .await
+                .map_err(|e| err_internal_data(format!("Deployment failed: {}", e)))?;
 
             if result.success {
                 json_result(serde_json::json!({
@@ -11897,20 +13973,31 @@ impl TenzroMcpServer {
                     "status": "deployed"
                 }))
             } else {
-                Err(err_internal_data(format!("Deployment reverted: {:?}", result.revert_reason)))
+                Err(err_internal_data(format!(
+                    "Deployment reverted: {:?}",
+                    result.revert_reason
+                )))
             }
         } else {
             Err(err_internal_data("VM runtime not initialized"))
         }
     }
 
-    #[tool(description = "Transfer tokens between VMs (e.g., EVM to SVM). Uses the cross-VM bridge precompile for atomic transfers. Only TNZO is currently supported for cross-VM transfers.")]
+    #[tool(
+        description = "Transfer tokens between VMs (e.g., EVM to SVM). Uses the cross-VM bridge precompile for atomic transfers. Only TNZO is currently supported for cross-VM transfers."
+    )]
     async fn cross_vm_transfer(
         &self,
         Parameters(params): Parameters<CrossVmTransferParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
-        let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
+        let registry = self
+            .node
+            .token_registry()
+            .ok_or_else(|| err_internal_data("Token registry not initialized"))?;
+        let token = self
+            .node
+            .token()
+            .ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
 
         let from_vm = parse_vm_type(&params.from_vm)?;
         let to_vm = parse_vm_type(&params.to_vm)?;
@@ -11918,18 +14005,30 @@ impl TenzroMcpServer {
         let token_id = if params.token.to_uppercase() == "TNZO" {
             tenzro_token::TokenId::tnzo()
         } else {
-            registry.get_by_symbol(&params.token)
+            registry
+                .get_by_symbol(&params.token)
                 .map(|d| d.token_id)
                 .ok_or_else(|| err_internal_data(format!("Token '{}' not found", params.token)))?
         };
 
-        let amount: u128 = params.amount.parse().map_err(|e| err_internal_data(format!("Invalid amount: {}", e)))?;
+        let amount: u128 = params
+            .amount
+            .parse()
+            .map_err(|e| err_internal_data(format!("Invalid amount: {}", e)))?;
 
-        let from_hex = params.from_address.strip_prefix("0x").unwrap_or(&params.from_address);
-        let from_bytes = hex::decode(from_hex).map_err(|e| err_internal_data(format!("Invalid from_address: {}", e)))?;
+        let from_hex = params
+            .from_address
+            .strip_prefix("0x")
+            .unwrap_or(&params.from_address);
+        let from_bytes = hex::decode(from_hex)
+            .map_err(|e| err_internal_data(format!("Invalid from_address: {}", e)))?;
 
-        let to_hex = params.to_address.strip_prefix("0x").unwrap_or(&params.to_address);
-        let to_bytes = hex::decode(to_hex).map_err(|e| err_internal_data(format!("Invalid to_address: {}", e)))?;
+        let to_hex = params
+            .to_address
+            .strip_prefix("0x")
+            .unwrap_or(&params.to_address);
+        let to_bytes = hex::decode(to_hex)
+            .map_err(|e| err_internal_data(format!("Invalid to_address: {}", e)))?;
 
         let transfer = tenzro_token::CrossVmTransfer {
             token_id,
@@ -11941,14 +14040,16 @@ impl TenzroMcpServer {
             nonce: 0,
         };
 
-        registry.validate_cross_vm_transfer(&transfer)
+        registry
+            .validate_cross_vm_transfer(&transfer)
             .map_err(|e| err_internal_data(format!("Transfer validation failed: {}", e)))?;
 
         // For TNZO (pointer model), execute via native TnzoToken
         if token_id == tenzro_token::TokenId::tnzo() {
             let from_addr = bytes_to_address(&from_bytes);
             let to_addr = bytes_to_address(&to_bytes);
-            token.transfer(&from_addr, &to_addr, amount)
+            token
+                .transfer(&from_addr, &to_addr, amount)
                 .map_err(|e| err_internal_data(format!("Transfer failed: {}", e)))?;
         }
 
@@ -11963,27 +14064,41 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Wrap native TNZO to a specific VM representation (wTNZO ERC-20 on EVM, wTNZO SPL on SVM). In the pointer model, this is a no-op since all VMs share the same balance — the tool confirms the balance is accessible on the target VM.")]
+    #[tool(
+        description = "Wrap native TNZO to a specific VM representation (wTNZO ERC-20 on EVM, wTNZO SPL on SVM). In the pointer model, this is a no-op since all VMs share the same balance — the tool confirms the balance is accessible on the target VM."
+    )]
     async fn wrap_tnzo(
         &self,
         Parameters(params): Parameters<WrapTnzoParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
+        let token = self
+            .node
+            .token()
+            .ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
 
         let addr_hex = params.address.strip_prefix("0x").unwrap_or(&params.address);
-        let addr_bytes = hex::decode(addr_hex).map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
+        let addr_bytes = hex::decode(addr_hex)
+            .map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
         let address = bytes_to_address(&addr_bytes);
 
         let balance = token.balance_of(&address);
-        let amount: u128 = params.amount.parse().map_err(|e| err_internal_data(format!("Invalid amount: {}", e)))?;
+        let amount: u128 = params
+            .amount
+            .parse()
+            .map_err(|e| err_internal_data(format!("Invalid amount: {}", e)))?;
 
         if balance < amount {
-            return Err(err_internal_data(format!("Insufficient TNZO balance: have {}, need {}", balance, amount)));
+            return Err(err_internal_data(format!(
+                "Insufficient TNZO balance: have {}, need {}",
+                balance, amount
+            )));
         }
 
         let target_vm = params.to_vm.to_lowercase();
         let representation = match target_vm.as_str() {
-            "evm" => "wTNZO ERC-20 at 0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93 (pointer contract, same balance)",
+            "evm" => {
+                "wTNZO ERC-20 at 0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93 (pointer contract, same balance)"
+            }
             "svm" => "wTNZO SPL (9 decimals, same underlying balance)",
             "daml" => "TNZO CIP-56 Holding (Canton enterprise format)",
             _ => return Err(err_internal_data("to_vm must be 'evm', 'svm', or 'daml'")),
@@ -12000,15 +14115,21 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get the TNZO balance for an address across all VMs. Shows native balance (18 decimals), EVM wTNZO balance (18 decimals), SVM wTNZO balance (9 decimals), and DAML holding amount.")]
+    #[tool(
+        description = "Get the TNZO balance for an address across all VMs. Shows native balance (18 decimals), EVM wTNZO balance (18 decimals), SVM wTNZO balance (9 decimals), and DAML holding amount."
+    )]
     async fn get_token_balance(
         &self,
         Parameters(params): Parameters<GetTokenBalanceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
+        let token = self
+            .node
+            .token()
+            .ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
 
         let addr_hex = params.address.strip_prefix("0x").unwrap_or(&params.address);
-        let addr_bytes = hex::decode(addr_hex).map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
+        let addr_bytes = hex::decode(addr_hex)
+            .map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
         let address = bytes_to_address(&addr_bytes);
 
         let native_balance = token.balance_of(&address);
@@ -12041,18 +14162,25 @@ impl TenzroMcpServer {
 
     // ─── Username ───
 
-    #[tool(description = "Set a globally unique username for a DID on the Tenzro Network. Usernames provide human-readable aliases for DIDs (e.g. 'alice' instead of 'did:tenzro:human:uuid').")]
+    #[tool(
+        description = "Set a globally unique username for a DID on the Tenzro Network. Usernames provide human-readable aliases for DIDs (e.g. 'alice' instead of 'did:tenzro:human:uuid')."
+    )]
     async fn set_username(
         &self,
         Parameters(params): Parameters<SetUsernameParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let registry = self.node.identity_registry().ok_or_else(|| err_internal_data("Identity registry not initialized"))?;
+        let registry = self
+            .node
+            .identity_registry()
+            .ok_or_else(|| err_internal_data("Identity registry not initialized"))?;
 
-        registry.register_username(&params.did, &params.username).map_err(|e| ErrorData {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("{}", e)),
-            data: None,
-        })?;
+        registry
+            .register_username(&params.did, &params.username)
+            .map_err(|e| ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("{}", e)),
+                data: None,
+            })?;
 
         json_result(serde_json::json!({
             "did": params.did,
@@ -12061,12 +14189,17 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Resolve a username to its DID on the Tenzro Network. Returns the DID associated with the given username.")]
+    #[tool(
+        description = "Resolve a username to its DID on the Tenzro Network. Returns the DID associated with the given username."
+    )]
     async fn resolve_username(
         &self,
         Parameters(params): Parameters<ResolveUsernameParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let registry = self.node.identity_registry().ok_or_else(|| err_internal_data("Identity registry not initialized"))?;
+        let registry = self
+            .node
+            .identity_registry()
+            .ok_or_else(|| err_internal_data("Identity registry not initialized"))?;
 
         match registry.resolve_username(&params.username) {
             Some(did) => json_result(serde_json::json!({
@@ -12083,29 +14216,36 @@ impl TenzroMcpServer {
 
     // ─── Skill & Tool Usage ───
 
-    #[tool(description = "Get usage statistics for a registered skill on the Tenzro Network. Returns total invocations and last used timestamp.")]
+    #[tool(
+        description = "Get usage statistics for a registered skill on the Tenzro Network. Returns total invocations and last used timestamp."
+    )]
     async fn get_skill_usage(
         &self,
         Parameters(params): Parameters<GetSkillUsageParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_storage::{CF_SKILLS, CF_METADATA, KvStore};
+        use tenzro_storage::{CF_METADATA, CF_SKILLS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal_data("Storage not available"))?;
 
-        let total_invocations = if let Ok(Some(bytes)) = storage.get(CF_SKILLS, params.skill_id.as_bytes()) {
-            let skill: tenzro_types::SkillDefinition = serde_json::from_slice(&bytes)
-                .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
-            skill.invocation_count
-        } else {
-            return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Skill not found: {}", params.skill_id)),
-                data: None,
-            });
-        };
+        let total_invocations =
+            if let Ok(Some(bytes)) = storage.get(CF_SKILLS, params.skill_id.as_bytes()) {
+                let skill: tenzro_types::SkillDefinition = serde_json::from_slice(&bytes)
+                    .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
+                skill.invocation_count
+            } else {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Skill not found: {}", params.skill_id)),
+                    data: None,
+                });
+            };
 
         let last_used_key = format!("skill_last_used:{}", params.skill_id);
-        let last_used: Option<u64> = storage.get(CF_METADATA, last_used_key.as_bytes())
+        let last_used: Option<u64> = storage
+            .get(CF_METADATA, last_used_key.as_bytes())
             .ok()
             .flatten()
             .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -12118,29 +14258,36 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get usage statistics for a registered tool on the Tenzro Network. Returns total invocations and last used timestamp.")]
+    #[tool(
+        description = "Get usage statistics for a registered tool on the Tenzro Network. Returns total invocations and last used timestamp."
+    )]
     async fn get_tool_usage(
         &self,
         Parameters(params): Parameters<GetToolUsageParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_storage::{CF_TOOLS, CF_METADATA, KvStore};
+        use tenzro_storage::{CF_METADATA, CF_TOOLS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal_data("Storage not available"))?;
 
-        let total_invocations = if let Ok(Some(bytes)) = storage.get(CF_TOOLS, params.tool_id.as_bytes()) {
-            let tool: tenzro_types::ToolDefinition = serde_json::from_slice(&bytes)
-                .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
-            tool.invocation_count
-        } else {
-            return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Tool not found: {}", params.tool_id)),
-                data: None,
-            });
-        };
+        let total_invocations =
+            if let Ok(Some(bytes)) = storage.get(CF_TOOLS, params.tool_id.as_bytes()) {
+                let tool: tenzro_types::ToolDefinition = serde_json::from_slice(&bytes)
+                    .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
+                tool.invocation_count
+            } else {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Tool not found: {}", params.tool_id)),
+                    data: None,
+                });
+            };
 
         let last_used_key = format!("tool_last_used:{}", params.tool_id);
-        let last_used: Option<u64> = storage.get(CF_METADATA, last_used_key.as_bytes())
+        let last_used: Option<u64> = storage
+            .get(CF_METADATA, last_used_key.as_bytes())
             .ok()
             .flatten()
             .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -12155,14 +14302,20 @@ impl TenzroMcpServer {
 
     // ─── Agent Template Marketplace Extended ───
 
-    #[tool(description = "Spawn an agent from a marketplace template on the Tenzro Network. Creates a new agent instance with its own identity, wallet, and capabilities based on the template definition.")]
+    #[tool(
+        description = "Spawn an agent from a marketplace template on the Tenzro Network. Creates a new agent instance with its own identity, wallet, and capabilities based on the template definition."
+    )]
     async fn spawn_agent_from_template(
         &self,
         Parameters(params): Parameters<SpawnAgentFromTemplateParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENTS, KvStore};
 
-        let kit = self.node.agent_kit().ok_or_else(|| err_internal_data("AgentKit runtime not initialized"))?.clone();
+        let kit = self
+            .node
+            .agent_kit()
+            .ok_or_else(|| err_internal_data("AgentKit runtime not initialized"))?
+            .clone();
 
         let spawn_args = tenzro_agent_kit::SpawnArgs {
             controller_display_name: params.name.clone(),
@@ -12170,11 +14323,14 @@ impl TenzroMcpServer {
             ..Default::default()
         };
 
-        let spawned = kit.spawn(&params.template_id, spawn_args).await.map_err(|e| ErrorData {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Spawn failed: {}", e)),
-            data: None,
-        })?;
+        let spawned = kit
+            .spawn(&params.template_id, spawn_args)
+            .await
+            .map_err(|e| ErrorData {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Spawn failed: {}", e)),
+                data: None,
+            })?;
 
         // Persist spawned agent to CF_AGENTS
         if let Some(storage) = self.node.storage() {
@@ -12200,7 +14356,9 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Rate an agent template on the Tenzro Network marketplace. Ratings are 1-5 and help others discover quality templates. Optionally include a text review.")]
+    #[tool(
+        description = "Rate an agent template on the Tenzro Network marketplace. Ratings are 1-5 and help others discover quality templates. Optionally include a text review."
+    )]
     async fn rate_agent_template(
         &self,
         Parameters(params): Parameters<RateAgentTemplateParams>,
@@ -12215,12 +14373,18 @@ impl TenzroMcpServer {
             });
         }
 
-        let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal_data("Storage not available"))?;
 
         // Verify template exists
-        let template_bytes = storage.get(CF_AGENT_TEMPLATES, params.template_id.as_bytes())
+        let template_bytes = storage
+            .get(CF_AGENT_TEMPLATES, params.template_id.as_bytes())
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?
-            .ok_or_else(|| err_internal_data(format!("Agent template not found: {}", params.template_id)))?;
+            .ok_or_else(|| {
+                err_internal_data(format!("Agent template not found: {}", params.template_id))
+            })?;
 
         let mut template: tenzro_types::AgentTemplate = serde_json::from_slice(&template_bytes)
             .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
@@ -12237,12 +14401,14 @@ impl TenzroMcpServer {
                 .as_secs(),
         });
         let rating_bytes = serde_json::to_vec(&rating_entry).unwrap_or_default();
-        storage.put(CF_METADATA, rating_key.as_bytes(), &rating_bytes)
+        storage
+            .put(CF_METADATA, rating_key.as_bytes(), &rating_bytes)
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?;
 
         // Recompute aggregate rating
         let rating_prefix = format!("template_rating:{}:", params.template_id);
-        let rating_keys = storage.get_keys_with_prefix(CF_METADATA, rating_prefix.as_bytes())
+        let rating_keys = storage
+            .get_keys_with_prefix(CF_METADATA, rating_prefix.as_bytes())
             .unwrap_or_default();
 
         let mut total_score: u64 = 0;
@@ -12250,10 +14416,11 @@ impl TenzroMcpServer {
         for rk in &rating_keys {
             if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice())
                 && let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb)
-                    && let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
-                        total_score += r;
-                        count += 1;
-                    }
+                && let Some(r) = entry.get("rating").and_then(|v| v.as_u64())
+            {
+                total_score += r;
+                count += 1;
+            }
         }
 
         if count > 0 {
@@ -12264,7 +14431,12 @@ impl TenzroMcpServer {
 
         let updated_template = serde_json::to_vec(&template)
             .map_err(|e| err_internal_data(format!("Serialization error: {}", e)))?;
-        storage.put(CF_AGENT_TEMPLATES, params.template_id.as_bytes(), &updated_template)
+        storage
+            .put(
+                CF_AGENT_TEMPLATES,
+                params.template_id.as_bytes(),
+                &updated_template,
+            )
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -12274,34 +14446,41 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Search agent templates on the Tenzro Network marketplace by query. Matches against template name, description, and tags using case-insensitive substring search.")]
+    #[tool(
+        description = "Search agent templates on the Tenzro Network marketplace by query. Matches against template name, description, and tags using case-insensitive substring search."
+    )]
     async fn search_agent_templates(
         &self,
         Parameters(params): Parameters<SearchAgentTemplatesParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal_data("Storage not available"))?;
         let query = params.query.to_lowercase();
 
-        let keys = storage.get_keys_with_prefix(CF_AGENT_TEMPLATES, b"")
+        let keys = storage
+            .get_keys_with_prefix(CF_AGENT_TEMPLATES, b"")
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?;
 
         let mut templates: Vec<serde_json::Value> = Vec::new();
         for key in &keys {
             if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key.as_slice())
-                && let Ok(tmpl) = serde_json::from_slice::<tenzro_types::AgentTemplate>(&bytes) {
-                    if query.is_empty() {
-                        templates.push(serde_json::to_value(&tmpl).unwrap_or_default());
-                        continue;
-                    }
-                    let name_match = tmpl.name.to_lowercase().contains(&query);
-                    let desc_match = tmpl.description.to_lowercase().contains(&query);
-                    let tag_match = tmpl.tags.iter().any(|t| t.to_lowercase().contains(&query));
-                    if name_match || desc_match || tag_match {
-                        templates.push(serde_json::to_value(&tmpl).unwrap_or_default());
-                    }
+                && let Ok(tmpl) = serde_json::from_slice::<tenzro_types::AgentTemplate>(&bytes)
+            {
+                if query.is_empty() {
+                    templates.push(serde_json::to_value(&tmpl).unwrap_or_default());
+                    continue;
                 }
+                let name_match = tmpl.name.to_lowercase().contains(&query);
+                let desc_match = tmpl.description.to_lowercase().contains(&query);
+                let tag_match = tmpl.tags.iter().any(|t| t.to_lowercase().contains(&query));
+                if name_match || desc_match || tag_match {
+                    templates.push(serde_json::to_value(&tmpl).unwrap_or_default());
+                }
+            }
         }
 
         json_result(serde_json::json!({
@@ -12311,25 +14490,34 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get statistics for an agent template on the Tenzro Network marketplace. Returns total spawns, average rating, and total number of ratings.")]
+    #[tool(
+        description = "Get statistics for an agent template on the Tenzro Network marketplace. Returns total spawns, average rating, and total number of ratings."
+    )]
     async fn get_agent_template_stats(
         &self,
         Parameters(params): Parameters<GetAgentTemplateStatsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENT_TEMPLATES, CF_METADATA, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal_data("Storage not available"))?;
 
-        let template_bytes = storage.get(CF_AGENT_TEMPLATES, params.template_id.as_bytes())
+        let template_bytes = storage
+            .get(CF_AGENT_TEMPLATES, params.template_id.as_bytes())
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?
-            .ok_or_else(|| err_internal_data(format!("Agent template not found: {}", params.template_id)))?;
+            .ok_or_else(|| {
+                err_internal_data(format!("Agent template not found: {}", params.template_id))
+            })?;
 
         let template: tenzro_types::AgentTemplate = serde_json::from_slice(&template_bytes)
             .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
 
         // Count all ratings
         let rating_prefix = format!("template_rating:{}:", params.template_id);
-        let rating_keys = storage.get_keys_with_prefix(CF_METADATA, rating_prefix.as_bytes())
+        let rating_keys = storage
+            .get_keys_with_prefix(CF_METADATA, rating_prefix.as_bytes())
             .unwrap_or_default();
 
         let mut total_score: u64 = 0;
@@ -12337,10 +14525,11 @@ impl TenzroMcpServer {
         for rk in &rating_keys {
             if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice())
                 && let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb)
-                    && let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
-                        total_score += r;
-                        total_ratings += 1;
-                    }
+                && let Some(r) = entry.get("rating").and_then(|v| v.as_u64())
+            {
+                total_score += r;
+                total_ratings += 1;
+            }
         }
 
         let average_rating: f64 = if total_ratings > 0 {
@@ -12359,27 +14548,38 @@ impl TenzroMcpServer {
 
     // ─── NFT Tools ───
 
-    #[tool(description = "Create a new NFT collection on the Tenzro ledger. Supports ERC-721 (unique tokens) and ERC-1155 (semi-fungible tokens). Returns the collection ID and deployed address.")]
+    #[tool(
+        description = "Create a new NFT collection on the Tenzro ledger. Supports ERC-721 (unique tokens) and ERC-1155 (semi-fungible tokens). Returns the collection ID and deployed address."
+    )]
     async fn create_nft_collection(
         &self,
         Parameters(params): Parameters<CreateNftCollectionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let standard = match params.standard.to_lowercase().as_str() {
             "erc721" | "erc-721" => "ERC-721",
             "erc1155" | "erc-1155" => "ERC-1155",
-            other => return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Unsupported NFT standard '{}'. Use 'erc721' or 'erc1155'.", other)),
-                data: None,
-            }),
+            other => {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Unsupported NFT standard '{}'. Use 'erc721' or 'erc1155'.",
+                        other
+                    )),
+                    data: None,
+                });
+            }
         };
 
         let creator_hex = params.creator.strip_prefix("0x").unwrap_or(&params.creator);
-        let creator_bytes = hex::decode(creator_hex).map_err(|e| err_internal_data(format!("Invalid creator address: {}", e)))?;
+        let creator_bytes = hex::decode(creator_hex)
+            .map_err(|e| err_internal_data(format!("Invalid creator address: {}", e)))?;
 
         let collection_id = uuid::Uuid::new_v4().to_string();
 
@@ -12413,33 +14613,44 @@ impl TenzroMcpServer {
         });
 
         let key = format!("collection:{}", collection_id).into_bytes();
-        let value = serde_json::to_vec(&collection).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_NFTS, &key, &value)
+        let value = serde_json::to_vec(&collection)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_NFTS, &key, &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(collection)
     }
 
-    #[tool(description = "Mint a new NFT in an existing collection. For ERC-721, each token_id is unique. For ERC-1155, you can mint multiple copies of the same token_id. Returns the minted token details.")]
+    #[tool(
+        description = "Mint a new NFT in an existing collection. For ERC-721, each token_id is unique. For ERC-1155, you can mint multiple copies of the same token_id. Returns the minted token details."
+    )]
     async fn mint_nft(
         &self,
         Parameters(params): Parameters<MintNftParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         // Verify collection exists
         let coll_key = format!("collection:{}", params.collection_id).into_bytes();
-        let coll_bytes = storage.get(CF_NFTS, &coll_key)
+        let coll_bytes = storage
+            .get(CF_NFTS, &coll_key)
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?
-            .ok_or_else(|| err_internal_data(format!("Collection not found: {}", params.collection_id)))?;
+            .ok_or_else(|| {
+                err_internal_data(format!("Collection not found: {}", params.collection_id))
+            })?;
 
         let mut collection: serde_json::Value = serde_json::from_slice(&coll_bytes)
             .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
 
         let to_hex = params.to.strip_prefix("0x").unwrap_or(&params.to);
-        let _ = hex::decode(to_hex).map_err(|e| err_internal_data(format!("Invalid recipient address: {}", e)))?;
+        let _ = hex::decode(to_hex)
+            .map_err(|e| err_internal_data(format!("Invalid recipient address: {}", e)))?;
 
         let amount = params.amount.unwrap_or(1);
 
@@ -12459,15 +14670,22 @@ impl TenzroMcpServer {
 
         // Store the NFT
         let nft_key = format!("nft:{}:{}", params.collection_id, params.token_id).into_bytes();
-        let nft_value = serde_json::to_vec(&nft).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_NFTS, &nft_key, &nft_value)
+        let nft_value = serde_json::to_vec(&nft)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_NFTS, &nft_key, &nft_value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         // Update collection total_supply
-        let prev_supply = collection.get("total_supply").and_then(|v| v.as_u64()).unwrap_or(0);
+        let prev_supply = collection
+            .get("total_supply")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         collection["total_supply"] = serde_json::json!(prev_supply + amount);
-        let coll_value = serde_json::to_vec(&collection).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_NFTS, &coll_key, &coll_value)
+        let coll_value = serde_json::to_vec(&collection)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_NFTS, &coll_key, &coll_value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -12480,24 +14698,37 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Transfer an NFT between addresses within a collection. Verifies the sender owns the token before transferring. Returns the updated ownership details.")]
+    #[tool(
+        description = "Transfer an NFT between addresses within a collection. Verifies the sender owns the token before transferring. Returns the updated ownership details."
+    )]
     async fn transfer_nft(
         &self,
         Parameters(params): Parameters<TransferNftParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let from_hex = params.from.strip_prefix("0x").unwrap_or(&params.from);
         let to_hex = params.to.strip_prefix("0x").unwrap_or(&params.to);
-        let _ = hex::decode(from_hex).map_err(|e| err_internal_data(format!("Invalid from address: {}", e)))?;
-        let _ = hex::decode(to_hex).map_err(|e| err_internal_data(format!("Invalid to address: {}", e)))?;
+        let _ = hex::decode(from_hex)
+            .map_err(|e| err_internal_data(format!("Invalid from address: {}", e)))?;
+        let _ = hex::decode(to_hex)
+            .map_err(|e| err_internal_data(format!("Invalid to address: {}", e)))?;
 
         let nft_key = format!("nft:{}:{}", params.collection_id, params.token_id).into_bytes();
-        let nft_bytes = storage.get(CF_NFTS, &nft_key)
+        let nft_bytes = storage
+            .get(CF_NFTS, &nft_key)
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?
-            .ok_or_else(|| err_internal_data(format!("NFT not found: collection={} token_id={}", params.collection_id, params.token_id)))?;
+            .ok_or_else(|| {
+                err_internal_data(format!(
+                    "NFT not found: collection={} token_id={}",
+                    params.collection_id, params.token_id
+                ))
+            })?;
 
         let mut nft: serde_json::Value = serde_json::from_slice(&nft_bytes)
             .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
@@ -12515,8 +14746,10 @@ impl TenzroMcpServer {
         // Update owner
         nft["owner"] = serde_json::json!(format!("0x{}", to_hex));
 
-        let nft_value = serde_json::to_vec(&nft).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_NFTS, &nft_key, &nft_value)
+        let nft_value = serde_json::to_vec(&nft)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_NFTS, &nft_key, &nft_value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -12529,21 +14762,32 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get information about an NFT collection or a specific token within a collection. If token_id is provided, returns token-level details (owner, URI). If omitted, returns collection-level info (name, symbol, total supply).")]
+    #[tool(
+        description = "Get information about an NFT collection or a specific token within a collection. If token_id is provided, returns token-level details (owner, URI). If omitted, returns collection-level info (name, symbol, total supply)."
+    )]
     async fn get_nft_info(
         &self,
         Parameters(params): Parameters<GetNftInfoParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         if let Some(ref token_id) = params.token_id {
             // Token-level query
             let nft_key = format!("nft:{}:{}", params.collection_id, token_id).into_bytes();
-            let nft_bytes = storage.get(CF_NFTS, &nft_key)
+            let nft_bytes = storage
+                .get(CF_NFTS, &nft_key)
                 .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?
-                .ok_or_else(|| err_internal_data(format!("NFT not found: collection={} token_id={}", params.collection_id, token_id)))?;
+                .ok_or_else(|| {
+                    err_internal_data(format!(
+                        "NFT not found: collection={} token_id={}",
+                        params.collection_id, token_id
+                    ))
+                })?;
 
             let nft: serde_json::Value = serde_json::from_slice(&nft_bytes)
                 .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
@@ -12552,9 +14796,12 @@ impl TenzroMcpServer {
         } else {
             // Collection-level query
             let coll_key = format!("collection:{}", params.collection_id).into_bytes();
-            let coll_bytes = storage.get(CF_NFTS, &coll_key)
+            let coll_bytes = storage
+                .get(CF_NFTS, &coll_key)
                 .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?
-                .ok_or_else(|| err_internal_data(format!("Collection not found: {}", params.collection_id)))?;
+                .ok_or_else(|| {
+                    err_internal_data(format!("Collection not found: {}", params.collection_id))
+                })?;
 
             let collection: serde_json::Value = serde_json::from_slice(&coll_bytes)
                 .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
@@ -12563,16 +14810,22 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "List all NFT collections registered on the Tenzro ledger. Optionally filter by creator address or NFT standard (erc721/erc1155).")]
+    #[tool(
+        description = "List all NFT collections registered on the Tenzro ledger. Optionally filter by creator address or NFT standard (erc721/erc1155)."
+    )]
     async fn list_nft_collections(
         &self,
         Parameters(params): Parameters<ListNftCollectionsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
-        let keys = storage.get_keys_with_prefix(CF_NFTS, b"collection:")
+        let keys = storage
+            .get_keys_with_prefix(CF_NFTS, b"collection:")
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         let limit = params.limit.unwrap_or(50).min(100);
@@ -12583,29 +14836,30 @@ impl TenzroMcpServer {
                 break;
             }
             if let Ok(Some(raw)) = storage.get(CF_NFTS, &key)
-                && let Ok(coll) = serde_json::from_slice::<serde_json::Value>(&raw) {
-                    // Apply filters
-                    if let Some(ref creator_filter) = params.creator {
-                        let creator_hex = creator_filter.strip_prefix("0x").unwrap_or(creator_filter);
-                        let coll_creator = coll.get("creator").and_then(|v| v.as_str()).unwrap_or("");
-                        let coll_creator_hex = coll_creator.strip_prefix("0x").unwrap_or(coll_creator);
-                        if coll_creator_hex.to_lowercase() != creator_hex.to_lowercase() {
-                            continue;
-                        }
+                && let Ok(coll) = serde_json::from_slice::<serde_json::Value>(&raw)
+            {
+                // Apply filters
+                if let Some(ref creator_filter) = params.creator {
+                    let creator_hex = creator_filter.strip_prefix("0x").unwrap_or(creator_filter);
+                    let coll_creator = coll.get("creator").and_then(|v| v.as_str()).unwrap_or("");
+                    let coll_creator_hex = coll_creator.strip_prefix("0x").unwrap_or(coll_creator);
+                    if coll_creator_hex.to_lowercase() != creator_hex.to_lowercase() {
+                        continue;
                     }
-                    if let Some(ref std_filter) = params.standard {
-                        let coll_std = coll.get("standard").and_then(|v| v.as_str()).unwrap_or("");
-                        let filter_normalized = match std_filter.to_lowercase().as_str() {
-                            "erc721" | "erc-721" => "ERC-721",
-                            "erc1155" | "erc-1155" => "ERC-1155",
-                            _ => std_filter.as_str(),
-                        };
-                        if coll_std != filter_normalized {
-                            continue;
-                        }
-                    }
-                    collections.push(coll);
                 }
+                if let Some(ref std_filter) = params.standard {
+                    let coll_std = coll.get("standard").and_then(|v| v.as_str()).unwrap_or("");
+                    let filter_normalized = match std_filter.to_lowercase().as_str() {
+                        "erc721" | "erc-721" => "ERC-721",
+                        "erc1155" | "erc-1155" => "ERC-1155",
+                        _ => std_filter.as_str(),
+                    };
+                    if coll_std != filter_normalized {
+                        continue;
+                    }
+                }
+                collections.push(coll);
+            }
         }
 
         json_result(serde_json::json!({
@@ -12614,32 +14868,46 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Register a cross-VM pointer for an NFT collection. Maps the collection to a contract address on another VM (EVM, SVM, or DAML) enabling cross-VM NFT discoverability.")]
+    #[tool(
+        description = "Register a cross-VM pointer for an NFT collection. Maps the collection to a contract address on another VM (EVM, SVM, or DAML) enabling cross-VM NFT discoverability."
+    )]
     async fn register_nft_pointer(
         &self,
         Parameters(params): Parameters<RegisterNftPointerParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let vm = match params.vm.to_lowercase().as_str() {
             "evm" | "svm" | "daml" => params.vm.to_lowercase(),
-            other => return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Unsupported VM '{}'. Use 'evm', 'svm', or 'daml'.", other)),
-                data: None,
-            }),
+            other => {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Unsupported VM '{}'. Use 'evm', 'svm', or 'daml'.",
+                        other
+                    )),
+                    data: None,
+                });
+            }
         };
 
         let addr_hex = params.address.strip_prefix("0x").unwrap_or(&params.address);
-        let _ = hex::decode(addr_hex).map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
+        let _ = hex::decode(addr_hex)
+            .map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
 
         // Load and update collection
         let coll_key = format!("collection:{}", params.collection_id).into_bytes();
-        let coll_bytes = storage.get(CF_NFTS, &coll_key)
+        let coll_bytes = storage
+            .get(CF_NFTS, &coll_key)
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?
-            .ok_or_else(|| err_internal_data(format!("Collection not found: {}", params.collection_id)))?;
+            .ok_or_else(|| {
+                err_internal_data(format!("Collection not found: {}", params.collection_id))
+            })?;
 
         let mut collection: serde_json::Value = serde_json::from_slice(&coll_bytes)
             .map_err(|e| err_internal_data(format!("Deserialization error: {}", e)))?;
@@ -12650,8 +14918,10 @@ impl TenzroMcpServer {
         }
         collection["vm_pointers"][&vm] = serde_json::json!(format!("0x{}", addr_hex));
 
-        let coll_value = serde_json::to_vec(&collection).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_NFTS, &coll_key, &coll_value)
+        let coll_value = serde_json::to_vec(&collection)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_NFTS, &coll_key, &coll_value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -12664,7 +14934,9 @@ impl TenzroMcpServer {
 
     // ─── Bridge Extended Tools ───
 
-    #[tool(description = "Get a bridge quote without executing the transfer. Returns estimated output amount, fees, estimated time, and recommended route. Useful for previewing costs before committing to a bridge transfer.")]
+    #[tool(
+        description = "Get a bridge quote without executing the transfer. Returns estimated output amount, fees, estimated time, and recommended route. Useful for previewing costs before committing to a bridge transfer."
+    )]
     async fn bridge_quote(
         &self,
         Parameters(params): Parameters<BridgeQuoteParams>,
@@ -12675,12 +14947,18 @@ impl TenzroMcpServer {
             .ok_or_else(|| err_internal("Bridge router not initialized"))?;
 
         // Get available routes
-        match router.get_available_routes(&params.from_chain, &params.to_chain).await {
+        match router
+            .get_available_routes(&params.from_chain, &params.to_chain)
+            .await
+        {
             Ok(routes) => {
                 // Filter by protocol if specified
                 let filtered: Vec<_> = if let Some(ref proto) = params.protocol {
                     let proto_lower = proto.to_lowercase();
-                    routes.iter().filter(|r| r.adapter_name.to_lowercase().contains(&proto_lower)).collect()
+                    routes
+                        .iter()
+                        .filter(|r| r.adapter_name.to_lowercase().contains(&proto_lower))
+                        .collect()
                 } else {
                     routes.iter().collect()
                 };
@@ -12727,7 +15005,9 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Execute a bridge transfer with a deBridge post-fulfillment hook. After the tokens arrive on the destination chain, the hook_target contract is called with hook_calldata. Enables composable cross-chain operations (e.g., bridge + swap, bridge + stake).")]
+    #[tool(
+        description = "Execute a bridge transfer with a deBridge post-fulfillment hook. After the tokens arrive on the destination chain, the hook_target contract is called with hook_calldata. Enables composable cross-chain operations (e.g., bridge + swap, bridge + stake)."
+    )]
     async fn bridge_with_hook(
         &self,
         Parameters(params): Parameters<BridgeWithHookParams>,
@@ -12738,11 +15018,20 @@ impl TenzroMcpServer {
             .ok_or_else(|| err_internal("Bridge router not initialized"))?;
 
         let sender_hex = params.sender.strip_prefix("0x").unwrap_or(&params.sender);
-        let _ = hex::decode(sender_hex).map_err(|e| err_internal_data(format!("Invalid sender address: {}", e)))?;
-        let hook_hex = params.hook_target.strip_prefix("0x").unwrap_or(&params.hook_target);
-        let _ = hex::decode(hook_hex).map_err(|e| err_internal_data(format!("Invalid hook_target address: {}", e)))?;
-        let calldata_hex = params.hook_calldata.strip_prefix("0x").unwrap_or(&params.hook_calldata);
-        let _ = hex::decode(calldata_hex).map_err(|e| err_internal_data(format!("Invalid hook_calldata: {}", e)))?;
+        let _ = hex::decode(sender_hex)
+            .map_err(|e| err_internal_data(format!("Invalid sender address: {}", e)))?;
+        let hook_hex = params
+            .hook_target
+            .strip_prefix("0x")
+            .unwrap_or(&params.hook_target);
+        let _ = hex::decode(hook_hex)
+            .map_err(|e| err_internal_data(format!("Invalid hook_target address: {}", e)))?;
+        let calldata_hex = params
+            .hook_calldata
+            .strip_prefix("0x")
+            .unwrap_or(&params.hook_calldata);
+        let _ = hex::decode(calldata_hex)
+            .map_err(|e| err_internal_data(format!("Invalid hook_calldata: {}", e)))?;
 
         use tenzro_bridge::BridgeTokenRequest;
 
@@ -12784,22 +15073,32 @@ impl TenzroMcpServer {
 
     // ─── ERC-7802 Crosschain Tools ───
 
-    #[tool(description = "Mint tokens via an authorized crosschain bridge (ERC-7802 crosschainMint). Only pre-authorized bridges can call this. The hex-encoded inbound bridge payload is dispatched through the bridge router for quorum verification; the verified TenzroMessage inside is the sole authority for recipient and amount. Returns the mint event and nonce.")]
+    #[tool(
+        description = "Mint tokens via an authorized crosschain bridge (ERC-7802 crosschainMint). Only pre-authorized bridges can call this. The hex-encoded inbound bridge payload is dispatched through the bridge router for quorum verification; the verified TenzroMessage inside is the sole authority for recipient and amount. Returns the mint event and nonce."
+    )]
     async fn crosschain_mint(
         &self,
         Parameters(params): Parameters<CrosschainMintParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
-        let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let token = self
+            .node
+            .token()
+            .ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let bridge_hex = params.bridge.strip_prefix("0x").unwrap_or(&params.bridge);
-        let _ = hex::decode(bridge_hex).map_err(|e| err_internal_data(format!("Invalid bridge address: {}", e)))?;
+        let _ = hex::decode(bridge_hex)
+            .map_err(|e| err_internal_data(format!("Invalid bridge address: {}", e)))?;
 
         // Verify bridge is authorized
         let auth_key = format!("crosschain_bridge:{}", bridge_hex.to_lowercase()).into_bytes();
-        let auth_bytes = storage.get(CF_METADATA, &auth_key)
+        let auth_bytes = storage
+            .get(CF_METADATA, &auth_key)
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?;
 
         if auth_bytes.is_none() {
@@ -12828,20 +15127,26 @@ impl TenzroMcpServer {
         let amount = transfer.amount;
 
         let to_hex = crate::rpc::normalize_hex_addr(&message.receiver);
-        let to_bytes = hex::decode(&to_hex)
-            .map_err(|e| err_internal_data(format!("Inbound message receiver is not a valid address: {}", e)))?;
+        let to_bytes = hex::decode(&to_hex).map_err(|e| {
+            err_internal_data(format!(
+                "Inbound message receiver is not a valid address: {}",
+                e
+            ))
+        })?;
         let to_addr = bytes_to_address(&to_bytes);
 
         // Cross-check caller-supplied expectations against the verified message.
         if let Some(ref expected_to) = params.to
-            && crate::rpc::normalize_hex_addr(expected_to) != to_hex {
+            && crate::rpc::normalize_hex_addr(expected_to) != to_hex
+        {
             return Err(err_internal_data(format!(
                 "Caller 'to' {} does not match verified message receiver 0x{}",
                 expected_to, to_hex
             )));
         }
         if let Some(expected_amount) = params.amount
-            && expected_amount != amount {
+            && expected_amount != amount
+        {
             return Err(err_internal_data(format!(
                 "Caller 'amount' {} does not match verified message amount {}",
                 expected_amount, amount
@@ -12849,9 +15154,11 @@ impl TenzroMcpServer {
         }
 
         // Mint tokens via TnzoToken (caller must be treasury)
-        let treasury = token.treasury_address_ref()
+        let treasury = token
+            .treasury_address_ref()
             .ok_or_else(|| err_internal_data("Treasury address not configured — cannot mint"))?;
-        token.mint(&to_addr, amount, &treasury)
+        token
+            .mint(&to_addr, amount, &treasury)
             .map_err(|e| err_internal_data(format!("Mint failed: {}", e)))?;
 
         // Increment nonce
@@ -12861,7 +15168,8 @@ impl TenzroMcpServer {
         } else {
             1
         };
-        storage.put(CF_METADATA, &nonce_key, &nonce.to_le_bytes())
+        storage
+            .put(CF_METADATA, &nonce_key, &nonce.to_le_bytes())
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -12878,22 +15186,32 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Burn tokens for a crosschain transfer (ERC-7802 crosschainBurn). Only pre-authorized bridges can call this. Tokens are burned on the local chain and will be minted on the destination chain. Returns the burn event and nonce.")]
+    #[tool(
+        description = "Burn tokens for a crosschain transfer (ERC-7802 crosschainBurn). Only pre-authorized bridges can call this. Tokens are burned on the local chain and will be minted on the destination chain. Returns the burn event and nonce."
+    )]
     async fn crosschain_burn(
         &self,
         Parameters(params): Parameters<CrosschainBurnParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
-        let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let token = self
+            .node
+            .token()
+            .ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let bridge_hex = params.bridge.strip_prefix("0x").unwrap_or(&params.bridge);
-        let _ = hex::decode(bridge_hex).map_err(|e| err_internal_data(format!("Invalid bridge address: {}", e)))?;
+        let _ = hex::decode(bridge_hex)
+            .map_err(|e| err_internal_data(format!("Invalid bridge address: {}", e)))?;
 
         // Verify bridge is authorized
         let auth_key = format!("crosschain_bridge:{}", bridge_hex.to_lowercase()).into_bytes();
-        let auth_bytes = storage.get(CF_METADATA, &auth_key)
+        let auth_bytes = storage
+            .get(CF_METADATA, &auth_key)
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?;
 
         if auth_bytes.is_none() {
@@ -12904,11 +15222,13 @@ impl TenzroMcpServer {
         }
 
         let from_hex = params.from.strip_prefix("0x").unwrap_or(&params.from);
-        let from_bytes = hex::decode(from_hex).map_err(|e| err_internal_data(format!("Invalid from address: {}", e)))?;
+        let from_bytes = hex::decode(from_hex)
+            .map_err(|e| err_internal_data(format!("Invalid from address: {}", e)))?;
         let from_addr = bytes_to_address(&from_bytes);
 
         // Burn tokens via TnzoToken
-        token.burn(&from_addr, params.amount)
+        token
+            .burn(&from_addr, params.amount)
             .map_err(|e| err_internal_data(format!("Burn failed: {}", e)))?;
 
         // Increment nonce
@@ -12918,7 +15238,8 @@ impl TenzroMcpServer {
         } else {
             1
         };
-        storage.put(CF_METADATA, &nonce_key, &nonce.to_le_bytes())
+        storage
+            .put(CF_METADATA, &nonce_key, &nonce.to_le_bytes())
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -12932,17 +15253,23 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Authorize a bridge address for ERC-7802 crosschain mint and burn operations. Only authorized bridges can mint/burn tokens for cross-chain transfers. Sets daily mint and burn limits for rate limiting.")]
+    #[tool(
+        description = "Authorize a bridge address for ERC-7802 crosschain mint and burn operations. Only authorized bridges can mint/burn tokens for cross-chain transfers. Sets daily mint and burn limits for rate limiting."
+    )]
     async fn authorize_crosschain_bridge(
         &self,
         Parameters(params): Parameters<AuthorizeCrosschainBridgeParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let bridge_hex = params.bridge.strip_prefix("0x").unwrap_or(&params.bridge);
-        let _ = hex::decode(bridge_hex).map_err(|e| err_internal_data(format!("Invalid bridge address: {}", e)))?;
+        let _ = hex::decode(bridge_hex)
+            .map_err(|e| err_internal_data(format!("Invalid bridge address: {}", e)))?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -12959,8 +15286,10 @@ impl TenzroMcpServer {
         });
 
         let key = format!("crosschain_bridge:{}", bridge_hex.to_lowercase()).into_bytes();
-        let value = serde_json::to_vec(&auth).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_METADATA, &key, &value)
+        let value = serde_json::to_vec(&auth)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_METADATA, &key, &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -12974,17 +15303,23 @@ impl TenzroMcpServer {
 
     // ─── ERC-3643 Compliance Tools ───
 
-    #[tool(description = "Check whether a token transfer would be compliant with the registered ERC-3643 compliance rules. Returns compliant/non-compliant status with specific violation details. Does not execute the transfer.")]
+    #[tool(
+        description = "Check whether a token transfer would be compliant with the registered ERC-3643 compliance rules. Returns compliant/non-compliant status with specific violation details. Does not execute the transfer."
+    )]
     async fn check_compliance(
         &self,
         Parameters(params): Parameters<CheckComplianceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_COMPLIANCE, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let rule_key = format!("rules:{}", params.token_id).into_bytes();
-        let rule_bytes = storage.get(CF_COMPLIANCE, &rule_key)
+        let rule_bytes = storage
+            .get(CF_COMPLIANCE, &rule_key)
             .map_err(|e| err_internal_data(format!("Storage error: {}", e)))?;
 
         if rule_bytes.is_none() {
@@ -13005,19 +15340,28 @@ impl TenzroMcpServer {
         let from_hex = params.from.strip_prefix("0x").unwrap_or(&params.from);
         let to_hex = params.to.strip_prefix("0x").unwrap_or(&params.to);
 
-        let frozen_key_from = format!("frozen:{}:{}", params.token_id, from_hex.to_lowercase()).into_bytes();
+        let frozen_key_from =
+            format!("frozen:{}:{}", params.token_id, from_hex.to_lowercase()).into_bytes();
         if let Ok(Some(_)) = storage.get(CF_COMPLIANCE, &frozen_key_from) {
             violations.push(format!("Sender address 0x{} is frozen", from_hex));
         }
 
-        let frozen_key_to = format!("frozen:{}:{}", params.token_id, to_hex.to_lowercase()).into_bytes();
+        let frozen_key_to =
+            format!("frozen:{}:{}", params.token_id, to_hex.to_lowercase()).into_bytes();
         if let Ok(Some(_)) = storage.get(CF_COMPLIANCE, &frozen_key_to) {
             violations.push(format!("Recipient address 0x{} is frozen", to_hex));
         }
 
         // Check KYC tier requirement
-        if rules.get("require_kyc").and_then(|v| v.as_bool()).unwrap_or(false) {
-            let min_tier = rules.get("min_kyc_tier").and_then(|v| v.as_u64()).unwrap_or(1);
+        if rules
+            .get("require_kyc")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let min_tier = rules
+                .get("min_kyc_tier")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
             // In a full implementation, we would look up the KYC tiers of from/to addresses
             // via the identity registry. For now, we check if identity is registered.
             if let Some(_identity_reg) = self.node.identity_registry() {
@@ -13032,12 +15376,14 @@ impl TenzroMcpServer {
         // Check max balance per holder
         if let Some(max_bal) = rules.get("max_balance_per_holder").and_then(|v| v.as_str())
             && let Ok(max) = max_bal.parse::<u128>()
-                && max > 0 && params.amount > max {
-                    violations.push(format!(
-                        "Transfer amount {} exceeds max balance per holder {}",
-                        params.amount, max
-                    ));
-                }
+            && max > 0
+            && params.amount > max
+        {
+            violations.push(format!(
+                "Transfer amount {} exceeds max balance per holder {}",
+                params.amount, max
+            ));
+        }
 
         json_result(serde_json::json!({
             "token_id": params.token_id,
@@ -13049,14 +15395,19 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Register ERC-3643 compliance rules for a token. Defines KYC requirements, holder limits, country restrictions, and balance caps. All transfers of this token will be checked against these rules.")]
+    #[tool(
+        description = "Register ERC-3643 compliance rules for a token. Defines KYC requirements, holder limits, country restrictions, and balance caps. All transfers of this token will be checked against these rules."
+    )]
     async fn register_compliance(
         &self,
         Parameters(params): Parameters<RegisterComplianceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_COMPLIANCE, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -13076,8 +15427,10 @@ impl TenzroMcpServer {
         });
 
         let key = format!("rules:{}", params.token_id).into_bytes();
-        let value = serde_json::to_vec(&rules).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_COMPLIANCE, &key, &value)
+        let value = serde_json::to_vec(&rules)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_COMPLIANCE, &key, &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -13089,17 +15442,23 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Freeze an address for a specific token under ERC-3643 compliance. A frozen address cannot send or receive the specified token. Returns the freeze record.")]
+    #[tool(
+        description = "Freeze an address for a specific token under ERC-3643 compliance. A frozen address cannot send or receive the specified token. Returns the freeze record."
+    )]
     async fn freeze_address(
         &self,
         Parameters(params): Parameters<FreezeAddressParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_COMPLIANCE, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let addr_hex = params.address.strip_prefix("0x").unwrap_or(&params.address);
-        let _ = hex::decode(addr_hex).map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
+        let _ = hex::decode(addr_hex)
+            .map_err(|e| err_internal_data(format!("Invalid address: {}", e)))?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -13114,8 +15473,10 @@ impl TenzroMcpServer {
         });
 
         let key = format!("frozen:{}:{}", params.token_id, addr_hex.to_lowercase()).into_bytes();
-        let value = serde_json::to_vec(&freeze).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_COMPLIANCE, &key, &value)
+        let value = serde_json::to_vec(&freeze)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_COMPLIANCE, &key, &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         json_result(serde_json::json!({
@@ -13132,20 +15493,30 @@ impl TenzroMcpServer {
     // layer and intentionally not exposed here; the approver signature plus
     // the configured threshold authorize these operations.
 
-    #[tool(description = "Approve a treasury withdrawal with a signed approval. The signature covers 'tenzro/treasury/withdrawal-approval' || withdrawal_id || asset_id || amount_le and must come from an authorized withdrawer. Returns the approval count and whether the threshold is reached.")]
+    #[tool(
+        description = "Approve a treasury withdrawal with a signed approval. The signature covers 'tenzro/treasury/withdrawal-approval' || withdrawal_id || asset_id || amount_le and must come from an authorized withdrawer. Returns the approval count and whether the threshold is reached."
+    )]
     async fn treasury_approve_withdrawal(
         &self,
         Parameters(params): Parameters<TreasuryApproveWithdrawalParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_crypto::KeyType;
 
-        let treasury = self.node.treasury().ok_or_else(|| err_internal("Treasury not initialized"))?;
+        let treasury = self
+            .node
+            .treasury()
+            .ok_or_else(|| err_internal("Treasury not initialized"))?;
 
         let asset_id = tenzro_types::asset::AssetId::new(&params.asset_id);
-        let amount: u128 = params.amount.parse()
+        let amount: u128 = params
+            .amount
+            .parse()
             .map_err(|_| err_internal_data("Invalid amount (decimal string in base units)"))?;
 
-        let addr_hex = params.approver.strip_prefix("0x").unwrap_or(&params.approver);
+        let addr_hex = params
+            .approver
+            .strip_prefix("0x")
+            .unwrap_or(&params.approver);
         let addr_bytes = hex::decode(addr_hex)
             .map_err(|e| err_internal_data(format!("Invalid approver address: {}", e)))?;
         let approver = tenzro_types::Address::from_bytes(&addr_bytes)
@@ -13161,7 +15532,14 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal_data(format!("Invalid signature hex: {}", e)))?;
 
         let threshold_reached = treasury
-            .approve_withdrawal(&params.withdrawal_id, &asset_id, amount, &approver, &public_key, &signature)
+            .approve_withdrawal(
+                &params.withdrawal_id,
+                &asset_id,
+                amount,
+                &approver,
+                &public_key,
+                &signature,
+            )
             .map_err(|e| err_internal_data(e.to_string()))?;
 
         let pending = treasury.pending_withdrawal(&params.withdrawal_id);
@@ -13175,15 +15553,22 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Execute a treasury withdrawal after the approval threshold is reached. The (withdrawal_id, asset_id, amount) triple must match the approved withdrawal exactly.")]
+    #[tool(
+        description = "Execute a treasury withdrawal after the approval threshold is reached. The (withdrawal_id, asset_id, amount) triple must match the approved withdrawal exactly."
+    )]
     async fn treasury_execute_withdrawal(
         &self,
         Parameters(params): Parameters<TreasuryExecuteWithdrawalParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let treasury = self.node.treasury().ok_or_else(|| err_internal("Treasury not initialized"))?;
+        let treasury = self
+            .node
+            .treasury()
+            .ok_or_else(|| err_internal("Treasury not initialized"))?;
 
         let asset_id = tenzro_types::asset::AssetId::new(&params.asset_id);
-        let amount: u128 = params.amount.parse()
+        let amount: u128 = params
+            .amount
+            .parse()
             .map_err(|_| err_internal_data("Invalid amount (decimal string in base units)"))?;
 
         treasury
@@ -13199,12 +15584,17 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Get a pending treasury withdrawal's approval state: asset, amount, approver addresses, approval count, and the configured threshold. Returns null when no pending withdrawal matches.")]
+    #[tool(
+        description = "Get a pending treasury withdrawal's approval state: asset, amount, approver addresses, approval count, and the configured threshold. Returns null when no pending withdrawal matches."
+    )]
     async fn treasury_get_pending_withdrawal(
         &self,
         Parameters(params): Parameters<TreasuryGetPendingWithdrawalParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let treasury = self.node.treasury().ok_or_else(|| err_internal("Treasury not initialized"))?;
+        let treasury = self
+            .node
+            .treasury()
+            .ok_or_else(|| err_internal("Treasury not initialized"))?;
 
         match treasury.pending_withdrawal(&params.withdrawal_id) {
             Some(p) => json_result(serde_json::json!({
@@ -13221,19 +15611,25 @@ impl TenzroMcpServer {
 
     // ─── Events Tools ───
 
-    #[tool(description = "Query historical events from the Tenzro ledger. Supports cursor-based pagination. Filter by block range, event type, and involved addresses. Returns events ordered by sequence number.")]
+    #[tool(
+        description = "Query historical events from the Tenzro ledger. Supports cursor-based pagination. Filter by block range, event type, and involved addresses. Returns events ordered by sequence number."
+    )]
     async fn get_events(
         &self,
         Parameters(params): Parameters<GetEventsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_EVENTS, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let limit = params.limit.unwrap_or(50).min(200);
         let from_seq = params.from_sequence.unwrap_or(0);
 
-        let keys = storage.get_keys_with_prefix(CF_EVENTS, b"event:")
+        let keys = storage
+            .get_keys_with_prefix(CF_EVENTS, b"event:")
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         let mut events: Vec<serde_json::Value> = Vec::new();
@@ -13243,56 +15639,75 @@ impl TenzroMcpServer {
             if events.len() >= limit {
                 // Set cursor to the next event's sequence
                 if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key)
-                    && let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw) {
-                        next_cursor = evt.get("sequence").and_then(|v| v.as_u64());
-                    }
+                    && let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw)
+                {
+                    next_cursor = evt.get("sequence").and_then(|v| v.as_u64());
+                }
                 break;
             }
 
             if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key)
-                && let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw) {
-                    let seq = evt.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
-                    if seq < from_seq {
+                && let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw)
+            {
+                let seq = evt.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
+                if seq < from_seq {
+                    continue;
+                }
+
+                // Filter by block range
+                if let Some(from_block) = params.from_block {
+                    let block = evt
+                        .get("block_height")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    if block < from_block {
                         continue;
                     }
-
-                    // Filter by block range
-                    if let Some(from_block) = params.from_block {
-                        let block = evt.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
-                        if block < from_block {
-                            continue;
-                        }
-                    }
-                    if let Some(to_block) = params.to_block {
-                        let block = evt.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
-                        if block > to_block {
-                            continue;
-                        }
-                    }
-
-                    // Filter by event type
-                    if let Some(ref types) = params.event_types {
-                        let event_type = evt.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
-                        if !types.iter().any(|t| t.to_lowercase() == event_type.to_lowercase()) {
-                            continue;
-                        }
-                    }
-
-                    // Filter by address
-                    if let Some(ref addrs) = params.addresses {
-                        let evt_from = evt.get("from").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-                        let evt_to = evt.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-                        let matches = addrs.iter().any(|a| {
-                            let a_lower = a.strip_prefix("0x").unwrap_or(a).to_lowercase();
-                            evt_from.contains(&a_lower) || evt_to.contains(&a_lower)
-                        });
-                        if !matches {
-                            continue;
-                        }
-                    }
-
-                    events.push(evt);
                 }
+                if let Some(to_block) = params.to_block {
+                    let block = evt
+                        .get("block_height")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    if block > to_block {
+                        continue;
+                    }
+                }
+
+                // Filter by event type
+                if let Some(ref types) = params.event_types {
+                    let event_type = evt.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+                    if !types
+                        .iter()
+                        .any(|t| t.to_lowercase() == event_type.to_lowercase())
+                    {
+                        continue;
+                    }
+                }
+
+                // Filter by address
+                if let Some(ref addrs) = params.addresses {
+                    let evt_from = evt
+                        .get("from")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let evt_to = evt
+                        .get("to")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let matches = addrs.iter().any(|a| {
+                        let a_lower = a.strip_prefix("0x").unwrap_or(a).to_lowercase();
+                        evt_from.contains(&a_lower) || evt_to.contains(&a_lower)
+                    });
+                    if !matches {
+                        continue;
+                    }
+                }
+
+                events.push(evt);
+            }
         }
 
         json_result(serde_json::json!({
@@ -13302,14 +15717,19 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Register an event filter for real-time streaming via WebSocket or gRPC. Returns a subscription ID and connection URLs for receiving matching events. Events matching the filter will be pushed to connected clients.")]
+    #[tool(
+        description = "Register an event filter for real-time streaming via WebSocket or gRPC. Returns a subscription ID and connection URLs for receiving matching events. Events matching the filter will be pushed to connected clients."
+    )]
     async fn subscribe_events(
         &self,
         Parameters(params): Parameters<SubscribeEventsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
+        let storage = self
+            .node
+            .storage()
+            .ok_or_else(|| err_internal("Storage not available"))?;
 
         let subscription_id = uuid::Uuid::new_v4().to_string();
 
@@ -13327,8 +15747,10 @@ impl TenzroMcpServer {
         });
 
         let key = format!("event_sub:{}", subscription_id).into_bytes();
-        let value = serde_json::to_vec(&subscription).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_METADATA, &key, &value)
+        let value = serde_json::to_vec(&subscription)
+            .map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
+        storage
+            .put(CF_METADATA, &key, &value)
             .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
 
         // Construct connection URLs based on RPC address
@@ -13345,13 +15767,17 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Register a webhook URL for event notifications. The Tenzro node will POST JSON event payloads to the registered URL when matching events occur. Each POST includes an HMAC-SHA256 signature in the X-Tenzro-Signature header for verification. URL must be `https://`; secret must be at least 16 characters.")]
+    #[tool(
+        description = "Register a webhook URL for event notifications. The Tenzro node will POST JSON event payloads to the registered URL when matching events occur. Each POST includes an HMAC-SHA256 signature in the X-Tenzro-Signature header for verification. URL must be `https://`; secret must be at least 16 characters. Requires owner_did plus a signed did_envelope proving control of it — the owner is what delete and list authorize against."
+    )]
     async fn register_webhook(
         &self,
         Parameters(params): Parameters<RegisterWebhookParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut req = serde_json::json!({
             "url": params.url,
+            "owner_did": params.owner_did,
+            "did_envelope": params.did_envelope,
             "secret": params.secret,
         });
         if let Some(types) = params.event_types {
@@ -13366,17 +15792,29 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List every registered webhook. Returns each webhook's id, url, active flag, event_types/addresses filters, and delivery counters (total_deliveries, failed_deliveries). Secret hashes are NOT returned — secrets are write-only.")]
+    #[tool(
+        description = "List the webhooks registered under one owner DID. Returns each webhook's id, url, active flag, event_types/addresses filters, and delivery counters (total_deliveries, failed_deliveries). Secret hashes are NOT returned — secrets are write-only. Scoped to one owner rather than the whole node: a row carries its delivery URL and the addresses its owner watches, so it requires a signed did_envelope for owner_did."
+    )]
     async fn list_webhooks(
         &self,
+        Parameters(params): Parameters<ListWebhooksParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listWebhooks", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("listWebhooks failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listWebhooks",
+            serde_json::json!({
+                "owner_did": params.owner_did,
+                "did_envelope": params.did_envelope,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listWebhooks failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Delete a webhook by id. Returns JSON-RPC error `-32602` if the id is unknown.")]
+    #[tool(
+        description = "Delete a webhook by id. Requires a signed did_envelope proving control of the owner_did recorded at registration — a webhook id comes back from every list call, so it identifies the row and authorizes nothing. Returns JSON-RPC error `-32602` if the id is unknown; a row that records no owner is refused rather than deleted."
+    )]
     async fn delete_webhook(
         &self,
         Parameters(params): Parameters<DeleteWebhookParams>,
@@ -13384,7 +15822,10 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_deleteWebhook",
-            serde_json::json!({ "webhook_id": params.webhook_id }),
+            serde_json::json!({
+                "webhook_id": params.webhook_id,
+                "did_envelope": params.did_envelope,
+            }),
         )
         .await
         .map_err(|e| err_internal(format!("deleteWebhook failed: {}", e)))?;
@@ -13393,7 +15834,9 @@ impl TenzroMcpServer {
 
     // ─── SLA Fault Detector ───
 
-    #[tool(description = "Issue a VRF-bound SLA liveness probe to a ModelProvider / TeeProvider DID and broadcast it on the `tenzro/sla` gossipsub topic. Validator-only — on a non-validator node this returns `-32000 SlaManager not initialized`. The probe is addressed by a 32-byte VRF output (`challenge_nonce`). `deadline_ms` is a Unix-millisecond timestamp; if the provider does not respond before this deadline the probe is counted as missed against the fault-detector's slash threshold.")]
+    #[tool(
+        description = "Issue a VRF-bound SLA liveness probe to a ModelProvider / TeeProvider DID and broadcast it on the `tenzro/sla` gossipsub topic. Validator-only — on a non-validator node this returns `-32000 SlaManager not initialized`. The probe is addressed by a 32-byte VRF output (`challenge_nonce`). `deadline_ms` is a Unix-millisecond timestamp; if the provider does not respond before this deadline the probe is counted as missed against the fault-detector's slash threshold."
+    )]
     async fn sla_issue_probe(
         &self,
         Parameters(params): Parameters<SlaIssueProbeParams>,
@@ -13413,7 +15856,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List every in-flight SLA probe awaiting a response, regardless of issuer. Returns `{count, probes: [...]}` with `challenge_nonce`, `provider_did`, `epoch`, `round`, `deadline_ms`, and `issuer` for each probe. Used by operators to spot stuck probes whose deadline has already elapsed without a matching response.")]
+    #[tool(
+        description = "List every in-flight SLA probe awaiting a response, regardless of issuer. Returns `{count, probes: [...]}` with `challenge_nonce`, `provider_did`, `epoch`, `round`, `deadline_ms`, and `issuer` for each probe. Used by operators to spot stuck probes whose deadline has already elapsed without a matching response."
+    )]
     async fn sla_list_outstanding_probes(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -13427,10 +15872,10 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read the SLA fault-detector parameters this validator is using: `slash_threshold` (number of missed probes before slashing fires for a provider), `slash_amount_wei` (per-crossing slash amount in wei, decimal string), and this validator's `vrf_pubkey` (0x-prefixed hex).")]
-    async fn sla_get_params(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Read the SLA fault-detector parameters this validator is using: `slash_threshold` (number of missed probes before slashing fires for a provider), `slash_amount_wei` (per-crossing slash amount in wei, decimal string), and this validator's `vrf_pubkey` (0x-prefixed hex)."
+    )]
+    async fn sla_get_params(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_slaGetParams", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("slaGetParams failed: {}", e)))?;
@@ -13439,17 +15884,19 @@ impl TenzroMcpServer {
 
     // ─── Snapshot (State Sync) ───
 
-    #[tool(description = "List local snapshots available for state-sync. Per-chunk hashes are elided for compactness — use `get_snapshot_manifest` to fetch the full manifest with `chunk_hashes_hex[]`. Returns `{snapshots: [{height, state_root_hex, num_chunks, created_at, format}, ...]}`.")]
-    async fn list_snapshots(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List local snapshots available for state-sync. Per-chunk hashes are elided for compactness — use `get_snapshot_manifest` to fetch the full manifest with `chunk_hashes_hex[]`. Returns `{snapshots: [{height, state_root_hex, num_chunks, created_at, format}, ...]}`."
+    )]
+    async fn list_snapshots(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listSnapshots", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listSnapshots failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Fetch the full snapshot manifest at `height`, including per-chunk SHA-256 hashes used to verify chunks before applying. Returns JSON-RPC error `-32004 no snapshot at height` if no snapshot exists at that height. The manifest contains `state_root_hex` which the caller MUST verify against a trusted QC at the same height before offering this manifest to another node.")]
+    #[tool(
+        description = "Fetch the full snapshot manifest at `height`, including per-chunk SHA-256 hashes used to verify chunks before applying. Returns JSON-RPC error `-32004 no snapshot at height` if no snapshot exists at that height. The manifest contains `state_root_hex` which the caller MUST verify against a trusted QC at the same height before offering this manifest to another node."
+    )]
     async fn get_snapshot_manifest(
         &self,
         Parameters(params): Parameters<SnapshotManifestParams>,
@@ -13464,7 +15911,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch one chunk of a local snapshot by `(height, chunk_index)`. The returned `data_b64` is the base64-encoded chunk bytes; verify against `manifest.chunk_hashes_hex[chunk_index]` before applying. Returns `{height, chunk_index, data_b64}`.")]
+    #[tool(
+        description = "Fetch one chunk of a local snapshot by `(height, chunk_index)`. The returned `data_b64` is the base64-encoded chunk bytes; verify against `manifest.chunk_hashes_hex[chunk_index]` before applying. Returns `{height, chunk_index, data_b64}`."
+    )]
     async fn get_snapshot_chunk(
         &self,
         Parameters(params): Parameters<SnapshotChunkParams>,
@@ -13482,50 +15931,11 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Register an inbound snapshot manifest received from a peer. **The caller MUST verify `state_root_hex` against a trusted QC at the same height before invoking** — this RPC only registers the offer and provisions the spool directory; it does not itself validate the manifest against chain state. Returns `{accepted: true, height, num_chunks}`.")]
-    async fn offer_snapshot(
-        &self,
-        Parameters(params): Parameters<OfferSnapshotParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(
-            &self.node,
-            "tenzro_offerSnapshot",
-            serde_json::json!({
-                "height": params.height,
-                "state_root_hex": params.state_root_hex,
-                "num_chunks": params.num_chunks,
-                "chunk_hashes_hex": params.chunk_hashes_hex,
-                "created_at": params.created_at,
-                "format": params.format,
-            }),
-        )
-        .await
-        .map_err(|e| err_internal(format!("offerSnapshot failed: {}", e)))?;
-        json_result(result)
-    }
-
-    #[tool(description = "Write one inbound snapshot chunk. The chunk's SHA-256 is verified against `manifest.chunk_hashes_hex[chunk_index]` before any disk write. On the final chunk, all chunks are decoded and atomically committed via `write_batch_sync`; `complete` will be `true` on that call. Returns `{complete, height, chunk_index}`.")]
-    async fn apply_snapshot_chunk(
-        &self,
-        Parameters(params): Parameters<ApplySnapshotChunkParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(
-            &self.node,
-            "tenzro_applySnapshotChunk",
-            serde_json::json!({
-                "height": params.height,
-                "chunk_index": params.chunk_index,
-                "data_b64": params.data_b64,
-            }),
-        )
-        .await
-        .map_err(|e| err_internal(format!("applySnapshotChunk failed: {}", e)))?;
-        json_result(result)
-    }
-
     // ─── EIP-7702 Tools (Set EOA Account Code helpers) ───
 
-    #[tool(description = "Compute the secp256k1 signing hash for an EIP-7702 authorization tuple `(chain_id, delegate_address, nonce)`. The returned `signing_hash` is what the EOA's secp256k1 private key signs client-side; full preimage is `MAGIC(0x05) || rlp([chain_id, delegate_address, nonce])`. Returns `{signing_hash, signing_data, magic_byte}`.")]
+    #[tool(
+        description = "Compute the secp256k1 signing hash for an EIP-7702 authorization tuple `(chain_id, delegate_address, nonce)`. The returned `signing_hash` is what the EOA's secp256k1 private key signs client-side; full preimage is `MAGIC(0x05) || rlp([chain_id, delegate_address, nonce])`. Returns `{signing_hash, signing_data, magic_byte}`."
+    )]
     async fn eip7702_signing_hash(
         &self,
         Parameters(params): Parameters<Eip7702SigningHashParams>,
@@ -13544,7 +15954,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Build the 23-byte EIP-7702 delegation designator (`0xef0100 || delegate_address`) that gets written into the EOA's code slot once an authorization is accepted. Returns `{designator, length: 23, prefix: '0xef0100', delegate_address}`.")]
+    #[tool(
+        description = "Build the 23-byte EIP-7702 delegation designator (`0xef0100 || delegate_address`) that gets written into the EOA's code slot once an authorization is accepted. Returns `{designator, length: 23, prefix: '0xef0100', delegate_address}`."
+    )]
     async fn eip7702_build_designator(
         &self,
         Parameters(params): Parameters<Eip7702BuildDesignatorParams>,
@@ -13561,7 +15973,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Decode an account's `code` (hex with or without 0x prefix) and extract the delegate address if it is a valid EIP-7702 designator. Returns `{is_designator: false, delegate_address: null}` for code that is not a 23-byte 7702 designator.")]
+    #[tool(
+        description = "Decode an account's `code` (hex with or without 0x prefix) and extract the delegate address if it is a valid EIP-7702 designator. Returns `{is_designator: false, delegate_address: null}` for code that is not a 23-byte 7702 designator."
+    )]
     async fn eip7702_parse_designator(
         &self,
         Parameters(params): Parameters<Eip7702ParseDesignatorParams>,
@@ -13576,7 +15990,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read static metadata about the EIP-7702 support surface — tx type (0x04), magic byte (0x05), designator prefix (0xef0100), designator length (23 bytes), signing scheme (secp256k1), and operator notes on the current transaction-side integration state.")]
+    #[tool(
+        description = "Read static metadata about the EIP-7702 support surface — tx type (0x04), magic byte (0x05), designator prefix (0xef0100), designator length (23 bytes), signing scheme (secp256k1), and operator notes on the current transaction-side integration state."
+    )]
     async fn eip7702_protocol_info(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -13592,7 +16008,9 @@ impl TenzroMcpServer {
 
     // ─── Institutional-primitive tools + BridgeFeeOracle ───
 
-    #[tool(description = "Read the ERC-7943 (uRWA) kill-switch state for a given token_id (32-byte hex). Returns the kill-switch active flag, the canonical 4-byte selectors for the standard uRWA functions, and the precompile addresses backing the on-chain enforcement path.")]
+    #[tool(
+        description = "Read the ERC-7943 (uRWA) kill-switch state for a given token_id (32-byte hex). Returns the kill-switch active flag, the canonical 4-byte selectors for the standard uRWA functions, and the precompile addresses backing the on-chain enforcement path."
+    )]
     async fn urwa_is_kill_switched(
         &self,
         Parameters(params): Parameters<UrwaTokenIdParams>,
@@ -13607,7 +16025,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read the ERC-7943 (uRWA) frozen-tokens amount for a (token_id, account) pair. Returns the frozen amount in token smallest unit.")]
+    #[tool(
+        description = "Read the ERC-7943 (uRWA) frozen-tokens amount for a (token_id, account) pair. Returns the frozen amount in token smallest unit."
+    )]
     async fn urwa_get_frozen_tokens(
         &self,
         Parameters(params): Parameters<UrwaFrozenLookupParams>,
@@ -13625,22 +16045,22 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Compute the canonical SHA-256 hash for an IVMS101 Travel Rule envelope. The caller passes the envelope JSON; the node returns the binding hash that anchors the envelope to a settlement receipt.")]
+    #[tool(
+        description = "Compute the canonical SHA-256 hash for an IVMS101 Travel Rule envelope. The caller passes the envelope JSON; the node returns the binding hash that anchors the envelope to a settlement receipt."
+    )]
     async fn ivms101_hash(
         &self,
         Parameters(params): Parameters<Ivms101HashParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(
-            &self.node,
-            "tenzro_ivms101Hash",
-            params.envelope,
-        )
-        .await
-        .map_err(|e| err_internal(format!("ivms101Hash failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_ivms101Hash", params.envelope)
+            .await
+            .map_err(|e| err_internal(format!("ivms101Hash failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Return the current node wall-clock as a Tenzro AttestedTimestamp envelope. The returned shape carries wall_ms, monotonic_ns, and TEE vendor (null when the node is not running inside a TEE).")]
+    #[tool(
+        description = "Return the current node wall-clock as a Tenzro AttestedTimestamp envelope. The returned shape carries wall_ms, monotonic_ns, and TEE vendor (null when the node is not running inside a TEE)."
+    )]
     async fn attested_clock_now(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -13654,7 +16074,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Enumerate the Wormhole NTT chain catalog supported by this Tenzro deployment. Returns Wormhole chain ids + names + supported Transceiver kinds (wormhole / axelar / layerzero / custom).")]
+    #[tool(
+        description = "Enumerate the Wormhole NTT chain catalog supported by this Tenzro deployment. Returns Wormhole chain ids + names + supported Transceiver kinds (wormhole / axelar / layerzero / custom)."
+    )]
     async fn wormhole_ntt_list_chains(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -13668,7 +16090,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Compute the canonical hash for an A2A v1.0 SignedAgentCard payload. The caller passes the AgentCard JSON; the node returns the 32-byte hash the domain owner must sign via JWS to produce the SignedAgentCard envelope.")]
+    #[tool(
+        description = "Compute the canonical hash for an A2A v1.0 SignedAgentCard payload. The caller passes the AgentCard JSON; the node returns the 32-byte hash the domain owner must sign via JWS to produce the SignedAgentCard envelope."
+    )]
     async fn signed_agent_card_canonical_hash(
         &self,
         Parameters(params): Parameters<SignedAgentCardHashParams>,
@@ -13683,7 +16107,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Quote the destination-native bridge fee in TNZO for a given (adapter, dest_chain, native_fee_smallest_unit). Read-only quote envelope; the matching tenzro_sponsorBridgeFee RPC consumes the quote to debit the user's TNZO and post a sponsorship receipt.")]
+    #[tool(
+        description = "Quote the destination-native bridge fee in TNZO for a given (adapter, dest_chain, native_fee_smallest_unit). Read-only quote envelope; the matching tenzro_sponsorBridgeFee RPC consumes the quote to debit the user's TNZO and post a sponsorship receipt."
+    )]
     async fn quote_bridge_fee_in_tnzo(
         &self,
         Parameters(params): Parameters<QuoteBridgeFeeParams>,
@@ -13702,7 +16128,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Enumerate the canonical per-adapter bridge sponsorship-pool vault addresses. Vault addresses are deterministic SHA-256 over 'tenzro/bridge/sponsorship-vault' || adapter_str (first 20 bytes).")]
+    #[tool(
+        description = "Enumerate the canonical per-adapter bridge sponsorship-pool vault addresses. Vault addresses are deterministic SHA-256 over 'tenzro/bridge/sponsorship-vault' || adapter_str (first 20 bytes)."
+    )]
     async fn list_bridge_sponsorship_pools(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -13718,7 +16146,9 @@ impl TenzroMcpServer {
 
     // ─── Permit2 Tools (SignatureTransfer) ───
 
-    #[tool(description = "Read the EIP-712 domain separator for the canonical Tenzro Permit2 contract (0x0000…00001023) on `chain_id`. Returns `{domain_separator, verifying_contract, chain_id}`.")]
+    #[tool(
+        description = "Read the EIP-712 domain separator for the canonical Tenzro Permit2 contract (0x0000…00001023) on `chain_id`. Returns `{domain_separator, verifying_contract, chain_id}`."
+    )]
     async fn permit2_domain_separator(
         &self,
         Parameters(params): Parameters<Permit2DomainSeparatorParams>,
@@ -13733,7 +16163,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Compute the EIP-712 digest a user signs for a Permit2 SignatureTransfer. If `witness` is provided, binds the permit to that 32-byte witness (used by ERC-7683 origin opens to bind to a specific cross-chain order). Returns `{digest, struct_hash, domain_separator}`.")]
+    #[tool(
+        description = "Compute the EIP-712 digest a user signs for a Permit2 SignatureTransfer. If `witness` is provided, binds the permit to that 32-byte witness (used by ERC-7683 origin opens to bind to a specific cross-chain order). Returns `{digest, struct_hash, domain_separator}`."
+    )]
     async fn permit2_digest(
         &self,
         Parameters(params): Parameters<Permit2DigestParams>,
@@ -13748,7 +16180,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Atomically verify a signed Permit2 message and consume its (owner, nonce) bitmap slot. Returns `{consumed, word_pos, bit_pos}`.")]
+    #[tool(
+        description = "Atomically verify a signed Permit2 message and consume its (owner, nonce) bitmap slot. Returns `{consumed, word_pos, bit_pos}`."
+    )]
     async fn permit2_verify_and_consume(
         &self,
         Parameters(params): Parameters<Permit2VerifyAndConsumeParams>,
@@ -13763,7 +16197,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Check whether a (owner, nonce) Permit2 slot has been consumed. Returns `{used, owner, nonce}`.")]
+    #[tool(
+        description = "Check whether a (owner, nonce) Permit2 slot has been consumed. Returns `{used, owner, nonce}`."
+    )]
     async fn permit2_nonce_used(
         &self,
         Parameters(params): Parameters<Permit2NonceUsedParams>,
@@ -13780,7 +16216,9 @@ impl TenzroMcpServer {
 
     // ─── Secure-Mint Tools ───
 
-    #[tool(description = "Set or update a Secure-Mint policy for a tokenized real-world asset. Enforces per-token 1:1 reserve attestation `circulating + amount ≤ reserve` at every mint.")]
+    #[tool(
+        description = "Set or update a Secure-Mint policy for a tokenized real-world asset. Enforces per-token 1:1 reserve attestation `circulating + amount ≤ reserve` at every mint."
+    )]
     async fn set_secure_mint_policy(
         &self,
         Parameters(params): Parameters<SecureMintSetPolicyParams>,
@@ -13825,7 +16263,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read-only invariant check for a proposed mint. Returns `{would_succeed, reserve, circulating, headroom, reason?}`.")]
+    #[tool(
+        description = "Read-only invariant check for a proposed mint. Returns `{would_succeed, reserve, circulating, headroom, reason?}`."
+    )]
     async fn secure_mint_check(
         &self,
         Parameters(params): Parameters<SecureMintAssetAmountParams>,
@@ -13840,7 +16280,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Atomic check + circulating increment. Use after the invariant check has passed off-chain.")]
+    #[tool(
+        description = "Atomic check + circulating increment. Use after the invariant check has passed off-chain."
+    )]
     async fn secure_mint_apply(
         &self,
         Parameters(params): Parameters<SecureMintAssetAmountParams>,
@@ -13855,7 +16297,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Record a redemption — decrements circulating. Call after the off-chain burn is finalized.")]
+    #[tool(
+        description = "Record a redemption — decrements circulating. Call after the off-chain burn is finalized."
+    )]
     async fn secure_mint_record_burn(
         &self,
         Parameters(params): Parameters<SecureMintAssetAmountParams>,
@@ -13872,7 +16316,9 @@ impl TenzroMcpServer {
 
     // ─── Stable-Asset Tools ───
 
-    #[tool(description = "Register or replace an issuer's stable-asset policy (issuer-agnostic stable-unit issuance on the Secure-Mint reserve floor). Requires the `issuer` API-key scope.")]
+    #[tool(
+        description = "Register or replace an issuer's stable-asset policy (issuer-agnostic stable-unit issuance on the Secure-Mint reserve floor). Requires the `issuer` API-key scope."
+    )]
     async fn register_stable_asset(
         &self,
         Parameters(params): Parameters<RegisterStableAssetParams>,
@@ -13902,7 +16348,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Mint stable units, hard-gated by the Secure-Mint reserve floor so circulating can never exceed the attested reserve.")]
+    #[tool(
+        description = "Mint stable units, hard-gated by the Secure-Mint reserve floor so circulating can never exceed the attested reserve."
+    )]
     async fn mint_stable_asset(
         &self,
         Parameters(params): Parameters<StableAssetMintParams>,
@@ -13934,7 +16382,9 @@ impl TenzroMcpServer {
 
     // ─── Hyperlane V3 Tools (sovereign Tenzro-validator-set ISM) ───
 
-    #[tool(description = "List supported Hyperlane chains and their canonical domain ids. Coverage: Ethereum, Polygon, Arbitrum, Optimism, Base, Avalanche, BSC, Mantle, Blast, Scroll, Linea, Manta, zkSync, Celo, Moonbeam, Mode, Fraxtal, Tenzro.")]
+    #[tool(
+        description = "List supported Hyperlane chains and their canonical domain ids. Coverage: Ethereum, Polygon, Arbitrum, Optimism, Base, Avalanche, BSC, Mantle, Blast, Scroll, Linea, Manta, zkSync, Celo, Moonbeam, Mode, Fraxtal, Tenzro."
+    )]
     async fn hyperlane_list_chains(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -13963,7 +16413,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Dispatch a Hyperlane V3 message through the canonical Mailbox. Tenzro runs a sovereign Tenzro-validator-set ISM, so inbound messages on Tenzro are verified against the active Tenzro validator BLS / ML-DSA set.")]
+    #[tool(
+        description = "Dispatch a Hyperlane V3 message through the canonical Mailbox. Tenzro runs a sovereign Tenzro-validator-set ISM, so inbound messages on Tenzro are verified against the active Tenzro validator BLS / ML-DSA set."
+    )]
     async fn hyperlane_dispatch(
         &self,
         Parameters(params): Parameters<HyperlaneDispatchParams>,
@@ -13995,7 +16447,9 @@ impl TenzroMcpServer {
 
     // ─── Axelar GMP Tools ───
 
-    #[tool(description = "List supported Axelar chains. Reach spans 30+ chains: EVM, Cosmos (Osmosis, Cosmos Hub, Juno, Neutron, Injective, Kujira, Crescent, Evmos), Move (Aptos, Sui), Stellar, XRP Ledger, Hyperliquid, Filecoin EVM, Kava.")]
+    #[tool(
+        description = "List supported Axelar chains. Reach spans 30+ chains: EVM, Cosmos (Osmosis, Cosmos Hub, Juno, Neutron, Injective, Kujira, Crescent, Evmos), Move (Aptos, Sui), Stellar, XRP Ledger, Hyperliquid, Filecoin EVM, Kava."
+    )]
     async fn axelar_list_chains(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -14009,7 +16463,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Dispatch an Axelar GMP `call_contract` message. Correlation id is `keccak256(payload)`.")]
+    #[tool(
+        description = "Dispatch an Axelar GMP `call_contract` message. Correlation id is `keccak256(payload)`."
+    )]
     async fn axelar_call_contract(
         &self,
         Parameters(params): Parameters<AxelarCallContractParams>,
@@ -14056,7 +16512,9 @@ impl TenzroMcpServer {
 
     // ─── Babylon Bitcoin Staking Tools ───
 
-    #[tool(description = "Register a Tenzro validator as a Babylon finality provider. Tenzro validators are then economically secured by native BTC delegations through Babylon's finality-providers protocol.")]
+    #[tool(
+        description = "Register a Tenzro validator as a Babylon finality provider. Tenzro validators are then economically secured by native BTC delegations through Babylon's finality-providers protocol."
+    )]
     async fn babylon_register_finality_provider(
         &self,
         Parameters(params): Parameters<BabylonRegisterFinalityProviderParams>,
@@ -14115,7 +16573,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Submit an EOTS (Extractable One-Time Signature) over a Tenzro block hash. Equivocation slashes the BTC delegations bonded to the finality provider.")]
+    #[tool(
+        description = "Submit an EOTS (Extractable One-Time Signature) over a Tenzro block hash. Equivocation slashes the BTC delegations bonded to the finality provider."
+    )]
     async fn babylon_submit_finality_signature(
         &self,
         Parameters(params): Parameters<BabylonSubmitFinalitySignatureParams>,
@@ -14147,17 +16607,19 @@ impl TenzroMcpServer {
 
     // ─── CAIP Discovery Tools (ChainAgnostic/namespaces#184) ───
 
-    #[tool(description = "Get the CAIP-2 chain id for this node: `tenzro:<lowercase hex of the first 16 bytes of the genesis block hash>`. Returns `{chain_id, namespace, reference, evm_chain_id}` — the `evm_chain_id` sidecar is for EVM tooling.")]
-    async fn caip2(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Get the CAIP-2 chain id for this node: `tenzro:<lowercase hex of the first 16 bytes of the genesis block hash>`. Returns `{chain_id, namespace, reference, evm_chain_id}` — the `evm_chain_id` sidecar is for EVM tooling."
+    )]
+    async fn caip2(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_caip2", serde_json::Value::Null)
             .await
             .map_err(|e| err_internal(format!("caip2 failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Get the CAIP-10 account id for a Tenzro address. Accepts hex or base58btc on input; normalises to canonical 64-hex.")]
+    #[tool(
+        description = "Get the CAIP-10 account id for a Tenzro address. Accepts hex or base58btc on input; normalises to canonical 64-hex."
+    )]
     async fn caip10(
         &self,
         Parameters(params): Parameters<Caip10Params>,
@@ -14172,7 +16634,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get the CAIP-19 asset id. Asset namespaces: `slip44` (native TNZO, SLIP-44 coin index 1414421071), `token` (Tenzro token registry id, 32-byte hex), `nft` (collection id + nft_token_id).")]
+    #[tool(
+        description = "Get the CAIP-19 asset id. Asset namespaces: `slip44` (native TNZO, SLIP-44 coin index 1414421071), `token` (Tenzro token registry id, 32-byte hex), `nft` (collection id + nft_token_id)."
+    )]
     async fn caip19(
         &self,
         Parameters(params): Parameters<Caip19Params>,
@@ -14189,7 +16653,9 @@ impl TenzroMcpServer {
 
     // ─── Auth-engine Approval Workflow Tools ───
 
-    #[tool(description = "List every approval in `Pending` state for the given approver DID. Lazy-expires stale records server-side before returning, so the caller never sees expired entries. Returns `{approver_did, count, pending: [{approval_id, requester_did, approver_did, created_at_ms, expires_at_ms, status, decided_at_ms, summary, action}]}`. Requires AuthEngine to be initialised on the node.")]
+    #[tool(
+        description = "List every approval in `Pending` state for the given approver DID. Lazy-expires stale records server-side before returning, so the caller never sees expired entries. Returns `{approver_did, count, pending: [{approval_id, requester_did, approver_did, created_at_ms, expires_at_ms, status, decided_at_ms, summary, action}]}`. Requires AuthEngine to be initialised on the node."
+    )]
     async fn list_pending_approvals(
         &self,
         Parameters(params): Parameters<ListPendingApprovalsParams>,
@@ -14204,7 +16670,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch a single approval record by id. The engine lazy-transitions an expired `Pending` record to `Expired` on this read path, so a returned `Pending` record is guaranteed to still be live. Returns the full record JSON; returns -32000 if id is unknown. Requires AuthEngine to be initialised on the node.")]
+    #[tool(
+        description = "Fetch a single approval record by id. The engine lazy-transitions an expired `Pending` record to `Expired` on this read path, so a returned `Pending` record is guaranteed to still be live. Returns the full record JSON; returns -32000 if id is unknown. Requires AuthEngine to be initialised on the node."
+    )]
     async fn get_approval(
         &self,
         Parameters(params): Parameters<GetApprovalParams>,
@@ -14219,7 +16687,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Decide a pending approval — `decision` is 'approved' or 'denied'. When `approver_did` is supplied, the engine refuses to apply the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns JSON-RPC -32001 (forbidden). `deny_reason` is recorded on a denial and surfaced to the requesting agent on retry. Returns the updated approval record. Requires AuthEngine to be initialised on the node.")]
+    #[tool(
+        description = "Decide a pending approval — `decision` is 'approved' or 'denied'. When `approver_did` is supplied, the engine refuses to apply the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns JSON-RPC -32001 (forbidden). `deny_reason` is recorded on a denial and surfaced to the requesting agent on retry. Returns the updated approval record. Requires AuthEngine to be initialised on the node."
+    )]
     async fn decide_approval(
         &self,
         Parameters(params): Parameters<DecideApprovalParams>,
@@ -14242,7 +16712,9 @@ impl TenzroMcpServer {
 
     // ─── Escrow + Dispute Inspection Tools ───
 
-    #[tool(description = "Read a single escrow record by its 32-byte escrow_id (hex, with or without 0x prefix). Returns `{escrow_id, payer, payee, amount, asset_id, status, created_at, expires_at, release_conditions}`. Requires EscrowManager to be initialised.")]
+    #[tool(
+        description = "Read a single escrow record by its 32-byte escrow_id (hex, with or without 0x prefix). Returns `{escrow_id, payer, payee, amount, asset_id, status, created_at, expires_at, release_conditions}`. Requires EscrowManager to be initialised."
+    )]
     async fn get_escrow(
         &self,
         Parameters(params): Parameters<GetEscrowParams>,
@@ -14257,7 +16729,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List every escrow funded by the given payer address. Returns `{payer, count, escrows: [...]}`. Backed by the `escrow_payer:` secondary index in CF_SETTLEMENTS. Requires EscrowManager.")]
+    #[tool(
+        description = "List every escrow funded by the given payer address. Returns `{payer, count, escrows: [...]}`. Backed by the `escrow_payer:` secondary index in CF_SETTLEMENTS. Requires EscrowManager."
+    )]
     async fn list_escrows_by_payer(
         &self,
         Parameters(params): Parameters<ListEscrowsByPayerParams>,
@@ -14272,7 +16746,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List every escrow held for the given payee address. Returns `{payee, count, escrows: [...]}`. Backed by the `escrow_payee:` secondary index in CF_SETTLEMENTS. Requires EscrowManager.")]
+    #[tool(
+        description = "List every escrow held for the given payee address. Returns `{payee, count, escrows: [...]}`. Backed by the `escrow_payee:` secondary index in CF_SETTLEMENTS. Requires EscrowManager."
+    )]
     async fn list_escrows_by_payee(
         &self,
         Parameters(params): Parameters<ListEscrowsByPayeeParams>,
@@ -14289,7 +16765,9 @@ impl TenzroMcpServer {
 
     // ─── Verifiable Inference Tools (TOPLOC commitments + challenges) ───
 
-    #[tool(description = "Fetch a stored TOPLOC inference commitment by hash. Returns the envelope {commitment_hash, model_id, provider, created_at, commitment: {k, prompt_tokens, steps}} or null when no commitment is stored under that hash. Mirrors tenzro_getInferenceCommitment.")]
+    #[tool(
+        description = "Fetch a stored TOPLOC inference commitment by hash. Returns the envelope {commitment_hash, model_id, provider, created_at, commitment: {k, prompt_tokens, steps}} or null when no commitment is stored under that hash. Mirrors tenzro_getInferenceCommitment."
+    )]
     async fn get_inference_commitment(
         &self,
         Parameters(params): Parameters<GetInferenceCommitmentParams>,
@@ -14304,7 +16782,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Verify a stored inference commitment by re-executing the prompt+output as a single prefill and comparing per-step top-k logits. The caller supplies the exact prompt (never stored). Requires the model loaded in serial (llama.cpp) mode on this node. Returns {commitment_hash, model_id, provider, pass, steps_total, steps_passed, failing_steps}. Mirrors tenzro_verifyInferenceCommitment.")]
+    #[tool(
+        description = "Verify a stored inference commitment by re-executing the prompt+output as a single prefill and comparing per-step top-k logits. The caller supplies the exact prompt (never stored). Requires the model loaded in serial (llama.cpp) mode on this node. Returns {commitment_hash, model_id, provider, pass, steps_total, steps_passed, failing_steps}. Mirrors tenzro_verifyInferenceCommitment."
+    )]
     async fn verify_inference_commitment(
         &self,
         Parameters(params): Parameters<VerifyInferenceCommitmentParams>,
@@ -14322,7 +16802,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "File a challenge against a stored inference commitment. Open to any caller; the model and provider are read from the stored envelope so filings cannot misattribute. Returns the filed challenge record with its challenge_id. Mirrors tenzro_fileInferenceChallenge.")]
+    #[tool(
+        description = "File a challenge against a stored inference commitment. Open to any caller; the model and provider are read from the stored envelope so filings cannot misattribute. Returns the filed challenge record with its challenge_id. Mirrors tenzro_fileInferenceChallenge."
+    )]
     async fn file_inference_challenge(
         &self,
         Parameters(params): Parameters<FileInferenceChallengeParams>,
@@ -14341,7 +16823,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch an inference challenge by id. Returns the full record (status, filed_at, resolved_at, verification) or null when unknown. Mirrors tenzro_getInferenceChallenge.")]
+    #[tool(
+        description = "Fetch an inference challenge by id. Returns the full record (status, filed_at, resolved_at, verification) or null when unknown. Mirrors tenzro_getInferenceChallenge."
+    )]
     async fn get_inference_challenge(
         &self,
         Parameters(params): Parameters<GetInferenceChallengeParams>,
@@ -14356,7 +16840,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List inference challenges, optionally filtered by status (voting_commit/voting_reveal/upheld/dismissed) and provider. Returns {count, challenges: [...]} sorted newest first. Mirrors tenzro_listInferenceChallenges.")]
+    #[tool(
+        description = "List inference challenges, optionally filtered by status (voting_commit/voting_reveal/upheld/dismissed) and provider. Returns {count, challenges: [...]} sorted newest first. Mirrors tenzro_listInferenceChallenges."
+    )]
     async fn list_inference_challenges(
         &self,
         Parameters(params): Parameters<ListInferenceChallengesParams>,
@@ -14374,7 +16860,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Commit a committee vote on an inference challenge. Open to drawn committee seats only. `commit_hash` = compute_vote_commit(verdict, salt, challenge_id, voter); the verdict stays hidden until reveal. When committed stake reaches the 2f+1 threshold the challenge advances to the reveal phase. Mirrors tenzro_commitChallengeVote.")]
+    #[tool(
+        description = "Commit a committee vote on an inference challenge. Open to drawn committee seats only. `commit_hash` = compute_vote_commit(verdict, salt, challenge_id, voter); the verdict stays hidden until reveal. When committed stake reaches the 2f+1 threshold the challenge advances to the reveal phase. Mirrors tenzro_commitChallengeVote."
+    )]
     async fn commit_challenge_vote(
         &self,
         Parameters(params): Parameters<CommitChallengeVoteParams>,
@@ -14393,7 +16881,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Reveal a previously committed committee vote. `(verdict, salt)` must reproduce the earlier commit hash. verdict=true means the commitment did not verify (upholds the challenge). Mirrors tenzro_revealChallengeVote.")]
+    #[tool(
+        description = "Reveal a previously committed committee vote. `(verdict, salt)` must reproduce the earlier commit hash. verdict=true means the commitment did not verify (upholds the challenge). Mirrors tenzro_revealChallengeVote."
+    )]
     async fn reveal_challenge_vote(
         &self,
         Parameters(params): Parameters<RevealChallengeVoteParams>,
@@ -14413,7 +16903,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Finalize an inference challenge by tallying revealed committee votes weighted by stake. No admin token — the verdict is the committee's. Idempotent: a decided challenge returns unchanged. An upheld verdict decrements the provider's reputation and records a compute-bond failure (response carries reputation_penalized + bond_failure_recorded). Pass force=true to close a challenge after the reveal window with no uphold quorum. Mirrors tenzro_finalizeChallenge.")]
+    #[tool(
+        description = "Finalize an inference challenge by tallying revealed committee votes weighted by stake. No admin token — the verdict is the committee's. Idempotent: a decided challenge returns unchanged. An upheld verdict decrements the provider's reputation and records a compute-bond failure (response carries reputation_penalized + bond_failure_recorded). Pass force=true to close a challenge after the reveal window with no uphold quorum. Mirrors tenzro_finalizeChallenge."
+    )]
     async fn finalize_challenge(
         &self,
         Parameters(params): Parameters<FinalizeChallengeParams>,
@@ -14433,7 +16925,9 @@ impl TenzroMcpServer {
 
     // ─── Prepaid streaming-service balance tools ───
 
-    #[tool(description = "Pre-fund the streaming settlement path: lock `amount` (wei) of the renter's on-chain TNZO into the prepaid ledger so storage/compute runtimes can stream per epoch out of it. Returns `{renter, asset, deposited, balance}`. Requires the node to run with storage + token subsystems.")]
+    #[tool(
+        description = "Pre-fund the streaming settlement path: lock `amount` (wei) of the renter's on-chain TNZO into the prepaid ledger so storage/compute runtimes can stream per epoch out of it. Returns `{renter, asset, deposited, balance}`. Requires the node to run with storage + token subsystems."
+    )]
     async fn prepaid_deposit(
         &self,
         Parameters(params): Parameters<PrepaidDepositParams>,
@@ -14451,7 +16945,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Withdraw up to `amount` (wei) of the renter's unspent prepaid balance back to their on-chain account. Returns `{renter, asset, withdrawn, balance}` — `withdrawn` is capped at the available balance.")]
+    #[tool(
+        description = "Withdraw up to `amount` (wei) of the renter's unspent prepaid balance back to their on-chain account. Returns `{renter, asset, withdrawn, balance}` — `withdrawn` is capped at the available balance."
+    )]
     async fn prepaid_withdraw(
         &self,
         Parameters(params): Parameters<PrepaidWithdrawParams>,
@@ -14469,7 +16965,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read the renter's current prepaid balance. Returns `{renter, asset, balance}` in wei.")]
+    #[tool(
+        description = "Read the renter's current prepaid balance. Returns `{renter, asset, balance}` in wei."
+    )]
     async fn prepaid_balance(
         &self,
         Parameters(params): Parameters<PrepaidBalanceParams>,
@@ -14484,7 +16982,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch a single channel dispute by id. Returns the full ChannelDispute (challenger, evidence blobs, status, opened_at / timeout_at / resolved_at, resolution). Returns -32004 if no dispute with that id exists. Requires ChannelManager.")]
+    #[tool(
+        description = "Fetch a single channel dispute by id. Returns the full ChannelDispute (challenger, evidence blobs, status, opened_at / timeout_at / resolved_at, resolution). Returns -32004 if no dispute with that id exists. Requires ChannelManager."
+    )]
     async fn get_dispute(
         &self,
         Parameters(params): Parameters<GetDisputeParams>,
@@ -14499,7 +16999,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List every dispute (open or historical) attached to a channel. Returns `{channel_id, count, disputes: [...]}`. Empty list is not an error — a channel with no disputes returns count: 0. Requires ChannelManager.")]
+    #[tool(
+        description = "List every dispute (open or historical) attached to a channel. Returns `{channel_id, count, disputes: [...]}`. Empty list is not an error — a channel with no disputes returns count: 0. Requires ChannelManager."
+    )]
     async fn list_disputes_by_channel(
         &self,
         Parameters(params): Parameters<ListDisputesByChannelParams>,
@@ -14516,782 +17018,1264 @@ impl TenzroMcpServer {
 
     // ─── Crypto Tools ───
 
-    #[tool(description = "Sign a message with a private key. Returns the hex-encoded signature. Supports Ed25519 and Secp256k1 key types.")]
+    #[tool(
+        description = "Sign a message with a private key. Returns the hex-encoded signature. Supports Ed25519 and Secp256k1 key types."
+    )]
     async fn sign_message(
         &self,
         Parameters(params): Parameters<SignMessageParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let key_type = params.key_type.as_deref().unwrap_or("ed25519");
-        let result = rpc_dispatch(&self.node,"tenzro_signMessage", serde_json::json!({
-            "private_key": params.private_key,
-            "message_hex": params.message_hex,
-            "key_type": key_type,
-        })).await.map_err(|e| err_internal(format!("signMessage failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_signMessage",
+            serde_json::json!({
+                "private_key": params.private_key,
+                "message_hex": params.message_hex,
+                "key_type": key_type,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("signMessage failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Verify a cryptographic signature against a public key and message. Returns whether the signature is valid.")]
+    #[tool(
+        description = "Verify a cryptographic signature against a public key and message. Returns whether the signature is valid."
+    )]
     async fn verify_signature(
         &self,
         Parameters(params): Parameters<VerifySignatureParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_verifySignature", serde_json::json!({
-            "public_key": params.public_key,
-            "message_hex": params.message_hex,
-            "signature_hex": params.signature_hex,
-        })).await.map_err(|e| err_internal(format!("verifySignature failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_verifySignature",
+            serde_json::json!({
+                "public_key": params.public_key,
+                "message_hex": params.message_hex,
+                "signature_hex": params.signature_hex,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("verifySignature failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Encrypt data using AES-256-GCM symmetric encryption. Returns the ciphertext and nonce in hex.")]
+    #[tool(
+        description = "Encrypt data using AES-256-GCM symmetric encryption. Returns the ciphertext and nonce in hex."
+    )]
     async fn encrypt_data(
         &self,
         Parameters(params): Parameters<EncryptDataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_encrypt", serde_json::json!({
-            "key_hex": params.key_hex,
-            "plaintext_hex": params.plaintext_hex,
-        })).await.map_err(|e| err_internal(format!("encrypt failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_encrypt",
+            serde_json::json!({
+                "key_hex": params.key_hex,
+                "plaintext_hex": params.plaintext_hex,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("encrypt failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Decrypt AES-256-GCM encrypted data using the key and nonce. Returns the plaintext in hex.")]
+    #[tool(
+        description = "Decrypt AES-256-GCM encrypted data using the key and nonce. Returns the plaintext in hex."
+    )]
     async fn decrypt_data(
         &self,
         Parameters(params): Parameters<DecryptDataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_decrypt", serde_json::json!({
-            "key_hex": params.key_hex,
-            "ciphertext_hex": params.ciphertext_hex,
-            "nonce_hex": params.nonce_hex,
-        })).await.map_err(|e| err_internal(format!("decrypt failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_decrypt",
+            serde_json::json!({
+                "key_hex": params.key_hex,
+                "ciphertext_hex": params.ciphertext_hex,
+                "nonce_hex": params.nonce_hex,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("decrypt failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Derive a 256-bit encryption key from a password using Argon2id KDF. Returns the derived key in hex.")]
+    #[tool(
+        description = "Derive a 256-bit encryption key from a password using Argon2id KDF. Returns the derived key in hex."
+    )]
     async fn derive_key(
         &self,
         Parameters(params): Parameters<DeriveKeyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_deriveKey", serde_json::json!({
-            "password": params.password,
-        })).await.map_err(|e| err_internal(format!("deriveKey failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_deriveKey",
+            serde_json::json!({
+                "password": params.password,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("deriveKey failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Generate a new cryptographic keypair. Returns the public key, private key, and derived address in hex.")]
+    #[tool(
+        description = "Generate a new cryptographic keypair. Returns the public key, private key, and derived address in hex."
+    )]
     async fn generate_keypair(
         &self,
         Parameters(params): Parameters<GenerateKeypairParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_generateKeypair", serde_json::json!({
-            "key_type": params.key_type,
-        })).await.map_err(|e| err_internal(format!("generateKeypair failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_generateKeypair",
+            serde_json::json!({
+                "key_type": params.key_type,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("generateKeypair failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Compute the SHA-256 hash of hex-encoded data. Returns the 32-byte hash in hex.")]
+    #[tool(
+        description = "Compute the SHA-256 hash of hex-encoded data. Returns the 32-byte hash in hex."
+    )]
     async fn hash_sha256(
         &self,
         Parameters(params): Parameters<HashSha256Params>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_hashSha256", serde_json::json!({
-            "data_hex": params.data_hex,
-        })).await.map_err(|e| err_internal(format!("hashSha256 failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_hashSha256",
+            serde_json::json!({
+                "data_hex": params.data_hex,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("hashSha256 failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Compute the Keccak-256 hash of hex-encoded data. Returns the 32-byte hash in hex. Used for Ethereum-compatible hashing.")]
+    #[tool(
+        description = "Compute the Keccak-256 hash of hex-encoded data. Returns the 32-byte hash in hex. Used for Ethereum-compatible hashing."
+    )]
     async fn hash_keccak256(
         &self,
         Parameters(params): Parameters<HashKeccak256Params>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_hashKeccak256", serde_json::json!({
-            "data_hex": params.data_hex,
-        })).await.map_err(|e| err_internal(format!("hashKeccak256 failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_hashKeccak256",
+            serde_json::json!({
+                "data_hex": params.data_hex,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("hashKeccak256 failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Perform an X25519 Diffie-Hellman key exchange. Returns the 32-byte shared secret in hex.")]
+    #[tool(
+        description = "Perform an X25519 Diffie-Hellman key exchange. Returns the 32-byte shared secret in hex."
+    )]
     async fn x25519_key_exchange(
         &self,
         Parameters(params): Parameters<X25519KeyExchangeParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_x25519KeyExchange", serde_json::json!({
-            "private_key_hex": params.private_key_hex,
-            "public_key_hex": params.public_key_hex,
-        })).await.map_err(|e| err_internal(format!("x25519KeyExchange failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_x25519KeyExchange",
+            serde_json::json!({
+                "private_key_hex": params.private_key_hex,
+                "public_key_hex": params.public_key_hex,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("x25519KeyExchange failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── TEE Tools ───
 
-    #[tool(description = "Detect available Trusted Execution Environment (TEE) hardware on this node. Returns detected TEE type (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) or simulation mode.")]
+    #[tool(
+        description = "Detect available Trusted Execution Environment (TEE) hardware on this node. Returns detected TEE type (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) or simulation mode."
+    )]
     async fn detect_tee(
         &self,
         Parameters(_params): Parameters<DetectTeeParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_detectTee", serde_json::json!({}))
-            .await.map_err(|e| err_internal(format!("detectTee failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_detectTee", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("detectTee failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Generate a TEE attestation report from the node's hardware enclave. The attestation proves the code is running in a genuine TEE. Optionally specify the TEE type or auto-detect.")]
+    #[tool(
+        description = "Generate a TEE attestation report from the node's hardware enclave. The attestation proves the code is running in a genuine TEE. Optionally specify the TEE type or auto-detect."
+    )]
     async fn get_tee_attestation(
         &self,
         Parameters(params): Parameters<GetTeeAttestationParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_getAttestation", serde_json::json!({
-            "tee_type": params.tee_type,
-        })).await.map_err(|e| err_internal(format!("getAttestation failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getAttestation",
+            serde_json::json!({
+                "tee_type": params.tee_type,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getAttestation failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Verify a TEE attestation report. Checks the vendor certificate chain, signature, and measurement hashes. Returns verification status and details.")]
+    #[tool(
+        description = "Verify a TEE attestation report. Checks the vendor certificate chain, signature, and measurement hashes. Returns verification status and details."
+    )]
     async fn verify_tee_attestation(
         &self,
         Parameters(params): Parameters<VerifyTeeAttestationParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_verifyTeeAttestation", serde_json::json!({
-            "attestation": params.attestation,
-            "tee_type": params.tee_type,
-        })).await.map_err(|e| err_internal(format!("verifyTeeAttestation failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_verifyTeeAttestation",
+            serde_json::json!({
+                "attestation": params.attestation,
+                "tee_type": params.tee_type,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("verifyTeeAttestation failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Seal (encrypt) data within the TEE enclave using hardware-derived keys. The sealed data can only be unsealed on the same TEE platform with the same key_id.")]
+    #[tool(
+        description = "Seal (encrypt) data within the TEE enclave using hardware-derived keys. The sealed data can only be unsealed on the same TEE platform with the same key_id."
+    )]
     async fn seal_data(
         &self,
         Parameters(params): Parameters<SealDataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_sealData", serde_json::json!({
-            "data_hex": params.data_hex,
-            "key_id": params.key_id,
-        })).await.map_err(|e| err_internal(format!("sealData failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_sealData",
+            serde_json::json!({
+                "data_hex": params.data_hex,
+                "key_id": params.key_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("sealData failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Unseal (decrypt) data that was previously sealed within the TEE enclave. Requires the same key_id used during sealing.")]
+    #[tool(
+        description = "Unseal (decrypt) data that was previously sealed within the TEE enclave. Requires the same key_id used during sealing."
+    )]
     async fn unseal_data(
         &self,
         Parameters(params): Parameters<UnsealDataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_unsealData", serde_json::json!({
-            "sealed_hex": params.sealed_hex,
-            "key_id": params.key_id,
-        })).await.map_err(|e| err_internal(format!("unsealData failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_unsealData",
+            serde_json::json!({
+                "sealed_hex": params.sealed_hex,
+                "key_id": params.key_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("unsealData failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List all registered TEE providers on the network, including their TEE type, attestation status, and supported capabilities.")]
+    #[tool(
+        description = "List all registered TEE providers on the network, including their TEE type, attestation status, and supported capabilities."
+    )]
     async fn list_tee_providers(
         &self,
         Parameters(_params): Parameters<ListTeeProvidersParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_listTeeProviders", serde_json::json!({}))
-            .await.map_err(|e| err_internal(format!("listTeeProviders failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listTeeProviders", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listTeeProviders failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── ZK Tools ───
 
-    #[tool(description = "Create a Plonky3 STARK proof for one of the three Tenzro AIRs (`inference`, `settlement`, `identity`) over the KoalaBear field. Returns the hex-encoded bincode-serialized p3_uni_stark::Proof and public inputs (4-byte LE KoalaBear chunks).")]
+    #[tool(
+        description = "Create a Plonky3 STARK proof for one of the three Tenzro AIRs (`inference`, `settlement`, `identity`) over the KoalaBear field. Returns the hex-encoded bincode-serialized p3_uni_stark::Proof and public inputs (4-byte LE KoalaBear chunks)."
+    )]
     async fn create_zk_proof(
         &self,
         Parameters(params): Parameters<CreateZkProofParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = params.witness;
         if let Some(obj) = payload.as_object_mut() {
-            obj.insert("circuit_id".to_string(), serde_json::Value::String(params.circuit_id));
+            obj.insert(
+                "circuit_id".to_string(),
+                serde_json::Value::String(params.circuit_id),
+            );
         } else {
             return Err(err_internal("witness must be a JSON object"));
         }
-        let result = rpc_dispatch(&self.node,"tenzro_createZkProof", payload)
-            .await.map_err(|e| err_internal(format!("createZkProof failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_createZkProof", payload)
+            .await
+            .map_err(|e| err_internal(format!("createZkProof failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List all available ZK circuits on the node — name, AIR type, field, and hash function.")]
+    #[tool(
+        description = "List all available ZK circuits on the node — name, AIR type, field, and hash function."
+    )]
     async fn list_zk_circuits(
         &self,
         Parameters(_params): Parameters<ListZkCircuitsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_listCircuits", serde_json::json!({}))
-            .await.map_err(|e| err_internal(format!("listCircuits failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listCircuits", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listCircuits failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── Custody Tools ───
 
-    #[tool(description = "Create a new MPC threshold wallet with configurable threshold and share count. Default is 2-of-3. Returns the wallet ID, address, and key share metadata.")]
+    #[tool(
+        description = "Create a new MPC threshold wallet with configurable threshold and share count. Default is 2-of-3. Returns the wallet ID, address, and key share metadata."
+    )]
     async fn create_mpc_wallet(
         &self,
         Parameters(params): Parameters<CreateMpcWalletParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_createMpcWallet", serde_json::json!({
-            "threshold": params.threshold.unwrap_or(2),
-            "total_shares": params.total_shares.unwrap_or(3),
-            "key_type": params.key_type.as_deref().unwrap_or("ed25519"),
-        })).await.map_err(|e| err_internal(format!("createMpcWallet failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_createMpcWallet",
+            serde_json::json!({
+                "threshold": params.threshold.unwrap_or(2),
+                "total_shares": params.total_shares.unwrap_or(3),
+                "key_type": params.key_type.as_deref().unwrap_or("ed25519"),
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("createMpcWallet failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Export a wallet's keystore as an encrypted JSON file. Uses Argon2id KDF for key derivation. The exported keystore can be imported on another node.")]
+    #[tool(
+        description = "Export a wallet's keystore as an encrypted JSON file. Uses Argon2id KDF for key derivation. The exported keystore can be imported on another node."
+    )]
     async fn export_keystore(
         &self,
         Parameters(params): Parameters<ExportKeystoreParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_exportKeystore", serde_json::json!({
-            "wallet_id": params.wallet_id,
-            "password": params.password,
-        })).await.map_err(|e| err_internal(format!("exportKeystore failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_exportKeystore",
+            serde_json::json!({
+                "wallet_id": params.wallet_id,
+                "password": params.password,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("exportKeystore failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Import a wallet from an encrypted keystore JSON. Decrypts with the provided password and adds the wallet to the local node.")]
+    #[tool(
+        description = "Import a wallet from an encrypted keystore JSON. Decrypts with the provided password and adds the wallet to the local node."
+    )]
     async fn import_keystore(
         &self,
         Parameters(params): Parameters<ImportKeystoreParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_importKeystore", serde_json::json!({
-            "keystore_json": params.keystore_json,
-            "password": params.password,
-        })).await.map_err(|e| err_internal(format!("importKeystore failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_importKeystore",
+            serde_json::json!({
+                "keystore_json": params.keystore_json,
+                "password": params.password,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("importKeystore failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Get the key share metadata for an MPC wallet. Returns the threshold, total shares, and share indices without exposing secret key material.")]
+    #[tool(
+        description = "Get the key share metadata for an MPC wallet. Returns the threshold, total shares, and share indices without exposing secret key material."
+    )]
     async fn get_key_shares(
         &self,
         Parameters(params): Parameters<GetKeySharesParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_getKeyShares", serde_json::json!({
-            "wallet_id": params.wallet_id,
-        })).await.map_err(|e| err_internal(format!("getKeyShares failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getKeyShares",
+            serde_json::json!({
+                "wallet_id": params.wallet_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getKeyShares failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Rotate the key shares of an MPC wallet. Generates new shares while keeping the same public key and address. Old shares become invalid.")]
+    #[tool(
+        description = "Rotate the key shares of an MPC wallet. Generates new shares while keeping the same public key and address. Old shares become invalid."
+    )]
     async fn rotate_keys(
         &self,
         Parameters(params): Parameters<RotateKeysParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_rotateKeys", serde_json::json!({
-            "wallet_id": params.wallet_id,
-        })).await.map_err(|e| err_internal(format!("rotateKeys failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_rotateKeys",
+            serde_json::json!({
+                "wallet_id": params.wallet_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("rotateKeys failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Set spending limits for a wallet. Defines the maximum daily spend and per-transaction limit in TNZO. Transactions exceeding these limits will be rejected.")]
+    #[tool(
+        description = "Set spending limits for a wallet. Defines the maximum daily spend and per-transaction limit in TNZO. Transactions exceeding these limits will be rejected."
+    )]
     async fn set_spending_limits(
         &self,
         Parameters(params): Parameters<SetSpendingLimitsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_setSpendingLimits", serde_json::json!({
-            "wallet_id": params.wallet_id,
-            "daily_limit": params.daily_limit,
-            "per_tx_limit": params.per_tx_limit,
-        })).await.map_err(|e| err_internal(format!("setSpendingLimits failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_setSpendingLimits",
+            serde_json::json!({
+                "wallet_id": params.wallet_id,
+                "daily_limit": params.daily_limit,
+                "per_tx_limit": params.per_tx_limit,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("setSpendingLimits failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Get the current spending limits for a wallet. Returns the daily limit, per-transaction limit, and current daily usage.")]
+    #[tool(
+        description = "Get the current spending limits for a wallet. Returns the daily limit, per-transaction limit, and current daily usage."
+    )]
     async fn get_spending_limits(
         &self,
         Parameters(params): Parameters<GetSpendingLimitsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_getSpendingLimits", serde_json::json!({
-            "wallet_id": params.wallet_id,
-        })).await.map_err(|e| err_internal(format!("getSpendingLimits failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getSpendingLimits",
+            serde_json::json!({
+                "wallet_id": params.wallet_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getSpendingLimits failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Authorize a temporary session for a wallet with specific allowed operations and a time limit. Returns a session ID and expiry timestamp.")]
+    #[tool(
+        description = "Authorize a temporary session for a wallet with specific allowed operations and a time limit. Requires a signed did_envelope from the DID that owns the wallet — opening a session is an act on the wallet. Returns a session ID and expiry timestamp."
+    )]
     async fn authorize_session(
         &self,
         Parameters(params): Parameters<AuthorizeSessionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_authorizeSession", serde_json::json!({
-            "wallet_id": params.wallet_id,
-            "duration_secs": params.duration_secs,
-            "operations": params.operations,
-        })).await.map_err(|e| err_internal(format!("authorizeSession failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_authorizeSession",
+            serde_json::json!({
+                "wallet_id": params.wallet_id,
+                "did_envelope": params.did_envelope,
+                "duration_secs": params.duration_secs,
+                "operations": params.operations,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("authorizeSession failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Revoke an active wallet session immediately. The session ID becomes invalid and any pending operations under this session are cancelled.")]
+    #[tool(
+        description = "Revoke an active wallet session immediately. Requires a signed did_envelope from the DID that owns the session's wallet. The session ID becomes invalid and any pending operations under this session are cancelled."
+    )]
     async fn revoke_session(
         &self,
         Parameters(params): Parameters<RevokeSessionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_revokeSession", serde_json::json!({
-            "session_id": params.session_id,
-        })).await.map_err(|e| err_internal(format!("revokeSession failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_revokeSession",
+            serde_json::json!({
+                "session_id": params.session_id,
+                "did_envelope": params.did_envelope,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("revokeSession failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── App Registry Tools (non-custodial developer payments) ───
 
-    #[tool(description = "Register a developer app in the on-chain app registry. Permissionless and first-writer-wins: the developer signs a DID envelope with their own key; the app wallet is the developer's own TNZO treasury (the network never holds custody). Provide a developer-signed `envelope` (hex header value) bound to the canonical registration params.")]
+    #[tool(
+        description = "Register a developer app in the on-chain app registry. Permissionless and first-writer-wins: the developer signs a DID envelope with their own key; the app wallet is the developer's own TNZO treasury (the network never holds custody). Provide a developer-signed `envelope` (hex header value) bound to the canonical registration params."
+    )]
     async fn register_app(
         &self,
         Parameters(params): Parameters<RegisterAppParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_registerApp", serde_json::json!({
-            "app_id": params.app_id,
-            "developer_did": params.developer_did,
-            "app_wallet": params.app_wallet,
-            "signing_pubkeys": params.signing_pubkeys,
-            "margin_bps": params.margin_bps,
-            "min_balance": params.min_balance,
-            "active": params.active,
-            "envelope": params.envelope,
-        })).await.map_err(|e| err_internal(format!("registerApp failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_registerApp",
+            serde_json::json!({
+                "app_id": params.app_id,
+                "developer_did": params.developer_did,
+                "app_wallet": params.app_wallet,
+                "signing_pubkeys": params.signing_pubkeys,
+                "margin_bps": params.margin_bps,
+                "min_balance": params.min_balance,
+                "active": params.active,
+                "envelope": params.envelope,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("registerApp failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Activate or deactivate a registered app. Requires a developer-signed DID envelope (hex header value) authorizing tenzro_setAppStatus over the canonical status params of (app_id, active). A deactivated app rejects new settlement authorizations.")]
+    #[tool(
+        description = "Activate or deactivate a registered app. Requires a developer-signed DID envelope (hex header value) authorizing tenzro_setAppStatus over the canonical status params of (app_id, active). A deactivated app rejects new settlement authorizations."
+    )]
     async fn set_app_status(
         &self,
         Parameters(params): Parameters<SetAppStatusParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_setAppStatus", serde_json::json!({
-            "app_id": params.app_id,
-            "active": params.active,
-            "envelope": params.envelope,
-        })).await.map_err(|e| err_internal(format!("setAppStatus failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_setAppStatus",
+            serde_json::json!({
+                "app_id": params.app_id,
+                "active": params.active,
+                "envelope": params.envelope,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("setAppStatus failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Look up a registered app by id. Returns the developer DID, app wallet, registered signing keys, developer margin, and active status.")]
+    #[tool(
+        description = "Look up a registered app by id. Returns the developer DID, app wallet, registered signing keys, developer margin, and active status."
+    )]
     async fn get_app(
         &self,
         Parameters(params): Parameters<GetAppParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_getApp", serde_json::json!({
-            "app_id": params.app_id,
-        })).await.map_err(|e| err_internal(format!("getApp failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getApp",
+            serde_json::json!({
+                "app_id": params.app_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getApp failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List all apps registered in the on-chain app registry, sorted by app id.")]
+    #[tool(
+        description = "List all apps registered in the on-chain app registry, sorted by app id."
+    )]
     async fn list_apps(
         &self,
         Parameters(_params): Parameters<ListAppsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_listApps", serde_json::json!({}))
-            .await.map_err(|e| err_internal(format!("listApps failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listApps", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listApps failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Execute a developer-signed settlement authorization. The developer already charged the end user in fiat on their own payment-provider account; this moves TNZO from the app wallet to the payer, minus the network commission. Idempotent per (app_id, external_ref): a replay returns the recorded outcome with duplicate=true. The signature must be from one of the app's registered signing keys.")]
+    #[tool(
+        description = "Execute a developer-signed settlement authorization. The developer already charged the end user in fiat on their own payment-provider account; this moves TNZO from the app wallet to the payer, minus the network commission. Idempotent per (app_id, external_ref): a replay returns the recorded outcome with duplicate=true. The signature must be from one of the app's registered signing keys."
+    )]
     async fn settle_authorized(
         &self,
         Parameters(params): Parameters<SettleAuthorizedParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_settleAuthorized", serde_json::json!({
-            "app_id": params.app_id,
-            "chain_id": params.chain_id,
-            "payer_did": params.payer_did,
-            "amount_tnzo": params.amount_tnzo,
-            "external_ref": params.external_ref,
-            "nonce": params.nonce,
-            "expiry": params.expiry,
-            "key_id": params.key_id,
-            "signature": params.signature,
-        })).await.map_err(|e| err_internal(format!("settleAuthorized failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_settleAuthorized",
+            serde_json::json!({
+                "app_id": params.app_id,
+                "chain_id": params.chain_id,
+                "payer_did": params.payer_did,
+                "amount_tnzo": params.amount_tnzo,
+                "external_ref": params.external_ref,
+                "nonce": params.nonce,
+                "expiry": params.expiry,
+                "key_id": params.key_id,
+                "signature": params.signature,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("settleAuthorized failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Fetch the recorded outcome for a settlement authorization by (app_id, external_ref). Returns the amount, payer net, commission, and success/failure detail, or an error if no settlement was recorded for that reference.")]
+    #[tool(
+        description = "Fetch the recorded outcome for a settlement authorization by (app_id, external_ref). Returns the amount, payer net, commission, and success/failure detail, or an error if no settlement was recorded for that reference."
+    )]
     async fn get_settle_authorized_outcome(
         &self,
         Parameters(params): Parameters<GetSettleAuthorizedOutcomeParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_getSettleAuthorizedOutcome", serde_json::json!({
-            "app_id": params.app_id,
-            "external_ref": params.external_ref,
-        })).await.map_err(|e| err_internal(format!("getSettleAuthorizedOutcome failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getSettleAuthorizedOutcome",
+            serde_json::json!({
+                "app_id": params.app_id,
+                "external_ref": params.external_ref,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getSettleAuthorizedOutcome failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── Contract ABI Tools ───
 
-    #[tool(description = "ABI-encode a function call. Takes a Solidity-style function signature and arguments, returns hex-encoded calldata. Useful for preparing EVM contract interactions.")]
+    #[tool(
+        description = "ABI-encode a function call. Takes a Solidity-style function signature and arguments, returns hex-encoded calldata. Useful for preparing EVM contract interactions."
+    )]
     async fn encode_function(
         &self,
         Parameters(params): Parameters<EncodeFunctionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_encodeFunction", serde_json::json!({
-            "function_sig": params.function_sig,
-            "args": params.args,
-        })).await.map_err(|e| err_internal(format!("encodeFunction failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_encodeFunction",
+            serde_json::json!({
+                "function_sig": params.function_sig,
+                "args": params.args,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("encodeFunction failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-decode contract call return data. Takes hex-encoded return data and output type signatures, returns decoded values. Useful for interpreting EVM contract responses.")]
+    #[tool(
+        description = "ABI-decode contract call return data. Takes hex-encoded return data and output type signatures, returns decoded values. Useful for interpreting EVM contract responses."
+    )]
     async fn decode_result(
         &self,
         Parameters(params): Parameters<DecodeResultParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_decodeResult", serde_json::json!({
-            "data_hex": params.data_hex,
-            "output_types": params.output_types,
-        })).await.map_err(|e| err_internal(format!("decodeResult failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_decodeResult",
+            serde_json::json!({
+                "data_hex": params.data_hex,
+                "output_types": params.output_types,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("decodeResult failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── AP2 (Agent Payments Protocol) Tools ────────────────────────────────
 
-    #[tool(description = "Sign an AP2 mandate (Intent or Cart) with the auth-bound wallet's Ed25519 key, returning a verified Verifiable Digital Credential (VDC). Auth: DPoP+JWT mandatory. Wallet must be Ed25519. signer_did must match the wallet's controller DID.")]
+    #[tool(
+        description = "Sign an AP2 mandate (Intent or Cart) with the auth-bound wallet's Ed25519 key, returning a verified Verifiable Digital Credential (VDC). Auth: DPoP+JWT mandatory. Wallet must be Ed25519. signer_did must match the wallet's controller DID."
+    )]
     async fn ap2_sign_mandate(
         &self,
         Parameters(params): Parameters<Ap2SignMandateParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ap2SignMandate", serde_json::json!({
-            "mandate_kind": params.mandate_kind,
-            "mandate": params.mandate,
-            "signer_did": params.signer_did,
-        })).await.map_err(|e| err_internal(format!("ap2SignMandate failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ap2SignMandate",
+            serde_json::json!({
+                "mandate_kind": params.mandate_kind,
+                "mandate": params.mandate,
+                "signer_did": params.signer_did,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ap2SignMandate failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Verify a single AP2 mandate (Verifiable Digital Credential). Checks the VDC proof, issuer, and schema for Intent, Cart, or Payment mandates per Google's AP2 spec.")]
+    #[tool(
+        description = "Verify a single AP2 mandate (Verifiable Digital Credential). Checks the VDC proof, issuer, and schema for Intent, Cart, or Payment mandates per Google's AP2 spec."
+    )]
     async fn ap2_verify_mandate(
         &self,
         Parameters(params): Parameters<Ap2VerifyMandateParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ap2VerifyMandate", serde_json::json!({
-            "vdc": params.vdc,
-        })).await.map_err(|e| err_internal(format!("ap2VerifyMandate failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ap2VerifyMandate",
+            serde_json::json!({
+                "vdc": params.vdc,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ap2VerifyMandate failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Validate an AP2 v0.2 Checkout+Payment mandate pair for consistency: ensures the PaymentMandate references the CheckoutMandate, amounts/items match the checkout's constraints, and both VDCs verify. When enforce_delegation=true, additionally cross-checks the agent's TDIP DelegationScope against the payment total (TDIP identifies. AP2 authorizes. Tenzro settles).")]
+    #[tool(
+        description = "Validate an AP2 v0.2 Checkout+Payment mandate pair for consistency: ensures the PaymentMandate references the CheckoutMandate, amounts/items match the checkout's constraints, and both VDCs verify. When enforce_delegation=true, additionally cross-checks the agent's TDIP DelegationScope against the payment total (TDIP identifies. AP2 authorizes. Tenzro settles)."
+    )]
     async fn ap2_validate_mandate_pair(
         &self,
         Parameters(params): Parameters<Ap2ValidateMandatePairParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ap2ValidateMandatePair", serde_json::json!({
-            "checkout_vdc": params.checkout_vdc,
-            "payment_vdc": params.payment_vdc,
-            "enforce_delegation": params.enforce_delegation,
-        })).await.map_err(|e| err_internal(format!("ap2ValidateMandatePair failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ap2ValidateMandatePair",
+            serde_json::json!({
+                "checkout_vdc": params.checkout_vdc,
+                "payment_vdc": params.payment_vdc,
+                "enforce_delegation": params.enforce_delegation,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ap2ValidateMandatePair failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Return AP2 protocol metadata: version, supported mandate types, supported VC formats, and issuer DID methods recognized by this node.")]
-    async fn ap2_protocol_info(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Return AP2 protocol metadata: version, supported mandate types, supported VC formats, and issuer DID methods recognized by this node."
+    )]
+    async fn ap2_protocol_info(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_ap2ProtocolInfo", serde_json::json!({}))
-            .await.map_err(|e| err_internal(format!("ap2ProtocolInfo failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("ap2ProtocolInfo failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── ERC-8004 (Trustless Agents Registry) Tools ─────────────────────────
 
-    #[tool(description = "ABI-encode IdentityRegistry.register() (ERC-8004 v0.6+ no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.register() (ERC-8004 v0.6+ no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId). Returns hex calldata."
+    )]
     async fn erc8004_encode_register(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegister", serde_json::json!({}))
-            .await.map_err(|e| err_internal(format!("erc8004EncodeRegister failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeRegister",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeRegister failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.register(string agentURI) (ERC-8004 v0.6+ overload with agent URI). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.register(string agentURI) (ERC-8004 v0.6+ overload with agent URI). Returns hex calldata."
+    )]
     async fn erc8004_encode_register_with_uri(
         &self,
         Parameters(params): Parameters<Erc8004EncodeRegisterWithUriParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegisterWithUri", serde_json::json!({
-            "agent_uri": params.agent_uri,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeRegisterWithUri failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeRegisterWithUri",
+            serde_json::json!({
+                "agent_uri": params.agent_uri,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeRegisterWithUri failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (ERC-8004 v0.6+ overload with metadata entries). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (ERC-8004 v0.6+ overload with metadata entries). Returns hex calldata."
+    )]
     async fn erc8004_encode_register_with_metadata(
         &self,
         Parameters(params): Parameters<Erc8004EncodeRegisterWithMetadataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let metadata: Vec<serde_json::Value> = params.metadata.iter()
+        let metadata: Vec<serde_json::Value> = params
+            .metadata
+            .iter()
             .map(|e| serde_json::json!({ "key": e.key, "value": e.value }))
             .collect();
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegisterWithMetadata", serde_json::json!({
-            "agent_uri": params.agent_uri,
-            "metadata": metadata,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeRegisterWithMetadata failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeRegisterWithMetadata",
+            serde_json::json!({
+                "agent_uri": params.agent_uri,
+                "metadata": metadata,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeRegisterWithMetadata failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.getAgent(uint256 agentId). Returns hex calldata for an eth_call lookup.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.getAgent(uint256 agentId). Returns hex calldata for an eth_call lookup."
+    )]
     async fn erc8004_encode_get_agent(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgent", serde_json::json!({
-            "agent_id": params.agent_id,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgent failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetAgent",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetAgent failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Decode the (address, string) return data of an IdentityRegistry.getAgent() eth_call into { agent_address, metadata_uri }.")]
+    #[tool(
+        description = "Decode the (address, string) return data of an IdentityRegistry.getAgent() eth_call into { agent_address, metadata_uri }."
+    )]
     async fn erc8004_decode_get_agent(
         &self,
         Parameters(params): Parameters<Erc8004DecodeGetAgentParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004DecodeGetAgent", serde_json::json!({
-            "return_data": params.return_data,
-        })).await.map_err(|e| err_internal(format!("erc8004DecodeGetAgent failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004DecodeGetAgent",
+            serde_json::json!({
+                "return_data": params.return_data,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004DecodeGetAgent failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (ERC-8004 v0.6+ mutator). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (ERC-8004 v0.6+ mutator). Returns hex calldata."
+    )]
     async fn erc8004_encode_set_agent_uri(
         &self,
         Parameters(params): Parameters<Erc8004EncodeSetAgentUriParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetAgentURI", serde_json::json!({
-            "agent_id": params.agent_id,
-            "metadata_uri": params.metadata_uri,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeSetAgentURI failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeSetAgentURI",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "metadata_uri": params.metadata_uri,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeSetAgentURI failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature) (ERC-8004 v0.6+ wallet rotation). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature) (ERC-8004 v0.6+ wallet rotation). Returns hex calldata."
+    )]
     async fn erc8004_encode_set_agent_wallet(
         &self,
         Parameters(params): Parameters<Erc8004EncodeSetAgentWalletParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetAgentWallet", serde_json::json!({
-            "agent_id": params.agent_id,
-            "new_wallet": params.new_wallet,
-            "deadline": params.deadline,
-            "signature": params.signature,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeSetAgentWallet failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeSetAgentWallet",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "new_wallet": params.new_wallet,
+                "deadline": params.deadline,
+                "signature": params.signature,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeSetAgentWallet failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.setMetadata(uint256 agentId, string metadataKey, bytes metadataValue) (ERC-8004 v0.6+ key-value metadata). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.setMetadata(uint256 agentId, string metadataKey, bytes metadataValue) (ERC-8004 v0.6+ key-value metadata). Returns hex calldata."
+    )]
     async fn erc8004_encode_set_metadata(
         &self,
         Parameters(params): Parameters<Erc8004EncodeSetMetadataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetMetadata", serde_json::json!({
-            "agent_id": params.agent_id,
-            "metadata_key": params.metadata_key,
-            "metadata_value": params.metadata_value,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeSetMetadata failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeSetMetadata",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "metadata_key": params.metadata_key,
+                "metadata_value": params.metadata_value,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeSetMetadata failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.getMetadata(uint256 agentId, string metadataKey) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.getMetadata(uint256 agentId, string metadataKey) (ERC-8004 v0.6+ read). Returns hex calldata."
+    )]
     async fn erc8004_encode_get_metadata(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetMetadataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetMetadata", serde_json::json!({
-            "agent_id": params.agent_id,
-            "metadata_key": params.metadata_key,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetMetadata failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetMetadata",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "metadata_key": params.metadata_key,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetMetadata failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Decode the bytes return data of an IdentityRegistry.getMetadata() eth_call into { metadata_value }.")]
+    #[tool(
+        description = "Decode the bytes return data of an IdentityRegistry.getMetadata() eth_call into { metadata_value }."
+    )]
     async fn erc8004_decode_get_metadata(
         &self,
         Parameters(params): Parameters<Erc8004DecodeGetMetadataParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004DecodeGetMetadata", serde_json::json!({
-            "return_data": params.return_data,
-        })).await.map_err(|e| err_internal(format!("erc8004DecodeGetMetadata failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004DecodeGetMetadata",
+            serde_json::json!({
+                "return_data": params.return_data,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004DecodeGetMetadata failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.getAgentURI(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.getAgentURI(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata."
+    )]
     async fn erc8004_encode_get_agent_uri(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentUriParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgentURI", serde_json::json!({
-            "agent_id": params.agent_id,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgentURI failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetAgentURI",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetAgentURI failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.getAgentWallet(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode IdentityRegistry.getAgentWallet(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata."
+    )]
     async fn erc8004_encode_get_agent_wallet(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentWalletParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgentWallet", serde_json::json!({
-            "agent_id": params.agent_id,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgentWallet failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetAgentWallet",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetAgentWallet failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ReputationRegistry.submitFeedback(bytes32 subjectAgentId, int8 rating, string contextURI). Rating is in -100..=100.")]
+    #[tool(
+        description = "ABI-encode ReputationRegistry.submitFeedback(bytes32 subjectAgentId, int8 rating, string contextURI). Rating is in -100..=100."
+    )]
     async fn erc8004_encode_feedback(
         &self,
         Parameters(params): Parameters<Erc8004EncodeFeedbackParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeFeedback", serde_json::json!({
-            "subject_agent_id": params.subject_agent_id,
-            "rating": params.rating,
-            "context_uri": params.context_uri,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeFeedback failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeFeedback",
+            serde_json::json!({
+                "subject_agent_id": params.subject_agent_id,
+                "rating": params.rating,
+                "context_uri": params.context_uri,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeFeedback failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ReputationRegistry.getFeedback(bytes32 subject, uint256 index). Returns hex calldata for an eth_call lookup.")]
+    #[tool(
+        description = "ABI-encode ReputationRegistry.getFeedback(bytes32 subject, uint256 index). Returns hex calldata for an eth_call lookup."
+    )]
     async fn erc8004_encode_get_feedback(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetFeedbackParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedback", serde_json::json!({
-            "subject_agent_id": params.subject_agent_id,
-            "index": params.index,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetFeedback failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetFeedback",
+            serde_json::json!({
+                "subject_agent_id": params.subject_agent_id,
+                "index": params.index,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetFeedback failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ReputationRegistry.getFeedbackCount(bytes32 subject). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode ReputationRegistry.getFeedbackCount(bytes32 subject). Returns hex calldata."
+    )]
     async fn erc8004_encode_get_feedback_count(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetFeedbackCountParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedbackCount", serde_json::json!({
-            "subject_agent_id": params.subject_agent_id,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetFeedbackCount failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetFeedbackCount",
+            serde_json::json!({
+                "subject_agent_id": params.subject_agent_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetFeedbackCount failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ReputationRegistry.revokeFeedback(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ mutator). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode ReputationRegistry.revokeFeedback(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ mutator). Returns hex calldata."
+    )]
     async fn erc8004_encode_revoke_feedback(
         &self,
         Parameters(params): Parameters<Erc8004EncodeRevokeFeedbackParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRevokeFeedback", serde_json::json!({
-            "agent_id": params.agent_id,
-            "feedback_id": params.feedback_id,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeRevokeFeedback failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeRevokeFeedback",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "feedback_id": params.feedback_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeRevokeFeedback failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ReputationRegistry.appendResponse(uint256 agentId, bytes32 feedbackId, string responseURI) (ERC-8004 v0.6+ mutator). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode ReputationRegistry.appendResponse(uint256 agentId, bytes32 feedbackId, string responseURI) (ERC-8004 v0.6+ mutator). Returns hex calldata."
+    )]
     async fn erc8004_encode_append_response(
         &self,
         Parameters(params): Parameters<Erc8004EncodeAppendResponseParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeAppendResponse", serde_json::json!({
-            "agent_id": params.agent_id,
-            "feedback_id": params.feedback_id,
-            "response_uri": params.response_uri,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeAppendResponse failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeAppendResponse",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "feedback_id": params.feedback_id,
+                "response_uri": params.response_uri,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeAppendResponse failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ReputationRegistry.isFeedbackRevoked(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode ReputationRegistry.isFeedbackRevoked(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata."
+    )]
     async fn erc8004_encode_is_feedback_revoked(
         &self,
         Parameters(params): Parameters<Erc8004EncodeIsFeedbackRevokedParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeIsFeedbackRevoked", serde_json::json!({
-            "agent_id": params.agent_id,
-            "feedback_id": params.feedback_id,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeIsFeedbackRevoked failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeIsFeedbackRevoked",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "feedback_id": params.feedback_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeIsFeedbackRevoked failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ReputationRegistry.getFeedbackResponses(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode ReputationRegistry.getFeedbackResponses(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata."
+    )]
     async fn erc8004_encode_get_feedback_responses(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetFeedbackResponsesParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedbackResponses", serde_json::json!({
-            "agent_id": params.agent_id,
-            "feedback_id": params.feedback_id,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetFeedbackResponses failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetFeedbackResponses",
+            serde_json::json!({
+                "agent_id": params.agent_id,
+                "feedback_id": params.feedback_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetFeedbackResponses failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ValidationRegistry.validationRequest(address validatorAddress, uint256 agentId, string requestURI, bytes32 requestHash). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode ValidationRegistry.validationRequest(address validatorAddress, uint256 agentId, string requestURI, bytes32 requestHash). Returns hex calldata."
+    )]
     async fn erc8004_encode_validation_request(
         &self,
         Parameters(params): Parameters<Erc8004EncodeValidationRequestParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeValidationRequest", serde_json::json!({
-            "validator_address": params.validator_address,
-            "agent_id": params.agent_id,
-            "request_uri": params.request_uri,
-            "request_hash": params.request_hash,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeValidationRequest failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeValidationRequest",
+            serde_json::json!({
+                "validator_address": params.validator_address,
+                "agent_id": params.agent_id,
+                "request_uri": params.request_uri,
+                "request_hash": params.request_hash,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeValidationRequest failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ValidationRegistry.validationResponse(bytes32 requestHash, uint8 response, string responseURI, bytes32 responseHash, string tag). Response is a 0..=100 quality score.")]
+    #[tool(
+        description = "ABI-encode ValidationRegistry.validationResponse(bytes32 requestHash, uint8 response, string responseURI, bytes32 responseHash, string tag). Response is a 0..=100 quality score."
+    )]
     async fn erc8004_encode_validation_response(
         &self,
         Parameters(params): Parameters<Erc8004EncodeValidationResponseParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeValidationResponse", serde_json::json!({
-            "request_hash": params.request_hash,
-            "response": params.response,
-            "response_uri": params.response_uri,
-            "response_hash": params.response_hash,
-            "tag": params.tag,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeValidationResponse failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeValidationResponse",
+            serde_json::json!({
+                "request_hash": params.request_hash,
+                "response": params.response,
+                "response_uri": params.response_uri,
+                "response_hash": params.response_hash,
+                "tag": params.tag,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeValidationResponse failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode ValidationRegistry.getValidation(bytes32 requestHash) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    #[tool(
+        description = "ABI-encode ValidationRegistry.getValidation(bytes32 requestHash) (ERC-8004 v0.6+ read). Returns hex calldata."
+    )]
     async fn erc8004_encode_get_validation(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetValidationParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetValidation", serde_json::json!({
-            "request_hash": params.request_hash,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetValidation failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_erc8004EncodeGetValidation",
+            serde_json::json!({
+                "request_hash": params.request_hash,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("erc8004EncodeGetValidation failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── Wormhole Cross-Chain Tools ─────────────────────────────────────────
 
-    #[tool(description = "Look up the Wormhole numeric chain id for a chain name (ethereum=2, solana=1, base=30, arbitrum=23, optimism=24, etc.).")]
+    #[tool(
+        description = "Look up the Wormhole numeric chain id for a chain name (ethereum=2, solana=1, base=30, arbitrum=23, optimism=24, etc.)."
+    )]
     async fn wormhole_chain_id(
         &self,
         Parameters(params): Parameters<WormholeChainIdParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_wormholeChainId", serde_json::json!({
-            "chain": params.chain,
-        })).await.map_err(|e| err_internal(format!("wormholeChainId failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_wormholeChainId",
+            serde_json::json!({
+                "chain": params.chain,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("wormholeChainId failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Parse a canonical Wormhole VAA id of the form {chain}/{emitter}/{sequence} into its components.")]
+    #[tool(
+        description = "Parse a canonical Wormhole VAA id of the form {chain}/{emitter}/{sequence} into its components."
+    )]
     async fn wormhole_parse_vaa_id(
         &self,
         Parameters(params): Parameters<WormholeParseVaaIdParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_wormholeParseVaaId", serde_json::json!({
-            "vaa_id": params.vaa_id,
-        })).await.map_err(|e| err_internal(format!("wormholeParseVaaId failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_wormholeParseVaaId",
+            serde_json::json!({
+                "vaa_id": params.vaa_id,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("wormholeParseVaaId failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Bridge tokens via the Wormhole adapter registered on the BridgeRouter. Returns transfer_id, tx_hash, fee_paid, and estimated_arrival_ms on success.")]
+    #[tool(
+        description = "Bridge tokens via the Wormhole adapter registered on the BridgeRouter. Returns transfer_id, tx_hash, fee_paid, and estimated_arrival_ms on success."
+    )]
     async fn wormhole_bridge(
         &self,
         Parameters(params): Parameters<WormholeBridgeParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_wormholeBridge", serde_json::json!({
-            "source_chain": params.source_chain,
-            "dest_chain": params.dest_chain,
-            "asset": params.asset,
-            "amount": params.amount,
-            "sender": params.sender,
-            "recipient": params.recipient,
-        })).await.map_err(|e| err_internal(format!("wormholeBridge failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_wormholeBridge",
+            serde_json::json!({
+                "source_chain": params.source_chain,
+                "dest_chain": params.dest_chain,
+                "asset": params.asset,
+                "amount": params.amount,
+                "sender": params.sender,
+                "recipient": params.recipient,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("wormholeBridge failed: {}", e)))?;
         json_result(result)
     }
 
@@ -15302,49 +18286,73 @@ impl TenzroMcpServer {
     // Each method is a thin forward to the `tenzro_ccip*` JSON-RPC
     // handler — no logic duplication.
 
-    #[tool(description = "Quote a Chainlink CCIP fee via Router.getFee() eth_call. CCIP is Tenzro's regulated rail: OCR commit-store committee + RMN ARM blessing. Returns native fee in wei on the source chain.")]
+    #[tool(
+        description = "Quote a Chainlink CCIP fee via Router.getFee() eth_call. CCIP is Tenzro's regulated rail: OCR commit-store committee + RMN ARM blessing. Returns native fee in wei on the source chain."
+    )]
     async fn ccip_get_fee(
         &self,
         Parameters(params): Parameters<CcipGetFeeMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipGetFee", serde_json::json!({
-            "source_chain": params.source_chain,
-            "dest_chain": params.dest_chain,
-            "receiver": params.receiver,
-            "data_hex": params.data_hex.unwrap_or_default(),
-            "token_amounts": params.token_amounts.unwrap_or_default(),
-            "fee_token": params.fee_token,
-        })).await.map_err(|e| err_internal(format!("ccipGetFee failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipGetFee",
+            serde_json::json!({
+                "source_chain": params.source_chain,
+                "dest_chain": params.dest_chain,
+                "receiver": params.receiver,
+                "data_hex": params.data_hex.unwrap_or_default(),
+                "token_amounts": params.token_amounts.unwrap_or_default(),
+                "fee_token": params.fee_token,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipGetFee failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Prepare a Router.ccipSend() envelope — returns calldata + msg.value ready for the caller to sign and broadcast via eth_sendRawTransaction.")]
+    #[tool(
+        description = "Prepare a Router.ccipSend() envelope — returns calldata + msg.value ready for the caller to sign and broadcast via eth_sendRawTransaction."
+    )]
     async fn ccip_send(
         &self,
         Parameters(params): Parameters<CcipSendMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipSend", serde_json::json!({
-            "source_chain": params.source_chain,
-            "dest_chain": params.dest_chain,
-            "receiver": params.receiver,
-            "data_hex": params.data_hex.unwrap_or_default(),
-            "token_amounts": params.token_amounts.unwrap_or_default(),
-            "fee_token": params.fee_token,
-            "gas_limit": params.gas_limit,
-        })).await.map_err(|e| err_internal(format!("ccipSend failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipSend",
+            serde_json::json!({
+                "source_chain": params.source_chain,
+                "dest_chain": params.dest_chain,
+                "receiver": params.receiver,
+                "data_hex": params.data_hex.unwrap_or_default(),
+                "token_amounts": params.token_amounts.unwrap_or_default(),
+                "fee_token": params.fee_token,
+                "gas_limit": params.gas_limit,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipSend failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Track CCIP message execution via OffRamp.getExecutionState(bytes32). States: 0=UNTOUCHED, 1=IN_PROGRESS, 2=SUCCESS, 3=FAILURE.")]
+    #[tool(
+        description = "Track CCIP message execution via OffRamp.getExecutionState(bytes32). States: 0=UNTOUCHED, 1=IN_PROGRESS, 2=SUCCESS, 3=FAILURE."
+    )]
     async fn ccip_track(
         &self,
         Parameters(params): Parameters<CcipTrackMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipTrack", serde_json::json!({
-            "message_id": params.message_id,
-            "dest_chain": params.dest_chain,
-            "offramp_address": params.offramp_address,
-        })).await.map_err(|e| err_internal(format!("ccipTrack failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipTrack",
+            serde_json::json!({
+                "message_id": params.message_id,
+                "dest_chain": params.dest_chain,
+                "offramp_address": params.offramp_address,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipTrack failed: {}", e)))?;
         json_result(result)
     }
 
@@ -15353,9 +18361,15 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<CcipEnvParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipSupportedChains", serde_json::json!({
-            "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
-        })).await.map_err(|e| err_internal(format!("ccipSupportedChains failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipSupportedChains",
+            serde_json::json!({
+                "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipSupportedChains failed: {}", e)))?;
         json_result(result)
     }
 
@@ -15364,111 +18378,174 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<CcipEnvParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipSupportedTokens", serde_json::json!({
-            "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
-        })).await.map_err(|e| err_internal(format!("ccipSupportedTokens failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipSupportedTokens",
+            serde_json::json!({
+                "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipSupportedTokens failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List CCIP lanes (source-destination chain pairs). Optionally filter by source or destination chain selector.")]
+    #[tool(
+        description = "List CCIP lanes (source-destination chain pairs). Optionally filter by source or destination chain selector."
+    )]
     async fn ccip_lanes(
         &self,
         Parameters(params): Parameters<CcipLanesMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipLanes", serde_json::json!({
-            "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
-            "source_chain_selector": params.source_chain_selector,
-            "dest_chain_selector": params.dest_chain_selector,
-        })).await.map_err(|e| err_internal(format!("ccipLanes failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipLanes",
+            serde_json::json!({
+                "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
+                "source_chain_selector": params.source_chain_selector,
+                "dest_chain_selector": params.dest_chain_selector,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipLanes failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Inspect a CCIP CCT v1.6+ token-pool contract. Returns chain, pool address, and the bound ERC-20 token address read from the pool's getToken().")]
+    #[tool(
+        description = "Inspect a CCIP CCT v1.6+ token-pool contract. Returns chain, pool address, and the bound ERC-20 token address read from the pool's getToken()."
+    )]
     async fn ccip_token_pool(
         &self,
         Parameters(params): Parameters<CcipTokenPoolMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipTokenPool", serde_json::json!({
-            "chain": params.chain,
-            "pool_address": params.pool_address,
-        })).await.map_err(|e| err_internal(format!("ccipTokenPool failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipTokenPool",
+            serde_json::json!({
+                "chain": params.chain,
+                "pool_address": params.pool_address,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipTokenPool failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Read inbound + outbound rate-limiter state for a (pool, remote-chain) pair. Returns the RateLimiter.TokenBucket tuple (tokens, lastUpdated, isEnabled, capacity, rate).")]
+    #[tool(
+        description = "Read inbound + outbound rate-limiter state for a (pool, remote-chain) pair. Returns the RateLimiter.TokenBucket tuple (tokens, lastUpdated, isEnabled, capacity, rate)."
+    )]
     async fn ccip_rate_limits(
         &self,
         Parameters(params): Parameters<CcipRateLimitsMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipRateLimits", serde_json::json!({
-            "chain": params.chain,
-            "pool_address": params.pool_address,
-            "remote_chain": params.remote_chain,
-        })).await.map_err(|e| err_internal(format!("ccipRateLimits failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipRateLimits",
+            serde_json::json!({
+                "chain": params.chain,
+                "pool_address": params.pool_address,
+                "remote_chain": params.remote_chain,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipRateLimits failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Bridge tokens through the BridgeRouter pinned to the Chainlink CCIP regulated rail. Refuses the call if no CCIP adapter is registered rather than silently falling back to a generic adapter. Returns transfer_id, tx_hash, fee_paid, estimated_arrival_ms.")]
+    #[tool(
+        description = "Bridge tokens through the BridgeRouter pinned to the Chainlink CCIP regulated rail. Refuses the call if no CCIP adapter is registered rather than silently falling back to a generic adapter. Returns transfer_id, tx_hash, fee_paid, estimated_arrival_ms."
+    )]
     async fn ccip_bridge(
         &self,
         Parameters(params): Parameters<CcipBridgeMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_ccipBridge", serde_json::json!({
-            "source_chain": params.source_chain,
-            "dest_chain": params.dest_chain,
-            "asset": params.asset,
-            "amount": params.amount,
-            "sender": params.sender,
-            "recipient": params.recipient,
-        })).await.map_err(|e| err_internal(format!("ccipBridge failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ccipBridge",
+            serde_json::json!({
+                "source_chain": params.source_chain,
+                "dest_chain": params.dest_chain,
+                "asset": params.asset,
+                "amount": params.amount,
+                "sender": params.sender,
+                "recipient": params.recipient,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("ccipBridge failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── TNZO CCT (Chainlink Cross-Chain Token) Tools ───────────────────────
 
-    #[tool(description = "List all TNZO CCT pools in the canonical mainnet registry (Ethereum LockRelease; Base/Arbitrum/Optimism/Solana BurnMint).")]
+    #[tool(
+        description = "List all TNZO CCT pools in the canonical mainnet registry (Ethereum LockRelease; Base/Arbitrum/Optimism/Solana BurnMint)."
+    )]
     async fn cct_list_pools(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_cctListPools", serde_json::json!({}))
-            .await.map_err(|e| err_internal(format!("cctListPools failed: {}", e)))?;
+            .await
+            .map_err(|e| err_internal(format!("cctListPools failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Get a single TNZO CCT pool by chain name. Returns chain_id, chain_selector, pool_address, token_address, pool_type, contract_name, capacities, refill_rate.")]
+    #[tool(
+        description = "Get a single TNZO CCT pool by chain name. Returns chain_id, chain_selector, pool_address, token_address, pool_type, contract_name, capacities, refill_rate."
+    )]
     async fn cct_get_pool(
         &self,
         Parameters(params): Parameters<CctGetPoolParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_cctGetPool", serde_json::json!({
-            "chain": params.chain,
-        })).await.map_err(|e| err_internal(format!("cctGetPool failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_cctGetPool",
+            serde_json::json!({
+                "chain": params.chain,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("cctGetPool failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── Multi-modal: Forecast (timeseries) ───
 
-    #[tool(description = "List forecast (timeseries) models currently loaded on this node. Use list_forecast_catalog to browse available models from the curated catalog.")]
+    #[tool(
+        description = "List forecast (timeseries) models currently loaded on this node. Use list_forecast_catalog to browse available models from the curated catalog."
+    )]
     async fn list_forecast_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listForecastModels", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("listForecastModels failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listForecastModels",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listForecastModels failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX forecast (timeseries) catalog. Returns models like TimesFM 2.5 — each with HF repo, context length, max horizon, and quantile support.")]
+    #[tool(
+        description = "Browse the curated ONNX forecast (timeseries) catalog. Returns models like TimesFM 2.5 — each with HF repo, context length, max horizon, and quantile support."
+    )]
     async fn list_forecast_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listForecastCatalog", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("listForecastCatalog failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listForecastCatalog",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listForecastCatalog failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Load a forecast (timeseries) ONNX model into the node's runtime. The file at `path` must be a valid ONNX export. Either pass `catalog_id` to inherit context_length/max_horizon/output_name/batch_size from the curated catalog and enforce its license tier, or set them explicitly. For multi-output graphs (TimesFM 2.5 transformers export), `output_name` selects the prediction tensor and `batch_size=2` satisfies the export's flip-invariance averaging.")]
+    #[tool(
+        description = "Load a forecast (timeseries) ONNX model into the node's runtime. The file at `path` must be a valid ONNX export. Either pass `catalog_id` to inherit context_length/max_horizon/output_name/batch_size from the curated catalog and enforce its license tier, or set them explicitly. For multi-output graphs (TimesFM 2.5 transformers export), `output_name` selects the prediction tensor and `batch_size=2` satisfies the export's flip-invariance averaging."
+    )]
     async fn load_forecast_model(
         &self,
         Parameters(params): Parameters<LoadForecastModelParams>,
@@ -15498,7 +18575,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Unload a registered forecast model from this node, freeing its ORT session.")]
+    #[tool(
+        description = "Unload a registered forecast model from this node, freeing its ORT session."
+    )]
     async fn unload_forecast_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
@@ -15513,7 +18592,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Run a univariate timeseries forecast on a registered model. Pass `history` (most-recent-last context series), `horizon` (steps ahead), and optional `quantiles` (e.g. [0.1, 0.5, 0.9]) and `frequency_seconds`. Returns point forecasts and (when supported) quantile bands.")]
+    #[tool(
+        description = "Run a univariate timeseries forecast on a registered model. Pass `history` (most-recent-last context series), `horizon` (steps ahead), and optional `quantiles` (e.g. [0.1, 0.5, 0.9]) and `frequency_seconds`. Returns point forecasts and (when supported) quantile bands."
+    )]
     async fn forecast(
         &self,
         Parameters(params): Parameters<ForecastParams>,
@@ -15537,7 +18618,9 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Vision encoders ───
 
-    #[tool(description = "List vision encoder models currently loaded on this node (DINOv3, SigLIP2, CLIP, etc.). Use list_vision_catalog to browse available models.")]
+    #[tool(
+        description = "List vision encoder models currently loaded on this node (DINOv3, SigLIP2, CLIP, etc.). Use list_vision_catalog to browse available models."
+    )]
     async fn list_vision_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15548,18 +18631,26 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX vision encoder catalog: DINOv3 (small/base/large), SigLIP2 (base/large/so400m), CLIP ViT-B/32 + L/14, DINOv2. Each entry carries input_size, embedding_dim, normalization preset, and license tier.")]
+    #[tool(
+        description = "Browse the curated ONNX vision encoder catalog: DINOv3 (small/base/large), SigLIP2 (base/large/so400m), CLIP ViT-B/32 + L/14, DINOv2. Each entry carries input_size, embedding_dim, normalization preset, and license tier."
+    )]
     async fn list_vision_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listVisionCatalog", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("listVisionCatalog failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listVisionCatalog",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listVisionCatalog failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Load a vision encoder ONNX into the node. Either pass `catalog_id` to inherit input_size/embedding_dim/normalization from the curated catalog, or set them explicitly. Returns when the ORT session is ready.")]
+    #[tool(
+        description = "Load a vision encoder ONNX into the node. Either pass `catalog_id` to inherit input_size/embedding_dim/normalization from the curated catalog, or set them explicitly. Returns when the ORT session is ready."
+    )]
     async fn load_vision_model(
         &self,
         Parameters(params): Parameters<LoadVisionModelParams>,
@@ -15601,7 +18692,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Embed a single image with a registered vision encoder. Pass base64-encoded PNG/JPEG/WebP bytes. Returns a dense feature vector (e.g. 768-dim for DINOv3-base, 1152-dim for SigLIP2-so400m).")]
+    #[tool(
+        description = "Embed a single image with a registered vision encoder. Pass base64-encoded PNG/JPEG/WebP bytes. Returns a dense feature vector (e.g. 768-dim for DINOv3-base, 1152-dim for SigLIP2-so400m)."
+    )]
     async fn vision_embed(
         &self,
         Parameters(params): Parameters<VisionEmbedParams>,
@@ -15617,7 +18710,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Compute cosine similarity between an image embedding and a text embedding (must have matching dimension). Pure math — does not load any model. Typical use: pair vision_embed (image) with text_embed against a CLIP/SigLIP text tower.")]
+    #[tool(
+        description = "Compute cosine similarity between an image embedding and a text embedding (must have matching dimension). Pure math — does not load any model. Typical use: pair vision_embed (image) with text_embed against a CLIP/SigLIP text tower."
+    )]
     async fn vision_similarity(
         &self,
         Parameters(params): Parameters<VisionSimilarityParams>,
@@ -15634,7 +18729,9 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Text embeddings ───
 
-    #[tool(description = "List text-embedding models currently loaded on this node (Qwen3-Embedding, EmbeddingGemma, BGE-M3, etc.). Use list_text_embedding_catalog to browse the curated catalog.")]
+    #[tool(
+        description = "List text-embedding models currently loaded on this node (Qwen3-Embedding, EmbeddingGemma, BGE-M3, etc.). Use list_text_embedding_catalog to browse the curated catalog."
+    )]
     async fn list_text_embedding_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15649,7 +18746,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX text-embedding catalog: Qwen3-Embedding (0.6B/4B/8B), EmbeddingGemma-300M, BGE-M3, ModernBERT-embed (base/large). Each entry carries embedding_dim, supported Matryoshka truncations, and license tier.")]
+    #[tool(
+        description = "Browse the curated ONNX text-embedding catalog: Qwen3-Embedding (0.6B/4B/8B), EmbeddingGemma-300M, BGE-M3, ModernBERT-embed (base/large). Each entry carries embedding_dim, supported Matryoshka truncations, and license tier."
+    )]
     async fn list_text_embedding_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15664,7 +18763,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a text-embedding ONNX model. Two paths: pass a catalog id as `model_id` with no `path` and the node fetches the ONNX graph and tokenizer from HuggingFace onto its models directory, or pass `path` + `tokenizer_path` + `family` for files already on the node, with `catalog_id` supplying embedding_dim and max_sequence_length. This is the one modality with a fetch path — every other loader needs the artifact on the node's filesystem first.")]
+    #[tool(
+        description = "Load a text-embedding ONNX model. Two paths: pass a catalog id as `model_id` with no `path` and the node fetches the ONNX graph and tokenizer from HuggingFace onto its models directory, or pass `path` + `tokenizer_path` + `family` for files already on the node, with `catalog_id` supplying embedding_dim and max_sequence_length. This is the one modality with a fetch path — every other loader needs the artifact on the node's filesystem first."
+    )]
     async fn load_text_embedding_model(
         &self,
         Parameters(params): Parameters<LoadTextEmbeddingModelParams>,
@@ -15709,7 +18810,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Embed a batch of strings with a registered text encoder. Returns one row per input. Optional `requested_dim` enables Matryoshka truncation (e.g. 128/256/512 from a native 768/1024-dim model).")]
+    #[tool(
+        description = "Embed a batch of strings with a registered text encoder. Returns one row per input. Optional `requested_dim` enables Matryoshka truncation (e.g. 128/256/512 from a native 768/1024-dim model)."
+    )]
     async fn text_embed(
         &self,
         Parameters(params): Parameters<TextEmbedParams>,
@@ -15730,7 +18833,9 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Segmentation ───
 
-    #[tool(description = "List segmentation models currently loaded on this node (SAM 2, EdgeSAM, MobileSAM). Use list_segmentation_catalog to browse the curated catalog.")]
+    #[tool(
+        description = "List segmentation models currently loaded on this node (SAM 2, EdgeSAM, MobileSAM). Use list_segmentation_catalog to browse the curated catalog."
+    )]
     async fn list_segmentation_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15745,7 +18850,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX segmentation catalog: SAM 2 (base/large), EdgeSAM, MobileSAM. SAM 3 / 3.1 are text-promptable with a different decoder ABI and are not exposed via this point/box segment tool.")]
+    #[tool(
+        description = "Browse the curated ONNX segmentation catalog: SAM 2 (base/large), EdgeSAM, MobileSAM. SAM 3 / 3.1 are text-promptable with a different decoder ABI and are not exposed via this point/box segment tool."
+    )]
     async fn list_segmentation_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15760,7 +18867,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a segmenter (SAM 2 base/large, EdgeSAM, MobileSAM) from an encoder ONNX plus a decoder ONNX already on the node's filesystem. `catalog_id` supplies the family and input resolution from the catalog and enforces the entry's license tier; otherwise set `family` and `input_size` yourself.")]
+    #[tool(
+        description = "Load a segmenter (SAM 2 base/large, EdgeSAM, MobileSAM) from an encoder ONNX plus a decoder ONNX already on the node's filesystem. `catalog_id` supplies the family and input resolution from the catalog and enforces the entry's license tier; otherwise set `family` and `input_size` yourself."
+    )]
     async fn load_segmentation_model(
         &self,
         Parameters(params): Parameters<LoadSegmentationModelParams>,
@@ -15800,7 +18909,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Run prompt-driven image segmentation. `prompts` is an array of `{type:'point', x, y, is_foreground}` (is_foreground true for a point inside the object, false for background) or `{type:'box', x0, y0, x1, y1}` objects, in original-image pixels. Returns mask data with IOU scores. The encoder caches the per-image embedding, so repeated prompts against the same image only re-run the decoder.")]
+    #[tool(
+        description = "Run prompt-driven image segmentation. `prompts` is an array of `{type:'point', x, y, is_foreground}` (is_foreground true for a point inside the object, false for background) or `{type:'box', x0, y0, x1, y1}` objects, in original-image pixels. Returns mask data with IOU scores. The encoder caches the per-image embedding, so repeated prompts against the same image only re-run the decoder."
+    )]
     async fn segment(
         &self,
         Parameters(params): Parameters<SegmentParams>,
@@ -15818,7 +18929,9 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Text-promptable segmentation (SAM 3 / SAM 3.1) ───
 
-    #[tool(description = "List text-promptable segmenters currently loaded on this node (SAM 3 family). Use list_text_segmentation_catalog to browse the curated catalog.")]
+    #[tool(
+        description = "List text-promptable segmenters currently loaded on this node (SAM 3 family). Use list_text_segmentation_catalog to browse the curated catalog."
+    )]
     async fn list_text_segmentation_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15833,7 +18946,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX text-promptable segmentation catalog: SAM 3 / SAM 3.1 (Meta) — open-vocabulary text-promptable segmenter, ViT-H backbone, 1008x1008 input, 32-token CLIP BPE language encoder.")]
+    #[tool(
+        description = "Browse the curated ONNX text-promptable segmentation catalog: SAM 3 / SAM 3.1 (Meta) — open-vocabulary text-promptable segmenter, ViT-H backbone, 1008x1008 input, 32-token CLIP BPE language encoder."
+    )]
     async fn list_text_segmentation_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15848,7 +18963,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Download (or reuse cached) the SAM-3 family ONNX bundle from HuggingFace Hub and register it under model_id. Bundle contains image encoder, language (CLIP) encoder, decoder, and CLIP tokenizer.")]
+    #[tool(
+        description = "Download (or reuse cached) the SAM-3 family ONNX bundle from HuggingFace Hub and register it under model_id. Bundle contains image encoder, language (CLIP) encoder, decoder, and CLIP tokenizer."
+    )]
     async fn load_text_segmentation_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
@@ -15863,7 +18980,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Unload a registered SAM-3 segmenter, freeing its three ORT sessions (image encoder, language encoder, decoder).")]
+    #[tool(
+        description = "Unload a registered SAM-3 segmenter, freeing its three ORT sessions (image encoder, language encoder, decoder)."
+    )]
     async fn unload_text_segmentation_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
@@ -15878,7 +18997,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Run open-vocabulary text-promptable segmentation. Provide a free-text label (e.g. 'person', 'dog') and an image; optionally narrow with a normalized cxcywh box. Returns a variable number of detections, each with a bbox (x0,y0,x1,y1 pixels), score, and binary mask resampled to original image dimensions.")]
+    #[tool(
+        description = "Run open-vocabulary text-promptable segmentation. Provide a free-text label (e.g. 'person', 'dog') and an image; optionally narrow with a normalized cxcywh box. Returns a variable number of detections, each with a bbox (x0,y0,x1,y1 pixels), score, and binary mask resampled to original image dimensions."
+    )]
     async fn text_segment(
         &self,
         Parameters(params): Parameters<TextSegmentParams>,
@@ -15902,7 +19023,9 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Object detection ───
 
-    #[tool(description = "List object detection models currently loaded on this node (RF-DETR, D-FINE). Use list_detection_catalog to browse the curated catalog.")]
+    #[tool(
+        description = "List object detection models currently loaded on this node (RF-DETR, D-FINE). Use list_detection_catalog to browse the curated catalog."
+    )]
     async fn list_detection_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15917,7 +19040,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX detection catalog: RF-DETR (nano/small/medium/base/large/2xl) — first real-time detector >60 AP on COCO (ICLR 2026); D-FINE (n/s/m/l/x). All Apache-2.0.")]
+    #[tool(
+        description = "Browse the curated ONNX detection catalog: RF-DETR (nano/small/medium/base/large/2xl) — first real-time detector >60 AP on COCO (ICLR 2026); D-FINE (n/s/m/l/x). All Apache-2.0."
+    )]
     async fn list_detection_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15932,7 +19057,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a detector (RF-DETR, D-FINE) from an ONNX file already on the node's filesystem. `catalog_id` supplies the family, input resolution and class count from the catalog and enforces the entry's license tier; otherwise set `family`, `input_size` and `num_classes` yourself.")]
+    #[tool(
+        description = "Load a detector (RF-DETR, D-FINE) from an ONNX file already on the node's filesystem. `catalog_id` supplies the family, input resolution and class count from the catalog and enforces the entry's license tier; otherwise set `family`, `input_size` and `num_classes` yourself."
+    )]
     async fn load_detection_model(
         &self,
         Parameters(params): Parameters<LoadDetectionModelParams>,
@@ -15974,7 +19101,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Run object detection on an image. Returns an array of detections with bounding box (x0,y0,x1,y1), label_id, and confidence score. NMS-free for DETR-family models — just sigmoid + score threshold.")]
+    #[tool(
+        description = "Run object detection on an image. Returns an array of detections with bounding box (x0,y0,x1,y1), label_id, and confidence score. NMS-free for DETR-family models — just sigmoid + score threshold."
+    )]
     async fn detect(
         &self,
         Parameters(params): Parameters<DetectParams>,
@@ -15994,7 +19123,9 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Audio ASR ───
 
-    #[tool(description = "List ASR (speech-to-text) models currently loaded on this node. The catalog covers Moonshine v2, Distil-Whisper, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, and Canary-1B-Flash, all backed by ORT sessions.")]
+    #[tool(
+        description = "List ASR (speech-to-text) models currently loaded on this node. The catalog covers Moonshine v2, Distil-Whisper, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, and Canary-1B-Flash, all backed by ORT sessions."
+    )]
     async fn list_audio_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -16005,7 +19136,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX ASR catalog: Moonshine v2 (tiny/base, MIT, on-device), Distil-Whisper (small.en/medium.en/large-v3, MIT), Whisper Large-v3-turbo (MIT, flagship), Parakeet-TDT-0.6B-v3 (CC-BY-4.0, 25 European langs), Canary-1B-Flash (CC-BY-4.0, multilingual). The catalog is stable; the ORT-backed transcribers are feature-gated (default builds return ProviderNotAvailable).")]
+    #[tool(
+        description = "Browse the curated ONNX ASR catalog: Moonshine v2 (tiny/base, MIT, on-device), Distil-Whisper (small.en/medium.en/large-v3, MIT), Whisper Large-v3-turbo (MIT, flagship), Parakeet-TDT-0.6B-v3 (CC-BY-4.0, 25 European langs), Canary-1B-Flash (CC-BY-4.0, multilingual). The catalog is stable; the ORT-backed transcribers are feature-gated (default builds return ProviderNotAvailable)."
+    )]
     async fn list_audio_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -16016,7 +19149,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load an ASR ONNX model (Moonshine, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash) from files already on the node's filesystem. Either pass `catalog_id` to inherit `family` / `max_audio_seconds` / `whisper_variant` from the catalog and enforce its license tier, or set them explicitly. Which auxiliary paths are required depends on the family: 'moonshine' and 'whisper' need `tokenizer_path`, 'parakeet' and 'canary' need `preprocessor_path` + `vocab_path`. The ORT-backed transcribers ship behind an audio feature flag; default node builds return ProviderNotAvailable until built with that feature.")]
+    #[tool(
+        description = "Load an ASR ONNX model (Moonshine, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash) from files already on the node's filesystem. Either pass `catalog_id` to inherit `family` / `max_audio_seconds` / `whisper_variant` from the catalog and enforce its license tier, or set them explicitly. Which auxiliary paths are required depends on the family: 'moonshine' and 'whisper' need `tokenizer_path`, 'parakeet' and 'canary' need `preprocessor_path` + `vocab_path`. The ORT-backed transcribers ship behind an audio feature flag; default node builds return ProviderNotAvailable until built with that feature."
+    )]
     async fn load_audio_model(
         &self,
         Parameters(params): Parameters<LoadAudioModelParams>,
@@ -16074,7 +19209,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Transcribe an audio clip (WAV/MP3/FLAC, base64-encoded) with a registered ASR model. Optional language hint, per-segment timestamps, and decoding temperature. Note: the ORT-backed transcriber is feature-gated — default builds return ProviderNotAvailable.")]
+    #[tool(
+        description = "Transcribe an audio clip (WAV/MP3/FLAC, base64-encoded) with a registered ASR model. Optional language hint, per-segment timestamps, and decoding temperature. Note: the ORT-backed transcriber is feature-gated — default builds return ProviderNotAvailable."
+    )]
     async fn transcribe(
         &self,
         Parameters(params): Parameters<TranscribeParams>,
@@ -16098,7 +19235,9 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Video encoders ───
 
-    #[tool(description = "List clip-level video encoders currently loaded on this node, each wrapping an image encoder with a frame count. Use list_video_catalog to browse the curated catalog.")]
+    #[tool(
+        description = "List clip-level video encoders currently loaded on this node, each wrapping an image encoder with a frame count. Use list_video_catalog to browse the curated catalog."
+    )]
     async fn list_video_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -16109,7 +19248,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated video encoder catalog: the V-JEPA 2 family (vjepa2-vitl-256, vjepa2-vith-256, vjepa2-vitg-384 — Meta AI). Serving is frame-based rather than native — load_video_model composes a clip encoder over an already-loaded image encoder and mean-pools the per-frame embeddings.")]
+    #[tool(
+        description = "Browse the curated video encoder catalog: the V-JEPA 2 family (vjepa2-vitl-256, vjepa2-vith-256, vjepa2-vitg-384 — Meta AI). Serving is frame-based rather than native — load_video_model composes a clip encoder over an already-loaded image encoder and mean-pools the per-frame embeddings."
+    )]
     async fn list_video_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -16120,7 +19261,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Register a clip-level video encoder over an already-loaded image encoder. Video embedding is frame-based: the node extracts `num_frames` evenly-spaced frames, embeds each through the encoder named by `vision_model_id`, and mean-pools. Load that image encoder first with load_vision_model — an unloaded `vision_model_id` is refused with JSON-RPC -32004.")]
+    #[tool(
+        description = "Register a clip-level video encoder over an already-loaded image encoder. Video embedding is frame-based: the node extracts `num_frames` evenly-spaced frames, embeds each through the encoder named by `vision_model_id`, and mean-pools. Load that image encoder first with load_vision_model — an unloaded `vision_model_id` is refused with JSON-RPC -32004."
+    )]
     async fn load_video_model(
         &self,
         Parameters(params): Parameters<LoadVideoModelParams>,
@@ -16153,7 +19296,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Produce a clip-level embedding from a short video (base64-encoded). The node extracts evenly-spaced frames, embeds each through the image encoder the clip encoder was registered over, and mean-pools. `frame_stride` overrides the even spacing with a fixed stride. Billing covers both the decode, which scales with clip duration, and the embedding, which scales with frames kept.")]
+    #[tool(
+        description = "Produce a clip-level embedding from a short video (base64-encoded). The node extracts evenly-spaced frames, embeds each through the image encoder the clip encoder was registered over, and mean-pools. `frame_stride` overrides the even spacing with a fixed stride. Billing covers both the decode, which scales with clip duration, and the embedding, which scales with frames kept."
+    )]
     async fn video_embed(
         &self,
         Parameters(params): Parameters<VideoEmbedParams>,
@@ -16179,7 +19324,9 @@ impl TenzroMcpServer {
     // read-only views over the in-memory `WorkflowRuntime` state, which
     // is rehydrated from RocksDB on node startup.
 
-    #[tool(description = "Fetch a workflow by 32-byte hex id. Returns the full Workflow record (creator, participants, obligations, approval gates, status, canton_mirror, signatures). Read-only. Writes use send_transaction with the workflow privileged-VM selectors.")]
+    #[tool(
+        description = "Fetch a workflow by 32-byte hex id. Returns the full Workflow record (creator, participants, obligations, approval gates, status, canton_mirror, signatures). Read-only. Writes use send_transaction with the workflow privileged-VM selectors."
+    )]
     async fn get_workflow(
         &self,
         Parameters(params): Parameters<WorkflowIdParams>,
@@ -16191,7 +19338,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List workflow ids created by a given DID. Returns up to all workflows the DID has authored, regardless of status.")]
+    #[tool(
+        description = "List workflow ids created by a given DID. Returns up to all workflows the DID has authored, regardless of status."
+    )]
     async fn list_workflows_by_creator(
         &self,
         Parameters(params): Parameters<CreatorDidParams>,
@@ -16203,7 +19352,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List workflow ids that include a DID as a participant (regardless of role). The DID may be the creator, an obligor, an oblige, or an approver.")]
+    #[tool(
+        description = "List workflow ids that include a DID as a participant (regardless of role). The DID may be the creator, an obligor, an oblige, or an approver."
+    )]
     async fn list_workflows_by_participant(
         &self,
         Parameters(params): Parameters<DidParams>,
@@ -16215,7 +19366,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List workflow ids in a given status. Status: draft | awaiting_signatures | active | suspended | settling | completed | failed | disputed | cancelled.")]
+    #[tool(
+        description = "List workflow ids in a given status. Status: draft | awaiting_signatures | active | suspended | settling | completed | failed | disputed | cancelled."
+    )]
     async fn list_workflows_by_status(
         &self,
         Parameters(params): Parameters<WorkflowStatusParams>,
@@ -16227,7 +19380,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Full lifecycle history for a workflow: ordered list of LifecycleTransition entries (from-status, to-status, reason, actor, at). Useful for audit and dispute resolution.")]
+    #[tool(
+        description = "Full lifecycle history for a workflow: ordered list of LifecycleTransition entries (from-status, to-status, reason, actor, at). Useful for audit and dispute resolution."
+    )]
     async fn get_workflow_lifecycle(
         &self,
         Parameters(params): Parameters<WorkflowIdParams>,
@@ -16239,7 +19394,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch an obligation record by 32-byte hex id. Returns the obligor / oblige / kind / amount / status / discharge proof.")]
+    #[tool(
+        description = "Fetch an obligation record by 32-byte hex id. Returns the obligor / oblige / kind / amount / status / discharge proof."
+    )]
     async fn get_obligation(
         &self,
         Parameters(params): Parameters<ObligationIdParams>,
@@ -16251,7 +19408,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch an approval gate by 32-byte hex id. Returns the approver set (single / threshold / role / delegated), m-of-n threshold, on-event trigger, and effect.")]
+    #[tool(
+        description = "Fetch an approval gate by 32-byte hex id. Returns the approver set (single / threshold / role / delegated), m-of-n threshold, on-event trigger, and effect."
+    )]
     async fn get_approval_gate(
         &self,
         Parameters(params): Parameters<ApprovalGateIdParams>,
@@ -16263,7 +19422,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch an open or finalized approval request by 32-byte hex id. Returns the gate, decisions collected, threshold progress, and final outcome (approved / rejected / pending).")]
+    #[tool(
+        description = "Fetch an open or finalized approval request by 32-byte hex id. Returns the gate, decisions collected, threshold progress, and final outcome (approved / rejected / pending)."
+    )]
     async fn get_approval_request(
         &self,
         Parameters(params): Parameters<ApprovalRequestIdParams>,
@@ -16275,7 +19436,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch a privacy domain by 32-byte hex id. Returns members, X25519 envelope policy, freeze status. Members see plaintext, non-members see Deny (indistinguishable from non-existence).")]
+    #[tool(
+        description = "Fetch a privacy domain by 32-byte hex id. Returns members, X25519 envelope policy, freeze status. Members see plaintext, non-members see Deny (indistinguishable from non-existence)."
+    )]
     async fn get_privacy_domain(
         &self,
         Parameters(params): Parameters<PrivacyDomainIdParams>,
@@ -16287,7 +19450,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List privacy domains a given DID is a member of. Caller-side filtered to the DIDs the requester is authorized to see.")]
+    #[tool(
+        description = "List privacy domains a given DID is a member of. Caller-side filtered to the DIDs the requester is authorized to see."
+    )]
     async fn list_privacy_domains_for_did(
         &self,
         Parameters(params): Parameters<DidParams>,
@@ -16299,7 +19464,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch a single workflow receipt by 32-byte hex id. Receipts are append-only and form a per-workflow hash chain via prev_receipt for audit.")]
+    #[tool(
+        description = "Fetch a single workflow receipt by 32-byte hex id. Receipts are append-only and form a per-workflow hash chain via prev_receipt for audit."
+    )]
     async fn get_workflow_receipt(
         &self,
         Parameters(params): Parameters<WorkflowReceiptIdParams>,
@@ -16311,7 +19478,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Walk a workflow's receipt chain from head backwards via prev_receipt. Returns receipts oldest-last, bounded by `max` (default 256). Use this for audit trails and dispute history.")]
+    #[tool(
+        description = "Walk a workflow's receipt chain from head backwards via prev_receipt. Returns receipts oldest-last, bounded by `max` (default 256). Use this for audit trails and dispute history."
+    )]
     async fn list_workflow_receipts(
         &self,
         Parameters(params): Parameters<WorkflowReceiptListParams>,
@@ -16326,7 +19495,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch a fee route by 32-byte hex id. Fee routes describe how a settlement payout is split across recipients in basis points (must sum to 10_000).")]
+    #[tool(
+        description = "Fetch a fee route by 32-byte hex id. Fee routes describe how a settlement payout is split across recipients in basis points (must sum to 10_000)."
+    )]
     async fn get_fee_route(
         &self,
         Parameters(params): Parameters<FeeRouteIdParams>,
@@ -16338,7 +19509,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List every registered fee route. Each route has a label, splits in bps, and a derived 32-byte id used by Workflow.fee_route.")]
+    #[tool(
+        description = "List every registered fee route. Each route has a label, splits in bps, and a derived 32-byte id used by Workflow.fee_route."
+    )]
     async fn list_fee_routes(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listFeeRoutes", serde_json::json!({}))
             .await
@@ -16346,7 +19519,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Pure preview: how would a `gross_wei` amount be split across a fee route's recipients? Truncates to last for the remainder. Does not settle — settlement is consensus-mediated.")]
+    #[tool(
+        description = "Pure preview: how would a `gross_wei` amount be split across a fee route's recipients? Truncates to last for the remainder. Does not settle — settlement is consensus-mediated."
+    )]
     async fn compute_fee_route_payouts(
         &self,
         Parameters(params): Parameters<FeeRoutePayoutsParams>,
@@ -16361,7 +19536,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Snapshot of workflow operational metrics (workflows/obligations/approvals partitioned by status, signature totals, canton-mirror count, fee routes, privacy domains). Returns the same data as the /metrics scrape, but as typed JSON.")]
+    #[tool(
+        description = "Snapshot of workflow operational metrics (workflows/obligations/approvals partitioned by status, signature totals, canton-mirror count, fee routes, privacy domains). Returns the same data as the /metrics scrape, but as typed JSON."
+    )]
     async fn get_workflow_operational_metrics(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -16420,9 +19597,7 @@ impl TenzroMcpServer {
     #[tool(
         description = "Operator-only. List every API key the node has issued — active and revoked. Requires `X-Tenzro-Admin-Token`. Returns `key_id`, `subject`, `label`, `scopes`, `class`, `created_at`, `revoked_at`, `active`."
     )]
-    async fn list_api_keys(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    async fn list_api_keys(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listApiKeys", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listApiKeys failed: {}", e)))?;
@@ -16446,9 +19621,7 @@ impl TenzroMcpServer {
     #[tool(
         description = "Subject-gated. List every API key belonging to the caller's own subject, and the entitlement behind each: scopes, tier ceiling, `canton_networks`, `canton_user_id`, and party-delegation arrays. A row with a non-empty `canton_networks` but a null `canton_user_id` has node access without ledger access — it authenticates but is bound to no Canton party, so command submission is refused. Requires the caller's MCP request to carry an `X-Tenzro-Api-Key` header identifying the subject."
     )]
-    async fn list_my_api_keys(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    async fn list_my_api_keys(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listMyApiKeys", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listMyApiKeys failed: {}", e)))?;
@@ -16471,108 +19644,150 @@ impl TenzroMcpServer {
 
     // ─── Passkey-first wallet custody (Coinbase / Daimo / Argent pattern) ───
 
-    #[tool(description = "Enroll a passkey-bound smart account. Consumes a WebAuthn registration credential (P-256 public key + opaque credential ID + ML-DSA-65 verifying key for hybrid PQ), creates a TDIP human identity, deploys a smart account via the shared AccountFactory, and installs WebAuthnValidator as the primary signer. The signing key never leaves the user's hardware secure element.")]
+    #[tool(
+        description = "Ask the node for the challenge an already-enrolled passkey must sign to authorize one custody change (add_passkey, remove_passkey, set_passkey_policy, grant_session_key, revoke_session_key, set_spending_limit, add_hardware_signer, add_guardian). Changing who can sign for a wallet needs proof of control from a device already on the account — the account address is a public identifier, not a credential. The challenge is single-use, time-bounded, and bound to this account and operation."
+    )]
+    async fn create_custody_challenge(
+        &self,
+        Parameters(params): Parameters<CustodyChallengeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_createCustodyChallenge", payload)
+            .await
+            .map_err(|e| err_internal(format!("createCustodyChallenge failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Enroll a passkey-bound smart account. Consumes a WebAuthn registration credential (P-256 public key + opaque credential ID + ML-DSA-65 verifying key for hybrid PQ), creates a TDIP human identity, deploys a smart account via the shared AccountFactory, and installs WebAuthnValidator as the primary signer. The signing key never leaves the user's hardware secure element."
+    )]
     async fn enroll_passkey(
         &self,
         Parameters(params): Parameters<PasskeyEnrollParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_enrollPasskey", payload)
             .await
             .map_err(|e| err_internal(format!("enrollPasskey failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Verify a WebAuthn assertion against the registered passkey on a smart account. Returns verified=true iff the P-256 leg validates and the embedded challenge matches the supplied user-op hash.")]
+    #[tool(
+        description = "Verify a WebAuthn assertion against the registered passkey on a smart account. Returns verified=true iff the P-256 leg validates and the embedded challenge matches the supplied user-op hash."
+    )]
     async fn sign_with_passkey(
         &self,
         Parameters(params): Parameters<PasskeySignParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_signWithPasskey", payload)
             .await
             .map_err(|e| err_internal(format!("signWithPasskey failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Set a smart account's second-factor policy. \"single_credential\" (default): one enrolled passkey approves each operation. \"two_credentials\": two distinct enrolled passkeys must both sign every operation (requires at least two enrolled credentials).")]
+    #[tool(
+        description = "Set a smart account's second-factor policy. \"single_credential\" (default): one enrolled passkey approves each operation. \"two_credentials\": two distinct enrolled passkeys must both sign every operation (requires at least two enrolled credentials)."
+    )]
     async fn set_passkey_policy(
         &self,
         Parameters(params): Parameters<PasskeySetPolicyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_setPasskeyPolicy", payload)
             .await
             .map_err(|e| err_internal(format!("setPasskeyPolicy failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Get a smart account's second-factor policy: the policy name, how many passkey signatures each operation requires, and how many credentials are enrolled.")]
+    #[tool(
+        description = "Get a smart account's second-factor policy: the policy name, how many passkey signatures each operation requires, and how many credentials are enrolled."
+    )]
     async fn get_passkey_policy(
         &self,
         Parameters(params): Parameters<PasskeyGetPolicyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_getPasskeyPolicy", payload)
             .await
             .map_err(|e| err_internal(format!("getPasskeyPolicy failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Add a social-recovery guardian to a smart account. The guardian holds an Ed25519 + ML-DSA-65 composite key and will be asked to sign rotation proofs when the user loses access to their primary passkey.")]
+    #[tool(
+        description = "Add a social-recovery guardian to a smart account. The guardian holds an Ed25519 + ML-DSA-65 composite key and will be asked to sign rotation proofs when the user loses access to their primary passkey."
+    )]
     async fn add_passkey_guardian(
         &self,
         Parameters(params): Parameters<PasskeyAddGuardianParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_addGuardian", payload)
             .await
             .map_err(|e| err_internal(format!("addGuardian failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Initiate a social-recovery ceremony to rotate a smart account to a freshly enrolled passkey. Returns a recovery_id and the 32-byte op hash that guardians must sign.")]
+    #[tool(
+        description = "Initiate a social-recovery ceremony to rotate a smart account to a freshly enrolled passkey. Returns a recovery_id and the 32-byte op hash that guardians must sign."
+    )]
     async fn initiate_passkey_recovery(
         &self,
         Parameters(params): Parameters<PasskeyInitiateRecoveryParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_initiateRecovery", payload)
             .await
             .map_err(|e| err_internal(format!("initiateRecovery failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Submit one guardian's composite (Ed25519 + ML-DSA-65) signature against an in-flight social-recovery ceremony. Returns the running tally and a quorum_reached flag.")]
+    #[tool(
+        description = "Submit one guardian's composite (Ed25519 + ML-DSA-65) signature against an in-flight social-recovery ceremony. Returns the running tally and a quorum_reached flag."
+    )]
     async fn submit_recovery_signature(
         &self,
         Parameters(params): Parameters<PasskeySubmitRecoverySignatureParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_submitRecoverySignature", payload)
             .await
             .map_err(|e| err_internal(format!("submitRecoverySignature failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Finalize a social-recovery ceremony once guardian quorum is reached. The node installs the new passkey as the smart account's primary WebAuthnValidator.")]
+    #[tool(
+        description = "Finalize a social-recovery ceremony once guardian quorum is reached. The node installs the new passkey as the smart account's primary WebAuthnValidator."
+    )]
     async fn finalize_passkey_recovery(
         &self,
         Parameters(params): Parameters<PasskeyFinalizeRecoveryParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_finalizeRecovery", payload)
             .await
             .map_err(|e| err_internal(format!("finalizeRecovery failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Grant a scoped session key to a smart account so an agent can sign a bounded subset of operations without holding the human's passkey. Permissions: allowed function selectors, target contracts, per-call value cap, cumulative value cap, validity window.")]
+    #[tool(
+        description = "Grant a scoped session key to a smart account so an agent can sign a bounded subset of operations without holding the human's passkey. Permissions: allowed function selectors, target contracts, per-call value cap, cumulative value cap, validity window."
+    )]
     async fn grant_session_key(
         &self,
         Parameters(params): Parameters<PasskeyGrantSessionKeyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_grantSessionKey", payload)
             .await
             .map_err(|e| err_internal(format!("grantSessionKey failed: {}", e)))?;
@@ -16584,65 +19799,84 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<PasskeyRevokeSessionKeyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_revokeSessionKey", payload)
             .await
             .map_err(|e| err_internal(format!("revokeSessionKey failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Install or update the per-account SpendingLimitValidator config (per-tx + daily rolling-window caps).")]
+    #[tool(
+        description = "Install or update the per-account SpendingLimitValidator config (per-tx + daily rolling-window caps)."
+    )]
     async fn set_spending_limit(
         &self,
         Parameters(params): Parameters<PasskeySetSpendingLimitParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_setSpendingLimit", payload)
             .await
             .map_err(|e| err_internal(format!("setSpendingLimit failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Install a hardware-signer ERC-7579 validator (Ledger / Trezor / GridPlus / YubiKey / generic) as an additional ANDed validator on a smart account.")]
+    #[tool(
+        description = "Install a hardware-signer ERC-7579 validator (Ledger / Trezor / GridPlus / YubiKey / generic) as an additional ANDed validator on a smart account."
+    )]
     async fn add_hardware_signer(
         &self,
         Parameters(params): Parameters<PasskeyAddHardwareSignerParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_addHardwareSigner", payload)
             .await
             .map_err(|e| err_internal(format!("addHardwareSigner failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Fetch the smart-account summary: address, owner, nonce, deployment status, installed ERC-7579 validators.")]
+    #[tool(
+        description = "Fetch the smart-account summary: address, owner, nonce, deployment status, installed ERC-7579 validators."
+    )]
     async fn get_smart_account(
         &self,
         Parameters(params): Parameters<PasskeyGetSmartAccountParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_getSmartAccount", payload)
             .await
             .map_err(|e| err_internal(format!("getSmartAccount failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List every smart account known to the node, including each account's installed validators.")]
+    #[tool(
+        description = "List every smart account known to the node, including each account's installed validators."
+    )]
     async fn list_smart_accounts(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listSmartAccounts", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("listSmartAccounts failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listSmartAccounts",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listSmartAccounts failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List in-flight social-recovery ceremonies for a smart account, with current signature counts and expiration timestamps.")]
+    #[tool(
+        description = "List in-flight social-recovery ceremonies for a smart account, with current signature counts and expiration timestamps."
+    )]
     async fn list_pending_recoveries(
         &self,
         Parameters(params): Parameters<PasskeyListPendingRecoveriesParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_listPendingRecoveries", payload)
             .await
             .map_err(|e| err_internal(format!("listPendingRecoveries failed: {}", e)))?;
@@ -16651,60 +19885,75 @@ impl TenzroMcpServer {
 
     // ─── Browser-launch passkey auth sessions (gcloud-style device flow) ───
 
-    #[tool(description = "Create a pending browser-launch passkey ceremony session (enroll a new account, add a device credential, or sign over an op hash). Returns a session id and the node-served /auth/passkey URL to open in a browser; the browser runs navigator.credentials.create()/get() and the caller polls get_passkey_session until the session reaches a terminal status.")]
+    #[tool(
+        description = "Create a pending browser-launch passkey ceremony session (enroll a new account, add a device credential, or sign over an op hash). Returns a session id and the node-served /auth/passkey URL to open in a browser; the browser runs navigator.credentials.create()/get() and the caller polls get_passkey_session until the session reaches a terminal status."
+    )]
     async fn create_passkey_session(
         &self,
         Parameters(params): Parameters<CreatePasskeySessionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_createPasskeySession", payload)
             .await
             .map_err(|e| err_internal(format!("createPasskeySession failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Poll a browser-launch passkey ceremony session by id. Returns the session kind, status (pending/in_flight/completed/failed/expired), and — once terminal — the handler result or error.")]
+    #[tool(
+        description = "Poll a browser-launch passkey ceremony session by id. Returns the session kind, status (pending/in_flight/completed/failed/expired), and — once terminal — the handler result or error."
+    )]
     async fn get_passkey_session(
         &self,
         Parameters(params): Parameters<GetPasskeySessionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_getPasskeySession", payload)
             .await
             .map_err(|e| err_internal(format!("getPasskeySession failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Add an additional WebAuthn device credential to an existing passkey-bound smart account. The account must already have at least one enrolled credential.")]
+    #[tool(
+        description = "Add an additional WebAuthn device credential to an existing passkey-bound smart account. The account must already have at least one enrolled credential."
+    )]
     async fn add_passkey(
         &self,
         Parameters(params): Parameters<AddPasskeyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_addPasskey", payload)
             .await
             .map_err(|e| err_internal(format!("addPasskey failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List the WebAuthn credential ids enrolled on a passkey-bound smart account.")]
+    #[tool(
+        description = "List the WebAuthn credential ids enrolled on a passkey-bound smart account."
+    )]
     async fn list_passkeys(
         &self,
         Parameters(params): Parameters<ListPasskeysParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_listPasskeys", payload)
             .await
             .map_err(|e| err_internal(format!("listPasskeys failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Revoke a single WebAuthn credential from a passkey-bound smart account by credential id. The account stays usable while at least one other credential survives; removing the last one leaves it recoverable-only until a guardian finalizes a recovery.")]
+    #[tool(
+        description = "Revoke a single WebAuthn credential from a passkey-bound smart account by credential id. The account stays usable while at least one other credential survives; removing the last one leaves it recoverable-only until a guardian finalizes a recovery."
+    )]
     async fn remove_passkey(
         &self,
         Parameters(params): Parameters<RemovePasskeyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_removePasskey", payload)
             .await
             .map_err(|e| err_internal(format!("removePasskey failed: {}", e)))?;
@@ -16713,24 +19962,30 @@ impl TenzroMcpServer {
 
     // ─── MPC distributed key generation (DKLS23 secp256k1) ───
 
-    #[tool(description = "Operator-only. Start a DKLS23 secp256k1 distributed-key-generation ceremony. Requires X-Tenzro-Admin-Token. Every participant's operator posts identical params (same participant_dids, finalized_block_hash, session_nonce, threshold) so the derived InstanceId matches byte-for-byte; peer_bindings must map every remote participant DID to its libp2p PeerId or the call is rejected. Idempotent — re-posting the same session returns the existing record.")]
+    #[tool(
+        description = "Operator-only. Start a DKLS23 secp256k1 distributed-key-generation ceremony. Requires X-Tenzro-Admin-Token. Every participant's operator posts identical params (same participant_dids, finalized_block_hash, session_nonce, threshold) so the derived InstanceId matches byte-for-byte; peer_bindings must map every remote participant DID to its libp2p PeerId or the call is rejected. Idempotent — re-posting the same session returns the existing record."
+    )]
     async fn mpc_keygen(
         &self,
         Parameters(params): Parameters<McpKeygenParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_mpcKeygen", payload)
             .await
             .map_err(|e| err_internal(format!("mpcKeygen failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Query MPC keygen session state. Pass instance_id for a single session, or omit it to list every keygen session on this node. Each record carries status, threshold, total_parties, local_party_index, and — once completed — group_id, group_public_key, and the derived EIP-55 address.")]
+    #[tool(
+        description = "Query MPC keygen session state. Pass instance_id for a single session, or omit it to list every keygen session on this node. Each record carries status, threshold, total_parties, local_party_index, and — once completed — group_id, group_public_key, and the derived EIP-55 address."
+    )]
     async fn mpc_keygen_status(
         &self,
         Parameters(params): Parameters<McpKeygenStatusParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_mpcKeygenStatus", payload)
             .await
             .map_err(|e| err_internal(format!("mpcKeygenStatus failed: {}", e)))?;
@@ -16739,24 +19994,30 @@ impl TenzroMcpServer {
 
     // ─── Identity + credential lifecycle (admin-gated) ───
 
-    #[tool(description = "Operator-only. Revoke a JWT by its jti. Requires X-Tenzro-Admin-Token. Cascades to any tokens minted from the revoked token.")]
+    #[tool(
+        description = "Revoke a JWT by its jti. Requires a signed did_envelope from the token's bearer DID or the controller DID that authorized it — a jti travels in every audit row, so knowing one is not authority to destroy it. Cascades to any tokens minted from the revoked token."
+    )]
     async fn revoke_jwt(
         &self,
         Parameters(params): Parameters<RevokeJwtParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_revokeJwt", payload)
             .await
             .map_err(|e| err_internal(format!("revokeJwt failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Operator-only. Register a trusted credential issuer DID. Requires X-Tenzro-Admin-Token. Pass topics to scope trust to specific gossip topic ids, or leave it empty to trust the issuer for all topics. Persisted to the compliance store.")]
+    #[tool(
+        description = "Operator-only. Register a trusted credential issuer DID. Requires X-Tenzro-Admin-Token. Pass topics to scope trust to specific gossip topic ids, or leave it empty to trust the issuer for all topics. Persisted to the compliance store."
+    )]
     async fn add_trusted_issuer(
         &self,
         Parameters(params): Parameters<AddTrustedIssuerParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let payload =
+            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
         let result = rpc_dispatch(&self.node, "tenzro_addTrustedIssuer", payload)
             .await
             .map_err(|e| err_internal(format!("addTrustedIssuer failed: {}", e)))?;
@@ -16765,7 +20026,9 @@ impl TenzroMcpServer {
 
     // ─── Storage market ───
 
-    #[tool(description = "Store an object on this node's storage provider with an erasure-coded redundancy scheme. Returns the object id, stored size, and shard counts.")]
+    #[tool(
+        description = "Store an object on this node's storage provider with an erasure-coded redundancy scheme. Returns the object id, stored size, and shard counts."
+    )]
     async fn storage_store_object(
         &self,
         Parameters(params): Parameters<StorageStoreObjectParams>,
@@ -16786,7 +20049,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Open a streaming storage deal for an already-stored object. The renter pre-funds total_epochs from their deposit; the per-epoch price is size × rate.")]
+    #[tool(
+        description = "Open a streaming storage deal for an already-stored object. The renter pre-funds total_epochs from their deposit; the per-epoch price is size × rate."
+    )]
     async fn storage_open_deal(
         &self,
         Parameters(params): Parameters<StorageOpenDealParams>,
@@ -16803,7 +20068,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Run one proof-of-retrievability-gated charge epoch for a storage deal. Charges only when the retrievability challenge passes.")]
+    #[tool(
+        description = "Run one proof-of-retrievability-gated charge epoch for a storage deal. Charges only when the retrievability challenge passes."
+    )]
     async fn storage_charge_epoch(
         &self,
         Parameters(params): Parameters<StorageChargeEpochParams>,
@@ -16827,7 +20094,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Set the byte-epoch storage pricing policy. Use mode \"dynamic\" with a non-zero capacity and optional min_rate/max_rate bounds; fixed-rate is the spawn default.")]
+    #[tool(
+        description = "Set the byte-epoch storage pricing policy. Use mode \"dynamic\" with a non-zero capacity and optional min_rate/max_rate bounds; fixed-rate is the spawn default."
+    )]
     async fn storage_set_pricing(
         &self,
         Parameters(params): Parameters<StorageSetPricingParams>,
@@ -16844,7 +20113,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Summary of this node's storage-provider state: effective rate and stored object count.")]
+    #[tool(
+        description = "Summary of this node's storage-provider state: effective rate and stored object count."
+    )]
     async fn storage_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_storageStatus", serde_json::json!({}))
             .await
@@ -16854,7 +20125,9 @@ impl TenzroMcpServer {
 
     // ─── Compute rental ───
 
-    #[tool(description = "Book a compute rental against this node's compute provider. The renter pre-funds total_epochs from their deposit.")]
+    #[tool(
+        description = "Book a compute rental against this node's compute provider. The renter pre-funds total_epochs from their deposit."
+    )]
     async fn compute_book_rental(
         &self,
         Parameters(params): Parameters<ComputeBookRentalParams>,
@@ -16869,7 +20142,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Settle one epoch of an active compute rental, gated on the provider's availability proof. A valid proof streams the epoch slice to the provider; an invalid or missing proof makes the renter whole from stake.")]
+    #[tool(
+        description = "Settle one epoch of an active compute rental, gated on the provider's availability proof. A valid proof streams the epoch slice to the provider; an invalid or missing proof makes the renter whole from stake."
+    )]
     async fn compute_settle_epoch(
         &self,
         Parameters(params): Parameters<ComputeSettleEpochParams>,
@@ -16896,7 +20171,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Set the per-epoch compute pricing policy. Use mode \"dynamic\" with a non-zero capacity and optional min_rate/max_rate bounds; fixed-rate is the spawn default.")]
+    #[tool(
+        description = "Set the per-epoch compute pricing policy. Use mode \"dynamic\" with a non-zero capacity and optional min_rate/max_rate bounds; fixed-rate is the spawn default."
+    )]
     async fn compute_set_pricing(
         &self,
         Parameters(params): Parameters<ComputeSetPricingParams>,
@@ -16913,7 +20190,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Summary of this node's compute-rental state: effective rate and active rental count.")]
+    #[tool(
+        description = "Summary of this node's compute-rental state: effective rate and active rental count."
+    )]
     async fn compute_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_computeStatus", serde_json::json!({}))
             .await
@@ -16923,7 +20202,9 @@ impl TenzroMcpServer {
 
     // ─── MoE serving ───
 
-    #[tool(description = "Return the expert shard map for a model: per-expert holders, replication counts, role counts, the replication policy, and lists of under-replicated and hot experts across known providers.")]
+    #[tool(
+        description = "Return the expert shard map for a model: per-expert holders, replication counts, role counts, the replication policy, and lists of under-replicated and hot experts across known providers."
+    )]
     async fn moe_shard_map(
         &self,
         Parameters(params): Parameters<MoeModelIdParams>,
@@ -16935,7 +20216,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Given per-token top-k routing decisions, return the per-holder batch plan and per-token slot assignments. Set allow_cold to permit routing to experts that are not warm-resident.")]
+    #[tool(
+        description = "Given per-token top-k routing decisions, return the per-holder batch plan and per-token slot assignments. Set allow_cold to permit routing to experts that are not warm-resident."
+    )]
     async fn moe_plan_dispatch(
         &self,
         Parameters(params): Parameters<MoePlanDispatchParams>,
@@ -16965,17 +20248,25 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Return the current replication policy used by shard-view consumers: min/max replication and the hot-expert tokens-per-second threshold.")]
+    #[tool(
+        description = "Return the current replication policy used by shard-view consumers: min/max replication and the hot-expert tokens-per-second threshold."
+    )]
     async fn moe_replication_policy(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_moeReplicationPolicy", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("moeReplicationPolicy failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_moeReplicationPolicy",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("moeReplicationPolicy failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Return the catalog MoE topology for a model (num_experts, experts_per_token, shared_experts, params_per_expert_x10) and its architecture. The moe field is null for dense models.")]
+    #[tool(
+        description = "Return the catalog MoE topology for a model (num_experts, experts_per_token, shared_experts, params_per_expert_x10) and its architecture. The moe field is null for dense models."
+    )]
     async fn moe_catalog_shape(
         &self,
         Parameters(params): Parameters<MoeModelIdParams>,
@@ -16987,7 +20278,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a per-expert safetensors weight blob (gate_proj/up_proj/down_proj) into this node's MoE expert runtime, from an inline base64 blob or a tenzro://blob URI. Returns the resident expert's dimensions and byte footprint.")]
+    #[tool(
+        description = "Load a per-expert safetensors weight blob (gate_proj/up_proj/down_proj) into this node's MoE expert runtime, from an inline base64 blob or a tenzro://blob URI. Returns the resident expert's dimensions and byte footprint."
+    )]
     async fn moe_expert_load(
         &self,
         Parameters(params): Parameters<MoeExpertLoadParams>,
@@ -17005,7 +20298,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a gating-network safetensors blob (router.weight) for a model layer into this node's MoE expert runtime, from an inline base64 blob or a tenzro://blob URI.")]
+    #[tool(
+        description = "Load a gating-network safetensors blob (router.weight) for a model layer into this node's MoE expert runtime, from an inline base64 blob or a tenzro://blob URI."
+    )]
     async fn moe_gate_load(
         &self,
         Parameters(params): Parameters<MoeGateLoadParams>,
@@ -17022,7 +20317,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Slice a catalog MoE checkpoint into per-expert safetensors blobs (and optionally the layer gate), optionally block-quantizing each projection (q4_k_m / q8_0 / q4_k / q6_k preset, or a per-projection gate/up/down mix), and publish them as tenzro://blob content so holders can load them. Runs asynchronously; returns a job_id to poll with moe_prepare_status. Omit experts to prepare every expert in the layer.")]
+    #[tool(
+        description = "Slice a catalog MoE checkpoint into per-expert safetensors blobs (and optionally the layer gate), optionally block-quantizing each projection (q4_k_m / q8_0 / q4_k / q6_k preset, or a per-projection gate/up/down mix), and publish them as tenzro://blob content so holders can load them. Runs asynchronously; returns a job_id to poll with moe_prepare_status. Omit experts to prepare every expert in the layer."
+    )]
     async fn moe_prepare_experts(
         &self,
         Parameters(params): Parameters<MoePrepareExpertsParams>,
@@ -17046,7 +20343,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Poll the state of an expert-preparation job started by moe_prepare_experts. Returns the job's model_id, layer, state (running / done / error), any error, and the prepared per-expert tenzro://blob URIs when done.")]
+    #[tool(
+        description = "Poll the state of an expert-preparation job started by moe_prepare_experts. Returns the job's model_id, layer, state (running / done / error), any error, and the prepared per-expert tenzro://blob URIs when done."
+    )]
     async fn moe_prepare_status(
         &self,
         Parameters(params): Parameters<MoePrepareStatusParams>,
@@ -17058,15 +20357,21 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Snapshot of this node's resident MoE experts and gating networks: each entry's residency tier (memory / disk), byte footprint, the total footprint, the memory budget, and whether GPU compute is active.")]
-    async fn moe_expert_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Snapshot of this node's resident MoE experts and gating networks: each entry's residency tier (memory / disk), byte footprint, the total footprint, the memory budget, and whether GPU compute is active."
+    )]
+    async fn moe_expert_status(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_moeExpertStatus", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("moeExpertStatus failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Run a distributed MoE forward for one layer: gate-route the hidden-state batch locally, fan expert sub-batches out to holders (local runtime, iroh tenzro/moe ALPN, or HTTP JSON-RPC), and gather the gate-weighted combined outputs. hidden_states and outputs are base64 of little-endian f32 bytes.")]
+    #[tool(
+        description = "Run a distributed MoE forward for one layer: gate-route the hidden-state batch locally, fan expert sub-batches out to holders (local runtime, iroh tenzro/moe ALPN, or HTTP JSON-RPC), and gather the gate-weighted combined outputs. hidden_states and outputs are base64 of little-endian f32 bytes."
+    )]
     async fn moe_forward(
         &self,
         Parameters(params): Parameters<MoeForwardParams>,
@@ -17087,7 +20392,9 @@ impl TenzroMcpServer {
 
     // ─── Local discovery / cluster ───
 
-    #[tool(description = "List the peer ids discovered on this node's local network segment, with a count. When the network service is not running the list is empty and available is false.")]
+    #[tool(
+        description = "List the peer ids discovered on this node's local network segment, with a count. When the network service is not running the list is empty and available is false."
+    )]
     async fn local_peers(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_localPeers", serde_json::json!({}))
             .await
@@ -17095,15 +20402,21 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Return this node's sustained connectivity tier. When the network service is not running the tier is null and available is false.")]
-    async fn node_reachability(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Return this node's sustained connectivity tier. When the network service is not running the tier is null and available is false."
+    )]
+    async fn node_reachability(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_nodeReachability", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("nodeReachability failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Return this node's hardware self-profile: linked runtime build commit, CPU architecture, operating system, detected compute devices, and derived serving values (capacity in GB, serving backend, capability key). Each device reports the ggml backend it executes on — CUDA, Metal, Vulkan, ROCm, SYCL, or CPU — and serving_backend is the backend of the strongest GPU-class device, else CPU.")]
+    #[tool(
+        description = "Return this node's hardware self-profile: linked runtime build commit, CPU architecture, operating system, detected compute devices, and derived serving values (capacity in GB, serving backend, capability key). Each device reports the ggml backend it executes on — CUDA, Metal, Vulkan, ROCm, SYCL, or CPU — and serving_backend is the backend of the strongest GPU-class device, else CPU."
+    )]
     async fn node_profile(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_nodeProfile", serde_json::json!({}))
             .await
@@ -17111,7 +20424,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Compute a deterministic cluster placement for a model across candidate members. Returns the fit decision and, when a cluster forms, the VRAM-weighted per-member layer assignment ordered to minimize pipeline transfer cost. Pure function of the params; reads no node state.")]
+    #[tool(
+        description = "Compute a deterministic cluster placement for a model across candidate members. Returns the fit decision and, when a cluster forms, the VRAM-weighted per-member layer assignment ordered to minimize pipeline transfer cost. Pure function of the params; reads no node state."
+    )]
     async fn cluster_plan(
         &self,
         Parameters(params): Parameters<ClusterPlanParams>,
@@ -17133,7 +20448,9 @@ impl TenzroMcpServer {
 
     // ─── App hosting: static sites ───
 
-    #[tool(description = "Publish a static site (any framework's static export). Uploads the route map of BLAKE3 blob hashes; the node serves them over the tenzro/http ALPN behind wildcard TLS. Returns the site_id. Mutations require a signed did_envelope matching owner_did.")]
+    #[tool(
+        description = "Publish a static site (any framework's static export). Uploads the route map of BLAKE3 blob hashes; the node serves them over the tenzro/http ALPN behind wildcard TLS. Returns the site_id. Mutations require a signed did_envelope matching owner_did."
+    )]
     async fn site_publish(
         &self,
         Parameters(params): Parameters<SitePublishParams>,
@@ -17146,7 +20463,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read a published site's manifest by site_id: routes, index/not-found paths, SPA flag, price per request, and placement.")]
+    #[tool(
+        description = "Read a published site's manifest by site_id: routes, index/not-found paths, SPA flag, price per request, and placement."
+    )]
     async fn site_get(
         &self,
         Parameters(params): Parameters<SiteGetParams>,
@@ -17172,7 +20491,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Remove a published site by site_id. Requires a signed did_envelope matching owner_did.")]
+    #[tool(
+        description = "Remove a published site by site_id. Requires a signed did_envelope matching owner_did."
+    )]
     async fn site_remove(
         &self,
         Parameters(params): Parameters<SiteRemoveParams>,
@@ -17185,7 +20506,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Map a public hostname (e.g. my-app.apps.tenzro.xyz) to a site_id. Requires a signed did_envelope matching owner_did.")]
+    #[tool(
+        description = "Map a public hostname (e.g. my-app.apps.tenzro.xyz) to a site_id. Requires a signed did_envelope matching owner_did."
+    )]
     async fn site_set_alias(
         &self,
         Parameters(params): Parameters<SiteSetAliasParams>,
@@ -17221,7 +20544,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Unmap a public hostname alias. Requires a signed did_envelope matching owner_did.")]
+    #[tool(
+        description = "Unmap a public hostname alias. Requires a signed did_envelope matching owner_did."
+    )]
     async fn site_remove_alias(
         &self,
         Parameters(params): Parameters<SiteRemoveAliasParams>,
@@ -17234,7 +20559,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Pin a site's serving nodes (iroh EndpointId strings). An empty list reverts to serving locally on this node. Requires a signed did_envelope.")]
+    #[tool(
+        description = "Pin a site's serving nodes (iroh EndpointId strings). An empty list reverts to serving locally on this node. Requires a signed did_envelope."
+    )]
     async fn site_set_placement(
         &self,
         Parameters(params): Parameters<SiteSetPlacementParams>,
@@ -17264,13 +20591,19 @@ impl TenzroMcpServer {
     async fn list_site_placements(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_listSitePlacements", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("listSitePlacements failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listSitePlacements",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listSitePlacements failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Clear a site's pinned placement, reverting to local serving. Requires a signed did_envelope.")]
+    #[tool(
+        description = "Clear a site's pinned placement, reverting to local serving. Requires a signed did_envelope."
+    )]
     async fn site_remove_placement(
         &self,
         Parameters(params): Parameters<SiteRemovePlacementParams>,
@@ -17283,7 +20616,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Claim a custom domain (e.g. app.example.com) for a site. Returns the DNS TXT proof to publish before verification. Requires a signed did_envelope.")]
+    #[tool(
+        description = "Claim a custom domain (e.g. app.example.com) for a site. Returns the DNS TXT proof to publish before verification. Requires a signed did_envelope."
+    )]
     async fn site_claim_domain(
         &self,
         Parameters(params): Parameters<SiteClaimDomainParams>,
@@ -17296,7 +20631,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Verify a claimed custom domain against its published DNS TXT proof, activating wildcard-independent TLS for it. Requires a signed did_envelope.")]
+    #[tool(
+        description = "Verify a claimed custom domain against its published DNS TXT proof, activating wildcard-independent TLS for it. Requires a signed did_envelope."
+    )]
     async fn site_verify_domain(
         &self,
         Parameters(params): Parameters<SiteVerifyDomainParams>,
@@ -17332,7 +20669,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Remove a claimed custom domain. Requires a signed did_envelope matching owner_did.")]
+    #[tool(
+        description = "Remove a claimed custom domain. Requires a signed did_envelope matching owner_did."
+    )]
     async fn site_remove_domain(
         &self,
         Parameters(params): Parameters<SiteRemoveDomainParams>,
@@ -17347,7 +20686,9 @@ impl TenzroMcpServer {
 
     // ─── App hosting: functions (wasi:http components) ───
 
-    #[tool(description = "Deploy a wasi:http WebAssembly component as a request-scoped function. The node runs it under wasmtime with the granted capabilities, fuel limit, and per-request deadline. Requires a signed did_envelope.")]
+    #[tool(
+        description = "Deploy a wasi:http WebAssembly component as a request-scoped function. The node runs it under wasmtime with the granted capabilities, fuel limit, and per-request deadline. Requires a signed did_envelope."
+    )]
     async fn function_deploy(
         &self,
         Parameters(params): Parameters<FunctionDeployParams>,
@@ -17360,7 +20701,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read a deployed function's manifest: wasm blob hash, capabilities, fuel/deadline limits, price, and placement.")]
+    #[tool(
+        description = "Read a deployed function's manifest: wasm blob hash, capabilities, fuel/deadline limits, price, and placement."
+    )]
     async fn function_get(
         &self,
         Parameters(params): Parameters<HostingIdParams>,
@@ -17386,7 +20729,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Remove a deployed function by id. Requires a signed did_envelope matching owner_did.")]
+    #[tool(
+        description = "Remove a deployed function by id. Requires a signed did_envelope matching owner_did."
+    )]
     async fn function_remove(
         &self,
         Parameters(params): Parameters<HostingRemoveByIdParams>,
@@ -17401,7 +20746,9 @@ impl TenzroMcpServer {
 
     // ─── App hosting: machines (Firecracker microVMs) ───
 
-    #[tool(description = "Deploy a long-running microVM (Firecracker) from a content-addressed image. Placed only on KVM+nested-virt nodes; optionally TEE-sealed. Env vars are wrapped to the node's X25519 sealing key. Requires a signed did_envelope.")]
+    #[tool(
+        description = "Deploy a long-running microVM (Firecracker) from a content-addressed image. Placed only on KVM+nested-virt nodes; optionally TEE-sealed. Env vars are wrapped to the node's X25519 sealing key. Requires a signed did_envelope."
+    )]
     async fn machine_deploy(
         &self,
         Parameters(params): Parameters<MachineDeployParams>,
@@ -17414,7 +20761,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read a deployed machine's manifest: artifact CAID, internal port, resources, TEE requirement, price, and placement.")]
+    #[tool(
+        description = "Read a deployed machine's manifest: artifact CAID, internal port, resources, TEE requirement, price, and placement."
+    )]
     async fn machine_get(
         &self,
         Parameters(params): Parameters<HostingIdParams>,
@@ -17440,7 +20789,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Remove a deployed machine by id, tearing down the microVM. Requires a signed did_envelope matching owner_did.")]
+    #[tool(
+        description = "Remove a deployed machine by id, tearing down the microVM. Requires a signed did_envelope matching owner_did."
+    )]
     async fn machine_remove(
         &self,
         Parameters(params): Parameters<HostingRemoveByIdParams>,
@@ -17453,7 +20804,9 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Read a running machine's live status: lifecycle state, serving node, and last heartbeat.")]
+    #[tool(
+        description = "Read a running machine's live status: lifecycle state, serving node, and last heartbeat."
+    )]
     async fn machine_status(
         &self,
         Parameters(params): Parameters<HostingIdParams>,
@@ -17466,29 +20819,37 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Fetch this node's X25519 machine sealing public key. Wrap machine env-var ciphertext to it (alg x25519-envelope-aes-256-gcm) before machine_deploy.")]
+    #[tool(
+        description = "Fetch this node's X25519 machine sealing public key. Wrap machine env-var ciphertext to it (alg x25519-hkdf-sha256-envelope-aes-256-gcm) before machine_deploy."
+    )]
     async fn machine_sealing_key(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_machineSealingKey", serde_json::json!({}))
-            .await
-            .map_err(|e| err_internal(format!("machineSealingKey failed: {}", e)))?;
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_machineSealingKey",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("machineSealingKey failed: {}", e)))?;
         json_result(result)
     }
 
     // ─── App hosting: placement leases ───
 
-    #[tool(description = "List all active placement leases held on this node across sites, functions, and machines.")]
-    async fn list_leases(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "List all active placement leases held on this node across sites, functions, and machines."
+    )]
+    async fn list_leases(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listLeases", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listLeases failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "List the placement leases bound to a specific app (site / function / machine) id.")]
+    #[tool(
+        description = "List the placement leases bound to a specific app (site / function / machine) id."
+    )]
     async fn get_leases_for_app(
         &self,
         Parameters(params): Parameters<GetLeasesForAppParams>,
@@ -17522,7 +20883,10 @@ fn parse_modality(s: &str) -> std::result::Result<tenzro_types::model::ModelModa
         "text_image" | "textimage" => Ok(ModelModality::TextImage),
         "text_audio" | "textaudio" => Ok(ModelModality::TextAudio),
         "multimodal" => Ok(ModelModality::Multimodal),
-        other => Err(NodeError::InvalidState(format!("Unknown modality: {}", other))),
+        other => Err(NodeError::InvalidState(format!(
+            "Unknown modality: {}",
+            other
+        ))),
     }
 }
 
@@ -17712,6 +21076,7 @@ impl ServerHandler for TenzroMcpServer {
              • close_payment_channel — Close a payment channel with a final balance\n\n\
              Network:\n\
              • get_node_status — Node health, block height, peers\n\
+             • get_node_did_document — Every way of reaching this node\n\
              • get_network_stats — libp2p NetworkMetrics snapshot (connections, gossipsub, kad, peer_address_migrations_total)\n\
              • get_block — Get block by height\n\
              • get_block_range — Fetch a contiguous range of blocks (default 64, max 256)\n\
@@ -17791,7 +21156,7 @@ pub async fn start_mcp_server_with_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> NodeResult<()> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     // Use stateless mode with JSON responses. Each HTTP POST is independent —
@@ -17821,6 +21186,10 @@ pub async fn start_mcp_server_with_shutdown(
     *node.oauth_state.write() = Some(oauth_state.clone());
     let oauth_mw_state = oauth_state.clone();
 
+    // Operator admission gate for the MCP surface. Captured before `node` is
+    // moved into the service factory closure.
+    let admission_gate = node.admission_gate().clone();
+
     let service = StreamableHttpService::new(
         move || Ok(TenzroMcpServer::new(node.clone(), web_state.clone())),
         Arc::new(LocalSessionManager::default()),
@@ -17846,14 +21215,8 @@ pub async fn start_mcp_server_with_shutdown(
             axum::routing::get(super::oauth::authorize_handler)
                 .post(super::oauth::authorize_submit_handler),
         )
-        .route(
-            "/token",
-            axum::routing::post(super::oauth::token_handler),
-        )
-        .route(
-            "/revoke",
-            axum::routing::post(super::oauth::revoke_handler),
-        )
+        .route("/token", axum::routing::post(super::oauth::token_handler))
+        .route("/revoke", axum::routing::post(super::oauth::revoke_handler))
         .with_state(oauth_state)
         // MCP endpoint (protected by bearer auth middleware)
         .nest_service("/mcp", service)
@@ -17880,11 +21243,23 @@ pub async fn start_mcp_server_with_shutdown(
                 response
             },
         ))
+        // Operator admission gate. Outside the bearer-auth layer so a gated
+        // node refuses an unkeyed caller before running OAuth, and so the
+        // refusal names the missing service key rather than a missing bearer
+        // token — two different credentials, two different remedies.
+        .layer(axum::middleware::from_fn_with_state(
+            admission_gate,
+            |state, req, next| {
+                crate::admission::gate_request(tenzro_auth::ServiceSurface::Mcp, state, req, next)
+            },
+        ))
         // DoS hardening: concurrency throttle + body size limit. MCP is
         // JSON-RPC over HTTP; the same DoS surface as the main RPC server
         // applies. MCP tool calls carry small JSON envelopes, not blobs.
         .layer(tower::limit::ConcurrencyLimitLayer::new(200))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(4 * 1024 * 1024));
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            4 * 1024 * 1024,
+        ));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(addr = %listen_addr, tools = 20, mode = "stateless-json", oauth = true, "MCP Server listening (endpoint: /mcp, OAuth 2.1 enabled)");
@@ -17898,7 +21273,6 @@ pub async fn start_mcp_server_with_shutdown(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

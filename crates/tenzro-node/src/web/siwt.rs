@@ -94,10 +94,7 @@ impl SiwtMessage {
         buf.push_str(&format!("Version: {}\n", self.version));
         buf.push_str(&format!("Chain ID: {}\n", self.chain_id));
         buf.push_str(&format!("Nonce: {}\n", self.nonce));
-        buf.push_str(&format!(
-            "Issued At: {}",
-            self.issued_at.to_rfc3339()
-        ));
+        buf.push_str(&format!("Issued At: {}", self.issued_at.to_rfc3339()));
         if let Some(exp) = self.expiration_time {
             buf.push_str(&format!("\nExpiration Time: {}", exp.to_rfc3339()));
         }

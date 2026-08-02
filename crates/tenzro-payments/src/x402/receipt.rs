@@ -274,9 +274,7 @@ impl X402SettlementReceiptBody {
 
 /// Normalize an address-or-hash string to lower-case hex without `0x`.
 fn normalize_hex(s: &str) -> String {
-    s.strip_prefix("0x")
-        .unwrap_or(s)
-        .to_ascii_lowercase()
+    s.strip_prefix("0x").unwrap_or(s).to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -287,7 +285,10 @@ mod tests {
     fn tenzro_network_parses_three_native_vms() {
         assert_eq!(TenzroNetwork::parse("tenzro-evm"), Some(TenzroNetwork::Evm));
         assert_eq!(TenzroNetwork::parse("tenzro-svm"), Some(TenzroNetwork::Svm));
-        assert_eq!(TenzroNetwork::parse("tenzro-daml"), Some(TenzroNetwork::Daml));
+        assert_eq!(
+            TenzroNetwork::parse("tenzro-daml"),
+            Some(TenzroNetwork::Daml)
+        );
         assert_eq!(TenzroNetwork::parse("base-sepolia"), None);
         assert_eq!(TenzroNetwork::parse(""), None);
     }
@@ -442,21 +443,34 @@ mod tests {
     #[test]
     fn finalized_normalizes_hex_for_commitment_stability() {
         let upper = X402SettlementReceiptBody::finalized(
-            "exact", "tenzro-evm", "ch", "cr", "/r", "USDC", "1",
-            "0xABCD", "0xEF01", "0xDEADBEEF",
+            "exact",
+            "tenzro-evm",
+            "ch",
+            "cr",
+            "/r",
+            "USDC",
+            "1",
+            "0xABCD",
+            "0xEF01",
+            "0xDEADBEEF",
         )
         .unwrap();
         let lower = X402SettlementReceiptBody::finalized(
-            "exact", "tenzro-evm", "ch", "cr", "/r", "USDC", "1",
-            "abcd", "ef01", "deadbeef",
+            "exact",
+            "tenzro-evm",
+            "ch",
+            "cr",
+            "/r",
+            "USDC",
+            "1",
+            "abcd",
+            "ef01",
+            "deadbeef",
         )
         .unwrap();
         // Same logical settlement → same commitment regardless of
         // upper-case / 0x prefix variations in the input.
-        assert_eq!(
-            upper.decoded_commitment(),
-            lower.decoded_commitment()
-        );
+        assert_eq!(upper.decoded_commitment(), lower.decoded_commitment());
     }
 
     #[test]
@@ -479,7 +493,16 @@ mod tests {
         assert!(matches!(err, PaymentError::UnsupportedProtocol(_)));
 
         let err = X402SettlementReceiptBody::finalized(
-            "exact", "tenzro evm", "ch", "cr", "/r", "USDC", "1", "abc", "def", "deadbeef",
+            "exact",
+            "tenzro evm",
+            "ch",
+            "cr",
+            "/r",
+            "USDC",
+            "1",
+            "abc",
+            "def",
+            "deadbeef",
         )
         .unwrap_err();
         assert!(matches!(err, PaymentError::UnsupportedProtocol(_)));
@@ -488,8 +511,16 @@ mod tests {
     #[test]
     fn receipt_round_trips_through_json() {
         let r = X402SettlementReceiptBody::finalized(
-            "tenzro-hybrid", "tenzro-daml", "ch-1", "cr-1", "/api/r",
-            "TNZO", "1000000000000000000", "0xabc", "0xdef", "contract-id-7",
+            "tenzro-hybrid",
+            "tenzro-daml",
+            "ch-1",
+            "cr-1",
+            "/api/r",
+            "TNZO",
+            "1000000000000000000",
+            "0xabc",
+            "0xdef",
+            "contract-id-7",
         )
         .unwrap();
         let json = serde_json::to_string(&r).unwrap();

@@ -139,7 +139,10 @@ mod tests {
     fn test_create_did_document() {
         let doc = DidDocument::new("did:tenzro:human:alice-uuid");
         assert_eq!(doc.id, "did:tenzro:human:alice-uuid");
-        assert!(doc.context.contains(&"https://www.w3.org/ns/did/v1".to_string()));
+        assert!(
+            doc.context
+                .contains(&"https://www.w3.org/ns/did/v1".to_string())
+        );
         assert!(doc.controller.is_none());
     }
 
@@ -205,7 +208,9 @@ mod tests {
             id: "did:tenzro:human:alice-uuid#key-1".to_string(),
             controller: "did:tenzro:human:alice-uuid".to_string(),
             method_type: "Ed25519VerificationKey2020".to_string(),
-            public_key_multibase: Some("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string()),
+            public_key_multibase: Some(
+                "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string(),
+            ),
             public_key_jwk: None,
             purposes: vec![VerificationPurpose::Authentication],
         });
@@ -215,10 +220,19 @@ mod tests {
 
         // Verify W3C required fields are present
         assert!(json.contains("@context"), "Missing @context field");
-        assert!(json.contains("https://www.w3.org/ns/did/v1"), "Missing W3C DID context");
+        assert!(
+            json.contains("https://www.w3.org/ns/did/v1"),
+            "Missing W3C DID context"
+        );
         assert!(json.contains("\"id\""), "Missing id field");
-        assert!(json.contains("verificationMethod"), "Missing verificationMethod");
-        assert!(json.contains("authentication"), "Missing authentication relationship");
+        assert!(
+            json.contains("verificationMethod"),
+            "Missing verificationMethod"
+        );
+        assert!(
+            json.contains("authentication"),
+            "Missing authentication relationship"
+        );
 
         // Deserialize and verify
         let parsed: DidDocument = serde_json::from_str(&json).unwrap();

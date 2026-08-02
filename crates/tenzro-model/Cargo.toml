@@ -147,3 +147,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "model_benchmarks"
 harness = false
+
+[lints]
+workspace = true

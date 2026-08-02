@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tenzro_network::NetworkConfig;
 use tenzro_consensus::ConsensusConfig;
+use tenzro_network::NetworkConfig;
 use tenzro_types::{NetworkRole, RoleSet};
 
 use crate::error::{NodeError, Result};
@@ -239,13 +239,27 @@ pub struct CortexWorkerConfig {
     pub timeout_secs: u64,
 }
 
-fn default_sidecar_url() -> String { "http://127.0.0.1:8799".to_string() }
-fn default_arch() -> String { "rdt-moe".to_string() }
-fn default_max_loops() -> u32 { 32 }
-fn default_moe_experts() -> u32 { 64 }
-fn default_experts_per_token() -> u32 { 2 }
-fn default_attn_type() -> String { "mla".to_string() }
-fn default_cortex_timeout_secs() -> u64 { 120 }
+fn default_sidecar_url() -> String {
+    "http://127.0.0.1:8799".to_string()
+}
+fn default_arch() -> String {
+    "rdt-moe".to_string()
+}
+fn default_max_loops() -> u32 {
+    32
+}
+fn default_moe_experts() -> u32 {
+    64
+}
+fn default_experts_per_token() -> u32 {
+    2
+}
+fn default_attn_type() -> String {
+    "mla".to_string()
+}
+fn default_cortex_timeout_secs() -> u64 {
+    120
+}
 
 impl std::fmt::Debug for CortexWorkerConfig {
     /// Custom `Debug` that redacts the sidecar `bearer_token`. Presence
@@ -257,7 +271,11 @@ impl std::fmt::Debug for CortexWorkerConfig {
             .field("sidecar_url", &self.sidecar_url)
             .field(
                 "bearer_token",
-                &if self.bearer_token.is_some() { "<redacted>" } else { "<unset>" },
+                &if self.bearer_token.is_some() {
+                    "<redacted>"
+                } else {
+                    "<unset>"
+                },
             )
             .field("arch", &self.arch)
             .field("max_loops", &self.max_loops)
@@ -336,11 +354,21 @@ pub struct TrainingConfig {
     pub trainer_extra_args: Vec<String>,
 }
 
-fn default_max_concurrent_trainers() -> usize { 1 }
-fn default_trainer_poll_interval_secs() -> u64 { 30 }
-fn default_trainer_backoff_base_ms() -> u64 { 2_000 }
-fn default_trainer_backoff_max_ms() -> u64 { 300_000 }
-fn default_trainer_max_restarts() -> u32 { 8 }
+fn default_max_concurrent_trainers() -> usize {
+    1
+}
+fn default_trainer_poll_interval_secs() -> u64 {
+    30
+}
+fn default_trainer_backoff_base_ms() -> u64 {
+    2_000
+}
+fn default_trainer_backoff_max_ms() -> u64 {
+    300_000
+}
+fn default_trainer_max_restarts() -> u32 {
+    8
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
@@ -684,11 +712,9 @@ impl BridgeAdapterConfig {
     /// specified but not present in the environment.
     pub fn resolve_private_key(&self) -> Result<Option<String>> {
         if let Some(env_var) = &self.private_key_env {
-            return std::env::var(env_var)
-                .map(Some)
-                .map_err(|_| NodeError::Config(format!(
-                    "Bridge signer env var '{}' is not set", env_var
-                )));
+            return std::env::var(env_var).map(Some).map_err(|_| {
+                NodeError::Config(format!("Bridge signer env var '{}' is not set", env_var))
+            });
         }
         Ok(self.private_key.clone())
     }
@@ -716,7 +742,11 @@ impl std::fmt::Debug for BridgeAdapterConfig {
             .field("rpc_url", &self.rpc_url)
             .field(
                 "private_key",
-                &if self.private_key.is_some() { "<redacted>" } else { "<unset>" },
+                &if self.private_key.is_some() {
+                    "<redacted>"
+                } else {
+                    "<unset>"
+                },
             )
             .field("private_key_env", &self.private_key_env)
             .field("tee_sealed", &self.tee_sealed)
@@ -732,10 +762,30 @@ impl std::fmt::Debug for BridgeAdapterConfig {
 /// When `enabled = true`, requests to paths in `paid_routes` without a
 /// valid payment credential are answered with HTTP 402 + a challenge JSON
 /// body. Verified credentials forward the request to the underlying handler.
+/// Container-level `#[serde(default)]` so an operator may write only the keys
+/// they care about. Without it, omitting any single key — `default_protocol`,
+/// say — fails the whole config parse with `missing field`, which is a poor
+/// trade for a section whose every field already has a sensible fallback in
+/// [`PaymentsConfig::default`].
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PaymentsConfig {
-    /// Whether the payment gate middleware is wired into the Web API
-    pub enabled: bool,
+    /// Whether the payment gate middleware is wired into the Web API.
+    ///
+    /// Tri-state on purpose. The role-driven default (see
+    /// [`PaymentsConfig::effective`]) turns the gate on for a node that serves
+    /// `ai` and can name a recipient, and the documented way to opt out is an
+    /// explicit `enabled = false`. A plain `bool` cannot express that: omitted
+    /// and `false` both arrive as `false`, so the opt-out has to be guessed at
+    /// from surrounding fields — and the previous heuristic guessed that a
+    /// operator who set a `recipient` had opted *out*, which inverts the one
+    /// signal that most clearly means "I want this on".
+    ///
+    /// - `Some(true)`  — gate on, unconditionally
+    /// - `Some(false)` — gate off, unconditionally (the explicit opt-out)
+    /// - `None`        — unset; the role-driven default decides
+    #[serde(default)]
+    pub enabled: Option<bool>,
 
     /// Default payment protocol used to issue challenges (e.g. "mpp", "x402")
     pub default_protocol: String,
@@ -849,7 +899,11 @@ impl std::fmt::Debug for X402FacilitatorConfig {
             .field("chain_id", &self.chain_id)
             .field(
                 "evm_relayer_key",
-                &if self.resolve_relayer_key().is_some() { "<redacted>" } else { "<unset>" },
+                &if self.resolve_relayer_key().is_some() {
+                    "<redacted>"
+                } else {
+                    "<unset>"
+                },
             )
             .finish()
     }
@@ -858,7 +912,7 @@ impl std::fmt::Debug for X402FacilitatorConfig {
 impl Default for PaymentsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: None,
             default_protocol: "mpp".to_string(),
             default_amount: 0,
             default_asset: "USDC".to_string(),
@@ -914,18 +968,12 @@ impl PaymentsConfig {
     /// `amount` defaults to whatever the config carries (0 for a freshly
     /// launched node), so the mechanism can be wired and proven on the fleet
     /// before a real price is set.
-    pub fn effective(
-        &self,
-        roles: &RoleSet,
-        default_recipient: Option<&str>,
-    ) -> EffectivePayments {
-        // Operator opt-out: an explicit `enabled = false` in a config that
-        // otherwise looks configured (non-empty recipient or routes) means the
-        // operator deliberately turned the gate off. A bare default config
-        // (enabled=false, empty recipient, empty routes) is indistinguishable
-        // from "unset", so role-driven gating still applies there.
-        let explicitly_disabled = !self.enabled
-            && (!self.recipient.is_empty() || !self.paid_routes.is_empty());
+    pub fn effective(&self, roles: &RoleSet, default_recipient: Option<&str>) -> EffectivePayments {
+        // Operator opt-out is now stated, not inferred: `enabled` is tri-state,
+        // so `Some(false)` is unambiguously "turn it off" and `None` leaves the
+        // decision to the role default. No need to read intent out of whether
+        // other fields happen to be populated.
+        let explicitly_disabled = self.enabled == Some(false);
 
         let recipient = if self.recipient.is_empty() {
             default_recipient.unwrap_or_default().to_string()
@@ -934,7 +982,7 @@ impl PaymentsConfig {
         };
 
         let role_gate = roles.serves_ai() && !recipient.is_empty() && !explicitly_disabled;
-        let gate_on = self.enabled || role_gate;
+        let gate_on = self.enabled == Some(true) || role_gate;
 
         let mut paid_routes = self.paid_routes.clone();
         if role_gate {
@@ -969,7 +1017,11 @@ impl std::fmt::Debug for PaymentsConfig {
             .field("paid_routes", &self.paid_routes)
             .field(
                 "stripe_api_key",
-                &if self.stripe_api_key.is_some() { "<redacted>" } else { "<unset>" },
+                &if self.stripe_api_key.is_some() {
+                    "<redacted>"
+                } else {
+                    "<unset>"
+                },
             )
             .field("stripe_api_base", &self.stripe_api_base)
             .field("tempo_stablecoins", &self.tempo_stablecoins)
@@ -986,7 +1038,9 @@ impl std::fmt::Debug for PaymentsConfig {
 /// [`CantonConfig::default_network`] when the key authorizes exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum CantonNetwork {
+    #[default]
     Devnet,
     Mainnet,
 }
@@ -1008,12 +1062,6 @@ impl CantonNetwork {
             "mainnet" => Some(Self::Mainnet),
             _ => None,
         }
-    }
-}
-
-impl Default for CantonNetwork {
-    fn default() -> Self {
-        Self::Devnet
     }
 }
 
@@ -1076,7 +1124,10 @@ impl std::fmt::Debug for CantonNetworkConfig {
             .field("port", &self.port)
             .field("tls", &self.tls)
             .field("oauth", &self.oauth)
-            .field("static_jwt", &self.static_jwt.as_ref().map(|_| "<redacted>"))
+            .field(
+                "static_jwt",
+                &self.static_jwt.as_ref().map(|_| "<redacted>"),
+            )
             .field("workflow_receipt_template", &self.workflow_receipt_template)
             .finish()
     }
@@ -1260,7 +1311,11 @@ impl CantonNetworkConfig {
         };
 
         // A long-lived bearer is honoured only when no grant is configured.
-        let static_jwt = if oauth.is_none() { var("JWT_TOKEN") } else { None };
+        let static_jwt = if oauth.is_none() {
+            var("JWT_TOKEN")
+        } else {
+            None
+        };
 
         Some(Self {
             host,
@@ -1349,7 +1404,9 @@ impl CantonIdentityProvidersConfig {
             .unwrap_or(false);
         Self {
             enabled,
-            mgmt_url: std::env::var("CANTON_IDP_MGMT_URL").ok().filter(|v| !v.is_empty()),
+            mgmt_url: std::env::var("CANTON_IDP_MGMT_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
             mgmt_client_id: std::env::var("CANTON_IDP_MGMT_CLIENT_ID")
                 .ok()
                 .filter(|v| !v.is_empty()),
@@ -1391,6 +1448,137 @@ pub enum DaBackendSelector {
     Committee,
 }
 
+/// How the node divides memory between models and everything else.
+///
+/// The node serves models out of the same pool that holds RocksDB's block
+/// cache, the iroh endpoint, the web/MCP/A2A surfaces, and the OS. Left
+/// unmanaged, models expand into memory that storage needs and the machine
+/// dies under an OOM kill. These settings draw the line.
+///
+/// All fields are in **GiB** rather than bytes: an operator sets these by
+/// hand, and `reserve_gb = 16` is legible where `17179869184` is not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Total memory the node may account for. `None` detects the machine's
+    /// physical memory, which is right when the node owns the box. Set it
+    /// lower when sharing a host with other workloads — the node cannot see
+    /// those and will otherwise count their memory as its own.
+    pub total_gb: Option<u32>,
+
+    /// Held back from models for the OS, this process, RocksDB, iroh, and the
+    /// service surfaces. Never lent to a model at any load.
+    ///
+    /// Raise it on a node carrying a deep RocksDB working set or co-hosting
+    /// other services; a node that only serves models can lower it.
+    pub reserve_gb: u32,
+
+    /// Ceiling for always-resident models: language models, embeddings,
+    /// forecasting, ASR, TTS. `None` gives them 60% of what remains after the
+    /// reserve.
+    pub resident_ceiling_gb: Option<u32>,
+
+    /// Ceiling for pipelines loaded per job and evicted afterwards — image
+    /// and video generation. `None` gives them whatever the resident tier
+    /// does not take.
+    ///
+    /// Separate from the resident ceiling on purpose: a chat model must not
+    /// be able to crowd out the diffusion worker, and a video pipeline must
+    /// not evict the model currently answering requests.
+    pub on_demand_ceiling_gb: Option<u32>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            total_gb: None,
+            reserve_gb: (tenzro_model::memory_budget::DEFAULT_RESERVE_BYTES / (1024 * 1024 * 1024))
+                as u32,
+            resident_ceiling_gb: None,
+            on_demand_ceiling_gb: None,
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// Project into the model layer's budget configuration.
+    ///
+    /// Detects physical memory when `total_gb` is unset. GiB are widened to
+    /// bytes here so the operator-facing units and the accounting units stay
+    /// separate.
+    pub fn to_budget_config(&self) -> tenzro_model::memory_budget::BudgetConfig {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let total_bytes = match self.total_gb {
+            Some(gb) => u64::from(gb) * GIB,
+            None => {
+                let mut sys = sysinfo::System::new();
+                sys.refresh_memory();
+                sys.total_memory()
+            }
+        };
+        tenzro_model::memory_budget::BudgetConfig {
+            total_bytes,
+            reserve_bytes: u64::from(self.reserve_gb) * GIB,
+            resident_ceiling_bytes: self.resident_ceiling_gb.map(|gb| u64::from(gb) * GIB),
+            on_demand_ceiling_bytes: self.on_demand_ceiling_gb.map(|gb| u64::from(gb) * GIB),
+        }
+    }
+}
+
+/// What the operator is willing to rent out.
+///
+/// Distinct from [`MemoryConfig`], which bounds what the node's own models may
+/// take. This bounds what *tenants* may take, and the two are different
+/// decisions with different owners: an operator happy to rent 40 GB of
+/// accelerator memory may still want their own models to keep 60.
+///
+/// Every figure is what the operator CHOSE to offer, not what the machine
+/// has. A 121 GB box may offer 60; the other 61 is retained, not undersold.
+/// All-zero — the default — means nothing is for rent, which is the right
+/// default because an operator who has not said what is for sale has not
+/// opted in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RentalConfig {
+    /// CPU cores offered to tenants.
+    pub cpu_cores: u32,
+    /// System memory offered, GiB.
+    pub memory_gb: u32,
+    /// Per-accelerator memory offered, keyed by host index, GiB.
+    ///
+    /// On unified-memory hardware this is the figure that matters: granting a
+    /// whole accelerator there hands over the pool the node itself runs from,
+    /// so an operator renting a GPU without renting the machine has to slice
+    /// it by memory.
+    pub accelerator_gb: std::collections::HashMap<u32, u32>,
+    /// Disk offered, GiB.
+    pub storage_gb: u32,
+}
+
+impl RentalConfig {
+    /// Whether the operator has offered anything at all.
+    pub fn offers_anything(&self) -> bool {
+        self.cpu_cores > 0
+            || self.memory_gb > 0
+            || self.storage_gb > 0
+            || self.accelerator_gb.values().any(|&gb| gb > 0)
+    }
+
+    /// Project into the rental ledger's capacity type.
+    pub fn to_rentable_capacity(&self) -> crate::remote_access::RentableCapacity {
+        crate::remote_access::RentableCapacity {
+            cpu_cores: self.cpu_cores,
+            memory_mib: u64::from(self.memory_gb) * 1024,
+            accelerator_mib: self
+                .accelerator_gb
+                .iter()
+                .map(|(&i, &gb)| (i, u64::from(gb) * 1024))
+                .collect(),
+            storage_mib: u64::from(self.storage_gb) * 1024,
+        }
+    }
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1415,8 +1603,43 @@ pub struct NodeConfig {
     /// Models directory for inference providers
     pub models_dir: Option<PathBuf>,
 
+    /// How the node divides memory between models and everything else.
+    pub memory: MemoryConfig,
+
+    /// What the operator is willing to rent out to tenants.
+    #[serde(default)]
+    pub rental: RentalConfig,
+
+    /// Whether and how the node tunes its own serving configuration.
+    ///
+    /// Off by default: a node that rewrites its own dials is one an operator
+    /// has to reason about during an incident, so it is opted into. When off
+    /// the controller still runs and records what it *would* have done, which
+    /// is the sensible way to build confidence before enabling it.
+    #[serde(default)]
+    pub autotune: crate::autotune_sampler::AutotuneConfig,
+
     /// Log level (trace, debug, info, warn, error)
     pub log_level: String,
+
+    /// SHA-256 digests (hex) of service keys that may reach this node's
+    /// service surface — JSON-RPC, MCP, A2A and the web API.
+    ///
+    /// Empty is the default and means the gate is off: the network is
+    /// permissionless and a node that configures nothing serves anyone.
+    /// Setting even one digest turns the gate on for all four surfaces at
+    /// once; `/health` and `/ready` stay reachable regardless so an
+    /// orchestrator can still see the node.
+    ///
+    /// Digests rather than plaintext, because a config file is the wrong
+    /// place to keep a secret. Generate one with
+    /// `printf %s "<key>" | sha256sum`, or let the node hash it by passing
+    /// the plaintext through `TENZRO_SERVICE_KEYS` instead.
+    ///
+    /// This gate covers the service surface only. A gated node still
+    /// validates, votes and gossips.
+    #[serde(default)]
+    pub service_keys: Vec<String>,
 
     /// RPC server listen address
     pub rpc_addr: String,
@@ -1676,7 +1899,7 @@ pub struct HostingConfig {
     /// Advertised in the provider announcement as the operator's hosting bid;
     /// placement ranks capable nodes cheapest first. `0` (the default) means the
     /// operator hosts for free — the most competitive bid.
-    #[serde(default)]
+    #[serde(default, with = "u128_as_string")]
     pub price_per_hour: u128,
 }
 
@@ -1872,11 +2095,14 @@ impl NodeConfig {
         };
         Self {
             roles: RoleSet::validator_only(),
-            data_dir: PathBuf::from("./data/validator"),
+            data_dir: tenzro_types::paths::instance_data_dir("validator"),
             network,
             consensus: Some(ConsensusConfig::default()),
             tee_enabled: true,
             models_dir: None,
+            memory: MemoryConfig::default(),
+            autotune: crate::autotune_sampler::AutotuneConfig::default(),
+            rental: RentalConfig::default(),
             log_level: "info".to_string(),
             // Validators are the public infrastructure class — they serve
             // RPC to wallets / dApps / joiner nodes in addition to producing
@@ -1884,6 +2110,7 @@ impl NodeConfig {
             // with decentralized consensus but a single public gateway,
             // which is functionally a centralized chain on the access axis.
             // Override with `--rpc-addr 127.0.0.1:8545` for a private node.
+            service_keys: Vec::new(),
             rpc_addr: "0.0.0.0:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
@@ -1927,12 +2154,16 @@ impl NodeConfig {
     pub fn default_provider() -> Self {
         Self {
             roles: RoleSet::from(NetworkRole::ModelProvider),
-            data_dir: PathBuf::from("./data/provider"),
+            data_dir: tenzro_types::paths::instance_data_dir("provider"),
             network: NetworkConfig::default(),
             consensus: None,
             tee_enabled: true,
-            models_dir: Some(PathBuf::from("./models")),
+            models_dir: None,
+            memory: MemoryConfig::default(),
+            autotune: crate::autotune_sampler::AutotuneConfig::default(),
+            rental: RentalConfig::default(),
             log_level: "info".to_string(),
+            service_keys: Vec::new(),
             rpc_addr: "127.0.0.1:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
@@ -1976,12 +2207,16 @@ impl NodeConfig {
     pub fn default_tee_provider() -> Self {
         Self {
             roles: RoleSet::from(NetworkRole::TeeProvider),
-            data_dir: PathBuf::from("./data/tee-provider"),
+            data_dir: tenzro_types::paths::instance_data_dir("tee-provider"),
             network: NetworkConfig::default(),
             consensus: None,
             tee_enabled: true,
-            models_dir: Some(PathBuf::from("./models")),
+            models_dir: None,
+            memory: MemoryConfig::default(),
+            autotune: crate::autotune_sampler::AutotuneConfig::default(),
+            rental: RentalConfig::default(),
             log_level: "info".to_string(),
+            service_keys: Vec::new(),
             rpc_addr: "127.0.0.1:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
@@ -2025,12 +2260,16 @@ impl NodeConfig {
     pub fn default_user() -> Self {
         Self {
             roles: RoleSet::from(NetworkRole::LightClient),
-            data_dir: PathBuf::from("./data/user"),
+            data_dir: tenzro_types::paths::default_data_dir(),
             network: NetworkConfig::default(),
             consensus: None,
             tee_enabled: true,
             models_dir: None,
+            memory: MemoryConfig::default(),
+            autotune: crate::autotune_sampler::AutotuneConfig::default(),
+            rental: RentalConfig::default(),
             log_level: "info".to_string(),
+            service_keys: Vec::new(),
             rpc_addr: "127.0.0.1:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
@@ -2107,7 +2346,6 @@ impl NodeConfig {
             ));
         }
 
-
         // Validate log level
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
         if !valid_levels.contains(&self.log_level.as_str()) {
@@ -2148,7 +2386,7 @@ impl NodeConfig {
         }
 
         // Validate payments config when enabled
-        if self.payments.enabled {
+        if self.payments.enabled == Some(true) {
             if self.payments.recipient.trim().is_empty() {
                 return Err(NodeError::Config(
                     "payments.recipient must be set when payments.enabled = true".to_string(),
@@ -2189,14 +2427,24 @@ impl NodeConfig {
 
     /// Resolve the directory where GGUF model weights are stored and served.
     ///
-    /// Uses the explicit `models_dir` when configured, otherwise a `models`
-    /// subdirectory of `data_dir`. Rooting under `data_dir` keeps downloaded
-    /// weights on the same persistent volume as chain state, so they survive a
-    /// process/container restart instead of being re-downloaded every boot.
+    /// Uses the explicit `models_dir` when configured, otherwise the shared
+    /// machine-wide model store under the Tenzro root.
+    ///
+    /// Shared rather than per-instance, and deliberately not a subdirectory of
+    /// `data_dir`. Weights are content-addressed and read-only once written,
+    /// so two nodes on one machine have no reason to hold separate copies of
+    /// the same tens of gigabytes — and when they did, the CLI wrote to one
+    /// copy while the node served from another, which is how a machine ended
+    /// up with several half-populated model directories and no way to say
+    /// which was current.
+    ///
+    /// Operators who keep weights on a separate volume set `models_dir`
+    /// explicitly; that path still wins.
     pub fn effective_models_dir(&self) -> PathBuf {
         self.models_dir
             .clone()
-            .unwrap_or_else(|| self.data_dir.join("models"))
+            .map(tenzro_types::paths::expand_tilde)
+            .unwrap_or_else(tenzro_types::paths::models_dir)
     }
 }
 
@@ -2214,7 +2462,16 @@ mod tests {
 
         let provider = NodeConfig::default_provider();
         assert!(provider.roles.serves_ai());
-        assert!(provider.models_dir.is_some());
+        // `models_dir` unset means "the shared machine-wide store", which is
+        // what a provider should use — it is the same directory the CLI
+        // downloads into. Asserting on the resolved path rather than on the
+        // override being present is the check that actually matters: a
+        // provider must have somewhere to serve weights from.
+        assert!(provider.models_dir.is_none());
+        assert_eq!(
+            provider.effective_models_dir(),
+            tenzro_types::paths::models_dir()
+        );
 
         let user = NodeConfig::default_user();
         assert!(user.roles.has(NetworkRole::LightClient));
@@ -2333,10 +2590,7 @@ mod tests {
             .find(header)
             .expect("[canton.devnet] table must be rendered")
             + header.len();
-        injected.insert_str(
-            after_header,
-            "\nstatic_jwt = \"injected-by-fetch-on-boot\"",
-        );
+        injected.insert_str(after_header, "\nstatic_jwt = \"injected-by-fetch-on-boot\"");
         std::fs::write(&temp_file, &injected).unwrap();
 
         // Load: the deserializer must populate the secret despite the
@@ -2378,7 +2632,10 @@ mod tests {
         let roles: RoleSet = "validator".parse().unwrap();
         let cfg = PaymentsConfig::default();
         let eff = cfg.effective(&roles, Some("addr-of-this-node"));
-        assert!(!eff.gate_on, "a validator that serves no models does not gate");
+        assert!(
+            !eff.gate_on,
+            "a validator that serves no models does not gate"
+        );
         assert!(eff.paid_routes.is_empty());
     }
 
@@ -2393,10 +2650,11 @@ mod tests {
     #[test]
     fn operator_opts_out_by_disabling_with_explicit_recipient() {
         let roles: RoleSet = "validator,ai".parse().unwrap();
-        // enabled=false alongside a non-default recipient reads as a
-        // deliberate opt-out, not a bare default.
+        // An explicit `enabled = false` is the documented opt-out and now
+        // says so directly, rather than being inferred from the recipient
+        // being populated.
         let cfg = PaymentsConfig {
-            enabled: false,
+            enabled: Some(false),
             recipient: "operator-picked".to_string(),
             ..PaymentsConfig::default()
         };
@@ -2408,7 +2666,7 @@ mod tests {
     fn explicit_enable_forces_gate_regardless_of_role() {
         let roles: RoleSet = "validator".parse().unwrap();
         let cfg = PaymentsConfig {
-            enabled: true,
+            enabled: Some(true),
             recipient: "operator-picked".to_string(),
             paid_routes: vec!["/settle".to_string()],
             ..PaymentsConfig::default()
@@ -2446,7 +2704,7 @@ recipient = "treasury-addr"
 paid_routes = ["/chat"]
 "#;
         let cfg: NodeConfig = toml::from_str(toml_src).unwrap();
-        assert!(cfg.payments.enabled);
+        assert_eq!(cfg.payments.enabled, Some(true));
         assert_eq!(cfg.payments.default_amount, 1000);
         assert_eq!(cfg.payments.recipient, "treasury-addr");
         assert!(cfg.payments.paid_routes.iter().any(|r| r == "/chat"));

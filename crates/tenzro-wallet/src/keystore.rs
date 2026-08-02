@@ -117,9 +117,7 @@ impl Keystore {
         password: &str,
     ) -> Result<()> {
         if shares.is_empty() {
-            return Err(WalletError::KeystoreError(
-                "No shares to store".to_string(),
-            ));
+            return Err(WalletError::KeystoreError("No shares to store".to_string()));
         }
 
         let salt = Self::generate_salt();
@@ -219,14 +217,15 @@ impl Keystore {
         // Decrypt each share.
         let mut decrypted_shares = Vec::with_capacity(bundle.encrypted_shares.len());
         for encrypted in bundle.encrypted_shares {
-            let decrypted_bytes = decryption_key
-                .decrypt(&encrypted.encrypted_data)
-                .map_err(|e| {
-                    WalletError::KeystoreError(format!(
-                        "Failed to decrypt share {} (wrong password?): {}",
-                        encrypted.signer_index, e
-                    ))
-                })?;
+            let decrypted_bytes =
+                decryption_key
+                    .decrypt(&encrypted.encrypted_data)
+                    .map_err(|e| {
+                        WalletError::KeystoreError(format!(
+                            "Failed to decrypt share {} (wrong password?): {}",
+                            encrypted.signer_index, e
+                        ))
+                    })?;
             let share = KeyShare::from_bytes(&decrypted_bytes)?;
             if share.signer_index.0 != encrypted.signer_index {
                 return Err(WalletError::SerializationError(format!(
@@ -451,11 +450,7 @@ impl Keystore {
     }
 
     /// Load and decrypt the wallet's BLS12-381 keypair.
-    pub fn load_bls_seed(
-        &mut self,
-        wallet_id: &WalletId,
-        password: &str,
-    ) -> Result<BlsKeyPair> {
+    pub fn load_bls_seed(&mut self, wallet_id: &WalletId, password: &str) -> Result<BlsKeyPair> {
         let path = self.get_bls_keystore_path(wallet_id);
         if !path.exists() {
             return Err(WalletError::KeystoreError(format!(
@@ -515,8 +510,7 @@ impl Keystore {
                 WalletError::KeystoreError(format!("Argon2 key derivation failed: {}", e))
             })?;
 
-        SymmetricKey::from_bytes(&key_bytes)
-            .map_err(|e| WalletError::KeystoreError(e.to_string()))
+        SymmetricKey::from_bytes(&key_bytes).map_err(|e| WalletError::KeystoreError(e.to_string()))
     }
 
     /// Read the three encrypted keystore files for `wallet_id` as raw bytes,
@@ -644,7 +638,12 @@ mod tests {
         let password = "test-password-123";
 
         keystore
-            .store_shares(&wallet.wallet_id, &pubkey_package, &wallet.key_shares, password)
+            .store_shares(
+                &wallet.wallet_id,
+                &pubkey_package,
+                &wallet.key_shares,
+                password,
+            )
             .unwrap();
 
         assert!(keystore.has_wallet(&wallet.wallet_id));
@@ -687,7 +686,13 @@ mod tests {
         // Make sure the rehydrated wallet can produce a valid signature.
         let _ = address;
         let mut addr_bytes = [0u8; 32];
-        addr_bytes[..20].copy_from_slice(loaded_pkg.group_public_key.as_public_key().to_address().as_bytes());
+        addr_bytes[..20].copy_from_slice(
+            loaded_pkg
+                .group_public_key
+                .as_public_key()
+                .to_address()
+                .as_bytes(),
+        );
         let rehydrated_address = Address::new(addr_bytes);
 
         let restored = MpcWallet::new(
@@ -790,7 +795,8 @@ mod tests {
         // Destination keystore: import the bundle.
         let dst_dir = TempDir::new().unwrap();
         let mut dst = Keystore::new(dst_dir.path()).unwrap();
-        dst.import_encrypted_wallet_files(&wallet_id, &bundle).unwrap();
+        dst.import_encrypted_wallet_files(&wallet_id, &bundle)
+            .unwrap();
 
         // Importing twice must refuse — we don't silently overwrite.
         let dup = dst.import_encrypted_wallet_files(&wallet_id, &bundle);
@@ -820,8 +826,7 @@ mod tests {
         .unwrap();
 
         let sig = MpcSigner::sign(&restored, b"car export round-trip").unwrap();
-        tenzro_crypto::signatures::verify(&original_pk, b"car export round-trip", &sig)
-            .unwrap();
+        tenzro_crypto::signatures::verify(&original_pk, b"car export round-trip", &sig).unwrap();
     }
 
     #[test]

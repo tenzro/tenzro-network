@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tenzro_crypto::keys::{Address, PublicKey};
-use tenzro_crypto::signatures::{verify, Signature, Signer};
-use tenzro_crypto::vrf::{self, VrfProof, VrfPublicKey, VrfSecretKey, OUTPUT_LEN, PROOF_LEN};
+use tenzro_crypto::signatures::{Signature, Signer, verify};
+use tenzro_crypto::vrf::{self, OUTPUT_LEN, PROOF_LEN, VrfProof, VrfPublicKey, VrfSecretKey};
 use tracing::{debug, info, warn};
 
 use crate::error::{ModelError, Result};
@@ -221,12 +221,7 @@ impl SlaManager {
 
     /// Compute the VRF input bytes for one (epoch, round, provider) tuple.
     /// Exposed so verifiers can reconstruct the input independently.
-    pub fn vrf_input_for(
-        issuer: &Address,
-        epoch: u64,
-        round: u64,
-        provider_did: &str,
-    ) -> Vec<u8> {
+    pub fn vrf_input_for(issuer: &Address, epoch: u64, round: u64, provider_did: &str) -> Vec<u8> {
         let mut hasher = Sha256::new();
         hasher.update(SLA_PROBE_DOMAIN);
         hasher.update(epoch.to_be_bytes());
@@ -293,12 +288,8 @@ impl SlaManager {
         let proof = VrfProof::from_bytes(&probe.vrf_proof)
             .map_err(|e| ModelError::Other(format!("VRF proof decode failed: {e}")))?;
         let pk = VrfPublicKey(probe.vrf_pubkey);
-        let input = Self::vrf_input_for(
-            &probe.issuer,
-            probe.epoch,
-            probe.round,
-            &probe.provider_did,
-        );
+        let input =
+            Self::vrf_input_for(&probe.issuer, probe.epoch, probe.round, &probe.provider_did);
         let output = vrf::verify(&pk, &input, &proof)
             .map_err(|e| ModelError::Other(format!("VRF proof invalid: {e}")))?;
         if &output.as_bytes()[..32] != probe.challenge_nonce.as_slice() {
@@ -396,11 +387,7 @@ impl SlaManager {
                     "SLA slash threshold crossed — escalating"
                 );
                 self.bond_callback
-                    .slash_provider_bond(
-                        &probe.provider_did,
-                        self.slash_amount,
-                        result.as_reason(),
-                    )
+                    .slash_provider_bond(&probe.provider_did, self.slash_amount, result.as_reason())
                     .await?;
                 // The callback is responsible for resetting the counter on
                 // a successful slash — we don't reset here to avoid a
@@ -528,9 +515,11 @@ mod tests {
         assert_eq!(cb.counts.lock().get("p1").copied().unwrap(), 1);
 
         let probe = mgr.issue_probe("p1", 0, 0, 10_000).unwrap();
-        let response =
-            SlaManager::build_response(&probe, paddr, &psigner, ppk, 5_000).unwrap();
-        let result = mgr.apply_response(&probe, Some(&response), 6_000).await.unwrap();
+        let response = SlaManager::build_response(&probe, paddr, &psigner, ppk, 5_000).unwrap();
+        let result = mgr
+            .apply_response(&probe, Some(&response), 6_000)
+            .await
+            .unwrap();
         assert_eq!(result, SlaResult::Ok);
         assert_eq!(cb.counts.lock().get("p1").copied().unwrap(), 0);
         assert!(cb.slashes.lock().is_empty());
@@ -553,10 +542,12 @@ mod tests {
         let mgr = SlaManager::new(issuer, vrf, cb.clone());
         let (paddr, psigner, ppk) = provider_keypair();
         let probe = mgr.issue_probe("p1", 0, 0, 1_000).unwrap();
-        let response =
-            SlaManager::build_response(&probe, paddr, &psigner, ppk, 500).unwrap();
+        let response = SlaManager::build_response(&probe, paddr, &psigner, ppk, 500).unwrap();
         // Receiver clock past the deadline.
-        let result = mgr.apply_response(&probe, Some(&response), 2_000).await.unwrap();
+        let result = mgr
+            .apply_response(&probe, Some(&response), 2_000)
+            .await
+            .unwrap();
         assert_eq!(result, SlaResult::Late);
         assert_eq!(cb.counts.lock().get("p1").copied().unwrap(), 1);
     }
@@ -567,10 +558,12 @@ mod tests {
         let mgr = SlaManager::new(issuer, vrf, cb.clone());
         let (paddr, psigner, ppk) = provider_keypair();
         let probe = mgr.issue_probe("p1", 0, 0, 10_000).unwrap();
-        let mut response =
-            SlaManager::build_response(&probe, paddr, &psigner, ppk, 5_000).unwrap();
+        let mut response = SlaManager::build_response(&probe, paddr, &psigner, ppk, 5_000).unwrap();
         response.challenge_nonce[0] ^= 0x01;
-        let result = mgr.apply_response(&probe, Some(&response), 6_000).await.unwrap();
+        let result = mgr
+            .apply_response(&probe, Some(&response), 6_000)
+            .await
+            .unwrap();
         assert_eq!(result, SlaResult::Tampered);
     }
 
@@ -580,8 +573,7 @@ mod tests {
         let mgr = SlaManager::new(issuer, vrf, cb.clone());
         let (paddr, psigner, ppk) = provider_keypair();
         let probe = mgr.issue_probe("p1", 0, 0, 10_000).unwrap();
-        let response =
-            SlaManager::build_response(&probe, paddr, &psigner, ppk, 5_000).unwrap();
+        let response = SlaManager::build_response(&probe, paddr, &psigner, ppk, 5_000).unwrap();
         // Build a corrupted signature by flipping a byte in a re-constructed
         // Signature value.
         let mut sig_bytes = response.signature.to_bytes();
@@ -591,7 +583,10 @@ mod tests {
             signature: bad_sig,
             ..response
         };
-        let result = mgr.apply_response(&probe, Some(&bad_response), 6_000).await.unwrap();
+        let result = mgr
+            .apply_response(&probe, Some(&bad_response), 6_000)
+            .await
+            .unwrap();
         assert_eq!(result, SlaResult::InvalidSignature);
     }
 
@@ -658,7 +653,10 @@ mod tests {
         // Pin the reason strings so downstream parsers can rely on them.
         assert_eq!(SlaResult::Ok.as_reason(), "sla:ok");
         assert_eq!(SlaResult::Missed.as_reason(), "sla:probe_timeout");
-        assert_eq!(SlaResult::InvalidSignature.as_reason(), "sla:probe_invalid_sig");
+        assert_eq!(
+            SlaResult::InvalidSignature.as_reason(),
+            "sla:probe_invalid_sig"
+        );
         assert_eq!(SlaResult::Tampered.as_reason(), "sla:probe_tampered");
         assert_eq!(SlaResult::Late.as_reason(), "sla:probe_late");
     }

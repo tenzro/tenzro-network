@@ -3,9 +3,9 @@
 //! Lists and inspects TNZO CCT pools in the canonical mainnet registry
 //! (Ethereum LockRelease; Base/Arbitrum/Optimism/Solana BurnMint).
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// TNZO CCT pool inspection
 #[derive(Debug, Subcommand)]
@@ -89,15 +89,21 @@ fn print_pool(pool: &serde_json::Value) {
     );
     output::print_field(
         "Chain Selector",
-        pool.get("chain_selector").and_then(|v| v.as_str()).unwrap_or(""),
+        pool.get("chain_selector")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "Pool Address",
-        pool.get("pool_address").and_then(|v| v.as_str()).unwrap_or(""),
+        pool.get("pool_address")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "Token Address",
-        pool.get("token_address").and_then(|v| v.as_str()).unwrap_or(""),
+        pool.get("token_address")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "Pool Type",
@@ -105,18 +111,26 @@ fn print_pool(pool: &serde_json::Value) {
     );
     output::print_field(
         "Contract Name",
-        pool.get("contract_name").and_then(|v| v.as_str()).unwrap_or(""),
+        pool.get("contract_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "Outbound Capacity",
-        pool.get("outbound_capacity").and_then(|v| v.as_str()).unwrap_or(""),
+        pool.get("outbound_capacity")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "Inbound Capacity",
-        pool.get("inbound_capacity").and_then(|v| v.as_str()).unwrap_or(""),
+        pool.get("inbound_capacity")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
     output::print_field(
         "Refill Rate",
-        pool.get("refill_rate").and_then(|v| v.as_str()).unwrap_or(""),
+        pool.get("refill_rate")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
 }

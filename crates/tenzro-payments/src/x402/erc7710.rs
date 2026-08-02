@@ -170,11 +170,7 @@ impl Erc7710DelegationVerifier {
 
     /// Overrides the EIP-712 domain name/version (defaults:
     /// `DelegationManager` / `1`).
-    pub fn with_domain(
-        mut self,
-        name: impl Into<String>,
-        version: impl Into<String>,
-    ) -> Self {
+    pub fn with_domain(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
         self.domain_name = name.into();
         self.domain_version = version.into();
         self
@@ -235,8 +231,7 @@ impl Erc7710DelegationVerifier {
                 (None, None) => {
                     if authority != ROOT_AUTHORITY {
                         return Err(PaymentError::VerificationFailed(
-                            "erc7710 root delegation authority is not ROOT_AUTHORITY"
-                                .to_string(),
+                            "erc7710 root delegation authority is not ROOT_AUTHORITY".to_string(),
                         ));
                     }
                 }
@@ -293,8 +288,7 @@ impl Erc7710DelegationVerifier {
             CaveatEnforcerKind::AllowedTargets => {
                 if terms.is_empty() || terms.len() % 20 != 0 {
                     return Err(PaymentError::VerificationFailed(
-                        "erc7710 allowed-targets caveat terms are not N x 20 bytes"
-                            .to_string(),
+                        "erc7710 allowed-targets caveat terms are not N x 20 bytes".to_string(),
                     ));
                 }
                 let target = context.target.ok_or_else(|| {
@@ -335,8 +329,7 @@ impl Erc7710DelegationVerifier {
                     ceiling.copy_from_slice(&terms[16..]);
                     if context.amount > u128::from_be_bytes(ceiling) {
                         return Err(PaymentError::VerificationFailed(
-                            "erc7710 redemption amount exceeds the max-amount caveat"
-                                .to_string(),
+                            "erc7710 redemption amount exceeds the max-amount caveat".to_string(),
                         ));
                     }
                 }
@@ -447,8 +440,7 @@ impl DelegationVerifier for Erc7710DelegationVerifier {
         let now = chrono::Utc::now().timestamp() as u64;
         if now < auth.valid_after || now >= auth.valid_before {
             return Err(PaymentError::VerificationFailed(
-                "erc7710 authorization validity window has not started or has expired"
-                    .to_string(),
+                "erc7710 authorization validity window has not started or has expired".to_string(),
             ));
         }
 
@@ -910,11 +902,8 @@ mod tests {
         let key = test_key(1);
         let d = root_delegation(&key, TOKEN, vec![]);
         let v1 = verifier();
-        let v2 = Erc7710DelegationVerifier::new(
-            9999,
-            "0x00000000000000000000000000000000000010ab",
-        )
-        .unwrap();
+        let v2 = Erc7710DelegationVerifier::new(9999, "0x00000000000000000000000000000000000010ab")
+            .unwrap();
         assert_ne!(
             v1.delegation_digest(&d).unwrap(),
             v2.delegation_digest(&d).unwrap()
@@ -1113,15 +1102,17 @@ mod tests {
 
         let mut early = context(1);
         early.timestamp = 1_500_000_000;
-        assert!(v
-            .verify_chain(std::slice::from_ref(&signed), &early)
-            .is_err());
+        assert!(
+            v.verify_chain(std::slice::from_ref(&signed), &early)
+                .is_err()
+        );
 
         let mut late = context(1);
         late.timestamp = 1_900_000_000;
-        assert!(v
-            .verify_chain(std::slice::from_ref(&signed), &late)
-            .is_err());
+        assert!(
+            v.verify_chain(std::slice::from_ref(&signed), &late)
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1139,8 +1130,8 @@ mod tests {
             chain: vec![signed],
             binding: format!("0x{}", hex::encode(binding)),
         };
-        let proof_b64 = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(&proof).unwrap());
+        let proof_b64 =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&proof).unwrap());
 
         let challenge = PaymentChallenge {
             challenge_id: challenge_id.to_string(),
@@ -1189,13 +1180,12 @@ mod tests {
         let d = root_delegation(&payer, "0x0000000000000000000000000000000000000d01", vec![]);
         let signed = sign_delegation(&v, &payer, d);
 
-        let transfer = encode_erc20_transfer("0x00000000000000000000000000000000000000aa", 42)
-            .unwrap();
+        let transfer =
+            encode_erc20_transfer("0x00000000000000000000000000000000000000aa", 42).unwrap();
         assert_eq!(&transfer[..4], &ERC20_TRANSFER_SELECTOR);
         assert_eq!(transfer.len(), 4 + 64);
 
-        let calldata =
-            build_redeem_delegations_calldata(&[signed], TOKEN, 0, &transfer).unwrap();
+        let calldata = build_redeem_delegations_calldata(&[signed], TOKEN, 0, &transfer).unwrap();
 
         let expected_selector: [u8; 32] =
             Keccak256::digest(b"redeemDelegations(bytes[],bytes32[],bytes[])").into();

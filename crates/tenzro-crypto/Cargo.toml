@@ -24,6 +24,7 @@ p256 = { workspace = true }
 signature = { workspace = true }
 sha2 = { workspace = true }
 sha3 = { workspace = true }
+hkdf = "0.12"
 aes-gcm = { workspace = true }
 x25519-dalek = { workspace = true }
 rand = { workspace = true }
@@ -61,3 +62,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "crypto_benchmarks"
 harness = false
+
+[lints]
+workspace = true

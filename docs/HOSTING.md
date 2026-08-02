@@ -83,6 +83,36 @@ Claiming a domain requires control of the owner DID and ownership of the target 
 
 All mutating methods require a hex `did_envelope` proving control of `owner_did`.
 
+### What the envelope must commit to
+
+A valid signature by the owner is not the same thing as authorization for *this* call. The envelope commits to a method and a hash of the parameters precisely so one signature cannot be replayed as another — checking only the signature would mean any envelope an owner ever produced for any site operation authorizes every other one (remove a different site, repoint an alias, hand a domain elsewhere) for as long as it stays inside the freshness window.
+
+So the node checks three things beyond the signature:
+
+- **`method`** must equal the RPC method name exactly (`tenzro_siteRemove`, not `site.remove`).
+- **`params_hash`** must equal `SHA-256(canonical)` for that method's canonical bytes, below.
+- **`nonce`** must not have been seen before. The method and params bindings narrow a captured envelope to exactly one call; the nonce is what stops that one call being made twice. It shares the node-wide cache with every other envelope-authenticated surface, so a nonce burned here cannot be spent on a database query either.
+
+### Canonical bytes per method
+
+| Method | `canonical` |
+|--------|-------------|
+| `tenzro_sitePublish` | `name` |
+| `tenzro_siteRemove` | `site_id` |
+| `tenzro_siteSetAlias` | `<hostname>:<site_id>` |
+| `tenzro_siteRemoveAlias` | `hostname` |
+| `tenzro_siteSetPlacement` | `site_id` |
+| `tenzro_siteRemovePlacement` | `site_id` |
+| `tenzro_siteClaimDomain` | `<hostname>:<site_id>` |
+| `tenzro_siteVerifyDomain` | `hostname` |
+| `tenzro_siteRemoveDomain` | `hostname` |
+| `tenzro_functionDeploy` | `name` |
+| `tenzro_functionRemove` | `id` |
+| `tenzro_machineDeploy` | `name` |
+| `tenzro_machineRemove` | `id` |
+
+UTF-8 bytes of the value as sent, with no separator other than the literal `:` shown. Reads are ungated — a published site has to be servable, and its manifest is public by construction.
+
 | Method | Description |
 |--------|-------------|
 | `tenzro_sitePublish` | Publish a manifest. Params: `name`, `owner_did`, `routes`, `index_path?`, `not_found_path?`, `spa?`, `price_per_request?`, `did_envelope`. |

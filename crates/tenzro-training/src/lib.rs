@@ -58,57 +58,57 @@ pub mod slashing;
 pub mod sparse;
 
 pub use activation::{
-    top_k_delta_probes, validate_activation_commitment, verify_activation_commitment,
     ActivationVerification, MAX_MEAN_LOSS_REL_DELTA, MAX_MEAN_PROBE_REL_DELTA,
-    MIN_PROBE_INDEX_OVERLAP,
+    MIN_PROBE_INDEX_OVERLAP, top_k_delta_probes, validate_activation_commitment,
+    verify_activation_commitment,
 };
 pub use aggregation::{
-    aggregator_for, clip_gradients, clip_to_l2_norm, l2_norm, Aggregator,
-    CoordinateMedianAggregator, KrumAggregator, MeanAggregator, TrimmedMeanAggregator,
+    Aggregator, CoordinateMedianAggregator, KrumAggregator, MeanAggregator, TrimmedMeanAggregator,
+    aggregator_for, clip_gradients, clip_to_l2_norm, l2_norm,
 };
 pub use commitments::{
     compute_run_root, compute_state_root, outer_gradient_signing_bytes, sync_round_signing_bytes,
 };
 pub use committee::{
-    committee_seed, is_in_committee, recommended_committee_size, select_witness_committee,
-    COMMITTEE_SCORE_DOMAIN_TAG, COMMITTEE_SEED_DOMAIN_TAG,
+    COMMITTEE_SCORE_DOMAIN_TAG, COMMITTEE_SEED_DOMAIN_TAG, committee_seed, is_in_committee,
+    recommended_committee_size, select_witness_committee,
 };
 pub use confidential::{
-    compute_manifest_hash, compute_shard_ciphertext_hash, parse_tee_dataset_ref,
-    validate_confidential_enrollment, verify_manifest_binding, verify_shard_ciphertext,
-    InMemorySealedShardStore, SealedManifestStore, SealedShardStore,
+    EnclaveIdentityVerifier, InMemorySealedShardStore, SealedManifestStore, SealedShardStore,
+    VerifiedEnclaveIdentity, compute_manifest_hash, compute_shard_ciphertext_hash,
+    parse_tee_dataset_ref, validate_confidential_enrollment, verify_manifest_binding,
+    verify_shard_ciphertext,
 };
 pub use error::{Result, TrainingError};
 pub use gossip::{
-    decode_for_topic, encode_install_sealed_manifest, encode_outer_gradient, encode_sync_round,
-    TrainingGossipMessage, TRAINING_SYNCER_TOPIC, TRAINING_TOPIC,
+    TRAINING_SYNCER_TOPIC, TRAINING_TOPIC, TrainingGossipMessage, decode_for_topic,
+    encode_install_sealed_manifest, encode_outer_gradient, encode_sync_round,
 };
 pub use outer_optimizer::{
-    gradient_agreement, sparse_ef_step, AdaptiveLrConfig, NesterovSgdConfig, NesterovSgdState,
+    AdaptiveLrConfig, NesterovSgdConfig, NesterovSgdState, gradient_agreement, sparse_ef_step,
 };
 pub use payload_store::{
-    compute_payload_hash, verify_payload, GradientPayloadStore, InMemoryGradientStore,
+    GradientPayloadStore, InMemoryGradientStore, compute_payload_hash, verify_payload,
 };
 pub use quantization::{dequantize, encoded_len, quantize};
 pub use runtime::{
-    min_tier_for_rule, validate_aggregation_for_tier, validate_objective, validate_payload_kind,
-    FragmentBuffer, RoundDecision, SyncerState, TrainingRuntime,
+    FragmentBuffer, RoundDecision, SyncerState, TrainingRuntime, min_tier_for_rule,
+    validate_aggregation_for_tier, validate_objective, validate_payload_kind,
 };
-pub use slashing::{eviction_decisions, EvictionReason, TrainerSlashingCallback};
+pub use slashing::{EvictionReason, TrainerSlashingCallback, eviction_decisions};
 pub use sparse::{
-    select_transmitted, sparse_decode, sparse_encode, sparse_encoded_len, ErrorFeedback,
-    SparseDecoded,
+    ErrorFeedback, SparseDecoded, select_transmitted, sparse_decode, sparse_encode,
+    sparse_encoded_len,
 };
 
 // Re-export the protocol-level types from `tenzro-types` for convenience —
 // downstream crates can `use tenzro_training::TrainingTaskSpec` instead of
 // `use tenzro_types::training::TrainingTaskSpec`.
 pub use tenzro_types::training::{
-    ActivationCommitment, AggregationRule, ArchitectureSpec, DeltaProbe, FragmentQuorumStatus,
-    GradientQuantization, OuterGradient, OuterUpdateMode, PayloadKind, PipelineAssignment,
-    PipelineConfig, RlConfig, SealedDatasetManifest, SealedShardEnvelope, SparseTopKParams,
-    SyncRound, SyncStrategy, TrainingAttestation,
-    TrainingModality, TrainingObjective, TrainingReceipt, TrainingRun, TrainingRunStatus,
-    TrainingTaskSpec, TrainingTier, ACTIVATION_COMMITMENT_DOMAIN_TAG, DEFAULT_PROBE_K,
-    MAX_PROBE_K,
+    ACTIVATION_COMMITMENT_DOMAIN_TAG, ActivationCommitment, AggregationRule, ArchitectureSpec,
+    DEFAULT_PROBE_K, DeltaProbe, FragmentQuorumStatus, GradientQuantization, MAX_PROBE_K,
+    OuterGradient, OuterUpdateMode, PayloadKind, PipelineAssignment, PipelineConfig, RlConfig,
+    SealedDatasetManifest, SealedShardEnvelope, SparseTopKParams, SyncRound, SyncStrategy,
+    TrainingAttestation, TrainingModality, TrainingObjective, TrainingReceipt, TrainingRun,
+    TrainingRunStatus, TrainingTaskSpec, TrainingTier,
 };

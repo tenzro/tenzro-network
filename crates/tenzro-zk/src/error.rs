@@ -72,4 +72,3 @@ pub enum ZkError {
     #[error("{0}")]
     Other(String),
 }
-

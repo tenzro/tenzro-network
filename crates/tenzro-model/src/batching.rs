@@ -520,9 +520,10 @@ fn admit(model: &LlamaModel, ctx_size: i32, slots: &mut [Option<Sequence>], req:
     let tokens = match model.str_to_token(&prompt, AddBos::Always) {
         Ok(t) => t,
         Err(e) => {
-            let _ = req
-                .result_tx
-                .send(Err(ModelError::Other(format!("tokenization failed: {}", e))));
+            let _ = req.result_tx.send(Err(ModelError::Other(format!(
+                "tokenization failed: {}",
+                e
+            ))));
             return;
         }
     };

@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tenzro_crypto::bls::{BlsKeyPair, BlsPublicKey, BlsSignature};
-use tenzro_storage::{CommitteeShape, KvStore, CF_AUDIT};
+use tenzro_storage::{CF_AUDIT, CommitteeShape, KvStore};
 use tenzro_types::primitives::{Address, Hash};
 use tenzro_types::transaction::SignedTransaction;
 
@@ -235,11 +235,7 @@ impl BatchAvailabilityCertificate {
     /// `tenzro_crypto::bls::aggregate_signatures`, and each signer's bit is set
     /// at `validator_set.index_of(&ack.validator)`. Fails if the collected
     /// signers do not reach `2f+1` stake-weight.
-    pub fn form(
-        batch_id: Hash,
-        acks: &[BatchAck],
-        validator_set: &ValidatorSet,
-    ) -> Result<Self> {
+    pub fn form(batch_id: Hash, acks: &[BatchAck], validator_set: &ValidatorSet) -> Result<Self> {
         let active = validator_set.active_validators();
         let n = active.len();
         let bitmap_bytes = n.div_ceil(8);
@@ -754,12 +750,10 @@ impl BatchCertStore {
             .iter()
             .filter_map(|entry| {
                 let id = *entry.key();
-                self.bodies
-                    .get(&id)
-                    .map(|b| (b.producer, b.sequence, id))
+                self.bodies.get(&id).map(|b| (b.producer, b.sequence, id))
             })
             .collect();
-        ordered.sort_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.1.cmp(&b.1)));
+        ordered.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.1.cmp(&b.1)));
         let certified: std::collections::HashSet<Hash> =
             self.certs.iter().map(|e| *e.key()).collect();
         let local: Vec<Hash> = ordered.into_iter().map(|(_, _, id)| id).collect();
@@ -963,7 +957,12 @@ mod tests {
         let store = BatchCertStore::new(keys[0].clone(), infos[0].address);
         let batch = store.produce(vec![]);
         let ack = store.sign_ack(&batch.id);
-        assert!(store.record_ack(batch.id, ack.clone(), &vset).unwrap().is_none());
+        assert!(
+            store
+                .record_ack(batch.id, ack.clone(), &vset)
+                .unwrap()
+                .is_none()
+        );
         // Same validator's ack again must not double-count.
         assert!(store.record_ack(batch.id, ack, &vset).unwrap().is_none());
         assert!(store.get_cert(&batch.id).is_none());

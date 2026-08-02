@@ -174,22 +174,22 @@ pub use intent_7683_fills::Spec4FillRegistry;
 pub use kill_switch::{KillSwitchStats, KillSwitchStore};
 pub use micropayments::{
     ChannelDispute, ChannelManager, ChannelState, ChannelStats, ChannelStatus, ChannelStorage,
-    DisputeStatus, InMemoryChannelStorage, MicropaymentChannel,
-    NanopaymentBatcher, NanopaymentBatchResult, NanopaymentEntry, RocksDbChannelStorage,
+    DisputeStatus, InMemoryChannelStorage, MicropaymentChannel, NanopaymentBatchResult,
+    NanopaymentBatcher, NanopaymentEntry, RocksDbChannelStorage,
 };
 pub use netting::{
-    compute_batch_id, verify_netting_invariant, NettingBatch, NettingManager, NettingStatus,
-    Obligation, SettlementInstruction,
+    NettingBatch, NettingManager, NettingStatus, Obligation, SettlementInstruction,
+    compute_batch_id, verify_netting_invariant,
 };
 pub use obligations::{ObligationSource, ProviderObligations};
 pub use prepaid::{AccountLedger, PrepaidLedger};
 pub use rental::{
-    EpochOutcome, RentalAgreement, RentalManager, RentalStatus, StakeLedger, TerminationReason,
-    DEFAULT_MISS_TERMINATION_THRESHOLD,
+    DEFAULT_MISS_TERMINATION_THRESHOLD, EpochOutcome, RentalAgreement, RentalManager, RentalStatus,
+    StakeLedger, TerminationReason,
 };
 pub use saga::{
-    compute_saga_id, DvpSaga, LegExecutor, LegOutcome, LegReceipt, LegResult, LegVenue, SagaLeg,
-    SagaOrchestrator, SagaState,
+    DvpSaga, LegExecutor, LegOutcome, LegReceipt, LegResult, LegVenue, SagaLeg, SagaOrchestrator,
+    SagaState, compute_saga_id,
 };
 
 #[cfg(test)]

@@ -12,7 +12,7 @@
 //! or a reading older than the per-feed `max_staleness_secs` all reject with
 //! a typed [`PorError`].
 
-use crate::chainlink_feed::{u64_from_be_32, u128_from_be_32, SELECTOR_LATEST_ROUND_DATA};
+use crate::chainlink_feed::{SELECTOR_LATEST_ROUND_DATA, u64_from_be_32, u128_from_be_32};
 use crate::error::BridgeError;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -154,7 +154,9 @@ impl ChainlinkPorAdapter {
         let config = self
             .feed(asset_id)
             .ok_or_else(|| PorError::NotConfigured(asset_id.to_string()))?;
-        let bytes = self.eth_call_latest_round_data(&config.aggregator_address).await?;
+        let bytes = self
+            .eth_call_latest_round_data(&config.aggregator_address)
+            .await?;
         let reading = decode_por_round(&bytes, &config.aggregator_address, config.decimals)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -412,7 +414,9 @@ mod tests {
             round_id: 3,
             decimals: 8,
         };
-        let att = adapter.to_attestation(&r, "tenzro:539/erc20:0xabc").unwrap();
+        let att = adapter
+            .to_attestation(&r, "tenzro:539/erc20:0xabc")
+            .unwrap();
         assert_eq!(att.reserve, 42);
         assert_eq!(att.attested_at, 1_700_000_000);
         assert_eq!(

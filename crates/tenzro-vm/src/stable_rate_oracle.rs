@@ -139,8 +139,7 @@ impl GovernanceSetRateOracle {
     }
 
     pub fn set_rate(&self, row: RateRow) {
-        self.rows
-            .insert((row.asset.clone(), row.unit.clone()), row);
+        self.rows.insert((row.asset.clone(), row.unit.clone()), row);
     }
 
     pub fn get_rate(&self, asset: &str, unit: &str) -> Option<RateRow> {
@@ -153,10 +152,12 @@ impl GovernanceSetRateOracle {
 #[async_trait::async_trait]
 impl StableRateOracle for GovernanceSetRateOracle {
     async fn quote(&self, asset: &str, unit: &str, amount_in: u128) -> Result<StableRateQuote> {
-        let row = self.get_rate(asset, unit).ok_or_else(|| StableRateError::NoRate {
-            asset: asset.to_string(),
-            unit: unit.to_string(),
-        })?;
+        let row = self
+            .get_rate(asset, unit)
+            .ok_or_else(|| StableRateError::NoRate {
+                asset: asset.to_string(),
+                unit: unit.to_string(),
+            })?;
         build_quote(
             asset,
             unit,
@@ -404,7 +405,11 @@ mod tests {
     struct StubFeed(u128);
     #[async_trait::async_trait]
     impl CrossRateFeed for StubFeed {
-        async fn derive_cross_rate_q18(&self, _a: &str, _u: &str) -> std::result::Result<u128, String> {
+        async fn derive_cross_rate_q18(
+            &self,
+            _a: &str,
+            _u: &str,
+        ) -> std::result::Result<u128, String> {
             Ok(self.0)
         }
     }
@@ -412,7 +417,11 @@ mod tests {
     struct FailFeed;
     #[async_trait::async_trait]
     impl CrossRateFeed for FailFeed {
-        async fn derive_cross_rate_q18(&self, _a: &str, _u: &str) -> std::result::Result<u128, String> {
+        async fn derive_cross_rate_q18(
+            &self,
+            _a: &str,
+            _u: &str,
+        ) -> std::result::Result<u128, String> {
             Err("stale feed".into())
         }
     }
@@ -470,7 +479,10 @@ mod tests {
         assert_eq!(mul_q18(1_000_000, Q18).unwrap(), 1_000_000);
         assert_eq!(mul_q18(1_000_000, Q18 / 4).unwrap(), 250_000);
         // 1 BTC (1e8 sats) at 60_000 unit/BTC → expressed in Q18.
-        assert_eq!(mul_q18(100_000_000, 60_000 * Q18).unwrap(), 6_000_000_000_000);
+        assert_eq!(
+            mul_q18(100_000_000, 60_000 * Q18).unwrap(),
+            6_000_000_000_000
+        );
     }
 
     #[test]

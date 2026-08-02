@@ -34,16 +34,16 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use reqwest::Client;
-use safetensors::tensor::TensorView;
 use safetensors::Dtype;
+use safetensors::tensor::TensorView;
 use serde::Deserialize;
 use tracing::debug;
 
 use crate::catalog::ModelArchitecture;
 use crate::error::{ModelError, Result};
 use crate::moe_exec::{
-    quantize_expert_blob, ExpertQuantPlan, META_ROUTED_SCALING_FACTOR, META_SHARED_EXPERTS,
-    TENSOR_DOWN_PROJ, TENSOR_GATE_PROJ, TENSOR_ROUTER, TENSOR_ROUTER_BIAS, TENSOR_UP_PROJ,
+    ExpertQuantPlan, META_ROUTED_SCALING_FACTOR, META_SHARED_EXPERTS, TENSOR_DOWN_PROJ,
+    TENSOR_GATE_PROJ, TENSOR_ROUTER, TENSOR_ROUTER_BIAS, TENSOR_UP_PROJ, quantize_expert_blob,
 };
 
 /// Upper bound on a shard's safetensors JSON header. Real headers for
@@ -77,7 +77,11 @@ impl MoeTensorNaming {
         match arch {
             ModelArchitecture::Qwen3Moe
             | ModelArchitecture::Qwen35Moe
-            | ModelArchitecture::Qwen36Moe => Some(Self::QwenMoe),
+            | ModelArchitecture::Qwen36Moe
+            // Qwen3-Next replaces half the attention layers with gated
+            // delta-net but leaves the MoE MLP block — and so its tensor
+            // names — identical to the rest of the Qwen MoE line.
+            | ModelArchitecture::Qwen3Next => Some(Self::QwenMoe),
             ModelArchitecture::DeepSeekV3 | ModelArchitecture::Kimi => Some(Self::DeepSeekMoe),
             _ => None,
         }
@@ -417,9 +421,7 @@ impl MoeExtractor {
             expert: u32,
         ) -> Result<TensorView<'a>> {
             TensorView::new(t.0, t.1.clone(), &t.2).map_err(|e| {
-                ModelError::InvalidModel(format!(
-                    "expert L{layer}/E{expert}: tensor view: {e:?}"
-                ))
+                ModelError::InvalidModel(format!("expert L{layer}/E{expert}: tensor view: {e:?}"))
             })
         }
         let tensors = vec![
@@ -444,9 +446,7 @@ impl MoeExtractor {
     ) -> Result<Vec<u8>> {
         let dense = self.expert_blob(layer, expert).await?;
         quantize_expert_blob(&dense, plan).map_err(|e| {
-            ModelError::SerializationError(format!(
-                "quantize expert blob L{layer}/E{expert}: {e}"
-            ))
+            ModelError::SerializationError(format!("quantize expert blob L{layer}/E{expert}: {e}"))
         })
     }
 
@@ -513,9 +513,7 @@ impl MoeExtractor {
         let down = self.fetch_named(&down_name).await?;
         fn view<'a>(t: &'a (Dtype, Vec<usize>, Bytes), layer: u32) -> Result<TensorView<'a>> {
             TensorView::new(t.0, t.1.clone(), &t.2).map_err(|e| {
-                ModelError::InvalidModel(format!(
-                    "shared expert L{layer}: tensor view: {e:?}"
-                ))
+                ModelError::InvalidModel(format!("shared expert L{layer}: tensor view: {e:?}"))
             })
         }
         let tensors = vec![

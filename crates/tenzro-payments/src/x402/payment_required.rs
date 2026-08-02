@@ -100,11 +100,8 @@ impl X402PaymentRequired {
 
     /// Decodes from a base64-encoded X-PAYMENT-REQUIRED header value
     pub fn from_base64(encoded: &str) -> Result<Self> {
-        let decoded = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            encoded,
-        )
-        .map_err(|e| {
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .map_err(|e| {
             PaymentError::ChallengeError(format!("Invalid base64 in payment header: {}", e))
         })?;
 

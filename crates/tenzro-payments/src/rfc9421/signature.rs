@@ -38,7 +38,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use tenzro_crypto::keys::{KeyPair, KeyType, PublicKey};
-use tenzro_crypto::signatures::{Ed25519SignerImpl, Ed25519VerifierImpl, Signature, Signer, Verifier};
+use tenzro_crypto::signatures::{
+    Ed25519SignerImpl, Ed25519VerifierImpl, Signature, Signer, Verifier,
+};
 use tracing::debug;
 
 use sha2::{Digest, Sha256, Sha512};
@@ -322,9 +324,8 @@ pub fn parse_signature_input(header: &str) -> Result<SignatureInput> {
         ));
     }
 
-    let alg = alg.ok_or_else(|| {
-        PaymentError::Rfc9421Error("missing required parameter: alg".to_string())
-    })?;
+    let alg = alg
+        .ok_or_else(|| PaymentError::Rfc9421Error("missing required parameter: alg".to_string()))?;
 
     Ok(SignatureInput {
         label: label.clone(),
@@ -378,7 +379,10 @@ fn parse_inner_list(s: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Build the canonical signature base string per RFC 9421 §2.5.
-pub fn build_signature_base(request_parts: &RequestParts, input: &SignatureInput) -> Result<String> {
+pub fn build_signature_base(
+    request_parts: &RequestParts,
+    input: &SignatureInput,
+) -> Result<String> {
     let mut lines = Vec::with_capacity(input.covered_components.len() + 1);
 
     for component in &input.covered_components {
@@ -439,9 +443,10 @@ fn canonicalize_component(raw: &str, parts: &RequestParts) -> Result<String> {
         // Regular HTTP field. We don't yet support `bs` (binary-wrapped) or
         // re-serialized Structured Field rendering — values are looked up and
         // run through field-value canonicalization (§2.1.1).
-        let raw_val = parts.headers.get(&name_lower).ok_or_else(|| {
-            PaymentError::Rfc9421Error(format!("missing header: {}", name_lower))
-        })?;
+        let raw_val = parts
+            .headers
+            .get(&name_lower)
+            .ok_or_else(|| PaymentError::Rfc9421Error(format!("missing header: {}", name_lower)))?;
         canonicalize_field_value(raw_val)
     };
 
@@ -478,10 +483,7 @@ fn split_component(raw: &str) -> (String, Vec<(String, Option<String>)>) {
                 continue;
             }
             if let Some((k, v)) = part.split_once('=') {
-                params.push((
-                    k.trim().to_ascii_lowercase(),
-                    Some(v.trim().to_string()),
-                ));
+                params.push((k.trim().to_ascii_lowercase(), Some(v.trim().to_string())));
             } else {
                 params.push((part.to_ascii_lowercase(), None));
             }
@@ -534,9 +536,7 @@ fn derived_component_value(
                 .find(|(k, _)| k == "name")
                 .and_then(|(_, v)| v.as_ref())
                 .ok_or_else(|| {
-                    PaymentError::Rfc9421Error(
-                        "@query-param requires `name` parameter".to_string(),
-                    )
+                    PaymentError::Rfc9421Error("@query-param requires `name` parameter".to_string())
                 })?;
             let key = key.trim_matches('"');
             let decoded = find_query_param(&parts.query, key).ok_or_else(|| {
@@ -612,13 +612,27 @@ pub fn verify_http_signature(
     let sig_bytes = &signed_headers.signature_bytes;
 
     match algorithm {
-        SignatureAlgorithm::Ed25519 => verify_ed25519(public_key_bytes, signature_base.as_bytes(), sig_bytes),
-        SignatureAlgorithm::EcdsaP256Sha256 => verify_ecdsa_p256(public_key_bytes, signature_base.as_bytes(), sig_bytes),
-        SignatureAlgorithm::EcdsaP384Sha384 => verify_ecdsa_p384(public_key_bytes, signature_base.as_bytes(), sig_bytes),
-        SignatureAlgorithm::RsaPssSha256 => verify_rsa_pss::<Sha256>(public_key_bytes, signature_base.as_bytes(), sig_bytes),
-        SignatureAlgorithm::RsaPssSha512 => verify_rsa_pss::<Sha512>(public_key_bytes, signature_base.as_bytes(), sig_bytes),
-        SignatureAlgorithm::RsaV15Sha256 => verify_rsa_pkcs1v15(public_key_bytes, signature_base.as_bytes(), sig_bytes),
-        SignatureAlgorithm::HmacSha256 => verify_hmac_sha256(public_key_bytes, signature_base.as_bytes(), sig_bytes),
+        SignatureAlgorithm::Ed25519 => {
+            verify_ed25519(public_key_bytes, signature_base.as_bytes(), sig_bytes)
+        }
+        SignatureAlgorithm::EcdsaP256Sha256 => {
+            verify_ecdsa_p256(public_key_bytes, signature_base.as_bytes(), sig_bytes)
+        }
+        SignatureAlgorithm::EcdsaP384Sha384 => {
+            verify_ecdsa_p384(public_key_bytes, signature_base.as_bytes(), sig_bytes)
+        }
+        SignatureAlgorithm::RsaPssSha256 => {
+            verify_rsa_pss::<Sha256>(public_key_bytes, signature_base.as_bytes(), sig_bytes)
+        }
+        SignatureAlgorithm::RsaPssSha512 => {
+            verify_rsa_pss::<Sha512>(public_key_bytes, signature_base.as_bytes(), sig_bytes)
+        }
+        SignatureAlgorithm::RsaV15Sha256 => {
+            verify_rsa_pkcs1v15(public_key_bytes, signature_base.as_bytes(), sig_bytes)
+        }
+        SignatureAlgorithm::HmacSha256 => {
+            verify_hmac_sha256(public_key_bytes, signature_base.as_bytes(), sig_bytes)
+        }
     }
 }
 
@@ -650,17 +664,18 @@ fn verify_ed25519(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Resu
     let sig = Signature::new(KeyType::Ed25519, sig_bytes.to_vec());
     let verifier = Ed25519VerifierImpl::new(pk)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid Ed25519 public key: {}", e)))?;
-    verifier
-        .verify(msg, &sig)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("Ed25519 signature verification failed: {}", e)))?;
+    verifier.verify(msg, &sig).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("Ed25519 signature verification failed: {}", e))
+    })?;
     Ok(())
 }
 
 fn sign_ed25519(private_key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
     let keypair = KeyPair::from_bytes(KeyType::Ed25519, private_key_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid Ed25519 private key: {}", e)))?;
-    let signer = Ed25519SignerImpl::new(keypair)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("Ed25519 signer creation failed: {}", e)))?;
+    let signer = Ed25519SignerImpl::new(keypair).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("Ed25519 signer creation failed: {}", e))
+    })?;
     let signature = signer
         .sign(msg)
         .map_err(|e| PaymentError::Rfc9421Error(format!("Ed25519 signing failed: {}", e)))?;
@@ -677,8 +692,9 @@ fn verify_ecdsa_p256(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> R
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid P-256 signature: {}", e)))?;
     let _ = vk; // silence if both branches fail
     let vk2: P256Vk = parse_p256_verifying_key(public_key_bytes)?;
-    Sigv3Verifier::verify(&vk2, msg, &sig)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("P-256 signature verification failed: {}", e)))?;
+    Sigv3Verifier::verify(&vk2, msg, &sig).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("P-256 signature verification failed: {}", e))
+    })?;
     Ok(())
 }
 
@@ -719,8 +735,9 @@ fn verify_ecdsa_p384(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> R
     let sig = P384Sig::from_slice(sig_bytes)
         .or_else(|_| P384Sig::from_der(sig_bytes))
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid P-384 signature: {}", e)))?;
-    Sigv3Verifier::verify(&vk, msg, &sig)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("P-384 signature verification failed: {}", e)))?;
+    Sigv3Verifier::verify(&vk, msg, &sig).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("P-384 signature verification failed: {}", e))
+    })?;
     Ok(())
 }
 
@@ -759,9 +776,9 @@ fn verify_rsa_pss<H>(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> R
 where
     H: Digest + sha2::digest::FixedOutputReset + sha2::digest::const_oid::AssociatedOid,
 {
-    use rsa::pss::{Signature as PssSig, VerifyingKey as PssVk};
-    use rsa::pkcs8::DecodePublicKey;
     use rsa::RsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::pss::{Signature as PssSig, VerifyingKey as PssVk};
 
     let pk = RsaPublicKey::from_public_key_der(public_key_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA public key (DER): {}", e)))?;
@@ -769,8 +786,9 @@ where
     let sig = PssSig::try_from(sig_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA-PSS signature: {}", e)))?;
     // rsa 0.9 impls the `signature` 2.x `Verifier` — use the v2 alias.
-    Sigv2Verifier::verify(&vk, msg, &sig)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("RSA-PSS signature verification failed: {}", e)))?;
+    Sigv2Verifier::verify(&vk, msg, &sig).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("RSA-PSS signature verification failed: {}", e))
+    })?;
     Ok(())
 }
 
@@ -778,24 +796,25 @@ fn sign_rsa_pss<H>(private_key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>>
 where
     H: Digest + sha2::digest::FixedOutputReset + sha2::digest::const_oid::AssociatedOid,
 {
-    use rsa::pss::{Signature as PssSig, SigningKey as PssSk};
-    use rsa::pkcs8::DecodePrivateKey;
-    use rsa::RsaPrivateKey;
     use rand::rngs::OsRng;
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::pss::{Signature as PssSig, SigningKey as PssSk};
     // rsa 0.9 impls `signature` 2.x's `RandomizedSigner` (not v3).
     use signature_v2::RandomizedSigner;
 
-    let sk = RsaPrivateKey::from_pkcs8_der(private_key_bytes)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA private key (PKCS#8 DER): {}", e)))?;
+    let sk = RsaPrivateKey::from_pkcs8_der(private_key_bytes).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("invalid RSA private key (PKCS#8 DER): {}", e))
+    })?;
     let signing_key: PssSk<H> = PssSk::<H>::new(sk);
     let sig: PssSig = signing_key.sign_with_rng(&mut OsRng, msg);
     Ok(<PssSig as Into<Box<[u8]>>>::into(sig).to_vec())
 }
 
 fn verify_rsa_pkcs1v15(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<()> {
+    use rsa::RsaPublicKey;
     use rsa::pkcs1v15::{Signature as Pkcs1Sig, VerifyingKey as Pkcs1Vk};
     use rsa::pkcs8::DecodePublicKey;
-    use rsa::RsaPublicKey;
 
     let pk = RsaPublicKey::from_public_key_der(public_key_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA public key (DER): {}", e)))?;
@@ -803,18 +822,20 @@ fn verify_rsa_pkcs1v15(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) ->
     let sig = Pkcs1Sig::try_from(sig_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA-v1.5 signature: {}", e)))?;
     // rsa 0.9 impls the `signature` 2.x `Verifier` — use the v2 alias.
-    Sigv2Verifier::verify(&vk, msg, &sig)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("RSA-v1.5 signature verification failed: {}", e)))?;
+    Sigv2Verifier::verify(&vk, msg, &sig).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("RSA-v1.5 signature verification failed: {}", e))
+    })?;
     Ok(())
 }
 
 fn sign_rsa_pkcs1v15(private_key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
+    use rsa::RsaPrivateKey;
     use rsa::pkcs1v15::{Signature as Pkcs1Sig, SigningKey as Pkcs1Sk};
     use rsa::pkcs8::DecodePrivateKey;
-    use rsa::RsaPrivateKey;
 
-    let sk = RsaPrivateKey::from_pkcs8_der(private_key_bytes)
-        .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA private key (PKCS#8 DER): {}", e)))?;
+    let sk = RsaPrivateKey::from_pkcs8_der(private_key_bytes).map_err(|e| {
+        PaymentError::Rfc9421Error(format!("invalid RSA private key (PKCS#8 DER): {}", e))
+    })?;
     let signing_key: Pkcs1Sk<Sha256> = Pkcs1Sk::<Sha256>::new(sk);
     // rsa 0.9 impls the `signature` 2.x `Signer` — use the v2 alias.
     let sig: Pkcs1Sig = Sigv2Signer::sign(&signing_key, msg);
@@ -999,8 +1020,8 @@ mod tests {
         let vk = sk.verifying_key();
         let public_sec1 = vk.to_sec1_point(false).as_bytes().to_vec();
 
-        let request_parts = RequestParts::for_request("POST", "api.example.com", "/test")
-            .with_query("a=1&b=2");
+        let request_parts =
+            RequestParts::for_request("POST", "api.example.com", "/test").with_query("a=1&b=2");
 
         let input = SignatureInput {
             label: "sig".to_string(),
@@ -1020,13 +1041,25 @@ mod tests {
             },
         };
 
-        let sig = create_http_signature(&request_parts, &input, &private_pkcs8, &SignatureAlgorithm::EcdsaP256Sha256).unwrap();
+        let sig = create_http_signature(
+            &request_parts,
+            &input,
+            &private_pkcs8,
+            &SignatureAlgorithm::EcdsaP256Sha256,
+        )
+        .unwrap();
         let signed = SignedHeaders {
             signature_input_raw: "x".to_string(),
             signature_bytes: sig,
             parsed: input,
         };
-        verify_http_signature(&request_parts, &signed, &public_sec1, &SignatureAlgorithm::EcdsaP256Sha256).unwrap();
+        verify_http_signature(
+            &request_parts,
+            &signed,
+            &public_sec1,
+            &SignatureAlgorithm::EcdsaP256Sha256,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1057,13 +1090,25 @@ mod tests {
             },
         };
 
-        let sig = create_http_signature(&request_parts, &input, &private_pkcs8, &SignatureAlgorithm::EcdsaP384Sha384).unwrap();
+        let sig = create_http_signature(
+            &request_parts,
+            &input,
+            &private_pkcs8,
+            &SignatureAlgorithm::EcdsaP384Sha384,
+        )
+        .unwrap();
         let signed = SignedHeaders {
             signature_input_raw: "x".to_string(),
             signature_bytes: sig,
             parsed: input,
         };
-        verify_http_signature(&request_parts, &signed, &public_sec1, &SignatureAlgorithm::EcdsaP384Sha384).unwrap();
+        verify_http_signature(
+            &request_parts,
+            &signed,
+            &public_sec1,
+            &SignatureAlgorithm::EcdsaP384Sha384,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1085,13 +1130,25 @@ mod tests {
             },
         };
 
-        let sig = create_http_signature(&request_parts, &input, &secret, &SignatureAlgorithm::HmacSha256).unwrap();
+        let sig = create_http_signature(
+            &request_parts,
+            &input,
+            &secret,
+            &SignatureAlgorithm::HmacSha256,
+        )
+        .unwrap();
         let signed = SignedHeaders {
             signature_input_raw: "x".to_string(),
             signature_bytes: sig,
             parsed: input,
         };
-        verify_http_signature(&request_parts, &signed, &secret, &SignatureAlgorithm::HmacSha256).unwrap();
+        verify_http_signature(
+            &request_parts,
+            &signed,
+            &secret,
+            &SignatureAlgorithm::HmacSha256,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1128,7 +1185,8 @@ mod tests {
 
     #[test]
     fn test_query_param_component_with_param_modifier() {
-        let request_parts = RequestParts::for_request("GET", "x.example", "/r").with_query("a=1&b=two");
+        let request_parts =
+            RequestParts::for_request("GET", "x.example", "/r").with_query("a=1&b=two");
 
         let input = SignatureInput {
             label: "s".to_string(),
@@ -1198,22 +1256,55 @@ mod tests {
     #[test]
     fn test_signature_algorithm_display() {
         assert_eq!(SignatureAlgorithm::Ed25519.to_string(), "ed25519");
-        assert_eq!(SignatureAlgorithm::RsaPssSha256.to_string(), "rsa-pss-sha256");
-        assert_eq!(SignatureAlgorithm::RsaPssSha512.to_string(), "rsa-pss-sha512");
-        assert_eq!(SignatureAlgorithm::EcdsaP256Sha256.to_string(), "ecdsa-p256-sha256");
-        assert_eq!(SignatureAlgorithm::EcdsaP384Sha384.to_string(), "ecdsa-p384-sha384");
+        assert_eq!(
+            SignatureAlgorithm::RsaPssSha256.to_string(),
+            "rsa-pss-sha256"
+        );
+        assert_eq!(
+            SignatureAlgorithm::RsaPssSha512.to_string(),
+            "rsa-pss-sha512"
+        );
+        assert_eq!(
+            SignatureAlgorithm::EcdsaP256Sha256.to_string(),
+            "ecdsa-p256-sha256"
+        );
+        assert_eq!(
+            SignatureAlgorithm::EcdsaP384Sha384.to_string(),
+            "ecdsa-p384-sha384"
+        );
         assert_eq!(SignatureAlgorithm::HmacSha256.to_string(), "hmac-sha256");
     }
 
     #[test]
     fn test_signature_algorithm_from_str() {
-        assert_eq!(SignatureAlgorithm::from_str("ed25519").unwrap(), SignatureAlgorithm::Ed25519);
-        assert_eq!(SignatureAlgorithm::from_str("ED25519").unwrap(), SignatureAlgorithm::Ed25519);
-        assert_eq!(SignatureAlgorithm::from_str("rsa-pss-sha256").unwrap(), SignatureAlgorithm::RsaPssSha256);
-        assert_eq!(SignatureAlgorithm::from_str("rsa-pss-sha512").unwrap(), SignatureAlgorithm::RsaPssSha512);
-        assert_eq!(SignatureAlgorithm::from_str("ecdsa-p256-sha256").unwrap(), SignatureAlgorithm::EcdsaP256Sha256);
-        assert_eq!(SignatureAlgorithm::from_str("ecdsa-p384-sha384").unwrap(), SignatureAlgorithm::EcdsaP384Sha384);
-        assert_eq!(SignatureAlgorithm::from_str("hmac-sha256").unwrap(), SignatureAlgorithm::HmacSha256);
+        assert_eq!(
+            SignatureAlgorithm::from_str("ed25519").unwrap(),
+            SignatureAlgorithm::Ed25519
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("ED25519").unwrap(),
+            SignatureAlgorithm::Ed25519
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("rsa-pss-sha256").unwrap(),
+            SignatureAlgorithm::RsaPssSha256
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("rsa-pss-sha512").unwrap(),
+            SignatureAlgorithm::RsaPssSha512
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("ecdsa-p256-sha256").unwrap(),
+            SignatureAlgorithm::EcdsaP256Sha256
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("ecdsa-p384-sha384").unwrap(),
+            SignatureAlgorithm::EcdsaP384Sha384
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("hmac-sha256").unwrap(),
+            SignatureAlgorithm::HmacSha256
+        );
         assert!(SignatureAlgorithm::from_str("unknown").is_err());
     }
 

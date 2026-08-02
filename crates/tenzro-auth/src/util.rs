@@ -7,8 +7,8 @@
 //! who submits a forged JWT is that the engine "revokes" a `jti` that
 //! doesn't exist in the audit index, which is a no-op.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 /// Extract the `jti` claim from a JWT *without* verifying its
 /// signature.

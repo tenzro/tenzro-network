@@ -148,7 +148,45 @@ Databases mirror the two-sided model of the rest of the network. A developer can
 
 ---
 
-## 10. RPC surface
+## 10. Reaching a database
+
+Three surfaces, one gate. REST, JSON-RPC and the MCP tools all end up in the same handler, so the access-policy adjudication, the capability check and the engine routing are the same code on every path — a REST route cannot become a way around a check the RPC path enforces.
+
+### Authentication: two ways to prove a caller DID
+
+Every operation is adjudicated against a `caller_did`, and the node will not take that field on trust. There are exactly two ways to establish it:
+
+1. **A signed DID envelope** (`envelope`), binding the DID, the method, and a hash of these specific parameters. This is the node-to-node path: a caller legitimately speaking for someone else proves it.
+2. **A `database`-scoped API key whose `subject` is the claimed caller.** The node minted that key, recorded the subject on it, and compares the presented value constant-time against its own store — so it is not the weaker assertion. It exists because requiring an envelope would mean the only callers able to use a managed database are those already carrying Tenzro identity keys, which excludes every application developer holding a `tnz_...` key.
+
+The scope check is what keeps the second path honest: a key issued for inference names a subject too, and that subject must not thereby become an authenticated database caller.
+
+A caller with neither gets a pass only from a `public` policy's read path, which grants nothing identity-based.
+
+### `/v1/databases` (REST)
+
+| Route | Does |
+|---|---|
+| `GET /v1/databases/engines` | the engine catalog |
+| `POST /v1/databases` | create |
+| `GET /v1/databases` | list |
+| `GET /v1/databases/{id}` | read a descriptor |
+| `DELETE /v1/databases/{id}` | drop |
+| `GET /v1/databases/{id}/partitions` | partition placements |
+| `POST /v1/databases/{id}/query` | engine-dialect query |
+| `POST /v1/databases/{id}/rescale` | rescale in place |
+| `POST /v1/databases/{id}/connections` | mint a connection credential |
+| `GET /v1/databases/{id}/usage` | pricing and usage counters |
+
+On this surface `caller_did` is **derived** from the presented key's subject, and any value in the request body is overwritten. So is `owner_did` on create — and so, on create, is a supplied `access_policy` checked to be owned by the caller, because `tenzro_createDatabase` reads a full policy's own owner and never looks at the top-level `owner_did`. A body carrying `{"access_policy": {"kind": "owner_only", "owner_did": "<someone else>"}}` is refused rather than silently corrected: it is not a shape question, it is an attempt, and rewriting it would hide that from whoever reads the logs.
+
+`GET /v1/databases/engines` is the one route that needs no key. It reports which engines this operator wired up — node capability advertisement, the same class of fact as `/v1/models` — and gating it would mean a caller cannot discover what a node offers without first being issued a key by its operator, which defeats network-level resource discovery.
+
+### MCP
+
+All twelve operations are exposed as MCP tools, dispatching through the same JSON-RPC layer with the caller's `X-Tenzro-Api-Key` forwarded, so an agent with a tool list and no HTTP client reaches the same surface under the same gate.
+
+## 10.1. RPC surface
 
 | RPC | Purpose |
 |-----|---------|
@@ -188,3 +226,5 @@ tenzro database rescale <id> --caller-did <did> --placement <mode> [--partitions
 tenzro database usage <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
 tenzro database drop <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
 ```
+
+Every subcommand takes `--api-key` (falling back to `TENZRO_API_KEY`). It is surfaced per subcommand rather than left to the environment because the key's subject *is* the caller DID: a command run with the wrong key does not fail closed with a clear error, it succeeds as somebody else.

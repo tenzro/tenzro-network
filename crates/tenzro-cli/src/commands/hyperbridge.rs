@@ -35,7 +35,10 @@ impl RpcOnly {
         output::print_header("Hyperbridge Mint Controls (default)");
         let rpc = RpcClient::new(&self.rpc);
         let v: serde_json::Value = rpc
-            .call("tenzro_hyperbridgeMintControlsDefault", serde_json::json!({}))
+            .call(
+                "tenzro_hyperbridgeMintControlsDefault",
+                serde_json::json!({}),
+            )
             .await?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())

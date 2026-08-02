@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tenzro_storage::{KvStore, WriteOp, CF_DATABASES};
+use tenzro_storage::{CF_DATABASES, KvStore, WriteOp};
 
 use crate::error::{DatabaseError, Result};
 
@@ -36,7 +36,10 @@ pub struct DatabasePricing {
 impl DatabasePricing {
     /// Free-for-authorized-callers pricing (the default for a new database).
     pub fn free() -> Self {
-        Self { asset_id: "TNZO".to_string(), price_per_query: 0 }
+        Self {
+            asset_id: "TNZO".to_string(),
+            price_per_query: 0,
+        }
     }
 
     /// Whether authorized non-owner callers query without payment.
@@ -84,13 +87,19 @@ impl DatabaseUsageMeter {
     /// An in-memory meter with no persistence. Use [`Self::with_storage`] for a
     /// durable one.
     pub fn new() -> Self {
-        Self { stats: DashMap::new(), storage: None }
+        Self {
+            stats: DashMap::new(),
+            storage: None,
+        }
     }
 
     /// A meter backed by `storage`, hydrating previously-persisted counters
     /// from `CF_DATABASES`.
     pub fn with_storage(storage: Arc<dyn KvStore>) -> Result<Self> {
-        let meter = Self { stats: DashMap::new(), storage: Some(storage.clone()) };
+        let meter = Self {
+            stats: DashMap::new(),
+            storage: Some(storage.clone()),
+        };
         for (_, value) in storage
             .scan_prefix(CF_DATABASES, USAGE_PREFIX)
             .map_err(|e| DatabaseError::Persistence(e.to_string()))?

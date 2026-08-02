@@ -19,10 +19,10 @@ use crate::leader_reputation::LeaderReputation;
 use crate::mempool::Mempool;
 use crate::proposer::BlockProposer;
 use crate::traits::{ConsensusEngine, SlashingCallback};
-use crate::validator::{
-    ProposerElection, ReputationProposer, RoundRobinProposer, ValidatorSet,
+use crate::validator::{ProposerElection, ReputationProposer, RoundRobinProposer, ValidatorSet};
+use crate::vote_state::{
+    LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep, VrsDecision,
 };
-use crate::vote_state::{LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep, VrsDecision};
 use crate::voter::{QuorumCertificate, Vote, VoteCollector, VoteType};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -30,8 +30,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
-use tokio::time::sleep;
+use tenzro_crypto::KeyPair;
 use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_crypto::composite::{
     CompositePublicKey, CompositeSignature, HybridSigner, HybridVerifier, InMemoryHybridSigner,
@@ -39,10 +38,11 @@ use tenzro_crypto::composite::{
 };
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::signatures::Ed25519SignerImpl;
-use tenzro_crypto::KeyPair;
 use tenzro_types::block::Block;
 use tenzro_types::primitives::{Address, BlockHeight, Hash};
-use tenzro_types::transaction::{Transaction, SignedTransaction};
+use tenzro_types::transaction::{SignedTransaction, Transaction};
+use tokio::sync::broadcast;
+use tokio::time::sleep;
 
 /// Cap on the exponent applied to [`ViewChangeTimer::on_timeout`]. With
 /// `backoff_multiplier = 2.0` and `base_timeout = 1000ms`, a cap of 3 yields
@@ -257,10 +257,9 @@ impl P2Quantile {
         if self.count < 5 {
             // During warm-up, the best available estimate is the max seen —
             // conservative for a tail quantile (never under-estimates).
-            self.init
-                .iter()
-                .copied()
-                .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.max(v))))
+            self.init.iter().copied().fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.max(v)))
+            })
         } else {
             Some(self.q[2])
         }
@@ -878,9 +877,7 @@ impl HotStuff2Engine {
             Arc<dyn ProposerElection>,
             Option<Arc<LeaderReputation>>,
         ) = match config.proposer_election {
-            ProposerElectionKind::RoundRobin => {
-                (Arc::new(RoundRobinProposer::new()), None)
-            }
+            ProposerElectionKind::RoundRobin => (Arc::new(RoundRobinProposer::new()), None),
             ProposerElectionKind::Reputation => {
                 let rep = Arc::new(LeaderReputation::new(n));
                 (Arc::new(ReputationProposer::new(rep.clone())), Some(rep))
@@ -941,8 +938,9 @@ impl HotStuff2Engine {
     /// start and at epoch transitions capture whichever detector is
     /// current.
     pub fn with_audit_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
-        self.equivocation_detector =
-            Arc::new(crate::validator::EquivocationDetector::with_storage(storage));
+        self.equivocation_detector = Arc::new(
+            crate::validator::EquivocationDetector::with_storage(storage),
+        );
         self
     }
 
@@ -981,10 +979,7 @@ impl HotStuff2Engine {
     /// [`Self::ingest_batch_certificate`]) drive availability-certificate
     /// formation. Absent this, the engine runs the direct mempool-selection
     /// path with no availability plane. Must be called before `start()`.
-    pub fn with_batch_cert_store(
-        mut self,
-        store: Arc<crate::batch_cert::BatchCertStore>,
-    ) -> Self {
+    pub fn with_batch_cert_store(mut self, store: Arc<crate::batch_cert::BatchCertStore>) -> Self {
         self.batch_cert_store = Some(store);
         self
     }
@@ -1031,7 +1026,9 @@ impl HotStuff2Engine {
                 "batch_cert: erasure-coded batch for broadcast"
             ),
             Ok(None) => {}
-            Err(e) => tracing::warn!(error = %e, "batch_cert: erasure encode failed; falling back to direct gossip"),
+            Err(e) => {
+                tracing::warn!(error = %e, "batch_cert: erasure encode failed; falling back to direct gossip")
+            }
         }
         // Sign our own availability ack (the producer stored the body) so the
         // producer's own stake counts toward the certificate.
@@ -1086,10 +1083,7 @@ impl HotStuff2Engine {
     /// `tenzro/batches`): verifies its BLS aggregate against the active
     /// validator set and installs it so the ordering path can reference the
     /// batch by hash. No-op without a batch-cert store.
-    pub fn ingest_batch_certificate(
-        &self,
-        cert: crate::batch_cert::BatchAvailabilityCertificate,
-    ) {
+    pub fn ingest_batch_certificate(&self, cert: crate::batch_cert::BatchAvailabilityCertificate) {
         let Some(store) = self.batch_cert_store.as_ref() else {
             return;
         };
@@ -1265,14 +1259,17 @@ impl HotStuff2Engine {
             ConsensusOutMessage::BatchCertificate(_) => "BatchCertificate",
         };
         match self.consensus_out_tx {
-            Some(ref tx) => {
-                match tx.send(msg) {
-                    Ok(()) => tracing::info!(kind = kind, "consensus.send_out: queued to event_loop"),
-                    Err(e) => tracing::warn!(kind = kind, error = %e, "consensus.send_out: tx.send FAILED (rx dropped?)"),
+            Some(ref tx) => match tx.send(msg) {
+                Ok(()) => tracing::info!(kind = kind, "consensus.send_out: queued to event_loop"),
+                Err(e) => {
+                    tracing::warn!(kind = kind, error = %e, "consensus.send_out: tx.send FAILED (rx dropped?)")
                 }
-            }
+            },
             None => {
-                tracing::warn!(kind = kind, "consensus.send_out: NO TX wired (consensus_out_tx is None)");
+                tracing::warn!(
+                    kind = kind,
+                    "consensus.send_out: NO TX wired (consensus_out_tx is None)"
+                );
             }
         }
     }
@@ -1812,7 +1809,8 @@ impl HotStuff2Engine {
         // weight and gets evicted.
         {
             let min_view = new_view.saturating_sub(VOTE_CACHE_VIEW_WINDOW);
-            self.proposal_dedup.retain(|(view, _hash), _| *view >= min_view);
+            self.proposal_dedup
+                .retain(|(view, _hash), _| *view >= min_view);
         }
 
         // Drop the TimeoutCollector's per-view caches for views that can no
@@ -2004,8 +2002,7 @@ impl HotStuff2Engine {
         // Reconstruct the hybrid signer (same pattern as create_vote — the
         // engine's long-lived Arc<MlDsaSigningKey> can't be consumed).
         let keypair_bytes = self.keypair.to_bytes();
-        let keypair_copy =
-            KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
+        let keypair_copy = KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
         let classical = Ed25519SignerImpl::new(keypair_copy)?;
         let pq_seed = self.pq_signing_key.seed_bytes();
         let pq_copy = MlDsaSigningKey::from_seed(pq_seed)?;
@@ -2219,10 +2216,7 @@ impl HotStuff2Engine {
     ///
     /// Mirrors `create_timeout_msg` but with the NEC-specific signing
     /// payload (`TENZRO_NO_ENDORSEMENT:`-tagged, no `high_qc_view`).
-    fn create_no_endorsement_msg(
-        &self,
-        view: u64,
-    ) -> Result<crate::timeout::NoEndorsementMsg> {
+    fn create_no_endorsement_msg(&self, view: u64) -> Result<crate::timeout::NoEndorsementMsg> {
         let placeholder_sig =
             tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = crate::timeout::NoEndorsementMsg::new(
@@ -2234,8 +2228,7 @@ impl HotStuff2Engine {
         let payload = unsigned.signing_payload();
 
         let keypair_bytes = self.keypair.to_bytes();
-        let keypair_copy =
-            KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
+        let keypair_copy = KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
         let classical = Ed25519SignerImpl::new(keypair_copy)?;
         let pq_seed = self.pq_signing_key.seed_bytes();
         let pq_copy = MlDsaSigningKey::from_seed(pq_seed)?;
@@ -2321,11 +2314,7 @@ impl HotStuff2Engine {
     ///   verbatim (idempotent retry).
     /// - Otherwise (same tuple, different hash, or earlier tuple) refuse with
     ///   `ConsensusError::Equivocation` — a self-detected double-sign attempt.
-    fn create_vote(
-        &self,
-        block: &Block,
-        vote_type: VoteType,
-    ) -> Result<Vote> {
+    fn create_vote(&self, block: &Block, vote_type: VoteType) -> Result<Vote> {
         let (view, height) = {
             let state = self.view_state.read();
             (state.view, state.height)
@@ -2365,7 +2354,9 @@ impl HotStuff2Engine {
                     view,
                 });
             }
-            VrsDecision::Reuse { signature: sig_bytes } => {
+            VrsDecision::Reuse {
+                signature: sig_bytes,
+            } => {
                 // Idempotent retry — reconstruct the Vote from persisted
                 // signature bytes. Wire format is `CompositeSignature` JSON.
                 let signature: tenzro_crypto::composite::CompositeSignature =
@@ -2411,7 +2402,8 @@ impl HotStuff2Engine {
         // Step 2: Build the unsigned vote (placeholder signature) so we can
         // compute the canonical signing payload — this MUST match what
         // VoteCollector::add_vote feeds to StandardHybridVerifier.
-        let placeholder_sig = tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
+        let placeholder_sig =
+            tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
         let placeholder_bls = self.bls_signing_key.sign(b"__placeholder__");
         let unsigned_vote = Vote::new(
             view,
@@ -2555,7 +2547,9 @@ impl HotStuff2Engine {
 
             Ok(qc)
         } else {
-            Err(ConsensusError::Internal("Vote collector not initialized".to_string()))
+            Err(ConsensusError::Internal(
+                "Vote collector not initialized".to_string(),
+            ))
         }
     }
 
@@ -2585,7 +2579,9 @@ impl HotStuff2Engine {
             if let Some(collector) = vote_collector.as_ref() {
                 collector.add_vote(vote)?
             } else {
-                return Err(ConsensusError::Internal("Vote collector not initialized".to_string()));
+                return Err(ConsensusError::Internal(
+                    "Vote collector not initialized".to_string(),
+                ));
             }
         }; // vote_collector read lock DROPPED HERE
 
@@ -2606,7 +2602,10 @@ impl HotStuff2Engine {
             // where the finality tracker is ahead of view state), re-sync state.height
             // to match what the finality tracker expects and return without propagating
             // the error — the next proposal will be at the correct height.
-            if let Err(e) = self.finality_tracker.finalize_block(block.clone(), qc.clone()) {
+            if let Err(e) = self
+                .finality_tracker
+                .finalize_block(block.clone(), qc.clone())
+            {
                 let corrected_height = self.finality_tracker.finalized_height() + 1u64;
                 tracing::warn!(
                     error = %e,
@@ -2644,7 +2643,9 @@ impl HotStuff2Engine {
             state.reset_timer();
 
             // Remove finalized transactions from mempool
-            let tx_hashes: Vec<Hash> = block.transactions.iter()
+            let tx_hashes: Vec<Hash> = block
+                .transactions
+                .iter()
                 .map(|tx| tx.transaction.hash())
                 .collect();
             self.mempool.remove_transactions(&tx_hashes);
@@ -2700,7 +2701,11 @@ impl HotStuff2Engine {
                         .map(|b| b.hash())
                 })
         };
-        if self.epoch_manager.transition_epoch(height, anchor_of)?.is_none() {
+        if self
+            .epoch_manager
+            .transition_epoch(height, anchor_of)?
+            .is_none()
+        {
             return Ok(false);
         }
         tracing::info!(height = %height, "Epoch transition triggered");
@@ -2713,12 +2718,12 @@ impl HotStuff2Engine {
             new_validator_set.clone(),
             self.equivocation_detector.clone(),
         )));
-        *self.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(new_validator_set.clone()),
-        ));
-        *self.nec_collector.write() = Some(Arc::new(
-            crate::timeout::NoEndorsementCollector::new(new_validator_set),
-        ));
+        *self.timeout_collector.write() = Some(Arc::new(crate::timeout::TimeoutCollector::new(
+            new_validator_set.clone(),
+        )));
+        *self.nec_collector.write() = Some(Arc::new(crate::timeout::NoEndorsementCollector::new(
+            new_validator_set,
+        )));
 
         Ok(true)
     }
@@ -2989,8 +2994,7 @@ impl HotStuff2Engine {
         }
         if let Some(tc) = self.last_round_tc.read().as_ref() {
             let recovery_view = tc.view + 1;
-            let already_handled =
-                self.last_proposed_view.load(Ordering::SeqCst) >= recovery_view;
+            let already_handled = self.last_proposed_view.load(Ordering::SeqCst) >= recovery_view;
             if !already_handled {
                 return true;
             }
@@ -3052,7 +3056,8 @@ impl HotStuff2Engine {
             .or_else(|| self.finality_tracker.get_finalized_hash(parent_height))
             .unwrap_or_default();
 
-        let state_root = self.state_root_provider
+        let state_root = self
+            .state_root_provider
             .as_ref()
             .map(|p| p.current_state_root())
             .unwrap_or_default();
@@ -3298,8 +3303,11 @@ impl HotStuff2Engine {
         self.record_committed_round_metadata(block, &commit_qc);
 
         // Remove finalized transactions from mempool
-        let tx_hashes: Vec<Hash> =
-            block.transactions.iter().map(|tx| tx.transaction.hash()).collect();
+        let tx_hashes: Vec<Hash> = block
+            .transactions
+            .iter()
+            .map(|tx| tx.transaction.hash())
+            .collect();
         self.mempool.remove_transactions(&tx_hashes);
 
         // G6: evict availability certificates whose batches are now finalized
@@ -3312,7 +3320,10 @@ impl HotStuff2Engine {
             let finalized: std::collections::HashSet<Hash> = tx_hashes.iter().copied().collect();
             let evicted = store.evict_finalized(&finalized);
             if evicted > 0 {
-                tracing::debug!(evicted, "batch_cert: evicted finalized availability certificates");
+                tracing::debug!(
+                    evicted,
+                    "batch_cert: evicted finalized availability certificates"
+                );
             }
         }
 
@@ -3340,11 +3351,7 @@ impl HotStuff2Engine {
     /// node-local observations that diverge across the fleet, which would
     /// diverge the reputation histories and therefore the elected
     /// leaders. See `on_view_timeout`.
-    fn record_committed_round_metadata(
-        &self,
-        block: &Block,
-        commit_qc: &QuorumCertificate,
-    ) {
+    fn record_committed_round_metadata(&self, block: &Block, commit_qc: &QuorumCertificate) {
         let Some(reputation) = self.reputation.as_ref() else {
             return;
         };
@@ -3401,9 +3408,10 @@ impl ConsensusEngine for HotStuff2Engine {
         }
 
         if !self.is_validator() {
-            return Err(ConsensusError::InvalidValidatorSet(
-                format!("Node {} is not a validator", self.address),
-            ));
+            return Err(ConsensusError::InvalidValidatorSet(format!(
+                "Node {} is not a validator",
+                self.address
+            )));
         }
 
         // Initialize vote collector around the engine's long-lived
@@ -3415,14 +3423,14 @@ impl ConsensusEngine for HotStuff2Engine {
             self.equivocation_detector.clone(),
         )));
         // Initialize timeout collector (Bracha boost + 2f+1 TC formation)
-        *self.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set_arc.clone()),
-        ));
+        *self.timeout_collector.write() = Some(Arc::new(crate::timeout::TimeoutCollector::new(
+            validator_set_arc.clone(),
+        )));
         // Initialize no-endorsement collector (f+1 NEC formation, the
         // NEC tail-fork defence)
-        *self.nec_collector.write() = Some(Arc::new(
-            crate::timeout::NoEndorsementCollector::new(validator_set_arc),
-        ));
+        *self.nec_collector.write() = Some(Arc::new(crate::timeout::NoEndorsementCollector::new(
+            validator_set_arc,
+        )));
 
         // Create shutdown channel
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -3711,9 +3719,10 @@ impl ConsensusEngine for HotStuff2Engine {
             let qc_bytes = block.header.consensus_proof.proof_data.as_slice();
             if parent_known && !qc_bytes.is_empty() {
                 match bincode::deserialize::<QuorumCertificate>(qc_bytes) {
-                    Ok(parent_commit_qc) if parent_commit_qc.vote_type == VoteType::Commit
-                        && parent_commit_qc.block_hash == parent_hash
-                        && parent_commit_qc.height == local_height =>
+                    Ok(parent_commit_qc)
+                        if parent_commit_qc.vote_type == VoteType::Commit
+                            && parent_commit_qc.block_hash == parent_hash
+                            && parent_commit_qc.height == local_height =>
                     {
                         // The QC arrived over the wire inside the proposal —
                         // it MUST be cryptographically verified against the
@@ -3722,19 +3731,21 @@ impl ConsensusEngine for HotStuff2Engine {
                         // A structural match (height/hash/vote_type) alone is
                         // trivially forgeable.
                         let qc_verified = match self.validator_set_for_height(local_height) {
-                            Some(parent_set) => match parent_commit_qc.verify_bls_aggregate(&parent_set) {
-                                Ok(()) => true,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        proposal_height = %proposal_height,
-                                        parent_height = %local_height,
-                                        "Catchup-on-proposal: embedded parent QC failed \
-                                         signature/quorum verification — rejecting catchup"
-                                    );
-                                    false
+                            Some(parent_set) => {
+                                match parent_commit_qc.verify_bls_aggregate(&parent_set) {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            proposal_height = %proposal_height,
+                                            parent_height = %local_height,
+                                            "Catchup-on-proposal: embedded parent QC failed \
+                                             signature/quorum verification — rejecting catchup"
+                                        );
+                                        false
+                                    }
                                 }
-                            },
+                            }
                             None => {
                                 tracing::warn!(
                                     parent_height = %local_height,
@@ -4056,11 +4067,9 @@ impl ConsensusEngine for HotStuff2Engine {
                 self.handle_commit_phase(block).await?;
                 self.create_vote(block, VoteType::Commit)
             }
-            Phase::Decide => {
-                Err(ConsensusError::InvalidProposal(
-                    "Already in decide phase".to_string(),
-                ))
-            }
+            Phase::Decide => Err(ConsensusError::InvalidProposal(
+                "Already in decide phase".to_string(),
+            )),
         }
     }
 
@@ -4098,7 +4107,10 @@ impl ConsensusEngine for HotStuff2Engine {
             };
             match collector.add_vote(vote.clone()) {
                 Ok(qc) => qc,
-                Err(ConsensusError::Equivocation { ref validator, view }) => {
+                Err(ConsensusError::Equivocation {
+                    ref validator,
+                    view,
+                }) => {
                     // Equivocation detected — trigger slashing via callback
                     tracing::error!(
                         validator = %validator,
@@ -4315,7 +4327,9 @@ impl ConsensusEngine for HotStuff2Engine {
     }
 
     async fn is_leader(&self) -> bool {
-        self.get_leader().map(|l| l == self.address).unwrap_or(false)
+        self.get_leader()
+            .map(|l| l == self.address)
+            .unwrap_or(false)
     }
 }
 
@@ -4432,9 +4446,7 @@ mod tests {
     /// the child's base fee from the genesis-edge parent (`gas_limit==0`,
     /// `base_fee_per_gas==Some(initial_base_fee)`).
     struct TestBlockProvider {
-        blocks: parking_lot::RwLock<
-            std::collections::HashMap<BlockHeight, Block>,
-        >,
+        blocks: parking_lot::RwLock<std::collections::HashMap<BlockHeight, Block>>,
     }
 
     impl TestBlockProvider {
@@ -4461,8 +4473,7 @@ mod tests {
     /// `base_fee_per_gas` does not match the value derived from the parent.
     fn stamp_genesis_edge_base_fee(mut block: Block) -> Block {
         use tenzro_types::block::FeeMarketParams;
-        block.header.metadata.base_fee_per_gas =
-            Some(FeeMarketParams::default().initial_base_fee);
+        block.header.metadata.base_fee_per_gas = Some(FeeMarketParams::default().initial_base_fee);
         block
     }
 
@@ -4473,8 +4484,7 @@ mod tests {
     /// adopts `FeeMarketParams::default().initial_base_fee`.
     fn build_test_genesis() -> Block {
         use tenzro_types::block::{
-            BlockHeader, BlockMetadata, ConsensusAlgorithm, ConsensusProof,
-            FeeMarketParams,
+            BlockHeader, BlockMetadata, ConsensusAlgorithm, ConsensusProof, FeeMarketParams,
         };
         use tenzro_types::primitives::Address;
         let mut header = BlockHeader::new_at_view(
@@ -4500,9 +4510,7 @@ mod tests {
     /// `view`. Distinct views produce distinct block hashes, mirroring the
     /// single-height view churn that drives the OOM the count cap guards.
     fn build_test_block_at_view(height: u64, view: u64) -> Block {
-        use tenzro_types::block::{
-            BlockHeader, ConsensusAlgorithm, ConsensusProof,
-        };
+        use tenzro_types::block::{BlockHeader, ConsensusAlgorithm, ConsensusProof};
         use tenzro_types::primitives::Address;
         let header = BlockHeader::new_at_view(
             BlockHeight::from(height),
@@ -4532,8 +4540,7 @@ mod tests {
 
         // The 10 survivors must be the highest views (90..100): eviction
         // drops the stalest competing proposals first.
-        let mut surviving_views: Vec<u64> =
-            blocks.iter().map(|e| e.value().header.view).collect();
+        let mut surviving_views: Vec<u64> = blocks.iter().map(|e| e.value().header.view).collect();
         surviving_views.sort_unstable();
         assert_eq!(surviving_views, (90..100).collect::<Vec<_>>());
     }
@@ -4597,7 +4604,11 @@ mod tests {
         engine.resume_from_height(BlockHeight(0));
 
         let state = engine.view_state.read();
-        assert_eq!(state.height, BlockHeight(1), "height must advance to 1 (next-to-propose)");
+        assert_eq!(
+            state.height,
+            BlockHeight(1),
+            "height must advance to 1 (next-to-propose)"
+        );
         assert!(
             state.view >= 63,
             "view must jump past persisted last_vote view=62 to avoid CheckHRS wedge — got view={}",
@@ -4783,7 +4794,9 @@ mod tests {
         // crash-and-restart cannot regress the signing ceiling below the
         // certified state.
         use crate::vote_state::VoteStateStore;
-        let persisted = store.load().expect("synthetic LastSignState must be recorded");
+        let persisted = store
+            .load()
+            .expect("synthetic LastSignState must be recorded");
         assert_eq!(
             persisted.view, certifying_view,
             "synthetic LastSignState.view must equal certifying_view"
@@ -4961,7 +4974,8 @@ mod tests {
 
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, local_bls, config, epoch_manager);
+        let mut engine =
+            HotStuff2Engine::new(local_keypair, local_pq, local_bls, config, epoch_manager);
 
         // Wire a synthetic genesis block at height 0 so EIP-1559
         // `validate_base_fee` can re-derive the child's base fee from a
@@ -4974,12 +4988,10 @@ mod tests {
         // `handle_prepare_phase`. This is what `start()` does, but we don't
         // want to spawn the consensus loop in tests.
         let validator_set = Arc::new(engine.validator_set());
-        *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+        *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(validator_set.clone())));
+        *engine.timeout_collector.write() = Some(Arc::new(crate::timeout::TimeoutCollector::new(
             validator_set.clone(),
         )));
-        *engine.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set.clone()),
-        ));
         *engine.nec_collector.write() = Some(Arc::new(
             crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
@@ -5191,7 +5203,8 @@ mod tests {
 
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, local_bls, config, epoch_manager);
+        let mut engine =
+            HotStuff2Engine::new(local_keypair, local_pq, local_bls, config, epoch_manager);
 
         // Wire a synthetic genesis block at height 0 so EIP-1559
         // `validate_base_fee` can re-derive the child's base fee.
@@ -5200,12 +5213,10 @@ mod tests {
         engine = engine.with_block_provider(block_provider);
 
         let validator_set = Arc::new(engine.validator_set());
-        *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+        *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(validator_set.clone())));
+        *engine.timeout_collector.write() = Some(Arc::new(crate::timeout::TimeoutCollector::new(
             validator_set.clone(),
         )));
-        *engine.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set.clone()),
-        ));
         *engine.nec_collector.write() = Some(Arc::new(
             crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
@@ -5220,7 +5231,13 @@ mod tests {
         peer_keypair: &KeyPair,
         peer_pq: &MlDsaSigningKey,
     ) -> crate::timeout::TimeoutMsg {
-        peer_sign_timeout_with_hqc(view, view.saturating_sub(1), peer_address, peer_keypair, peer_pq)
+        peer_sign_timeout_with_hqc(
+            view,
+            view.saturating_sub(1),
+            peer_address,
+            peer_keypair,
+            peer_pq,
+        )
     }
 
     /// Hybrid-sign a TimeoutMsg with an explicit `high_qc_view` (must be `< view`).
@@ -5323,8 +5340,7 @@ mod tests {
     async fn test_on_timeout_msg_advances_local_view() {
         use tenzro_types::primitives::BlockHeight;
 
-        let (engine, peer_kp, peer_pq, peer_addr) =
-            build_test_engine_with_peer_signer().await;
+        let (engine, peer_kp, peer_pq, peer_addr) = build_test_engine_with_peer_signer().await;
 
         // Local view stuck at 5; peer is at 17.
         {
@@ -5336,11 +5352,17 @@ mod tests {
         }
 
         let msg = peer_sign_timeout(17, peer_addr, &peer_kp, &peer_pq);
-        engine.on_timeout_msg(&msg).await.expect("valid timeout accepted");
+        engine
+            .on_timeout_msg(&msg)
+            .await
+            .expect("valid timeout accepted");
 
         let state = engine.view_state.read();
         assert_eq!(state.view, 17, "local view advances to peer view");
-        assert!(matches!(state.phase, Phase::Prepare), "phase reset to Prepare");
+        assert!(
+            matches!(state.phase, Phase::Prepare),
+            "phase reset to Prepare"
+        );
         assert!(state.prepare_qc.is_none(), "stale prepare QC cleared");
         assert!(state.commit_qc.is_none(), "stale commit QC cleared");
     }
@@ -5349,8 +5371,7 @@ mod tests {
     /// the downgrade-attack defence: a peer cannot drag us backwards.
     #[tokio::test]
     async fn test_on_timeout_msg_ignores_lower_view() {
-        let (engine, peer_kp, peer_pq, peer_addr) =
-            build_test_engine_with_peer_signer().await;
+        let (engine, peer_kp, peer_pq, peer_addr) = build_test_engine_with_peer_signer().await;
 
         {
             let mut state = engine.view_state.write();
@@ -5358,7 +5379,10 @@ mod tests {
         }
 
         let msg = peer_sign_timeout(20, peer_addr, &peer_kp, &peer_pq);
-        engine.on_timeout_msg(&msg).await.expect("verified timeout silently ignored");
+        engine
+            .on_timeout_msg(&msg)
+            .await
+            .expect("verified timeout silently ignored");
 
         assert_eq!(engine.view_state.read().view, 50, "local view unchanged");
     }
@@ -5370,23 +5394,36 @@ mod tests {
     /// proposer re-proposing a conflicting block at that height.
     #[tokio::test]
     async fn test_on_timeout_msg_fires_behind_hint_on_higher_finalized_height() {
-        let (engine, peer_kp, peer_pq, peer_addr) =
-            build_test_engine_with_peer_signer().await;
+        let (engine, peer_kp, peer_pq, peer_addr) = build_test_engine_with_peer_signer().await;
 
         let mut hint_rx = engine.subscribe_behind_hint();
-        assert_eq!(*hint_rx.borrow_and_update(), 0, "no hint before any timeout");
+        assert_eq!(
+            *hint_rx.borrow_and_update(),
+            0,
+            "no hint before any timeout"
+        );
 
         // Peer claims finalized height 7; our fresh tracker is at 0.
         let msg = peer_sign_timeout_full(17, 16, 7, peer_addr, &peer_kp, &peer_pq);
-        engine.on_timeout_msg(&msg).await.expect("valid timeout accepted");
+        engine
+            .on_timeout_msg(&msg)
+            .await
+            .expect("valid timeout accepted");
 
         assert!(hint_rx.has_changed().unwrap(), "behind-hint fired");
-        assert_eq!(*hint_rx.borrow_and_update(), 7, "hint carries peer finalized height");
+        assert_eq!(
+            *hint_rx.borrow_and_update(),
+            7,
+            "hint carries peer finalized height"
+        );
 
         // A second timeout advertising a height we already match must NOT
         // re-fire (peer height 0 == local 0 is not strictly greater).
         let msg2 = peer_sign_timeout_full(18, 17, 0, peer_addr, &peer_kp, &peer_pq);
-        engine.on_timeout_msg(&msg2).await.expect("valid timeout accepted");
+        engine
+            .on_timeout_msg(&msg2)
+            .await
+            .expect("valid timeout accepted");
         assert!(!hint_rx.has_changed().unwrap(), "no hint when not behind");
     }
 
@@ -5394,8 +5431,7 @@ mod tests {
     /// rejected by the engine — this is the spoofing defence.
     #[tokio::test]
     async fn test_on_timeout_msg_rejects_tampered_signature() {
-        let (engine, peer_kp, peer_pq, peer_addr) =
-            build_test_engine_with_peer_signer().await;
+        let (engine, peer_kp, peer_pq, peer_addr) = build_test_engine_with_peer_signer().await;
 
         {
             let mut state = engine.view_state.write();
@@ -5409,9 +5445,16 @@ mod tests {
             .on_timeout_msg(&msg)
             .await
             .expect_err("tampered timeout must be rejected");
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
 
-        assert_eq!(engine.view_state.read().view, 5, "view unchanged on bad sig");
+        assert_eq!(
+            engine.view_state.read().view,
+            5,
+            "view unchanged on bad sig"
+        );
     }
 
     /// Builds a 4-validator engine and returns the local engine + every
@@ -5423,7 +5466,12 @@ mod tests {
     /// going through the gossip layer.
     async fn build_test_engine_with_all_signers() -> (
         HotStuff2Engine,
-        Vec<(KeyPair, MlDsaSigningKey, tenzro_crypto::bls::BlsKeyPair, tenzro_types::primitives::Address)>,
+        Vec<(
+            KeyPair,
+            MlDsaSigningKey,
+            tenzro_crypto::bls::BlsKeyPair,
+            tenzro_types::primitives::Address,
+        )>,
     ) {
         let mut peers = Vec::new();
         let mut validators = Vec::new();
@@ -5467,11 +5515,18 @@ mod tests {
             KeyPair::from_bytes(local_kp.key_type(), &local_kp.to_bytes()).unwrap();
         let local_pq_for_engine = MlDsaSigningKey::from_seed(local_pq.seed_bytes()).unwrap();
         let local_bls_for_engine = tenzro_crypto::bls::BlsKeyPair::from_secret_key(
-            tenzro_crypto::bls::BlsSecretKey::from_bytes(&local_bls.secret_key().to_bytes()).unwrap(),
+            tenzro_crypto::bls::BlsSecretKey::from_bytes(&local_bls.secret_key().to_bytes())
+                .unwrap(),
         );
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let mut engine = HotStuff2Engine::new(local_kp_for_engine, local_pq_for_engine, local_bls_for_engine, config, epoch_manager);
+        let mut engine = HotStuff2Engine::new(
+            local_kp_for_engine,
+            local_pq_for_engine,
+            local_bls_for_engine,
+            config,
+            epoch_manager,
+        );
 
         // Wire a synthetic genesis block at height 0 so EIP-1559
         // `validate_base_fee` can re-derive the child's base fee. See
@@ -5482,9 +5537,9 @@ mod tests {
 
         let validator_set = Arc::new(engine.validator_set());
         *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(validator_set.clone())));
-        *engine.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set.clone()),
-        ));
+        *engine.timeout_collector.write() = Some(Arc::new(crate::timeout::TimeoutCollector::new(
+            validator_set.clone(),
+        )));
         *engine.nec_collector.write() = Some(Arc::new(
             crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
@@ -5496,7 +5551,12 @@ mod tests {
     /// Finds the signer tuple for `addr` in the vec returned by
     /// `build_test_engine_with_all_signers`.
     fn signer_for(
-        peers: &[(KeyPair, MlDsaSigningKey, tenzro_crypto::bls::BlsKeyPair, tenzro_types::primitives::Address)],
+        peers: &[(
+            KeyPair,
+            MlDsaSigningKey,
+            tenzro_crypto::bls::BlsKeyPair,
+            tenzro_types::primitives::Address,
+        )],
         addr: &tenzro_types::primitives::Address,
     ) -> (KeyPair, MlDsaSigningKey) {
         let (kp, pq, _, _) = peers
@@ -5547,7 +5607,11 @@ mod tests {
             "view jump > 1 without TC must be rejected, got {:?}",
             result
         );
-        assert_eq!(engine.view_state.read().view, 0, "local view unchanged on rejection");
+        assert_eq!(
+            engine.view_state.read().view,
+            0,
+            "local view unchanged on rejection"
+        );
     }
 
     /// safe_to_extend happy path: a proposal at view V > local_view + 1 with a

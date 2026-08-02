@@ -1,0 +1,89 @@
+# cargo-audit configuration.
+#
+# Every entry is a *recorded decision* backed by a reachability analysis, not a
+# silenced warning. Each states what was verified and what would invalidate it.
+# Assessed 2026-07-31.
+#
+# Advisories cleared by upgrading rather than ignoring, same session:
+#   rustls-webpki   0.103.11 -> 0.103.13   RUSTSEC-2026-0098/0099/0104
+#   quinn-proto     0.11.14  -> 0.11.16    RUSTSEC-2026-0185
+#   ruint           1.17.2   -> 1.20.0     RUSTSEC-2026-0220
+#   crossbeam-epoch 0.9.18   -> 0.9.20     RUSTSEC-2026-0204
+#   quick-xml       0.38     -> 0.41       RUSTSEC-2026-0194/0195
+#   plist           1.9.0    -> 1.10.0     drops its quick-xml 0.39 copy entirely
+
+[advisories]
+ignore = [
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2023-0071 — rsa 0.9.10, "Marvin" timing sidechannel.
+  #
+  # No patched release exists: every 0.9.x is affected and there is no 0.10.
+  #
+  # NOT REACHABLE. The attack requires an attacker to observe timing on a
+  # *private-key* operation. Every production use here is public-key
+  # verification:
+  #   - tenzro-tee::attestation   — RSA-PSS verify over attestation payloads
+  #   - tenzro-payments::rfc9421  — RSA-PSS / PKCS#1v15 verify, JWKS parsing
+  #
+  # `create_http_signature` is the only signing entry point in the tree, and its
+  # single production caller (`visa_tap::issuer`) is pinned to Ed25519. The
+  # `sign_rsa_pss` / `sign_rsa_pkcs1v15` arms are reached only from unit tests.
+  # There is no RSA decryption anywhere in the workspace.
+  #
+  # RE-ASSESS IF: an RSA signing or decryption path is wired to a request
+  # handler, or `visa_tap::issuer` gains a non-Ed25519 algorithm.
+  "RUSTSEC-2023-0071",
+
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2026-0118 — hickory-proto 0.25.2, NSEC3 closest-encloser proof
+  # validation enters an unbounded loop on cross-zone responses.
+  #
+  # NOT COMPILED — a compile-time fact, not a judgement call. In hickory-proto
+  # 0.25.2 the entire DNSSEC module is feature-gated:
+  #
+  #     #[cfg(any(feature = "dnssec-aws-lc-rs", feature = "dnssec-ring"))]
+  #     pub mod dnssec;                                     // src/lib.rs:55
+  #
+  # and `src/dnssec/nsec3.rs` — the vulnerable code — lives inside it. The
+  # features active in this build are `tokio`, `mdns`, `std`, `futures-io` and
+  # `socket2`; neither dnssec feature is enabled. Verified independently by
+  # `cargo tree -p hickory-proto@0.25.2 --depth 1`, which pulls in neither
+  # `ring` nor `aws-lc-rs` — both optional deps activated only by those
+  # features.
+  #
+  # Note the advisory's `patched` field is empty, which reads as "no fix
+  # exists"; its `unaffected` field is `>=0.26.0-beta.1`, so the 0.26 line is
+  # in fact clear. Read both fields before concluding an advisory is permanent.
+  #
+  # RE-ASSESS IF: anything enables `dnssec-ring` or `dnssec-aws-lc-rs`.
+  "RUSTSEC-2026-0118",
+
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2026-0119 — hickory-proto 0.25.2, O(n²) name compression during
+  # message ENCODING.
+  #
+  # NOT REACHABLE in a stub-resolver configuration. The quadratic term is over
+  # the *number of records in one encoded message* — per the advisory, "a
+  # malicious message with many records can both introduce many candidate
+  # labels, and invoke this linear scan many times."
+  #
+  # The only consumer is `libp2p-dns`, which drives
+  # `hickory_resolver::TokioResolver`, a stub resolver. A stub resolver encodes
+  # outbound *queries*: one question record, no answer or authority section. It
+  # never encodes a many-record message — that is a DNS server's job, and no DNS
+  # server is run here. n is 1–2, so the quadratic term does not bite.
+  #
+  # WHY NOT FIXED BY UPGRADE: the fix is hickory >= 0.26.1, but `libp2p-dns`
+  # 0.44.0 (newest release) requires `hickory-resolver ^0.25.2`, which excludes
+  # it. A vendored bump was attempted and rejected: 0.26 is a breaking API
+  # change — `name_server` is now private, and `ResolveError`,
+  # `ResolveErrorKind`, `Ipv4Lookup`, `Ipv6Lookup` and `TxtLookup` all moved or
+  # were removed. Carrying that port would mean redoing it on every libp2p
+  # release, and a hand-ported DNS transport is a larger risk than a bounded DoS
+  # that cannot be triggered in this configuration.
+  #
+  # RE-ASSESS IF: libp2p releases against the hickory 0.26 line — expected, and
+  # this entry should then be deleted rather than kept — or a DNS server or
+  # many-record encoder is introduced.
+  "RUSTSEC-2026-0119",
+]

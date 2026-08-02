@@ -40,17 +40,19 @@ pub mod traits;
 pub mod worker;
 
 pub use advertisement::{
-    AdvertisementBroadcaster, CortexAdvertisement, CortexGossipPublisher, RemoteWorkerRegistry,
-    CORTEX_TOPIC, DEFAULT_ADVERT_INTERVAL_SECS, DEFAULT_ADVERT_TTL_SECS,
+    AdvertisementBroadcaster, CORTEX_TOPIC, CortexAdvertisement, CortexGossipPublisher,
+    DEFAULT_ADVERT_INTERVAL_SECS, DEFAULT_ADVERT_TTL_SECS, RemoteWorkerRegistry,
 };
 pub use attestation::{AttestationSuite, TeeAttestationProvider, ZkProofProvider};
 pub use error::{CortexError, Result};
 pub use metrics::{
-    CortexMetrics, CortexMetricsSnapshot, LatencyHistogramSnapshot, RejectionReason, TierSnapshot,
-    LATENCY_BUCKETS_MS,
+    CortexMetrics, CortexMetricsSnapshot, LATENCY_BUCKETS_MS, LatencyHistogramSnapshot,
+    RejectionReason, TierSnapshot,
 };
 pub use mock::MockCortexModel;
-pub use receipt::{canonicalize_input, canonicalize_output, hash_commitment, sign_receipt, verify_receipt};
+pub use receipt::{
+    canonicalize_input, canonicalize_output, hash_commitment, sign_receipt, verify_receipt,
+};
 pub use sidecar::{SidecarConfig, SidecarModel};
 pub use signer::PersistentCortexSigner;
 pub use traits::RecurrentDepthModel;
@@ -62,8 +64,8 @@ mod tests {
     use std::sync::Arc;
     use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
     use tenzro_types::cortex::{
-        AttestationRequirement, CortexModelFamily, CortexPricing, CortexRequest,
-        ReasoningBudget, ReasoningTier,
+        AttestationRequirement, CortexModelFamily, CortexPricing, CortexRequest, ReasoningBudget,
+        ReasoningTier,
     };
     use tenzro_types::primitives::Address;
 

@@ -51,9 +51,7 @@ pub enum TrainingError {
     #[error("invalid activation commitment: {what}")]
     CommitmentInvalid { what: &'static str },
 
-    #[error(
-        "no buffered gradient for trainer {trainer_did} at round {round} fragment {fragment}"
-    )]
+    #[error("no buffered gradient for trainer {trainer_did} at round {round} fragment {fragment}")]
     GradientNotFound {
         round: u32,
         fragment: u32,
@@ -89,6 +87,15 @@ pub enum TrainingError {
     },
 
     #[error(
+        "no enclave verifier is installed, so a Confidential-tier attestation cannot be \
+         checked; enrollment is refused"
+    )]
+    EnclaveVerifierUnavailable,
+
+    #[error("attestation verification failed for trainer {trainer_did}: {reason}")]
+    AttestationVerificationFailed { trainer_did: String, reason: String },
+
+    #[error(
         "aggregation rule {rule:?} requires tier {required:?} or higher; task spec tier is {actual:?}"
     )]
     AggregationRuleTierMismatch {
@@ -119,17 +126,13 @@ pub enum TrainingError {
         trainer_stage: u32,
     },
 
-    #[error(
-        "quantization mismatch: task spec requires {expected}, submission declares {got}"
-    )]
+    #[error("quantization mismatch: task spec requires {expected}, submission declares {got}")]
     QuantizationMismatch {
         expected: tenzro_types::training::GradientQuantization,
         got: tenzro_types::training::GradientQuantization,
     },
 
-    #[error(
-        "payload-kind mismatch: task spec requires {expected}, submission declares {got}"
-    )]
+    #[error("payload-kind mismatch: task spec requires {expected}, submission declares {got}")]
     PayloadKindMismatch {
         expected: tenzro_types::training::PayloadKind,
         got: tenzro_types::training::PayloadKind,
@@ -169,11 +172,7 @@ pub enum TrainingError {
     },
 
     #[error("quorum not yet reached for fragment {fragment} (have {have}, need {need})")]
-    QuorumNotMet {
-        fragment: u32,
-        have: u32,
-        need: u32,
-    },
+    QuorumNotMet { fragment: u32, have: u32, need: u32 },
 
     #[error("dimension mismatch in aggregation: {0}")]
     DimensionMismatch(String),

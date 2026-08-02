@@ -185,7 +185,11 @@ impl NesterovSgdState {
 ///   θ ← θ − η · ḡ
 ///
 /// where `ḡ` is the aggregated (densified, zero-filled) sparse outer gradient.
-pub fn sparse_ef_step(mut params: ArrayViewMut1<'_, f32>, outer_grad: ArrayView1<'_, f32>, lr: f32) {
+pub fn sparse_ef_step(
+    mut params: ArrayViewMut1<'_, f32>,
+    outer_grad: ArrayView1<'_, f32>,
+    lr: f32,
+) {
     debug_assert_eq!(params.len(), outer_grad.len());
     for (p, g) in params.iter_mut().zip(outer_grad.iter()) {
         *p -= lr * (*g);

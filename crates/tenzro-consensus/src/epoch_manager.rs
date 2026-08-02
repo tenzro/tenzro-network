@@ -159,10 +159,7 @@ impl EpochManager {
     /// without that, a node catching up across an epoch boundary cannot
     /// verify historical commit-QCs and gets stuck in `InvalidHeight`
     /// rejection (the May 2026 testnet stall).
-    pub fn new(
-        initial_validators: Vec<ValidatorInfo>,
-        epoch_duration: u64,
-    ) -> Result<Self> {
+    pub fn new(initial_validators: Vec<ValidatorInfo>, epoch_duration: u64) -> Result<Self> {
         let validator_set = ValidatorSet::new(0, initial_validators)?;
 
         let current_epoch = Epoch::new(
@@ -216,9 +213,8 @@ impl EpochManager {
                 validator_set,
                 Hash::default(),
             );
-            let bytes = bincode::serialize(&epoch).map_err(|e| {
-                ConsensusError::Internal(format!("bootstrap epoch 0 encode: {e}"))
-            })?;
+            let bytes = bincode::serialize(&epoch)
+                .map_err(|e| ConsensusError::Internal(format!("bootstrap epoch 0 encode: {e}")))?;
             if let Err(e) = store.put_epoch(0, bytes) {
                 tracing::warn!(error = %e, "Failed to persist bootstrap epoch 0; continuing in-memory");
             }
@@ -770,16 +766,17 @@ impl EpochManager {
             }
         };
 
-        records.iter().rev().find_map(|bytes| {
-            match bincode::deserialize::<Epoch>(bytes) {
+        records
+            .iter()
+            .rev()
+            .find_map(|bytes| match bincode::deserialize::<Epoch>(bytes) {
                 Ok(epoch) if pred(&epoch) => Some(epoch),
                 Ok(_) => None,
                 Err(e) => {
                     tracing::warn!(error = %e, "Skipping undecodable epoch record in store");
                     None
                 }
-            }
-        })
+            })
     }
 
     /// Returns epoch statistics
@@ -846,10 +843,7 @@ mod tests {
 
     #[test]
     fn test_epoch_creation() {
-        let validators = vec![
-            create_test_validator(1000),
-            create_test_validator(2000),
-        ];
+        let validators = vec![create_test_validator(1000), create_test_validator(2000)];
 
         let manager = EpochManager::new(validators, 100).unwrap();
 
@@ -868,14 +862,18 @@ mod tests {
         assert!(manager.should_transition(BlockHeight::from(100)));
 
         // Not yet due → Ok(None), state unchanged
-        assert!(manager
-            .transition_epoch(BlockHeight::from(50), |_| None)
-            .unwrap()
-            .is_none());
+        assert!(
+            manager
+                .transition_epoch(BlockHeight::from(50), |_| None)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(manager.current_epoch().number, 0);
 
         // Transition to next epoch
-        let new_validators = manager.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+        let new_validators = manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap();
         assert!(new_validators.is_some());
 
         let epoch = manager.current_epoch();
@@ -894,7 +892,9 @@ mod tests {
         let manager = EpochManager::new(validators, 100).unwrap();
 
         // Transition fires late, at height 789 instead of 100.
-        let next = manager.transition_epoch(BlockHeight::from(789), |_| None).unwrap();
+        let next = manager
+            .transition_epoch(BlockHeight::from(789), |_| None)
+            .unwrap();
         assert!(next.is_some());
 
         let epoch = manager.current_epoch();
@@ -922,8 +922,7 @@ mod tests {
         let v0 = create_test_validator(1000);
         let v1 = create_test_validator(2000);
         let v2 = create_test_validator(3000);
-        let manager =
-            EpochManager::new(vec![v0.clone(), v1.clone(), v2.clone()], 100).unwrap();
+        let manager = EpochManager::new(vec![v0.clone(), v1.clone(), v2.clone()], 100).unwrap();
 
         let v3 = create_test_validator(4000);
         manager.add_pending_validator(v3.clone());
@@ -951,8 +950,7 @@ mod tests {
         let v0 = create_test_validator(1000);
         let v1 = create_test_validator(2000);
         let v2 = create_test_validator(3000);
-        let manager =
-            EpochManager::new(vec![v0.clone(), v1.clone(), v2.clone()], 100).unwrap();
+        let manager = EpochManager::new(vec![v0.clone(), v1.clone(), v2.clone()], 100).unwrap();
 
         manager.remove_pending_validator(&v1.address);
         assert_eq!(manager.pending_removals().len(), 1);
@@ -1063,8 +1061,7 @@ mod tests {
         // 6 validators × 1000 stake (total 6000, removal budget 2000).
         // Queueing 4 removals must apply exactly 2 per transition and
         // defer the rest, so ≥ 2/3 of outgoing stake persists each epoch.
-        let validators: Vec<ValidatorInfo> =
-            (0..6).map(|_| create_test_validator(1000)).collect();
+        let validators: Vec<ValidatorInfo> = (0..6).map(|_| create_test_validator(1000)).collect();
         let manager = EpochManager::new(validators.clone(), 100).unwrap();
 
         for v in validators.iter().take(4) {
@@ -1077,7 +1074,11 @@ mod tests {
             .unwrap()
             .expect("transition due");
         assert_eq!(next.len(), 4, "budget admits 2 removals of 1000 each");
-        assert_eq!(manager.pending_removals().len(), 2, "excess removals deferred");
+        assert_eq!(
+            manager.pending_removals().len(),
+            2,
+            "excess removals deferred"
+        );
 
         // Next transition: total 4000, budget 1333 → exactly 1 more removal.
         let next = manager
@@ -1120,8 +1121,7 @@ mod tests {
         // 3 validators × 1000 (continuing 3000, entrant budget 1500).
         // First 1000-stake entrant fits; the second would push entrant
         // stake to 2000 > 1500 and is deferred to the next epoch.
-        let validators: Vec<ValidatorInfo> =
-            (0..3).map(|_| create_test_validator(1000)).collect();
+        let validators: Vec<ValidatorInfo> = (0..3).map(|_| create_test_validator(1000)).collect();
         let manager = EpochManager::new(validators, 100).unwrap();
 
         let a = create_test_validator(1000);
@@ -1136,7 +1136,11 @@ mod tests {
         assert_eq!(next.len(), 4);
         assert!(next.is_validator(&a.address));
         assert!(!next.is_validator(&b.address));
-        assert_eq!(manager.pending_validators().len(), 1, "excess entrant deferred");
+        assert_eq!(
+            manager.pending_validators().len(),
+            1,
+            "excess entrant deferred"
+        );
 
         // Next epoch: continuing 4000, budget 2000 → deferred entrant joins.
         let next = manager
@@ -1285,8 +1289,12 @@ mod tests {
         let validators = vec![create_test_validator(1000)];
         let manager = EpochManager::new(validators, 100).unwrap();
 
-        manager.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
-        manager.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
+        manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap();
+        manager
+            .transition_epoch(BlockHeight::from(200), |_| None)
+            .unwrap();
 
         // Should have epoch 0 in history
         let epoch0 = manager.get_epoch(0);
@@ -1302,7 +1310,9 @@ mod tests {
         let validators = vec![create_test_validator(1000)];
         let manager = EpochManager::new(validators, 100).unwrap();
 
-        manager.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+        manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap();
 
         // Height 50 should be in epoch 0
         let epoch = manager.get_epoch_for_height(BlockHeight::from(50));

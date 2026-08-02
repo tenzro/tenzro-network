@@ -110,8 +110,9 @@ mod tests {
 
     #[test]
     fn tiered_prefers_local_segment() {
-        let mut cands: Vec<TieredCandidate> =
-            (0..4).map(|i| TieredCandidate::local(format!("local-{i}"))).collect();
+        let mut cands: Vec<TieredCandidate> = (0..4)
+            .map(|i| TieredCandidate::local(format!("local-{i}")))
+            .collect();
         cands.extend((0..4).map(|i| TieredCandidate::direct(format!("net-{i}"))));
         let out = select_tiered_holders(&partition_key("db", 0), &cands, 2);
         assert_eq!(out.local.len(), 2);

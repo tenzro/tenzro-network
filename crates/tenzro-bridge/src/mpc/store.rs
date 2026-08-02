@@ -203,24 +203,24 @@ pub(crate) mod tests {
                 })
         }
 
-        async fn latest(
-            &self,
-            group_id: &GroupId,
-        ) -> Result<KeyshareEnvelope, KeyshareError> {
+        async fn latest(&self, group_id: &GroupId) -> Result<KeyshareEnvelope, KeyshareError> {
             let g = self.inner.lock().await;
             g.iter()
                 .rev()
-                .find_map(|((gid, _), env)| if gid == group_id { Some(env.clone()) } else { None })
+                .find_map(|((gid, _), env)| {
+                    if gid == group_id {
+                        Some(env.clone())
+                    } else {
+                        None
+                    }
+                })
                 .ok_or(KeyshareError::NotFound {
                     group: group_id.to_hex(),
                     epoch: 0,
                 })
         }
 
-        async fn list_epochs(
-            &self,
-            group_id: &GroupId,
-        ) -> Result<Vec<u64>, KeyshareError> {
+        async fn list_epochs(&self, group_id: &GroupId) -> Result<Vec<u64>, KeyshareError> {
             let g = self.inner.lock().await;
             let mut out: Vec<u64> = g
                 .keys()

@@ -59,9 +59,7 @@ use crate::error::{ModelError, Result};
 use crate::registry::{ModelFilter, ModelRegistry};
 use crate::routing::InferenceRouter;
 use crate::usage::UsageTracker;
-use tenzro_types::model::{
-    InferenceRequest, ModelInfo, ModelModality, ModelStatus,
-};
+use tenzro_types::model::{InferenceRequest, ModelInfo, ModelModality, ModelStatus};
 use tenzro_types::primitives::Address;
 use tracing::debug;
 
@@ -106,7 +104,13 @@ impl UseCase {
     /// Every valid string form, in canonical order. Used by handlers to build
     /// the error message when [`UseCase::parse`] rejects an unknown use case.
     pub const ALL: &'static [&'static str] = &[
-        "chat", "code", "reasoning", "research", "summarize", "extract", "embed",
+        "chat",
+        "code",
+        "reasoning",
+        "research",
+        "summarize",
+        "extract",
+        "embed",
     ];
 
     /// Lowercase label, the inverse of [`UseCase::parse`].
@@ -560,11 +564,7 @@ impl MetaRouter {
                 continue;
             }
 
-            let est_cost = estimate_cost(
-                &model,
-                intent.est_input_tokens,
-                intent.est_output_tokens,
-            );
+            let est_cost = estimate_cost(&model, intent.est_input_tokens, intent.est_output_tokens);
 
             // Per-request budget pre-filter.
             if let Some(cap) = cap
@@ -619,16 +619,17 @@ impl MetaRouter {
             // prompt's cluster with its cost, weighted by the knob. Declared
             // tier is not consulted — observations supersede metadata.
             Some(_) => {
-                let (min_cost, max_cost) = candidates.iter().fold(
-                    (u128::MAX, 0u128),
-                    |(lo, hi), c| (lo.min(c.est_cost), hi.max(c.est_cost)),
-                );
+                let (min_cost, max_cost) =
+                    candidates.iter().fold((u128::MAX, 0u128), |(lo, hi), c| {
+                        (lo.min(c.est_cost), hi.max(c.est_cost))
+                    });
                 let span = max_cost.saturating_sub(min_cost);
                 let w = intent.optimize;
                 candidates.sort_by(|a, b| {
                     let sa = blended_score(a, w, min_cost, span);
                     let sb = blended_score(b, w, min_cost, span);
-                    sa.total_cmp(&sb).then_with(|| cost_key(a).cmp(&cost_key(b)))
+                    sa.total_cmp(&sb)
+                        .then_with(|| cost_key(a).cmp(&cost_key(b)))
                 });
             }
             // Declared: resolve the target tier from the cost-quality knob and
@@ -792,12 +793,7 @@ impl MetaRouter {
 
         let mut tried: Vec<String> = Vec::new();
         for model_id in &chain {
-            let request = InferenceRequest::new(
-                model_id.clone(),
-                requester,
-                Vec::new(),
-                max_price,
-            );
+            let request = InferenceRequest::new(model_id.clone(), requester, Vec::new(), max_price);
             match self.router.route_request(&request) {
                 Ok(provider) => {
                     return Ok((model_id.clone(), provider, decision));
@@ -849,9 +845,7 @@ fn estimate_cost(model: &ModelInfo, input_tokens: u64, output_tokens: u64) -> u1
     let p = &model.pricing;
     let input = (p.price_per_input_token as u128).saturating_mul(input_tokens as u128);
     let output = (p.price_per_output_token as u128).saturating_mul(output_tokens as u128);
-    input
-        .saturating_add(output)
-        .max(p.minimum_price as u128)
+    input.saturating_add(output).max(p.minimum_price as u128)
 }
 
 /// Classifies a model into a quality tier from its declared parameters. A
@@ -908,6 +902,16 @@ mod tests {
             ModelModality::Text,
             Address::new([1; 32]),
         );
+        // `ModelInfo::new` leaves `model_hash` zero, and `ModelRegistry::
+        // register_model` refuses a zero hash outright. Derive a distinct
+        // non-zero hash per id, matching `registry.rs::create_test_model`.
+        {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(id.as_bytes());
+            m.model_hash = tenzro_types::primitives::Hash::from_bytes(&hasher.finalize())
+                .expect("SHA-256 produces 32 bytes");
+        }
         m.status = ModelStatus::Active;
         m.parameters = ModelParameters {
             parameter_count: Some(params),
@@ -933,8 +937,14 @@ mod tests {
 
     #[test]
     fn tiering_by_params() {
-        assert_eq!(quality_tier(&model("s", 70_000_000_000, 8192, 1, 1)), QualityTier::Strong);
-        assert_eq!(quality_tier(&model("c", 3_000_000_000, 8192, 1, 1)), QualityTier::Cheap);
+        assert_eq!(
+            quality_tier(&model("s", 70_000_000_000, 8192, 1, 1)),
+            QualityTier::Strong
+        );
+        assert_eq!(
+            quality_tier(&model("c", 3_000_000_000, 8192, 1, 1)),
+            QualityTier::Cheap
+        );
     }
 
     #[test]
@@ -942,19 +952,26 @@ mod tests {
         let (registry, usage, router) = router_stack();
         let mr = MetaRouter::new(registry, usage, router);
         let intent = RouteIntent::new(UseCase::Chat, Budget::None);
-        assert!(matches!(mr.route(&intent), Err(ModelError::NoProvidersAvailable(_))));
+        assert!(matches!(
+            mr.route(&intent),
+            Err(ModelError::NoProvidersAvailable(_))
+        ));
     }
 
     #[test]
     fn budget_prefilter_drops_expensive() {
         let (registry, usage, router) = router_stack();
         // Cheap model: 1+1 per token. Expensive model: 1000 per token.
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
-        registry.register_model(model("pricey", 3_000_000_000, 8192, 1000, 1000)).unwrap();
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("pricey", 3_000_000_000, 8192, 1000, 1000))
+            .unwrap();
         let mr = MetaRouter::new(registry, usage, router);
         // Budget only affords the cheap model at 256+256 tokens.
-        let intent = RouteIntent::new(UseCase::Chat, Budget::PerRequestTnzo(1000))
-            .with_tokens(256, 256);
+        let intent =
+            RouteIntent::new(UseCase::Chat, Budget::PerRequestTnzo(1000)).with_tokens(256, 256);
         let d = mr.route(&intent).unwrap();
         assert_eq!(d.model_id, "cheap");
     }
@@ -962,8 +979,12 @@ mod tests {
     #[test]
     fn quality_floor_filters() {
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
-        registry.register_model(model("strong", 70_000_000_000, 8192, 2, 2)).unwrap();
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("strong", 70_000_000_000, 8192, 2, 2))
+            .unwrap();
         let mr = MetaRouter::new(registry, usage, router);
         let intent = RouteIntent::new(UseCase::Reasoning, Budget::None)
             .with_quality_floor(QualityTier::Strong)
@@ -976,8 +997,12 @@ mod tests {
     #[test]
     fn cheapest_wins_within_tier() {
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("a", 3_000_000_000, 8192, 5, 5)).unwrap();
-        registry.register_model(model("b", 3_000_000_000, 8192, 2, 2)).unwrap();
+        registry
+            .register_model(model("a", 3_000_000_000, 8192, 5, 5))
+            .unwrap();
+        registry
+            .register_model(model("b", 3_000_000_000, 8192, 2, 2))
+            .unwrap();
         let mr = MetaRouter::new(registry, usage, router);
         let intent = RouteIntent::new(UseCase::Chat, Budget::None).with_tokens(10, 10);
         let d = mr.route(&intent).unwrap();
@@ -1000,8 +1025,12 @@ mod tests {
         assert!(UseCase::ALL.contains(&"research"));
         // A neutral knob on a strong-favoring use case reaches the strong tier.
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
-        registry.register_model(model("strong", 70_000_000_000, 8192, 2, 2)).unwrap();
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("strong", 70_000_000_000, 8192, 2, 2))
+            .unwrap();
         let mr = MetaRouter::new(registry, usage, router);
         let intent = RouteIntent::new(UseCase::Research, Budget::None)
             .with_optimize(0.5)
@@ -1014,13 +1043,17 @@ mod tests {
     #[test]
     fn per_did_gate_rejects() {
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
-        let mr = MetaRouter::new(registry, usage, router)
-            .with_budget_gate(Arc::new(DenyGate));
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
+        let mr = MetaRouter::new(registry, usage, router).with_budget_gate(Arc::new(DenyGate));
         let intent = RouteIntent::new(UseCase::Chat, Budget::None)
             .with_tokens(10, 10)
             .with_payer_did("did:tenzro:machine:test");
-        assert!(matches!(mr.route(&intent), Err(ModelError::RoutingError(_))));
+        assert!(matches!(
+            mr.route(&intent),
+            Err(ModelError::RoutingError(_))
+        ));
     }
 
     struct FixedBalance(u128);
@@ -1034,8 +1067,12 @@ mod tests {
     fn wallet_ceiling_drops_unaffordable_but_routes_cheaper() {
         let (registry, usage, router) = router_stack();
         // Cheap: 1+1 per token → 20 at 10+10 tokens. Pricey: 1000 per token.
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
-        registry.register_model(model("pricey", 70_000_000_000, 8192, 1000, 1000)).unwrap();
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("pricey", 70_000_000_000, 8192, 1000, 1000))
+            .unwrap();
         // Balance affords the cheap model but not the pricey one.
         let mr = MetaRouter::new(registry, usage, router)
             .with_balance_provider(Arc::new(FixedBalance(100)));
@@ -1051,13 +1088,18 @@ mod tests {
     #[test]
     fn wallet_ceiling_rejects_when_nothing_affordable() {
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("pricey", 3_000_000_000, 8192, 1000, 1000)).unwrap();
+        registry
+            .register_model(model("pricey", 3_000_000_000, 8192, 1000, 1000))
+            .unwrap();
         let mr = MetaRouter::new(registry, usage, router)
             .with_balance_provider(Arc::new(FixedBalance(1)));
         let intent = RouteIntent::new(UseCase::Chat, Budget::None)
             .with_tokens(10, 10)
             .with_payer_address(Address::new([9; 32]));
-        assert!(matches!(mr.route(&intent), Err(ModelError::NoProvidersAvailable(_))));
+        assert!(matches!(
+            mr.route(&intent),
+            Err(ModelError::NoProvidersAvailable(_))
+        ));
     }
 
     /// Two same-priced candidates, one cheap-tier and one strong-tier, plus a
@@ -1065,11 +1107,16 @@ mod tests {
     /// only differentiator once it exists.
     fn measured_stack() -> (MetaRouter, Arc<DifficultyIndex>) {
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
-        registry.register_model(model("strong", 70_000_000_000, 8192, 1, 1)).unwrap();
-        let index = Arc::new(DifficultyIndex::new(crate::difficulty::DEFAULT_CLUSTER_CAPACITY));
-        let mr = MetaRouter::new(registry, usage, router)
-            .with_difficulty_index(index.clone());
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("strong", 70_000_000_000, 8192, 1, 1))
+            .unwrap();
+        let index = Arc::new(DifficultyIndex::new(
+            crate::difficulty::DEFAULT_CLUSTER_CAPACITY,
+        ));
+        let mr = MetaRouter::new(registry, usage, router).with_difficulty_index(index.clone());
         (mr, index)
     }
 
@@ -1116,7 +1163,10 @@ mod tests {
 
         // The cheap model repeatedly failed to resolve prompts here.
         for _ in 0..20 {
-            assert!(mr.record_outcome("cheap", cluster, RouteOutcome::Escalated).unwrap());
+            assert!(
+                mr.record_outcome("cheap", cluster, RouteOutcome::Escalated)
+                    .unwrap()
+            );
         }
 
         // Same neighbourhood, same knob, same cost — now the strong model wins.
@@ -1139,7 +1189,8 @@ mod tests {
         // The cheap model measures well here, so unconstrained routing would
         // pick it. A caller-declared floor overrides the measurement.
         for _ in 0..20 {
-            mr.record_outcome("cheap", cluster, RouteOutcome::Resolved).unwrap();
+            mr.record_outcome("cheap", cluster, RouteOutcome::Resolved)
+                .unwrap();
         }
         let intent = measured_intent(embedding).with_quality_floor(QualityTier::Strong);
         let d = mr.route(&intent).unwrap();
@@ -1150,7 +1201,9 @@ mod tests {
     #[test]
     fn outcome_without_an_index_is_not_an_error() {
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
         let mr = MetaRouter::new(registry, usage, router);
         assert!(!mr.record_outcome("cheap", 0, RouteOutcome::Failed).unwrap());
     }
@@ -1167,8 +1220,12 @@ mod tests {
     #[tokio::test]
     async fn route_intent_embeds_the_prompt() {
         let (registry, usage, router) = router_stack();
-        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
-        let index = Arc::new(DifficultyIndex::new(crate::difficulty::DEFAULT_CLUSTER_CAPACITY));
+        registry
+            .register_model(model("cheap", 3_000_000_000, 8192, 1, 1))
+            .unwrap();
+        let index = Arc::new(DifficultyIndex::new(
+            crate::difficulty::DEFAULT_CLUSTER_CAPACITY,
+        ));
         let mr = MetaRouter::new(registry, usage, router)
             .with_difficulty_index(index.clone())
             .with_prompt_embedder(Arc::new(ConstantEmbedder(vec![0.0, 0.0, 1.0])));

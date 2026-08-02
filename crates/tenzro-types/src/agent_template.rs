@@ -117,8 +117,6 @@ pub struct AgentRuntimeRequirements {
     pub supported_platforms: Vec<String>,
 }
 
-
-
 /// Pricing model for using an agent template
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -835,10 +833,7 @@ mod execution_spec_tests {
         );
         let mut value: serde_json::Value = serde_json::to_value(&original).unwrap();
         // Strip the new field as if this JSON came from a pre-execution-spec node.
-        let removed = value
-            .as_object_mut()
-            .unwrap()
-            .remove("execution_spec");
+        let removed = value.as_object_mut().unwrap().remove("execution_spec");
         assert!(removed.is_some(), "execution_spec should have been present");
         let stripped = serde_json::to_string(&value).unwrap();
         // Confirm the key is no longer in the JSON object (the field is fully absent,
@@ -931,13 +926,22 @@ mod execution_spec_tests {
         let free = AgentPricingModel::Free;
         assert_eq!(free.fee_for_invocation(1000), 0);
 
-        let per_exec = AgentPricingModel::PerExecution { price: 500_000_000_000_000_000u128 };
-        assert_eq!(per_exec.fee_for_invocation(1000), 500_000_000_000_000_000u128);
+        let per_exec = AgentPricingModel::PerExecution {
+            price: 500_000_000_000_000_000u128,
+        };
+        assert_eq!(
+            per_exec.fee_for_invocation(1000),
+            500_000_000_000_000_000u128
+        );
 
-        let per_token = AgentPricingModel::PerToken { price_per_token: 1_000_000_000u128 };
+        let per_token = AgentPricingModel::PerToken {
+            price_per_token: 1_000_000_000u128,
+        };
         assert_eq!(per_token.fee_for_invocation(500), 500_000_000_000u128);
 
-        let subscription = AgentPricingModel::Subscription { monthly_rate: 1_000_000u128 };
+        let subscription = AgentPricingModel::Subscription {
+            monthly_rate: 1_000_000u128,
+        };
         assert_eq!(subscription.fee_for_invocation(1000), 0); // settled out-of-band
     }
 }

@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 
 use crate::output;
@@ -162,13 +162,12 @@ pub struct IrohPublishCmd {
 
 impl IrohPublishCmd {
     pub async fn execute(&self) -> Result<()> {
-        use base64::Engine as _;
         use crate::rpc::RpcClient;
+        use base64::Engine as _;
 
         output::print_header("Publish to Iroh Blob Store");
 
-        let bytes =
-            std::fs::read(&self.file).with_context(|| format!("read {:?}", self.file))?;
+        let bytes = std::fs::read(&self.file).with_context(|| format!("read {:?}", self.file))?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
         let rpc = RpcClient::new(&self.rpc);
@@ -206,9 +205,9 @@ pub struct IrohFetchCmd {
 
 impl IrohFetchCmd {
     pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
         use base64::Engine as _;
         use std::io::Write as _;
-        use crate::rpc::RpcClient;
 
         let rpc = RpcClient::new(&self.rpc);
         let spinner = output::create_spinner("Fetching...");

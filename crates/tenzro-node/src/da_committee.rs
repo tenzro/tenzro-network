@@ -55,13 +55,9 @@ use sha2::{Digest, Sha256};
 
 use tenzro_crypto::keys::{KeyPair, PublicKey};
 use tenzro_crypto::signatures::{self, Ed25519SignerImpl, Signer};
-use tenzro_storage::da::{
-    compute_commitment, DaBackend, DaBackendId, DaBackendStatus, DaPointer,
-};
-use tenzro_storage::kv::{KvStore, WriteOp, CF_DA_COMMITTEE};
-use tenzro_storage::redstuff::{
-    self, CommitteeShape, EncodedBlob, SliverPair,
-};
+use tenzro_storage::da::{DaBackend, DaBackendId, DaBackendStatus, DaPointer, compute_commitment};
+use tenzro_storage::kv::{CF_DA_COMMITTEE, KvStore, WriteOp};
+use tenzro_storage::redstuff::{self, CommitteeShape, EncodedBlob, SliverPair};
 use tenzro_types::primitives::{Address, Hash, Timestamp};
 
 /// Domain-separation tag for the message a validator signs when attesting that
@@ -175,11 +171,7 @@ pub trait DaCommitteeSurface: Send + Sync {
 
     /// Ask member `to_index` for its stored sliver for `commitment`. Returns
     /// `None` if the member does not hold it.
-    async fn fetch_sliver(
-        &self,
-        to_index: usize,
-        commitment: &Hash,
-    ) -> Result<Option<SliverPair>>;
+    async fn fetch_sliver(&self, to_index: usize, commitment: &Hash) -> Result<Option<SliverPair>>;
 
     /// Challenge member `to_index` to prove *current* possession of its sliver
     /// for `commitment`. The member replies with a [`PossessionProof`] — the
@@ -531,19 +523,27 @@ impl DaCommitteeStore {
     }
 
     fn sliver_key(commitment: &Hash) -> Vec<u8> {
-        [Self::SLIVER_PREFIX, hex::encode(commitment.as_bytes()).as_bytes()].concat()
+        [
+            Self::SLIVER_PREFIX,
+            hex::encode(commitment.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     fn cert_key(commitment: &Hash) -> Vec<u8> {
-        [Self::CERT_PREFIX, hex::encode(commitment.as_bytes()).as_bytes()].concat()
+        [
+            Self::CERT_PREFIX,
+            hex::encode(commitment.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     /// Persist this node's assigned sliver for a blob.
     pub fn put_sliver(&self, stored: StoredSliver) -> Result<()> {
         let hex = hex::encode(stored.commitment.as_bytes());
         if let Some(storage) = &self.storage {
-            let value = bincode::serialize(&stored)
-                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+            let value =
+                bincode::serialize(&stored).map_err(|e| DaCommitteeError::Store(e.to_string()))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_DA_COMMITTEE.to_string(),
@@ -567,8 +567,8 @@ impl DaCommitteeStore {
     pub fn put_cert(&self, cert: AvailabilityCertificate) -> Result<()> {
         let hex = hex::encode(cert.commitment.as_bytes());
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(&cert)
-                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+            let value =
+                serde_json::to_vec(&cert).map_err(|e| DaCommitteeError::Store(e.to_string()))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_DA_COMMITTEE.to_string(),
@@ -598,19 +598,27 @@ impl DaCommitteeStore {
     }
 
     fn challenge_key(id: &Hash) -> Vec<u8> {
-        [Self::CHALLENGE_PREFIX, hex::encode(id.as_bytes()).as_bytes()].concat()
+        [
+            Self::CHALLENGE_PREFIX,
+            hex::encode(id.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     fn availability_key(address: &Address) -> Vec<u8> {
-        [Self::AVAILABILITY_PREFIX, hex::encode(address.as_bytes()).as_bytes()].concat()
+        [
+            Self::AVAILABILITY_PREFIX,
+            hex::encode(address.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     /// Persist a resolved possession-challenge record.
     pub fn put_challenge(&self, record: ChallengeRecord) -> Result<()> {
         let hex = hex::encode(record.id.as_bytes());
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(&record)
-                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+            let value =
+                serde_json::to_vec(&record).map_err(|e| DaCommitteeError::Store(e.to_string()))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_DA_COMMITTEE.to_string(),
@@ -649,8 +657,8 @@ impl DaCommitteeStore {
             .unwrap_or_else(|| AvailabilityScore::fresh(*address));
         score.apply(outcome, now_ms);
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(&score)
-                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+            let value =
+                serde_json::to_vec(&score).map_err(|e| DaCommitteeError::Store(e.to_string()))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_DA_COMMITTEE.to_string(),
@@ -672,8 +680,11 @@ impl DaCommitteeStore {
 
     /// All availability scores, lowest score first (the members most at risk).
     pub fn list_availability(&self) -> Vec<AvailabilityScore> {
-        let mut scores: Vec<AvailabilityScore> =
-            self.availability.iter().map(|s| s.value().clone()).collect();
+        let mut scores: Vec<AvailabilityScore> = self
+            .availability
+            .iter()
+            .map(|s| s.value().clone())
+            .collect();
         scores.sort_by_key(|s| s.score);
         scores
     }
@@ -870,8 +881,7 @@ impl DaCommitteeBackend {
                     let msg = challenge_message(commitment, &nonce, &proof.address);
                     let sig_ok = proof.index == member.index
                         && proof.address == member.address
-                        && signatures::verify(&member.public_key, &msg, &proof.signature)
-                            .is_ok();
+                        && signatures::verify(&member.public_key, &msg, &proof.signature).is_ok();
                     // The member must prove possession of ITS OWN assigned
                     // sliver — a valid sliver fetched from a neighbor at
                     // challenge time would carry the wrong node_index.
@@ -1055,8 +1065,8 @@ impl DaCommitteeBackend {
         let shape = CommitteeShape::from_committee_size(n)
             .map_err(|_| DaCommitteeError::CommitteeTooSmall(n))?;
 
-        let encoded: EncodedBlob = redstuff::encode(payload, shape)
-            .map_err(|e| DaCommitteeError::Core(e.to_string()))?;
+        let encoded: EncodedBlob =
+            redstuff::encode(payload, shape).map_err(|e| DaCommitteeError::Core(e.to_string()))?;
         let commitment = encoded.commitment;
         let quorum = shape.quorum();
 
@@ -1158,8 +1168,9 @@ impl DaCommitteeBackend {
         // any committee member returns (each sliver's proof binds it to the
         // commitment under a specific shape/length, so a lying member cannot
         // spoof the shape without failing verification downstream).
-        let (shape, blob_len, symbol_len, mut collected) =
-            self.discover_shape_and_first_slivers(&commitment, &members).await?;
+        let (shape, blob_len, symbol_len, mut collected) = self
+            .discover_shape_and_first_slivers(&commitment, &members)
+            .await?;
 
         let quorum = shape.quorum();
 
@@ -1237,7 +1248,9 @@ impl DaCommitteeBackend {
         // proof reproduces `commitment` teaches us the shape/length.
         for member in members {
             let sliver = if member.address == self.local_address {
-                self.store.get_sliver(commitment).map(|s| (s.shape, s.blob_len, s.symbol_len, s.sliver))
+                self.store
+                    .get_sliver(commitment)
+                    .map(|s| (s.shape, s.blob_len, s.symbol_len, s.sliver))
             } else {
                 match tokio::time::timeout(
                     self.per_member_timeout,
@@ -1256,7 +1269,12 @@ impl DaCommitteeBackend {
                                 let symbol_len = s.primary.len() / shape.cols();
                                 // blob_len is not carried on the sliver; derive
                                 // the maximum and let verify_sliver confirm.
-                                (shape, (shape.rows() * shape.cols() * symbol_len) as u64, symbol_len, s)
+                                (
+                                    shape,
+                                    (shape.rows() * shape.cols() * symbol_len) as u64,
+                                    symbol_len,
+                                    s,
+                                )
                             })
                     }
                     _ => None,
@@ -1390,7 +1408,10 @@ impl DaCommitteeBackend {
                 return Ok(());
             }
         }
-        Err(DaCommitteeError::QuorumNotReached { have: held, need: quorum })
+        Err(DaCommitteeError::QuorumNotReached {
+            have: held,
+            need: quorum,
+        })
     }
 }
 
@@ -1483,7 +1504,9 @@ mod tests {
             }
             // The member independently verifies the sliver before storing.
             if !redstuff::verify_sliver(sliver, shape, blob_len, symbol_len, commitment) {
-                return Err(DaCommitteeError::Transport("sliver failed verification".into()));
+                return Err(DaCommitteeError::Transport(
+                    "sliver failed verification".into(),
+                ));
             }
             self.stores[to_index].put_sliver(StoredSliver {
                 shape,
@@ -1511,7 +1534,9 @@ mod tests {
             if self.offline.contains(&to_index) {
                 return Ok(None);
             }
-            Ok(self.stores[to_index].get_sliver(commitment).map(|s| s.sliver))
+            Ok(self.stores[to_index]
+                .get_sliver(commitment)
+                .map(|s| s.sliver))
         }
 
         async fn challenge_sliver(
@@ -1607,14 +1632,9 @@ mod tests {
             members: committee.members.clone(),
             keypairs: committee.keypairs.iter().map(clone_kp).collect(),
         });
-        DaCommitteeBackend::new(
-            local_kp,
-            view,
-            surface,
-            Arc::new(DaCommitteeStore::new()),
-        )
-        .unwrap()
-        .with_per_member_timeout(Duration::from_secs(2))
+        DaCommitteeBackend::new(local_kp, view, surface, Arc::new(DaCommitteeStore::new()))
+            .unwrap()
+            .with_per_member_timeout(Duration::from_secs(2))
     }
 
     #[tokio::test]
@@ -1916,7 +1936,10 @@ mod tests {
             .store
             .get_availability(&committee.members[1].address)
             .unwrap();
-        assert_eq!(score.score, AVAILABILITY_SCORE_MAX - CHALLENGE_BAD_PROOF_DELTA);
+        assert_eq!(
+            score.score,
+            AVAILABILITY_SCORE_MAX - CHALLENGE_BAD_PROOF_DELTA
+        );
     }
 
     #[tokio::test]
@@ -1940,10 +1963,11 @@ mod tests {
         assert_eq!(record.outcome, ChallengeOutcome::Passed);
         assert_ne!(record.target_address, backend.local_address());
         let cert = backend.store.get_cert(&commitment).unwrap();
-        assert!(cert
-            .attestations
-            .iter()
-            .any(|a| a.index == record.target_index && a.address == record.target_address));
+        assert!(
+            cert.attestations
+                .iter()
+                .any(|a| a.index == record.target_index && a.address == record.target_address)
+        );
     }
 
     #[tokio::test]

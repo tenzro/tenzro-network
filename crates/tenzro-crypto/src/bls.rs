@@ -114,8 +114,7 @@
 //! ```
 
 use blst::min_pk::{
-    AggregatePublicKey as BlstAggregatePublicKey,
-    AggregateSignature as BlstAggregateSignature,
+    AggregatePublicKey as BlstAggregatePublicKey, AggregateSignature as BlstAggregateSignature,
     PublicKey, SecretKey, Signature,
 };
 use serde::{Deserialize, Serialize};
@@ -179,8 +178,9 @@ impl BlsSecretKey {
             )));
         }
 
-        let inner = SecretKey::from_bytes(bytes)
-            .map_err(|e| BlsError::InvalidSecretKey(format!("Failed to parse secret key: {:?}", e)))?;
+        let inner = SecretKey::from_bytes(bytes).map_err(|e| {
+            BlsError::InvalidSecretKey(format!("Failed to parse secret key: {:?}", e))
+        })?;
 
         Ok(Self { inner })
     }
@@ -268,8 +268,9 @@ impl BlsPublicKey {
             )));
         }
 
-        let inner = PublicKey::from_bytes(bytes)
-            .map_err(|e| BlsError::InvalidPublicKey(format!("Failed to parse public key: {:?}", e)))?;
+        let inner = PublicKey::from_bytes(bytes).map_err(|e| {
+            BlsError::InvalidPublicKey(format!("Failed to parse public key: {:?}", e))
+        })?;
 
         Ok(Self { inner })
     }
@@ -362,8 +363,9 @@ impl BlsSignature {
             )));
         }
 
-        let inner = Signature::from_bytes(bytes)
-            .map_err(|e| BlsError::InvalidSignature(format!("Failed to parse signature: {:?}", e)))?;
+        let inner = Signature::from_bytes(bytes).map_err(|e| {
+            BlsError::InvalidSignature(format!("Failed to parse signature: {:?}", e))
+        })?;
 
         Ok(Self { inner })
     }
@@ -409,12 +411,12 @@ impl BlsSignature {
         const DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
         let result = self.inner.verify(
-            true,  // check signature is in correct subgroup
+            true, // check signature is in correct subgroup
             message,
             DST,
-            &[],  // optional augmentation
+            &[], // optional augmentation
             &public_key.inner,
-            true,  // check public key is in correct subgroup
+            true, // check public key is in correct subgroup
         );
 
         Ok(result == blst::BLST_ERROR::BLST_SUCCESS)
@@ -671,28 +673,33 @@ impl AggregateSignature {
 
         // Aggregate signatures
         let sig_refs: Vec<&Signature> = self.signatures.iter().map(|s| &s.inner).collect();
-        let agg_sig: BlstAggregateSignature = match BlstAggregateSignature::aggregate(&sig_refs, true) {
-            Ok(agg) => agg,
-            Err(e) => return Err(BlsError::AggregationError(format!("Failed to aggregate signatures: {:?}", e))),
-        };
+        let agg_sig: BlstAggregateSignature =
+            match BlstAggregateSignature::aggregate(&sig_refs, true) {
+                Ok(agg) => agg,
+                Err(e) => {
+                    return Err(BlsError::AggregationError(format!(
+                        "Failed to aggregate signatures: {:?}",
+                        e
+                    )));
+                }
+            };
 
         // Aggregate public keys
         let pk_refs: Vec<&PublicKey> = public_keys.iter().map(|pk| &pk.inner).collect();
-        let agg_pk: BlstAggregatePublicKey = match BlstAggregatePublicKey::aggregate(&pk_refs, true) {
+        let agg_pk: BlstAggregatePublicKey = match BlstAggregatePublicKey::aggregate(&pk_refs, true)
+        {
             Ok(apk) => apk,
-            Err(e) => return Err(BlsError::AggregationError(format!("Failed to aggregate public keys: {:?}", e))),
+            Err(e) => {
+                return Err(BlsError::AggregationError(format!(
+                    "Failed to aggregate public keys: {:?}",
+                    e
+                )));
+            }
         };
 
         // Verify aggregate signature
         let sig = agg_sig.to_signature();
-        let result = sig.verify(
-            true,
-            message,
-            DST,
-            &[],
-            &agg_pk.to_public_key(),
-            true,
-        );
+        let result = sig.verify(true, message, DST, &[], &agg_pk.to_public_key(), true);
 
         Ok(result == blst::BLST_ERROR::BLST_SUCCESS)
     }
@@ -986,11 +993,19 @@ mod tests {
 
         // Verify should fail with wrong message
         let wrong_message = b"Different message";
-        assert!(!signature.verify(keypair.public_key(), wrong_message).unwrap());
+        assert!(
+            !signature
+                .verify(keypair.public_key(), wrong_message)
+                .unwrap()
+        );
 
         // Verify should fail with wrong public key
         let other_keypair = BlsKeyPair::generate().unwrap();
-        assert!(!signature.verify(other_keypair.public_key(), message).unwrap());
+        assert!(
+            !signature
+                .verify(other_keypair.public_key(), message)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1011,7 +1026,10 @@ mod tests {
         let aggregate = aggregate_signatures(&signatures).unwrap();
         assert_eq!(aggregate.count(), num_validators);
 
-        let public_keys: Vec<_> = validators.iter().map(|kp| kp.public_key().clone()).collect();
+        let public_keys: Vec<_> = validators
+            .iter()
+            .map(|kp| kp.public_key().clone())
+            .collect();
         assert!(aggregate.verify(&public_keys, message).unwrap());
     }
 
@@ -1042,9 +1060,7 @@ mod tests {
         let message = b"Original message";
         let wrong_message = b"Wrong message";
 
-        let keypairs: Vec<_> = (0..3)
-            .map(|_| BlsKeyPair::generate().unwrap())
-            .collect();
+        let keypairs: Vec<_> = (0..3).map(|_| BlsKeyPair::generate().unwrap()).collect();
 
         let signatures: Vec<_> = keypairs.iter().map(|kp| kp.sign(message)).collect();
 
@@ -1062,9 +1078,7 @@ mod tests {
     fn test_aggregate_verification_fails_with_wrong_pubkey_count() {
         let message = b"Test message";
 
-        let keypairs: Vec<_> = (0..3)
-            .map(|_| BlsKeyPair::generate().unwrap())
-            .collect();
+        let keypairs: Vec<_> = (0..3).map(|_| BlsKeyPair::generate().unwrap()).collect();
 
         let signatures: Vec<_> = keypairs.iter().map(|kp| kp.sign(message)).collect();
 
@@ -1121,9 +1135,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_public_keys() {
-        let keypairs: Vec<_> = (0..5)
-            .map(|_| BlsKeyPair::generate().unwrap())
-            .collect();
+        let keypairs: Vec<_> = (0..5).map(|_| BlsKeyPair::generate().unwrap()).collect();
 
         let public_keys: Vec<_> = keypairs.iter().map(|kp| kp.public_key().clone()).collect();
 
@@ -1183,9 +1195,7 @@ mod tests {
     #[test]
     fn test_aggregate_signature_serialization() {
         let message = b"Aggregate test";
-        let keypairs: Vec<_> = (0..3)
-            .map(|_| BlsKeyPair::generate().unwrap())
-            .collect();
+        let keypairs: Vec<_> = (0..3).map(|_| BlsKeyPair::generate().unwrap()).collect();
 
         let signatures: Vec<_> = keypairs.iter().map(|kp| kp.sign(message)).collect();
         let aggregate = aggregate_signatures(&signatures).unwrap();
@@ -1265,9 +1275,7 @@ mod tests {
     #[test]
     fn test_aggregate_signature_json_serialization() {
         let message = b"JSON test";
-        let keypairs: Vec<_> = (0..2)
-            .map(|_| BlsKeyPair::generate().unwrap())
-            .collect();
+        let keypairs: Vec<_> = (0..2).map(|_| BlsKeyPair::generate().unwrap()).collect();
 
         let signatures: Vec<_> = keypairs.iter().map(|kp| kp.sign(message)).collect();
         let aggregate = aggregate_signatures(&signatures).unwrap();

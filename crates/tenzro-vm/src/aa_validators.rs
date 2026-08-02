@@ -87,8 +87,8 @@ pub const SELECTOR_ATTEST_MODULE: [u8; 4] = [0x01, 0x00, 0x00, 0x62];
 /// EVM-compatible chain (Ethereum, Optimism, Arbitrum, Base, Polygon, …)
 /// per ERC-7484 §4.
 pub const ERC7484_REGISTRY_ADDRESS: [u8; 20] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x69, 0xE2, 0xa1, 0x87, 0xAE,
-    0xFF, 0xb8, 0x52, 0xBF, 0x3c, 0xCD, 0xC9, 0x51, 0x51, 0xB2,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x69, 0xE2, 0xa1, 0x87, 0xAE, 0xFF, 0xb8, 0x52, 0xBF, 0x3c, 0xCD,
+    0xC9, 0x51, 0x51, 0xB2,
 ];
 
 // -----------------------------------------------------------------------------
@@ -410,7 +410,10 @@ impl ValidatorRegistry {
         let module_addr = module.module_address();
 
         // ERC-7484 attestation gate.
-        if !self.attestations.is_attested(&self.trusted_registry, &module_addr) {
+        if !self
+            .attestations
+            .is_attested(&self.trusted_registry, &module_addr)
+        {
             return Err(ValidatorError::ModuleNotAttested {
                 module: module_addr,
                 registry: self.trusted_registry,
@@ -459,16 +462,10 @@ impl ValidatorRegistry {
 
     /// Uninstall a validator from `account`. No-op (and `Ok(false)`) if the
     /// module wasn't installed.
-    pub fn uninstall(
-        &self,
-        account: &[u8],
-        module: &[u8; 20],
-    ) -> Result<bool, ValidatorError> {
+    pub fn uninstall(&self, account: &[u8], module: &[u8; 20]) -> Result<bool, ValidatorError> {
         let key = (account.to_vec(), *module);
         let removed = self.installed.remove(&key).is_some();
-        if removed
-            && let Some(mut idx) = self.account_index.get_mut(account)
-        {
+        if removed && let Some(mut idx) = self.account_index.get_mut(account) {
             idx.retain(|a| a != module);
         }
         Ok(removed)
@@ -572,17 +569,22 @@ pub enum ValidatorError {
     #[error("module type {0:?} is not yet supported (Phase 1 supports Validator only)")]
     UnsupportedModuleType(ModuleType),
 
-    #[error("module 0x{} is not attested in registry 0x{}", hex::encode(module), hex::encode(registry))]
+    #[error(
+        "module 0x{} is not attested in registry 0x{}",
+        hex::encode(module),
+        hex::encode(registry)
+    )]
     ModuleNotAttested {
         module: [u8; 20],
         registry: [u8; 20],
     },
 
-    #[error("module 0x{} already installed on account 0x{}", hex::encode(module), hex::encode(account))]
-    ModuleAlreadyInstalled {
-        account: Vec<u8>,
-        module: [u8; 20],
-    },
+    #[error(
+        "module 0x{} already installed on account 0x{}",
+        hex::encode(module),
+        hex::encode(account)
+    )]
+    ModuleAlreadyInstalled { account: Vec<u8>, module: [u8; 20] },
 
     #[error("account 0x{} has no validator installed", hex::encode(account))]
     NoValidatorInstalled { account: Vec<u8> },
@@ -898,25 +900,21 @@ mod tests {
         let reg = ValidatorRegistry::new();
         let module_addr = [0x42u8; 20];
         attest_module(&reg, module_addr);
-        assert!(reg
-            .attestations()
-            .is_attested(reg.trusted_registry(), &module_addr));
+        assert!(
+            reg.attestations()
+                .is_attested(reg.trusted_registry(), &module_addr)
+        );
 
         reg.attestations()
             .revoke(reg.trusted_registry(), &module_addr);
-        assert!(!reg
-            .attestations()
-            .is_attested(reg.trusted_registry(), &module_addr));
+        assert!(
+            !reg.attestations()
+                .is_attested(reg.trusted_registry(), &module_addr)
+        );
 
         let module = Arc::new(NoOpValidator::new(module_addr));
         let err = reg
-            .install(
-                vec![0x01; 20],
-                ModuleType::Validator,
-                module,
-                100,
-                vec![],
-            )
+            .install(vec![0x01; 20], ModuleType::Validator, module, 100, vec![])
             .unwrap_err();
         assert!(matches!(err, ValidatorError::ModuleNotAttested { .. }));
     }
@@ -961,7 +959,10 @@ mod tests {
 
         // (a) Non-empty sig: NoOp accepts → EntryPoint validate succeeds.
         let mut op = dummy_user_op(account.clone(), vec![0xAA; 65]);
-        op.nonce = crate::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&account)).to_bytes();
+        op.nonce = crate::account_abstraction::Nonce::from_seq(
+            entry_point.get_nonce_default_key(&account),
+        )
+        .to_bytes();
         entry_point.validate_user_op(&op).unwrap();
 
         // (b) Empty sig: NoOp returns failure → EntryPoint surfaces InvalidSignature.

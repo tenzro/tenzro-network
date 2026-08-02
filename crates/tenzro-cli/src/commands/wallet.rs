@@ -1,9 +1,9 @@
 //! Wallet management commands for the Tenzro CLI
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
-use tenzro_wallet::{WalletProvisioner, ProvisioningConfig};
 use crate::output::{self};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use tenzro_wallet::{ProvisioningConfig, WalletProvisioner};
 
 /// Wallet management commands
 #[derive(Debug, Subcommand)]
@@ -87,12 +87,17 @@ impl WalletCreateCmd {
 
         // Register wallet with node
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_createWallet", serde_json::json!([{
-            "address": wallet.address.to_string(),
-            "threshold": wallet.threshold,
-            "total_shares": wallet.total_shares,
-            "key_type": format!("{:?}", wallet.key_type())
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createWallet",
+                serde_json::json!([{
+                    "address": wallet.address.to_string(),
+                    "threshold": wallet.threshold,
+                    "total_shares": wallet.total_shares,
+                    "key_type": format!("{:?}", wallet.key_type())
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -100,7 +105,10 @@ impl WalletCreateCmd {
         println!();
         output::print_field("Wallet ID", &wallet.wallet_id.to_string());
         output::print_field("Address", &wallet.address.to_string());
-        output::print_field("Threshold", &format!("{}-of-{}", wallet.threshold, wallet.total_shares));
+        output::print_field(
+            "Threshold",
+            &format!("{}-of-{}", wallet.threshold, wallet.total_shares),
+        );
         output::print_field("Key Type", &format!("{:?}", wallet.key_type()));
 
         if let Some(name) = &self.name {
@@ -112,7 +120,9 @@ impl WalletCreateCmd {
         }
 
         println!();
-        output::print_warning("IMPORTANT: Your wallet key shares are encrypted and stored locally.");
+        output::print_warning(
+            "IMPORTANT: Your wallet key shares are encrypted and stored locally.",
+        );
         output::print_warning("Make sure to backup your wallet configuration file.");
 
         Ok(())
@@ -140,8 +150,8 @@ pub struct WalletImportCmd {
 
 impl WalletImportCmd {
     pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
         use crate::config;
+        use crate::rpc::RpcClient;
 
         output::print_header("Import Wallet from Private Key");
 
@@ -164,25 +174,41 @@ impl WalletImportCmd {
 
         // Call tenzro_importIdentity RPC on the node
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_importIdentity", serde_json::json!([{
-            "private_key": key_hex,
-            "key_type": self.key_type,
-            "display_name": display_name,
-            "password": password
-        }]))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to import identity: {}", e))?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_importIdentity",
+                serde_json::json!([{
+                    "private_key": key_hex,
+                    "key_type": self.key_type,
+                    "display_name": display_name,
+                    "password": password
+                }]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to import identity: {}", e))?;
 
         spinner.finish_and_clear();
 
         // Extract identity from response
         let identity = result.get("identity").cloned().unwrap_or_default();
-        let did = identity.get("did").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let did = identity
+            .get("did")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         // Extract wallet from response
         let wallet = result.get("wallet").cloned().unwrap_or_default();
-        let wallet_id = wallet.get("wallet_id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let wallet_address = wallet.get("address").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let wallet_id = wallet
+            .get("wallet_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let wallet_address = wallet
+            .get("address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         output::print_success("Wallet imported successfully!");
         println!();
@@ -205,8 +231,13 @@ impl WalletImportCmd {
         config::save_config(&cfg)?;
 
         println!();
-        output::print_success(&format!("Configuration saved to: {}", config::config_path().display()));
-        output::print_warning("IMPORTANT: Your wallet key shares are encrypted and stored on the node.");
+        output::print_success(&format!(
+            "Configuration saved to: {}",
+            config::config_path().display()
+        ));
+        output::print_warning(
+            "IMPORTANT: Your wallet key shares are encrypted and stored on the node.",
+        );
 
         Ok(())
     }
@@ -230,7 +261,7 @@ pub struct WalletBalanceCmd {
 
 impl WalletBalanceCmd {
     pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::{RpcClient, parse_hex_u128, format_tnzo};
+        use crate::rpc::{RpcClient, format_tnzo, parse_hex_u128};
 
         output::print_header("Wallet Balances");
 
@@ -240,7 +271,9 @@ impl WalletBalanceCmd {
 
         if let Some(addr) = &self.address {
             // Fetch balance for specific address
-            let balance_hex: String = rpc.call("eth_getBalance", serde_json::json!([addr, "latest"])).await?;
+            let balance_hex: String = rpc
+                .call("eth_getBalance", serde_json::json!([addr, "latest"]))
+                .await?;
             let balance_wei = parse_hex_u128(&balance_hex);
 
             spinner.finish_and_clear();
@@ -252,14 +285,12 @@ impl WalletBalanceCmd {
             if self.detailed {
                 // Detailed view with all assets
                 let headers = vec!["Asset", "Symbol", "Balance", "USD Value"];
-                let rows = vec![
-                    vec![
-                        "Tenzro Network Token".to_string(),
-                        "TNZO".to_string(),
-                        format_tnzo(balance_wei),
-                        "N/A".to_string(),
-                    ],
-                ];
+                let rows = vec![vec![
+                    "Tenzro Network Token".to_string(),
+                    "TNZO".to_string(),
+                    format_tnzo(balance_wei),
+                    "N/A".to_string(),
+                ]];
                 output::print_table(&headers, &rows);
             } else {
                 // Simple view
@@ -269,7 +300,9 @@ impl WalletBalanceCmd {
             // Try the configured wallet address first, then list all accounts
             let cfg = crate::config::load_config();
             if let Some(addr) = cfg.wallet_address {
-                let balance_hex: String = rpc.call("eth_getBalance", serde_json::json!([&addr, "latest"])).await?;
+                let balance_hex: String = rpc
+                    .call("eth_getBalance", serde_json::json!([&addr, "latest"]))
+                    .await?;
                 let balance_wei = parse_hex_u128(&balance_hex);
 
                 spinner.finish_and_clear();
@@ -278,14 +311,17 @@ impl WalletBalanceCmd {
                 output::print_field("TNZO Balance", &format_tnzo(balance_wei));
             } else {
                 // Fetch all accounts and show balances for each
-                let accounts: Vec<serde_json::Value> = rpc.call("tenzro_listAccounts", serde_json::json!([]))
+                let accounts: Vec<serde_json::Value> = rpc
+                    .call("tenzro_listAccounts", serde_json::json!([]))
                     .await
                     .unwrap_or_default();
 
                 spinner.finish_and_clear();
 
                 if accounts.is_empty() {
-                    output::print_info("No wallets found. Create one with: tenzro-cli wallet create");
+                    output::print_info(
+                        "No wallets found. Create one with: tenzro-cli wallet create",
+                    );
                 } else {
                     let mut headers = vec!["Address", "Balance (TNZO)"];
                     if self.detailed {
@@ -293,21 +329,39 @@ impl WalletBalanceCmd {
                     }
                     let mut rows = Vec::new();
                     for account in &accounts {
-                        let addr = account.get("address").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        let balance = match rpc.call::<String>("eth_getBalance", serde_json::json!([addr, "latest"])).await {
+                        let addr = account
+                            .get("address")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let balance = match rpc
+                            .call::<String>("eth_getBalance", serde_json::json!([addr, "latest"]))
+                            .await
+                        {
                             Ok(hex) => format_tnzo(parse_hex_u128(&hex)),
                             Err(_) => "N/A".to_string(),
                         };
-                        let mut row = vec![
-                            output::format_address(addr),
-                            balance,
-                        ];
+                        let mut row = vec![output::format_address(addr), balance];
                         if self.detailed {
-                            row.push(account.get("wallet_type").and_then(|v| v.as_str()).unwrap_or("MPC").to_string());
+                            row.push(
+                                account
+                                    .get("wallet_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("MPC")
+                                    .to_string(),
+                            );
                         }
                         rows.push(row);
                     }
-                    output::print_table(&headers.iter().map(|s| s.to_string()).collect::<Vec<_>>().iter().map(|s| s.as_str()).collect::<Vec<_>>(), &rows);
+                    output::print_table(
+                        &headers
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>(),
+                        &rows,
+                    );
                 }
             }
         }
@@ -363,9 +417,15 @@ impl WalletSendCmd {
 
         // Resolve sender address (from --from or stored config)
         let cfg = crate::config::load_config();
-        let from_address = self.from.clone()
+        let from_address = self
+            .from
+            .clone()
             .or_else(|| cfg.wallet_address.clone())
-            .ok_or_else(|| anyhow::anyhow!("--from address is required (or run `tenzro-cli wallet import` first)"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--from address is required (or run `tenzro-cli wallet import` first)"
+                )
+            })?;
 
         // Authentication is ambient: the node identifies the signing wallet
         // from the OAuth/DPoP bearer token (TENZRO_BEARER_JWT +
@@ -397,25 +457,29 @@ impl WalletSendCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // Query nonce for the sender (eth_getTransactionCount matches the Python skill)
-        let nonce_result = rpc.call::<serde_json::Value>(
-            "eth_getTransactionCount",
-            serde_json::json!([&from_address, "latest"]),
-        ).await;
+        let nonce_result = rpc
+            .call::<serde_json::Value>(
+                "eth_getTransactionCount",
+                serde_json::json!([&from_address, "latest"]),
+            )
+            .await;
         let nonce: u64 = match nonce_result {
-            Ok(val) => u64::from_str_radix(
-                val.as_str().unwrap_or("0x0").trim_start_matches("0x"),
-                16,
-            ).unwrap_or(0),
+            Ok(val) => {
+                u64::from_str_radix(val.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16)
+                    .unwrap_or(0)
+            }
             Err(_) => 0,
         };
 
         // Query chain ID
-        let chain_id_result = rpc.call::<serde_json::Value>("eth_chainId", serde_json::json!([])).await;
+        let chain_id_result = rpc
+            .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
+            .await;
         let chain_id: u64 = match chain_id_result {
-            Ok(val) => u64::from_str_radix(
-                val.as_str().unwrap_or("0x539").trim_start_matches("0x"),
-                16,
-            ).unwrap_or(1337),
+            Ok(val) => {
+                u64::from_str_radix(val.as_str().unwrap_or("0x539").trim_start_matches("0x"), 16)
+                    .unwrap_or(1337)
+            }
             Err(_) => 1337,
         };
 
@@ -425,20 +489,22 @@ impl WalletSendCmd {
         // the canonical preimage (including timestamp) and verifies the
         // Ed25519 signature before accepting — see node/src/rpc.rs
         // `handle_sign_and_send_transaction`.
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": from_address,
-                "to": self.to,
-                // Decimal string carries the full u128 range — JSON numbers
-                // clamp to u64 in the handler's numeric path.
-                "value": amount_wei.to_string(),
-                "gas_limit": 21000u64,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": from_address,
+                    "to": self.to,
+                    // Decimal string carries the full u128 range — JSON numbers
+                    // clamp to u64 in the handler's numeric path.
+                    "value": amount_wei.to_string(),
+                    "gas_limit": 21000u64,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                }),
+            )
+            .await?;
 
         let tx_hash = result
             .get("tx_hash")
@@ -490,8 +556,9 @@ impl WalletSendCmd {
         // verifier accepts it directly via `matches_pubkey`.
         let from_hex = signer.from_address_hex();
         let from_bytes = signer.ed25519_public_key().to_vec();
-        let from_address = Address::from_bytes(&from_bytes)
-            .ok_or_else(|| anyhow::anyhow!("local Ed25519 pubkey is not a valid 32-byte address"))?;
+        let from_address = Address::from_bytes(&from_bytes).ok_or_else(|| {
+            anyhow::anyhow!("local Ed25519 pubkey is not a valid 32-byte address")
+        })?;
 
         // Parse the recipient (left-aligned into a 32-byte slot, matching the
         // node's `parse_address`).
@@ -517,17 +584,26 @@ impl WalletSendCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let nonce: u64 = match rpc
-            .call::<serde_json::Value>("eth_getTransactionCount", serde_json::json!([&from_hex, "latest"]))
+            .call::<serde_json::Value>(
+                "eth_getTransactionCount",
+                serde_json::json!([&from_hex, "latest"]),
+            )
             .await
         {
-            Ok(val) => u64::from_str_radix(val.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16).unwrap_or(0),
+            Ok(val) => {
+                u64::from_str_radix(val.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16)
+                    .unwrap_or(0)
+            }
             Err(_) => 0,
         };
         let chain_id: u64 = match rpc
             .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
             .await
         {
-            Ok(val) => u64::from_str_radix(val.as_str().unwrap_or("0x539").trim_start_matches("0x"), 16).unwrap_or(1337),
+            Ok(val) => {
+                u64::from_str_radix(val.as_str().unwrap_or("0x539").trim_start_matches("0x"), 16)
+                    .unwrap_or(1337)
+            }
             Err(_) => 1337,
         };
 
@@ -625,7 +701,8 @@ impl WalletListCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // Fetch accounts from node
-        let accounts: Vec<serde_json::Value> = rpc.call("tenzro_listAccounts", serde_json::json!([]))
+        let accounts: Vec<serde_json::Value> = rpc
+            .call("tenzro_listAccounts", serde_json::json!([]))
             .await
             .unwrap_or_default();
 
@@ -658,10 +735,26 @@ impl WalletListCmd {
             let mut rows = Vec::new();
             for account in &accounts {
                 rows.push(vec![
-                    account.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
-                    account.get("address").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                    account.get("wallet_type").and_then(|v| v.as_str()).unwrap_or("MPC 2-of-3").to_string(),
-                    account.get("balance").and_then(|v| v.as_str()).unwrap_or("0 TNZO").to_string(),
+                    account
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                    account
+                        .get("address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    account
+                        .get("wallet_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("MPC 2-of-3")
+                        .to_string(),
+                    account
+                        .get("balance")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0 TNZO")
+                        .to_string(),
                 ]);
             }
             output::print_table(&headers, &rows);
@@ -692,14 +785,22 @@ impl WalletCreateAccountCmd {
         let spinner = output::create_spinner("Creating account...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_createAccount", serde_json::json!({
-            "key_type": self.key_type,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createAccount",
+                serde_json::json!({
+                    "key_type": self.key_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Account created!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Address",
+            result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
+        );
         output::print_field("Key Type", &self.key_type);
 
         Ok(())
@@ -724,9 +825,14 @@ impl WalletFaucetCmd {
         let spinner = output::create_spinner("Requesting tokens...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_requestFaucet", serde_json::json!({
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_requestFaucet",
+                serde_json::json!({
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -768,10 +874,15 @@ impl WalletHistoryCmd {
         let spinner = output::create_spinner("Fetching history...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getTransactionHistory", serde_json::json!({
-            "address": self.address,
-            "limit": self.limit,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getTransactionHistory",
+                serde_json::json!({
+                    "address": self.address,
+                    "limit": self.limit,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -783,17 +894,40 @@ impl WalletHistoryCmd {
                 let mut rows = Vec::new();
                 for tx in txs {
                     let hash = tx.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-                    let hash_short = if hash.len() > 18 { format!("{}...", &hash[..18]) } else { hash.to_string() };
+                    let hash_short = if hash.len() > 18 {
+                        format!("{}...", &hash[..18])
+                    } else {
+                        hash.to_string()
+                    };
                     rows.push(vec![
                         hash_short,
-                        tx.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        tx.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        tx.get("value").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
-                        tx.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        tx.get("from")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        tx.get("to")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        tx.get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0")
+                            .to_string(),
+                        tx.get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
-                println!("Showing {} of {} transactions", txs.len(), result.get("total").and_then(|v| v.as_u64()).unwrap_or(txs.len() as u64));
+                println!(
+                    "Showing {} of {} transactions",
+                    txs.len(),
+                    result
+                        .get("total")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(txs.len() as u64)
+                );
             }
         } else {
             output::print_json(&result)?;
@@ -824,16 +958,27 @@ impl WalletTokenBalanceCmd {
         let spinner = output::create_spinner("Fetching balance...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_tokenBalance", serde_json::json!({
-            "address": self.address,
-            "token": self.token,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_tokenBalance",
+                serde_json::json!({
+                    "address": self.address,
+                    "token": self.token,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_field("Address", &self.address);
         output::print_field("Token", &self.token);
-        output::print_field("Balance", result.get("balance").and_then(|v| v.as_str()).unwrap_or("0"));
+        output::print_field(
+            "Balance",
+            result
+                .get("balance")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0"),
+        );
         if let Some(decimals) = result.get("decimals").and_then(|v| v.as_u64()) {
             output::print_field("Decimals", &decimals.to_string());
         }
@@ -876,7 +1021,10 @@ impl WalletCreateLocalCmd {
         output::print_success("Self-custody hybrid key created!");
         println!();
         output::print_field("Address (Ed25519 pubkey)", &address);
-        output::print_field("Sealed key", &crate::keystore::hybrid_key_path().display().to_string());
+        output::print_field(
+            "Sealed key",
+            &crate::keystore::hybrid_key_path().display().to_string(),
+        );
         println!();
         output::print_warning("The node never holds this secret. `wallet send` now signs locally.");
         output::print_warning("Back up the sealed key file — losing it loses the account.");
@@ -918,9 +1066,14 @@ impl WalletImportLocalCmd {
         output::print_success("Self-custody hybrid key imported!");
         println!();
         output::print_field("Address (Ed25519 pubkey)", &address);
-        output::print_field("Sealed key", &crate::keystore::hybrid_key_path().display().to_string());
+        output::print_field(
+            "Sealed key",
+            &crate::keystore::hybrid_key_path().display().to_string(),
+        );
         println!();
-        output::print_warning("A fresh ML-DSA-65 leg was derived. The node never holds this secret.");
+        output::print_warning(
+            "A fresh ML-DSA-65 leg was derived. The node never holds this secret.",
+        );
 
         Ok(())
     }

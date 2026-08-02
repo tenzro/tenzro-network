@@ -37,6 +37,9 @@ pub enum AdminCommand {
     /// Threshold-key distributed key generation (DKLS23 secp256k1).
     #[command(subcommand)]
     MpcKeygen(MpcKeygenSubcommand),
+    /// Node admission gate — who may reach this node's services at all.
+    #[command(subcommand)]
+    ServiceKey(ServiceKeySubcommand),
 }
 
 impl AdminCommand {
@@ -44,7 +47,203 @@ impl AdminCommand {
         match self {
             Self::ApiKey(cmd) => cmd.execute().await,
             Self::MpcKeygen(cmd) => cmd.execute().await,
+            Self::ServiceKey(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Service-key admission gate.
+///
+/// Answers a different question from API keys: not *what may this caller do*,
+/// but *may this caller reach my node's services at all*. Covers JSON-RPC,
+/// MCP, A2A and the web API in one setting.
+///
+/// Off by default — the network is permissionless and a node that configures
+/// nothing serves anyone. Adding the first key turns the gate on for all four
+/// surfaces at once.
+///
+/// The gate never covers consensus or P2P: a gated node still validates,
+/// votes and gossips. `/health` and `/ready` also stay reachable, so an
+/// orchestrator can still see the node.
+#[derive(Debug, Subcommand)]
+pub enum ServiceKeySubcommand {
+    /// Accept a new service key (turns the gate on if it was off).
+    Add(ServiceKeyAddCmd),
+    /// Revoke a service key by its digest.
+    Revoke(ServiceKeyRevokeCmd),
+    /// Show whether the gate is on and how many keys it accepts.
+    Status(ServiceKeyStatusCmd),
+}
+
+impl ServiceKeySubcommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Add(cmd) => cmd.execute().await,
+            Self::Revoke(cmd) => cmd.execute().await,
+            Self::Status(cmd) => cmd.execute().await,
+        }
+    }
+}
+
+/// Accept a new service key on this node.
+#[derive(Debug, Parser)]
+pub struct ServiceKeyAddCmd {
+    /// The key callers will present in `X-Tenzro-Service-Key`. Only its
+    /// SHA-256 digest is stored; the node never logs or persists this value,
+    /// so keep your own copy.
+    #[arg(long)]
+    key: String,
+
+    /// RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`).
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl ServiceKeyAddCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Add Service Key");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
+
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_addServiceKey",
+                serde_json::json!({ "key": self.key }),
+            )
+            .await?;
+
+        let digest = result
+            .get("key_digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("node did not return a key digest"))?;
+
+        output::print_field("Key digest", digest);
+        output::print_field(
+            "Accepted keys",
+            &result
+                .get("accepted_keys")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+
+        if result
+            .get("gate_newly_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            // The first key is the one that changes the node's posture. An
+            // operator who does not notice has just made their node
+            // unreachable to everyone who does not hold this string.
+            output::print_warning(
+                "This was the first key — the admission gate is now ON. Callers must send \
+                 X-Tenzro-Service-Key on JSON-RPC, MCP, A2A and the web API. Consensus, P2P, \
+                 /health and /ready are unaffected.",
+            );
+        }
+
+        output::print_info("Store the key now — the node kept only its digest.");
+        Ok(())
+    }
+}
+
+/// Revoke a service key.
+#[derive(Debug, Parser)]
+pub struct ServiceKeyRevokeCmd {
+    /// The 64-character hex digest reported by `add` or printed when the key
+    /// was configured. Not the key itself — the node does not hold that.
+    #[arg(long)]
+    key_digest: String,
+
+    /// RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`).
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl ServiceKeyRevokeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Revoke Service Key");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
+
+        let _: serde_json::Value = rpc
+            .call(
+                "tenzro_revokeServiceKey",
+                serde_json::json!({ "key_digest": self.key_digest }),
+            )
+            .await?;
+
+        output::print_success(&format!("Revoked {}", self.key_digest));
+        output::print_info(
+            "Revocation outlives a restart even if the digest is still listed in the node's \
+             config or TENZRO_SERVICE_KEYS.",
+        );
+        Ok(())
+    }
+}
+
+/// Show the admission gate's state.
+#[derive(Debug, Parser)]
+pub struct ServiceKeyStatusCmd {
+    /// RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`).
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl ServiceKeyStatusCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Service Key Status");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
+
+        let result: serde_json::Value = rpc
+            .call("tenzro_serviceKeyStatus", serde_json::json!({}))
+            .await?;
+
+        let enabled = result
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        output::print_field(
+            "Gate",
+            if enabled {
+                "ON"
+            } else {
+                "off (permissionless)"
+            },
+        );
+        output::print_field(
+            "Accepted keys",
+            &result
+                .get("accepted_keys")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field("Header", "X-Tenzro-Service-Key");
+        output::print_info("The gate never covers consensus or P2P; /health and /ready stay open.");
+        Ok(())
     }
 }
 

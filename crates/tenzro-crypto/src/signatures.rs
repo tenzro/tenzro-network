@@ -5,9 +5,9 @@
 use crate::error::{CryptoError, Result};
 use crate::keys::{Address, KeyPair, KeyType, PublicKey};
 use ed25519_dalek::{
-    Signature as Ed25519Signature, Signer as Ed25519Signer,
+    SIGNATURE_LENGTH, Signature as Ed25519Signature, Signer as Ed25519Signer,
     SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
-    VerifyingKey as Ed25519VerifyingKey, SIGNATURE_LENGTH,
+    VerifyingKey as Ed25519VerifyingKey,
 };
 use k256::ecdsa::{
     Signature as Secp256k1Signature, SigningKey as Secp256k1SigningKey,
@@ -18,8 +18,8 @@ use k256::ecdsa::{
 // traits. Import the v3 traits under disambiguating aliases so the Secp256k1
 // signer/verifier call sites resolve unambiguously without breaking the
 // Ed25519 sites that still need v2.
-use signature::{Signer as Sigv3Signer, Verifier as Sigv3Verifier};
 use serde::{Deserialize, Serialize};
+use signature::{Signer as Sigv3Signer, Verifier as Sigv3Verifier};
 
 /// A signature in Tenzro Network.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

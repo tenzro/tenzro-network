@@ -39,8 +39,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 
 use tenzro_training::{
-    compute_shard_ciphertext_hash, verify_shard_ciphertext, Result as TrainingResult,
-    SealedShardStore, TrainingError,
+    Result as TrainingResult, SealedShardStore, TrainingError, compute_shard_ciphertext_hash,
+    verify_shard_ciphertext,
 };
 use tenzro_types::primitives::Hash;
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -195,7 +195,7 @@ mod tests {
             wrapped_data_key: vec![0xbb; 96],
             wrap_alg: "hpke-x25519-hkdf-sha256-aes-256-gcm".to_string(),
             enclave_pubkey: vec![0xcc; 32],
-            enclave_measurements_hex: "deadbeef".to_string(),
+            enclave_measurement_hex: "deadbeef".to_string(),
             created_at: Timestamp::now(),
         }
     }

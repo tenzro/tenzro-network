@@ -43,7 +43,7 @@
 
 use crate::error::{PaymentError, Result};
 use crate::rfc9421::{AgentPublicKeyInfo, SignatureAlgorithm};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 /// A single JWK (RFC 7517 §4) covering the four key types needed for
@@ -241,13 +241,12 @@ fn encode_ec(bytes: &[u8], crv: &str, alg: &str, coord_len: usize, base: JwkBase
 }
 
 fn encode_rsa(bytes: &[u8], alg: &str, base: JwkBase) -> Result<Jwk> {
+    use rsa::RsaPublicKey;
     use rsa::pkcs8::DecodePublicKey;
     use rsa::traits::PublicKeyParts;
-    use rsa::RsaPublicKey;
 
-    let pk = RsaPublicKey::from_public_key_der(bytes).map_err(|e| {
-        PaymentError::Rfc9421Error(format!("RSA SPKI parse failed: {}", e))
-    })?;
+    let pk = RsaPublicKey::from_public_key_der(bytes)
+        .map_err(|e| PaymentError::Rfc9421Error(format!("RSA SPKI parse failed: {}", e)))?;
 
     let n_bytes = pk.n().to_bytes_be();
     let e_bytes = pk.e().to_bytes_be();
@@ -397,8 +396,8 @@ mod tests {
 
     #[test]
     fn test_rsa_pss_sha256_jwk_encoding() {
-        use rsa::pkcs8::EncodePublicKey;
         use rsa::RsaPrivateKey;
+        use rsa::pkcs8::EncodePublicKey;
         let mut rng = rand::rngs::OsRng;
         let sk = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let pk = sk.to_public_key();

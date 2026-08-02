@@ -155,10 +155,7 @@ impl NetworkMpcSurface {
 
 #[async_trait::async_trait]
 impl MpcLibp2pSurface for NetworkMpcSurface {
-    async fn send_point_to_point(
-        &self,
-        message: &MpcRoundMessage,
-    ) -> Result<(), TransportError> {
+    async fn send_point_to_point(&self, message: &MpcRoundMessage) -> Result<(), TransportError> {
         let request = round_message_to_request(message);
         self.network
             .send_mpc_relay_message(request)

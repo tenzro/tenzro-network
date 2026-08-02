@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_storage::kv::{KvStore, CF_MODELS};
+use tenzro_storage::kv::{CF_MODELS, KvStore};
 use tenzro_types::{
     model::{AcceptancePolicy, ModelInfo, ModelModality, ModelStatus},
     primitives::{Address, Hash, Timestamp},
@@ -85,7 +85,9 @@ impl ModelFilter {
         }
 
         if let Some(max_price) = self.max_price {
-            let model_price = model.pricing.price_per_input_token
+            let model_price = model
+                .pricing
+                .price_per_input_token
                 .max(model.pricing.price_per_output_token);
             if model_price > max_price {
                 return false;
@@ -99,7 +101,10 @@ impl ModelFilter {
         }
 
         if let Some(ref name_filter) = self.name_contains
-            && !model.name.to_lowercase().contains(&name_filter.to_lowercase())
+            && !model
+                .name
+                .to_lowercase()
+                .contains(&name_filter.to_lowercase())
         {
             return false;
         }
@@ -209,7 +214,10 @@ impl ModelRegistry {
                 }
             }
             Err(e) => {
-                warn!("Failed to scan CF_MODELS during ModelRegistry hydration: {}", e);
+                warn!(
+                    "Failed to scan CF_MODELS during ModelRegistry hydration: {}",
+                    e
+                );
             }
         }
 
@@ -240,7 +248,10 @@ impl ModelRegistry {
                 Ok(data) => {
                     let key = Self::storage_key(&model.model_id);
                     if let Err(e) = storage.put(CF_MODELS, &key, &data) {
-                        warn!("Failed to persist model {} to CF_MODELS: {}", model.model_id, e);
+                        warn!(
+                            "Failed to persist model {} to CF_MODELS: {}",
+                            model.model_id, e
+                        );
                     }
                 }
                 Err(e) => {
@@ -281,12 +292,16 @@ impl ModelRegistry {
         // Verify model hash is not zero (requires proper hash)
         if model.model_hash == Hash::zero() {
             return Err(ModelError::InvalidModel(
-                "Model hash cannot be zero - SHA-256 hash required for integrity verification".to_string(),
+                "Model hash cannot be zero - SHA-256 hash required for integrity verification"
+                    .to_string(),
             ));
         }
 
         // License gate: refuse models whose tier the operator has not accepted.
-        if !self.acceptance.admits(model.license_tier, model.license_id.as_deref()) {
+        if !self
+            .acceptance
+            .admits(model.license_tier, model.license_id.as_deref())
+        {
             return Err(ModelError::LicenseNotAccepted {
                 model_id,
                 tier: model.license_tier,

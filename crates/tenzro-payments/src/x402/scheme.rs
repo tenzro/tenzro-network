@@ -319,8 +319,7 @@ impl SchemeBackend for TenzroHybridBackend {
         let message = build_credential_preimage(credential);
         let classical_pk = extract_classical_public_key(credential)?;
 
-        let composite_pk =
-            CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
+        let composite_pk = CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
         let composite_sig = CompositeSignature::new(
             credential.signature.clone(),
             credential.pq_signature.clone(),
@@ -328,10 +327,7 @@ impl SchemeBackend for TenzroHybridBackend {
 
         let verifier = StandardHybridVerifier::new(composite_pk);
         verifier.verify(&message, &composite_sig).map_err(|e| {
-            PaymentError::VerificationFailed(format!(
-                "Hybrid signature verification failed: {}",
-                e
-            ))
+            PaymentError::VerificationFailed(format!("Hybrid signature verification failed: {}", e))
         })?;
 
         debug!(
@@ -360,7 +356,10 @@ impl SchemeBackend for TenzroHybridBackend {
             ));
         }
 
-        let sig_hex = inner.signature.strip_prefix("0x").unwrap_or(&inner.signature);
+        let sig_hex = inner
+            .signature
+            .strip_prefix("0x")
+            .unwrap_or(&inner.signature);
         let sig_bytes = hex::decode(sig_hex).map_err(|e| {
             PaymentError::VerificationFailed(format!("Invalid signature hex: {}", e))
         })?;
@@ -384,9 +383,8 @@ impl SchemeBackend for TenzroHybridBackend {
         let public_key = PublicKey::new(KeyType::Ed25519, pk_bytes);
         let signature = Signature::new(KeyType::Ed25519, sig_bytes);
 
-        let verifier = Ed25519VerifierImpl::new(public_key).map_err(|e| {
-            PaymentError::VerificationFailed(format!("Invalid public key: {}", e))
-        })?;
+        let verifier = Ed25519VerifierImpl::new(public_key)
+            .map_err(|e| PaymentError::VerificationFailed(format!("Invalid public key: {}", e)))?;
 
         verifier.verify(&message, &signature).map_err(|e| {
             PaymentError::VerificationFailed(format!(
@@ -410,10 +408,7 @@ impl SchemeBackend for TenzroHybridBackend {
 /// Exposed so signers and verifiers can never disagree on the layout.
 pub fn build_credential_preimage(credential: &PaymentCredential) -> Vec<u8> {
     let mut message = Vec::with_capacity(
-        credential.challenge_id.len()
-            + credential.payer_did.len()
-            + 16
-            + credential.asset.len(),
+        credential.challenge_id.len() + credential.payer_did.len() + 16 + credential.asset.len(),
     );
     message.extend_from_slice(credential.challenge_id.as_bytes());
     message.extend_from_slice(credential.payer_did.as_bytes());
@@ -426,9 +421,8 @@ fn extract_classical_public_key(credential: &PaymentCredential) -> Result<Public
     if let Some(pk_value) = credential.extra.get("public_key")
         && let Some(pk_hex) = pk_value.as_str()
     {
-        let pk_bytes = hex::decode(pk_hex).map_err(|e| {
-            PaymentError::CredentialError(format!("Invalid public key hex: {}", e))
-        })?;
+        let pk_bytes = hex::decode(pk_hex)
+            .map_err(|e| PaymentError::CredentialError(format!("Invalid public key hex: {}", e)))?;
         return Ok(PublicKey::new(KeyType::Ed25519, pk_bytes));
     }
     if !credential.payer_address.is_empty() {
@@ -549,12 +543,15 @@ impl SchemeBackend for UptoBackend {
         }
 
         // The buyer's hybrid signature commits to the maximum, not the actual.
-        let message =
-            build_upto_preimage(&credential.challenge_id, &credential.payer_did, upto_max, &credential.asset);
+        let message = build_upto_preimage(
+            &credential.challenge_id,
+            &credential.payer_did,
+            upto_max,
+            &credential.asset,
+        );
         let classical_pk = extract_classical_public_key(credential)?;
 
-        let composite_pk =
-            CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
+        let composite_pk = CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
         let composite_sig = CompositeSignature::new(
             credential.signature.clone(),
             credential.pq_signature.clone(),
@@ -758,8 +755,7 @@ impl SchemeBackend for BatchSettlementBackend {
         );
         let classical_pk = extract_classical_public_key(credential)?;
 
-        let composite_pk =
-            CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
+        let composite_pk = CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
         let composite_sig = CompositeSignature::new(
             credential.signature.clone(),
             credential.pq_signature.clone(),
@@ -794,18 +790,10 @@ impl SchemeBackend for BatchSettlementBackend {
 pub trait FacilitatorVerifier: Send + Sync + std::fmt::Debug {
     /// Verify the payload is admissible. Implementations MUST return
     /// `Err(PaymentError::VerificationFailed)` on rejection.
-    async fn verify_payload(
-        &self,
-        payload_b64: &str,
-        requirements_b64: &str,
-    ) -> Result<()>;
+    async fn verify_payload(&self, payload_b64: &str, requirements_b64: &str) -> Result<()>;
 
     /// Settle the payload. Returns the on-chain tx hash on success.
-    async fn settle_payload(
-        &self,
-        payload_b64: &str,
-        requirements_b64: &str,
-    ) -> Result<String>;
+    async fn settle_payload(&self, payload_b64: &str, requirements_b64: &str) -> Result<String>;
 }
 
 /// Default facilitator verifier — wraps [`CdpFacilitatorClient`].
@@ -834,11 +822,7 @@ impl Default for CdpFacilitatorVerifier {
 
 #[async_trait]
 impl FacilitatorVerifier for CdpFacilitatorVerifier {
-    async fn verify_payload(
-        &self,
-        payload_b64: &str,
-        requirements_b64: &str,
-    ) -> Result<()> {
+    async fn verify_payload(&self, payload_b64: &str, requirements_b64: &str) -> Result<()> {
         let resp = self
             .client
             .verify(&VerifyRequest {
@@ -857,11 +841,7 @@ impl FacilitatorVerifier for CdpFacilitatorVerifier {
         }
     }
 
-    async fn settle_payload(
-        &self,
-        payload_b64: &str,
-        requirements_b64: &str,
-    ) -> Result<String> {
+    async fn settle_payload(&self, payload_b64: &str, requirements_b64: &str) -> Result<String> {
         let resp = self
             .client
             .settle(&SettleRequest {
@@ -872,10 +852,9 @@ impl FacilitatorVerifier for CdpFacilitatorVerifier {
         if resp.success {
             Ok(resp.tx_hash)
         } else {
-            Err(PaymentError::SettlementError(
-                resp.error
-                    .unwrap_or_else(|| "Facilitator settlement failed".to_string()),
-            ))
+            Err(PaymentError::SettlementError(resp.error.unwrap_or_else(
+                || "Facilitator settlement failed".to_string(),
+            )))
         }
     }
 }
@@ -964,7 +943,9 @@ impl SchemeBackend for Eip3009Backend {
         credential: &PaymentCredential,
     ) -> Result<()> {
         let (payload, requirements) = extract_facilitator_envelope(credential, "exact-eip3009")?;
-        self.facilitator.verify_payload(&payload, &requirements).await
+        self.facilitator
+            .verify_payload(&payload, &requirements)
+            .await
     }
 
     async fn settle(
@@ -1030,7 +1011,9 @@ impl SchemeBackend for Permit2Backend {
         credential: &PaymentCredential,
     ) -> Result<()> {
         let (payload, requirements) = extract_facilitator_envelope(credential, "permit2")?;
-        self.facilitator.verify_payload(&payload, &requirements).await
+        self.facilitator
+            .verify_payload(&payload, &requirements)
+            .await
     }
 
     async fn settle(
@@ -1098,8 +1081,7 @@ pub trait DelegationVerifier: Send + Sync + std::fmt::Debug {
         _payload: &X402PaymentPayload,
     ) -> Result<()> {
         Err(PaymentError::VerificationFailed(
-            "ERC-7710 payload-form redemption verifier is not configured"
-                .to_string(),
+            "ERC-7710 payload-form redemption verifier is not configured".to_string(),
         ))
     }
 }
@@ -1306,11 +1288,7 @@ mod tests {
 
     #[async_trait]
     impl FacilitatorVerifier for StubFacilitator {
-        async fn verify_payload(
-            &self,
-            payload: &str,
-            requirements: &str,
-        ) -> Result<()> {
+        async fn verify_payload(&self, payload: &str, requirements: &str) -> Result<()> {
             self.calls
                 .lock()
                 .unwrap()
@@ -1324,11 +1302,7 @@ mod tests {
             }
         }
 
-        async fn settle_payload(
-            &self,
-            _payload: &str,
-            _requirements: &str,
-        ) -> Result<String> {
+        async fn settle_payload(&self, _payload: &str, _requirements: &str) -> Result<String> {
             if self.accept {
                 Ok("0xstubtx".to_string())
             } else {
@@ -1420,14 +1394,8 @@ mod tests {
 
     fn make_erc7710_credential() -> PaymentCredential {
         let mut extra = StdHashMap::new();
-        extra.insert(
-            "delegation_id".to_string(),
-            serde_json::json!("0xdeadbeef"),
-        );
-        extra.insert(
-            "redemption_proof".to_string(),
-            serde_json::json!("0xproof"),
-        );
+        extra.insert("delegation_id".to_string(), serde_json::json!("0xdeadbeef"));
+        extra.insert("redemption_proof".to_string(), serde_json::json!("0xproof"));
         PaymentCredential {
             credential_id: "cred-erc7710".to_string(),
             challenge_id: "ch-1".to_string(),
@@ -1518,8 +1486,14 @@ mod tests {
         let classical_pk_hex = hex::encode(composite_pk.classical.as_bytes());
 
         let mut extra = StdHashMap::new();
-        extra.insert("public_key".to_string(), serde_json::json!(classical_pk_hex));
-        extra.insert("upto_max".to_string(), serde_json::json!(upto_max.to_string()));
+        extra.insert(
+            "public_key".to_string(),
+            serde_json::json!(classical_pk_hex),
+        );
+        extra.insert(
+            "upto_max".to_string(),
+            serde_json::json!(upto_max.to_string()),
+        );
         PaymentCredential {
             credential_id: "cred-upto".to_string(),
             challenge_id: "ch-1".to_string(),
@@ -1678,19 +1652,17 @@ mod tests {
         let signer = upto_hybrid_signer();
         let payer_did = "did:tenzro:human:alice";
         let asset = "USDC";
-        let message = build_batch_voucher_preimage(
-            channel_id,
-            payer_did,
-            cumulative,
-            voucher_nonce,
-            asset,
-        );
+        let message =
+            build_batch_voucher_preimage(channel_id, payer_did, cumulative, voucher_nonce, asset);
         let sig = signer.sign(&message).unwrap();
         let composite_pk = signer.public_key();
         let classical_pk_hex = hex::encode(composite_pk.classical.as_bytes());
 
         let mut extra = StdHashMap::new();
-        extra.insert("public_key".to_string(), serde_json::json!(classical_pk_hex));
+        extra.insert(
+            "public_key".to_string(),
+            serde_json::json!(classical_pk_hex),
+        );
         extra.insert("channel_id".to_string(), serde_json::json!(channel_id));
         extra.insert(
             "cumulative_amount".to_string(),

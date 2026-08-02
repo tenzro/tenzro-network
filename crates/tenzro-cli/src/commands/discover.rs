@@ -45,7 +45,10 @@ impl LocalPeersCmd {
         match result {
             Ok(value) => {
                 println!();
-                let available = value.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+                let available = value
+                    .get("available")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 if !available {
                     output::print_info("Networking is not running; no local peer set available.");
                     return Ok(());
@@ -81,19 +84,26 @@ impl ReachabilityCmd {
         output::print_header("Node Reachability");
         let spinner = output::create_spinner("Querying reachability tier...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> =
-            rpc.call("tenzro_nodeReachability", serde_json::json!([])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_nodeReachability", serde_json::json!([]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
             Ok(value) => {
                 println!();
-                let available = value.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+                let available = value
+                    .get("available")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 if !available {
                     output::print_info("Networking is not running; reachability tier is unknown.");
                     return Ok(());
                 }
-                let tier = value.get("tier").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let tier = value
+                    .get("tier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 output::print_field("Tier", tier);
             }
             Err(e) => output::print_error(&format!("Failed to query reachability: {}", e)),
@@ -143,8 +153,14 @@ impl ProfileCmd {
                     println!();
                     output::print_field("Devices", &devices.len().to_string());
                     for dev in devices {
-                        let desc = dev.get("description").and_then(|v| v.as_str()).unwrap_or("?");
-                        let backend = dev.get("backend").map(|v| v.to_string()).unwrap_or_default();
+                        let desc = dev
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let backend = dev
+                            .get("backend")
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
                         let backend = backend.trim_matches('"');
                         output::print_field("Device", &format!("{} [{}]", desc, backend));
                     }

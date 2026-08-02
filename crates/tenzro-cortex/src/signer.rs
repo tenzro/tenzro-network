@@ -134,10 +134,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_creates_key() {
-        let tmp = std::env::temp_dir().join(format!(
-            "cortex-signer-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp = std::env::temp_dir().join(format!("cortex-signer-test-{}", uuid::Uuid::new_v4()));
         let path = tmp.join("cortex-worker.key");
         let s1 = PersistentCortexSigner::load_or_generate(&path).unwrap();
         assert!(path.exists());

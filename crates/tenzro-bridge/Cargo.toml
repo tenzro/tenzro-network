@@ -62,3 +62,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "bridge_benchmarks"
 harness = false
+
+[lints]
+workspace = true

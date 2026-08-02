@@ -22,6 +22,6 @@
 //!    layer that links the crypto; this layer only records the envelopes.
 
 pub use tenzro_types::access_policy::{
-    AccessPolicy, ConfidentialSeal, WrappedDataKey, DEFAULT_READ_ACTION, DEFAULT_WRITE_ACTION,
-    WRAP_ALG,
+    AccessPolicy, ConfidentialSeal, DEFAULT_READ_ACTION, DEFAULT_WRITE_ACTION, WRAP_ALG,
+    WrappedDataKey,
 };

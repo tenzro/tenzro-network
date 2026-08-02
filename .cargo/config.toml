@@ -17,6 +17,22 @@
 # On Linux x86_64, AVX2/AVX-512 are still auto-detected by the compiler.
 CMAKE_ARGS = "-DGGML_NATIVE=OFF"
 
+# Spawned-thread stack size, 32 MiB.
+#
+# Rust gives a spawned thread 2 MiB by default. libtest (and cargo-nextest) run
+# each test on a spawned thread, and the `tenzro-node` integration suites
+# construct a full `TenzroNode` — storage, RPC, auth engine, the whole subsystem
+# graph — which does not fit. Those tests abort with
+# `fatal runtime error: stack overflow` rather than failing an assertion, so the
+# symptom looks like a crash rather than a test failure.
+#
+# This is a harness limit, not a product one: in production `TenzroNode::new` is
+# reached from `main()` under `#[tokio::main]` and runs on the main thread, which
+# gets 8 MiB. Setting this here makes the test environment match the one the code
+# actually runs in. cargo-nextest reads `[env]` from this file, so it applies to
+# every test process.
+RUST_MIN_STACK = "33554432"
+
 [target.x86_64-unknown-linux-gnu]
 # x86_64 Linux: enable AVX2 for modern CPUs (Haswell+ / Zen+)
 rustflags = ["-C", "target-cpu=x86-64-v3"]

@@ -82,8 +82,91 @@ Tenzro Labs) can mutate it via the admin token.
 | Per-developer API key      | `X-Tenzro-Api-Key`           | Calling scoped RPCs (e.g. Canton); also self-listing / self-revoke |
 | Operator admin token       | `X-Tenzro-Admin-Token`       | Minting / listing / revoking API keys on the operator's node       |
 | Canton network selector    | `X-Canton-Network`           | Naming the target Canton ledger on the Canton MCP server           |
+| Node service key           | `X-Tenzro-Service-Key`       | Reaching a gated node's services at all (see below)                |
 
 The admin token is held by that node's operator. Developers never see it.
+
+## Service keys vs API keys
+
+These answer different questions and compose rather than overlap.
+
+An **API key** answers *what may this caller do* — it carries scopes, a tier,
+a Canton binding, and a subject for audit. A **service key** answers *may this
+caller reach my node's services at all*. A node with a service key configured
+refuses every request on JSON-RPC, MCP, A2A and the web API that does not
+present one, before any API-key scope is consulted.
+
+The service-key gate is **off by default**. The network is permissionless and
+a node that configures nothing serves anyone; setting even one key is an
+operator's local decision about their own hardware.
+
+Two things it never covers:
+
+- **Consensus and P2P.** A gated node still proposes, votes and gossips. An
+  operator restricting who may call their inference API has said nothing about
+  whether they want to keep validating, and a staked node that quietly stopped
+  participating because of a service-surface setting would be withholding what
+  it is bonded to provide.
+- **`/health` and `/ready`** (and their `/verify/` aliases). Operators put
+  nodes behind load balancers and orchestrators that cannot present
+  credentials; a gate that makes a node look dead to its own supervisor causes
+  an outage rather than preventing one.
+
+The operator's own `X-Tenzro-Admin-Token` is accepted as a service key on a
+gated node, so gating your node does not lock you out of it. Setting an admin
+token alone does **not** turn the gate on.
+
+### Configuring the gate
+
+Three sources, all additive; a revocation beats all of them.
+
+```toml
+# node config — digests, never plaintext
+service_keys = ["3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b"]
+```
+
+```bash
+# environment — plaintext, hashed on the way in
+TENZRO_SERVICE_KEYS="key-one,key-two"
+```
+
+```bash
+# runtime — persisted, survives a restart
+tenzro admin service-key add --key "$(openssl rand -hex 32)"
+tenzro admin service-key status
+tenzro admin service-key revoke --key-digest <64-hex>
+```
+
+Revocation is recorded rather than the acceptance being deleted, so a config
+file or environment variable that still names the key cannot re-admit it at
+the next restart.
+
+Callers then present the key on every gated surface:
+
+```bash
+curl -s https://your-node.example:8545 \
+  -H 'content-type: application/json' \
+  -H "X-Tenzro-Service-Key: $TENZRO_SERVICE_KEY" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
+```
+
+A refused request returns HTTP 401 with a body naming the header:
+
+```json
+{ "error": "this node requires a service key",
+  "header": "x-tenzro-service-key",
+  "surface": "json_rpc" }
+```
+
+### Operator RPCs
+
+| Method | Effect |
+|---|---|
+| `tenzro_addServiceKey` | Accept a key; returns its digest only. Turning on the gate is reported as `gate_newly_enabled`. |
+| `tenzro_revokeServiceKey` | Refuse a key from now on, by digest. |
+| `tenzro_serviceKeyStatus` | Whether the gate is on and how many keys it accepts. Does not enumerate digests. |
+
+All three require `X-Tenzro-Admin-Token`.
 
 On the JSON-RPC surface the Canton network travels as a `canton_network`
 **param** rather than a header — see [Canton networks](#canton-networks).
@@ -115,6 +198,25 @@ where RPC-side revocation is refused outright.
 |----------|---------------------------------------------------------------------|
 | `canton` | `tenzro_listCantonDomains`, `tenzro_listDamlContracts`, `tenzro_submitDamlCommand`, and the Canton MCP tools |
 | `issuer` | `tenzro_registerStableAsset`, `tenzro_mintStableAsset`, `tenzro_redeemStableAsset`, and the issuer's policy reads/updates |
+| `database` | The whole `/v1/databases` surface and every `tenzro_*Database*` RPC except `tenzro_listDatabaseEngines`, plus the database MCP tools |
+| `storage` | The whole `/v1/files` surface, `tenzro_uploadFile` / `tenzro_listFiles` / `tenzro_getFile` / `tenzro_downloadFile` / `tenzro_deleteFile` / `tenzro_fileStorageUsage`, and the object-storage MCP tools |
+
+`database` carries a second meaning beyond reachability: the key's
+`subject` is one of the two ways a caller proves the DID a query is
+adjudicated against (the other being a signed DID envelope). A key with
+the scope but no `subject` therefore authenticates nobody and is refused.
+`tenzro_listDatabaseEngines` is deliberately outside the scope — it
+reports which engines a node can serve, and gating it would mean a caller
+cannot discover what a node offers without first being issued a key by
+its operator.
+
+`storage` differs from every other scope in the table in one way worth
+stating plainly: the others gate a surface an operator *may* choose to
+monetise, and can reasonably run open. `storage` is not optional. The
+key's `subject` is recorded as the file's owner, so a request without one
+has no owner to record — which means `/v1/files` has no unauthenticated
+path at all, **including for reads**. A key with the scope but no
+`subject` is refused for the same reason.
 
 Mints under the `issuer` scope are still hard-bounded by the
 SecureMint reserve floor regardless of the key — the scope authorises

@@ -21,10 +21,9 @@ use super::config::{Pcs, TenzroStarkConfig, Val, build_testnet_config};
 use p3_commit::Pcs as PcsTrait;
 
 /// Error returned when STARK verification fails.
-pub type Plonky3VerificationError = VerificationError<<Pcs as PcsTrait<
-    super::config::Challenge,
-    super::config::Challenger,
->>::Error>;
+pub type Plonky3VerificationError = VerificationError<
+    <Pcs as PcsTrait<super::config::Challenge, super::config::Challenger>>::Error,
+>;
 
 /// A STARK verifier bound to a specific AIR.
 pub struct Plonky3Verifier<A> {
@@ -55,8 +54,7 @@ impl<A> Plonky3Verifier<A> {
 
 impl<A> Plonky3Verifier<A>
 where
-    A: Air<SymbolicAirBuilder<Val>>
-        + for<'a> Air<VerifierConstraintFolder<'a, TenzroStarkConfig>>,
+    A: Air<SymbolicAirBuilder<Val>> + for<'a> Air<VerifierConstraintFolder<'a, TenzroStarkConfig>>,
 {
     /// Verify a STARK `proof` for `air` against the claimed `public_values`.
     pub fn verify_air(

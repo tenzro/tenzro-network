@@ -57,8 +57,7 @@ AiEA4J0lrHoMs+Xo5o/sX6O9QWxHRAvZUGOdRQ7cvqRXaqI=\n\
 -----END CERTIFICATE-----";
 
 /// SHA-256 fingerprint of the Intel SGX Root CA certificate
-pub const INTEL_SGX_ROOT_CA_SHA256_FINGERPRINT: &str =
-    "44:A0:19:6B:2B:99:F8:89:B8:E1:49:E9:5B:80:7A:35:0E:74:24:96:43:99:E8:85:A7:CB:B8:CC:FA:B6:74:D3";
+pub const INTEL_SGX_ROOT_CA_SHA256_FINGERPRINT: &str = "44:A0:19:6B:2B:99:F8:89:B8:E1:49:E9:5B:80:7A:35:0E:74:24:96:43:99:E8:85:A7:CB:B8:CC:FA:B6:74:D3";
 
 /// AMD SEV-SNP ARK (AMD Root Key) certificate for Milan processors (EPYC 7003, Zen 3)
 ///
@@ -271,8 +270,7 @@ IwLz3/Y=\n\
 -----END CERTIFICATE-----";
 
 /// SHA-256 fingerprint of the AWS Nitro Root CA certificate
-pub const AWS_NITRO_ROOT_CA_SHA256_FINGERPRINT: &str =
-    "64:1A:03:21:A3:E2:44:EF:E4:56:46:31:95:D6:06:31:7E:D7:CD:CC:3C:17:56:E0:98:93:F3:C6:8F:79:BB:5B";
+pub const AWS_NITRO_ROOT_CA_SHA256_FINGERPRINT: &str = "64:1A:03:21:A3:E2:44:EF:E4:56:46:31:95:D6:06:31:7E:D7:CD:CC:3C:17:56:E0:98:93:F3:C6:8F:79:BB:5B";
 
 /// NVIDIA Remote Attestation Service (NRAS) API endpoint
 ///
@@ -392,44 +390,76 @@ mod tests {
     #[test]
     fn test_intel_root_ca_pem_decodes() {
         let der = pem_to_der(INTEL_SGX_ROOT_CA_PEM);
-        assert!(der.is_ok(), "Intel SGX Root CA PEM should decode: {:?}", der.err());
+        assert!(
+            der.is_ok(),
+            "Intel SGX Root CA PEM should decode: {:?}",
+            der.err()
+        );
         let der = der.unwrap();
         // X.509 certificates start with ASN.1 SEQUENCE tag (0x30)
         assert_eq!(der[0], 0x30, "DER should start with SEQUENCE tag");
-        assert!(der.len() > 100, "Certificate should be substantial: {} bytes", der.len());
+        assert!(
+            der.len() > 100,
+            "Certificate should be substantial: {} bytes",
+            der.len()
+        );
     }
 
     #[test]
     fn test_amd_ark_milan_pem_decodes() {
         let der = pem_to_der(AMD_ARK_MILAN_PEM);
-        assert!(der.is_ok(), "AMD ARK Milan PEM should decode: {:?}", der.err());
+        assert!(
+            der.is_ok(),
+            "AMD ARK Milan PEM should decode: {:?}",
+            der.err()
+        );
         let der = der.unwrap();
         assert_eq!(der[0], 0x30);
-        assert!(der.len() > 500, "RSA-4096 cert should be large: {} bytes", der.len());
+        assert!(
+            der.len() > 500,
+            "RSA-4096 cert should be large: {} bytes",
+            der.len()
+        );
     }
 
     #[test]
     fn test_amd_ask_milan_pem_decodes() {
         let der = pem_to_der(AMD_ASK_MILAN_PEM);
-        assert!(der.is_ok(), "AMD ASK Milan PEM should decode: {:?}", der.err());
+        assert!(
+            der.is_ok(),
+            "AMD ASK Milan PEM should decode: {:?}",
+            der.err()
+        );
     }
 
     #[test]
     fn test_amd_ark_genoa_pem_decodes() {
         let der = pem_to_der(AMD_ARK_GENOA_PEM);
-        assert!(der.is_ok(), "AMD ARK Genoa PEM should decode: {:?}", der.err());
+        assert!(
+            der.is_ok(),
+            "AMD ARK Genoa PEM should decode: {:?}",
+            der.err()
+        );
     }
 
     #[test]
     fn test_amd_ask_genoa_pem_decodes() {
         let der = pem_to_der(AMD_ASK_GENOA_PEM);
-        assert!(der.is_ok(), "AMD ASK Genoa PEM should decode: {:?}", der.err());
+        assert!(
+            der.is_ok(),
+            "AMD ASK Genoa PEM should decode: {:?}",
+            der.err()
+        );
     }
 
     #[test]
     fn test_aws_nitro_root_ca_pem_decodes() {
         let der = pem_to_der(AWS_NITRO_ROOT_CA_PEM);
-        assert!(der.is_ok(), "AWS Nitro Root CA PEM should decode: {:?}", der.err());
+        assert!(
+            der.is_ok(),
+            "AWS Nitro Root CA PEM should decode: {:?}",
+            der.err()
+        );
         let der = der.unwrap();
         assert_eq!(der[0], 0x30);
     }
@@ -452,26 +482,32 @@ mod tests {
     #[test]
     fn test_aws_nitro_fingerprint() {
         let der = pem_to_der(AWS_NITRO_ROOT_CA_PEM).unwrap();
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let hash = Sha256::digest(&der);
-        let fingerprint = hash.iter()
+        let fingerprint = hash
+            .iter()
             .map(|b| format!("{:02X}", b))
             .collect::<Vec<String>>()
             .join(":");
-        assert_eq!(fingerprint, AWS_NITRO_ROOT_CA_SHA256_FINGERPRINT,
-            "AWS Nitro Root CA fingerprint mismatch");
+        assert_eq!(
+            fingerprint, AWS_NITRO_ROOT_CA_SHA256_FINGERPRINT,
+            "AWS Nitro Root CA fingerprint mismatch"
+        );
     }
 
     #[test]
     fn test_intel_sgx_fingerprint() {
         let der = pem_to_der(INTEL_SGX_ROOT_CA_PEM).unwrap();
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let hash = Sha256::digest(&der);
-        let fingerprint = hash.iter()
+        let fingerprint = hash
+            .iter()
             .map(|b| format!("{:02X}", b))
             .collect::<Vec<String>>()
             .join(":");
-        assert_eq!(fingerprint, INTEL_SGX_ROOT_CA_SHA256_FINGERPRINT,
-            "Intel SGX Root CA fingerprint mismatch");
+        assert_eq!(
+            fingerprint, INTEL_SGX_ROOT_CA_SHA256_FINGERPRINT,
+            "Intel SGX Root CA fingerprint mismatch"
+        );
     }
 }

@@ -8,11 +8,11 @@
 //!
 //! Run with: cargo bench -p tenzro-vm --bench passkey_benchmarks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use k256::ecdsa::{signature::Signer, Signature, SigningKey};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use k256::ecdsa::{Signature, SigningKey, signature::Signer};
 use tenzro_vm::aa_validators::IValidator;
 use tenzro_vm::erc7579::{
-    HardwareSignerConfig, HardwareSignerValidator, HARDWARE_VALIDATOR_LEDGER,
+    HARDWARE_VALIDATOR_LEDGER, HardwareSignerConfig, HardwareSignerValidator,
 };
 
 fn deterministic_signing_key(seed: u8) -> SigningKey {

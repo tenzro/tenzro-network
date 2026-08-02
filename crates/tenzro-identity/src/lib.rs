@@ -84,46 +84,44 @@ pub mod wallet_binding;
 // Re-export commonly used types
 pub use car::IdentityCarBundle;
 pub use credential::{
-    sign_credential_hybrid, CredentialProof, TenzroCredentialType, VerifiableCredential,
+    CredentialProof, TenzroCredentialType, VerifiableCredential, sign_credential_hybrid,
 };
 pub use delegation::{DelegationEntry, DelegationScope, TimeBound};
 pub use derivation::{
-    evm_address, stellar_strkey, xrpl_classic_address, ChainDerivation, DerivationError,
-    TargetChain, TargetCurve,
+    ChainDerivation, DerivationError, TargetChain, TargetCurve, evm_address, stellar_strkey,
+    xrpl_classic_address,
 };
 pub use did::{DidType, TenzroDid};
-pub use envelope::{
-    canonical_preimage, params_hash, verify_envelope, EnvelopeError, TenzroDidEnvelope,
-};
 pub use document::{DidDocument, DidService, VerificationMethod};
+pub use envelope::{
+    EnvelopeError, TenzroDidEnvelope, canonical_preimage, params_hash, verify_envelope,
+};
 pub use erc8004::{
-    agent_id_from_uint256_be, agent_id_to_uint256_be, AgentRecord, Erc8004Adapter,
-    Erc8004Addresses, Erc8004Transport, EthAddress, FeedbackEntry, MetadataEntry,
-    OnChainAgentRegistry, ValidationRequest, ValidationResult,
+    AgentRecord, Erc8004Adapter, Erc8004Addresses, Erc8004Transport, EthAddress, FeedbackEntry,
+    MetadataEntry, OnChainAgentRegistry, ValidationRequest, ValidationResult,
+    agent_id_from_uint256_be, agent_id_to_uint256_be,
 };
 pub use erc8004_daml::{
     DamlAgentRecord, DamlPackageIds, Erc8004DamlTransport, OnChainAgentDamlRegistry, PackageId,
     PartyId,
 };
-pub use erc8004_svm::{
-    Erc8004SvmTransport, OnChainAgentSvmRegistry, SolPubkey, SvmAgentRecord,
-};
+pub use erc8004_svm::{Erc8004SvmTransport, OnChainAgentSvmRegistry, SolPubkey, SvmAgentRecord};
 pub use error::{IdentityError, Result};
 pub use gossip::{
-    decode_identity_for_topic, encode_revocation_broadcast, IdentityGossipMessage, IDENTITY_TOPIC,
+    IDENTITY_TOPIC, IdentityGossipMessage, decode_identity_for_topic, encode_revocation_broadcast,
 };
 pub use identity::{
-    validate_username, IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry,
-    ServiceEndpoint, TenzroIdentity,
+    IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry, ServiceEndpoint,
+    TenzroIdentity, validate_username,
 };
 pub use iso20022::{
-    DecimalAmount, Iso20022Error, Ivms101Mapping, Pacs008Document, TransferDetails,
-    PACS008_NAMESPACE,
+    DecimalAmount, Iso20022Error, Ivms101Mapping, PACS008_NAMESPACE, Pacs008Document,
+    TransferDetails,
 };
 pub use kya::{
-    compute_kya_level, is_kya_service_type, AuthenticatorBinding, KyaLevel, KyaRecord,
-    SERVICE_TYPE_MASTERCARD_KYA, SERVICE_TYPE_STRIPE_SPT, SERVICE_TYPE_TEMPO_ACCOUNT,
-    SERVICE_TYPE_VISA_TAP,
+    AuthenticatorBinding, KyaLevel, KyaRecord, SERVICE_TYPE_MASTERCARD_KYA,
+    SERVICE_TYPE_STRIPE_SPT, SERVICE_TYPE_TEMPO_ACCOUNT, SERVICE_TYPE_VISA_TAP, compute_kya_level,
+    is_kya_service_type,
 };
 pub use registry::{
     DelegationPolicy, DidResolutionBackend, IdentityRegistry, RegistrationResult,

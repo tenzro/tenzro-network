@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 try:
     import torch
-    import torch.nn as nn
+    from torch import nn
 except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
@@ -39,7 +39,7 @@ class DistContext:
         return self.rank == 0
 
     @staticmethod
-    def detect() -> "DistContext":
+    def detect() -> DistContext:
         """Read torchrun environment variables and initialize the group.
 
         Returns a disabled context when RANK/WORLD_SIZE are absent or the
@@ -100,7 +100,7 @@ def shard_model_fsdp2(model: nn.Module, ctx: DistContext) -> nn.Module:
     return model
 
 
-def is_dtensor(t: "torch.Tensor") -> bool:
+def is_dtensor(t: torch.Tensor) -> bool:
     if torch is None:
         return False
     try:
@@ -147,7 +147,7 @@ def add_into(param: torch.Tensor, delta: torch.Tensor) -> None:
         param.add_(delta.to(device=param.device, dtype=param.dtype))
 
 
-def context_metadata(ctx: DistContext) -> Dict[str, Any]:
+def context_metadata(ctx: DistContext) -> dict[str, Any]:
     """Round-report metadata describing the process-group shape."""
     return {
         "dist_enabled": ctx.enabled,

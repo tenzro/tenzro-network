@@ -128,7 +128,7 @@ impl TokenId {
 
     /// Computes a TokenId from creator address and nonce
     pub fn compute(creator: &[u8], nonce: u64) -> Self {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"tenzro-token-id:");
         hasher.update(creator);

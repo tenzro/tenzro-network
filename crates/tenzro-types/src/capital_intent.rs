@@ -201,10 +201,18 @@ impl RegRegime {
 /// string for the signing payload.
 fn serde_objective_tag(o: &Objective) -> String {
     match o {
-        Objective::Acquire { asset_id, target_notional, max_unit_price } => {
+        Objective::Acquire {
+            asset_id,
+            target_notional,
+            max_unit_price,
+        } => {
             format!("acquire:{asset_id}:{target_notional}:{max_unit_price}")
         }
-        Objective::Exit { asset_id, quantity, min_unit_price } => {
+        Objective::Exit {
+            asset_id,
+            quantity,
+            min_unit_price,
+        } => {
             format!("exit:{asset_id}:{quantity}:{min_unit_price}")
         }
         Objective::Rebalance { targets } => {
@@ -214,10 +222,18 @@ fn serde_objective_tag(o: &Objective) -> String {
             }
             s
         }
-        Objective::Hedge { asset_id, notional, instrument } => {
+        Objective::Hedge {
+            asset_id,
+            notional,
+            instrument,
+        } => {
             format!("hedge:{asset_id}:{notional}:{instrument}")
         }
-        Objective::Yield { asset_id, amount, min_apy_bps } => {
+        Objective::Yield {
+            asset_id,
+            amount,
+            min_apy_bps,
+        } => {
             format!("yield:{asset_id}:{amount}:{min_apy_bps}")
         }
     }
@@ -358,8 +374,7 @@ pub struct CapitalIntentRecord {
 impl CapitalIntentRecord {
     /// True when every executed leg has settled (and at least one exists).
     pub fn all_legs_settled(&self) -> bool {
-        !self.legs.is_empty()
-            && self.legs.iter().all(|l| l.status == LegStatus::Settled)
+        !self.legs.is_empty() && self.legs.iter().all(|l| l.status == LegStatus::Settled)
     }
 
     /// True when the intent has reached a terminal status.

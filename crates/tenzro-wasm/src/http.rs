@@ -13,11 +13,11 @@
 
 use std::time::Duration;
 
-use wasmtime::component::{Component, Linker};
 use wasmtime::Store;
+use wasmtime::component::{Component, Linker};
+use wasmtime_wasi_http::p2::WasiHttpView;
 use wasmtime_wasi_http::p2::bindings::ProxyPre;
 use wasmtime_wasi_http::p2::body::{HyperIncomingBody, HyperOutgoingBody};
-use wasmtime_wasi_http::p2::WasiHttpView;
 
 /// Outward-facing request scheme handed to [`HttpComponent::serve`].
 /// Re-exported so callers need no direct `wasmtime-wasi-http` dependency.
@@ -96,8 +96,9 @@ impl HttpComponent {
         fuel_limit: u64,
         deadline: Duration,
     ) -> WasmResult<Self> {
-        let component = Component::new(engine.inner(), bytes)
-            .map_err(|e| WasmError::InvalidComponent(format!("wasmtime rejected component: {e:#}")))?;
+        let component = Component::new(engine.inner(), bytes).map_err(|e| {
+            WasmError::InvalidComponent(format!("wasmtime rejected component: {e:#}"))
+        })?;
 
         let mut linker: Linker<WasiState> = Linker::new(engine.inner());
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
@@ -209,9 +210,7 @@ impl HttpComponent {
     ) -> WasmResult<FunctionResponse> {
         use http_body_util::BodyExt as _;
 
-        let mut builder = hyper::Request::builder()
-            .method(method)
-            .uri(target);
+        let mut builder = hyper::Request::builder().method(method).uri(target);
         for (k, v) in headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
@@ -219,7 +218,11 @@ impl HttpComponent {
             .body(incoming_body_from_bytes(body))
             .map_err(|e| WasmError::HostContractViolation(format!("building request: {e}")))?;
 
-        let scheme = if scheme_https { Scheme::Https } else { Scheme::Http };
+        let scheme = if scheme_https {
+            Scheme::Https
+        } else {
+            Scheme::Http
+        };
         let response = self.serve(scheme, request).await?;
 
         let (parts, out_body) = response.into_parts();

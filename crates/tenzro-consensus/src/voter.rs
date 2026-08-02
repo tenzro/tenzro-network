@@ -6,7 +6,9 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_crypto::bls::{BlsPublicKey, BlsSignature};
-use tenzro_crypto::composite::{CompositePublicKey, CompositeSignature, HybridVerifier, StandardHybridVerifier};
+use tenzro_crypto::composite::{
+    CompositePublicKey, CompositeSignature, HybridVerifier, StandardHybridVerifier,
+};
 use tenzro_types::primitives::{Address, BlockHeight, Hash};
 
 /// Length-checked serde for the QC's 96-byte BLS aggregate. `serde` does not
@@ -569,9 +571,7 @@ impl VoteCollector {
         let validator = self
             .validator_set
             .get_by_address(&vote.voter)
-            .ok_or_else(|| {
-                ConsensusError::NonValidator(format!("Address: {}", vote.voter))
-            })?;
+            .ok_or_else(|| ConsensusError::NonValidator(format!("Address: {}", vote.voter)))?;
 
         if !validator.is_active() {
             return Err(ConsensusError::NonValidator(format!(
@@ -602,14 +602,12 @@ impl VoteCollector {
         // canonical signing payload — refuses downgrade attacks.
         let payload = vote.signing_payload();
         let verifier = StandardHybridVerifier::new(validator.composite_public_key());
-        verifier
-            .verify(&payload, &vote.signature)
-            .map_err(|e| {
-                ConsensusError::InvalidSignature(format!(
-                    "hybrid vote signature verification failed for {}: {}",
-                    vote.voter, e
-                ))
-            })?;
+        verifier.verify(&payload, &vote.signature).map_err(|e| {
+            ConsensusError::InvalidSignature(format!(
+                "hybrid vote signature verification failed for {}: {}",
+                vote.voter, e
+            ))
+        })?;
 
         // ROADMAP B.1: third leg — BLS12-381. The vote MUST carry a BLS
         // signature over the QC-level canonical payload (`bls_signing_payload`
@@ -770,7 +768,12 @@ impl VoteCollector {
     }
 
     /// Gets a quorum certificate for the given view and block
-    pub fn get_qc(&self, view: u64, block_hash: Hash, vote_type: VoteType) -> Option<QuorumCertificate> {
+    pub fn get_qc(
+        &self,
+        view: u64,
+        block_hash: Hash,
+        vote_type: VoteType,
+    ) -> Option<QuorumCertificate> {
         let key = VoteKey {
             view,
             block_hash,
@@ -792,7 +795,8 @@ impl VoteCollector {
     /// Clears votes for views below the given height (cleanup)
     pub fn cleanup_old_votes(&self, min_view: u64) {
         self.votes.retain(|key, _| key.view >= min_view);
-        self.quorum_certificates.retain(|key, _| key.view >= min_view);
+        self.quorum_certificates
+            .retain(|key, _| key.view >= min_view);
         self.equivocation_detector.cleanup_old_votes(min_view);
     }
 
@@ -812,11 +816,7 @@ impl VoteCollector {
     }
 
     /// Returns equivocation evidence for a specific validator and view
-    pub fn get_evidence_for(
-        &self,
-        validator: &Address,
-        view: u64,
-    ) -> Option<EquivocationEvidence> {
+    pub fn get_evidence_for(&self, validator: &Address, view: u64) -> Option<EquivocationEvidence> {
         self.equivocation_detector.get_evidence(validator, view)
     }
 
@@ -905,7 +905,8 @@ mod tests {
             create_test_validator(4000),
         ];
 
-        let validator_infos: Vec<ValidatorInfo> = validators.iter().map(|v| v.info.clone()).collect();
+        let validator_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|v| v.info.clone()).collect();
         let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
         let collector = VoteCollector::new(validator_set.clone());
 
@@ -913,23 +914,51 @@ mod tests {
         let height = BlockHeight::from(10);
 
         // Add first vote
-        let vote1 = create_signed_vote(view, height, validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
+        let vote1 = create_signed_vote(
+            view,
+            height,
+            validators[0].info.address,
+            VoteType::Prepare,
+            &validators[0].signer,
+            &validators[0].bls,
+        );
         let result = collector.add_vote(vote1).unwrap();
         assert!(result.is_none());
 
         // Add second vote
-        let vote2 = create_signed_vote(view, height, validators[1].info.address, VoteType::Prepare, &validators[1].signer, &validators[1].bls);
+        let vote2 = create_signed_vote(
+            view,
+            height,
+            validators[1].info.address,
+            VoteType::Prepare,
+            &validators[1].signer,
+            &validators[1].bls,
+        );
         let result = collector.add_vote(vote2).unwrap();
         assert!(result.is_none());
 
         // Third vote: cumulative stake 1000+2000+3000 = 6000 of 10000 = 60%,
         // still below the > 2/3 (6667) stake-weighted quorum — no QC yet.
-        let vote3 = create_signed_vote(view, height, validators[2].info.address, VoteType::Prepare, &validators[2].signer, &validators[2].bls);
+        let vote3 = create_signed_vote(
+            view,
+            height,
+            validators[2].info.address,
+            VoteType::Prepare,
+            &validators[2].signer,
+            &validators[2].bls,
+        );
         let result = collector.add_vote(vote3).unwrap();
         assert!(result.is_none());
 
         // Fourth vote: cumulative stake 10000 = 100% ≥ quorum → QC forms.
-        let vote4 = create_signed_vote(view, height, validators[3].info.address, VoteType::Prepare, &validators[3].signer, &validators[3].bls);
+        let vote4 = create_signed_vote(
+            view,
+            height,
+            validators[3].info.address,
+            VoteType::Prepare,
+            &validators[3].signer,
+            &validators[3].bls,
+        );
         let result = collector.add_vote(vote4).unwrap();
         assert!(result.is_some());
 
@@ -942,15 +971,25 @@ mod tests {
     fn test_duplicate_vote() {
         // Use 4 validators so quorum threshold is 3 (f=1, 2f+1=3)
         // This means first vote doesn't immediately form quorum
-        let validators = [create_test_validator(1000),
+        let validators = [
             create_test_validator(1000),
             create_test_validator(1000),
-            create_test_validator(1000)];
-        let validator_infos: Vec<ValidatorInfo> = validators.iter().map(|v| v.info.clone()).collect();
+            create_test_validator(1000),
+            create_test_validator(1000),
+        ];
+        let validator_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|v| v.info.clone()).collect();
         let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
         let collector = VoteCollector::new(validator_set);
 
-        let vote1 = create_signed_vote(1, BlockHeight::from(1), validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
+        let vote1 = create_signed_vote(
+            1,
+            BlockHeight::from(1),
+            validators[0].info.address,
+            VoteType::Prepare,
+            &validators[0].signer,
+            &validators[0].bls,
+        );
         collector.add_vote(vote1.clone()).unwrap();
 
         // Try to add same vote again - should error due to duplicate voter
@@ -961,7 +1000,8 @@ mod tests {
     #[test]
     fn test_non_validator_vote() {
         let validators = [create_test_validator(1000)];
-        let validator_infos: Vec<ValidatorInfo> = validators.iter().map(|v| v.info.clone()).collect();
+        let validator_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|v| v.info.clone()).collect();
         let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
         let collector = VoteCollector::new(validator_set);
 
@@ -975,7 +1015,14 @@ mod tests {
         let classical = Ed25519SignerImpl::new(keypair).unwrap();
         let non_val_signer = InMemoryHybridSigner::new(Box::new(classical), pq);
         let non_val_bls = BlsKeyPair::generate().unwrap();
-        let vote = create_signed_vote(1, BlockHeight::from(1), address, VoteType::Prepare, &non_val_signer, &non_val_bls);
+        let vote = create_signed_vote(
+            1,
+            BlockHeight::from(1),
+            address,
+            VoteType::Prepare,
+            &non_val_signer,
+            &non_val_bls,
+        );
 
         let result = collector.add_vote(vote);
         assert!(result.is_err());
@@ -984,7 +1031,8 @@ mod tests {
     #[test]
     fn test_invalid_signature_vote() {
         let validators = [create_test_validator(1000)];
-        let validator_infos: Vec<ValidatorInfo> = validators.iter().map(|v| v.info.clone()).collect();
+        let validator_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|v| v.info.clone()).collect();
         let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
         let collector = VoteCollector::new(validator_set);
 
@@ -1020,7 +1068,8 @@ mod tests {
             create_test_validator(1000),
         ];
 
-        let validator_infos: Vec<ValidatorInfo> = validators.iter().map(|v| v.info.clone()).collect();
+        let validator_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|v| v.info.clone()).collect();
         let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
         let collector = VoteCollector::new(validator_set);
 
@@ -1028,7 +1077,14 @@ mod tests {
         let height = BlockHeight::from(10);
 
         // Validator 0 votes for block A (Hash::default())
-        let vote_a = create_signed_vote(view, height, validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
+        let vote_a = create_signed_vote(
+            view,
+            height,
+            validators[0].info.address,
+            VoteType::Prepare,
+            &validators[0].signer,
+            &validators[0].bls,
+        );
         let result = collector.add_vote(vote_a);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none()); // No QC yet
@@ -1082,13 +1138,21 @@ mod tests {
             create_test_validator(1000),
         ];
 
-        let validator_infos: Vec<ValidatorInfo> = validators.iter().map(|v| v.info.clone()).collect();
+        let validator_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|v| v.info.clone()).collect();
         let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
         let collector = VoteCollector::new(validator_set);
 
         // Add votes for views 1, 2, 3
         for view in 1..=3u64 {
-            let vote = create_signed_vote(view, BlockHeight::from(10), validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
+            let vote = create_signed_vote(
+                view,
+                BlockHeight::from(10),
+                validators[0].info.address,
+                VoteType::Prepare,
+                &validators[0].signer,
+                &validators[0].bls,
+            );
             let _ = collector.add_vote(vote);
         }
 
@@ -1096,9 +1160,18 @@ mod tests {
         collector.cleanup_old_votes(2);
 
         // View 1 votes should be gone; views 2 and 3 should remain
-        assert_eq!(collector.vote_count(1, Hash::default(), VoteType::Prepare), 0);
-        assert_eq!(collector.vote_count(2, Hash::default(), VoteType::Prepare), 1);
-        assert_eq!(collector.vote_count(3, Hash::default(), VoteType::Prepare), 1);
+        assert_eq!(
+            collector.vote_count(1, Hash::default(), VoteType::Prepare),
+            0
+        );
+        assert_eq!(
+            collector.vote_count(2, Hash::default(), VoteType::Prepare),
+            1
+        );
+        assert_eq!(
+            collector.vote_count(3, Hash::default(), VoteType::Prepare),
+            1
+        );
     }
 
     /// Drives a 4-validator collector to quorum and returns
@@ -1226,8 +1299,7 @@ mod tests {
         match err {
             ConsensusError::InvalidSignature(msg) => {
                 assert!(
-                    msg.contains("signer_bitmap empty")
-                        || msg.contains("below quorum threshold"),
+                    msg.contains("signer_bitmap empty") || msg.contains("below quorum threshold"),
                     "expected empty/sub-quorum error, got: {msg}"
                 );
             }

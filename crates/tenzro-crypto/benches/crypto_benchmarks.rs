@@ -2,11 +2,11 @@
 //!
 //! Run with: cargo bench -p tenzro-crypto
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use tenzro_crypto::encryption::{self, SymmetricKey};
+use tenzro_crypto::hash;
 use tenzro_crypto::keys::{KeyPair, KeyType};
 use tenzro_crypto::signatures::{self, Ed25519SignerImpl, Secp256k1SignerImpl, Signer};
-use tenzro_crypto::hash;
-use tenzro_crypto::encryption::{self, SymmetricKey};
 
 fn bench_key_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("key_generation");

@@ -150,7 +150,10 @@ impl WorkflowVerifyCmd {
             "workflow_id": self.workflow_id, "step_idx": self.step_idx,
         });
         if let Some(s) = self.outcome_score {
-            params.as_object_mut().unwrap().insert("outcome_score".into(), serde_json::json!(s));
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert("outcome_score".into(), serde_json::json!(s));
         }
         let result: serde_json::Value = RpcClient::new(&self.rpc)
             .call("tenzro_workflowStepVerify", params)

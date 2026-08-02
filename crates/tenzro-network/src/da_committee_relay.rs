@@ -35,8 +35,8 @@
 //!   * Outbound request timeout: 30 s (store + fetch both cross the wire once).
 
 use libp2p::{
-    request_response::{self, ProtocolSupport},
     StreamProtocol,
+    request_response::{self, ProtocolSupport},
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -194,16 +194,13 @@ pub type DaCommitteeBehaviour =
 pub fn new_behaviour() -> DaCommitteeBehaviour {
     let protocol = StreamProtocol::new(DA_COMMITTEE_PROTOCOL);
     let cfg = request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT);
-    request_response::cbor::Behaviour::new(
-        std::iter::once((protocol, ProtocolSupport::Full)),
-        cfg,
-    )
+    request_response::cbor::Behaviour::new(std::iter::once((protocol, ProtocolSupport::Full)), cfg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_crypto::{keys::KeyPair, signatures::Signer, KeyType};
+    use tenzro_crypto::{KeyType, keys::KeyPair, signatures::Signer};
 
     fn sample_attestation() -> WireMemberAttestation {
         let kp = KeyPair::generate(KeyType::Ed25519).unwrap();

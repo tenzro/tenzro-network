@@ -201,15 +201,10 @@ impl GovernanceSetFeeOracle {
     }
 
     pub fn set_rate(&self, row: GovernanceFeeRow) {
-        self.rows
-            .insert((row.adapter, row.dest_chain.clone()), row);
+        self.rows.insert((row.adapter, row.dest_chain.clone()), row);
     }
 
-    pub fn get_rate(
-        &self,
-        adapter: BridgeAdapterId,
-        dest_chain: &str,
-    ) -> Option<GovernanceFeeRow> {
+    pub fn get_rate(&self, adapter: BridgeAdapterId, dest_chain: &str) -> Option<GovernanceFeeRow> {
         self.rows
             .get(&(adapter, dest_chain.to_string()))
             .map(|r| r.value().clone())
@@ -224,21 +219,19 @@ impl BridgeFeeOracle for GovernanceSetFeeOracle {
         dest_chain: &str,
         native_fee_smallest_unit: u128,
     ) -> Result<BridgeFeeQuote> {
-        let row = self
-            .get_rate(adapter, dest_chain)
-            .ok_or_else(|| {
-                BridgeError::AdapterError(format!(
-                    "no governance-set TNZO rate for adapter={} dest_chain={}",
-                    adapter.as_str(),
-                    dest_chain
-                ))
-            })?;
+        let row = self.get_rate(adapter, dest_chain).ok_or_else(|| {
+            BridgeError::AdapterError(format!(
+                "no governance-set TNZO rate for adapter={} dest_chain={}",
+                adapter.as_str(),
+                dest_chain
+            ))
+        })?;
 
         // tnzo = native_fee * rate_q18 / 1e18, with markup applied.
         // Use u128 saturating arithmetic to avoid overflow on extreme rates.
         let raw_tnzo = mul_q18(native_fee_smallest_unit, row.rate_q18)?;
-        let with_markup = raw_tnzo
-            .saturating_add(raw_tnzo.saturating_mul(row.markup_bps as u128) / 10_000);
+        let with_markup =
+            raw_tnzo.saturating_add(raw_tnzo.saturating_mul(row.markup_bps as u128) / 10_000);
 
         let now_ms = current_ms();
         let valid_until_ms = now_ms.saturating_add(row.valid_window_ms);
@@ -367,9 +360,8 @@ impl BridgeFeeOracle for ChainlinkFeedFeeOracle {
                     Ok(rate_q18) => {
                         // tnzo = native_fee * rate_q18 / 1e18, apply markup.
                         let raw = mul_q18(native_fee_smallest_unit, rate_q18)?;
-                        let with_markup = raw.saturating_add(
-                            raw.saturating_mul(self.markup_bps as u128) / 10_000,
-                        );
+                        let with_markup = raw
+                            .saturating_add(raw.saturating_mul(self.markup_bps as u128) / 10_000);
                         let now_ms = current_ms();
                         let valid_until_ms = now_ms.saturating_add(self.valid_window_ms);
                         let quote_id_hex = compute_quote_id(
@@ -474,7 +466,7 @@ mod tests {
             // express full Q18; e.g. 1 ETH wei = 0.0001 TNZO wei would be
             // ~1e14 in Q18.)
             rate_q18: 10 * 1_000_000_000_000_000_000u128, // 10.0 in Q18
-            markup_bps: 100, // 1%
+            markup_bps: 100,                              // 1%
             valid_window_ms: 60_000,
             updated_at_ms: 0,
         });
@@ -516,10 +508,16 @@ mod tests {
             valid_window_ms: 60_000,
             updated_at_ms: 0,
         });
-        let q1 = o.quote(BridgeAdapterId::Hyperlane, "eip155:1", 100).await.unwrap();
+        let q1 = o
+            .quote(BridgeAdapterId::Hyperlane, "eip155:1", 100)
+            .await
+            .unwrap();
         // Sleep so issued_at_ms differs.
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        let q2 = o.quote(BridgeAdapterId::Hyperlane, "eip155:1", 200).await.unwrap();
+        let q2 = o
+            .quote(BridgeAdapterId::Hyperlane, "eip155:1", 200)
+            .await
+            .unwrap();
         assert_ne!(q1.quote_id_hex, q2.quote_id_hex);
     }
 
@@ -546,7 +544,16 @@ mod tests {
 
     #[test]
     fn bridge_adapter_id_round_trip() {
-        for s in ["layerzero", "ccip", "wormhole", "debridge", "hyperlane", "axelar", "lifi", "canton"] {
+        for s in [
+            "layerzero",
+            "ccip",
+            "wormhole",
+            "debridge",
+            "hyperlane",
+            "axelar",
+            "lifi",
+            "canton",
+        ] {
             let id = BridgeAdapterId::from_str(s).unwrap();
             assert_eq!(id.as_str(), s);
         }
@@ -558,7 +565,11 @@ mod tests {
         let r = mul_q18(1, 1000 * 1_000_000_000_000_000_000u128).unwrap();
         assert_eq!(r, 1000);
         // Large native fee: 1 ETH (1e18 wei) at the same rate.
-        let r = mul_q18(1_000_000_000_000_000_000u128, 1000 * 1_000_000_000_000_000_000u128).unwrap();
+        let r = mul_q18(
+            1_000_000_000_000_000_000u128,
+            1000 * 1_000_000_000_000_000_000u128,
+        )
+        .unwrap();
         assert_eq!(r, 1000 * 1_000_000_000_000_000_000u128);
     }
 }

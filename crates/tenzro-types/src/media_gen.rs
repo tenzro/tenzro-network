@@ -186,12 +186,16 @@ impl MediaGenStatus {
     /// transitions; a claim may only happen from `Pending`; a receipt may
     /// only complete a job a worker already holds.
     pub fn can_transition_to(&self, next: Self) -> bool {
-        match (self, next) {
-            (Self::Pending, Self::Claimed | Self::Cancelled | Self::Failed) => true,
-            (Self::Claimed, Self::Running | Self::Completed | Self::Failed) => true,
-            (Self::Running, Self::Completed | Self::Failed) => true,
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (
+                Self::Pending,
+                Self::Claimed | Self::Cancelled | Self::Failed
+            ) | (
+                Self::Claimed,
+                Self::Running | Self::Completed | Self::Failed
+            ) | (Self::Running, Self::Completed | Self::Failed)
+        )
     }
 }
 
@@ -626,7 +630,10 @@ mod tests {
     #[test]
     fn kind_roundtrip() {
         for s in ["text2image", "t2i", "TEXT-TO-IMAGE"] {
-            assert_eq!(MediaGenKind::from_str_lossy(s), Some(MediaGenKind::Text2Image));
+            assert_eq!(
+                MediaGenKind::from_str_lossy(s),
+                Some(MediaGenKind::Text2Image)
+            );
         }
         assert_eq!(MediaGenKind::from_str_lossy("garbage"), None);
     }

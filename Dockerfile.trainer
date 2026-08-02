@@ -62,6 +62,13 @@ RUN chown -R tenzro:tenzro /opt/tenzro-trainer-venv
 # resolve_python in trainer_daemon.rs). Operators still gate the daemon with
 # `[training] enabled = true` in the node config.
 ENV TENZRO_TRAINING_VENV_PATH=/opt/tenzro-trainer-venv
+# Same root as the node image. The node exports these to the trainer child
+# process anyway; setting them here means a trainer run directly in this
+# image agrees with one the node launched, instead of falling back to
+# ~/.cache/huggingface inside the ephemeral layer.
+ENV TENZRO_HOME=/data/tenzro
+ENV HF_HOME=/data/tenzro/hf
+ENV TENZRO_TRAINER_CACHE=/data/tenzro/trainer-cache
 
 USER tenzro
 WORKDIR /home/tenzro

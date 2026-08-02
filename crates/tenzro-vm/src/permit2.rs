@@ -30,10 +30,7 @@ pub const PERMIT2_DOMAIN_NAME: &str = "Permit2";
 
 /// `keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)")`.
 pub fn eip712_domain_typehash() -> [u8; 32] {
-    Keccak256::digest(
-        b"EIP712Domain(string name,uint256 chainId,address verifyingContract)",
-    )
-    .into()
+    Keccak256::digest(b"EIP712Domain(string name,uint256 chainId,address verifyingContract)").into()
 }
 
 /// `keccak256("TokenPermissions(address token,uint256 amount)")`.
@@ -234,8 +231,8 @@ pub fn recover_signer(digest: &[u8; 32], signature: &[u8]) -> Result<[u8; 20], P
     }
     let mut sig_bytes = [0u8; 64];
     sig_bytes.copy_from_slice(&signature[..64]);
-    let signature_obj = Signature::from_slice(&sig_bytes)
-        .map_err(|_| Permit2Error::InvalidSignature)?;
+    let signature_obj =
+        Signature::from_slice(&sig_bytes).map_err(|_| Permit2Error::InvalidSignature)?;
     let v = signature[64];
     let recid_byte = if v >= 27 { v - 27 } else { v };
     let recid = RecoveryId::from_byte(recid_byte).ok_or(Permit2Error::InvalidSignature)?;
@@ -328,7 +325,8 @@ impl Permit2NonceBitmap {
             owner.copy_from_slice(&key[prefix_len..prefix_len + owner_len]);
             let mut word_pos = [0u8; 31];
             word_pos.copy_from_slice(
-                &key[prefix_len + owner_len + sep_len..prefix_len + owner_len + sep_len + word_pos_len],
+                &key[prefix_len + owner_len + sep_len
+                    ..prefix_len + owner_len + sep_len + word_pos_len],
             );
             let mut word = [0u8; 32];
             word.copy_from_slice(&value);
@@ -349,11 +347,7 @@ impl Permit2NonceBitmap {
     /// Check whether `nonce` has been used by `owner` and, if not, mark
     /// it used atomically. Returns `Ok(())` if the nonce was freshly
     /// reserved or `Err(NonceAlreadyUsed)` if it was already set.
-    pub fn check_and_use(
-        &self,
-        owner: &[u8; 20],
-        nonce: &[u8; 32],
-    ) -> Result<(), Permit2Error> {
+    pub fn check_and_use(&self, owner: &[u8; 20], nonce: &[u8; 32]) -> Result<(), Permit2Error> {
         let mut word_pos = [0u8; 31];
         word_pos.copy_from_slice(&nonce[..31]);
         let bit_pos = nonce[31];

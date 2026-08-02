@@ -6,11 +6,10 @@ Run: python -m pytest test_tenzro_rpc.py -v
   or: python -m unittest test_tenzro_rpc -v
 """
 
-import json
 import os
 import sys
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 # Ensure the module under test is importable
 sys.path.insert(0, os.path.dirname(__file__))
@@ -1204,7 +1203,9 @@ class TestEventsWebhooks(unittest.TestCase):
             "url": "https://example.com/hook",
             "status": "active",
         })
-        result = tenzro_rpc.register_webhook("https://example.com/hook")
+        result = tenzro_rpc.register_webhook(
+            "https://example.com/hook", "did:tenzro:human:owner", "de-adbe-ef"
+        )
         self.assertEqual(result["webhook_id"], "wh-1")
         self.assertEqual(result["status"], "active")
 
@@ -1213,7 +1214,7 @@ class TestEventsWebhooks(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response([
             {"webhook_id": "wh-1", "url": "https://example.com/hook"},
         ])
-        result = tenzro_rpc.list_webhooks()
+        result = tenzro_rpc.list_webhooks("did:tenzro:human:owner", "de-adbe-ef")
         self.assertEqual(len(result), 1)
 
     @patch("tenzro_rpc.requests.post")
@@ -1222,7 +1223,7 @@ class TestEventsWebhooks(unittest.TestCase):
             "webhook_id": "wh-1",
             "status": "deleted",
         })
-        result = tenzro_rpc.delete_webhook("wh-1")
+        result = tenzro_rpc.delete_webhook("wh-1", "de-adbe-ef")
         self.assertEqual(result["status"], "deleted")
 
 
@@ -1300,8 +1301,9 @@ class TestCLIDispatch(unittest.TestCase):
             # SLA Fault Detector
             "sla_issue_probe", "sla_list_outstanding_probes", "sla_get_params",
             # Snapshot (State Sync)
+            # Read half only: the node does not expose the inbound half of
+            # state-sync over RPC.
             "list_snapshots", "get_snapshot_manifest", "get_snapshot_chunk",
-            "offer_snapshot", "apply_snapshot_chunk",
             # EIP-7702 (Set EOA Account Code)
             "eip7702_signing_hash", "eip7702_build_designator",
             "eip7702_parse_designator", "eip7702_protocol_info",
@@ -1358,7 +1360,7 @@ class TestAp2(unittest.TestCase):
         result = tenzro_rpc.ap2_protocol_info()
         self.assertEqual(result["mandate_kinds"], ["checkout", "payment"])
         # Verify JSON-RPC method name
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_ap2ProtocolInfo")
 
     @patch("tenzro_rpc.requests.post")
@@ -1380,7 +1382,7 @@ class TestAp2(unittest.TestCase):
         result = tenzro_rpc.ap2_verify_mandate(vdc)
         self.assertTrue(result["valid"])
         self.assertEqual(result["kind"], "checkout")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_ap2VerifyMandate"
         )
@@ -1398,7 +1400,7 @@ class TestAp2(unittest.TestCase):
         payment = {"kind": "payment"}
         result = tenzro_rpc.ap2_validate_mandate_pair(checkout, payment)
         self.assertTrue(result["valid"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_ap2ValidateMandatePair"
         )
@@ -1425,7 +1427,7 @@ class TestAp2(unittest.TestCase):
         )
         self.assertTrue(result["valid"])
         self.assertTrue(result["delegation_enforced"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_ap2ValidateMandatePair"
         )
@@ -1447,7 +1449,7 @@ class TestAp2(unittest.TestCase):
             "TNZO",
         )
         self.assertEqual(result["session_id"], "sess-123")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["max_amount"], 1000)
         self.assertEqual(params["asset"], "TNZO")
@@ -1504,7 +1506,7 @@ class TestErc8004(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xabcdef"})
         result = tenzro_rpc.erc8004_encode_register()
         self.assertTrue(result["calldata"].startswith("0x"))
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeRegister"
         )
@@ -1515,7 +1517,7 @@ class TestErc8004(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xabcdef"})
         result = tenzro_rpc.erc8004_encode_register_with_uri("ipfs://Qm...")
         self.assertTrue(result["calldata"].startswith("0x"))
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeRegisterWithUri"
         )
@@ -1529,7 +1531,7 @@ class TestErc8004(unittest.TestCase):
             "ipfs://Qm...", metadata,
         )
         self.assertTrue(result["calldata"].startswith("0x"))
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeRegisterWithMetadata"
@@ -1551,7 +1553,7 @@ class TestErc8004(unittest.TestCase):
         })
         result = tenzro_rpc.erc8004_decode_get_agent("0xreturndata")
         self.assertEqual(result["agent_address"], "0xowner")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["params"]["return_data"], "0xreturndata"
         )
@@ -1563,7 +1565,7 @@ class TestErc8004(unittest.TestCase):
             "0xagent", "ipfs://new"
         )
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeSetAgentURI"
         )
@@ -1575,7 +1577,7 @@ class TestErc8004(unittest.TestCase):
             "0xagent", "0xnewwallet", 9999, "0xsig"
         )
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["new_wallet"], "0xnewwallet")
         self.assertEqual(params["deadline"], 9999)
@@ -1588,7 +1590,7 @@ class TestErc8004(unittest.TestCase):
             "0xagent", "endpoint", "0xc0ffee"
         )
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["metadata_key"], "endpoint")
         self.assertEqual(params["metadata_value"], "0xc0ffee")
@@ -1612,7 +1614,7 @@ class TestErc8004(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xguri"})
         result = tenzro_rpc.erc8004_encode_get_agent_uri("0xagent")
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeGetAgentURI"
         )
@@ -1622,7 +1624,7 @@ class TestErc8004(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xgwallet"})
         result = tenzro_rpc.erc8004_encode_get_agent_wallet("0xagent")
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeGetAgentWallet"
         )
@@ -1636,7 +1638,7 @@ class TestErc8004(unittest.TestCase):
             "0xsubject", 75, "ipfs://feedback"
         )
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["subject_agent_id"], "0xsubject")
         self.assertEqual(params["rating"], 75)
@@ -1647,7 +1649,7 @@ class TestErc8004(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xgf"})
         result = tenzro_rpc.erc8004_encode_get_feedback("0xsubject", 3)
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["index"], 3)
 
@@ -1662,7 +1664,7 @@ class TestErc8004(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xrev"})
         result = tenzro_rpc.erc8004_encode_revoke_feedback("0xagent", "0xfid")
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeRevokeFeedback"
         )
@@ -1674,7 +1676,7 @@ class TestErc8004(unittest.TestCase):
             "0xagent", "0xfid", "ipfs://resp"
         )
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["response_uri"], "ipfs://resp")
 
@@ -1703,7 +1705,7 @@ class TestErc8004(unittest.TestCase):
             "0xvalidator", "0xagentid", "ipfs://req", "0xrequesthash"
         )
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["validator_address"], "0xvalidator")
         self.assertEqual(params["agent_id"], "0xagentid")
@@ -1716,7 +1718,7 @@ class TestErc8004(unittest.TestCase):
             "0xrequesthash", 95, "ipfs://resp", "0xresponsehash", "valid"
         )
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(params["response"], 95)
         self.assertEqual(params["response_hash"], "0xresponsehash")
@@ -1727,7 +1729,7 @@ class TestErc8004(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xgv"})
         result = tenzro_rpc.erc8004_encode_get_validation("0xrequesthash")
         self.assertIn("calldata", result)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004EncodeGetValidation"
         )
@@ -1744,7 +1746,7 @@ class TestWormhole(unittest.TestCase):
         })
         result = tenzro_rpc.wormhole_chain_id("ethereum")
         self.assertEqual(result["wormhole_chain_id"], 2)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_wormholeChainId"
         )
@@ -1772,7 +1774,7 @@ class TestWormhole(unittest.TestCase):
             1000000000000000000, "0xsender", "0xrecipient",
         )
         self.assertEqual(result["status"], "submitted")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_wormholeBridge"
         )
@@ -1791,7 +1793,7 @@ class TestCct(unittest.TestCase):
         })
         result = tenzro_rpc.cct_list_pools()
         self.assertEqual(len(result["pools"]), 2)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_cctListPools"
         )
@@ -1819,7 +1821,7 @@ class TestX402Bazaar(unittest.TestCase):
         })
         result = tenzro_rpc.x402_protocol_info()
         self.assertIn("tenzro-hybrid", result["schemes"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_x402ProtocolInfo")
 
     @patch("tenzro_rpc.requests.post")
@@ -1832,7 +1834,7 @@ class TestX402Bazaar(unittest.TestCase):
             "1000000000000000000",
         )
         self.assertEqual(result["listingId"], "lst_abc")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_x402RegisterResource")
         self.assertEqual(params["sellerDid"], "did:tenzro:machine:seller")
@@ -1851,7 +1853,7 @@ class TestX402Bazaar(unittest.TestCase):
         })
         result = tenzro_rpc.x402_discover_resources(scheme="tenzro-hybrid")
         self.assertEqual(result["count"], 1)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_x402DiscoverResources")
         self.assertEqual(kwargs["json"]["params"]["scheme"], "tenzro-hybrid")
 
@@ -1862,7 +1864,7 @@ class TestX402Bazaar(unittest.TestCase):
             "lst_abc", "did:tenzro:machine:seller"
         )
         self.assertTrue(result["removed"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_x402DeregisterResource")
         self.assertEqual(params["listingId"], "lst_abc")
@@ -1878,7 +1880,7 @@ class TestX402Bazaar(unittest.TestCase):
         requirement = {"scheme": "tenzro-hybrid", "payTo": "0xpayto"}
         result = tenzro_rpc.x402_verify_offer(requirement)
         self.assertTrue(result["valid"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_x402VerifyOffer")
         self.assertEqual(kwargs["json"]["params"]["requirement"], requirement)
 
@@ -1888,7 +1890,8 @@ class TestX402Bazaar(unittest.TestCase):
         result = tenzro_rpc.x402_payment_id(
             "did:tenzro:machine:payer", offer_commitment="0xcommit"
         )
-        args, kwargs = mock_post.call_args
+        self.assertEqual(result, "pay_deadbeef")
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_x402PaymentId")
         self.assertEqual(params["payerDid"], "did:tenzro:machine:payer")
@@ -1909,7 +1912,7 @@ class TestManagedDatabases(unittest.TestCase):
         })
         result = tenzro_rpc.list_database_engines()
         self.assertEqual(len(result["engines"]), 5)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_listDatabaseEngines")
 
     @patch("tenzro_rpc.requests.post")
@@ -1923,7 +1926,7 @@ class TestManagedDatabases(unittest.TestCase):
             "vecmem", "qdrant", owner_did="did:tenzro:human:owner",
         )
         self.assertEqual(result["database_id"], "vecmem")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_createDatabase")
         self.assertEqual(params["engine_id"], "qdrant")
@@ -1939,7 +1942,7 @@ class TestManagedDatabases(unittest.TestCase):
             "secrets", "postgres", owner_did="did:tenzro:human:owner",
             confidential=True,
         )
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertTrue(kwargs["json"]["params"]["confidential"])
 
     @patch("tenzro_rpc.requests.post")
@@ -1947,7 +1950,7 @@ class TestManagedDatabases(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"database_id": "vecmem"})
         result = tenzro_rpc.get_database("vecmem")
         self.assertEqual(result["database_id"], "vecmem")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_getDatabase")
         self.assertEqual(kwargs["json"]["params"]["database_id"], "vecmem")
 
@@ -1955,7 +1958,7 @@ class TestManagedDatabases(unittest.TestCase):
     def test_list_databases(self, mock_post):
         mock_post.return_value = _mock_rpc_response({"databases": []})
         tenzro_rpc.list_databases()
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_listDatabases")
 
     @patch("tenzro_rpc.requests.post")
@@ -1963,7 +1966,7 @@ class TestManagedDatabases(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"partitions": [{"index": 0}]})
         result = tenzro_rpc.list_database_partitions("vecmem")
         self.assertEqual(len(result["partitions"]), 1)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_listDatabasePartitions"
         )
@@ -1973,7 +1976,7 @@ class TestManagedDatabases(unittest.TestCase):
     def test_get_partition(self, mock_post):
         mock_post.return_value = _mock_rpc_response({"index": 0, "holders": []})
         tenzro_rpc.get_database_partition("vecmem", 0)
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_getDatabasePartition")
         self.assertEqual(params["partition_index"], 0)
@@ -1985,7 +1988,7 @@ class TestManagedDatabases(unittest.TestCase):
             "vecmem", "did:tenzro:human:owner",
         )
         self.assertEqual(result["token"], "conn_abc")
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_issueDatabaseConnection"
@@ -2004,7 +2007,7 @@ class TestManagedDatabases(unittest.TestCase):
             "vecmem", "did:tenzro:human:owner", body,
         )
         self.assertTrue(result["served_here"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_databaseQuery")
         self.assertEqual(params["body"], body)
@@ -2020,7 +2023,7 @@ class TestManagedDatabases(unittest.TestCase):
             "vecmem", "did:tenzro:human:owner",
         )
         self.assertTrue(result["authorized"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_authorizeDatabaseRead"
         )
@@ -2034,7 +2037,7 @@ class TestManagedDatabases(unittest.TestCase):
             "vecmem", "did:tenzro:human:owner", "lan_cluster",
             partitions=3, min_replication=2, max_replication=4,
         )
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_rescaleDatabase")
         self.assertEqual(params["placement"], "lan_cluster")
@@ -2048,7 +2051,7 @@ class TestManagedDatabases(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response({"removed": True})
         result = tenzro_rpc.drop_database("vecmem")
         self.assertTrue(result["removed"])
-        args, kwargs = mock_post.call_args
+        _args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_dropDatabase")
         self.assertEqual(kwargs["json"]["params"]["database_id"], "vecmem")
 
@@ -2340,10 +2343,10 @@ class TestHosting(unittest.TestCase):
     @patch("tenzro_rpc.requests.post")
     def test_machine_sealing_key(self, mock_post):
         mock_post.return_value = _mock_rpc_response(
-            {"sealing_public_key": "abcd", "alg": "x25519-envelope-aes-256-gcm"}
+            {"sealing_public_key": "abcd", "alg": "x25519-hkdf-sha256-envelope-aes-256-gcm"}
         )
         result = tenzro_rpc.machine_sealing_key()
-        self.assertEqual(result["alg"], "x25519-envelope-aes-256-gcm")
+        self.assertEqual(result["alg"], "x25519-hkdf-sha256-envelope-aes-256-gcm")
         _, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_machineSealingKey")
 

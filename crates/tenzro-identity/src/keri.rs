@@ -274,12 +274,9 @@ impl KeyEventLog {
                 }
             }
             KeriEventKind::Rotation | KeriEventKind::Interaction => {
-                let prior = ev
-                    .values()
-                    .max_by_key(|e| e.sequence)
-                    .ok_or_else(|| IdentityError::CredentialError(
-                        "non-inception event requires prior".into(),
-                    ))?;
+                let prior = ev.values().max_by_key(|e| e.sequence).ok_or_else(|| {
+                    IdentityError::CredentialError("non-inception event requires prior".into())
+                })?;
                 if event.prior_said != prior.said {
                     return Err(IdentityError::CredentialError(
                         "prior_said does not match latest event".into(),
@@ -290,9 +287,7 @@ impl KeyEventLog {
                         "sequence must advance by 1".into(),
                     ));
                 }
-                if event.kind == KeriEventKind::Rotation
-                    && !event.is_valid_rotation_of(prior)
-                {
+                if event.kind == KeriEventKind::Rotation && !event.is_valid_rotation_of(prior) {
                     return Err(IdentityError::CredentialError(
                         "rotation does not match prior next_key_digests".into(),
                     ));
@@ -338,8 +333,7 @@ impl KeyEventLog {
 /// codes use this. We re-implement here so the crate doesn't grow a new
 /// dependency on `base64` just for this module.
 fn base64_url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -379,24 +373,11 @@ mod tests {
         let kel = KeyEventLog::new();
         let sk0 = vec![0xaa; 32];
         let sk1 = vec![0xbb; 32];
-        let icp = KeriEvent::inception(
-            vec![sk0.clone()],
-            1,
-            vec![dig(&sk1)],
-            1,
-        )
-        .unwrap();
+        let icp = KeriEvent::inception(vec![sk0.clone()], 1, vec![dig(&sk1)], 1).unwrap();
         kel.append(icp.clone()).unwrap();
         assert_eq!(kel.len(), 1);
         let sk2 = vec![0xcc; 32];
-        let rot = KeriEvent::rotation(
-            &icp,
-            vec![sk1.clone()],
-            1,
-            vec![dig(&sk2)],
-            1,
-        )
-        .unwrap();
+        let rot = KeriEvent::rotation(&icp, vec![sk1.clone()], 1, vec![dig(&sk2)], 1).unwrap();
         kel.append(rot.clone()).unwrap();
         assert_eq!(kel.len(), 2);
         assert_eq!(kel.latest().unwrap().said, rot.said);
@@ -410,8 +391,7 @@ mod tests {
         let icp = KeriEvent::inception(vec![sk0], 1, vec![dig(&sk1)], 1).unwrap();
         kel.append(icp.clone()).unwrap();
         let wrong_sk = vec![0xff; 32];
-        let bad_rot =
-            KeriEvent::rotation(&icp, vec![wrong_sk], 1, vec![dig(b"next")], 1).unwrap();
+        let bad_rot = KeriEvent::rotation(&icp, vec![wrong_sk], 1, vec![dig(b"next")], 1).unwrap();
         let err = kel.append(bad_rot).unwrap_err();
         assert!(matches!(err, IdentityError::CredentialError(_)));
     }

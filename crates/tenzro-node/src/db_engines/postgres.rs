@@ -11,8 +11,8 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use tenzro_database::{
-    catalog::engine_ids, DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth,
-    QueryRequest, QueryResponse, Result,
+    DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
+    Result, catalog::engine_ids,
 };
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls, Row};
@@ -47,7 +47,10 @@ impl PostgresEngine {
     /// Schema name for a partition. Deterministic from database id + index so a
     /// restart resolves the same schema.
     fn schema_name(handle: &PartitionHandle) -> String {
-        sanitize_ident(&format!("tz_{}_{}", handle.database_id, handle.partition_index))
+        sanitize_ident(&format!(
+            "tz_{}_{}",
+            handle.database_id, handle.partition_index
+        ))
     }
 }
 
@@ -86,14 +89,20 @@ impl DatabaseEngine for PostgresEngine {
         let client = self.connect().await?;
         // Set the search_path to the partition's schema so unqualified table
         // names resolve to it.
-        let schema = sanitize_ident(&format!("tz_{}_{}", request.database_id, request.partition_index));
+        let schema = sanitize_ident(&format!(
+            "tz_{}_{}",
+            request.database_id, request.partition_index
+        ));
         client
             .batch_execute(&format!("SET search_path TO {schema}, public"))
             .await
             .map_err(|e| DatabaseError::Query(format!("set search_path: {e}")))?;
 
-        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            body.params.iter().map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = body
+            .params
+            .iter()
+            .map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
         let rows = client
             .query(&body.sql, &params)
             .await
@@ -154,11 +163,31 @@ fn row_to_json(row: &Row) -> serde_json::Value {
 fn cell_to_json(row: &Row, idx: usize, ty: &Type) -> serde_json::Value {
     use serde_json::Value;
     match *ty {
-        Type::BOOL => row.try_get::<_, Option<bool>>(idx).ok().flatten().map(Value::Bool).unwrap_or(Value::Null),
-        Type::INT2 => opt_i64(row.try_get::<_, Option<i16>>(idx).ok().flatten().map(|v| v as i64)),
-        Type::INT4 => opt_i64(row.try_get::<_, Option<i32>>(idx).ok().flatten().map(|v| v as i64)),
+        Type::BOOL => row
+            .try_get::<_, Option<bool>>(idx)
+            .ok()
+            .flatten()
+            .map(Value::Bool)
+            .unwrap_or(Value::Null),
+        Type::INT2 => opt_i64(
+            row.try_get::<_, Option<i16>>(idx)
+                .ok()
+                .flatten()
+                .map(|v| v as i64),
+        ),
+        Type::INT4 => opt_i64(
+            row.try_get::<_, Option<i32>>(idx)
+                .ok()
+                .flatten()
+                .map(|v| v as i64),
+        ),
         Type::INT8 => opt_i64(row.try_get::<_, Option<i64>>(idx).ok().flatten()),
-        Type::FLOAT4 => opt_f64(row.try_get::<_, Option<f32>>(idx).ok().flatten().map(|v| v as f64)),
+        Type::FLOAT4 => opt_f64(
+            row.try_get::<_, Option<f32>>(idx)
+                .ok()
+                .flatten()
+                .map(|v| v as f64),
+        ),
         Type::FLOAT8 => opt_f64(row.try_get::<_, Option<f64>>(idx).ok().flatten()),
         Type::JSON | Type::JSONB => row
             .try_get::<_, Option<JsonCell>>(idx)
@@ -203,7 +232,8 @@ impl<'a> tokio_postgres::types::FromSql<'a> for JsonCell {
 }
 
 fn opt_i64(v: Option<i64>) -> serde_json::Value {
-    v.map(|n| serde_json::Value::Number(n.into())).unwrap_or(serde_json::Value::Null)
+    v.map(|n| serde_json::Value::Number(n.into()))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_f64(v: Option<f64>) -> serde_json::Value {
@@ -228,7 +258,13 @@ fn sanitize_ident(s: &str) -> String {
             }
         })
         .collect();
-    if out.is_empty() || out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+    if out.is_empty()
+        || out
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(true)
+    {
         out.insert(0, '_');
     }
     out.truncate(63); // Postgres identifier limit.

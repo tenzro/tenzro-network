@@ -4,9 +4,9 @@
 //! through the local Tenzro node. The node proxies calls to its configured
 //! Canton participant; callers never see the operator's OAuth client secret.
 
-use clap::{Parser, Subcommand};
-use anyhow::{anyhow, Result};
 use crate::output;
+use anyhow::{Result, anyhow};
+use clap::{Parser, Subcommand};
 
 /// Canton/DAML integration commands (Canton 3.5+ JSON Ledger API).
 ///
@@ -92,14 +92,25 @@ impl CantonCommand {
             Self::SubmitWithMandate(cmd) => cmd.execute().await,
             Self::Health(cmd) => cmd.execute("Canton Health", "tenzro_canton_health").await,
             Self::Version(cmd) => cmd.execute("Canton Version", "tenzro_canton_version").await,
-            Self::MyUser(cmd) => cmd.execute("Canton My User", "tenzro_canton_getMyUser").await,
-            Self::Parties(cmd) => cmd.execute("Canton Parties", "tenzro_canton_listParties").await,
-            Self::Packages(cmd) => cmd.execute("Canton Packages", "tenzro_canton_listPackages").await,
+            Self::MyUser(cmd) => {
+                cmd.execute("Canton My User", "tenzro_canton_getMyUser")
+                    .await
+            }
+            Self::Parties(cmd) => {
+                cmd.execute("Canton Parties", "tenzro_canton_listParties")
+                    .await
+            }
+            Self::Packages(cmd) => {
+                cmd.execute("Canton Packages", "tenzro_canton_listPackages")
+                    .await
+            }
             Self::CoinBalance(cmd) => {
-                cmd.execute("Canton Coin Balance", "tenzro_canton_coinBalance").await
+                cmd.execute("Canton Coin Balance", "tenzro_canton_coinBalance")
+                    .await
             }
             Self::FeeSchedule(cmd) => {
-                cmd.execute("Canton Fee Schedule", "tenzro_canton_feeSchedule").await
+                cmd.execute("Canton Fee Schedule", "tenzro_canton_feeSchedule")
+                    .await
             }
             Self::ConnectedSynchronizers(cmd) => {
                 cmd.execute(
@@ -169,7 +180,10 @@ impl CantonDomainsCmd {
 
         spinner.finish_and_clear();
 
-        let enabled = result.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let enabled = result
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         output::print_field("Canton Enabled", if enabled { "Yes" } else { "No" });
 
         if !enabled {
@@ -187,9 +201,21 @@ impl CantonDomainsCmd {
                 let mut rows = Vec::new();
                 for domain in domains {
                     rows.push(vec![
-                        domain.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                        domain.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                        domain.get("native_token").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                        domain
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        domain
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        domain
+                            .get("native_token")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-")
+                            .to_string(),
                         domain
                             .get("finality_time_secs")
                             .and_then(|v| v.as_u64())
@@ -260,8 +286,8 @@ impl CantonContractsCmd {
             ),
         );
         if let Some(q) = &self.query {
-            let parsed: serde_json::Value = serde_json::from_str(q)
-                .map_err(|e| anyhow!("--query is not valid JSON: {}", e))?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(q).map_err(|e| anyhow!("--query is not valid JSON: {}", e))?;
             params.insert("query".to_string(), parsed);
         }
 
@@ -348,50 +374,48 @@ pub struct DamlCommandArgs {
 
 impl DamlCommandArgs {
     fn to_params(&self) -> Result<serde_json::Value> {
-        let mut params = match self.command_type.as_str() {
-            "create" => {
-                let raw = self
-                    .create_arguments
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("--create-arguments is required for create commands"))?;
-                let create_arguments: serde_json::Value = serde_json::from_str(raw)
-                    .map_err(|e| anyhow!("--create-arguments is not valid JSON: {}", e))?;
-                serde_json::json!({
-                    "command_type": "create",
-                    "template_id": self.template,
-                    "create_arguments": create_arguments,
-                })
-            }
-            "exercise" => {
-                let contract_id = self
-                    .contract_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("--contract-id is required for exercise commands"))?;
-                let choice = self
-                    .choice
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("--choice is required for exercise commands"))?;
-                let raw = self
-                    .choice_argument
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("--choice-argument is required for exercise commands"))?;
-                let choice_argument: serde_json::Value = serde_json::from_str(raw)
-                    .map_err(|e| anyhow!("--choice-argument is not valid JSON: {}", e))?;
-                serde_json::json!({
-                    "command_type": "exercise",
-                    "template_id": self.template,
-                    "contract_id": contract_id,
-                    "choice": choice,
-                    "choice_argument": choice_argument,
-                })
-            }
-            other => {
-                return Err(anyhow!(
-                    "Unsupported command type '{}' (supported: create, exercise)",
-                    other
-                ))
-            }
-        };
+        let mut params =
+            match self.command_type.as_str() {
+                "create" => {
+                    let raw = self.create_arguments.as_deref().ok_or_else(|| {
+                        anyhow!("--create-arguments is required for create commands")
+                    })?;
+                    let create_arguments: serde_json::Value = serde_json::from_str(raw)
+                        .map_err(|e| anyhow!("--create-arguments is not valid JSON: {}", e))?;
+                    serde_json::json!({
+                        "command_type": "create",
+                        "template_id": self.template,
+                        "create_arguments": create_arguments,
+                    })
+                }
+                "exercise" => {
+                    let contract_id = self.contract_id.as_deref().ok_or_else(|| {
+                        anyhow!("--contract-id is required for exercise commands")
+                    })?;
+                    let choice = self
+                        .choice
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("--choice is required for exercise commands"))?;
+                    let raw = self.choice_argument.as_deref().ok_or_else(|| {
+                        anyhow!("--choice-argument is required for exercise commands")
+                    })?;
+                    let choice_argument: serde_json::Value = serde_json::from_str(raw)
+                        .map_err(|e| anyhow!("--choice-argument is not valid JSON: {}", e))?;
+                    serde_json::json!({
+                        "command_type": "exercise",
+                        "template_id": self.template,
+                        "contract_id": contract_id,
+                        "choice": choice,
+                        "choice_argument": choice_argument,
+                    })
+                }
+                other => {
+                    return Err(anyhow!(
+                        "Unsupported command type '{}' (supported: create, exercise)",
+                        other
+                    ));
+                }
+            };
         if let Some(party) = &self.act_as {
             params["act_as"] = serde_json::Value::String(party.clone());
         }
@@ -438,9 +462,7 @@ impl CantonSubmitCmd {
 
         let params = self.command.to_params()?;
 
-        let result: serde_json::Value = rpc
-            .call("tenzro_submitDamlCommand", params)
-            .await?;
+        let result: serde_json::Value = rpc.call("tenzro_submitDamlCommand", params).await?;
 
         spinner.finish_and_clear();
 
@@ -537,14 +559,15 @@ impl CantonSubmitWithMandateCmd {
         }
 
         let spinner = output::create_spinner("Validating mandate and submitting…");
-        let result: serde_json::Value = rpc
-            .call("tenzro_canton_submitWithMandate", params)
-            .await?;
+        let result: serde_json::Value = rpc.call("tenzro_canton_submitWithMandate", params).await?;
         spinner.finish_and_clear();
 
         output::print_success("Mandate accepted, DAML command submitted.");
         println!();
-        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into()));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
         Ok(())
     }
 }
@@ -604,7 +627,10 @@ impl CantonAggregateAnalyticsCmd {
             .await?;
         spinner.finish_and_clear();
 
-        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into()));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
         Ok(())
     }
 }
@@ -742,8 +768,7 @@ impl CantonGetTransactionCmd {
         let params = serde_json::json!({ "update_id": self.update_id });
         let spinner = output::create_spinner("Fetching transaction…");
 
-        let result: serde_json::Value =
-            rpc.call("tenzro_canton_getTransaction", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_canton_getTransaction", params).await?;
         spinner.finish_and_clear();
 
         println!(
@@ -777,7 +802,7 @@ pub struct CantonUploadDarCmd {
 impl CantonUploadDarCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
         output::print_header("Canton Upload DAR");
 
@@ -803,8 +828,7 @@ impl CantonUploadDarCmd {
         let params = serde_json::json!({ "dar_content_base64": b64 });
         let spinner = output::create_spinner("Uploading DAR…");
 
-        let result: serde_json::Value =
-            rpc.call("tenzro_canton_uploadDar", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_canton_uploadDar", params).await?;
         spinner.finish_and_clear();
 
         output::print_success("DAR uploaded.");
@@ -958,9 +982,18 @@ impl CantonGrantRightsCmd {
         if let Some(uid) = &self.user_id {
             params.insert("user_id".into(), serde_json::Value::String(uid.clone()));
         }
-        params.insert("party".into(), serde_json::Value::String(self.party.clone()));
-        params.insert("can_act_as".into(), serde_json::Value::Bool(self.can_act_as));
-        params.insert("can_read_as".into(), serde_json::Value::Bool(self.can_read_as));
+        params.insert(
+            "party".into(),
+            serde_json::Value::String(self.party.clone()),
+        );
+        params.insert(
+            "can_act_as".into(),
+            serde_json::Value::Bool(self.can_act_as),
+        );
+        params.insert(
+            "can_read_as".into(),
+            serde_json::Value::Bool(self.can_read_as),
+        );
         if let Some(idp) = &self.identity_provider_id {
             params.insert(
                 "identity_provider_id".into(),
@@ -1031,8 +1064,7 @@ impl CantonListRightsCmd {
         };
 
         let spinner = output::create_spinner("Listing rights…");
-        let result: serde_json::Value =
-            rpc.call("tenzro_canton_listUserRights", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_canton_listUserRights", params).await?;
         spinner.finish_and_clear();
 
         println!(
@@ -1092,8 +1124,9 @@ impl CantonListAnalyticsCmd {
         };
 
         let spinner = output::create_spinner("Listing analytics…");
-        let result: serde_json::Value =
-            rpc.call("tenzro_canton_listApiKeyAnalytics", params).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_canton_listApiKeyAnalytics", params)
+            .await?;
         spinner.finish_and_clear();
 
         println!(
@@ -1151,8 +1184,7 @@ impl CantonWatchPartyCmd {
         });
 
         let spinner = output::create_spinner("Watching party…");
-        let result: serde_json::Value =
-            rpc.call("tenzro_canton_watchParty", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_canton_watchParty", params).await?;
         spinner.finish_and_clear();
 
         println!(
@@ -1221,8 +1253,7 @@ impl CantonIdpCreateCmd {
         });
 
         let spinner = output::create_spinner("Creating IDP…");
-        let result: serde_json::Value =
-            rpc.call("tenzro_canton_createIdp", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_canton_createIdp", params).await?;
         spinner.finish_and_clear();
 
         println!(
@@ -1277,8 +1308,7 @@ impl CantonIdpDeleteCmd {
         });
 
         let spinner = output::create_spinner("Deleting IDP…");
-        let result: serde_json::Value =
-            rpc.call("tenzro_canton_deleteIdp", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_canton_deleteIdp", params).await?;
         spinner.finish_and_clear();
 
         println!(
@@ -1338,8 +1368,7 @@ impl CantonMirrorWorkflowCmd {
         });
 
         let spinner = output::create_spinner("Mirroring workflow…");
-        let result: serde_json::Value =
-            rpc.call("tenzro_mirrorWorkflowToCanton", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_mirrorWorkflowToCanton", params).await?;
         spinner.finish_and_clear();
 
         println!(
@@ -1400,8 +1429,7 @@ impl CantonMirrorObligationCmd {
         });
 
         let spinner = output::create_spinner("Mirroring obligation…");
-        let result: serde_json::Value =
-            rpc.call("tenzro_mirrorObligationToCanton", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_mirrorObligationToCanton", params).await?;
         spinner.finish_and_clear();
 
         println!(

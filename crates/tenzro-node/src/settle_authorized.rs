@@ -27,11 +27,9 @@ use serde::{Deserialize, Serialize};
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::Signature;
 use tenzro_identity::IdentityRegistry;
-use tenzro_storage::{KvStore, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_token::TnzoToken;
-use tenzro_types::{
-    split_settlement_authorization, Address, SettlementAuthorization,
-};
+use tenzro_types::{Address, SettlementAuthorization, split_settlement_authorization};
 
 use crate::app_registry::AppRegistry;
 
@@ -153,9 +151,8 @@ pub fn execute_settle_authorized(
         .get(CF_SETTLEMENTS, &dedup_key)
         .map_err(|e| SettleAuthorizedError::Unavailable(format!("storage error: {e}")))?
     {
-        let outcome: SettleAuthorizedOutcome = serde_json::from_slice(&bytes).map_err(|e| {
-            SettleAuthorizedError::Unavailable(format!("corrupt outcome row: {e}"))
-        })?;
+        let outcome: SettleAuthorizedOutcome = serde_json::from_slice(&bytes)
+            .map_err(|e| SettleAuthorizedError::Unavailable(format!("corrupt outcome row: {e}")))?;
         return Ok((outcome, true));
     }
 
@@ -253,8 +250,7 @@ pub fn execute_settle_authorized(
             "payer received {} but commission transfer failed: {e}",
             payer_net
         ));
-        outcome.app_wallet_funded =
-            token.balance_of(&record.app_wallet) >= record.min_balance;
+        outcome.app_wallet_funded = token.balance_of(&record.app_wallet) >= record.min_balance;
         persist_outcome(storage, &dedup_key, &outcome)?;
         return Ok((outcome, false));
     }
@@ -355,10 +351,7 @@ fn pair_hash(a: &str, b: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn read_spend(
-    storage: &Arc<dyn KvStore>,
-    key: &[u8],
-) -> Result<u128, SettleAuthorizedError> {
+fn read_spend(storage: &Arc<dyn KvStore>, key: &[u8]) -> Result<u128, SettleAuthorizedError> {
     match storage
         .get(CF_SETTLEMENTS, key)
         .map_err(|e| SettleAuthorizedError::Unavailable(format!("storage error: {e}")))?
@@ -405,15 +398,13 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_registry::{
-        AppRecord, AppRegistry, AppSigningKey, METHOD_REGISTER_APP,
-    };
+    use crate::app_registry::{AppRecord, AppRegistry, AppSigningKey, METHOD_REGISTER_APP};
     use tenzro_crypto::keys::KeyPair;
     use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
-    use tenzro_identity::envelope::{params_hash, TenzroDidEnvelope};
     use tenzro_identity::canonical_preimage;
-    use tenzro_types::identity::KycTier;
+    use tenzro_identity::envelope::{TenzroDidEnvelope, params_hash};
     use tenzro_storage::MemoryStore;
+    use tenzro_types::identity::KycTier;
 
     fn did_key_signer() -> (String, Ed25519SignerImpl) {
         let kp = KeyPair::generate(KeyType::Ed25519).unwrap();
@@ -447,7 +438,9 @@ mod tests {
         let app_wallet = Address::new([0x02; 32]);
         token.set_treasury_address(treasury);
         if app_wallet_balance > 0 {
-            token.mint(&app_wallet, app_wallet_balance, &treasury).unwrap();
+            token
+                .mint(&app_wallet, app_wallet_balance, &treasury)
+                .unwrap();
         }
 
         // Register the app with a developer-signed envelope.
@@ -531,14 +524,7 @@ mod tests {
         fx: &Fixture,
         auth: &SettlementAuthorization,
     ) -> Result<(SettleAuthorizedOutcome, bool), SettleAuthorizedError> {
-        execute_settle_authorized(
-            auth,
-            1337,
-            &fx.apps,
-            &fx.identities,
-            &fx.token,
-            &fx.storage,
-        )
+        execute_settle_authorized(auth, 1337, &fx.apps, &fx.identities, &fx.token, &fx.storage)
     }
 
     #[tokio::test]
@@ -632,12 +618,20 @@ mod tests {
         let (outcome, duplicate) = run(&fx, &auth).unwrap();
         assert!(!duplicate);
         assert!(!outcome.success);
-        assert!(outcome.failure_reason.as_deref().unwrap().contains("underfunded"));
+        assert!(
+            outcome
+                .failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("underfunded")
+        );
         assert_eq!(fx.token.balance_of(&fx.payer_wallet), 0);
 
         // Funding the wallet does NOT resurrect the consumed reference —
         // the developer refunds the fiat and issues a new charge.
-        fx.token.mint(&fx.app_wallet, 1_000_000, &fx.treasury).unwrap();
+        fx.token
+            .mint(&fx.app_wallet, 1_000_000, &fx.treasury)
+            .unwrap();
         let (replay, duplicate) = run(&fx, &auth).unwrap();
         assert!(duplicate);
         assert!(!replay.success);
@@ -682,11 +676,17 @@ mod tests {
     #[tokio::test]
     async fn get_outcome_reads_recorded_row() {
         let fx = fixture(None, 1_000_000).await;
-        assert!(get_outcome(&fx.storage, "demo-app", "pi_1").unwrap().is_none());
+        assert!(
+            get_outcome(&fx.storage, "demo-app", "pi_1")
+                .unwrap()
+                .is_none()
+        );
         let auth = signed_auth(&fx, 10_000, "pi_1");
         let (outcome, _) = run(&fx, &auth).unwrap();
         assert_eq!(
-            get_outcome(&fx.storage, "demo-app", "pi_1").unwrap().unwrap(),
+            get_outcome(&fx.storage, "demo-app", "pi_1")
+                .unwrap()
+                .unwrap(),
             outcome
         );
     }

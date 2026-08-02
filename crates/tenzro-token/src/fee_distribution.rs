@@ -19,7 +19,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::Timestamp;
 use tracing::{debug, info, warn};
@@ -104,8 +104,7 @@ impl FeeRecord {
 }
 
 /// Fee statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeeStats {
     /// Total fees collected per asset
     pub total_collected: HashMap<AssetId, u128>,
@@ -120,7 +119,6 @@ pub struct FeeStats {
     /// Fee count
     pub fee_count: u64,
 }
-
 
 /// Distribution history entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,7 +157,11 @@ impl DistributionHistory {
     pub fn add_fee(&mut self, record: &FeeRecord) {
         self.total_fees = self.total_fees.saturating_add(record.amount);
 
-        let asset_total = self.fees_by_asset.get(&record.asset_id).copied().unwrap_or(0);
+        let asset_total = self
+            .fees_by_asset
+            .get(&record.asset_id)
+            .copied()
+            .unwrap_or(0);
         self.fees_by_asset.insert(
             record.asset_id.clone(),
             asset_total.saturating_add(record.amount),
@@ -326,7 +328,9 @@ impl FeeProcessor {
                 operation: "fee amount".to_string(),
             })?;
         if amount == 0 {
-            return Err(TokenError::InvalidAmount("Fee amount must be greater than zero".to_string()));
+            return Err(TokenError::InvalidAmount(
+                "Fee amount must be greater than zero".to_string(),
+            ));
         }
 
         // Create fee record
@@ -346,7 +350,8 @@ impl FeeProcessor {
         let asset_total = stats.total_collected.get(&asset_id).copied().unwrap_or(0);
         stats.total_collected.insert(
             asset_id.clone(),
-            asset_total.checked_add(amount)
+            asset_total
+                .checked_add(amount)
                 .ok_or_else(|| TokenError::ArithmeticOverflow {
                     operation: "fee total collected".to_string(),
                 })?,
@@ -356,22 +361,28 @@ impl FeeProcessor {
         let source_total = stats.by_source.get(&source).copied().unwrap_or(0);
         stats.by_source.insert(
             source,
-            source_total.checked_add(amount)
+            source_total
+                .checked_add(amount)
                 .ok_or_else(|| TokenError::ArithmeticOverflow {
                     operation: "fee by source".to_string(),
                 })?,
         );
 
         // Update distribution totals
-        stats.total_to_treasury = stats.total_to_treasury.checked_add(treasury_share)
+        stats.total_to_treasury = stats
+            .total_to_treasury
+            .checked_add(treasury_share)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "fee total to treasury".to_string(),
             })?;
-        stats.total_burned = stats.total_burned.checked_add(burn_share)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
+        stats.total_burned = stats.total_burned.checked_add(burn_share).ok_or_else(|| {
+            TokenError::ArithmeticOverflow {
                 operation: "fee total burned".to_string(),
-            })?;
-        stats.total_to_stakers = stats.total_to_stakers.checked_add(staker_share)
+            }
+        })?;
+        stats.total_to_stakers = stats
+            .total_to_stakers
+            .checked_add(staker_share)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "fee total to stakers".to_string(),
             })?;
@@ -407,7 +418,11 @@ impl FeeProcessor {
 
         debug!(
             "Processed fee: {} of {} (treasury: {}, burn: {}, stakers: {})",
-            amount, asset_id.as_str(), treasury_share, burn_share, staker_share
+            amount,
+            asset_id.as_str(),
+            treasury_share,
+            burn_share,
+            staker_share
         );
 
         Ok(record)

@@ -2,8 +2,8 @@
 
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
-use tenzro_types::tee::AttestationReport;
 use tenzro_types::primitives::Timestamp;
+use tenzro_types::tee::AttestationReport;
 
 /// Type of zero-knowledge proof system.
 ///
@@ -49,11 +49,7 @@ pub struct Proof {
 
 impl Proof {
     /// Create a new proof
-    pub fn new(
-        proof_bytes: Vec<u8>,
-        public_inputs: Vec<Vec<u8>>,
-        circuit_id: String,
-    ) -> Self {
+    pub fn new(proof_bytes: Vec<u8>, public_inputs: Vec<Vec<u8>>, circuit_id: String) -> Self {
         Self {
             proof_bytes,
             public_inputs,
@@ -229,11 +225,7 @@ mod tests {
 
     #[test]
     fn test_proof_serialization() {
-        let proof = Proof::new(
-            vec![1, 2, 3, 4],
-            vec![vec![5, 6]],
-            "settlement".to_string(),
-        );
+        let proof = Proof::new(vec![1, 2, 3, 4], vec![vec![5, 6]], "settlement".to_string());
 
         let json = proof.to_json().unwrap();
         let deserialized = Proof::from_json(&json).unwrap();
@@ -242,11 +234,7 @@ mod tests {
 
     #[test]
     fn test_tee_zk_proof() {
-        let proof = Proof::new(
-            vec![1, 2, 3, 4],
-            vec![vec![5, 6]],
-            "identity".to_string(),
-        );
+        let proof = Proof::new(vec![1, 2, 3, 4], vec![vec![5, 6]], "identity".to_string());
 
         let attestation = AttestationReport::new(
             TeeVendor::IntelSGX,
@@ -268,18 +256,10 @@ mod tests {
 
     #[test]
     fn test_commitment_hash() {
-        let proof = Proof::new(
-            vec![1, 2, 3],
-            vec![],
-            "inference".to_string(),
-        );
+        let proof = Proof::new(vec![1, 2, 3], vec![], "inference".to_string());
 
-        let attestation = AttestationReport::new(
-            TeeVendor::IntelSGX,
-            vec![],
-            vec![4, 5, 6],
-            vec![7, 8, 9],
-        );
+        let attestation =
+            AttestationReport::new(TeeVendor::IntelSGX, vec![], vec![4, 5, 6], vec![7, 8, 9]);
 
         let tee_zk_proof = TeeZkProof::new(proof, attestation);
         let hash = tee_zk_proof.commitment_hash();

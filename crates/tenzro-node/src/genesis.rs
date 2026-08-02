@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_storage::{
+    CF_ACCOUNTS, CF_METADATA, CF_STATE, KvStore, RocksDbStore, WriteOp,
     account_store::AccountStoreImpl, block_store::BlockStoreImpl, traits::AccountStore,
-    traits::BlockStore, KvStore, RocksDbStore, WriteOp, CF_ACCOUNTS, CF_METADATA, CF_STATE,
+    traits::BlockStore,
 };
 use tenzro_types::{
+    Account, AccountState,
     block::{Block, BlockHeader, BlockMetadata, ConsensusAlgorithm, ConsensusProof},
     primitives::{Address, BlockHeight, Hash, Nonce, Timestamp},
-    Account, AccountState,
 };
 use tracing::{info, warn};
 
@@ -30,8 +31,7 @@ use tracing::{info, warn};
 /// implementation contracts. Schema: `tenzro/erc8004-predeploys/v1`.
 ///
 /// Re-run the regenerate script after bumping the vendor pin to refresh.
-const ERC8004_PREDEPLOYS_JSON: &str =
-    include_str!("../res/genesis/erc8004-predeploys.json");
+const ERC8004_PREDEPLOYS_JSON: &str = include_str!("../res/genesis/erc8004-predeploys.json");
 
 /// Schema string the loader refuses to deserialize anything else under.
 const ERC8004_PREDEPLOYS_SCHEMA: &str = "tenzro/erc8004-predeploys/v1";
@@ -142,9 +142,8 @@ struct PredeployAccount {
 /// Parse `"0x<hex>"` (or bare `<hex>`) → owned `Vec<u8>`.
 fn parse_hex_bytes(s: &str, what: &str) -> Result<Vec<u8>> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
-    hex::decode(stripped).map_err(|e| {
-        NodeError::Config(format!("Invalid {} hex {:?}: {}", what, s, e))
-    })
+    hex::decode(stripped)
+        .map_err(|e| NodeError::Config(format!("Invalid {} hex {:?}: {}", what, s, e)))
 }
 
 /// Parse `"0x<hex>"` into a u128, treating empty/`"0x0"` as zero.
@@ -153,9 +152,8 @@ fn parse_hex_u128(s: &str, what: &str) -> Result<u128> {
     if stripped.is_empty() {
         return Ok(0);
     }
-    u128::from_str_radix(stripped, 16).map_err(|e| {
-        NodeError::Config(format!("Invalid {} hex u128 {:?}: {}", what, s, e))
-    })
+    u128::from_str_radix(stripped, 16)
+        .map_err(|e| NodeError::Config(format!("Invalid {} hex u128 {:?}: {}", what, s, e)))
 }
 
 /// Right-pad a raw EVM address (20 bytes) to Tenzro's 32-byte address layout
@@ -197,11 +195,9 @@ fn install_erc8004_predeploys(
     token_entries: &mut Vec<WriteOp>,
     total_supply: &mut u128,
 ) -> Result<Hash> {
-    let bundle: Erc8004Bundle = serde_json::from_str(ERC8004_PREDEPLOYS_JSON)
-        .map_err(|e| NodeError::Config(format!(
-            "Failed to parse erc8004-predeploys.json: {}",
-            e
-        )))?;
+    let bundle: Erc8004Bundle = serde_json::from_str(ERC8004_PREDEPLOYS_JSON).map_err(|e| {
+        NodeError::Config(format!("Failed to parse erc8004-predeploys.json: {}", e))
+    })?;
 
     if bundle.schema != ERC8004_PREDEPLOYS_SCHEMA {
         return Err(NodeError::Config(format!(
@@ -256,7 +252,8 @@ fn install_erc8004_predeploys(
         if evm_addr.len() != 20 {
             return Err(NodeError::Config(format!(
                 "ERC-8004 predeploy address {} is {} bytes (expected 20)",
-                addr_hex, evm_addr.len()
+                addr_hex,
+                evm_addr.len()
             )));
         }
         // Hex-lowercase the 20-byte address — matches `hex::encode(addr)`
@@ -288,17 +285,14 @@ fn install_erc8004_predeploys(
             if slot_key.len() != 32 {
                 return Err(NodeError::Config(format!(
                     "Storage slot key {} is {} bytes (expected 32)",
-                    slot_key_hex, slot_key.len()
+                    slot_key_hex,
+                    slot_key.len()
                 )));
             }
             // Storage key format mirrors `StateAdapter::get_storage`:
             // `storage:<40-hex-addr>:<64-hex-slot-key>`. Value is the raw
             // 32-byte slot contents.
-            let db_key = format!(
-                "storage:{}:{}",
-                addr_hex_lower,
-                hex::encode(&slot_key)
-            );
+            let db_key = format!("storage:{}:{}", addr_hex_lower, hex::encode(&slot_key));
             state_entries.push((db_key.into_bytes(), slot_value));
             storage_slot_count += 1;
         }
@@ -366,7 +360,8 @@ pub async fn initialize_genesis(
     for ga in &genesis_config.accounts {
         let address = parse_hex_address(&ga.address)?;
         // Multiply whole TNZO units by 10^18 to get smallest unit
-        let balance_raw: u128 = ga.balance
+        let balance_raw: u128 = ga
+            .balance
             .checked_mul(1_000_000_000_000_000_000u128)
             .ok_or_else(|| {
                 NodeError::Config(format!("Genesis balance overflow for {}", ga.address))
@@ -401,64 +396,63 @@ pub async fn initialize_genesis(
         });
         total_supply = total_supply.saturating_add(balance_raw);
 
-        info!(
-            "Pre-funded account {} with {} TNZO",
-            ga.address, ga.balance
-        );
+        info!("Pre-funded account {} with {} TNZO", ga.address, ga.balance);
     }
 
     // Pre-fund faucet account if configured
     if let Some(faucet) = &genesis_config.faucet
         && faucet.enabled
     {
-            let address = parse_hex_address(&faucet.address)?;
-            // Also persist the faucet address under CF_METADATA so later code
-            // (e.g., the RPC faucet handler, the key provisioner) can look it
-            // up without needing access to the genesis config file.
-            store
-                .put(
-                    CF_METADATA,
-                    b"genesis_faucet_address",
-                    hex::encode(address.as_bytes()).as_bytes(),
-                )
-                .map_err(|e| NodeError::Other(format!("Failed to store genesis_faucet_address: {}", e)))?;
-            let faucet_balance: u128 = 1_000_000_000 * 1_000_000_000_000_000_000u128; // 1B TNZO
+        let address = parse_hex_address(&faucet.address)?;
+        // Also persist the faucet address under CF_METADATA so later code
+        // (e.g., the RPC faucet handler, the key provisioner) can look it
+        // up without needing access to the genesis config file.
+        store
+            .put(
+                CF_METADATA,
+                b"genesis_faucet_address",
+                hex::encode(address.as_bytes()).as_bytes(),
+            )
+            .map_err(|e| {
+                NodeError::Other(format!("Failed to store genesis_faucet_address: {}", e))
+            })?;
+        let faucet_balance: u128 = 1_000_000_000 * 1_000_000_000_000_000_000u128; // 1B TNZO
 
-            let account = Account {
-                address,
-                nonce: Nonce::initial(),
-                balance: faucet_balance,
-                staked: 0,
-                state: AccountState::default(),
-                storage_root: Hash::zero(),
-                code_hash: None,
-            };
+        let account = Account {
+            address,
+            nonce: Nonce::initial(),
+            balance: faucet_balance,
+            staked: 0,
+            state: AccountState::default(),
+            storage_root: Hash::zero(),
+            code_hash: None,
+        };
 
-            account_store
-                .put_account(&account)
-                .await
-                .map_err(|e| NodeError::Other(format!("Failed to store faucet account: {}", e)))?;
+        account_store
+            .put_account(&account)
+            .await
+            .map_err(|e| NodeError::Other(format!("Failed to store faucet account: {}", e)))?;
 
-            let balance_key = format!("balance:{}", hex::encode(address.as_bytes()));
-            state_entries.push((
-                balance_key.into_bytes(),
-                faucet_balance.to_le_bytes().to_vec(),
-            ));
+        let balance_key = format!("balance:{}", hex::encode(address.as_bytes()));
+        state_entries.push((
+            balance_key.into_bytes(),
+            faucet_balance.to_le_bytes().to_vec(),
+        ));
 
-            // Also store faucet balance in CF_ACCOUNTS for TnzoToken
-            let mut token_key = b"balance:".to_vec();
-            token_key.extend_from_slice(address.as_bytes());
-            token_entries.push(WriteOp::Put {
-                cf: CF_ACCOUNTS.to_string(),
-                key: token_key,
-                value: faucet_balance.to_le_bytes().to_vec(),
-            });
-            total_supply = total_supply.saturating_add(faucet_balance);
+        // Also store faucet balance in CF_ACCOUNTS for TnzoToken
+        let mut token_key = b"balance:".to_vec();
+        token_key.extend_from_slice(address.as_bytes());
+        token_entries.push(WriteOp::Put {
+            cf: CF_ACCOUNTS.to_string(),
+            key: token_key,
+            value: faucet_balance.to_le_bytes().to_vec(),
+        });
+        total_supply = total_supply.saturating_add(faucet_balance);
 
-            info!(
-                "Pre-funded faucet account with 1B TNZO (dispenses {} TNZO per request)",
-                faucet.amount_per_request
-            );
+        info!(
+            "Pre-funded faucet account with 1B TNZO (dispenses {} TNZO per request)",
+            faucet.amount_per_request
+        );
     }
 
     // Install ERC-8004 predeploys (factory + MinimalUUPS + 3 proxies + 3 impls).
@@ -468,11 +462,8 @@ pub async fn initialize_genesis(
     // commitment binds the predeploy bundle into the genesis state root —
     // any drift in `erc8004-predeploys.json` produces a different root,
     // which any honest validator will reject on cross-check.
-    let predeploys_commitment = install_erc8004_predeploys(
-        &mut state_entries,
-        &mut token_entries,
-        &mut total_supply,
-    )?;
+    let predeploys_commitment =
+        install_erc8004_predeploys(&mut state_entries, &mut token_entries, &mut total_supply)?;
 
     // Write state entries to CF_STATE
     if !state_entries.is_empty() {
@@ -497,10 +488,13 @@ pub async fn initialize_genesis(
             key: b"total_supply".to_vec(),
             value: total_supply.to_le_bytes().to_vec(),
         });
-        store
-            .write_batch(token_entries)
-            .map_err(|e| NodeError::Other(format!("Failed to write genesis token balances: {}", e)))?;
-        info!("Genesis token balances written to CF_ACCOUNTS (total supply: {} wei)", total_supply);
+        store.write_batch(token_entries).map_err(|e| {
+            NodeError::Other(format!("Failed to write genesis token balances: {}", e))
+        })?;
+        info!(
+            "Genesis token balances written to CF_ACCOUNTS (total supply: {} wei)",
+            total_supply
+        );
     }
 
     // 2. Compute state root (simplified - hash of all accounts + predeploy commitment)
@@ -576,11 +570,7 @@ pub async fn initialize_genesis(
     // bundle (see `compute_genesis_state_root`), so a single 32-byte
     // value is sufficient to detect any genesis drift.
     store
-        .put(
-            CF_METADATA,
-            b"genesis_state_root",
-            state_root.as_bytes(),
-        )
+        .put(CF_METADATA, b"genesis_state_root", state_root.as_bytes())
         .map_err(|e| NodeError::Other(format!("Failed to store genesis_state_root: {}", e)))?;
 
     info!(
@@ -602,8 +592,7 @@ fn compute_erc8004_bundle_commitment() -> Hash {
     h.update(b"tenzro/erc8004-predeploys");
     h.update(ERC8004_PREDEPLOYS_JSON.as_bytes());
     let digest = h.finalize();
-    Hash::from_bytes(digest.as_slice())
-        .expect("SHA-256 always produces 32 bytes")
+    Hash::from_bytes(digest.as_slice()).expect("SHA-256 always produces 32 bytes")
 }
 
 /// Cross-check the configured genesis against what's already persisted on
@@ -634,10 +623,7 @@ fn compute_erc8004_bundle_commitment() -> Hash {
 ///
 /// Errors are surfaced as `NodeError::Config` so the operator gets a
 /// clean abort with an actionable message rather than a panic.
-fn verify_chain_compat(
-    store: &Arc<RocksDbStore>,
-    genesis_config: &GenesisConfig,
-) -> Result<()> {
+fn verify_chain_compat(store: &Arc<RocksDbStore>, genesis_config: &GenesisConfig) -> Result<()> {
     // 1. chain_id check
     let stored_chain_id_bytes = store
         .get(CF_METADATA, b"chain_id")
@@ -687,9 +673,9 @@ fn verify_chain_compat(
     let predeploys_commitment = compute_erc8004_bundle_commitment();
     let configured_root = compute_genesis_state_root(genesis_config, &predeploys_commitment);
 
-    let stored_root_bytes = store
-        .get(CF_METADATA, b"genesis_state_root")
-        .map_err(|e| NodeError::Other(format!("Failed to read stored genesis_state_root: {}", e)))?;
+    let stored_root_bytes = store.get(CF_METADATA, b"genesis_state_root").map_err(|e| {
+        NodeError::Other(format!("Failed to read stored genesis_state_root: {}", e))
+    })?;
     if let Some(bytes) = stored_root_bytes {
         if bytes.len() != 32 {
             return Err(NodeError::Other(format!(
@@ -700,8 +686,8 @@ fn verify_chain_compat(
         }
         let mut stored_arr = [0u8; 32];
         stored_arr.copy_from_slice(&bytes);
-        let stored_root = Hash::from_bytes(&stored_arr)
-            .expect("32-byte slice always converts to Hash");
+        let stored_root =
+            Hash::from_bytes(&stored_arr).expect("32-byte slice always converts to Hash");
         if stored_root != configured_root {
             return Err(NodeError::Config(format!(
                 "Genesis state_root mismatch: configured genesis hashes to {} but \
@@ -726,7 +712,9 @@ fn verify_chain_compat(
                 b"genesis_state_root",
                 configured_root.as_bytes(),
             )
-            .map_err(|e| NodeError::Other(format!("Failed to back-fill genesis_state_root: {}", e)))?;
+            .map_err(|e| {
+                NodeError::Other(format!("Failed to back-fill genesis_state_root: {}", e))
+            })?;
         info!(
             "Back-filled genesis_state_root={} into CF_METADATA (pre-fix upgrade path)",
             configured_root
@@ -741,10 +729,7 @@ fn genesis_exists(store: &Arc<RocksDbStore>) -> Result<bool> {
     match store.get(CF_METADATA, b"genesis_initialized") {
         Ok(Some(_)) => Ok(true),
         Ok(None) => Ok(false),
-        Err(e) => Err(NodeError::Other(format!(
-            "Failed to check genesis: {}",
-            e
-        ))),
+        Err(e) => Err(NodeError::Other(format!("Failed to check genesis: {}", e))),
     }
 }
 
@@ -783,9 +768,8 @@ async fn load_genesis_block(store: &Arc<RocksDbStore>) -> Result<Block> {
 /// Parse hex-encoded address (with or without 0x prefix)
 fn parse_hex_address(hex_str: &str) -> Result<Address> {
     let hex_clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(hex_clean).map_err(|e| {
-        NodeError::Config(format!("Invalid hex address '{}': {}", hex_str, e))
-    })?;
+    let bytes = hex::decode(hex_clean)
+        .map_err(|e| NodeError::Config(format!("Invalid hex address '{}': {}", hex_str, e)))?;
 
     if bytes.len() > 32 {
         return Err(NodeError::Config(format!(
@@ -841,8 +825,7 @@ fn compute_genesis_state_root(genesis: &GenesisConfig, predeploys_commitment: &H
     hasher.update(predeploys_commitment.as_bytes());
 
     let result = hasher.finalize();
-    Hash::from_bytes(result.as_slice())
-        .expect("SHA-256 always produces 32 bytes")
+    Hash::from_bytes(result.as_slice()).expect("SHA-256 always produces 32 bytes")
 }
 
 /// Provision a real Ed25519 signing keypair for the faucet, if one doesn't
@@ -898,18 +881,17 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<(
                 value: pq_vk_hex.into_bytes(),
             },
         ];
-        store.write_batch(ops).map_err(|e| {
-            NodeError::Other(format!("Failed to back-fill faucet PQ key: {}", e))
-        })?;
+        store
+            .write_batch(ops)
+            .map_err(|e| NodeError::Other(format!("Failed to back-fill faucet PQ key: {}", e)))?;
         return Ok(());
     }
 
     info!("Provisioning faucet signing key (one-time bootstrap)");
 
     // Generate a fresh Ed25519 keypair for the faucet.
-    let keypair = KeyPair::generate(KeyType::Ed25519).map_err(|e| {
-        NodeError::Other(format!("Failed to generate faucet keypair: {}", e))
-    })?;
+    let keypair = KeyPair::generate(KeyType::Ed25519)
+        .map_err(|e| NodeError::Other(format!("Failed to generate faucet keypair: {}", e)))?;
     let pubkey_bytes = keypair.public_key().as_bytes().to_vec();
     let privkey_bytes = keypair.secret_key().as_bytes().to_vec();
 
@@ -922,8 +904,9 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<(
             pubkey_bytes.len()
         )));
     }
-    let new_faucet_address = Address::from_bytes(&pubkey_bytes)
-        .ok_or_else(|| NodeError::Other("Failed to build faucet address from pubkey".to_string()))?;
+    let new_faucet_address = Address::from_bytes(&pubkey_bytes).ok_or_else(|| {
+        NodeError::Other("Failed to build faucet address from pubkey".to_string())
+    })?;
 
     // Load the legacy sentinel faucet address (if any) so we can migrate its
     // remaining balance to the new signing address.
@@ -1023,7 +1006,7 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<(
 /// Idempotent: a no-op when balance is above threshold.
 pub async fn refill_faucet_if_low(store: &Arc<RocksDbStore>) -> Result<()> {
     const FAUCET_REFILL_THRESHOLD_WEI: u128 = 1_000_000 * 1_000_000_000_000_000_000u128; // 1M TNZO
-    const FAUCET_TARGET_BALANCE_WEI: u128 = 10_000_000 * 1_000_000_000_000_000_000u128;  // 10M TNZO
+    const FAUCET_TARGET_BALANCE_WEI: u128 = 10_000_000 * 1_000_000_000_000_000_000u128; // 10M TNZO
 
     let address_hex = match store.get(CF_METADATA, FAUCET_SIGNING_KEY_ADDRESS) {
         Ok(Some(bytes)) => match String::from_utf8(bytes) {
@@ -1241,11 +1224,17 @@ mod tests {
     fn test_parse_hex_address() {
         // With 0x prefix
         let addr1 = parse_hex_address("0x1234567890abcdef1234567890abcdef12345678").unwrap();
-        assert_eq!(&addr1.as_bytes()[..20], &hex::decode("1234567890abcdef1234567890abcdef12345678").unwrap()[..]);
+        assert_eq!(
+            &addr1.as_bytes()[..20],
+            &hex::decode("1234567890abcdef1234567890abcdef12345678").unwrap()[..]
+        );
 
         // Without 0x prefix
         let addr2 = parse_hex_address("1234567890abcdef1234567890abcdef12345678").unwrap();
-        assert_eq!(&addr2.as_bytes()[..20], &hex::decode("1234567890abcdef1234567890abcdef12345678").unwrap()[..]);
+        assert_eq!(
+            &addr2.as_bytes()[..20],
+            &hex::decode("1234567890abcdef1234567890abcdef12345678").unwrap()[..]
+        );
 
         // Invalid hex
         assert!(parse_hex_address("0xZZZZ").is_err());

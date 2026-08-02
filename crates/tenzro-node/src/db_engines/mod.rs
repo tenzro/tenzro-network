@@ -42,7 +42,10 @@ pub use valkey::ValkeyEngine;
 /// config serves no engines and its registry is empty — the query path answers
 /// with a routing error, never a panic. `data_dir` roots the embedded engines
 /// under `{data_dir}/databases/{lance,tantivy}/`.
-pub fn build_registry_from_config(cfg: &DatabasesConfig, data_dir: &std::path::Path) -> EngineRegistry {
+pub fn build_registry_from_config(
+    cfg: &DatabasesConfig,
+    data_dir: &std::path::Path,
+) -> EngineRegistry {
     let registry = EngineRegistry::new();
 
     if let Some(url) = &cfg.postgres_url {

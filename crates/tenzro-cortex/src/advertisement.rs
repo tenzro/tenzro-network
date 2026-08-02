@@ -18,7 +18,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tenzro_crypto::{
     keys::{KeyType, PublicKey},
-    signatures::{verify, Signature as CryptoSignature, Signer},
+    signatures::{Signature as CryptoSignature, Signer, verify},
 };
 use tenzro_types::{
     cortex::{CortexModelFamily, CortexPricing},
@@ -191,9 +191,7 @@ impl RemoteWorkerRegistry {
     pub fn ingest(&self, ad: CortexAdvertisement) -> Result<()> {
         ad.verify()?;
         if ad.is_expired() {
-            return Err(CortexError::WorkerRejected(
-                "advertisement expired".into(),
-            ));
+            return Err(CortexError::WorkerRejected("advertisement expired".into()));
         }
         let key = format!("{}::{}", ad.worker_did, ad.model_id);
         self.inner.insert(key, ad);

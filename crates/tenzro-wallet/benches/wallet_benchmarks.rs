@@ -11,11 +11,11 @@
 
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 
 use tenzro_types::primitives::Address;
 use tenzro_wallet::{
-    user_op_hash, Keystore, NonceManager, UserOp, UserOpBuilder, WalletProvisioner,
+    Keystore, NonceManager, UserOp, UserOpBuilder, WalletProvisioner, user_op_hash,
 };
 
 fn sample_user_op() -> UserOp {

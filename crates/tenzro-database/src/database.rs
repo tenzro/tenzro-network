@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tenzro_storage::{KvStore, WriteOp, CF_DATABASES};
+use tenzro_storage::{CF_DATABASES, KvStore, WriteOp};
 
 use crate::access_control::{AccessPolicy, ConfidentialSeal};
-use crate::catalog::{engine_by_id, EngineKind, ShardingModel};
+use crate::catalog::{EngineKind, ShardingModel, engine_by_id};
 use crate::error::{DatabaseError, Result};
-use crate::placement::{partition_key, select_tiered_holders, TieredCandidate};
+use crate::placement::{TieredCandidate, partition_key, select_tiered_holders};
 use crate::pricing::DatabasePricing;
 
 const DB_PREFIX: &[u8] = b"db/";
@@ -69,7 +69,10 @@ pub struct ReplicationPolicy {
 
 impl Default for ReplicationPolicy {
     fn default() -> Self {
-        Self { min_replication: 2, max_replication: 4 }
+        Self {
+            min_replication: 2,
+            max_replication: 4,
+        }
     }
 }
 
@@ -90,6 +93,11 @@ pub struct DatabaseDescriptor {
     pub replication: ReplicationPolicy,
     /// Free-form engine-specific config the runtime backend interprets (schema
     /// name, vector dimension, collection name, …). Opaque to the registry.
+    ///
+    /// Carried through `json_value_serde` because this descriptor is bincoded
+    /// onto the gossip wire, and a bare `serde_json::Value` cannot decode from
+    /// a non-self-describing format.
+    #[serde(with = "tenzro_types::primitives::json_value_serde")]
     pub engine_config: serde_json::Value,
     /// Who may read and administer this database. Enforced identically across
     /// the local, LAN-cluster, and network tiers — a node layer adjudicates the
@@ -144,7 +152,11 @@ pub struct PartitionPlacement {
 impl PartitionPlacement {
     /// All holders, local tier first then network tier.
     pub fn all_holders(&self) -> Vec<String> {
-        self.local_holders.iter().chain(self.network_holders.iter()).cloned().collect()
+        self.local_holders
+            .iter()
+            .chain(self.network_holders.iter())
+            .cloned()
+            .collect()
     }
 
     /// Distinct holders currently recorded for this partition.
@@ -205,7 +217,10 @@ fn validate_descriptor(mut desc: DatabaseDescriptor) -> Result<DatabaseDescripto
         PlacementMode::Local => {
             // A local database is one partition, one holder (self).
             desc.partitions = 1;
-            desc.replication = ReplicationPolicy { min_replication: 1, max_replication: 1 };
+            desc.replication = ReplicationPolicy {
+                min_replication: 1,
+                max_replication: 1,
+            };
         }
         PlacementMode::LanCluster | PlacementMode::Network => {
             if engine.kind == EngineKind::Embedded && desc.partitions > 1 {
@@ -254,7 +269,11 @@ impl DatabaseRegistry {
     /// An in-memory registry with no persistence. Use [`Self::with_storage`]
     /// for a durable one.
     pub fn new() -> Self {
-        Self { databases: DashMap::new(), placements: DashMap::new(), storage: None }
+        Self {
+            databases: DashMap::new(),
+            placements: DashMap::new(),
+            storage: None,
+        }
     }
 
     /// A registry backed by `storage`, hydrating any previously-persisted
@@ -270,7 +289,9 @@ impl DatabaseRegistry {
     }
 
     fn hydrate(&self) -> Result<()> {
-        let Some(ref storage) = self.storage else { return Ok(()) };
+        let Some(ref storage) = self.storage else {
+            return Ok(());
+        };
 
         for (_, value) in storage
             .scan_prefix(CF_DATABASES, DB_PREFIX)
@@ -285,7 +306,8 @@ impl DatabaseRegistry {
             .map_err(|e| DatabaseError::Persistence(e.to_string()))?
         {
             if let Ok(p) = serde_json::from_slice::<PartitionPlacement>(&value) {
-                self.placements.insert(placement_map_key(&p.database_id, p.partition_index), p);
+                self.placements
+                    .insert(placement_map_key(&p.database_id, p.partition_index), p);
             }
         }
         Ok(())
@@ -335,12 +357,16 @@ impl DatabaseRegistry {
             });
         }
         if let Some(ref storage) = self.storage {
-            storage.write_batch_sync(ops).map_err(|e| DatabaseError::Persistence(e.to_string()))?;
+            storage
+                .write_batch_sync(ops)
+                .map_err(|e| DatabaseError::Persistence(e.to_string()))?;
         }
 
-        self.databases.insert(desc.database_id.clone(), desc.clone());
+        self.databases
+            .insert(desc.database_id.clone(), desc.clone());
         for p in placements {
-            self.placements.insert(placement_map_key(&p.database_id, p.partition_index), p);
+            self.placements
+                .insert(placement_map_key(&p.database_id, p.partition_index), p);
         }
         Ok(desc)
     }
@@ -422,7 +448,11 @@ impl DatabaseRegistry {
     /// [`create_database`]: Self::create_database
     pub fn upsert_descriptor(&self, desc: DatabaseDescriptor) -> Result<()> {
         let desc = validate_descriptor(desc)?;
-        if self.databases.get(&desc.database_id).is_some_and(|r| *r.value() == desc) {
+        if self
+            .databases
+            .get(&desc.database_id)
+            .is_some_and(|r| *r.value() == desc)
+        {
             return Ok(());
         }
         if let Some(ref storage) = self.storage {
@@ -440,7 +470,11 @@ impl DatabaseRegistry {
     }
 
     /// The placement of one partition of a database.
-    pub fn get_partition(&self, database_id: &str, partition_index: usize) -> Result<PartitionPlacement> {
+    pub fn get_partition(
+        &self,
+        database_id: &str,
+        partition_index: usize,
+    ) -> Result<PartitionPlacement> {
         self.placements
             .get(&placement_map_key(database_id, partition_index))
             .map(|r| r.value().clone())
@@ -481,12 +515,15 @@ impl DatabaseRegistry {
             });
         }
         if let Some(ref storage) = self.storage {
-            storage.write_batch_sync(ops).map_err(|e| DatabaseError::Persistence(e.to_string()))?;
+            storage
+                .write_batch_sync(ops)
+                .map_err(|e| DatabaseError::Persistence(e.to_string()))?;
         }
 
         self.databases.remove(database_id);
         for p in partitions {
-            self.placements.remove(&placement_map_key(database_id, p.partition_index));
+            self.placements
+                .remove(&placement_map_key(database_id, p.partition_index));
         }
         Ok(())
     }
@@ -546,17 +583,22 @@ impl DatabaseRegistry {
             });
         }
         if let Some(ref storage) = self.storage {
-            storage.write_batch_sync(ops).map_err(|e| DatabaseError::Persistence(e.to_string()))?;
+            storage
+                .write_batch_sync(ops)
+                .map_err(|e| DatabaseError::Persistence(e.to_string()))?;
         }
 
         for old in &old_partitions {
             if old.partition_index >= desc.partitions {
-                self.placements.remove(&placement_map_key(database_id, old.partition_index));
+                self.placements
+                    .remove(&placement_map_key(database_id, old.partition_index));
             }
         }
-        self.databases.insert(desc.database_id.clone(), desc.clone());
+        self.databases
+            .insert(desc.database_id.clone(), desc.clone());
         for p in new_placements {
-            self.placements.insert(placement_map_key(&p.database_id, p.partition_index), p);
+            self.placements
+                .insert(placement_map_key(&p.database_id, p.partition_index), p);
         }
         Ok(desc)
     }
@@ -599,7 +641,8 @@ impl DatabaseRegistry {
             return Ok(p);
         }
         self.persist_partition(&p)?;
-        self.placements.insert(placement_map_key(database_id, partition_index), p.clone());
+        self.placements
+            .insert(placement_map_key(database_id, partition_index), p.clone());
         tracing::info!(
             database_id,
             partition_index,
@@ -694,8 +737,10 @@ impl DatabaseRegistry {
             p.network_holders.push(assignment.new_holder.clone());
         }
         self.persist_partition(&p)?;
-        self.placements
-            .insert(placement_map_key(database_id, assignment.partition_index), p.clone());
+        self.placements.insert(
+            placement_map_key(database_id, assignment.partition_index),
+            p.clone(),
+        );
         tracing::info!(
             database_id,
             partition_index = assignment.partition_index,
@@ -735,18 +780,31 @@ mod tests {
     use crate::catalog::engine_ids;
 
     fn locals(n: usize) -> Vec<TieredCandidate> {
-        (0..n).map(|i| TieredCandidate::local(format!("local-{i}"))).collect()
+        (0..n)
+            .map(|i| TieredCandidate::local(format!("local-{i}")))
+            .collect()
     }
 
     fn directs(n: usize) -> Vec<TieredCandidate> {
-        (0..n).map(|i| TieredCandidate::direct(format!("net-{i}"))).collect()
+        (0..n)
+            .map(|i| TieredCandidate::direct(format!("net-{i}")))
+            .collect()
     }
 
     fn policy(min: u8) -> ReplicationPolicy {
-        ReplicationPolicy { min_replication: min, max_replication: min + 2 }
+        ReplicationPolicy {
+            min_replication: min,
+            max_replication: min + 2,
+        }
     }
 
-    fn desc(id: &str, engine: &str, mode: PlacementMode, partitions: usize, min_replication: u8) -> DatabaseDescriptor {
+    fn desc(
+        id: &str,
+        engine: &str,
+        mode: PlacementMode,
+        partitions: usize,
+        min_replication: u8,
+    ) -> DatabaseDescriptor {
         DatabaseDescriptor {
             database_id: id.to_string(),
             engine_id: engine.to_string(),
@@ -765,10 +823,19 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let cands = locals(1);
         let out = reg
-            .create_database(desc("db-l", engine_ids::POSTGRES, PlacementMode::Local, 8, 5), &cands)
+            .create_database(
+                desc("db-l", engine_ids::POSTGRES, PlacementMode::Local, 8, 5),
+                &cands,
+            )
             .unwrap();
         assert_eq!(out.partitions, 1);
-        assert_eq!(out.replication, ReplicationPolicy { min_replication: 1, max_replication: 1 });
+        assert_eq!(
+            out.replication,
+            ReplicationPolicy {
+                min_replication: 1,
+                max_replication: 1
+            }
+        );
         let p = reg.get_partition("db-l", 0).unwrap();
         assert_eq!(p.all_holders(), vec!["local-0".to_string()]);
     }
@@ -778,8 +845,17 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let mut cands = locals(5);
         cands.extend(directs(5));
-        reg.create_database(desc("db-c", engine_ids::POSTGRES, PlacementMode::LanCluster, 3, 2), &cands)
-            .unwrap();
+        reg.create_database(
+            desc(
+                "db-c",
+                engine_ids::POSTGRES,
+                PlacementMode::LanCluster,
+                3,
+                2,
+            ),
+            &cands,
+        )
+        .unwrap();
         for idx in 0..3 {
             let p = reg.get_partition("db-c", idx).unwrap();
             assert_eq!(p.local_holders.len(), 2);
@@ -792,8 +868,11 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let mut cands = locals(1);
         cands.extend(directs(5));
-        reg.create_database(desc("db-n", engine_ids::POSTGRES, PlacementMode::Network, 2, 3), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("db-n", engine_ids::POSTGRES, PlacementMode::Network, 2, 3),
+            &cands,
+        )
+        .unwrap();
         let p = reg.get_partition("db-n", 0).unwrap();
         assert_eq!(p.all_holders().len(), 3);
         assert!(!p.network_holders.is_empty());
@@ -806,8 +885,11 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let mut cands = locals(2);
         cands.extend(directs(4));
-        reg.create_database(desc("db-m", engine_ids::MILVUS, PlacementMode::Network, 3, 2), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("db-m", engine_ids::MILVUS, PlacementMode::Network, 3, 2),
+            &cands,
+        )
+        .unwrap();
         for idx in 0..3 {
             let p = reg.get_partition("db-m", idx).unwrap();
             assert_eq!(p.role, ClusterRole::NativeClusterMember);
@@ -820,8 +902,11 @@ mod tests {
         // a standalone instance holding one Tenzro-assigned partition.
         let reg = DatabaseRegistry::new();
         let cands = locals(4);
-        reg.create_database(desc("db-q", engine_ids::QDRANT, PlacementMode::LanCluster, 3, 2), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("db-q", engine_ids::QDRANT, PlacementMode::LanCluster, 3, 2),
+            &cands,
+        )
+        .unwrap();
         for idx in 0..3 {
             let p = reg.get_partition("db-q", idx).unwrap();
             assert_eq!(p.role, ClusterRole::StandaloneShard);
@@ -833,7 +918,10 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let cands = locals(4);
         let err = reg
-            .create_database(desc("db-e", engine_ids::LANCE, PlacementMode::Network, 4, 2), &cands)
+            .create_database(
+                desc("db-e", engine_ids::LANCE, PlacementMode::Network, 4, 2),
+                &cands,
+            )
             .unwrap_err();
         assert!(matches!(err, DatabaseError::UnsupportedPlacement { .. }));
     }
@@ -844,7 +932,10 @@ mod tests {
         let cands = locals(4);
         // Single partition, but Network mode on a non-shardable engine.
         let err = reg
-            .create_database(desc("db-e2", engine_ids::TANTIVY, PlacementMode::Network, 1, 2), &cands)
+            .create_database(
+                desc("db-e2", engine_ids::TANTIVY, PlacementMode::Network, 1, 2),
+                &cands,
+            )
             .unwrap_err();
         assert!(matches!(err, DatabaseError::UnsupportedPlacement { .. }));
     }
@@ -854,7 +945,10 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let cands = locals(1);
         let out = reg
-            .create_database(desc("db-e3", engine_ids::LANCE, PlacementMode::Local, 1, 1), &cands)
+            .create_database(
+                desc("db-e3", engine_ids::LANCE, PlacementMode::Local, 1, 1),
+                &cands,
+            )
             .unwrap();
         assert_eq!(out.partitions, 1);
     }
@@ -863,7 +957,10 @@ mod tests {
     fn unknown_engine_rejected() {
         let reg = DatabaseRegistry::new();
         let err = reg
-            .create_database(desc("db-u", "mongodb", PlacementMode::Local, 1, 1), &locals(1))
+            .create_database(
+                desc("db-u", "mongodb", PlacementMode::Local, 1, 1),
+                &locals(1),
+            )
             .unwrap_err();
         assert!(matches!(err, DatabaseError::UnknownEngine(_)));
     }
@@ -872,10 +969,16 @@ mod tests {
     fn duplicate_database_rejected() {
         let reg = DatabaseRegistry::new();
         let cands = locals(1);
-        reg.create_database(desc("dup", engine_ids::POSTGRES, PlacementMode::Local, 1, 1), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("dup", engine_ids::POSTGRES, PlacementMode::Local, 1, 1),
+            &cands,
+        )
+        .unwrap();
         let err = reg
-            .create_database(desc("dup", engine_ids::POSTGRES, PlacementMode::Local, 1, 1), &cands)
+            .create_database(
+                desc("dup", engine_ids::POSTGRES, PlacementMode::Local, 1, 1),
+                &cands,
+            )
             .unwrap_err();
         assert!(matches!(err, DatabaseError::DatabaseExists(_)));
     }
@@ -885,8 +988,11 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let mut cands = locals(3);
         cands.extend(directs(3));
-        reg.create_database(desc("db-d", engine_ids::QDRANT, PlacementMode::Network, 3, 2), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("db-d", engine_ids::QDRANT, PlacementMode::Network, 3, 2),
+            &cands,
+        )
+        .unwrap();
         reg.drop_database("db-d").unwrap();
         assert!(reg.get_database("db-d").is_err());
         assert!(reg.list_partitions("db-d").is_empty());
@@ -899,8 +1005,11 @@ mod tests {
             let reg = DatabaseRegistry::with_storage(storage.clone()).unwrap();
             let mut cands = locals(3);
             cands.extend(directs(3));
-            reg.create_database(desc("db-p", engine_ids::POSTGRES, PlacementMode::Network, 2, 2), &cands)
-                .unwrap();
+            reg.create_database(
+                desc("db-p", engine_ids::POSTGRES, PlacementMode::Network, 2, 2),
+                &cands,
+            )
+            .unwrap();
         }
         // Reopen against the same store: descriptors + placements must return.
         let reg2 = DatabaseRegistry::with_storage(storage).unwrap();
@@ -913,7 +1022,10 @@ mod tests {
     fn empty_pricing_asset_rejected() {
         let reg = DatabaseRegistry::new();
         let mut d = desc("db-price", engine_ids::POSTGRES, PlacementMode::Local, 1, 1);
-        d.pricing = DatabasePricing { asset_id: String::new(), price_per_query: 5 };
+        d.pricing = DatabasePricing {
+            asset_id: String::new(),
+            price_per_query: 5,
+        };
         let err = reg.create_database(d, &locals(1)).unwrap_err();
         assert!(matches!(err, DatabaseError::InvalidRequest(_)));
     }
@@ -923,8 +1035,17 @@ mod tests {
         let storage: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
         {
             let reg = DatabaseRegistry::with_storage(storage.clone()).unwrap();
-            let mut d = desc("db-priced", engine_ids::POSTGRES, PlacementMode::Local, 1, 1);
-            d.pricing = DatabasePricing { asset_id: "TNZO".to_string(), price_per_query: 250 };
+            let mut d = desc(
+                "db-priced",
+                engine_ids::POSTGRES,
+                PlacementMode::Local,
+                1,
+                1,
+            );
+            d.pricing = DatabasePricing {
+                asset_id: "TNZO".to_string(),
+                price_per_query: 250,
+            };
             reg.create_database(d, &locals(1)).unwrap();
         }
         let reg2 = DatabaseRegistry::with_storage(storage).unwrap();
@@ -953,7 +1074,10 @@ mod tests {
         }
         let reg2 = DatabaseRegistry::with_storage(storage).unwrap();
         let got = reg2.get_database("db-ap").unwrap();
-        assert!(matches!(got.access_policy, AccessPolicy::CapabilityRequired { .. }));
+        assert!(matches!(
+            got.access_policy,
+            AccessPolicy::CapabilityRequired { .. }
+        ));
         assert_eq!(got.access_policy.owner_did(), "did:tenzro:human:alice");
     }
 
@@ -961,16 +1085,27 @@ mod tests {
     fn list_databases_returns_all() {
         let reg = DatabaseRegistry::new();
         let cands = locals(1);
-        reg.create_database(desc("a", engine_ids::VALKEY, PlacementMode::Local, 1, 1), &cands).unwrap();
-        reg.create_database(desc("b", engine_ids::POSTGRES, PlacementMode::Local, 1, 1), &cands).unwrap();
+        reg.create_database(
+            desc("a", engine_ids::VALKEY, PlacementMode::Local, 1, 1),
+            &cands,
+        )
+        .unwrap();
+        reg.create_database(
+            desc("b", engine_ids::POSTGRES, PlacementMode::Local, 1, 1),
+            &cands,
+        )
+        .unwrap();
         assert_eq!(reg.list_databases().len(), 2);
     }
 
     #[test]
     fn rescale_local_to_network_reshards() {
         let reg = DatabaseRegistry::new();
-        reg.create_database(desc("db-r", engine_ids::POSTGRES, PlacementMode::Local, 4, 3), &locals(1))
-            .unwrap();
+        reg.create_database(
+            desc("db-r", engine_ids::POSTGRES, PlacementMode::Local, 4, 3),
+            &locals(1),
+        )
+        .unwrap();
         // Local forces a single partition on self.
         assert_eq!(reg.get_database("db-r").unwrap().partitions, 1);
         assert_eq!(reg.list_partitions("db-r").len(), 1);
@@ -993,11 +1128,15 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let mut cands = locals(3);
         cands.extend(directs(3));
-        reg.create_database(desc("db-s", engine_ids::QDRANT, PlacementMode::Network, 4, 2), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("db-s", engine_ids::QDRANT, PlacementMode::Network, 4, 2),
+            &cands,
+        )
+        .unwrap();
         assert_eq!(reg.list_partitions("db-s").len(), 4);
 
-        reg.rescale_database("db-s", PlacementMode::Network, 2, policy(2), &cands).unwrap();
+        reg.rescale_database("db-s", PlacementMode::Network, 2, policy(2), &cands)
+            .unwrap();
         assert_eq!(reg.list_partitions("db-s").len(), 2);
         // Rows 2 and 3 are gone, not merely orphaned in the map.
         assert!(reg.get_partition("db-s", 2).is_err());
@@ -1009,11 +1148,15 @@ mod tests {
         let storage: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
         {
             let reg = DatabaseRegistry::with_storage(storage.clone()).unwrap();
-            reg.create_database(desc("db-rp", engine_ids::POSTGRES, PlacementMode::Local, 1, 1), &locals(1))
-                .unwrap();
+            reg.create_database(
+                desc("db-rp", engine_ids::POSTGRES, PlacementMode::Local, 1, 1),
+                &locals(1),
+            )
+            .unwrap();
             let mut cands = locals(2);
             cands.extend(directs(4));
-            reg.rescale_database("db-rp", PlacementMode::Network, 3, policy(2), &cands).unwrap();
+            reg.rescale_database("db-rp", PlacementMode::Network, 3, policy(2), &cands)
+                .unwrap();
         }
         let reg2 = DatabaseRegistry::with_storage(storage).unwrap();
         let d = reg2.get_database("db-rp").unwrap();
@@ -1039,14 +1182,20 @@ mod tests {
         let reg_a = DatabaseRegistry::new();
         let reg_b = DatabaseRegistry::new();
         reg_a
-            .create_database(desc("db-det", engine_ids::POSTGRES, PlacementMode::Network, 4, 3), &cands)
+            .create_database(
+                desc("db-det", engine_ids::POSTGRES, PlacementMode::Network, 4, 3),
+                &cands,
+            )
             .unwrap();
         // Same descriptor, same view, reversed candidate order: HRW must
         // produce the identical holder sets.
         let mut reversed = cands.clone();
         reversed.reverse();
         reg_b
-            .create_database(desc("db-det", engine_ids::POSTGRES, PlacementMode::Network, 4, 3), &reversed)
+            .create_database(
+                desc("db-det", engine_ids::POSTGRES, PlacementMode::Network, 4, 3),
+                &reversed,
+            )
             .unwrap();
 
         for idx in 0..4 {
@@ -1064,10 +1213,17 @@ mod tests {
     fn placement_fails_closed_below_replication_floor() {
         let reg = DatabaseRegistry::new();
         let err = reg
-            .create_database(desc("db-f", engine_ids::POSTGRES, PlacementMode::Network, 2, 3), &directs(2))
+            .create_database(
+                desc("db-f", engine_ids::POSTGRES, PlacementMode::Network, 2, 3),
+                &directs(2),
+            )
             .unwrap_err();
         match err {
-            DatabaseError::InsufficientProviders { required, available, .. } => {
+            DatabaseError::InsufficientProviders {
+                required,
+                available,
+                ..
+            } => {
                 assert_eq!(required, 3);
                 assert_eq!(available, 2);
             }
@@ -1082,8 +1238,11 @@ mod tests {
     fn holder_loss_surfaces_under_replication() {
         let reg = DatabaseRegistry::new();
         let cands = directs(4);
-        reg.create_database(desc("db-h", engine_ids::POSTGRES, PlacementMode::Network, 2, 2), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("db-h", engine_ids::POSTGRES, PlacementMode::Network, 2, 2),
+            &cands,
+        )
+        .unwrap();
         assert!(reg.under_replicated("db-h").unwrap().is_empty());
 
         let lost = reg.get_partition("db-h", 1).unwrap().all_holders()[0].clone();
@@ -1093,7 +1252,12 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(
             statuses[0],
-            PartitionReplicationStatus { partition_index: 1, current: 1, required: 2, missing: 1 }
+            PartitionReplicationStatus {
+                partition_index: 1,
+                current: 1,
+                required: 2,
+                missing: 1
+            }
         );
     }
 
@@ -1101,8 +1265,11 @@ mod tests {
     fn repair_plan_excludes_existing_holders() {
         let reg = DatabaseRegistry::new();
         let cands = directs(5);
-        reg.create_database(desc("db-rep", engine_ids::POSTGRES, PlacementMode::Network, 1, 2), &cands)
-            .unwrap();
+        reg.create_database(
+            desc("db-rep", engine_ids::POSTGRES, PlacementMode::Network, 1, 2),
+            &cands,
+        )
+        .unwrap();
         let lost = reg.get_partition("db-rep", 0).unwrap().all_holders()[0].clone();
         reg.mark_holder_lost("db-rep", 0, &lost).unwrap();
 
@@ -1121,7 +1288,10 @@ mod tests {
         let reg = DatabaseRegistry::new();
         let cands = directs(6);
         let mut d = desc("db-max", engine_ids::POSTGRES, PlacementMode::Network, 1, 2);
-        d.replication = ReplicationPolicy { min_replication: 2, max_replication: 2 };
+        d.replication = ReplicationPolicy {
+            min_replication: 2,
+            max_replication: 2,
+        };
         reg.create_database(d, &cands).unwrap();
 
         let extra = RepairAssignment {
@@ -1140,8 +1310,11 @@ mod tests {
         {
             let reg = DatabaseRegistry::with_storage(storage.clone()).unwrap();
             let cands = directs(5);
-            reg.create_database(desc("db-dur", engine_ids::POSTGRES, PlacementMode::Network, 1, 3), &cands)
-                .unwrap();
+            reg.create_database(
+                desc("db-dur", engine_ids::POSTGRES, PlacementMode::Network, 1, 3),
+                &cands,
+            )
+            .unwrap();
             lost = reg.get_partition("db-dur", 0).unwrap().all_holders()[0].clone();
             reg.mark_holder_lost("db-dur", 0, &lost).unwrap();
         }

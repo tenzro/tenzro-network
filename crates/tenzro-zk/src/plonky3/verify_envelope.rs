@@ -103,9 +103,7 @@ pub fn verify_proof_envelope(proof: &Proof) -> Result<(), VerifyEnvelopeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuits::airs::inference::{
-        generate_inference_trace, inference_public_inputs,
-    };
+    use crate::circuits::airs::inference::{generate_inference_trace, inference_public_inputs};
     use crate::plonky3::envelope::{encode_proof, encode_public_inputs};
     use crate::plonky3::prover::Plonky3Prover;
     use p3_field::PrimeCharacteristicRing;

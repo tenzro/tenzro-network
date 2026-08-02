@@ -17,7 +17,7 @@ pytest.importorskip("torch")
 pytest.importorskip("transformers")
 pytest.importorskip("peft")
 
-from tenzro_trainer.benchmark import run_lora_benchmark  # noqa: E402
+from tenzro_trainer.benchmark import run_lora_benchmark
 
 
 def _run(steps: int = 6, lora_rank: int = 8):

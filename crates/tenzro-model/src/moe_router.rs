@@ -26,9 +26,9 @@
 //! returns a [`MoeDispatchError::UnreachableExpert`] so the caller can
 //! pick a fallback strategy (round to a Replica provider, queue, etc.).
 
-use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -244,12 +244,7 @@ fn candidates_for_dispatch(
     } else {
         holders
             .into_iter()
-            .filter(|h| {
-                matches!(
-                    h.residency,
-                    tenzro_types::model::MoeExpertResidency::Warm
-                )
-            })
+            .filter(|h| matches!(h.residency, tenzro_types::model::MoeExpertResidency::Warm))
             .collect()
     }
 }
@@ -258,14 +253,11 @@ fn candidates_for_dispatch(
 mod tests {
     use super::*;
     use tenzro_types::model::{
-        InferenceProvider, MoeExpertHolding, MoeExpertResidency, MoeProviderRole,
-        ProviderCapacity, ProviderStatus,
+        InferenceProvider, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, ProviderCapacity,
+        ProviderStatus,
     };
 
-    fn provider(
-        addr: u8,
-        experts: &[(u32, u32, MoeExpertResidency, u32)],
-    ) -> InferenceProvider {
+    fn provider(addr: u8, experts: &[(u32, u32, MoeExpertResidency, u32)]) -> InferenceProvider {
         let mut p = InferenceProvider::new(Address::new([addr; 32]), format!("p{}", addr));
         p.status = ProviderStatus::Active;
         let mut capacity = ProviderCapacity {
@@ -391,7 +383,11 @@ mod tests {
         // Primary is a warm holder (bob or carol — holders() is stable
         // sort so warm entries keep insertion order: bob then carol).
         assert_eq!(batch.provider.as_bytes()[0], 2);
-        let backup_addrs: Vec<u8> = batch.backups.iter().map(|b| b.provider.as_bytes()[0]).collect();
+        let backup_addrs: Vec<u8> = batch
+            .backups
+            .iter()
+            .map(|b| b.provider.as_bytes()[0])
+            .collect();
         assert_eq!(backup_addrs, vec![3, 1]);
     }
 

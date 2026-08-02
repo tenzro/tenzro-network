@@ -30,10 +30,7 @@ pub enum TeeError {
 
     /// TCB (Trusted Computing Base) version is outdated
     #[error("TCB version outdated: current={current}, required={required}")]
-    TcbOutdated {
-        current: String,
-        required: String,
-    },
+    TcbOutdated { current: String, required: String },
 
     /// Enclave operation failed
     #[error("Enclave operation failed: {0}")]

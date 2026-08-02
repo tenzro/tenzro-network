@@ -53,3 +53,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "identity_benchmarks"
 harness = false
+
+[lints]
+workspace = true

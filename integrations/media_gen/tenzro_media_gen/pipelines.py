@@ -25,6 +25,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import pathlib
 import tempfile
 from dataclasses import dataclass
 from typing import Any
@@ -76,7 +77,7 @@ class ExpertPair:
     min_vram_gb_per_expert: int
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> "ExpertPair":
+    def from_json(cls, data: dict[str, Any]) -> ExpertPair:
         return cls(
             high_noise_component=str(data["high_noise_component"]),
             low_noise_component=str(data["low_noise_component"]),
@@ -112,7 +113,7 @@ class CatalogEntry:
     expert_pair: ExpertPair | None
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> "CatalogEntry":
+    def from_json(cls, data: dict[str, Any]) -> CatalogEntry:
         pair = data.get("expert_pair")
         return cls(
             id=str(data["id"]),
@@ -131,9 +132,7 @@ class CatalogEntry:
                 if data.get("default_num_frames") is not None
                 else None
             ),
-            default_fps=(
-                int(data["default_fps"]) if data.get("default_fps") is not None else None
-            ),
+            default_fps=(int(data["default_fps"]) if data.get("default_fps") is not None else None),
             min_vram_gb=int(data["min_vram_gb"]),
             license=str(data["license"]),
             expert_pair=ExpertPair.from_json(pair) if pair else None,
@@ -177,6 +176,21 @@ class LoadedPipeline:
     entry: CatalogEntry
     kind: MediaGenKind
     role: MediaGenExpertRole | None
+    #: Weight format the transformer was loaded at. Recorded because a
+    #: quantized pipeline behaves differently in ways a caller has to know
+    #: about — it cannot be moved between devices after load, and its outputs
+    #: are not bit-identical to the same model at bf16.
+    precision: str = "bfloat16"
+
+    @property
+    def is_quantized(self) -> bool:
+        """Whether the transformer holds sub-8-bit or int8 weights.
+
+        Callers use this to decide whether moving the pipeline between devices
+        is allowed — a bitsandbytes module is placed at load time and raises if
+        moved afterwards.
+        """
+        return self.precision in _QUANTIZED_PRECISIONS
 
     @property
     def transformer(self) -> Any:
@@ -186,6 +200,107 @@ class LoadedPipeline:
         return self.pipe.transformer
 
 
+#: Precisions a diffusion transformer can be loaded at, coarsest first.
+#:
+#: The two sub-8-bit tiers go through bitsandbytes, which was verified working
+#: on this project's target hardware (GB10, compute capability 12.1) with
+#: bitsandbytes 0.50.0 — both ``Linear4bit`` and ``Linear8bitLt`` execute there.
+#: On a GPU where the kernels are unavailable the load raises rather than
+#: silently falling back, because a caller who asked for 4-bit to make a model
+#: fit needs to know it did not.
+DIFFUSION_PRECISIONS: tuple[str, ...] = (
+    "nf4",
+    "int4",
+    "int8",
+    "float16",
+    "bfloat16",
+    "float32",
+)
+
+#: Precisions that need bitsandbytes and are applied to the transformer only.
+_QUANTIZED_PRECISIONS = {"nf4", "int4", "int8"}
+
+
+def _quantization_for(precision: str, compute_dtype: Any) -> Any | None:
+    """Build the diffusers quantization config for ``precision``.
+
+    Returns ``None`` for the plain floating-point tiers, which are expressed as
+    ``torch_dtype`` instead.
+
+    Quantization is scoped to the **transformer**, not the whole pipeline. The
+    text encoder and VAE are a small share of the weights and are where output
+    quality degrades most visibly under aggressive quantization — quantizing
+    the VAE in particular shows up as colour banding in every frame. The
+    transformer is both the bulk of the memory and the part that tolerates it,
+    so that is what gets quantized.
+    """
+    if precision not in _QUANTIZED_PRECISIONS:
+        return None
+    from diffusers import BitsAndBytesConfig
+
+    if precision == "int8":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    # nf4 is the normal-float 4-bit type; int4 is plain fp4. nf4 is the better
+    # default for weights that are roughly normally distributed, which
+    # transformer weights are, and it is what the diffusers guides use.
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4" if precision == "nf4" else "fp4",
+        bnb_4bit_compute_dtype=compute_dtype,
+        # Quantizes the quantization constants too — a further ~0.4 bits per
+        # weight for no measurable quality cost, which matters when the reason
+        # to be at 4-bit is that the model did not otherwise fit.
+        bnb_4bit_use_double_quant=True,
+    )
+
+
+def tenzro_home() -> pathlib.Path:
+    """The one Tenzro root: ``$TENZRO_HOME``, else ``~/.tenzro``.
+
+    Mirrors ``tenzro_types::paths::tenzro_home`` on the Rust side.
+    """
+    root = os.environ.get("TENZRO_HOME", "").strip()
+    if root:
+        return pathlib.Path(root).expanduser()
+    return pathlib.Path.home() / ".tenzro"
+
+
+def default_cache_dir() -> pathlib.Path:
+    """Where model weights land when the caller names no ``cache_dir``.
+
+    Without this, ``diffusers``/``huggingface_hub`` fall through to their own
+    ``~/.cache/huggingface`` default — a directory nothing else in Tenzro reads
+    or accounts for, so a machine ends up with two copies of every checkpoint
+    and no way to say which one is in use. ``$HF_HOME`` is honoured first
+    because the node exports it when it spawns a worker.
+    """
+    hf_home = os.environ.get("HF_HOME", "").strip()
+    if hf_home:
+        return pathlib.Path(hf_home).expanduser()
+    return tenzro_home() / "hf"
+
+
+def _token_from_cli_login() -> str | None:
+    """The HuggingFace token from disk, if the operator has one.
+
+    The Tenzro-owned copy first, then the standard location
+    `huggingface-cli login` writes, so someone who has already logged in the
+    ordinary way does not also have to export an environment variable.
+    """
+    candidates = [
+        default_cache_dir() / "token",
+        pathlib.Path.home() / ".cache" / "huggingface" / "token",
+    ]
+    for path in candidates:
+        try:
+            token = path.read_text().strip()
+        except OSError:
+            continue
+        if token:
+            return token
+    return None
+
+
 def load_pipeline(
     entry: CatalogEntry,
     kind: MediaGenKind,
@@ -193,6 +308,7 @@ def load_pipeline(
     *,
     device: str = "cuda",
     dtype: str = "bfloat16",
+    precision: str | None = None,
     cache_dir: str | None = None,
 ) -> LoadedPipeline:
     """Build the pipeline for one job.
@@ -201,6 +317,13 @@ def load_pipeline(
     empty, which is why the worker holding one half needs roughly half the VRAM
     the whole model would want. The pipeline reads whichever slot is populated
     for its dtype and channel count, so leaving one empty is supported.
+
+    ``precision`` selects the transformer's weight format from
+    :data:`DIFFUSION_PRECISIONS`. The floating-point tiers are the same thing as
+    ``dtype``; the ``nf4`` / ``int4`` / ``int8`` tiers additionally quantize the
+    transformer through bitsandbytes, with ``dtype`` remaining the compute type.
+    Defaults to ``dtype``, so an existing caller gets exactly what it did
+    before.
     """
     import diffusers
     import torch
@@ -212,7 +335,17 @@ def load_pipeline(
     if role is not None and not entry.is_split:
         raise ValueError(f"model {entry.id!r} has one transformer; a role is meaningless")
 
-    torch_dtype = getattr(torch, dtype)
+    precision = precision or dtype
+    if precision not in DIFFUSION_PRECISIONS:
+        raise ValueError(
+            f"unknown precision {precision!r}; expected one of {list(DIFFUSION_PRECISIONS)}"
+        )
+    # The compute dtype stays floating point even when the weights are
+    # quantized: 4-bit weights are dequantized into this type per matmul.
+    compute_dtype_name = dtype if precision in _QUANTIZED_PRECISIONS else precision
+    torch_dtype = getattr(torch, compute_dtype_name)
+    quant_config = _quantization_for(precision, torch_dtype)
+
     class_name = entry.pipeline_class_for(kind)
     pipeline_cls = getattr(diffusers, class_name, None)
     if pipeline_cls is None:
@@ -221,9 +354,24 @@ def load_pipeline(
             "the catalog is ahead of the installed diffusers"
         )
 
-    kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
-    if cache_dir:
-        kwargs["cache_dir"] = cache_dir
+    # An unset `cache_dir` used to mean "whatever huggingface_hub defaults to",
+    # which is a directory outside the Tenzro root that nothing else reads.
+    # Resolve it here instead so every load lands in one place.
+    resolved_cache = str(pathlib.Path(cache_dir).expanduser()) if cache_dir else str(default_cache_dir())
+
+    kwargs: dict[str, Any] = {"torch_dtype": torch_dtype, "cache_dir": resolved_cache}
+
+    # Gated checkpoints — FLUX.2 dev, the klein-9B line — need the operator's
+    # own HuggingFace token. `diffusers` reads `HF_TOKEN` itself, but only for
+    # some code paths and only in some versions, so it is passed explicitly.
+    # Absent, this is a no-op and ungated models load exactly as before.
+    hf_token = (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or _token_from_cli_login()
+    )
+    if hf_token:
+        kwargs["token"] = hf_token
 
     if entry.is_split:
         assert entry.expert_pair is not None
@@ -232,21 +380,35 @@ def load_pipeline(
             if role is MediaGenExpertRole.HIGH_NOISE
             else entry.expert_pair.low_noise_component
         )
-        transformer_cls = getattr(diffusers, "WanTransformer3DModel")
+        transformer_cls = diffusers.WanTransformer3DModel
         expert = transformer_cls.from_pretrained(
             entry.hf_repo,
             subfolder=subfolder,
             torch_dtype=torch_dtype,
-            **({"cache_dir": cache_dir} if cache_dir else {}),
+            **({"quantization_config": quant_config} if quant_config else {}),
+            cache_dir=resolved_cache,
         )
         slot = "transformer" if role is MediaGenExpertRole.HIGH_NOISE else "transformer_2"
         other = "transformer_2" if role is MediaGenExpertRole.HIGH_NOISE else "transformer"
         kwargs[slot] = expert
         kwargs[other] = None
 
+    if quant_config is not None and not entry.is_split:
+        # A whole-model load quantizes the transformer through the pipeline's
+        # own quantization mapping. The split path above already built its
+        # expert with the config applied directly, so it is not repeated here.
+        from diffusers.quantizers import PipelineQuantizationConfig
+
+        kwargs["quantization_config"] = PipelineQuantizationConfig(
+            quant_mapping={"transformer": quant_config}
+        )
+
     pipe = pipeline_cls.from_pretrained(entry.hf_repo, **kwargs)
-    pipe.to(device)
-    return LoadedPipeline(pipe=pipe, entry=entry, kind=kind, role=role)
+    # A bitsandbytes-quantized module is already placed on its device by the
+    # loader and cannot be moved afterwards; calling `.to()` on it raises.
+    if quant_config is None:
+        pipe.to(device)
+    return LoadedPipeline(pipe=pipe, entry=entry, kind=kind, role=role, precision=precision)
 
 
 def boundary_index(pipe: Any, steps: int, boundary_ratio: float) -> int:
@@ -321,11 +483,8 @@ def _decode_video(pipe: Any, latents: Any) -> Any:
         .view(1, z_dim, 1, 1, 1)
         .to(latents.device, latents.dtype)
     )
-    inv_std = (
-        1.0
-        / torch.tensor(pipe.vae.config.latents_std)
-        .view(1, z_dim, 1, 1, 1)
-        .to(latents.device, latents.dtype)
+    inv_std = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(1, z_dim, 1, 1, 1).to(
+        latents.device, latents.dtype
     )
     latents = latents / inv_std + mean
     frames = pipe.vae.decode(latents, return_dict=False)[0]

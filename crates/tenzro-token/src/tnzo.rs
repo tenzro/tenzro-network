@@ -5,10 +5,10 @@
 use crate::error::{Result, TokenError};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tenzro_types::primitives::Address;
-use tenzro_types::asset::AssetId;
-use tenzro_storage::kv::{KvStore, CF_ACCOUNTS};
 use std::sync::Arc;
+use tenzro_storage::kv::{CF_ACCOUNTS, KvStore};
+use tenzro_types::asset::AssetId;
+use tenzro_types::primitives::Address;
 use tracing::{debug, info, warn};
 
 /// Decimals for TNZO token (18 decimal places)
@@ -82,7 +82,11 @@ impl CircuitBreaker {
     /// 30-minute cooldown.
     pub fn default_for_tnzo() -> Self {
         let max_outflow = MAX_SUPPLY / 100 * CIRCUIT_BREAKER_MAX_OUTFLOW_PERCENT;
-        Self::new(max_outflow, CIRCUIT_BREAKER_WINDOW_SECS, CIRCUIT_BREAKER_COOLDOWN_SECS)
+        Self::new(
+            max_outflow,
+            CIRCUIT_BREAKER_WINDOW_SECS,
+            CIRCUIT_BREAKER_COOLDOWN_SECS,
+        )
     }
 
     /// Returns the current Unix timestamp in seconds.
@@ -122,7 +126,9 @@ impl CircuitBreaker {
     /// expired, it starts a new window before checking.
     pub fn check_outflow(&self, amount: u128) -> Result<()> {
         if self.is_tripped() {
-            let remaining = self.tripped_at.read()
+            let remaining = self
+                .tripped_at
+                .read()
                 .map(|t| {
                     let elapsed = Self::now_secs().saturating_sub(t);
                     self.cooldown_seconds.saturating_sub(elapsed)
@@ -149,11 +155,12 @@ impl CircuitBreaker {
         }
 
         // Check if the new outflow would exceed the limit
-        let new_outflow = current_outflow
-            .checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "circuit breaker outflow check".to_string(),
-            })?;
+        let new_outflow =
+            current_outflow
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "circuit breaker outflow check".to_string(),
+                })?;
 
         if new_outflow > self.max_outflow_per_window {
             // Trip the breaker
@@ -203,9 +210,7 @@ impl CircuitBreaker {
         warn!(
             "Circuit breaker TRIPPED: outflow limit of {} exceeded in {}-second window. \
              Transfers paused for {} seconds.",
-            self.max_outflow_per_window,
-            self.window_seconds,
-            self.cooldown_seconds,
+            self.max_outflow_per_window, self.window_seconds, self.cooldown_seconds,
         );
     }
 
@@ -280,7 +285,11 @@ impl StorageBackend for RocksDbBackend {
                     let array: [u8; 16] = bytes.try_into().unwrap();
                     Ok(Some(u128::from_le_bytes(array)))
                 } else {
-                    warn!("Invalid balance bytes length for {}: {}", address, bytes.len());
+                    warn!(
+                        "Invalid balance bytes length for {}: {}",
+                        address,
+                        bytes.len()
+                    );
                     Ok(None)
                 }
             }
@@ -456,7 +465,9 @@ impl TnzoToken {
     /// * `amount` - Amount to transfer (in smallest unit)
     pub fn transfer(&self, from: &Address, to: &Address, amount: u128) -> Result<()> {
         if amount == 0 {
-            return Err(TokenError::InvalidAmount("Amount must be greater than zero".to_string()));
+            return Err(TokenError::InvalidAmount(
+                "Amount must be greater than zero".to_string(),
+            ));
         }
 
         // ERC-7265 circuit breaker check
@@ -471,17 +482,21 @@ impl TnzoToken {
         }
 
         // Use checked_sub for sender
-        let new_from_balance = from_balance.checked_sub(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "transfer subtraction".to_string(),
-            })?;
+        let new_from_balance =
+            from_balance
+                .checked_sub(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "transfer subtraction".to_string(),
+                })?;
 
         // Use checked_add for recipient
         let to_balance = self.balance_of(to);
-        let new_to_balance = to_balance.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "transfer addition".to_string(),
-            })?;
+        let new_to_balance =
+            to_balance
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "transfer addition".to_string(),
+                })?;
 
         // Update balances in cache
         self.balances.insert(*from, new_from_balance);
@@ -515,28 +530,35 @@ impl TnzoToken {
         }
 
         if amount == 0 {
-            return Err(TokenError::InvalidAmount("Amount must be greater than zero".to_string()));
+            return Err(TokenError::InvalidAmount(
+                "Amount must be greater than zero".to_string(),
+            ));
         }
 
         // Check max supply
         let current_supply = *self.total_supply.read();
-        let new_supply = current_supply.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "mint supply increase".to_string(),
-            })?;
+        let new_supply =
+            current_supply
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "mint supply increase".to_string(),
+                })?;
 
         if new_supply > MAX_SUPPLY {
-            return Err(TokenError::InvalidAmount(
-                format!("Minting would exceed max supply: {} > {}", new_supply, MAX_SUPPLY)
-            ));
+            return Err(TokenError::InvalidAmount(format!(
+                "Minting would exceed max supply: {} > {}",
+                new_supply, MAX_SUPPLY
+            )));
         }
 
         // Update balance
         let current_balance = self.balance_of(to);
-        let new_balance = current_balance.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "mint balance increase".to_string(),
-            })?;
+        let new_balance =
+            current_balance
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "mint balance increase".to_string(),
+                })?;
         self.balances.insert(*to, new_balance);
 
         // Update total supply
@@ -558,7 +580,9 @@ impl TnzoToken {
     /// * `amount` - Amount to burn
     pub fn burn(&self, from: &Address, amount: u128) -> Result<()> {
         if amount == 0 {
-            return Err(TokenError::InvalidAmount("Amount must be greater than zero".to_string()));
+            return Err(TokenError::InvalidAmount(
+                "Amount must be greater than zero".to_string(),
+            ));
         }
 
         let balance = self.balance_of(from);
@@ -570,15 +594,18 @@ impl TnzoToken {
         }
 
         // Use checked_sub for balance
-        let new_balance = balance.checked_sub(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "burn balance decrease".to_string(),
-            })?;
+        let new_balance =
+            balance
+                .checked_sub(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "burn balance decrease".to_string(),
+                })?;
         self.balances.insert(*from, new_balance);
 
         // Update total supply with checked_sub
         let mut supply = self.total_supply.write();
-        *supply = supply.checked_sub(amount)
+        *supply = supply
+            .checked_sub(amount)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "burn supply decrease".to_string(),
             })?;
@@ -587,7 +614,8 @@ impl TnzoToken {
 
         // Update burned with checked_add
         let mut burned = self.total_burned.write();
-        *burned = burned.checked_add(amount)
+        *burned = burned
+            .checked_add(amount)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "burn total increase".to_string(),
             })?;
@@ -913,13 +941,21 @@ mod tests {
 
         // External writer (the VM) mutates storage directly, bypassing
         // TnzoToken::transfer. Pre-fix, balance_of would still return 0.
-        backend.balances.lock().unwrap().insert(recipient, 5_000 * ONE_TNZO);
+        backend
+            .balances
+            .lock()
+            .unwrap()
+            .insert(recipient, 5_000 * ONE_TNZO);
 
         // Post-fix: read goes back to storage, sees the new value.
         assert_eq!(token.balance_of(&recipient), 5_000 * ONE_TNZO);
 
         // Subsequent external mutation must also be visible.
-        backend.balances.lock().unwrap().insert(recipient, 1_000 * ONE_TNZO);
+        backend
+            .balances
+            .lock()
+            .unwrap()
+            .insert(recipient, 1_000 * ONE_TNZO);
         assert_eq!(token.balance_of(&recipient), 1_000 * ONE_TNZO);
     }
 }

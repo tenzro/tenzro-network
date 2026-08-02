@@ -55,10 +55,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router, Json, ServerHandler,
+    Json, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use tenzro_bridge::canton_auth::CantonTokenProvider;
@@ -159,7 +157,9 @@ pub struct CantonCreateAssetParams {
     pub description: String,
     #[schemars(description = "Nominal amount or quantity of the asset")]
     pub amount: String,
-    #[schemars(description = "Maturity date in ISO 8601 format (required for bonds, optional otherwise)")]
+    #[schemars(
+        description = "Maturity date in ISO 8601 format (required for bonds, optional otherwise)"
+    )]
     pub maturity_date: Option<String>,
     #[schemars(description = "User ID for command submission")]
     pub user_id: String,
@@ -181,7 +181,9 @@ pub struct CantonDvpSettleParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CantonUploadDarParams {
-    #[schemars(description = "Base64-encoded DAR file content (use base64 encoding of the .dar binary)")]
+    #[schemars(
+        description = "Base64-encoded DAR file content (use base64 encoding of the .dar binary)"
+    )]
     pub dar_content_base64: String,
     #[schemars(description = "Optional filename for the DAR package")]
     pub filename: Option<String>,
@@ -197,7 +199,9 @@ pub struct CantonGetFeeScheduleParams {
 pub struct CantonReconnectSynchronizerParams {
     #[schemars(description = "Synchronizer alias to reconnect (e.g. 'global', 'devnet')")]
     pub synchronizer_alias: String,
-    #[schemars(description = "If true, retry the connection on transient failure (default: false)")]
+    #[schemars(
+        description = "If true, retry the connection on transient failure (default: false)"
+    )]
     #[serde(default)]
     pub retry_on_failure: bool,
 }
@@ -252,7 +256,9 @@ pub struct CantonWatchPartyParams {
         description = "Fully-qualified party id (`<hint>::<participant-hash>`) to watch. Must be on the presenting API key's read-as or act-as delegation list."
     )]
     pub party: String,
-    #[schemars(description = "DAML template ids to filter the active-contract set by. At least one is required.")]
+    #[schemars(
+        description = "DAML template ids to filter the active-contract set by. At least one is required."
+    )]
     pub template_ids: Vec<String>,
 }
 
@@ -369,7 +375,9 @@ fn require_party(party_fq: &str, write: bool) -> std::result::Result<(), ErrorDa
     )))
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn json_result(
+    value: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
@@ -377,7 +385,9 @@ fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthro
 ///
 /// Used by tools that return a simple confirmation message rather than
 /// structured JSON (e.g. operational POST endpoints with empty 200 responses).
-fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn text_result(
+    text: impl Into<String>,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput {
         result: serde_json::json!({ "message": text.into() }),
     }))
@@ -542,9 +552,10 @@ impl CantonMcpServer {
     async fn resolve_bearer(&self) -> std::result::Result<Option<String>, ErrorData> {
         let ep = self.endpoint()?;
         if let Some(ref provider) = ep.token_provider {
-            let token = provider.bearer().await.map_err(|e| {
-                err_internal(format!("Canton auth: token refresh failed: {}", e))
-            })?;
+            let token = provider
+                .bearer()
+                .await
+                .map_err(|e| err_internal(format!("Canton auth: token refresh failed: {}", e)))?;
             return Ok(Some(token));
         }
         Ok(ep.jwt_token.clone())
@@ -673,10 +684,7 @@ impl CantonMcpServer {
     }
 
     /// Execute an Admin API GET and return the response body as JSON.
-    async fn admin_get(
-        &self,
-        endpoint: &str,
-    ) -> std::result::Result<serde_json::Value, ErrorData> {
+    async fn admin_get(&self, endpoint: &str) -> std::result::Result<serde_json::Value, ErrorData> {
         let resp = self
             .admin_request(reqwest::Method::GET, endpoint)
             .await?
@@ -739,7 +747,9 @@ impl CantonMcpServer {
     //  1. DAML Contract Tools
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Submit a DAML command (Create or Exercise) to the Canton JSON Ledger API v2. Creates new contracts or exercises choices on existing ones. Returns the transaction with created/exercised events.")]
+    #[tool(
+        description = "Submit a DAML command (Create or Exercise) to the Canton JSON Ledger API v2. Creates new contracts or exercises choices on existing ones. Returns the transaction with created/exercised events."
+    )]
     async fn canton_submit_command(
         &self,
         Parameters(params): Parameters<CantonSubmitCommandParams>,
@@ -818,7 +828,9 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "Query active DAML contracts on a Canton participant via the JSON Ledger API v2 (Canton 3.5+). Filters by template ID and party. Returns contract IDs, payloads, signatories, and observers. The `party` argument must be the fully-qualified party id (`<hint>::<participant-hash>`) — Canton 3.5+ rejects bare hints.")]
+    #[tool(
+        description = "Query active DAML contracts on a Canton participant via the JSON Ledger API v2 (Canton 3.5+). Filters by template ID and party. Returns contract IDs, payloads, signatories, and observers. The `party` argument must be the fully-qualified party id (`<hint>::<participant-hash>`) — Canton 3.5+ rejects bare hints."
+    )]
     async fn canton_list_contracts(
         &self,
         Parameters(params): Parameters<CantonListContractsParams>,
@@ -846,9 +858,7 @@ impl CantonMcpServer {
             "activeAtOffset": offset
         });
 
-        let response = self
-            .ledger_post("/state/active-contracts", &body)
-            .await?;
+        let response = self.ledger_post("/state/active-contracts", &body).await?;
 
         // Canton 3.5+ returns a bare top-level JSON array; older drafts
         // wrapped in `{contractEntries:...}` or `{results:...}`.
@@ -884,15 +894,18 @@ impl CantonMcpServer {
                 resp.status()
             )));
         }
-        let body: serde_json::Value = resp.json().await.map_err(|e| {
-            err_internal(format!("Invalid Canton ledger-end response: {}", e))
-        })?;
-        body.get("offset")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| err_internal("Canton ledger-end response missing 'offset' field".to_string()))
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| err_internal(format!("Invalid Canton ledger-end response: {}", e)))?;
+        body.get("offset").and_then(|v| v.as_i64()).ok_or_else(|| {
+            err_internal("Canton ledger-end response missing 'offset' field".to_string())
+        })
     }
 
-    #[tool(description = "Get create and archive events for a specific DAML contract via the JSON Ledger API v2. Returns the contract lifecycle events including creation arguments, signatories, and archive status.")]
+    #[tool(
+        description = "Get create and archive events for a specific DAML contract via the JSON Ledger API v2. Returns the contract lifecycle events including creation arguments, signatories, and archive status."
+    )]
     async fn canton_get_events(
         &self,
         Parameters(params): Parameters<CantonGetEventsParams>,
@@ -916,7 +929,9 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "Get a transaction by transaction ID via the Canton JSON Ledger API v2. Returns the complete transaction including all created, exercised, and archived events.")]
+    #[tool(
+        description = "Get a transaction by transaction ID via the Canton JSON Ledger API v2. Returns the complete transaction including all created, exercised, and archived events."
+    )]
     async fn canton_get_transaction(
         &self,
         Parameters(params): Parameters<CantonGetTransactionParams>,
@@ -931,9 +946,7 @@ impl CantonMcpServer {
             "requestingParties": params.requesting_parties,
         });
 
-        let response = self
-            .ledger_post("/updates/update-by-id", &body)
-            .await?;
+        let response = self.ledger_post("/updates/update-by-id", &body).await?;
 
         json_result(serde_json::json!({
             "transaction_id": params.transaction_id,
@@ -946,7 +959,9 @@ impl CantonMcpServer {
     //  2. Party Management
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Operator-only. Allocate a new party on the Canton participant node. Returns the fully-qualified party identifier (name::fingerprint) for use in DAML commands and queries.")]
+    #[tool(
+        description = "Operator-only. Allocate a new party on the Canton participant node. Returns the fully-qualified party identifier (name::fingerprint) for use in DAML commands and queries."
+    )]
     async fn canton_allocate_party(
         &self,
         Parameters(params): Parameters<CantonAllocatePartyParams>,
@@ -959,9 +974,7 @@ impl CantonMcpServer {
             "partyIdHint": params.party_hint,
         });
 
-        let response = self
-            .ledger_post("/parties", &body)
-            .await?;
+        let response = self.ledger_post("/parties", &body).await?;
 
         // Extract party details from response
         let party_id = response
@@ -977,7 +990,9 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "Operator-only. List all known parties on the Canton participant node. Returns party identifiers and hosting participant information.")]
+    #[tool(
+        description = "Operator-only. List all known parties on the Canton participant node. Returns party identifiers and hosting participant information."
+    )]
     async fn canton_list_parties(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<CantonListPartiesParams>,
@@ -985,9 +1000,7 @@ impl CantonMcpServer {
         // Enumerates every tenant's parties, not just the caller's.
         require_operator_key()?;
         // Canton 3.5: GET /v2/parties replaces POST /v2/party-management/list-known-parties.
-        let response = self
-            .ledger_get("/parties")
-            .await?;
+        let response = self.ledger_get("/parties").await?;
 
         let parties = response
             .get("partyDetails")
@@ -1105,19 +1118,16 @@ impl CantonMcpServer {
                      report on",
                 )
             })?;
-        let row = analytics.get(&key_id).ok_or_else(|| {
-            ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
-                    "No analytics record for key_id {} (this key has not made a canton call yet)",
-                    key_id
-                )),
-                data: None,
-            }
+        let row = analytics.get(&key_id).ok_or_else(|| ErrorData {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "No analytics record for key_id {} (this key has not made a canton call yet)",
+                key_id
+            )),
+            data: None,
         })?;
-        let value = serde_json::to_value(&row).map_err(|e| {
-            err_internal(format!("Canton analytics serialize failed: {}", e))
-        })?;
+        let value = serde_json::to_value(&row)
+            .map_err(|e| err_internal(format!("Canton analytics serialize failed: {}", e)))?;
         json_result(value)
     }
 
@@ -1141,9 +1151,8 @@ impl CantonMcpServer {
             rows.retain(|r| r.key_id == filter);
         }
         rows.sort_by_key(|r| std::cmp::Reverse(r.last_called_at.unwrap_or(0)));
-        let value = serde_json::to_value(&rows).map_err(|e| {
-            err_internal(format!("Canton analytics serialize failed: {}", e))
-        })?;
+        let value = serde_json::to_value(&rows)
+            .map_err(|e| err_internal(format!("Canton analytics serialize failed: {}", e)))?;
         json_result(serde_json::json!({ "analytics": value }))
     }
 
@@ -1151,14 +1160,14 @@ impl CantonMcpServer {
     //  3. Canton Network
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "List connected Canton synchronization domains (synchronizers). Returns domain IDs, connection status, sequencer endpoints, and whether each is the Global Synchronizer.")]
+    #[tool(
+        description = "List connected Canton synchronization domains (synchronizers). Returns domain IDs, connection status, sequencer endpoints, and whether each is the Global Synchronizer."
+    )]
     async fn canton_list_domains(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<CantonListDomainsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let response = self
-            .admin_get("/admin/domain/list-connected")
-            .await;
+        let response = self.admin_get("/admin/domain/list-connected").await;
 
         match response {
             Ok(domains) => json_result(serde_json::json!({
@@ -1185,7 +1194,9 @@ impl CantonMcpServer {
         }
     }
 
-    #[tool(description = "Check Canton participant health and connectivity. Returns node status, connected domains, active parties, and uptime information.")]
+    #[tool(
+        description = "Check Canton participant health and connectivity. Returns node status, connected domains, active parties, and uptime information."
+    )]
     async fn canton_get_health(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<CantonGetHealthParams>,
@@ -1197,10 +1208,7 @@ impl CantonMcpServer {
             .unwrap_or_else(|_| serde_json::json!({"status": "unreachable"}));
 
         // Also try participant status for richer info
-        let status = self
-            .admin_get("/admin/participant/status")
-            .await
-            .ok();
+        let status = self.admin_get("/admin/participant/status").await.ok();
 
         // The participant's own host:port is deliberately not reported.
         // Tenants reach Canton only through this node, and the participant
@@ -1221,7 +1229,9 @@ impl CantonMcpServer {
     //  4. Token (CIP-56 Canton Coin)
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Get the Canton Coin (CC) balance for a party. Queries the CIP-56 token balance via the Canton JSON Ledger API v2 by looking up active Holding contracts (Splice.Amulet:Amulet template). The presenting API key must be delegated read-as on the party.")]
+    #[tool(
+        description = "Get the Canton Coin (CC) balance for a party. Queries the CIP-56 token balance via the Canton JSON Ledger API v2 by looking up active Holding contracts (Splice.Amulet:Amulet template). The presenting API key must be delegated read-as on the party."
+    )]
     async fn canton_get_balance(
         &self,
         Parameters(params): Parameters<CantonGetBalanceParams>,
@@ -1256,9 +1266,7 @@ impl CantonMcpServer {
             "activeAtOffset": offset
         });
 
-        let response = self
-            .ledger_post("/state/active-contracts", &body)
-            .await;
+        let response = self.ledger_post("/state/active-contracts", &body).await;
 
         match response {
             Ok(data) => {
@@ -1314,7 +1322,9 @@ impl CantonMcpServer {
         }
     }
 
-    #[tool(description = "Transfer Canton Coin (CC) tokens between parties. Submits a DAML transfer command via the JSON Ledger API v2 using the CIP-56 Amulet transfer workflow (Splice.AmuletRules:Transfer template).")]
+    #[tool(
+        description = "Transfer Canton Coin (CC) tokens between parties. Submits a DAML transfer command via the JSON Ledger API v2 using the CIP-56 Amulet transfer workflow (Splice.AmuletRules:Transfer template)."
+    )]
     async fn canton_transfer(
         &self,
         Parameters(params): Parameters<CantonTransferParams>,
@@ -1364,7 +1374,9 @@ impl CantonMcpServer {
     //  5. Tokenization
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Create a tokenized asset (bond, equity, repo, or custom) as a DAML contract on Canton. Submits a Create command with the asset parameters. For bonds, maturity_date is required.")]
+    #[tool(
+        description = "Create a tokenized asset (bond, equity, repo, or custom) as a DAML contract on Canton. Submits a Create command with the asset parameters. For bonds, maturity_date is required."
+    )]
     async fn canton_create_asset(
         &self,
         Parameters(params): Parameters<CantonCreateAssetParams>,
@@ -1450,7 +1462,9 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "Execute atomic Delivery-vs-Payment (DvP) settlement on Canton. Creates a DvP settlement contract that atomically swaps the asset leg (delivery) and payment leg in a single DAML transaction, ensuring neither party bears settlement risk.")]
+    #[tool(
+        description = "Execute atomic Delivery-vs-Payment (DvP) settlement on Canton. Creates a DvP settlement contract that atomically swaps the asset leg (delivery) and payment leg in a single DAML transaction, ensuring neither party bears settlement risk."
+    )]
     async fn canton_dvp_settle(
         &self,
         Parameters(params): Parameters<CantonDvpSettleParams>,
@@ -1510,7 +1524,9 @@ impl CantonMcpServer {
     //  6. Administration
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Operator-only. Upload a DAR (DAML Archive) file to the Canton participant node. The DAR is installed and its packages become available for contract creation. Provide base64-encoded DAR content.")]
+    #[tool(
+        description = "Operator-only. Upload a DAR (DAML Archive) file to the Canton participant node. The DAR is installed and its packages become available for contract creation. Provide base64-encoded DAR content."
+    )]
     async fn canton_upload_dar(
         &self,
         Parameters(params): Parameters<CantonUploadDarParams>,
@@ -1522,15 +1538,11 @@ impl CantonMcpServer {
 
         let dar_bytes = base64::engine::general_purpose::STANDARD
             .decode(&params.dar_content_base64)
-            .map_err(|e| {
-                err_invalid_params(format!("Invalid base64 DAR content: {}", e))
-            })?;
+            .map_err(|e| err_invalid_params(format!("Invalid base64 DAR content: {}", e)))?;
 
         let dar_size = dar_bytes.len();
 
-        let _filename = params
-            .filename
-            .unwrap_or_else(|| "package.dar".to_string());
+        let _filename = params.filename.unwrap_or_else(|| "package.dar".to_string());
 
         // Canton 3.5+ JSON Ledger API: POST /v2/packages with raw DAR
         // bytes and a single `Content-Type: application/octet-stream`
@@ -1570,7 +1582,9 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "Operator-only. Reconnect a Canton participant to a synchronizer domain. Submits POST /admin/participant/synchronizer/{alias}/reconnect via the Canton Admin API. Used after a synchronizer outage or planned disconnection. Returns a plain-text confirmation on success.")]
+    #[tool(
+        description = "Operator-only. Reconnect a Canton participant to a synchronizer domain. Submits POST /admin/participant/synchronizer/{alias}/reconnect via the Canton Admin API. Used after a synchronizer outage or planned disconnection. Returns a plain-text confirmation on success."
+    )]
     async fn canton_reconnect_synchronizer(
         &self,
         Parameters(params): Parameters<CantonReconnectSynchronizerParams>,
@@ -1595,7 +1609,9 @@ impl CantonMcpServer {
         }
     }
 
-    #[tool(description = "Get the fee schedule for a Canton synchronizer domain. Queries the Admin API at /admin/synchronizer/{id}/fee-schedule. Returns base fee, per-byte fee, and other fee parameters.")]
+    #[tool(
+        description = "Get the fee schedule for a Canton synchronizer domain. Queries the Admin API at /admin/synchronizer/{id}/fee-schedule. Returns base fee, per-byte fee, and other fee parameters."
+    )]
     async fn canton_get_fee_schedule(
         &self,
         Parameters(params): Parameters<CantonGetFeeScheduleParams>,
@@ -1640,7 +1656,9 @@ impl CantonMcpServer {
         }
     }
 
-    #[tool(description = "Watch active DAML contracts for a specific party. Queries `POST /v2/state/active-contracts` with the party as the sole `filtersByParty` key. The presenting API key must be delegated read-as on the party.")]
+    #[tool(
+        description = "Watch active DAML contracts for a specific party. Queries `POST /v2/state/active-contracts` with the party as the sole `filtersByParty` key. The presenting API key must be delegated read-as on the party."
+    )]
     async fn canton_watch_party(
         &self,
         Parameters(params): Parameters<CantonWatchPartyParams>,
@@ -1683,7 +1701,9 @@ impl CantonMcpServer {
         json_result(response)
     }
 
-    #[tool(description = "Operator-only: register a per-tenant Canton IdentityProviderConfig (Stage 2.b). Submits POST /v2/idps with the tenant's OAuth issuer / JWKS / audience. Subsequent user provisioning under this IDP is scoped to it, so the tenant's JWTs are isolated from the operator's IDP.")]
+    #[tool(
+        description = "Operator-only: register a per-tenant Canton IdentityProviderConfig (Stage 2.b). Submits POST /v2/idps with the tenant's OAuth issuer / JWKS / audience. Subsequent user provisioning under this IDP is scoped to it, so the tenant's JWTs are isolated from the operator's IDP."
+    )]
     async fn canton_create_idp(
         &self,
         Parameters(params): Parameters<CantonCreateIdpParams>,
@@ -1703,23 +1723,28 @@ impl CantonMcpServer {
         json_result(response)
     }
 
-    #[tool(description = "Operator-only: list every Canton IdentityProviderConfig the participant is configured against (Stage 2.b roster). Returns the full IDP roster including the default IDP entry.")]
-    async fn canton_list_idps(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Operator-only: list every Canton IdentityProviderConfig the participant is configured against (Stage 2.b roster). Returns the full IDP roster including the default IDP entry."
+    )]
+    async fn canton_list_idps(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         require_operator_key()?;
         let response = self.ledger_get("/idps").await?;
         json_result(response)
     }
 
-    #[tool(description = "Operator-only: delete a Canton IdentityProviderConfig. Canton refuses to delete an IDP that has live users — revoke or migrate the tenants under that IDP first.")]
+    #[tool(
+        description = "Operator-only: delete a Canton IdentityProviderConfig. Canton refuses to delete an IDP that has live users — revoke or migrate the tenants under that IDP first."
+    )]
     async fn canton_delete_idp(
         &self,
         Parameters(params): Parameters<CantonDeleteIdpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         require_operator_key()?;
         require_write_tier()?;
-        let path = format!("/idps/{}", urlencoding::encode(&params.identity_provider_id));
+        let path = format!(
+            "/idps/{}",
+            urlencoding::encode(&params.identity_provider_id)
+        );
         let response = self.ledger_delete(&path).await?;
         json_result(response)
     }
@@ -1990,7 +2015,7 @@ pub async fn start_canton_mcp_server_with_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     // Use stateless mode with JSON responses — same pattern as the main MCP server.
@@ -2041,7 +2066,9 @@ pub async fn start_canton_mcp_server_with_shutdown(
         ))
         .layer(cors)
         .layer(tower::limit::ConcurrencyLimitLayer::new(100))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            2 * 1024 * 1024,
+        ));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(

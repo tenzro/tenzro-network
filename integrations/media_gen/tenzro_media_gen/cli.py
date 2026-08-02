@@ -13,9 +13,9 @@ import json
 import logging
 import os
 import sys
-from typing import Any
 
 from .commitments import WorkerKey, compute_job_id, verify_receipt
+from .pipelines import DIFFUSION_PRECISIONS
 from .rpc_bridge import RpcClient, RpcError, pretty
 from .types import (
     MediaGenExpertRole,
@@ -68,7 +68,9 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     for m in models:
         split = " (split)" if m.get("expert_pair") else ""
         kinds = ", ".join(m.get("kinds") or [])
-        print(f"{m['id']}{split}\n  {m['name']} — {kinds}\n  {m['min_vram_gb']} GB VRAM, {m['license']}")
+        print(
+            f"{m['id']}{split}\n  {m['name']} — {kinds}\n  {m['min_vram_gb']} GB VRAM, {m['license']}"
+        )
     return 0
 
 
@@ -91,7 +93,9 @@ def cmd_quote(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"{quote.pixel_steps} pixel-steps")
-    print(f"{quote.quote} attoTNZO ({quote.base_fee} base + {quote.pixel_steps} x {quote.per_pixel_step})")
+    print(
+        f"{quote.quote} attoTNZO ({quote.base_fee} base + {quote.pixel_steps} x {quote.per_pixel_step})"
+    )
     return 0
 
 
@@ -139,7 +143,9 @@ def cmd_post(args: argparse.Namespace) -> int:
         created_at=created_at,
     )
     job = client.post_job(spec)
-    print(job.job_id if not args.json else pretty({"job_id": job.job_id, "status": job.status.value}))
+    print(
+        job.job_id if not args.json else pretty({"job_id": job.job_id, "status": job.status.value})
+    )
     return 0
 
 
@@ -280,6 +286,7 @@ def _worker_config(args: argparse.Namespace) -> WorkerConfig:
         gpu_vram_gb=args.gpu_vram_gb,
         device=args.device,
         dtype=args.dtype,
+        precision=args.precision,
         cache_dir=args.cache_dir,
         poll_interval_secs=args.poll_interval,
     )
@@ -305,7 +312,9 @@ def cmd_workers(args: argparse.Namespace) -> int:
         return 0
     for w in workers:
         holdings = ", ".join(f"{h.model_id}:{h.role.value}" for h in w.expert_holdings) or "-"
-        print(f"{w.worker_did}\n  whole: {', '.join(w.supported_models) or '-'}\n  experts: {holdings}")
+        print(
+            f"{w.worker_did}\n  whole: {', '.join(w.supported_models) or '-'}\n  experts: {holdings}"
+        )
     return 0
 
 
@@ -346,7 +355,9 @@ def _add_params_args(p: argparse.ArgumentParser) -> None:
 def _add_worker_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--worker-did", required=True)
     p.add_argument("--worker-address", required=True, help="32 bytes of hex")
-    p.add_argument("--seed-hex", default=None, help="32-byte Ed25519 seed; else TENZRO_MEDIA_GEN_SEED")
+    p.add_argument(
+        "--seed-hex", default=None, help="32-byte Ed25519 seed; else TENZRO_MEDIA_GEN_SEED"
+    )
     p.add_argument(
         "--model",
         action="append",
@@ -364,6 +375,16 @@ def _add_worker_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--gpu-vram-gb", type=float, default=24.0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--dtype", default="bfloat16")
+    p.add_argument(
+        "--precision",
+        default=None,
+        choices=list(DIFFUSION_PRECISIONS),
+        help=(
+            "Transformer weight format. Defaults to --dtype. The nf4/int4/int8 "
+            "tiers quantize through bitsandbytes, trading some fidelity for "
+            "roughly a quarter to a half of the VRAM"
+        ),
+    )
     p.add_argument("--cache-dir", default=None)
     p.add_argument("--poll-interval", type=float, default=5.0)
 
@@ -373,7 +394,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tenzro-media-gen",
         description="Reference generative-media worker and job client for Tenzro Media Gen.",
     )
-    parser.add_argument("--url", default=DEFAULT_URL, help=f"node JSON-RPC endpoint (default {DEFAULT_URL})")
+    parser.add_argument(
+        "--url", default=DEFAULT_URL, help=f"node JSON-RPC endpoint (default {DEFAULT_URL})"
+    )
     parser.add_argument(
         "--timeout",
         type=float,

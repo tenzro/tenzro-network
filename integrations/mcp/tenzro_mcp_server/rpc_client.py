@@ -1,7 +1,8 @@
 """Async JSON-RPC and REST client for Tenzro node communication."""
 
-import httpx
 import os
+
+import httpx
 
 TENZRO_RPC_URL = os.environ.get("TENZRO_RPC_URL", "https://rpc.tenzro.xyz")
 TENZRO_API_URL = os.environ.get("TENZRO_API_URL", "https://api.tenzro.xyz")
@@ -79,14 +80,14 @@ async def rpc_call(method: str, params=None):
             },
         )
         data = r.json()
-        if "error" in data and data["error"]:
+        if data.get("error"):
             raise Exception(
                 f"RPC error: {data['error'].get('message', 'unknown')}"
             )
         return data.get("result")
 
 
-async def api_call(path: str, method: str = "GET", body: dict = None):
+async def api_call(path: str, method: str = "GET", body: dict | None = None):
     """Send an HTTP request to the Tenzro Web API."""
     async with httpx.AsyncClient(timeout=30) as client:
         url = f"{TENZRO_API_URL}{path}"

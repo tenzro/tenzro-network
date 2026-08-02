@@ -41,14 +41,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tenzro_cortex::{
+    CortexWorker,
     sidecar::{SidecarConfig, SidecarModel},
-    verify_receipt, CortexWorker,
+    verify_receipt,
 };
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_types::{
     cortex::{
-        AttestationRequirement, CortexModelFamily, CortexPricing, CortexRequest,
-        ReasoningBudget, ReasoningTier,
+        AttestationRequirement, CortexModelFamily, CortexPricing, CortexRequest, ReasoningBudget,
+        ReasoningTier,
     },
     primitives::{Address, Timestamp},
 };
@@ -259,9 +260,7 @@ async fn sidecar_subprocess_end_to_end() {
     let child = match spawn_python_sidecar(port) {
         Ok(Some(c)) => c,
         Ok(None) => {
-            eprintln!(
-                "sidecar_subprocess_end_to_end: skipping — `python3` not found on PATH"
-            );
+            eprintln!("sidecar_subprocess_end_to_end: skipping — `python3` not found on PATH");
             return;
         }
         Err(e) => panic!("failed to spawn python3: {e}"),
@@ -378,8 +377,7 @@ async fn sidecar_subprocess_end_to_end() {
     // byte-for-byte into the receipt.
     use sha2::{Digest, Sha256};
     let expected_weights = Sha256::digest(format!("weights:{MODEL_ID}").as_bytes());
-    let expected_runtime =
-        Sha256::digest(b"tenzro-cortex-stdlib-sidecar@0.1.0".as_slice());
+    let expected_runtime = Sha256::digest(b"tenzro-cortex-stdlib-sidecar@0.1.0".as_slice());
     assert_eq!(
         resp.receipt.weights_hash.as_bytes(),
         expected_weights.as_slice(),

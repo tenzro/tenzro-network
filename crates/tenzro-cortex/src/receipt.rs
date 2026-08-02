@@ -98,14 +98,17 @@ pub fn sign_receipt(
         signer.public_key().as_bytes().to_vec(),
     );
 
-    Ok(CortexReceipt { signature, ..unsigned })
+    Ok(CortexReceipt {
+        signature,
+        ..unsigned
+    })
 }
 
 /// Verify the signature on a [`CortexReceipt`] against the provided
 /// `tenzro-crypto` verifier. Returns `Ok(())` on success.
 pub fn verify_receipt(receipt: &CortexReceipt) -> Result<()> {
     use tenzro_crypto::keys::{KeyType, PublicKey};
-    use tenzro_crypto::signatures::{verify, Signature as CryptoSignature};
+    use tenzro_crypto::signatures::{Signature as CryptoSignature, verify};
 
     let preimage = receipt.signing_preimage();
 

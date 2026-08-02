@@ -141,7 +141,9 @@ impl BridgeFeeSponsor {
     }
 
     pub fn get_receipt(&self, sponsorship_id_hex: &str) -> Option<BridgeSponsorshipReceipt> {
-        self.receipts.get(sponsorship_id_hex).map(|r| r.value().clone())
+        self.receipts
+            .get(sponsorship_id_hex)
+            .map(|r| r.value().clone())
     }
 
     /// Validate a [`BridgeFeeQuote`], record the sponsorship, and emit
@@ -153,7 +155,11 @@ impl BridgeFeeSponsor {
         payer_did: impl Into<String>,
     ) -> Result<BridgeSponsorshipReceipt> {
         let now_ms = current_ms();
-        if quote.valid_until_ms.saturating_add(self.clock_skew_tolerance_ms) < now_ms {
+        if quote
+            .valid_until_ms
+            .saturating_add(self.clock_skew_tolerance_ms)
+            < now_ms
+        {
             return Err(BridgeError::AdapterError(format!(
                 "quote expired: valid_until={} now={}",
                 quote.valid_until_ms, now_ms
@@ -194,15 +200,9 @@ impl BridgeFeeSponsor {
 
     /// Called when the destination-side fee is claimed by the relayer/
     /// pool (delivery proof verified). Drains the pool's commitment.
-    pub fn record_claim(
-        &self,
-        sponsorship_id_hex: &str,
-    ) -> Result<()> {
+    pub fn record_claim(&self, sponsorship_id_hex: &str) -> Result<()> {
         let receipt = self.receipts.get(sponsorship_id_hex).ok_or_else(|| {
-            BridgeError::AdapterError(format!(
-                "unknown sponsorship_id: {}",
-                sponsorship_id_hex
-            ))
+            BridgeError::AdapterError(format!("unknown sponsorship_id: {}", sponsorship_id_hex))
         })?;
         let receipt = receipt.value().clone();
         if let Some(mut entry) = self.pools.get_mut(&receipt.adapter) {
@@ -267,9 +267,7 @@ impl WiredBridgeFeeSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fee_oracle::{
-        GovernanceFeeRow, GovernanceSetFeeOracle, OracleBacking,
-    };
+    use crate::fee_oracle::{GovernanceFeeRow, GovernanceSetFeeOracle, OracleBacking};
 
     fn quote_for_test(adapter: BridgeAdapterId, dest_chain: &str, tnzo: u128) -> BridgeFeeQuote {
         BridgeFeeQuote {
@@ -341,7 +339,7 @@ mod tests {
             adapter: BridgeAdapterId::ChainlinkCcip,
             dest_chain: "eip155:1".into(),
             rate_q18: 5 * 1_000_000_000_000_000_000u128, // 5.0
-            markup_bps: 200, // 2%
+            markup_bps: 200,                             // 2%
             valid_window_ms: 60_000,
             updated_at_ms: 0,
         });

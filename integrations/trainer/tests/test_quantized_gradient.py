@@ -9,15 +9,15 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from tenzro_trainer.gradient import (  # noqa: E402
+from tenzro_trainer.gradient import (
     TrainerKey,
     build_outer_gradient,
     deserialize_fragment_delta,
     flatten_fragment_values,
     serialize_fragment,
 )
-from tenzro_trainer.quantization import quantize  # noqa: E402
-from tenzro_trainer.types import GradientQuantization  # noqa: E402
+from tenzro_trainer.quantization import quantize
+from tenzro_trainer.types import GradientQuantization
 
 
 def _delta() -> dict:

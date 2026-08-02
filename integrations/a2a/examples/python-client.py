@@ -15,9 +15,9 @@ Requirements:
 import json
 import os
 import sys
-from typing import Any, Optional
-from urllib.request import Request, urlopen
+from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 A2A_ENDPOINT = os.environ.get("TENZRO_A2A_URL", "https://a2a.tenzro.xyz")
 
@@ -32,7 +32,7 @@ def get_agent_card() -> dict:
         return json.loads(resp.read().decode())
 
 
-def send_task(message: str, task_id: Optional[str] = None) -> dict:
+def send_task(message: str, task_id: str | None = None) -> dict:
     """Send a task to the A2A agent."""
     payload: dict[str, Any] = {
         "jsonrpc": "2.0",
@@ -59,7 +59,7 @@ def send_task(message: str, task_id: Optional[str] = None) -> dict:
     with urlopen(req) as resp:
         result = json.loads(resp.read().decode())
 
-    if "error" in result and result["error"]:
+    if result.get("error"):
         code = result["error"].get("code", -1)
         msg = result["error"].get("message", "Unknown error")
         raise RuntimeError(f"A2A Error [{code}]: {msg}")
@@ -87,7 +87,7 @@ def get_task(task_id: str) -> dict:
     with urlopen(req) as resp:
         result = json.loads(resp.read().decode())
 
-    if "error" in result and result["error"]:
+    if result.get("error"):
         raise RuntimeError(f"A2A Error: {result['error']['message']}")
 
     return result.get("result", {})
@@ -113,7 +113,7 @@ def cancel_task(task_id: str) -> dict:
     with urlopen(req) as resp:
         result = json.loads(resp.read().decode())
 
-    if "error" in result and result["error"]:
+    if result.get("error"):
         raise RuntimeError(f"A2A Error: {result['error']['message']}")
 
     return result.get("result", {})
@@ -139,7 +139,7 @@ def list_tasks() -> list:
     with urlopen(req) as resp:
         result = json.loads(resp.read().decode())
 
-    if "error" in result and result["error"]:
+    if result.get("error"):
         raise RuntimeError(f"A2A Error: {result['error']['message']}")
 
     return result.get("result", [])

@@ -153,7 +153,7 @@ mod tests {
     use tenzro_types::primitives::Address;
     use tenzro_vm::secure_mint::SecureMintPolicy;
     use tenzro_vm::stable_asset_registry::{PaymentRail, ReserveSource};
-    use tenzro_vm::stable_controller::{StableControllerConfig, Q18};
+    use tenzro_vm::stable_controller::{Q18, StableControllerConfig};
 
     struct FixedPrice(i128);
     impl MarketPriceSource for FixedPrice {
@@ -205,11 +205,7 @@ mod tests {
         }
     }
 
-    fn setup(
-        market: i128,
-        reserve: u128,
-        circulating: u128,
-    ) -> (StableControllerDriver, [u8; 20]) {
+    fn setup(market: i128, reserve: u128, circulating: u128) -> (StableControllerDriver, [u8; 20]) {
         let unit = [9u8; 20];
         let stable = Arc::new(StableAssetRegistry::new());
         stable.register(make_policy(unit)).unwrap();
@@ -230,7 +226,11 @@ mod tests {
         let (driver, _unit) = setup(Q18 + Q18 * 2 / 100, 2_000_000, 1_000_000);
         let steps = driver.step_all(1_000);
         assert_eq!(steps.len(), 1);
-        assert!(steps[0].applied_delta > 0, "expected mint, got {}", steps[0].applied_delta);
+        assert!(
+            steps[0].applied_delta > 0,
+            "expected mint, got {}",
+            steps[0].applied_delta
+        );
     }
 
     #[test]
@@ -245,7 +245,11 @@ mod tests {
     fn below_peg_burns() {
         let (driver, _unit) = setup(Q18 - Q18 * 2 / 100, 2_000_000, 1_000_000);
         let steps = driver.step_all(1_000);
-        assert!(steps[0].applied_delta < 0, "expected burn, got {}", steps[0].applied_delta);
+        assert!(
+            steps[0].applied_delta < 0,
+            "expected burn, got {}",
+            steps[0].applied_delta
+        );
     }
 
     #[test]

@@ -78,8 +78,16 @@ pub fn top_k_delta_probes(delta: &[f32], k: u8) -> Vec<DeltaProbe> {
         .map(|(i, &v)| (i as u64, v))
         .collect();
     let cmp = |a: &(u64, f32), b: &(u64, f32)| {
-        let ma = if a.1.is_finite() { a.1.abs() } else { f32::NEG_INFINITY };
-        let mb = if b.1.is_finite() { b.1.abs() } else { f32::NEG_INFINITY };
+        let ma = if a.1.is_finite() {
+            a.1.abs()
+        } else {
+            f32::NEG_INFINITY
+        };
+        let mb = if b.1.is_finite() {
+            b.1.abs()
+        } else {
+            f32::NEG_INFINITY
+        };
         mb.total_cmp(&ma).then_with(|| a.0.cmp(&b.0))
     };
     if k < indexed.len() {
@@ -262,10 +270,7 @@ mod tests {
     fn top_k_selects_largest_magnitude_descending() {
         let delta = [0.1f32, -3.0, 0.5, 2.0, -0.2];
         let probes = top_k_delta_probes(&delta, 3);
-        assert_eq!(
-            probes,
-            vec![probe(1, -3.0), probe(3, 2.0), probe(2, 0.5)]
-        );
+        assert_eq!(probes, vec![probe(1, -3.0), probe(3, 2.0), probe(2, 0.5)]);
     }
 
     #[test]
@@ -278,7 +283,10 @@ mod tests {
     #[test]
     fn top_k_is_deterministic() {
         let delta: Vec<f32> = (0..1000).map(|i| ((i * 37) % 101) as f32 - 50.0).collect();
-        assert_eq!(top_k_delta_probes(&delta, 16), top_k_delta_probes(&delta, 16));
+        assert_eq!(
+            top_k_delta_probes(&delta, 16),
+            top_k_delta_probes(&delta, 16)
+        );
     }
 
     #[test]
@@ -392,10 +400,7 @@ mod tests {
     #[test]
     fn fabricated_loss_trajectory_fails() {
         let claimed = valid_commitment();
-        let recomputed = commitment(
-            vec![9.0, 8.5, 8.2, 8.0],
-            claimed.probes.clone(),
-        );
+        let recomputed = commitment(vec![9.0, 8.5, 8.2, 8.0], claimed.probes.clone());
         let outcome = verify_activation_commitment(&claimed, &recomputed);
         assert!(!outcome.passed);
         assert!(outcome.mean_loss_rel_delta > MAX_MEAN_LOSS_REL_DELTA);

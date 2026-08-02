@@ -3,10 +3,10 @@
 //! Ported from the Tauri desktop app's `set_username()` command.
 //! Now supports on-chain registration via `tenzro_setUsername` RPC.
 
-use clap::Parser;
-use anyhow::Result;
 use crate::config;
 use crate::output;
+use anyhow::Result;
+use clap::Parser;
 
 /// Set your Tenzro username
 #[derive(Debug, Parser)]
@@ -32,7 +32,10 @@ impl SetUsernameCmd {
         if clean.len() > 20 {
             return Err(anyhow::anyhow!("Username must be at most 20 characters"));
         }
-        if !clean.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        if !clean
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
             return Err(anyhow::anyhow!(
                 "Username can only contain lowercase letters, digits, and underscores"
             ));
@@ -57,7 +60,7 @@ impl SetUsernameCmd {
 
         // Auto-generate wallet if missing
         if cfg.wallet_id.is_none() {
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let wallet_id = uuid::Uuid::new_v4().to_string();
             let mut hasher = Sha256::new();
             hasher.update(wallet_id.as_bytes());
@@ -76,10 +79,16 @@ impl SetUsernameCmd {
         let spinner = output::create_spinner("Registering username on-chain...");
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
-        match rpc.call::<serde_json::Value>("tenzro_setUsername", serde_json::json!([{
-            "did": did,
-            "username": clean,
-        }])).await {
+        match rpc
+            .call::<serde_json::Value>(
+                "tenzro_setUsername",
+                serde_json::json!([{
+                    "did": did,
+                    "username": clean,
+                }]),
+            )
+            .await
+        {
             Ok(result) => {
                 spinner.finish_and_clear();
                 output::print_success(&format!("Username @{} registered on-chain", clean));
@@ -90,7 +99,9 @@ impl SetUsernameCmd {
             Err(e) => {
                 spinner.finish_and_clear();
                 output::print_warning(&format!("On-chain registration failed: {}", e));
-                output::print_info("Username saved locally. You can retry on-chain registration later.");
+                output::print_info(
+                    "Username saved locally. You can retry on-chain registration later.",
+                );
             }
         }
 

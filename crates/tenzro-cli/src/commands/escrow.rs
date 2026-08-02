@@ -8,9 +8,9 @@
 //! Funds are locked in a deterministically-derived vault address by the Native
 //! VM; only the original payer can release or refund.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Escrow and payment channel commands
 #[derive(Debug, Subcommand)]
@@ -120,7 +120,10 @@ impl NettingCommand {
 }
 
 fn print_json(result: &serde_json::Value) {
-    println!("{}", serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+    );
 }
 
 /// Open a DvP saga.
@@ -157,12 +160,17 @@ impl DvpOpenCmd {
             .map_err(|e| anyhow::anyhow!("invalid --legs JSON: {}", e))?;
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_dvpOpenSaga", serde_json::json!({
-            "creator": self.creator,
-            "nonce": self.nonce,
-            "legs": legs,
-            "expires_at_ms": self.expires_at_ms,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_dvpOpenSaga",
+                serde_json::json!({
+                    "creator": self.creator,
+                    "nonce": self.nonce,
+                    "legs": legs,
+                    "expires_at_ms": self.expires_at_ms,
+                }),
+            )
+            .await?;
 
         output::print_success("DvP saga opened");
         println!();
@@ -226,9 +234,14 @@ impl DvpFinalizeCmd {
         output::print_header("Finalize DvP Saga");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_dvpFinalizeSaga", serde_json::json!({
-            "saga_id": self.saga_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_dvpFinalizeSaga",
+                serde_json::json!({
+                    "saga_id": self.saga_id,
+                }),
+            )
+            .await?;
 
         output::print_success("DvP saga finalized");
         println!();
@@ -254,9 +267,14 @@ impl DvpGetCmd {
         output::print_header("DvP Saga Details");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_dvpGetSaga", serde_json::json!({
-            "saga_id": self.saga_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_dvpGetSaga",
+                serde_json::json!({
+                    "saga_id": self.saga_id,
+                }),
+            )
+            .await?;
 
         println!();
         print_json(&result);
@@ -281,9 +299,14 @@ impl DvpListCmd {
         output::print_header("DvP Sagas by Creator");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_dvpListSagasByCreator", serde_json::json!({
-            "creator": self.creator,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_dvpListSagasByCreator",
+                serde_json::json!({
+                    "creator": self.creator,
+                }),
+            )
+            .await?;
 
         println!();
         print_json(&result);
@@ -313,9 +336,14 @@ impl NettingComputeCmd {
             .map_err(|e| anyhow::anyhow!("invalid --obligations JSON: {}", e))?;
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_nettingCompute", serde_json::json!({
-            "obligations": obligations,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_nettingCompute",
+                serde_json::json!({
+                    "obligations": obligations,
+                }),
+            )
+            .await?;
 
         output::print_success("Netting batch computed");
         println!();
@@ -341,9 +369,14 @@ impl NettingSettleCmd {
         output::print_header("Settle Netting Batch");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_nettingSettle", serde_json::json!({
-            "batch_id": self.batch_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_nettingSettle",
+                serde_json::json!({
+                    "batch_id": self.batch_id,
+                }),
+            )
+            .await?;
 
         output::print_success("Netting batch settled");
         println!();
@@ -369,9 +402,14 @@ impl NettingGetCmd {
         output::print_header("Netting Batch Details");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_nettingGetBatch", serde_json::json!({
-            "batch_id": self.batch_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_nettingGetBatch",
+                serde_json::json!({
+                    "batch_id": self.batch_id,
+                }),
+            )
+            .await?;
 
         println!();
         print_json(&result);
@@ -393,7 +431,9 @@ impl NettingListCmd {
         output::print_header("Netting Batches");
 
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_nettingListBatches", serde_json::json!({})).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_nettingListBatches", serde_json::json!({}))
+            .await?;
 
         println!();
         print_json(&result);
@@ -411,10 +451,7 @@ const DEFAULT_ESCROW_REFUND_GAS: u64 = 50_000;
 // authorized wallet matches `payer` for every escrow tx-type.
 
 /// Query nonce + chain_id for the sender (defaults if unreachable).
-async fn fetch_nonce_and_chain_id(
-    rpc: &crate::rpc::RpcClient,
-    address: &str,
-) -> (u64, u64) {
+async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
     let nonce = rpc
         .call::<serde_json::Value>(
             "eth_getTransactionCount",
@@ -441,10 +478,12 @@ async fn fetch_nonce_and_chain_id(
 
 fn parse_escrow_id(s: &str) -> Result<[u8; 32]> {
     let clean = s.trim_start_matches("0x");
-    let bytes = hex::decode(clean)
-        .map_err(|e| anyhow::anyhow!("invalid escrow_id hex: {}", e))?;
+    let bytes = hex::decode(clean).map_err(|e| anyhow::anyhow!("invalid escrow_id hex: {}", e))?;
     if bytes.len() != 32 {
-        anyhow::bail!("escrow_id must be 32 bytes (64 hex chars), got {}", bytes.len());
+        anyhow::bail!(
+            "escrow_id must be 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        );
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
@@ -519,21 +558,23 @@ impl EscrowCreateCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.payer,
-                // CreateEscrow has no natural recipient — the VM derives the vault.
-                // Pass payee for parity but the VM ignores `tx.to` for typed escrow tx.
-                "to": self.payee,
-                "value": 0u64,
-                "gas_limit": DEFAULT_ESCROW_CREATE_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.payer,
+                    // CreateEscrow has no natural recipient — the VM derives the vault.
+                    // Pass payee for parity but the VM ignores `tx.to` for typed escrow tx.
+                    "to": self.payee,
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_ESCROW_CREATE_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -557,7 +598,7 @@ impl EscrowCreateCmd {
         println!();
         output::print_warning(
             "Use `tenzro-cli escrow get <escrow_id>` once the tx finalizes — the \
-             escrow_id is logged by the VM (SHA-256 of payer || nonce_le)."
+             escrow_id is logged by the VM (SHA-256 of payer || nonce_le).",
         );
 
         Ok(())
@@ -616,19 +657,21 @@ impl EscrowReleaseCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.payer,
-                "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "value": 0u64,
-                "gas_limit": DEFAULT_ESCROW_RELEASE_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.payer,
+                    "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_ESCROW_RELEASE_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -682,19 +725,21 @@ impl EscrowRefundCmd {
             "RefundEscrow": { "escrow_id": escrow_id_bytes.to_vec() }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.payer,
-                "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "value": 0u64,
-                "gas_limit": DEFAULT_ESCROW_REFUND_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.payer,
+                    "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_ESCROW_REFUND_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -736,7 +781,10 @@ impl EscrowGetCmd {
         let escrow_id_hex = format!("0x{}", hex::encode(escrow_id_bytes));
 
         let result: serde_json::Value = rpc
-            .call("tenzro_getEscrow", serde_json::json!({ "escrow_id": escrow_id_hex }))
+            .call(
+                "tenzro_getEscrow",
+                serde_json::json!({ "escrow_id": escrow_id_hex }),
+            )
             .await?;
 
         println!();
@@ -774,10 +822,15 @@ impl ChannelOpenCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_openPaymentChannel", serde_json::json!({
-            "counterparty": self.counterparty,
-            "deposit": self.deposit,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_openPaymentChannel",
+                serde_json::json!({
+                    "counterparty": self.counterparty,
+                    "deposit": self.deposit,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -820,9 +873,14 @@ impl ChannelCloseCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_closePaymentChannel", serde_json::json!({
-            "channel_id": self.channel_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_closePaymentChannel",
+                serde_json::json!({
+                    "channel_id": self.channel_id,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -883,12 +941,17 @@ impl SettleCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_settle", serde_json::json!([{
-            "payer": self.payer,
-            "payee": self.payee,
-            "amount": self.amount,
-            "settlement_type": self.settlement_type,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_settle",
+                serde_json::json!([{
+                    "payer": self.payer,
+                    "payee": self.payee,
+                    "amount": self.amount,
+                    "settlement_type": self.settlement_type,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -933,7 +996,12 @@ impl GetSettlementCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getSettlement", serde_json::json!([self.settlement_id])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getSettlement",
+                serde_json::json!([self.settlement_id]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -976,11 +1044,16 @@ impl DelegateCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_delegateVotingPower", serde_json::json!({
-            "delegator": self.from,
-            "delegatee": self.to,
-            "amount": self.amount,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_delegateVotingPower",
+                serde_json::json!({
+                    "delegator": self.from,
+                    "delegatee": self.to,
+                    "amount": self.amount,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 

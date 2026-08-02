@@ -28,14 +28,15 @@
 use std::sync::Arc;
 
 use tenzro_cortex::{
+    CortexWorker, MockCortexModel,
     advertisement::{CortexAdvertisement, RemoteWorkerRegistry},
-    verify_receipt, CortexWorker, MockCortexModel,
+    verify_receipt,
 };
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_types::{
     cortex::{
-        AttestationRequirement, CortexModelFamily, CortexPricing, CortexRequest,
-        ReasoningBudget, ReasoningTier,
+        AttestationRequirement, CortexModelFamily, CortexPricing, CortexRequest, ReasoningBudget,
+        ReasoningTier,
     },
     primitives::{Address, Timestamp},
 };
@@ -271,10 +272,8 @@ async fn foreign_signature_fails_verify() {
     let forged = foreign_signer
         .sign(&preimage)
         .expect("foreign signer signs preimage");
-    resp.receipt.signature = tenzro_types::primitives::Signature::new(
-        forged.as_bytes().to_vec(),
-        worker_pubkey,
-    );
+    resp.receipt.signature =
+        tenzro_types::primitives::Signature::new(forged.as_bytes().to_vec(), worker_pubkey);
     assert!(
         verify_receipt(&resp.receipt).is_err(),
         "receipt signed by the wrong key must fail verification"

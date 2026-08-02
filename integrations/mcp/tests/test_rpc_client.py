@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import tenzro_mcp_server.rpc_client as rpc_client
+from tenzro_mcp_server import rpc_client
 from tenzro_mcp_server.rpc_client import api_call, rpc_call
 
 AUTH_ENV_VARS = ("TENZRO_BEARER_JWT", "TENZRO_DPOP_PROOF", "TENZRO_API_KEY")

@@ -66,13 +66,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use tenzro_crypto::pq::{ml_dsa_verify, ML_DSA_65_SIG_LEN, ML_DSA_65_VK_LEN};
-use tenzro_crypto::webauthn::{
-    verify_webauthn_assertion, WebAuthnAssertion, WebAuthnCeremonyType,
-};
+use tenzro_crypto::pq::{ML_DSA_65_SIG_LEN, ML_DSA_65_VK_LEN, ml_dsa_verify};
+use tenzro_crypto::webauthn::{WebAuthnAssertion, WebAuthnCeremonyType, verify_webauthn_assertion};
 
 use crate::aa_validators::{
-    IValidator, ValidationData, ValidatorError, ERC1271_FAILURE_VALUE, ERC1271_MAGIC_VALUE,
+    ERC1271_FAILURE_VALUE, ERC1271_MAGIC_VALUE, IValidator, ValidationData, ValidatorError,
 };
 use crate::account_abstraction::UserOperation;
 
@@ -110,7 +108,11 @@ impl WebAuthnAccountKey {
                 pq_pubkey.len()
             )));
         }
-        Ok(Self { pubkey_x, pubkey_y, pq_pubkey })
+        Ok(Self {
+            pubkey_x,
+            pubkey_y,
+            pq_pubkey,
+        })
     }
 
     /// SHA-256 hash of the ML-DSA verifying key — the on-chain commitment.
@@ -325,10 +327,7 @@ impl WebAuthnValidator {
             let account = rest[..sep_idx].to_vec();
             let credential_id = rest[sep_idx + 1..].to_vec();
             if let Ok(record) = bincode::deserialize::<WebAuthnAccountKey>(&value) {
-                let inner = self
-                    .enrollments
-                    .entry(account)
-                    .or_default();
+                let inner = self.enrollments.entry(account).or_default();
                 inner.insert(credential_id, record);
             }
         }
@@ -394,10 +393,7 @@ impl WebAuthnValidator {
             ));
         }
         self.persist(&account, &credential_id, &key);
-        let inner = self
-            .enrollments
-            .entry(account)
-            .or_default();
+        let inner = self.enrollments.entry(account).or_default();
         inner.insert(credential_id, key);
         Ok(())
     }
@@ -424,10 +420,7 @@ impl WebAuthnValidator {
         let mut last_credential_removed = false;
         let removed = if let Some(inner) = self.enrollments.get(account) {
             let required = self.second_factor_policy(account).required_signatures();
-            if required > 1
-                && inner.contains_key(credential_id)
-                && inner.len() - 1 < required
-            {
+            if required > 1 && inner.contains_key(credential_id) && inner.len() - 1 < required {
                 return Err(ValidatorError::InvalidInput(format!(
                     "revoking this credential would leave {} enrolled but the \
                      account's second-factor policy requires {}; downgrade the \
@@ -688,9 +681,7 @@ impl IValidator for WebAuthnValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aa_validators::{
-        ModuleAttestation, ModuleType, NoOpValidator, ValidatorRegistry,
-    };
+    use crate::aa_validators::{ModuleAttestation, ModuleType, NoOpValidator, ValidatorRegistry};
     use crate::account_abstraction::UserOperation;
     use tenzro_crypto::p256::{P256KeyPair, P256Signer};
     use tenzro_crypto::pq::MlDsaSigningKey;
@@ -736,8 +727,7 @@ mod tests {
         let pq_vk = pq.verifying_key_bytes().to_vec();
 
         // Build the WebAuthn assertion: challenge = base64url_no_pad(op_hash)
-        let challenge_b64url =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(op_hash);
+        let challenge_b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(op_hash);
         let client_data_json = serde_json::json!({
             "type": "webauthn.get",
             "challenge": challenge_b64url,
@@ -984,8 +974,7 @@ mod tests {
 
         // Unenrolled sender → failure.
         let other = vec![0x02; 20];
-        let fail =
-            validator.is_valid_signature_with_sender(&other, &op_hash, &sig_bytes);
+        let fail = validator.is_valid_signature_with_sender(&other, &op_hash, &sig_bytes);
         assert_eq!(fail, ERC1271_FAILURE_VALUE);
     }
 
@@ -1048,9 +1037,19 @@ mod tests {
 
         // Each signature validates against its own op_hash.
         let op_a = dummy_user_op(account.clone(), sig_a.clone());
-        assert!(!validator.validate_user_op(&op_a, &op_hash_a).unwrap().is_failure());
+        assert!(
+            !validator
+                .validate_user_op(&op_a, &op_hash_a)
+                .unwrap()
+                .is_failure()
+        );
         let op_b = dummy_user_op(account.clone(), sig_b);
-        assert!(!validator.validate_user_op(&op_b, &op_hash_b).unwrap().is_failure());
+        assert!(
+            !validator
+                .validate_user_op(&op_b, &op_hash_b)
+                .unwrap()
+                .is_failure()
+        );
 
         // Revoking credential A: signature A no longer validates, but
         // credential B is unaffected — the account is still usable.
@@ -1106,14 +1105,17 @@ mod tests {
         );
 
         // Both credentials signing the same op hash → success.
-        let both =
-            HybridWebAuthnSignature::encode_bundle(&[leg_a.clone(), leg_b.clone()]).unwrap();
+        let both = HybridWebAuthnSignature::encode_bundle(&[leg_a.clone(), leg_b.clone()]).unwrap();
         let op = dummy_user_op(account.clone(), both);
-        assert!(!validator.validate_user_op(&op, &op_hash).unwrap().is_failure());
+        assert!(
+            !validator
+                .validate_user_op(&op, &op_hash)
+                .unwrap()
+                .is_failure()
+        );
 
         // A single credential no longer satisfies the policy.
-        let single =
-            HybridWebAuthnSignature::encode_bundle(std::slice::from_ref(&leg_a)).unwrap();
+        let single = HybridWebAuthnSignature::encode_bundle(std::slice::from_ref(&leg_a)).unwrap();
         let op_single = dummy_user_op(account.clone(), single);
         assert!(
             validator
@@ -1124,8 +1126,7 @@ mod tests {
         );
 
         // The same credential twice is not two factors.
-        let duplicated =
-            HybridWebAuthnSignature::encode_bundle(&[leg_a.clone(), leg_a]).unwrap();
+        let duplicated = HybridWebAuthnSignature::encode_bundle(&[leg_a.clone(), leg_a]).unwrap();
         let op_dup = dummy_user_op(account.clone(), duplicated);
         assert!(
             validator
@@ -1140,10 +1141,13 @@ mod tests {
         let other_account = vec![0x02; 20];
         let (cred_c, key_c, leg_c) = make_hybrid_leg(&op_hash);
         let (cred_d, key_d, leg_d) = make_hybrid_leg(&op_hash);
-        validator.enroll(other_account.clone(), cred_c, key_c).unwrap();
-        validator.enroll(other_account.clone(), cred_d, key_d).unwrap();
-        let two_on_single =
-            HybridWebAuthnSignature::encode_bundle(&[leg_c, leg_d]).unwrap();
+        validator
+            .enroll(other_account.clone(), cred_c, key_c)
+            .unwrap();
+        validator
+            .enroll(other_account.clone(), cred_d, key_d)
+            .unwrap();
+        let two_on_single = HybridWebAuthnSignature::encode_bundle(&[leg_c, leg_d]).unwrap();
         let op_two = dummy_user_op(other_account, two_on_single);
         assert!(
             validator
@@ -1169,9 +1173,11 @@ mod tests {
 
         // One enrolled → still refuse.
         validator.enroll(account.clone(), cred_id, key).unwrap();
-        assert!(validator
-            .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
-            .is_err());
+        assert!(
+            validator
+                .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
+                .is_err()
+        );
         assert_eq!(
             validator.second_factor_policy(&account),
             SecondFactorPolicy::SingleCredential
@@ -1186,7 +1192,9 @@ mod tests {
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), cred_a.clone(), key_a).unwrap();
+        validator
+            .enroll(account.clone(), cred_a.clone(), key_a)
+            .unwrap();
         validator.enroll(account.clone(), cred_b, key_b).unwrap();
         validator
             .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
@@ -1229,25 +1237,18 @@ mod tests {
     #[test]
     fn second_factor_policy_persists_across_restart() {
         use std::sync::Arc;
-        let store: Arc<dyn tenzro_storage::KvStore> =
-            Arc::new(tenzro_storage::MemoryStore::new());
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
         let module_addr = [0x10u8; 20];
         let origin = ORIGIN.to_string();
         let account = vec![0xA1u8; 20];
         let cred_a = vec![0xC1u8; 16];
         let cred_b = vec![0xC2u8; 16];
-        let key_a = WebAuthnAccountKey::new(
-            [0x11u8; 32],
-            [0x22u8; 32],
-            vec![0x33u8; ML_DSA_65_VK_LEN],
-        )
-        .unwrap();
-        let key_b = WebAuthnAccountKey::new(
-            [0x44u8; 32],
-            [0x55u8; 32],
-            vec![0x66u8; ML_DSA_65_VK_LEN],
-        )
-        .unwrap();
+        let key_a =
+            WebAuthnAccountKey::new([0x11u8; 32], [0x22u8; 32], vec![0x33u8; ML_DSA_65_VK_LEN])
+                .unwrap();
+        let key_b =
+            WebAuthnAccountKey::new([0x44u8; 32], [0x55u8; 32], vec![0x66u8; ML_DSA_65_VK_LEN])
+                .unwrap();
 
         {
             let v = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
@@ -1291,8 +1292,7 @@ mod tests {
     #[test]
     fn webauthn_enrollment_persists_across_restart() {
         use std::sync::Arc;
-        let store: Arc<dyn tenzro_storage::KvStore> =
-            Arc::new(tenzro_storage::MemoryStore::new());
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
         let module_addr = [0x10u8; 20];
         let origin = "https://wallet.tenzro.xyz".to_string();
         let account_a = vec![0xA1u8; 20];
@@ -1300,30 +1300,24 @@ mod tests {
         let cred_a1 = vec![0xC1u8; 16];
         let cred_a2 = vec![0xC2u8; 16]; // second device on account A
         let cred_b1 = vec![0xC3u8; 16];
-        let key_a1 = WebAuthnAccountKey::new(
-            [0x11u8; 32],
-            [0x22u8; 32],
-            vec![0x33u8; ML_DSA_65_VK_LEN],
-        )
-        .unwrap();
-        let key_a2 = WebAuthnAccountKey::new(
-            [0x44u8; 32],
-            [0x55u8; 32],
-            vec![0x66u8; ML_DSA_65_VK_LEN],
-        )
-        .unwrap();
-        let key_b1 = WebAuthnAccountKey::new(
-            [0xAAu8; 32],
-            [0xBBu8; 32],
-            vec![0xCCu8; ML_DSA_65_VK_LEN],
-        )
-        .unwrap();
+        let key_a1 =
+            WebAuthnAccountKey::new([0x11u8; 32], [0x22u8; 32], vec![0x33u8; ML_DSA_65_VK_LEN])
+                .unwrap();
+        let key_a2 =
+            WebAuthnAccountKey::new([0x44u8; 32], [0x55u8; 32], vec![0x66u8; ML_DSA_65_VK_LEN])
+                .unwrap();
+        let key_b1 =
+            WebAuthnAccountKey::new([0xAAu8; 32], [0xBBu8; 32], vec![0xCCu8; ML_DSA_65_VK_LEN])
+                .unwrap();
 
         {
             let v = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
-            v.enroll(account_a.clone(), cred_a1.clone(), key_a1.clone()).unwrap();
-            v.enroll(account_a.clone(), cred_a2.clone(), key_a2.clone()).unwrap();
-            v.enroll(account_b.clone(), cred_b1.clone(), key_b1.clone()).unwrap();
+            v.enroll(account_a.clone(), cred_a1.clone(), key_a1.clone())
+                .unwrap();
+            v.enroll(account_a.clone(), cred_a2.clone(), key_a2.clone())
+                .unwrap();
+            v.enroll(account_b.clone(), cred_b1.clone(), key_b1.clone())
+                .unwrap();
             assert_eq!(v.enrolled_account_count(), 2);
             assert_eq!(v.enrolled_credential_count(), 3);
         }
@@ -1335,11 +1329,15 @@ mod tests {
             3,
             "every credential must hydrate"
         );
-        let restored_a1 = v2.get_credential(&account_a, &cred_a1).expect("a1 hydrated");
+        let restored_a1 = v2
+            .get_credential(&account_a, &cred_a1)
+            .expect("a1 hydrated");
         assert_eq!(restored_a1.pubkey_x, key_a1.pubkey_x);
         assert_eq!(restored_a1.pubkey_y, key_a1.pubkey_y);
         assert_eq!(restored_a1.pq_pubkey, key_a1.pq_pubkey);
-        let restored_a2 = v2.get_credential(&account_a, &cred_a2).expect("a2 hydrated");
+        let restored_a2 = v2
+            .get_credential(&account_a, &cred_a2)
+            .expect("a2 hydrated");
         assert_eq!(restored_a2.pubkey_x, key_a2.pubkey_x);
 
         // Revoke only credential A1; A2 must still be reachable after restart.

@@ -54,11 +54,11 @@ use sha2::{Digest, Sha384};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use tenzro_types::tee::*;
 use crate::attestation::{self, ParsedCertificate};
 use crate::certs;
 use crate::error::{Result, TeeError};
 use crate::traits::TeeProvider;
+use tenzro_types::tee::*;
 
 // ============================================================================
 // NSM (Nitro Secure Module) types
@@ -166,7 +166,9 @@ impl AwsNitroProvider {
         };
 
         Self {
-            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new("aws-nitro")),
+            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new(
+                "aws-nitro",
+            )),
             available,
             simulate,
         }
@@ -216,12 +218,16 @@ impl AwsNitroProvider {
                 .read(true)
                 .write(true)
                 .open("/dev/nsm")
-                .map_err(|e| TeeError::AttestationGenerationFailed(
-                    format!("Failed to open /dev/nsm: {}", e)
-                ))?;
+                .map_err(|e| {
+                    TeeError::AttestationGenerationFailed(format!("Failed to open /dev/nsm: {}", e))
+                })?;
 
             // Build CBOR-encoded attestation request
-            let user_data_opt = if user_data.is_empty() { None } else { Some(user_data) };
+            let user_data_opt = if user_data.is_empty() {
+                None
+            } else {
+                Some(user_data)
+            };
             let request_bytes = build_nsm_request_cbor(user_data_opt, nonce, None);
 
             tracing::debug!("NSM request: {} bytes (CBOR)", request_bytes.len());
@@ -234,26 +240,36 @@ impl AwsNitroProvider {
 
             // Write request to NSM
             let written = unsafe {
-                libc::write(fd, request_bytes.as_ptr() as *const libc::c_void, request_bytes.len())
+                libc::write(
+                    fd,
+                    request_bytes.as_ptr() as *const libc::c_void,
+                    request_bytes.len(),
+                )
             };
 
             if written < 0 {
                 let errno = std::io::Error::last_os_error();
-                return Err(TeeError::AttestationGenerationFailed(
-                    format!("Failed to write NSM request: {}", errno)
-                ));
+                return Err(TeeError::AttestationGenerationFailed(format!(
+                    "Failed to write NSM request: {}",
+                    errno
+                )));
             }
 
             // Read response from NSM
             let read_len = unsafe {
-                libc::read(fd, response_buf.as_mut_ptr() as *mut libc::c_void, response_buf.len())
+                libc::read(
+                    fd,
+                    response_buf.as_mut_ptr() as *mut libc::c_void,
+                    response_buf.len(),
+                )
             };
 
             if read_len < 0 {
                 let errno = std::io::Error::last_os_error();
-                return Err(TeeError::AttestationGenerationFailed(
-                    format!("Failed to read NSM response: {}", errno)
-                ));
+                return Err(TeeError::AttestationGenerationFailed(format!(
+                    "Failed to read NSM response: {}",
+                    errno
+                )));
             }
 
             response_buf.truncate(read_len as usize);
@@ -261,7 +277,10 @@ impl AwsNitroProvider {
 
             // Parse the NSM response to extract the attestation document
             let attestation_doc = parse_nsm_response_cbor(&response_buf)?;
-            tracing::info!("NSM attestation document received ({} bytes)", attestation_doc.len());
+            tracing::info!(
+                "NSM attestation document received ({} bytes)",
+                attestation_doc.len()
+            );
 
             Ok(attestation_doc)
         }
@@ -270,7 +289,7 @@ impl AwsNitroProvider {
         {
             let _ = (user_data, nonce);
             Err(TeeError::not_available(
-                "AWS Nitro Enclaves require Linux (ioctl to /dev/nsm)"
+                "AWS Nitro Enclaves require Linux (ioctl to /dev/nsm)",
             ))
         }
     }
@@ -282,9 +301,8 @@ impl AwsNitroProvider {
         }
 
         // Generate a nonce for replay protection
-        let nonce = Sha384::digest(
-            [user_data, &Utc::now().timestamp_millis().to_le_bytes()].concat()
-        );
+        let nonce =
+            Sha384::digest([user_data, &Utc::now().timestamp_millis().to_le_bytes()].concat());
 
         self.generate_nsm_attestation(user_data, Some(&nonce))
     }
@@ -298,9 +316,8 @@ impl AwsNitroProvider {
         let pcr4 = Sha384::digest(b"simulated-instance-id-hash");
         let pcr8 = Sha384::digest(b"simulated-signing-cert-hash");
 
-        let nonce = Sha384::digest(
-            [user_data, &Utc::now().timestamp_millis().to_le_bytes()].concat()
-        );
+        let nonce =
+            Sha384::digest([user_data, &Utc::now().timestamp_millis().to_le_bytes()].concat());
 
         let document = serde_json::json!({
             "version": 4,
@@ -330,7 +347,10 @@ impl AwsNitroProvider {
     fn parse_document(&self, data: &[u8]) -> Result<NitroAttestationDoc> {
         // Try JSON first (simulated)
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data)
-            && json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false)
+            && json
+                .get("simulated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             return self.parse_simulated_document(&json, data);
         }
@@ -340,7 +360,11 @@ impl AwsNitroProvider {
     }
 
     /// Parses a simulated JSON document.
-    fn parse_simulated_document(&self, json: &serde_json::Value, raw: &[u8]) -> Result<NitroAttestationDoc> {
+    fn parse_simulated_document(
+        &self,
+        json: &serde_json::Value,
+        raw: &[u8],
+    ) -> Result<NitroAttestationDoc> {
         let get_hex = |key: &str| -> Option<Vec<u8>> {
             json.get(key)
                 .and_then(|v| v.as_str())
@@ -359,14 +383,14 @@ impl AwsNitroProvider {
         }
 
         Ok(NitroAttestationDoc {
-            module_id: json.get("module_id")
+            module_id: json
+                .get("module_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            timestamp: json.get("timestamp")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0),
-            digest: json.get("digest")
+            timestamp: json.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
+            digest: json
+                .get("digest")
                 .and_then(|v| v.as_str())
                 .unwrap_or("SHA384")
                 .to_string(),
@@ -402,7 +426,7 @@ impl AwsNitroProvider {
     fn parse_cose_document(&self, data: &[u8]) -> Result<NitroAttestationDoc> {
         if data.is_empty() {
             return Err(TeeError::InvalidAttestationReport(
-                "Empty COSE document".to_string()
+                "Empty COSE document".to_string(),
             ));
         }
 
@@ -412,7 +436,8 @@ impl AwsNitroProvider {
         let tag = parser.read_tag()?;
         if tag != 18 {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "Expected COSE Sign1 tag (18), got tag({})", tag
+                "Expected COSE Sign1 tag (18), got tag({})",
+                tag
             )));
         }
 
@@ -420,7 +445,8 @@ impl AwsNitroProvider {
         let array_len = parser.read_array_len()?;
         if array_len != 4 {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "Expected COSE Sign1 array[4], got array[{}]", array_len
+                "Expected COSE Sign1 array[4], got array[{}]",
+                array_len
             )));
         }
 
@@ -510,7 +536,11 @@ impl AwsNitroProvider {
 
         tracing::debug!(
             "Parsed COSE Sign1: module_id={}, timestamp={}, {} PCRs, cert={} bytes, cabundle={} certs, payload_consumed={} bytes",
-            module_id, timestamp, pcrs.len(), certificate.len(), cabundle.len(),
+            module_id,
+            timestamp,
+            pcrs.len(),
+            certificate.len(),
+            cabundle.len(),
             payload_parser.position()
         );
 
@@ -544,17 +574,24 @@ impl AwsNitroProvider {
     ///
     /// For simulated documents:
     /// - Parse JSON, return result with simulated flag
-    async fn verify_nitro_document(&self, doc_data: &[u8], certificates: &[Vec<u8>]) -> Result<AttestationResult> {
+    async fn verify_nitro_document(
+        &self,
+        doc_data: &[u8],
+        certificates: &[Vec<u8>],
+    ) -> Result<AttestationResult> {
         let doc = self.parse_document(doc_data)?;
 
         // Bound PCR indices to the canonical Nitro PCR0..PCR15 range. Documents
         // that report PCRs beyond NITRO_PCR_COUNT - 1 are spec-violating and
         // are dropped from the surfaced measurement set so downstream policy
         // engines never see synthetic indices.
-        let measurements: Vec<Measurement> = doc.pcrs.iter()
+        let measurements: Vec<Measurement> = doc
+            .pcrs
+            .iter()
             .filter(|(index, _)| (**index as usize) < NITRO_PCR_COUNT)
             .map(|(index, value)| {
-                let description = PCR_DESCRIPTIONS.iter()
+                let description = PCR_DESCRIPTIONS
+                    .iter()
                     .find(|(i, _)| i == index)
                     .map(|(_, desc)| desc.to_string());
                 Measurement {
@@ -599,7 +636,10 @@ impl AwsNitroProvider {
             // Surface raw COSE_Sign1 byte length so downstream verifiers can
             // sanity-check the wire size against expected document bounds.
             details.insert("raw_doc_bytes".to_string(), doc.raw.len().to_string());
-            tracing::info!("Verifying real AWS Nitro document ({} raw bytes)", doc.raw.len());
+            tracing::info!(
+                "Verifying real AWS Nitro document ({} raw bytes)",
+                doc.raw.len()
+            );
 
             // Verify certificate chain against pinned AWS Nitro Root CA
             if !certificates.is_empty() {
@@ -616,9 +656,13 @@ impl AwsNitroProvider {
             if age_ms > max_age_ms {
                 tracing::warn!(
                     "Nitro attestation document may be stale: age={}ms (max={}ms)",
-                    age_ms, max_age_ms
+                    age_ms,
+                    max_age_ms
                 );
-                details.insert("freshness_warning".to_string(), format!("age_ms={}", age_ms));
+                details.insert(
+                    "freshness_warning".to_string(),
+                    format!("age_ms={}", age_ms),
+                );
             }
 
             // Verify COSE Sign1 ES384 signature using leaf certificate's public key.
@@ -638,10 +682,8 @@ impl AwsNitroProvider {
                         match attestation::extract_ec_point_from_spki(&leaf_cert.spki_der) {
                             Some(ec_point) if ec_point.len() == 96 => {
                                 // Build Sig_structure1 CBOR: ["Signature1", protected, h'', payload]
-                                let sig_struct = build_sig_structure1(
-                                    &doc.protected_header,
-                                    &doc.payload_bytes,
-                                );
+                                let sig_struct =
+                                    build_sig_structure1(&doc.protected_header, &doc.payload_bytes);
                                 match sig_struct {
                                     Ok(bytes) => {
                                         match attestation::verify_ecdsa_p384_raw_pubkey(
@@ -662,15 +704,14 @@ impl AwsNitroProvider {
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
-                                                    "AWS Nitro COSE signature verification error: {}", e
+                                                    "AWS Nitro COSE signature verification error: {}",
+                                                    e
                                                 );
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to build Sig_structure1: {}", e
-                                        );
+                                        tracing::warn!("Failed to build Sig_structure1: {}", e);
                                     }
                                 }
                             }
@@ -681,9 +722,7 @@ impl AwsNitroProvider {
                                 );
                             }
                             None => {
-                                tracing::warn!(
-                                    "Failed to extract EC point from Nitro leaf SPKI"
-                                );
+                                tracing::warn!("Failed to extract EC point from Nitro leaf SPKI");
                             }
                         }
                     }
@@ -718,10 +757,12 @@ impl AwsNitroProvider {
 
     /// Verifies the AWS certificate chain against pinned Nitro Root CA.
     fn verify_aws_cert_chain(&self, certificates: &[Vec<u8>]) -> Result<bool> {
-        let root_der = certs::pem_to_der(certs::AWS_NITRO_ROOT_CA_PEM)
-            .map_err(|e| TeeError::CertificateValidationFailed(
-                format!("Failed to decode AWS Nitro root CA: {}", e)
-            ))?;
+        let root_der = certs::pem_to_der(certs::AWS_NITRO_ROOT_CA_PEM).map_err(|e| {
+            TeeError::CertificateValidationFailed(format!(
+                "Failed to decode AWS Nitro root CA: {}",
+                e
+            ))
+        })?;
 
         let root_cert = attestation::parse_x509_certificate(&root_der)?;
 
@@ -750,7 +791,8 @@ impl AwsNitroProvider {
         } else {
             tracing::warn!(
                 "AWS chain does not terminate at Nitro Root CA: last issuer='{}', root='{}'",
-                last.issuer_cn, root_cert.subject_cn
+                last.issuer_cn,
+                root_cert.subject_cn
             );
             Ok(false)
         }
@@ -861,7 +903,8 @@ impl TeeProvider for AwsNitroProvider {
             ));
         }
 
-        self.verify_nitro_document(&report.attestation_data, &report.certificates).await
+        self.verify_nitro_document(&report.attestation_data, &report.certificates)
+            .await
     }
 
     async fn execute_in_enclave(&self, request: EnclaveRequest) -> Result<EnclaveResponse> {
@@ -871,12 +914,29 @@ impl TeeProvider for AwsNitroProvider {
 
         tracing::info!("Executing in Nitro Enclave: {:?}", request.operation);
 
+        // The node process already runs inside the Nitro enclave — an isolated
+        // VM with no persistent storage or interactive access, so this
+        // computation is inside the boundary by construction. See
+        // `TeeProvider::execute_in_enclave`.
+        let data = request.params;
+
+        // Bind the result to this enclave when the caller asked to be able to
+        // prove where it came from. Fails closed: a caller that requested
+        // evidence must not receive a response it cannot prove.
+        let attestation = if request.include_attestation {
+            let binding =
+                crate::traits::enclave_response_binding(&request.id, &request.operation, &data);
+            Some(self.generate_attestation(&binding).await?)
+        } else {
+            None
+        };
+
         Ok(EnclaveResponse {
             request_id: request.id,
             success: true,
-            data: request.params,
+            data,
             error: None,
-            attestation: None,
+            attestation,
         })
     }
 
@@ -892,7 +952,9 @@ impl TeeProvider for AwsNitroProvider {
         // Use a one-shot NSM attestation as IKM. The NSM-signed
         // COSE_Sign1 document is unpredictable to a remote attacker
         // and binds to the enclave's identity (PCRs, image hash).
-        let report = self.generate_attestation(b"tenzro-enclave-keygen-ikm").await?;
+        let report = self
+            .generate_attestation(b"tenzro-enclave-keygen-ikm")
+            .await?;
         let mut ikm = Vec::with_capacity(report.attestation_data.len() + 32);
         ikm.extend_from_slice(&report.attestation_data);
         ikm.extend_from_slice(&report.measurement);
@@ -975,9 +1037,11 @@ impl<'a> CborParser<'a> {
 
     fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
         if self.remaining() < len {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Cannot read {} bytes, only {} remaining", len, self.remaining())
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Cannot read {} bytes, only {} remaining",
+                len,
+                self.remaining()
+            )));
         }
         let start = self.pos;
         self.pos += len;
@@ -991,9 +1055,10 @@ impl<'a> CborParser<'a> {
         let additional = initial & 0x1F;
 
         if major != 0 {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Expected unsigned int (major 0), got major {}", major)
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Expected unsigned int (major 0), got major {}",
+                major
+            )));
         }
 
         Ok(match additional {
@@ -1010,13 +1075,15 @@ impl<'a> CborParser<'a> {
             27 => {
                 let bytes = self.read_bytes(8)?;
                 u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ])
             }
-            _ => return Err(TeeError::InvalidAttestationReport(
-                format!("Invalid additional info for uint: {}", additional)
-            )),
+            _ => {
+                return Err(TeeError::InvalidAttestationReport(format!(
+                    "Invalid additional info for uint: {}",
+                    additional
+                )));
+            }
         })
     }
 
@@ -1027,9 +1094,10 @@ impl<'a> CborParser<'a> {
         let additional = initial & 0x1F;
 
         if major != 6 {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Expected tag (major 6), got major {}", major)
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Expected tag (major 6), got major {}",
+                major
+            )));
         }
 
         Ok(match additional {
@@ -1046,13 +1114,15 @@ impl<'a> CborParser<'a> {
             27 => {
                 let bytes = self.read_bytes(8)?;
                 u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ])
             }
-            _ => return Err(TeeError::InvalidAttestationReport(
-                format!("Invalid additional info for tag: {}", additional)
-            )),
+            _ => {
+                return Err(TeeError::InvalidAttestationReport(format!(
+                    "Invalid additional info for tag: {}",
+                    additional
+                )));
+            }
         })
     }
 
@@ -1063,9 +1133,10 @@ impl<'a> CborParser<'a> {
         let additional = initial & 0x1F;
 
         if major != 4 {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Expected array (major 4), got major {}", major)
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Expected array (major 4), got major {}",
+                major
+            )));
         }
 
         Ok(match additional {
@@ -1082,13 +1153,15 @@ impl<'a> CborParser<'a> {
             27 => {
                 let bytes = self.read_bytes(8)?;
                 u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]) as usize
             }
-            _ => return Err(TeeError::InvalidAttestationReport(
-                format!("Invalid additional info for array: {}", additional)
-            )),
+            _ => {
+                return Err(TeeError::InvalidAttestationReport(format!(
+                    "Invalid additional info for array: {}",
+                    additional
+                )));
+            }
         })
     }
 
@@ -1099,9 +1172,10 @@ impl<'a> CborParser<'a> {
         let additional = initial & 0x1F;
 
         if major != 5 {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Expected map (major 5), got major {}", major)
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Expected map (major 5), got major {}",
+                major
+            )));
         }
 
         Ok(match additional {
@@ -1118,13 +1192,15 @@ impl<'a> CborParser<'a> {
             27 => {
                 let bytes = self.read_bytes(8)?;
                 u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]) as usize
             }
-            _ => return Err(TeeError::InvalidAttestationReport(
-                format!("Invalid additional info for map: {}", additional)
-            )),
+            _ => {
+                return Err(TeeError::InvalidAttestationReport(format!(
+                    "Invalid additional info for map: {}",
+                    additional
+                )));
+            }
         })
     }
 
@@ -1135,9 +1211,10 @@ impl<'a> CborParser<'a> {
         let additional = initial & 0x1F;
 
         if major != 2 {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Expected byte string (major 2), got major {}", major)
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Expected byte string (major 2), got major {}",
+                major
+            )));
         }
 
         let len = match additional {
@@ -1154,13 +1231,15 @@ impl<'a> CborParser<'a> {
             27 => {
                 let bytes = self.read_bytes(8)?;
                 u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]) as usize
             }
-            _ => return Err(TeeError::InvalidAttestationReport(
-                format!("Invalid additional info for bstr: {}", additional)
-            )),
+            _ => {
+                return Err(TeeError::InvalidAttestationReport(format!(
+                    "Invalid additional info for bstr: {}",
+                    additional
+                )));
+            }
         };
 
         Ok(self.read_bytes(len)?.to_vec())
@@ -1173,9 +1252,10 @@ impl<'a> CborParser<'a> {
         let additional = initial & 0x1F;
 
         if major != 3 {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Expected text string (major 3), got major {}", major)
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Expected text string (major 3), got major {}",
+                major
+            )));
         }
 
         let len = match additional {
@@ -1192,13 +1272,15 @@ impl<'a> CborParser<'a> {
             27 => {
                 let bytes = self.read_bytes(8)?;
                 u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]) as usize
             }
-            _ => return Err(TeeError::InvalidAttestationReport(
-                format!("Invalid additional info for tstr: {}", additional)
-            )),
+            _ => {
+                return Err(TeeError::InvalidAttestationReport(format!(
+                    "Invalid additional info for tstr: {}",
+                    additional
+                )));
+            }
         };
 
         let bytes = self.read_bytes(len)?;
@@ -1219,18 +1301,32 @@ impl<'a> CborParser<'a> {
                 self.read_byte()?;
                 match additional {
                     0..=23 => {}
-                    24 => { self.read_byte()?; }
-                    25 => { self.read_bytes(2)?; }
-                    26 => { self.read_bytes(4)?; }
-                    27 => { self.read_bytes(8)?; }
-                    _ => return Err(TeeError::InvalidAttestationReport(
-                        "Invalid additional info".to_string()
-                    )),
+                    24 => {
+                        self.read_byte()?;
+                    }
+                    25 => {
+                        self.read_bytes(2)?;
+                    }
+                    26 => {
+                        self.read_bytes(4)?;
+                    }
+                    27 => {
+                        self.read_bytes(8)?;
+                    }
+                    _ => {
+                        return Err(TeeError::InvalidAttestationReport(
+                            "Invalid additional info".to_string(),
+                        ));
+                    }
                 }
             }
             2 | 3 => {
                 // Byte string or text string
-                let _ = if major == 2 { self.read_bstr()? } else { self.read_tstr()?.into_bytes() };
+                let _ = if major == 2 {
+                    self.read_bstr()?
+                } else {
+                    self.read_tstr()?.into_bytes()
+                };
             }
             4 => {
                 // Array
@@ -1253,9 +1349,10 @@ impl<'a> CborParser<'a> {
                 self.skip_value()?; // tagged value
             }
             _ => {
-                return Err(TeeError::InvalidAttestationReport(
-                    format!("Unknown CBOR major type: {}", major)
-                ));
+                return Err(TeeError::InvalidAttestationReport(format!(
+                    "Unknown CBOR major type: {}",
+                    major
+                )));
             }
         }
 
@@ -1289,9 +1386,15 @@ fn build_nsm_request_cbor(
 
     // Count how many optional fields are present
     let mut inner_count = 0;
-    if user_data.is_some() { inner_count += 1; }
-    if nonce.is_some() { inner_count += 1; }
-    if public_key.is_some() { inner_count += 1; }
+    if user_data.is_some() {
+        inner_count += 1;
+    }
+    if nonce.is_some() {
+        inner_count += 1;
+    }
+    if public_key.is_some() {
+        inner_count += 1;
+    }
 
     // Outer map with 1 entry: "Attestation" => inner_map
     buf.push(0xA1); // map(1)
@@ -1338,33 +1441,37 @@ fn parse_nsm_response_cbor(data: &[u8]) -> Result<Vec<u8>> {
     // Outer map
     let outer_len = parser.read_map_len()?;
     if outer_len != 1 {
-        return Err(TeeError::InvalidAttestationReport(
-            format!("Expected NSM response map(1), got map({})", outer_len)
-        ));
+        return Err(TeeError::InvalidAttestationReport(format!(
+            "Expected NSM response map(1), got map({})",
+            outer_len
+        )));
     }
 
     // Key: "Attestation"
     let key = parser.read_tstr()?;
     if key != "Attestation" {
-        return Err(TeeError::InvalidAttestationReport(
-            format!("Expected 'Attestation' key, got '{}'", key)
-        ));
+        return Err(TeeError::InvalidAttestationReport(format!(
+            "Expected 'Attestation' key, got '{}'",
+            key
+        )));
     }
 
     // Inner map
     let inner_len = parser.read_map_len()?;
     if inner_len != 1 {
-        return Err(TeeError::InvalidAttestationReport(
-            format!("Expected Attestation map(1), got map({})", inner_len)
-        ));
+        return Err(TeeError::InvalidAttestationReport(format!(
+            "Expected Attestation map(1), got map({})",
+            inner_len
+        )));
     }
 
     // Key: "document"
     let doc_key = parser.read_tstr()?;
     if doc_key != "document" {
-        return Err(TeeError::InvalidAttestationReport(
-            format!("Expected 'document' key, got '{}'", doc_key)
-        ));
+        return Err(TeeError::InvalidAttestationReport(format!(
+            "Expected 'document' key, got '{}'",
+            doc_key
+        )));
     }
 
     // Value: COSE Sign1 document (byte string)
@@ -1443,8 +1550,7 @@ fn write_cbor_bstr(buf: &mut Vec<u8>, data: &[u8]) {
 /// Returns true only when simulation is explicitly requested via env var.
 /// Real hardware is the default — set `TENZRO_SIMULATE_NITRO=1` to override.
 fn is_simulation_mode() -> bool {
-    std::env::var("TENZRO_SIMULATE_NITRO")
-        .unwrap_or_else(|_| "0".to_string()) == "1"
+    std::env::var("TENZRO_SIMULATE_NITRO").unwrap_or_else(|_| "0".to_string()) == "1"
 }
 
 #[cfg(test)]
@@ -1459,7 +1565,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_nitro_simulation_mode() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_NITRO", "1");
+        }
         let provider = AwsNitroProvider::new();
         assert!(provider.simulate);
         assert!(provider.available);
@@ -1467,7 +1575,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_nitro_generate_simulated_document() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_NITRO", "1");
+        }
         let provider = AwsNitroProvider::new();
 
         let user_data = b"tenzro-network-test";
@@ -1486,7 +1596,9 @@ mod tests {
         // Simulated documents carry no cryptographic authority; verifier
         // populates measurements + details for observability but `valid`
         // MUST be false.
-        unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_NITRO", "1");
+        }
         let provider = AwsNitroProvider::new();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
@@ -1510,7 +1622,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_nitro_pcr_descriptions() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_NITRO", "1");
+        }
         let provider = AwsNitroProvider::new();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
@@ -1529,7 +1643,9 @@ mod tests {
     async fn test_nitro_keygen_in_simulation_returns_not_available() {
         // Simulation cannot supply a real NSM-signed attestation IKM;
         // `enclave_keygen` rejects with NotAvailable. No fabrication.
-        unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_NITRO", "1");
+        }
         let provider = AwsNitroProvider::new();
 
         let params = KeyGenParams {
@@ -1562,18 +1678,20 @@ mod tests {
         let msg = b"aws-nitro real Ed25519";
         let sig = ks.sign(&handle, msg).await.unwrap();
 
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(
-            <&[u8; 32]>::try_from(pk.as_slice()).unwrap(),
-        )
-        .unwrap();
+        let vk =
+            ed25519_dalek::VerifyingKey::from_bytes(<&[u8; 32]>::try_from(pk.as_slice()).unwrap())
+                .unwrap();
         let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
         let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
-        vk.verify(msg, &signature).expect("real Ed25519 signature must verify");
+        vk.verify(msg, &signature)
+            .expect("real Ed25519 signature must verify");
     }
 
     #[tokio::test]
     async fn test_nitro_wrong_vendor_rejected() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_NITRO", "1");
+        }
         let provider = AwsNitroProvider::new();
 
         let mut report = provider.generate_attestation(b"test").await.unwrap();
@@ -1585,7 +1703,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_nitro_parse_simulated_document() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_NITRO", "1");
+        }
         let provider = AwsNitroProvider::new();
 
         let data = provider.generate_simulated_document(b"hello").unwrap();

@@ -384,7 +384,10 @@ mod tests {
         p2.symbol = "TEST2".into();
         let prior = reg.register(p2).unwrap().unwrap();
         assert_eq!(prior.symbol, "TEST");
-        assert_eq!(reg.policy(&p.issuer, &p.unit_token).unwrap().symbol, "TEST2");
+        assert_eq!(
+            reg.policy(&p.issuer, &p.unit_token).unwrap().symbol,
+            "TEST2"
+        );
     }
 
     #[test]
@@ -416,8 +419,14 @@ mod tests {
     #[test]
     fn rail_parse_roundtrip() {
         assert_eq!(PaymentRail::parse("x402").unwrap(), PaymentRail::X402);
-        assert_eq!(PaymentRail::parse("visa-tap").unwrap(), PaymentRail::VisaTap);
-        assert_eq!(PaymentRail::parse("visa_tap").unwrap(), PaymentRail::VisaTap);
+        assert_eq!(
+            PaymentRail::parse("visa-tap").unwrap(),
+            PaymentRail::VisaTap
+        );
+        assert_eq!(
+            PaymentRail::parse("visa_tap").unwrap(),
+            PaymentRail::VisaTap
+        );
         assert!(matches!(
             PaymentRail::parse("paypal").unwrap_err(),
             StableAssetError::UnknownRail(_)

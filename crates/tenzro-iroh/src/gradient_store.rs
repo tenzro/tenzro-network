@@ -41,8 +41,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 
 use tenzro_training::{
-    compute_payload_hash, verify_payload, GradientPayloadStore, Result as TrainingResult,
-    TrainingError,
+    GradientPayloadStore, Result as TrainingResult, TrainingError, compute_payload_hash,
+    verify_payload,
 };
 use tenzro_types::primitives::Hash;
 use tenzro_types::tenzro_uri::TenzroUri;

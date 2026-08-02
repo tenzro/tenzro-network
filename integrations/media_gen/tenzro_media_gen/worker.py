@@ -22,8 +22,10 @@ to ``partner_timeout_secs`` and fails the job explicitly if none appears.
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -90,6 +92,12 @@ class WorkerConfig:
     gpu_vram_gb: float = 24.0
     device: str = "cuda"
     dtype: str = "bfloat16"
+    #: Transformer weight format. ``None`` means "same as ``dtype``", which is
+    #: what an operator who has not thought about quantization wants. Setting
+    #: it to one of the sub-8-bit tiers (``nf4`` / ``int4`` / ``int8``) trades
+    #: some output fidelity for roughly a quarter to a half of the VRAM, which
+    #: is what makes a large video model fit on a single card at all.
+    precision: str | None = None
     cache_dir: str | None = None
     poll_interval_secs: float = 5.0
     partner_timeout_secs: float = 900.0
@@ -131,7 +139,9 @@ class MediaGenWorker:
         self.client = client
         self.key = key
         self._catalog: list[dict[str, Any]] = []
-        self._pipelines: dict[tuple[str, str, str | None], LoadedPipeline] = {}
+        # OrderedDict, not dict: eviction is LRU and needs move_to_end.
+        # Oldest-first iteration order is what `_evict_until_fits` relies on.
+        self._pipelines: OrderedDict[tuple[str, str, str | None], LoadedPipeline] = OrderedDict()
 
     # ── enrollment and discovery ──────────────────────────────────────
 
@@ -158,7 +168,7 @@ class MediaGenWorker:
     def entry_for(self, model_id: str) -> CatalogEntry:
         return find_entry(self._catalog, model_id)
 
-    def claimable(self, job: MediaGenJob) -> "Claim | None":
+    def claimable(self, job: MediaGenJob) -> Claim | None:
         """Which piece of ``job``, if any, this worker can take.
 
         A split job in ``claimed`` state still has work available when only one
@@ -194,7 +204,7 @@ class MediaGenWorker:
                 continue
             try:
                 self.execute(job.job_id, claim.role)
-            except Exception as exc:  # noqa: BLE001 — report, then keep serving
+            except Exception as exc:
                 log.exception("job %s failed", job.job_id)
                 self._report_failure(job.job_id, str(exc))
             return True
@@ -272,20 +282,110 @@ class MediaGenWorker:
         kind: MediaGenKind,
         role: MediaGenExpertRole | None,
     ) -> LoadedPipeline:
-        cache_key = (entry.id, kind.value, role.value if role else None)
+        # Precision is part of the key. The same model at nf4 and at bf16 are
+        # different objects with different VRAM costs and different outputs;
+        # keying on the model alone would hand a caller who asked for bf16
+        # whichever precision happened to be loaded first.
+        cache_key = (
+            entry.id,
+            kind.value,
+            role.value if role else None,
+            self.config.precision or self.config.dtype,
+        )
         cached = self._pipelines.get(cache_key)
         if cached is not None:
+            # Refresh recency: this is an LRU, and the whole point is that the
+            # pipeline a worker keeps claiming is the one it keeps.
+            self._pipelines.move_to_end(cache_key)
             return cached
+
+        self._evict_until_fits(entry)
         loaded = load_pipeline(
             entry,
             kind,
             role,
             device=self.config.device,
             dtype=self.config.dtype,
+            precision=self.config.precision,
             cache_dir=self.config.cache_dir,
         )
         self._pipelines[cache_key] = loaded
         return loaded
+
+    def _entry_vram_gb(self, entry: CatalogEntry) -> float:
+        """What holding this pipeline costs, in GB.
+
+        The catalog's ``min_vram_gb`` is the model author's own floor for
+        running it, which is the closest thing to a truthful number available
+        without loading it first. Falls back to the on-disk size when absent.
+        """
+        declared = getattr(entry, "min_vram_gb", None)
+        if declared:
+            return float(declared)
+        size_bytes = getattr(entry, "size_bytes", 0) or 0
+        return float(size_bytes) / 1e9
+
+    def _resident_vram_gb(self) -> float:
+        return sum(self._entry_vram_gb(p.entry) for p in self._pipelines.values())
+
+    def _evict_until_fits(self, entry: CatalogEntry) -> None:
+        """Free least-recently-used pipelines until ``entry`` fits.
+
+        Without this the cache is unbounded: a worker that renders one image
+        job with a 33 GB pipeline and then a video job with a 34 GB one holds
+        both, and 67 GB does not fit in a budget sized for one at a time. The
+        symptom is an OOM kill on the second job, which looks like a video bug
+        rather than a cache bug.
+
+        Eviction is best-effort by design — a worker that cannot free enough
+        still attempts the load, because the catalog's VRAM figures are
+        estimates and refusing on an estimate would make a worker decline jobs
+        it could actually have rendered. The real ceiling is enforced by the
+        node's memory budget on the Rust side.
+        """
+        budget = float(self.config.gpu_vram_gb)
+        needed = self._entry_vram_gb(entry)
+
+        while self._pipelines and (self._resident_vram_gb() + needed) > budget:
+            victim_key, victim = next(iter(self._pipelines.items()))
+            del self._pipelines[victim_key]
+            self._release(victim)
+            log.info(
+                "evicted pipeline %s to make room for %s (%.1f GB needed, %.1f GB budget)",
+                victim_key[0],
+                entry.id,
+                needed,
+                budget,
+            )
+
+    @staticmethod
+    def _release(loaded: LoadedPipeline) -> None:
+        """Actually give the memory back.
+
+        Dropping the dict entry only drops a Python reference; the weights stay
+        in VRAM until the allocator's cache is emptied too. Skipping the
+        ``empty_cache`` leaves an eviction that frees nothing, which is worse
+        than no eviction because it also loses the pipeline.
+        """
+        try:
+            pipe = loaded.pipe
+            if hasattr(pipe, "to"):
+                try:
+                    pipe.to("cpu")
+                except Exception:  # noqa: BLE001 - best effort, never fatal
+                    pass
+            del pipe
+            del loaded
+            gc.collect()
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+        except Exception as exc:  # noqa: BLE001 - eviction must never kill the worker
+            log.warning("pipeline release did not complete cleanly: %s", exc)
 
     def _await(
         self,

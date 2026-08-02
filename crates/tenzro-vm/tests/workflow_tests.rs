@@ -381,11 +381,7 @@ mod evm_workflows {
                 .await
                 .expect("release tx should succeed");
             assert!(r.success, "release #{nonce} should succeed");
-            assert_eq!(
-                r.logs.len(),
-                1,
-                "each release emits exactly one LOG1 event"
-            );
+            assert_eq!(r.logs.len(), 1, "each release emits exactly one LOG1 event");
             let log = &r.logs[0];
             assert_eq!(log.topics.len(), 1, "LOG1 has exactly one topic");
             // Topic is 0x01 (from PUSH1 0x01 in runtime), left-padded to 32 bytes
@@ -482,10 +478,24 @@ mod svm_workflows {
     use super::*;
 
     /// Minimal non-ELF "program" bytes installed at the target
-    /// program address. Non-ELF payloads are treated as data
-    /// transfers by SvmExecutor::execute_transaction, but the
-    /// program bytes must still exist in state or the executor
-    /// returns ContractNotFound.
+    /// program address. The bytes are deliberately *not* a valid SBF ELF
+    /// (this is the WASM magic, `\0asm`).
+    ///
+    /// `SvmExecutor::execute_transaction` treats non-ELF bytes at a call
+    /// target as a client error: it charges gas, bumps the nonce (Solana
+    /// semantics for a failed transaction) and returns
+    /// `ExecutionResult::failed`. It used to fall back to treating the call as
+    /// a plain data transfer, which would have let a malformed program silently
+    /// succeed as a value movement — so the current behaviour is the correct
+    /// one and is what these tests pin.
+    ///
+    /// Running a *real* SBF program needs the `svm-full` feature (Anza's
+    /// solana-svm). It is off by default, and without it the SBF path returns
+    /// `VmError::SvmFullFeatureRequired` with no interpreter fallback — so a
+    /// default-feature test build cannot execute stored SBF bytecode at all.
+    /// What these tests do cover is the dispatch plumbing: that a `VmType::Svm`
+    /// transaction reaches the SVM executor and that the executor applies
+    /// Solana failure semantics.
     const NON_ELF_PROGRAM_STUB: &[u8] = &[0x00, 0x61, 0x73, 0x6D];
 
     async fn run_svm_workflow(payload: &[u8], sender_byte: u8) {
@@ -510,12 +520,36 @@ mod svm_workflows {
             VmType::Svm,
         );
 
+        // Dispatch itself must succeed — the transaction reaches the SVM
+        // executor rather than erroring out in `MultiVmRuntime`.
         let result = runtime
             .execute_transaction(&tx, &mut state)
             .await
-            .expect("SVM dispatch should succeed");
-        assert!(result.success, "SVM tx should succeed");
-        assert_eq!(state.get_nonce(&sender), 1, "nonce should bump");
+            .expect("SVM dispatch should reach the executor");
+
+        // Execution then fails, because the stored program is not a valid SBF
+        // ELF. See NON_ELF_PROGRAM_STUB.
+        assert!(
+            !result.success,
+            "a non-ELF program at the call target must not execute"
+        );
+        assert!(
+            result
+                .revert_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a valid SBF ELF"),
+            "expected the SBF-ELF rejection, got {:?}",
+            result.revert_reason
+        );
+
+        // Solana charges and sequences a failed transaction, so the nonce still
+        // advances — that is the part of the contract worth pinning here.
+        assert_eq!(
+            state.get_nonce(&sender),
+            1,
+            "a failed SVM tx still bumps the nonce"
+        );
     }
 
     #[tokio::test]
@@ -566,8 +600,18 @@ mod svm_workflows {
             .execute_transaction(&tx, &mut state)
             .await
             .expect("direct SVM executor dispatch should succeed");
-        assert!(result.success, "direct SVM tx should succeed");
-        assert_eq!(state.get_nonce(&sender), 1, "nonce should bump");
+        // Same contract as `run_svm_workflow`, minus the MultiVmRuntime hop:
+        // the stub is not a valid SBF ELF, so execution fails but is still
+        // charged and sequenced.
+        assert!(
+            !result.success,
+            "a non-ELF program at the call target must not execute"
+        );
+        assert_eq!(
+            state.get_nonce(&sender),
+            1,
+            "a failed SVM tx still bumps the nonce"
+        );
     }
 }
 
@@ -578,9 +622,7 @@ mod svm_workflows {
 mod canton_workflows {
     use super::helpers::*;
     use super::*;
-    use tenzro_types::canton::{
-        DamlCommand, DamlContractId, DamlParty, DamlTemplateId, DamlValue,
-    };
+    use tenzro_types::canton::{DamlCommand, DamlContractId, DamlParty, DamlTemplateId, DamlValue};
 
     fn mk_inventory_create() -> DamlCommand {
         DamlCommand::Create {
@@ -640,7 +682,9 @@ mod canton_workflows {
         // tests is to exercise the dispatch path, not assert on the
         // ledger's interpretation. Call via VmExecutor trait since
         // DamlExecutor doesn't expose a state-adapter-typed shortcut.
-        let _ = daml.execute_transaction(&tx, &mut state as &mut dyn VmState).await;
+        let _ = daml
+            .execute_transaction(&tx, &mut state as &mut dyn VmState)
+            .await;
     }
 
     #[tokio::test]
@@ -660,7 +704,10 @@ mod canton_workflows {
                         "buyer".to_string(),
                         DamlValue::Party(DamlParty::new("alice")),
                     ),
-                    ("seller".to_string(), DamlValue::Party(DamlParty::new("bob"))),
+                    (
+                        "seller".to_string(),
+                        DamlValue::Party(DamlParty::new("bob")),
+                    ),
                     ("asset".to_string(), DamlValue::Text("TNZO".to_string())),
                     ("price".to_string(), DamlValue::Int64(500)),
                 ],
@@ -753,7 +800,8 @@ mod cross_vm_workflows {
         let svm_sender = mk_svm_pubkey(0x66);
         let svm_program = mk_svm_pubkey(0xFB);
         state.set_balance(&svm_sender, SEED_BALANCE);
-        state.set_code(&svm_program, vec![0x00, 0x61, 0x73, 0x6D]);
+        // Plain account, no stored program: the SVM leg is an ordinary
+        // dispatch, which is what this cross-VM test is checking.
         let svm_tx = signed_tx(
             svm_sender.clone(),
             Some(svm_program.clone()),
@@ -775,7 +823,9 @@ mod cross_vm_workflows {
         if canton_available().await {
             tracing::info!("Canton leg enabled");
         } else {
-            tracing::warn!("Canton not available, cross_vm_agent_commerce_full_stack skipped Canton leg");
+            tracing::warn!(
+                "Canton not available, cross_vm_agent_commerce_full_stack skipped Canton leg"
+            );
         }
 
         // Both dispatched legs should have bumped their respective nonces
@@ -801,7 +851,7 @@ mod cross_vm_workflows {
         let agent = mk_svm_pubkey(0x88);
         let inference_program = mk_svm_pubkey(0xFC);
         state.set_balance(&agent, SEED_BALANCE);
-        state.set_code(&inference_program, vec![0x00, 0x61, 0x73, 0x6D]);
+        // Plain account, no stored program — see the commerce test above.
         let inference_tx = signed_tx(
             agent.clone(),
             Some(inference_program.clone()),

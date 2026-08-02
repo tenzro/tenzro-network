@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import tenzro_mcp_server.server as server
+from tenzro_mcp_server import server
 
 
 @pytest.fixture

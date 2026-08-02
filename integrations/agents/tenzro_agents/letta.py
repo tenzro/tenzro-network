@@ -24,19 +24,19 @@ they remain callable in tests without Letta installed.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .core import ReputationHook, TenzroClient
 
 # Module-level handle the registered tools close over. Set by
 # ``install_tenzro_memory_tools``; kept module-scoped so the tool
 # functions registered with Letta carry a clean top-level signature.
-_CLIENT: Optional[TenzroClient] = None
-_DID: Optional[str] = None
-_SUBJECT_AGENT_ID: Optional[int] = None
+_CLIENT: TenzroClient | None = None
+_DID: str | None = None
+_SUBJECT_AGENT_ID: int | None = None
 
 
-def tenzro_memory_grant(grantee_did: str, scope: str) -> Dict[str, Any]:
+def tenzro_memory_grant(grantee_did: str, scope: str) -> dict[str, Any]:
     """Grant ``grantee_did`` access to this agent's memory under ``scope``.
 
     Records the grant as a Tenzro task so the authorisation is auditable
@@ -59,7 +59,7 @@ def tenzro_memory_grant(grantee_did: str, scope: str) -> Dict[str, Any]:
     )
 
 
-def tenzro_memory_recall(key: str) -> Dict[str, Any]:
+def tenzro_memory_recall(key: str) -> dict[str, Any]:
     """Recall an archived memory entry by ``key``.
 
     Args:
@@ -70,7 +70,7 @@ def tenzro_memory_recall(key: str) -> Dict[str, Any]:
     return _CLIENT.call("tenzro_getTask", {"task_id": key})
 
 
-def tenzro_memory_archive(content: str, label: str = "memory") -> Dict[str, Any]:
+def tenzro_memory_archive(content: str, label: str = "memory") -> dict[str, Any]:
     """Archive ``content`` to the agent's durable store.
 
     Posts a Tenzro task carrying the archived blob, then (the archive hook)
@@ -104,8 +104,8 @@ def install_tenzro_memory_tools(
     tenzro_client: TenzroClient,
     did: str,
     *,
-    subject_agent_id: Optional[int] = None,
-) -> List[Any]:
+    subject_agent_id: int | None = None,
+) -> list[Any]:
     """Register the three Tenzro memory tools with a Letta client.
 
     Wires module state for the tool closures, then registers each tool via
@@ -124,8 +124,8 @@ def install_tenzro_memory_tools(
 
 
 __all__ = [
+    "install_tenzro_memory_tools",
+    "tenzro_memory_archive",
     "tenzro_memory_grant",
     "tenzro_memory_recall",
-    "tenzro_memory_archive",
-    "install_tenzro_memory_tools",
 ]

@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router, Json, ServerHandler,
+    Json, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 
@@ -16,11 +14,17 @@ use super::server::RpcPassthroughOutput;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SwapParams {
-    #[schemars(description = "Input token mint address (e.g. 'So11111111111111111111111111111111111111112' for SOL)")]
+    #[schemars(
+        description = "Input token mint address (e.g. 'So11111111111111111111111111111111111111112' for SOL)"
+    )]
     pub input_mint: String,
-    #[schemars(description = "Output token mint address (e.g. 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' for USDC)")]
+    #[schemars(
+        description = "Output token mint address (e.g. 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' for USDC)"
+    )]
     pub output_mint: String,
-    #[schemars(description = "Amount in smallest unit (lamports for SOL, base units for SPL tokens)")]
+    #[schemars(
+        description = "Amount in smallest unit (lamports for SOL, base units for SPL tokens)"
+    )]
     pub amount: String,
     #[schemars(description = "Slippage tolerance in basis points (default 50 = 0.5%)")]
     pub slippage_bps: Option<u32>,
@@ -28,7 +32,9 @@ pub struct SwapParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetPriceParams {
-    #[schemars(description = "Token mint address (e.g. 'So11111111111111111111111111111111111111112' for SOL, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' for USDC)")]
+    #[schemars(
+        description = "Token mint address (e.g. 'So11111111111111111111111111111111111111112' for SOL, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' for USDC)"
+    )]
     pub token_id: String,
 }
 
@@ -42,7 +48,9 @@ pub struct StakeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetYieldParams {
-    #[schemars(description = "Optional protocol filter: 'marinade', 'jito', 'blaze', 'lido', or omit for all")]
+    #[schemars(
+        description = "Optional protocol filter: 'marinade', 'jito', 'blaze', 'lido', or omit for all"
+    )]
     pub protocol: Option<String>,
 }
 
@@ -135,11 +143,15 @@ fn err_internal(msg: impl Into<String>) -> ErrorData {
     ErrorData::internal_error(msg.into(), None)
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn json_result(
+    value: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
-fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+fn text_result(
+    text: impl Into<String>,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput {
         result: serde_json::json!({ "message": text.into() }),
     }))
@@ -201,7 +213,9 @@ impl SolanaMcpServer {
 
     // ─── DeFi Tools ───
 
-    #[tool(description = "Get a swap quote from Jupiter aggregator for trading between two Solana tokens. Returns route, price impact, and estimated output amount.")]
+    #[tool(
+        description = "Get a swap quote from Jupiter aggregator for trading between two Solana tokens. Returns route, price impact, and estimated output amount."
+    )]
     async fn solana_swap(
         &self,
         Parameters(params): Parameters<SwapParams>,
@@ -247,15 +261,14 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get the current USD price of a Solana token from Jupiter Price API v3. Requires the token mint address (e.g. 'So11111111111111111111111111111111111111112' for SOL).")]
+    #[tool(
+        description = "Get the current USD price of a Solana token from Jupiter Price API v3. Requires the token mint address (e.g. 'So11111111111111111111111111111111111111112' for SOL)."
+    )]
     async fn solana_get_price(
         &self,
         Parameters(params): Parameters<GetPriceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let url = format!(
-            "https://api.jup.ag/price/v3?ids={}",
-            params.token_id
-        );
+        let url = format!("https://api.jup.ag/price/v3?ids={}", params.token_id);
         let resp = self
             .http
             .get(&url)
@@ -292,7 +305,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get instructions for staking SOL with a validator. Returns the step-by-step process (does not execute the transaction).")]
+    #[tool(
+        description = "Get instructions for staking SOL with a validator. Returns the step-by-step process (does not execute the transaction)."
+    )]
     async fn solana_stake(
         &self,
         Parameters(params): Parameters<StakeParams>,
@@ -335,7 +350,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get a static reference table of typical APY ranges for Solana staking protocols (Marinade, Jito, BlazeStake, native staking). These are reference ranges, not a live rate query — verify current rates on each protocol before acting.")]
+    #[tool(
+        description = "Get a static reference table of typical APY ranges for Solana staking protocols (Marinade, Jito, BlazeStake, native staking). These are reference ranges, not a live rate query — verify current rates on each protocol before acting."
+    )]
     async fn solana_get_yield(
         &self,
         Parameters(params): Parameters<GetYieldParams>,
@@ -439,7 +456,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get all SPL token accounts owned by a Solana wallet address, including balances and mint addresses")]
+    #[tool(
+        description = "Get all SPL token accounts owned by a Solana wallet address, including balances and mint addresses"
+    )]
     async fn solana_get_token_accounts(
         &self,
         Parameters(params): Parameters<GetTokenAccountsParams>,
@@ -471,7 +490,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get instructions for transferring SOL between two addresses. Returns the transaction structure (does not execute).")]
+    #[tool(
+        description = "Get instructions for transferring SOL between two addresses. Returns the transaction structure (does not execute)."
+    )]
     async fn solana_transfer(
         &self,
         Parameters(params): Parameters<TransferParams>,
@@ -503,7 +524,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get metadata for an SPL token by its mint address, including name, symbol, decimals, and logo from the Jupiter token list")]
+    #[tool(
+        description = "Get metadata for an SPL token by its mint address, including name, symbol, decimals, and logo from the Jupiter token list"
+    )]
     async fn solana_get_token_info(
         &self,
         Parameters(params): Parameters<GetTokenInfoParams>,
@@ -579,7 +602,9 @@ impl SolanaMcpServer {
 
     // ─── NFT Tools ───
 
-    #[tool(description = "Get NFT metadata using the Metaplex DAS (Digital Asset Standard) API. Requires a Helius API key set via HELIUS_API_KEY env var, or returns the call pattern for manual use.")]
+    #[tool(
+        description = "Get NFT metadata using the Metaplex DAS (Digital Asset Standard) API. Requires a Helius API key set via HELIUS_API_KEY env var, or returns the call pattern for manual use."
+    )]
     async fn solana_get_nft(
         &self,
         Parameters(params): Parameters<GetNftParams>,
@@ -629,7 +654,10 @@ impl SolanaMcpServer {
             return Err(err_internal(format!("DAS API error: {}", error)));
         }
 
-        let asset = json.get("result").cloned().unwrap_or(serde_json::json!(null));
+        let asset = json
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::json!(null));
         let result = serde_json::json!({
             "source": "helius_das_api",
             "mint_address": params.mint_address,
@@ -638,7 +666,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get all NFTs (compressed and standard) owned by a Solana address using the Metaplex DAS API. Requires HELIUS_API_KEY env var.")]
+    #[tool(
+        description = "Get all NFTs (compressed and standard) owned by a Solana address using the Metaplex DAS API. Requires HELIUS_API_KEY env var."
+    )]
     async fn solana_get_nfts_by_owner(
         &self,
         Parameters(params): Parameters<GetNftsByOwnerParams>,
@@ -701,7 +731,10 @@ impl SolanaMcpServer {
             return Err(err_internal(format!("DAS API error: {}", error)));
         }
 
-        let result_data = json.get("result").cloned().unwrap_or(serde_json::json!(null));
+        let result_data = json
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::json!(null));
         let total = result_data
             .get("total")
             .and_then(|t| t.as_u64())
@@ -725,12 +758,8 @@ impl SolanaMcpServer {
     // ─── Network Tools ───
 
     #[tool(description = "Get the current slot height of the Solana network")]
-    async fn solana_get_slot(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let rpc_result = self
-            .rpc_call("getSlot", serde_json::json!([]))
-            .await?;
+    async fn solana_get_slot(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let rpc_result = self.rpc_call("getSlot", serde_json::json!([])).await?;
 
         let slot = rpc_result
             .get("result")
@@ -744,15 +773,12 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get the current transactions per second (TPS) on the Solana network by sampling recent performance data")]
-    async fn solana_get_tps(
-        &self,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    #[tool(
+        description = "Get the current transactions per second (TPS) on the Solana network by sampling recent performance data"
+    )]
+    async fn solana_get_tps(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_result = self
-            .rpc_call(
-                "getRecentPerformanceSamples",
-                serde_json::json!([5]),
-            )
+            .rpc_call("getRecentPerformanceSamples", serde_json::json!([5]))
             .await?;
 
         let samples = rpc_result
@@ -792,7 +818,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get details of a Solana transaction by its signature, including status, block time, and instructions")]
+    #[tool(
+        description = "Get details of a Solana transaction by its signature, including status, block time, and instructions"
+    )]
     async fn solana_get_transaction(
         &self,
         Parameters(params): Parameters<GetTransactionParams>,
@@ -829,7 +857,9 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Resolve a .sol (Solana Name Service) domain to its owner wallet address using the Bonfida SNS proxy")]
+    #[tool(
+        description = "Resolve a .sol (Solana Name Service) domain to its owner wallet address using the Bonfida SNS proxy"
+    )]
     async fn solana_resolve_domain(
         &self,
         Parameters(params): Parameters<ResolveDomainParams>,
@@ -931,8 +961,7 @@ pub fn default_solana_rpc_url() -> String {
 pub async fn start_solana_mcp_server(
     listen_addr: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let rpc_url = std::env::var("SOLANA_RPC_URL")
-        .unwrap_or_else(|_| default_solana_rpc_url());
+    let rpc_url = std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| default_solana_rpc_url());
     let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
     start_solana_mcp_server_with_rpc_and_shutdown(listen_addr, rpc_url, shutdown_rx).await
 }
@@ -955,7 +984,7 @@ pub async fn start_solana_mcp_server_with_rpc_and_shutdown(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let config = StreamableHttpServerConfig::default()
@@ -979,7 +1008,9 @@ pub async fn start_solana_mcp_server_with_rpc_and_shutdown(
     let app = axum::Router::new()
         .nest_service("/mcp", service)
         .layer(tower::limit::ConcurrencyLimitLayer::new(100))
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            2 * 1024 * 1024,
+        ));
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
         addr = %listen_addr,

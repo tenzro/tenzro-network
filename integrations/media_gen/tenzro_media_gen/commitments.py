@@ -204,16 +204,16 @@ def _require_address(value: bytes) -> bytes:
 class WorkerKey:
     """Ed25519 signing key for a media-gen worker."""
 
-    signing: "object"
+    signing: object
 
     @classmethod
-    def generate(cls) -> "WorkerKey":
+    def generate(cls) -> WorkerKey:
         import nacl.signing
 
         return cls(signing=nacl.signing.SigningKey.generate())
 
     @classmethod
-    def from_seed(cls, seed: bytes) -> "WorkerKey":
+    def from_seed(cls, seed: bytes) -> WorkerKey:
         import nacl.signing
 
         if len(seed) != 32:
@@ -221,7 +221,7 @@ class WorkerKey:
         return cls(signing=nacl.signing.SigningKey(seed))
 
     @classmethod
-    def from_seed_hex(cls, seed_hex: str) -> "WorkerKey":
+    def from_seed_hex(cls, seed_hex: str) -> WorkerKey:
         return cls.from_seed(bytes.fromhex(seed_hex))
 
     @property

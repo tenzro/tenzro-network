@@ -11,8 +11,7 @@
 use std::sync::Arc;
 
 use tenzro_consensus::{
-    FileVoteStateStore, LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep,
-    VrsDecision,
+    FileVoteStateStore, LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep, VrsDecision,
 };
 use tenzro_types::primitives::Hash;
 
@@ -40,9 +39,7 @@ fn refuses_same_view_different_block() {
         .unwrap();
 
     // Now try to sign block B in the same view — must refuse.
-    let decision = store
-        .check_vrs(62, 1, VoteStep::Prepare, &h(0xBB))
-        .unwrap();
+    let decision = store.check_vrs(62, 1, VoteStep::Prepare, &h(0xBB)).unwrap();
 
     match decision {
         VrsDecision::Reject { reason } => {
@@ -84,7 +81,10 @@ fn file_store_survives_restart_and_refuses_equivocation() {
         .unwrap();
     match decision {
         VrsDecision::Reject { .. } => {}
-        other => panic!("post-restart equivocation must be rejected, got {:?}", other),
+        other => panic!(
+            "post-restart equivocation must be rejected, got {:?}",
+            other
+        ),
     }
 
     // Idempotent retry of the same block — must Reuse.

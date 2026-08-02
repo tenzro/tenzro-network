@@ -44,14 +44,15 @@ impl SpendingPolicyResolver for AgentRuntimeSpendingPolicyResolver {
         // u64 → u128 widen so the snapshot's amount-comparison axis matches
         // the u128 payment-amount axis used everywhere else in
         // `tenzro-payments`. No information loss.
-        Ok(self.runtime.get_spending_policy(payer_did).map(|p| {
-            SpendingPolicySnapshot {
+        Ok(self
+            .runtime
+            .get_spending_policy(payer_did)
+            .map(|p| SpendingPolicySnapshot {
                 max_per_transaction: p.max_per_transaction as u128,
                 max_daily_spend: p.max_daily_spend as u128,
                 current_daily_spend: p.current_daily_spend as u128,
                 enabled: p.enabled,
-            }
-        }))
+            }))
     }
 }
 
@@ -144,9 +145,7 @@ pub struct RuntimePromptEmbedder {
 
 impl RuntimePromptEmbedder {
     /// Wraps the node's text-embedding runtime.
-    pub fn new(
-        runtime: Arc<tenzro_model::text_embedding_runtime::TextEmbeddingRuntime>,
-    ) -> Self {
+    pub fn new(runtime: Arc<tenzro_model::text_embedding_runtime::TextEmbeddingRuntime>) -> Self {
         Self {
             runtime,
             preferred_model_id: None,

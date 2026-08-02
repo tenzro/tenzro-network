@@ -18,8 +18,8 @@ use crate::x402::payment_required::X402PaymentRequired;
 use crate::x402::scheme::SchemeRegistry;
 use std::sync::Arc;
 use tenzro_settlement::engine::SettlementEngine;
-use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 use tenzro_types::Address;
+use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
 use tracing::{debug, info};
 
 /// x402 facilitator for payment verification and settlement
@@ -271,8 +271,7 @@ mod tests {
                 value: value.to_string(),
                 valid_after: 0,
                 valid_before: u64::MAX,
-                nonce: "0x".to_string()
-                    + &hex::encode([0u8; 32]),
+                nonce: "0x".to_string() + &hex::encode([0u8; 32]),
             }),
         )
     }
@@ -499,7 +498,10 @@ mod tests {
         let requirements = X402PaymentRequired::new(vec![requirement]);
         let payload = empty_payload("not-a-real-scheme", "tenzro", "1000", "0xpayer");
 
-        let err = facilitator.verify(&requirements, &payload).await.unwrap_err();
+        let err = facilitator
+            .verify(&requirements, &payload)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, PaymentError::VerificationFailed(_)),
             "expected VerificationFailed, got {:?}",

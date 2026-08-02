@@ -14,17 +14,17 @@
 //!     +-- Future: gRPC, WebSocket, Webhook, Persistence
 //! ```
 
-pub mod types;
 pub mod bus;
+pub mod types;
 
 // Re-export commonly used types
-pub use types::{
-    TenzroEvent, EventEnvelope, EventFilter, EventType, VmType,
-    SubscriptionId, SubscriptionConfig, event_type_name,
-};
 pub use bus::{
-    EventBus, EventBusConfig, EventBusStats, EventBusError,
-    EventSubscriber, FilteredEventSubscriber, StatsSnapshot,
+    EventBus, EventBusConfig, EventBusError, EventBusStats, EventSubscriber,
+    FilteredEventSubscriber, StatsSnapshot,
+};
+pub use types::{
+    EventEnvelope, EventFilter, EventType, SubscriptionConfig, SubscriptionId, TenzroEvent, VmType,
+    event_type_name,
 };
 
 /// Event streaming crate version

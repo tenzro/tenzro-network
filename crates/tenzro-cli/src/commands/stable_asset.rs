@@ -91,7 +91,9 @@ impl RegisterCmd {
                 "vault": self.vault.as_deref().unwrap_or_default(),
                 "asset_caip19": self.asset_caip19,
             }),
-            other => anyhow::bail!("reserve_kind must be \"custodial\" or \"on_chain_vault\", got {other}"),
+            other => anyhow::bail!(
+                "reserve_kind must be \"custodial\" or \"on_chain_vault\", got {other}"
+            ),
         };
 
         let params = serde_json::json!({

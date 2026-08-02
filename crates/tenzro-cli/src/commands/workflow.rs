@@ -8,7 +8,7 @@
 //! AP2 / x402 / MPP / Stripe SPT / Visa TAP / Mastercard Agent Pay
 //! mandate.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 use crate::output;
@@ -147,7 +147,10 @@ impl WorkflowIdCmd {
         output::print_header(&format!("Workflow — {}", method));
         let rpc = RpcClient::new(&self.rpc);
         let v: serde_json::Value = rpc
-            .call(method, serde_json::json!({ "workflow_id": self.workflow_id }))
+            .call(
+                method,
+                serde_json::json!({ "workflow_id": self.workflow_id }),
+            )
             .await?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())

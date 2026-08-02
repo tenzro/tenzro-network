@@ -515,6 +515,43 @@ A validator:
 - Earns priority fees and the staker share of network commission.
 - TEE-attested validators get the 1.5× leader-selection multiplier.
 
+### How a settled inference or TEE payment divides
+
+One payment funds the party that did the work and the network that made it
+findable and settleable. Default split, in basis points:
+
+| Slot | Default | Who |
+|---|---:|---|
+| Operator | 80% | The provider that ran the model or the enclave |
+| Interim custodian | 10% | A **testnet stand-in** for the treasury (see below) |
+| Treasury | 10% | The network treasury |
+
+The operator's majority is enforced at construction, not merely documented: a
+config that inverts it is rejected rather than discovered later in a receipt.
+The three shares sum to exactly the payment, with rounding dust going to the
+operator by subtraction rather than a third multiplication.
+
+**The custodian slot is temporary.** Three slots, but only two economic
+parties. The remaining 20% is the network's cut; it is split between a
+custodian and the treasury only because, during testnet, the decentralized
+governance / DAO / treasury that should receive it is not yet operational.
+When governance is live the custodian slot goes to zero and the treasury takes
+the whole network cut — a configuration change with no code motion, which is
+why the custodian is a configured address rather than a constant.
+
+Holding the custodian position is permissionless but not free: it goes to the
+settling node's operator only if they hold Tier 3 (≥100,000 TNZO bonded, the
+same bar anyone else can clear). An unbonded node runs the governed split, and
+the treasury takes the whole network cut. A node that never staked taking a
+share of another operator's earnings would not be permissionless, only
+unguarded.
+
+**RPC providers are not paid from this split.** An RPC provider monetises the
+way every other chain's RPC operators do — billing their own tenants for API
+access, quotas, and SLA tiers on terms they set. That revenue never touches
+this split. Paying them from here as well would pay them twice for one
+request: once by their tenant, once out of the serving operator's earnings.
+
 ### Storage providers
 
 A storage provider:

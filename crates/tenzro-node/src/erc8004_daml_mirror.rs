@@ -43,11 +43,9 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tenzro_identity::erc8004_daml::{
-    commands, DamlPackageIds, OnChainAgentDamlRegistry,
-};
+use tenzro_identity::erc8004_daml::{DamlPackageIds, OnChainAgentDamlRegistry, commands};
 use tenzro_identity::error::Result as IdentityResult;
-use tenzro_storage::{KvStore, CF_IDENTITIES};
+use tenzro_storage::{CF_IDENTITIES, KvStore};
 
 /// Off-chain RocksDB keyspace prefix for the `did → agentId` index,
 /// populated by the DAML event reflector from `Registered` CreatedEvent
@@ -315,7 +313,10 @@ mod tests {
     fn lookup_returns_none_when_index_empty() {
         let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
         let mirror = NativeErc8004DamlMirror::new(storage, cfg());
-        assert_eq!(mirror.lookup_agent_id_by_did("did:tenzro:machine:nope"), None);
+        assert_eq!(
+            mirror.lookup_agent_id_by_did("did:tenzro:machine:nope"),
+            None
+        );
     }
 
     #[test]
@@ -358,10 +359,12 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&buffered).expect("valid JSON");
         let ex = &parsed["commands"][0]["ExerciseCommand"];
         assert_eq!(ex["choice"].as_str(), Some("Register"));
-        assert!(ex["templateId"]
-            .as_str()
-            .unwrap()
-            .ends_with(":Tenzro.Erc8004.Identity:RegistryAdmin"));
+        assert!(
+            ex["templateId"]
+                .as_str()
+                .unwrap()
+                .ends_with(":Tenzro.Erc8004.Identity:RegistryAdmin")
+        );
         assert_eq!(
             ex["choiceArgument"]["metadataUri"].as_str(),
             Some("did:tenzro:machine:42")

@@ -30,8 +30,8 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use tenzro_agent_kit::{
-    bootstrap_reference_templates, AgentKit, AgentKitError, RegistryClient, RunOptions,
-    SpawnArgs, SpawnedAgent,
+    AgentKit, AgentKitError, RegistryClient, RunOptions, SpawnArgs, SpawnedAgent,
+    bootstrap_reference_templates,
 };
 use tenzro_node::agent_kit_auth::NodeAuthIssuer;
 use tenzro_node::{NodeConfig, RpcServer, TenzroNode};
@@ -46,10 +46,17 @@ const TEMPLATE_CROSS_CHAIN_LIQUIDITY: &str = "ref-cross-chain-liquidity-aggregat
 
 fn test_config() -> (NodeConfig, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let cfg = NodeConfig {
+    let mut cfg = NodeConfig {
         data_dir: tmp.path().to_path_buf(),
         ..Default::default()
     };
+    // Register the `oneinch-aggregator` skill. Built-in skills are registered
+    // conditionally on what the node can actually serve, and this one is gated
+    // on `builtins.oneinch_api_key` — without it the row is never inserted and
+    // the `ref-cross-chain-liquidity-aggregator-v1` template fails to spawn
+    // with `UnresolvedSkillTag("oneinch-aggregator")`. The value is never
+    // dialled in these tests; its presence is what registers the skill.
+    cfg.builtins.oneinch_api_key = Some("test-oneinch-key".to_string());
     (cfg, tmp)
 }
 
@@ -74,9 +81,8 @@ async fn setup_test_server() -> (
     let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
     let rpc = RpcServer::new(node.clone(), "127.0.0.1:0".to_string());
-    let handle = tokio::spawn(async move {
-        rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await
-    });
+    let handle =
+        tokio::spawn(async move { rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await });
 
     let addr = addr_rx.await.expect("bound address");
     let base_url = format!("http://{}", addr);
@@ -112,8 +118,7 @@ fn build_kit_for(node: &Arc<TenzroNode>, base_url: &str) -> AgentKit {
         .auth_engine()
         .expect("node auth engine (default config wires AuthEngine)")
         .clone();
-    let issuer: Arc<dyn tenzro_agent_kit::AuthIssuer> =
-        Arc::new(NodeAuthIssuer::new(auth_engine));
+    let issuer: Arc<dyn tenzro_agent_kit::AuthIssuer> = Arc::new(NodeAuthIssuer::new(auth_engine));
     AgentKit::with_auth_issuer(base_url, identity_registry, agent_runtime, issuer)
 }
 
@@ -311,8 +316,14 @@ async fn test_dry_run_walks_solana_jupiter_swap_steps() {
     let kit = build_kit_for(&node, &base_url);
 
     let mut context = HashMap::new();
-    context.insert("input_mint".to_string(), "So11111111111111111111111111111111111111112".to_string());
-    context.insert("output_mint".to_string(), "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string());
+    context.insert(
+        "input_mint".to_string(),
+        "So11111111111111111111111111111111111111112".to_string(),
+    );
+    context.insert(
+        "output_mint".to_string(),
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+    );
     context.insert("amount".to_string(), "1000000000".to_string());
     context.insert("slippage_bps".to_string(), "50".to_string());
 
@@ -408,7 +419,10 @@ async fn test_dry_run_walks_cross_chain_aggregator_steps() {
             .collect::<Vec<_>>()
     );
 
-    assert_eq!(report.steps_executed, 0, "dry-run must not execute any step");
+    assert_eq!(
+        report.steps_executed, 0,
+        "dry-run must not execute any step"
+    );
     assert_eq!(
         report.steps_failed, 0,
         "dry-run must not fail any step (failure indicates wiring bug)"

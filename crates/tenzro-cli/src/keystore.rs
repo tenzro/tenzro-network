@@ -10,14 +10,14 @@
 //! default for runners without local keys; this is the opt-in local-key path
 //! for runners who bring their own custody.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tenzro_crypto::encryption::SymmetricKey;
 use tenzro_crypto::{
-    signatures::{Ed25519SignerImpl, Signer},
     KeyPair, KeyType, MlDsaSigningKey, PublicKey, SecretKey,
+    signatures::{Ed25519SignerImpl, Signer},
 };
 
 /// On-disk sealed hybrid keystore. Both seeds are AES-256-GCM ciphertext under
@@ -77,8 +77,7 @@ impl LocalHybridSigner {
 
 /// Path to the CLI's sealed hybrid key: `~/.tenzro/hybrid_key.json`.
 pub fn hybrid_key_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".tenzro").join("hybrid_key.json")
+    tenzro_types::paths::hybrid_key_path()
 }
 
 /// `true` iff a local self-custody hybrid key exists on disk.
@@ -90,8 +89,8 @@ pub fn has_local_key() -> bool {
 /// `password`. Overwrites any existing local key. Returns the raw Ed25519
 /// public key (the account address) as hex.
 pub fn create_local_key(password: &str) -> Result<String> {
-    let ed_keypair = KeyPair::generate(KeyType::Ed25519)
-        .map_err(|e| anyhow!("Ed25519 keygen failed: {}", e))?;
+    let ed_keypair =
+        KeyPair::generate(KeyType::Ed25519).map_err(|e| anyhow!("Ed25519 keygen failed: {}", e))?;
     let ml_dsa = MlDsaSigningKey::generate();
     persist(
         password,
@@ -100,13 +99,18 @@ pub fn create_local_key(password: &str) -> Result<String> {
         ml_dsa.seed_bytes(),
         ml_dsa.verifying_key_bytes(),
     )?;
-    Ok(format!("0x{}", hex::encode(ed_keypair.public_key().as_bytes())))
+    Ok(format!(
+        "0x{}",
+        hex::encode(ed_keypair.public_key().as_bytes())
+    ))
 }
 
 /// Import an existing Ed25519 secret key (32-byte hex) into a local self-custody
 /// keystore, deriving a fresh ML-DSA-65 leg. Returns the account address hex.
 pub fn import_local_key(ed25519_secret_hex: &str, password: &str) -> Result<String> {
-    let clean = ed25519_secret_hex.strip_prefix("0x").unwrap_or(ed25519_secret_hex);
+    let clean = ed25519_secret_hex
+        .strip_prefix("0x")
+        .unwrap_or(ed25519_secret_hex);
     let secret_bytes = hex::decode(clean).map_err(|e| anyhow!("invalid secret key hex: {}", e))?;
     if secret_bytes.len() != 32 {
         return Err(anyhow!(
@@ -125,7 +129,10 @@ pub fn import_local_key(ed25519_secret_hex: &str, password: &str) -> Result<Stri
         ml_dsa.seed_bytes(),
         ml_dsa.verifying_key_bytes(),
     )?;
-    Ok(format!("0x{}", hex::encode(ed_keypair.public_key().as_bytes())))
+    Ok(format!(
+        "0x{}",
+        hex::encode(ed_keypair.public_key().as_bytes())
+    ))
 }
 
 /// Unlock the local hybrid key with `password`, returning a signer.
@@ -153,18 +160,22 @@ pub fn unlock_local_key(password: &str) -> Result<LocalHybridSigner> {
     let secret = SecretKey::new(KeyType::Ed25519, ed_seed);
     let ed_keypair =
         KeyPair::from_secret_key(secret).map_err(|e| anyhow!("invalid Ed25519 seed: {}", e))?;
-    let ml_dsa =
-        MlDsaSigningKey::from_seed(&ml_seed).map_err(|e| anyhow!("invalid ML-DSA-65 seed: {}", e))?;
+    let ml_dsa = MlDsaSigningKey::from_seed(&ml_seed)
+        .map_err(|e| anyhow!("invalid ML-DSA-65 seed: {}", e))?;
 
     // Cross-check the sealed public keys against the reconstructed private keys
     // so a tampered clear-text pubkey field cannot mislead `from`. Snapshot the
     // Ed25519 pubkey bytes before the keypair is moved into the signer.
     let ed_public_key = ed_keypair.public_key().as_bytes().to_vec();
     if ed_public_key != sealed.ed25519_public_key {
-        return Err(anyhow!("hybrid keystore integrity: Ed25519 public key mismatch"));
+        return Err(anyhow!(
+            "hybrid keystore integrity: Ed25519 public key mismatch"
+        ));
     }
     if ml_dsa.verifying_key_bytes() != sealed.ml_dsa_verifying_key.as_slice() {
-        return Err(anyhow!("hybrid keystore integrity: ML-DSA-65 verifying key mismatch"));
+        return Err(anyhow!(
+            "hybrid keystore integrity: ML-DSA-65 verifying key mismatch"
+        ));
     }
 
     let ed25519 = Ed25519SignerImpl::new(ed_keypair)
@@ -228,8 +239,7 @@ fn generate_salt() -> [u8; 32] {
 /// Argon2id KDF — identical parameters to the `tenzro-wallet` keystore
 /// (64 MB memory, 3 iterations, parallelism 4, 32-byte output).
 fn derive_key(password: &str, salt: &[u8; 32]) -> Result<SymmetricKey> {
-    let params = Params::new(65536, 3, 4, Some(32))
-        .map_err(|e| anyhow!("Argon2 params: {}", e))?;
+    let params = Params::new(65536, 3, 4, Some(32)).map_err(|e| anyhow!("Argon2 params: {}", e))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key_bytes = [0u8; 32];
     argon2

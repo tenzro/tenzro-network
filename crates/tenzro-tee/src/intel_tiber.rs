@@ -309,7 +309,9 @@ impl IntelTiberClient {
             .header("Accept", "application/json")
             .send()
             .await
-            .map_err(|e| TeeError::AttestationVerificationFailed(format!("ITA nonce GET failed: {e}")))?;
+            .map_err(|e| {
+                TeeError::AttestationVerificationFailed(format!("ITA nonce GET failed: {e}"))
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -589,10 +591,7 @@ pub fn claims_to_attestation_result(claims: &TiberClaims) -> Result<AttestationR
     push_hex(0, "MRSIGNERSEAM", &claims.tdx_mrsignerseam)?;
 
     let mut details: HashMap<String, String> = HashMap::new();
-    details.insert(
-        "verification_method".to_string(),
-        "intel_tiber".to_string(),
-    );
+    details.insert("verification_method".to_string(), "intel_tiber".to_string());
     if let Some(tcb) = &claims.attester_tcb_status {
         details.insert("attester_tcb_status".to_string(), tcb.clone());
     }
@@ -611,19 +610,13 @@ pub fn claims_to_attestation_result(claims: &TiberClaims) -> Result<AttestationR
     if let Some(advisories) = &claims.attester_advisory_ids
         && !advisories.is_empty()
     {
-        details.insert(
-            "attester_advisory_ids".to_string(),
-            advisories.join(","),
-        );
+        details.insert("attester_advisory_ids".to_string(), advisories.join(","));
     }
 
     Ok(AttestationResult {
         valid,
         vendor: TeeVendor::IntelTdx,
-        tcb_version: claims
-            .attester_tcb_status
-            .clone()
-            .unwrap_or_default(),
+        tcb_version: claims.attester_tcb_status.clone().unwrap_or_default(),
         measurements,
         // Cert chain validation is delegated to Tiber — a successful JWT
         // verification against the JWKS implicitly attests to it.
@@ -734,7 +727,8 @@ mod tests {
             token_signing_alg: Some("PS384".to_string()),
             policy_must_match: Some(true),
         };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
         assert_eq!(v["quote"], "AAE=");
         assert_eq!(v["verifier_nonce"]["val"], "bg==");
         assert_eq!(v["runtime_data"], "cg==");
@@ -787,9 +781,18 @@ mod tests {
         assert_eq!(r.measurements[0].register, "MRTD");
         assert_eq!(r.measurements[0].value.len(), 48);
         assert_eq!(r.measurements[0].algorithm, "SHA384");
-        assert_eq!(r.details.get("verification_method").map(String::as_str), Some("intel_tiber"));
-        assert_eq!(r.details.get("dbgstat").map(String::as_str), Some("disabled"));
-        assert_eq!(r.details.get("attester_tcb_status").map(String::as_str), Some("OK"));
+        assert_eq!(
+            r.details.get("verification_method").map(String::as_str),
+            Some("intel_tiber")
+        );
+        assert_eq!(
+            r.details.get("dbgstat").map(String::as_str),
+            Some("disabled")
+        );
+        assert_eq!(
+            r.details.get("attester_tcb_status").map(String::as_str),
+            Some("OK")
+        );
         assert_eq!(r.details.get("tdx_seamsvn").map(String::as_str), Some("3"));
         assert_eq!(
             r.details.get("attester_advisory_ids").map(String::as_str),

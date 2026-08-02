@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::Signature as CryptoSignature;
-use tenzro_storage::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::settlement::{ReleaseConditions, ServiceProof};
@@ -174,7 +174,10 @@ impl std::fmt::Debug for EscrowManager {
             .field("escrows", &self.escrows.len())
             .field("escrows_by_payer", &self.escrows_by_payer.len())
             .field("escrows_by_payee", &self.escrows_by_payee.len())
-            .field("storage", &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"))
+            .field(
+                "storage",
+                &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"),
+            )
             .finish()
     }
 }
@@ -222,12 +225,20 @@ impl EscrowManager {
 
     /// Storage key for a payer index: `escrow_payer:<address_hex>`.
     fn payer_index_key(addr: &Address) -> Vec<u8> {
-        [ESCROW_PAYER_KEY_PREFIX, hex::encode(addr.as_bytes()).as_bytes()].concat()
+        [
+            ESCROW_PAYER_KEY_PREFIX,
+            hex::encode(addr.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     /// Storage key for a payee index: `escrow_payee:<address_hex>`.
     fn payee_index_key(addr: &Address) -> Vec<u8> {
-        [ESCROW_PAYEE_KEY_PREFIX, hex::encode(addr.as_bytes()).as_bytes()].concat()
+        [
+            ESCROW_PAYEE_KEY_PREFIX,
+            hex::encode(addr.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     /// Rehydrates the in-memory state from persistent storage.
@@ -275,7 +286,10 @@ impl EscrowManager {
         }
 
         if hydrated > 0 {
-            info!("Hydrated {} escrow(s) from RocksDB CF_SETTLEMENTS", hydrated);
+            info!(
+                "Hydrated {} escrow(s) from RocksDB CF_SETTLEMENTS",
+                hydrated
+            );
         }
     }
 
@@ -307,10 +321,12 @@ impl EscrowManager {
                 .map(|v| v.value().clone())
                 .unwrap_or_default();
 
-            let payer_data = serde_json::to_vec(&payer_ids)
-                .map_err(|e| SettlementError::StorageError(format!("serialize payer index: {}", e)))?;
-            let payee_data = serde_json::to_vec(&payee_ids)
-                .map_err(|e| SettlementError::StorageError(format!("serialize payee index: {}", e)))?;
+            let payer_data = serde_json::to_vec(&payer_ids).map_err(|e| {
+                SettlementError::StorageError(format!("serialize payer index: {}", e))
+            })?;
+            let payee_data = serde_json::to_vec(&payee_ids).map_err(|e| {
+                SettlementError::StorageError(format!("serialize payee index: {}", e))
+            })?;
 
             ops.push(WriteOp::Put {
                 cf: CF_SETTLEMENTS.to_string(),
@@ -413,7 +429,9 @@ impl EscrowManager {
 
         // Check if escrow can be released
         if escrow.status != EscrowStatus::Funded {
-            return Err(SettlementError::EscrowAlreadyReleased(escrow_id.to_string()));
+            return Err(SettlementError::EscrowAlreadyReleased(
+                escrow_id.to_string(),
+            ));
         }
 
         if escrow.is_expired() {
@@ -426,9 +444,9 @@ impl EscrowManager {
         // Credit payee
         let key = (escrow.payee, escrow.asset_id.clone());
         let mut balance_entry = self.balances.entry(key).or_insert(0);
-        *balance_entry = balance_entry.checked_add(escrow.amount).ok_or_else(|| {
-            SettlementError::ArithmeticOverflow("Credit overflow".to_string())
-        })?;
+        *balance_entry = balance_entry
+            .checked_add(escrow.amount)
+            .ok_or_else(|| SettlementError::ArithmeticOverflow("Credit overflow".to_string()))?;
         drop(balance_entry);
 
         // Update escrow status
@@ -455,15 +473,17 @@ impl EscrowManager {
 
         // Check if escrow can be refunded
         if escrow.status != EscrowStatus::Funded {
-            return Err(SettlementError::EscrowAlreadyReleased(escrow_id.to_string()));
+            return Err(SettlementError::EscrowAlreadyReleased(
+                escrow_id.to_string(),
+            ));
         }
 
         // Credit payer (refund)
         let key = (escrow.payer, escrow.asset_id.clone());
         let mut balance_entry = self.balances.entry(key).or_insert(0);
-        *balance_entry = balance_entry.checked_add(escrow.amount).ok_or_else(|| {
-            SettlementError::ArithmeticOverflow("Credit overflow".to_string())
-        })?;
+        *balance_entry = balance_entry
+            .checked_add(escrow.amount)
+            .ok_or_else(|| SettlementError::ArithmeticOverflow("Credit overflow".to_string()))?;
         drop(balance_entry);
 
         // Update escrow status
@@ -857,10 +877,8 @@ mod tests {
         let proof_data = b"service completed successfully";
 
         // Generate a real Ed25519 signature for the proof
-        let (provider_addr, provider_sig) = make_signed_proof_sig(
-            proof_data,
-            tenzro_types::settlement::SignerRole::Provider,
-        );
+        let (provider_addr, provider_sig) =
+            make_signed_proof_sig(proof_data, tenzro_types::settlement::SignerRole::Provider);
 
         let expires_at = Timestamp::now().as_millis() + 86400000;
         let escrow = manager
@@ -975,14 +993,10 @@ mod tests {
         let proof_data = b"both parties agree";
 
         // Generate two real signatures
-        let (provider_addr, provider_sig) = make_signed_proof_sig(
-            proof_data,
-            tenzro_types::settlement::SignerRole::Provider,
-        );
-        let (_consumer_addr, consumer_sig) = make_signed_proof_sig(
-            proof_data,
-            tenzro_types::settlement::SignerRole::Consumer,
-        );
+        let (provider_addr, provider_sig) =
+            make_signed_proof_sig(proof_data, tenzro_types::settlement::SignerRole::Provider);
+        let (_consumer_addr, consumer_sig) =
+            make_signed_proof_sig(proof_data, tenzro_types::settlement::SignerRole::Consumer);
 
         balances.insert((payer, asset_id.clone()), 10000);
 

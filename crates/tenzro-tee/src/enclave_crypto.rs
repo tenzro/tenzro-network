@@ -12,13 +12,13 @@
 //! Ciphertext is `nonce (12 bytes) || encrypted_data || tag (16 bytes)`.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::error::{TeeError, Result};
+use crate::error::{Result, TeeError};
 
 /// Platform measurement for key binding, populated on first use from TEE hardware.
 static PLATFORM_MEASUREMENT: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();

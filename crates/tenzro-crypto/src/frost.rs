@@ -107,7 +107,11 @@ pub struct PublicKeyPackage {
 }
 
 impl PublicKeyPackage {
-    fn from_native(pkg: &frost::keys::PublicKeyPackage, threshold: u16, total: u16) -> Result<Self> {
+    fn from_native(
+        pkg: &frost::keys::PublicKeyPackage,
+        threshold: u16,
+        total: u16,
+    ) -> Result<Self> {
         let inner_bytes = pkg
             .serialize()
             .map_err(|e| CryptoError::MpcError(format!("PublicKeyPackage serialize: {}", e)))?;
@@ -174,11 +178,11 @@ impl SecretShare {
             .ok_or_else(|| CryptoError::MpcError("empty SecretShare payload".into()))?;
         match *tag {
             SECRET_TAG_DEALER_SHARE => {
-                let secret = frost::keys::SecretShare::deserialize(payload)
-                    .map_err(|e| CryptoError::MpcError(format!("SecretShare deserialize: {}", e)))?;
-                frost::keys::KeyPackage::try_from(secret).map_err(|e| {
-                    CryptoError::MpcError(format!("SecretShare → KeyPackage: {}", e))
-                })
+                let secret = frost::keys::SecretShare::deserialize(payload).map_err(|e| {
+                    CryptoError::MpcError(format!("SecretShare deserialize: {}", e))
+                })?;
+                frost::keys::KeyPackage::try_from(secret)
+                    .map_err(|e| CryptoError::MpcError(format!("SecretShare → KeyPackage: {}", e)))
             }
             SECRET_TAG_DKG_KEY_PACKAGE => frost::keys::KeyPackage::deserialize(payload)
                 .map_err(|e| CryptoError::MpcError(format!("KeyPackage deserialize: {}", e))),
@@ -245,12 +249,7 @@ pub fn keygen_with_trusted_dealer(
     for (id, secret) in shares {
         // Identifier serializes to a 32-byte little-endian scalar; we extract
         // the low byte to recover the 1-based index used at construction.
-        let id_bytes = id
-            .serialize()
-            .as_slice()
-            .first()
-            .copied()
-            .unwrap_or(0);
+        let id_bytes = id.serialize().as_slice().first().copied().unwrap_or(0);
         let payload = secret
             .serialize()
             .map_err(|e| CryptoError::MpcError(format!("SecretShare serialize: {}", e)))?;
@@ -553,7 +552,8 @@ pub fn dkg_part2(
     round1_secret: DkgRound1Secret,
     round1_broadcasts: &[DkgRound1Public],
 ) -> Result<DkgRound2> {
-    let mut others: BTreeMap<frost::Identifier, frost::keys::dkg::round1::Package> = BTreeMap::new();
+    let mut others: BTreeMap<frost::Identifier, frost::keys::dkg::round1::Package> =
+        BTreeMap::new();
     for b in round1_broadcasts {
         if b.from == self_index {
             continue; // skip our own broadcast
@@ -757,7 +757,8 @@ mod tests {
         let mut shares_out = Vec::new();
         for idx in &[1u16, 2u16] {
             let s = shares.iter().find(|s| s.index.0 == *idx).unwrap();
-            shares_out.push(round2_sign(&signing_pkg, nonces_by_index.get(idx).unwrap(), s).unwrap());
+            shares_out
+                .push(round2_sign(&signing_pkg, nonces_by_index.get(idx).unwrap(), s).unwrap());
         }
         let sig = aggregate_signature(&signing_pkg, &shares_out, &pkg).unwrap();
         assert_eq!(sig.as_bytes().len(), ED25519_SIGNATURE_LEN);
@@ -913,11 +914,8 @@ mod tests {
         let mut group_pkg: Option<PublicKeyPackage> = None;
         for p in &participants {
             let r2_secret = r2_secrets.remove(p).unwrap();
-            let to_me: Vec<DkgRound2Unicast> = r2_unicasts
-                .iter()
-                .filter(|u| u.to == *p)
-                .cloned()
-                .collect();
+            let to_me: Vec<DkgRound2Unicast> =
+                r2_unicasts.iter().filter(|u| u.to == *p).cloned().collect();
             let (share, pkg) =
                 dkg_part3(*p, r2_secret, &r1_broadcasts, &to_me, threshold, total).unwrap();
             shares.insert(*p, share);

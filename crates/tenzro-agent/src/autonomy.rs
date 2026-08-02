@@ -64,7 +64,9 @@ impl TaskResult {
         } else {
             TaskResponse::error(
                 self.task_id.clone(),
-                self.error.clone().unwrap_or_else(|| "Unknown error".to_string()),
+                self.error
+                    .clone()
+                    .unwrap_or_else(|| "Unknown error".to_string()),
                 self.execution_time_ms,
             )
         }
@@ -149,10 +151,7 @@ impl TaskExecutor {
         };
 
         let handler = handler.ok_or_else(|| {
-            AgentError::CapabilityNotFound(format!(
-                "No handler for task type: {}",
-                task.task_type
-            ))
+            AgentError::CapabilityNotFound(format!("No handler for task type: {}", task.task_type))
         })?;
 
         // Increment active task count
@@ -191,7 +190,10 @@ impl TaskExecutor {
             warn!(
                 "Task {} failed: {}",
                 task_id,
-                result.error.as_ref().unwrap_or(&"Unknown error".to_string())
+                result
+                    .error
+                    .as_ref()
+                    .unwrap_or(&"Unknown error".to_string())
             );
         }
 
@@ -330,11 +332,7 @@ impl AutonomousScheduler {
             .iter()
             .filter_map(|entry| {
                 let task = entry.value().clone();
-                if task.is_due() {
-                    Some(task)
-                } else {
-                    None
-                }
+                if task.is_due() { Some(task) } else { None }
             })
             .collect()
     }
@@ -510,7 +508,8 @@ impl SpendingPolicy {
     /// Gets remaining daily spend allowance
     pub fn remaining_daily_allowance(&mut self) -> u64 {
         self.check_daily_reset();
-        self.max_daily_spend.saturating_sub(self.current_daily_spend)
+        self.max_daily_spend
+            .saturating_sub(self.current_daily_spend)
     }
 
     /// Enables the policy
@@ -529,7 +528,7 @@ impl SpendingPolicy {
 impl Default for SpendingPolicy {
     fn default() -> Self {
         Self::new(
-            1_000_000_000, // 1 TNZO per transaction
+            1_000_000_000,  // 1 TNZO per transaction
             10_000_000_000, // 10 TNZO per day
         )
     }
@@ -705,10 +704,9 @@ impl AgentExecutionLoop {
                 .await
                 .map_err(|e| AgentError::ProtocolError(format!("LLM request failed: {}", e)))?;
 
-            let resp_json: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| AgentError::ProtocolError(format!("LLM response parse failed: {}", e)))?;
+            let resp_json: serde_json::Value = resp.json().await.map_err(|e| {
+                AgentError::ProtocolError(format!("LLM response parse failed: {}", e))
+            })?;
 
             let content = resp_json["choices"][0]["message"]["content"]
                 .as_str()
@@ -736,10 +734,9 @@ impl AgentExecutionLoop {
 
             for call in calls {
                 let tool_name = call["function"]["name"].as_str().unwrap_or("");
-                let args: serde_json::Value = serde_json::from_str(
-                    call["function"]["arguments"].as_str().unwrap_or("{}"),
-                )
-                .unwrap_or_default();
+                let args: serde_json::Value =
+                    serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}"))
+                        .unwrap_or_default();
                 let call_id = call["id"].as_str().unwrap_or("call_0");
 
                 let result = self.execute_tool(agent_id, tool_name, &args).await;
@@ -799,9 +796,9 @@ impl AgentExecutionLoop {
                 )))
             }
             "delegate_task" => {
-                let target_id = args["agent_id"]
-                    .as_str()
-                    .ok_or_else(|| AgentError::InvalidConfiguration("missing agent_id".to_string()))?;
+                let target_id = args["agent_id"].as_str().ok_or_else(|| {
+                    AgentError::InvalidConfiguration("missing agent_id".to_string())
+                })?;
                 let task_text = args["task"]
                     .as_str()
                     .ok_or_else(|| AgentError::InvalidConfiguration("missing task".to_string()))?;
@@ -812,14 +809,14 @@ impl AgentExecutionLoop {
                 self.runtime
                     .delegate_task(sender, receiver, "task_execution".to_string(), parameters)
                     .await?;
-                Ok(ToolResult::Output(format!("Task delegated to {}", target_id)))
+                Ok(ToolResult::Output(format!(
+                    "Task delegated to {}",
+                    target_id
+                )))
             }
             "collect_results" => {
                 let children = self.runtime.get_children(agent_id);
-                Ok(ToolResult::Output(format!(
-                    "Child agents: {:?}",
-                    children
-                )))
+                Ok(ToolResult::Output(format!("Child agents: {:?}", children)))
             }
             "complete" => {
                 let result = args["result"].as_str().unwrap_or("").to_string();

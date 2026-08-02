@@ -127,8 +127,7 @@ fn print_help() {
 }
 
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut f = fs::File::create(path)
-        .with_context(|| format!("create {}", path.display()))?;
+    let mut f = fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
     f.write_all(bytes)
         .with_context(|| format!("write {}", path.display()))?;
     f.sync_all().ok();
@@ -290,19 +289,19 @@ fn main() -> Result<()> {
         "  3. Set your bootstrap peer to validator-0: {}",
         peer_id_summary[0].1
     );
-    eprintln!(
-        "  4. Deliver each validator's seeds (consensus/pq/p2p/bls) to its own"
-    );
-    eprintln!(
-        "     root-only secret storage before tenzro-node starts. How you deliver"
-    );
-    eprintln!(
-        "     them (secrets manager, encrypted transfer, hardware token) is up to"
-    );
+    eprintln!("  4. Deliver each validator's seeds (consensus/pq/p2p/bls) to its own");
+    eprintln!("     root-only secret storage before tenzro-node starts. How you deliver");
+    eprintln!("     them (secrets manager, encrypted transfer, hardware token) is up to");
     eprintln!("     your infrastructure.");
     eprintln!();
-    eprintln!("After delivery, securely wipe {} (the seeds must not", args.out_dir.display());
-    eprintln!("remain on disk):  shred -uvz {}/validator-*/*.seed", args.out_dir.display());
+    eprintln!(
+        "After delivery, securely wipe {} (the seeds must not",
+        args.out_dir.display()
+    );
+    eprintln!(
+        "remain on disk):  shred -uvz {}/validator-*/*.seed",
+        args.out_dir.display()
+    );
 
     Ok(())
 }

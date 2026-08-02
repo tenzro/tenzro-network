@@ -43,8 +43,8 @@
 //!   * Request timeout: 30s — a stage may be mid-decode on a large batch.
 
 use libp2p::{
-    request_response::{self, ProtocolSupport},
     StreamProtocol,
+    request_response::{self, ProtocolSupport},
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

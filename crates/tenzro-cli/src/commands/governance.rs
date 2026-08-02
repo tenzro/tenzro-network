@@ -1,8 +1,8 @@
 //! Governance commands for the Tenzro CLI
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Governance commands
 #[derive(Debug, Subcommand)]
@@ -58,7 +58,9 @@ impl GovernanceListCmd {
         let spinner = output::create_spinner("Fetching proposals...");
 
         let rpc = RpcClient::new(&self.rpc);
-        let proposals: Vec<serde_json::Value> = rpc.call("tenzro_listProposals", serde_json::json!([{}])).await?;
+        let proposals: Vec<serde_json::Value> = rpc
+            .call("tenzro_listProposals", serde_json::json!([{}]))
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -85,10 +87,18 @@ impl GovernanceListCmd {
                     output::print_status("Status", status, is_active);
                 }
                 println!();
-                if let Some(votes_for) = proposal.get("votes_for").and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))) {
+                if let Some(votes_for) = proposal.get("votes_for").and_then(|v| {
+                    v.as_u64()
+                        .map(|n| n as u128)
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+                }) {
                     output::print_field("Votes For", &format!("{} TNZO", votes_for));
                 }
-                if let Some(votes_against) = proposal.get("votes_against").and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))) {
+                if let Some(votes_against) = proposal.get("votes_against").and_then(|v| {
+                    v.as_u64()
+                        .map(|n| n as u128)
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+                }) {
                     output::print_field("Votes Against", &format!("{} TNZO", votes_against));
                 }
                 if let Some(ends_at) = proposal.get("ends_at").and_then(|v| v.as_str()) {
@@ -102,19 +112,48 @@ impl GovernanceListCmd {
             let mut rows = Vec::new();
 
             for proposal in &proposals {
-                let id = proposal.get("proposal_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let title = proposal.get("title").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let prop_type = proposal.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let status = proposal.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let votes_for = proposal.get("votes_for").and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))).unwrap_or(0);
-                let votes_against = proposal.get("votes_against").and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))).unwrap_or(0);
+                let id = proposal
+                    .get("proposal_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let title = proposal
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let prop_type = proposal
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let status = proposal
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let votes_for = proposal
+                    .get("votes_for")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .map(|n| n as u128)
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+                    })
+                    .unwrap_or(0);
+                let votes_against = proposal
+                    .get("votes_against")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .map(|n| n as u128)
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+                    })
+                    .unwrap_or(0);
                 let total_votes = votes_for + votes_against;
                 let for_pct = if total_votes > 0 {
                     format!("{:.1}%", (votes_for as f64 / total_votes as f64) * 100.0)
                 } else {
                     "N/A".to_string()
                 };
-                let ends_at = proposal.get("ends_at").and_then(|v| v.as_str()).unwrap_or("N/A");
+                let ends_at = proposal
+                    .get("ends_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A");
 
                 // Truncate title if too long
                 let title_short = if title.len() > 30 {
@@ -194,7 +233,9 @@ impl GovernanceProposeCmd {
         output::print_field("Deposit Required", &format!("{} TNZO", self.deposit));
         println!();
 
-        output::print_warning("Your deposit will be returned if the proposal passes or is rejected.");
+        output::print_warning(
+            "Your deposit will be returned if the proposal passes or is rejected.",
+        );
         output::print_warning("It will be slashed if the proposal is deemed spam or malicious.");
         println!();
 
@@ -217,13 +258,18 @@ impl GovernanceProposeCmd {
 
         spinner.set_message("Locking deposit...");
 
-        let result: serde_json::Value = rpc.call("tenzro_createProposal", serde_json::json!([{
-            "title": self.title,
-            "description": self.description,
-            "proposal_type": self.r#type,
-            "duration_days": self.duration_days,
-            "deposit": self.deposit
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createProposal",
+                serde_json::json!([{
+                    "title": self.title,
+                    "description": self.description,
+                    "proposal_type": self.r#type,
+                    "duration_days": self.duration_days,
+                    "deposit": self.deposit
+                }]),
+            )
+            .await?;
 
         spinner.set_message("Broadcasting proposal...");
 
@@ -242,7 +288,10 @@ impl GovernanceProposeCmd {
             output::print_field("Status", status);
         }
         output::print_field("Voting Starts", "Now");
-        output::print_field("Voting Ends", &format!("{} days from now", self.duration_days));
+        output::print_field(
+            "Voting Ends",
+            &format!("{} days from now", self.duration_days),
+        );
 
         Ok(())
     }
@@ -293,16 +342,21 @@ impl GovernanceVoteCmd {
             .ok_or_else(|| anyhow::anyhow!(
                 "No wallet address found. Run `tenzro-cli wallet create` or `tenzro-cli wallet import` first."
             ))?;
-        let vp_result = rpc.call::<serde_json::Value>("tenzro_getVotingPower", serde_json::json!([from_address])).await;
+        let vp_result = rpc
+            .call::<serde_json::Value>("tenzro_getVotingPower", serde_json::json!([from_address]))
+            .await;
         let voting_power: f64 = match vp_result {
-            Ok(val) => val.as_str()
+            Ok(val) => val
+                .as_str()
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(0.0),
             Err(_) => 0.0,
         };
 
         if voting_power == 0.0 {
-            output::print_warning("Warning: Your voting power is 0. Stake TNZO to participate in governance.");
+            output::print_warning(
+                "Warning: Your voting power is 0. Stake TNZO to participate in governance.",
+            );
         }
 
         println!();
@@ -319,7 +373,10 @@ impl GovernanceVoteCmd {
         // Confirm with user
         use dialoguer::Confirm;
         let confirmed = Confirm::new()
-            .with_prompt(format!("Cast your vote '{}' on proposal {}?", vote_choice, self.proposal_id))
+            .with_prompt(format!(
+                "Cast your vote '{}' on proposal {}?",
+                vote_choice, self.proposal_id
+            ))
             .default(false)
             .interact()?;
 
@@ -332,11 +389,16 @@ impl GovernanceVoteCmd {
 
         spinner.set_message("Broadcasting vote...");
 
-        let result: serde_json::Value = rpc.call("tenzro_vote", serde_json::json!([{
-            "proposal_id": self.proposal_id,
-            "vote": vote_choice,
-            "reason": self.reason.as_deref()
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_vote",
+                serde_json::json!([{
+                    "proposal_id": self.proposal_id,
+                    "vote": vote_choice,
+                    "reason": self.reason.as_deref()
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -349,7 +411,11 @@ impl GovernanceVoteCmd {
         if let Some(tx_hash) = result.get("transaction_hash").and_then(|v| v.as_str()) {
             output::print_field("Transaction Hash", tx_hash);
         }
-        if let Some(power) = result.get("voting_power").and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))) {
+        if let Some(power) = result.get("voting_power").and_then(|v| {
+            v.as_u64()
+                .map(|n| n as u128)
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+        }) {
             output::print_field("Voting Power Used", &format!("{} TNZO", power));
         } else {
             output::print_field("Voting Power Used", &format!("{} TNZO", voting_power));

@@ -35,15 +35,15 @@ ZERO_ADDRESS = bytes(32)
 
 
 def video_params(**overrides) -> MediaGenParams:
-    base = dict(
-        prompt="a fox walking",
-        width=1280,
-        height=720,
-        steps=40,
-        guidance_scale=4.0,
-        num_frames=81,
-        fps=16,
-    )
+    base = {
+        "prompt": "a fox walking",
+        "width": 1280,
+        "height": 720,
+        "steps": 40,
+        "guidance_scale": 4.0,
+        "num_frames": 81,
+        "fps": 16,
+    }
     base.update(overrides)
     return MediaGenParams(**base)
 
@@ -162,9 +162,7 @@ def test_an_image_conditioned_kind_needs_the_input_hash(kind, params):
     replace(bare, input_image_hash=bytes([7] * 32)).validate_for(kind)
 
 
-@pytest.mark.parametrize(
-    ("num_frames", "fps"), [(None, 16), (81, None), (None, None)]
-)
+@pytest.mark.parametrize(("num_frames", "fps"), [(None, 16), (81, None), (None, None)])
 def test_a_video_kind_needs_frames_and_fps(num_frames, fps):
     with pytest.raises(ValueError, match="num_frames and fps are required"):
         video_params(num_frames=num_frames, fps=fps).validate_for(MediaGenKind.TEXT2VIDEO)
@@ -178,9 +176,7 @@ def test_zero_frames_or_fps_is_rejected(num_frames, fps):
 
 def test_oversize_frame_count_is_rejected():
     with pytest.raises(ValueError, match="num_frames exceeds"):
-        video_params(num_frames=MAX_MEDIA_GEN_FRAMES + 1).validate_for(
-            MediaGenKind.TEXT2VIDEO
-        )
+        video_params(num_frames=MAX_MEDIA_GEN_FRAMES + 1).validate_for(MediaGenKind.TEXT2VIDEO)
 
 
 def test_frames_and_fps_are_ignored_for_image_kinds(params):
@@ -199,9 +195,7 @@ def test_params_round_trip_through_json(params):
         input_image_hash=bytes([4] * 32),
         metadata={"scheduler": "unipc"},
     )
-    assert MediaGenParams.from_json(json.loads(json.dumps(conditioned.to_json()))) == (
-        conditioned
-    )
+    assert MediaGenParams.from_json(json.loads(json.dumps(conditioned.to_json()))) == (conditioned)
 
 
 def test_hashes_and_addresses_serialize_as_integer_arrays(spec):
@@ -218,9 +212,7 @@ def test_task_spec_round_trips_through_json(spec):
 
 
 def test_receipt_round_trips_through_json(receipt):
-    signed = replace(
-        receipt, worker_signature=Signature(bytes_=bytes(64), public_key=bytes(32))
-    )
+    signed = replace(receipt, worker_signature=Signature(bytes_=bytes(64), public_key=bytes(32)))
     decoded = MediaGenReceipt.from_json(json.loads(json.dumps(signed.to_json())))
     assert decoded == signed
 
@@ -241,20 +233,18 @@ def test_an_absent_signature_decodes_as_empty():
 
 
 def capability(**overrides) -> MediaGenWorkerCapability:
-    base = dict(
-        worker_did="did:tenzro:machine:worker",
-        worker_address=ZERO_ADDRESS,
-        supported_models=["qwen-image"],
-        expert_holdings=[
-            MediaGenExpertHolding(
-                model_id="wan2.2-t2v-a14b", role=MediaGenExpertRole.HIGH_NOISE
-            )
+    base = {
+        "worker_did": "did:tenzro:machine:worker",
+        "worker_address": ZERO_ADDRESS,
+        "supported_models": ["qwen-image"],
+        "expert_holdings": [
+            MediaGenExpertHolding(model_id="wan2.2-t2v-a14b", role=MediaGenExpertRole.HIGH_NOISE)
         ],
-        max_resolution=1328,
-        max_frames=81,
-        gpu_vram_gb=48.0,
-        registered_at=1_700_000_000_000,
-    )
+        "max_resolution": 1328,
+        "max_frames": 81,
+        "gpu_vram_gb": 48.0,
+        "registered_at": 1_700_000_000_000,
+    }
     base.update(overrides)
     return MediaGenWorkerCapability(**base)
 
@@ -285,9 +275,7 @@ def test_output_bounds_are_checked_against_the_spec(spec):
 
 
 def test_a_video_job_needs_a_declared_frame_ceiling(spec):
-    video = replace(
-        spec, kind=MediaGenKind.TEXT2VIDEO, params=video_params(num_frames=81)
-    )
+    video = replace(spec, kind=MediaGenKind.TEXT2VIDEO, params=video_params(num_frames=81))
     assert capability().fits_output(video)
     assert not capability(max_frames=None).fits_output(video)
     assert not capability(max_frames=49).fits_output(video)

@@ -51,8 +51,9 @@ impl MppClient {
             debug!("Received 402 from {}, handling payment", url);
 
             // 1. Parse the payment challenge from the response body
-            let body = response.text().await
-                .map_err(|e| PaymentError::NetworkError(format!("Failed to read 402 response: {}", e)))?;
+            let body = response.text().await.map_err(|e| {
+                PaymentError::NetworkError(format!("Failed to read 402 response: {}", e))
+            })?;
 
             let challenge = Self::parse_challenge(&body)?;
 
@@ -89,19 +90,27 @@ impl MppClient {
 
     /// Creates a payment credential for a challenge
     async fn create_credential(&self, challenge: &PaymentChallenge) -> Result<PaymentCredential> {
-        debug!("Creating payment credential for challenge {}", challenge.challenge_id);
+        debug!(
+            "Creating payment credential for challenge {}",
+            challenge.challenge_id
+        );
 
         // Get the wallet service
-        let wallet_service = self.wallet_service.as_ref()
-            .ok_or_else(|| PaymentError::CredentialError(
-                "No wallet service configured for signing credentials".to_string()
-            ))?;
+        let wallet_service = self.wallet_service.as_ref().ok_or_else(|| {
+            PaymentError::CredentialError(
+                "No wallet service configured for signing credentials".to_string(),
+            )
+        })?;
 
         // Get the wallet
         let wallet_id = tenzro_wallet::WalletId::from_string(self.wallet_id.clone());
-        let wallet = wallet_service.get_wallet(&wallet_id).await
+        let wallet = wallet_service
+            .get_wallet(&wallet_id)
+            .await
             .map_err(|e| PaymentError::CredentialError(format!("Failed to get wallet: {}", e)))?
-            .ok_or_else(|| PaymentError::CredentialError(format!("Wallet {} not found", self.wallet_id)))?;
+            .ok_or_else(|| {
+                PaymentError::CredentialError(format!("Wallet {} not found", self.wallet_id))
+            })?;
 
         let payer_address = wallet.address;
         let public_key = wallet.public_key.clone();
@@ -116,14 +125,19 @@ impl MppClient {
 
         // Sign the message using the wallet — produces a hybrid (classical +
         // ML-DSA-65) signature. Surface BOTH legs into the credential.
-        let hybrid_sig = wallet_service.sign_data(&wallet_id, &message).await
-            .map_err(|e| PaymentError::CredentialError(format!("Failed to sign credential: {}", e)))?;
+        let hybrid_sig = wallet_service
+            .sign_data(&wallet_id, &message)
+            .await
+            .map_err(|e| {
+                PaymentError::CredentialError(format!("Failed to sign credential: {}", e))
+            })?;
         let signature_bytes = hybrid_sig.classical;
         // `HybridSignatureBytes.pq` is mandatory `Vec<u8>` (not Option).
         let pq_signature_bytes = hybrid_sig.pq;
         if pq_signature_bytes.is_empty() {
             return Err(PaymentError::CredentialError(
-                "Wallet hybrid signer produced an empty ML-DSA-65 leg for MPP credential".to_string(),
+                "Wallet hybrid signer produced an empty ML-DSA-65 leg for MPP credential"
+                    .to_string(),
             ));
         }
 
@@ -146,7 +160,9 @@ impl MppClient {
         };
 
         // Add the public key to the extra metadata
-        credential.extra.insert("public_key".to_string(), serde_json::json!(public_key_hex));
+        credential
+            .extra
+            .insert("public_key".to_string(), serde_json::json!(public_key_hex));
 
         debug!("Payment credential created: {}", credential.credential_id);
 

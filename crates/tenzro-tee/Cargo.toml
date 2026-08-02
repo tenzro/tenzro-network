@@ -79,3 +79,6 @@ ed25519-dalek = { workspace = true }
 [[bench]]
 name = "tee_benchmarks"
 harness = false
+
+[lints]
+workspace = true

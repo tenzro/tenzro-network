@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tenzro_agent::{
-    a2a_protocol::TaskRequest, AgentAutonomy, Result, ScheduledTask, SpendingPolicy,
-    TaskHandler, TaskResult,
+    AgentAutonomy, Result, ScheduledTask, SpendingPolicy, TaskHandler, TaskResult,
+    a2a_protocol::TaskRequest,
 };
 /// Example task handler that processes data analysis tasks
 struct DataAnalysisHandler;
@@ -74,7 +74,6 @@ impl TaskHandler for BlockchainHandler {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-
     println!("=== Tenzro Agent Autonomy Example ===\n");
 
     // Create spending policy

@@ -36,3 +36,6 @@ tempfile = "3"
 [[bench]]
 name = "settlement_benchmarks"
 harness = false
+
+[lints]
+workspace = true

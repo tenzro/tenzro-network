@@ -59,7 +59,9 @@ impl ResourceKind {
 /// A bid or ask in an order-book clearing round: `units` at `price` (per unit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Order {
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub units: u128,
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub price: u128,
 }
 
@@ -68,11 +70,17 @@ pub struct Order {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PricingPolicy {
     /// Flat operator-set rate (the override default).
-    Fixed { rate: u128 },
+    Fixed {
+        #[serde(with = "tenzro_types::primitives::u128_serde")]
+        rate: u128,
+    },
     /// Network-reactive EIP-1559 controller. Carries its own live state.
     Dynamic(DynamicPricing),
     /// Uniform-price clearing from an order book (computed per round).
-    OrderBook { current_rate: u128 },
+    OrderBook {
+        #[serde(with = "tenzro_types::primitives::u128_serde")]
+        current_rate: u128,
+    },
 }
 
 impl PricingPolicy {
@@ -98,18 +106,25 @@ impl PricingPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynamicPricing {
     /// Provider-advertised total capacity for this resource (per epoch).
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub capacity: u128,
     /// Max-change denominator (inverse gain). Lower = faster, more volatile.
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub denominator: u128,
     /// EMA smoothing window (epochs). Larger = smoother, slower.
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub ema_window: u128,
     /// Operator floor — the rate never drops below this.
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub min_rate: u128,
     /// Network ceiling — the rate never rises above this.
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub max_rate: u128,
     /// Current rate (base units per resource unit).
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub current_rate: u128,
     /// EMA-smoothed utilization carried between epochs.
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub ema_utilization: u128,
 }
 
@@ -248,7 +263,10 @@ mod tests {
         let mut last = d.current_rate;
         for _ in 0..20 {
             let r = d.step(1000);
-            assert!(r >= last, "rate must be monotonic up under sustained demand");
+            assert!(
+                r >= last,
+                "rate must be monotonic up under sustained demand"
+            );
             last = r;
         }
         assert!(last > 1_000_000);
@@ -256,7 +274,8 @@ mod tests {
 
     #[test]
     fn under_target_lowers_rate_but_respects_floor() {
-        let mut d = DynamicPricing::new(ResourceKind::Inference, 1000, 1_000_000, 900_000, u128::MAX);
+        let mut d =
+            DynamicPricing::new(ResourceKind::Inference, 1000, 1_000_000, 900_000, u128::MAX);
         let mut last = d.current_rate;
         for _ in 0..50 {
             let r = d.step(0);
@@ -273,7 +292,10 @@ mod tests {
         // One saturated epoch each, from the same seed.
         let ri = inf.step(1000);
         let rs = sto.step(1000);
-        assert!(ri >= rs, "D=8 inference should move at least as fast as D=16 storage");
+        assert!(
+            ri >= rs,
+            "D=8 inference should move at least as fast as D=16 storage"
+        );
     }
 
     #[test]
@@ -282,28 +304,73 @@ mod tests {
         for _ in 0..100 {
             d.step(1000);
         }
-        assert_eq!(d.current_rate, 1_100_000, "rate must not exceed the ceiling");
+        assert_eq!(
+            d.current_rate, 1_100_000,
+            "rate must not exceed the ceiling"
+        );
     }
 
     #[test]
     fn clearing_price_uniform_match() {
         // Asks: 2@100, 3@120. Bids: 4@130, 1@90.
         // Supply after first ask = 2; demand at >=100 = 4 (the 130 bid) ≥ 2 → clears at 100.
-        let asks = [Order { units: 2, price: 100 }, Order { units: 3, price: 120 }];
-        let bids = [Order { units: 4, price: 130 }, Order { units: 1, price: 90 }];
+        let asks = [
+            Order {
+                units: 2,
+                price: 100,
+            },
+            Order {
+                units: 3,
+                price: 120,
+            },
+        ];
+        let bids = [
+            Order {
+                units: 4,
+                price: 130,
+            },
+            Order {
+                units: 1,
+                price: 90,
+            },
+        ];
         assert_eq!(clearing_price(&asks, &bids), Some(100));
     }
 
     #[test]
     fn clearing_price_no_cross_is_none() {
-        let asks = [Order { units: 1, price: 200 }];
-        let bids = [Order { units: 1, price: 100 }];
+        let asks = [Order {
+            units: 1,
+            price: 200,
+        }];
+        let bids = [Order {
+            units: 1,
+            price: 100,
+        }];
         assert_eq!(clearing_price(&asks, &bids), None);
     }
 
     #[test]
     fn clearing_price_empty_is_none() {
-        assert_eq!(clearing_price(&[], &[Order { units: 1, price: 100 }]), None);
-        assert_eq!(clearing_price(&[Order { units: 1, price: 100 }], &[]), None);
+        assert_eq!(
+            clearing_price(
+                &[],
+                &[Order {
+                    units: 1,
+                    price: 100
+                }]
+            ),
+            None
+        );
+        assert_eq!(
+            clearing_price(
+                &[Order {
+                    units: 1,
+                    price: 100
+                }],
+                &[]
+            ),
+            None
+        );
     }
 }

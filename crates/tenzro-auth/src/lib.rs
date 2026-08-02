@@ -129,6 +129,7 @@
 #![deny(unsafe_code)]
 
 mod aap;
+mod admission;
 mod claims;
 mod dpop;
 mod engine;
@@ -140,9 +141,13 @@ mod storage;
 mod util;
 
 pub use aap::{
-    authority_action_to_aap, is_valid_action_name, rar_to_aap_action, AapAgentClaim,
-    AapAuditClaim, AapCapabilityClaim, AapConstraints, AapContextClaim, AapDelegationClaim,
-    AapOversightClaim, AapTaskClaim, AapTimeWindow,
+    AapAgentClaim, AapAuditClaim, AapCapabilityClaim, AapConstraints, AapContextClaim,
+    AapDelegationClaim, AapOversightClaim, AapTaskClaim, AapTimeWindow, authority_action_to_aap,
+    is_valid_action_name, rar_to_aap_action,
+};
+pub use admission::{
+    Admission, AdmissionPolicy, NEVER_GATED_PATHS, ServiceKeyHash, ServiceSurface, admit,
+    is_never_gated,
 };
 pub use claims::{AuthClaims, Cnf};
 pub use dpop::{DpopProof, DpopVerification};
@@ -152,8 +157,8 @@ pub use engine::{
 };
 pub use error::{AuthError, Result};
 pub use exchange::{
-    aap_capabilities_is_subset, detail_covers, rar_is_subset, TokenExchangeOutcome,
-    TokenExchangeRequest,
+    TokenExchangeOutcome, TokenExchangeRequest, aap_capabilities_is_subset, detail_covers,
+    rar_is_subset,
 };
 pub use introspect::IntrospectionResponse;
 pub use rar::{AuthorizationDetail, AuthorizationDetails, ResourceConstraint};

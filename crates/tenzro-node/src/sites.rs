@@ -472,8 +472,7 @@ impl SiteRegistry {
             // Guard against the alias and domain keyspaces, whose keys also
             // start with "site" — only decode manifests under the exact "site:"
             // prefix.
-            if key.starts_with(ALIAS_PREFIX.as_bytes())
-                || key.starts_with(DOMAIN_PREFIX.as_bytes())
+            if key.starts_with(ALIAS_PREFIX.as_bytes()) || key.starts_with(DOMAIN_PREFIX.as_bytes())
             {
                 continue;
             }
@@ -561,12 +560,12 @@ impl SiteRegistry {
     ) -> Result<SiteManifest, SiteError> {
         validate_name(name)?;
         if !owner_did.starts_with("did:") {
-            return Err(SiteError::InvalidManifest(
-                "owner_did must be a DID".into(),
-            ));
+            return Err(SiteError::InvalidManifest("owner_did must be a DID".into()));
         }
         if routes.is_empty() {
-            return Err(SiteError::InvalidManifest("routes must not be empty".into()));
+            return Err(SiteError::InvalidManifest(
+                "routes must not be empty".into(),
+            ));
         }
         if routes.len() > self.config.max_routes {
             return Err(SiteError::InvalidManifest(format!(
@@ -1060,7 +1059,15 @@ mod tests {
         traversal.insert("/../etc/passwd".to_string(), route(0x01));
         assert!(
             registry
-                .publish_site("s", "did:tenzro:human:a", traversal, None, None, false, None)
+                .publish_site(
+                    "s",
+                    "did:tenzro:human:a",
+                    traversal,
+                    None,
+                    None,
+                    false,
+                    None
+                )
                 .is_err()
         );
 
@@ -1096,7 +1103,15 @@ mod tests {
 
         assert!(
             registry
-                .publish_site("bad name!", "did:tenzro:human:a", one_page_routes(), None, None, false, None)
+                .publish_site(
+                    "bad name!",
+                    "did:tenzro:human:a",
+                    one_page_routes(),
+                    None,
+                    None,
+                    false,
+                    None
+                )
                 .is_err()
         );
         assert!(
@@ -1141,11 +1156,27 @@ mod tests {
     fn republish_bumps_version_preserves_created_at() {
         let registry = SiteRegistry::new();
         let v1 = registry
-            .publish_site("blog", "did:tenzro:human:a", one_page_routes(), None, None, false, None)
+            .publish_site(
+                "blog",
+                "did:tenzro:human:a",
+                one_page_routes(),
+                None,
+                None,
+                false,
+                None,
+            )
             .unwrap();
         assert_eq!(v1.version, 1);
         let v2 = registry
-            .publish_site("blog", "did:tenzro:human:a", one_page_routes(), None, None, false, Some(5))
+            .publish_site(
+                "blog",
+                "did:tenzro:human:a",
+                one_page_routes(),
+                None,
+                None,
+                false,
+                Some(5),
+            )
             .unwrap();
         assert_eq!(v2.version, 2);
         assert_eq!(v2.site_id, v1.site_id);
@@ -1157,13 +1188,25 @@ mod tests {
     fn remove_enforces_owner() {
         let registry = SiteRegistry::new();
         let m = registry
-            .publish_site("blog", "did:tenzro:human:a", one_page_routes(), None, None, false, None)
+            .publish_site(
+                "blog",
+                "did:tenzro:human:a",
+                one_page_routes(),
+                None,
+                None,
+                false,
+                None,
+            )
             .unwrap();
         assert!(matches!(
             registry.remove_site(&m.site_id, "did:tenzro:human:b"),
             Err(SiteError::NotOwner)
         ));
-        assert!(registry.remove_site(&m.site_id, "did:tenzro:human:a").is_ok());
+        assert!(
+            registry
+                .remove_site(&m.site_id, "did:tenzro:human:a")
+                .is_ok()
+        );
         assert!(registry.get_site(&m.site_id).is_none());
     }
 
@@ -1171,10 +1214,26 @@ mod tests {
     fn list_filters_by_owner() {
         let registry = SiteRegistry::new();
         registry
-            .publish_site("a", "did:tenzro:human:a", one_page_routes(), None, None, false, None)
+            .publish_site(
+                "a",
+                "did:tenzro:human:a",
+                one_page_routes(),
+                None,
+                None,
+                false,
+                None,
+            )
             .unwrap();
         registry
-            .publish_site("b", "did:tenzro:human:b", one_page_routes(), None, None, false, None)
+            .publish_site(
+                "b",
+                "did:tenzro:human:b",
+                one_page_routes(),
+                None,
+                None,
+                false,
+                None,
+            )
             .unwrap();
         assert_eq!(registry.list_sites(None).len(), 2);
         assert_eq!(registry.list_sites(Some("did:tenzro:human:a")).len(), 1);
@@ -1335,10 +1394,7 @@ mod tests {
             .set_alias("app.apps.tenzro.xyz", &m.site_id, "did:tenzro:human:a")
             .unwrap();
         assert_eq!(registry.list_aliases(None).len(), 1);
-        assert_eq!(
-            registry.list_aliases(Some("did:tenzro:human:b")).len(),
-            0
-        );
+        assert_eq!(registry.list_aliases(Some("did:tenzro:human:b")).len(), 0);
         assert!(matches!(
             registry.remove_alias("app.apps.tenzro.xyz", "did:tenzro:human:b"),
             Err(SiteError::NotOwner)

@@ -5,9 +5,9 @@ use crate::voter::QuorumCertificate;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tenzro_types::block::Block;
 use tenzro_types::primitives::{BlockHeight, Hash};
+use tokio::sync::broadcast;
 
 /// Notification about a finalized block
 #[derive(Debug, Clone)]
@@ -308,7 +308,8 @@ impl ForkChoice {
     pub fn prune_below_finalized(&self) {
         let finalized_height = self.finality_tracker.finalized_height();
 
-        self.blocks.retain(|_, block| block.height() >= finalized_height);
+        self.blocks
+            .retain(|_, block| block.height() >= finalized_height);
 
         // Count-bounded backstop. The height retain above cannot bound growth
         // when consensus is wedged at a single height: every failed view there

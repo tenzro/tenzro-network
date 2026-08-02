@@ -551,10 +551,7 @@ mod tests {
 
     #[test]
     fn vision_fallback_rejects_empty_video() {
-        let img: Arc<dyn ImageEncoder> = Arc::new(ConstantImage {
-            dim: 8,
-            value: 0.1,
-        });
+        let img: Arc<dyn ImageEncoder> = Arc::new(ConstantImage { dim: 8, value: 0.1 });
         let v = VisionFallbackVideoEncoder::new(img, 4);
         let r = v.embed(&[], &VideoEmbedConfig::default());
         assert!(matches!(r, Err(ModelError::InvalidModel(_))));
@@ -583,10 +580,7 @@ mod tests {
 
     #[test]
     fn num_frames_clamped_to_at_least_one() {
-        let img: Arc<dyn ImageEncoder> = Arc::new(ConstantImage {
-            dim: 4,
-            value: 0.0,
-        });
+        let img: Arc<dyn ImageEncoder> = Arc::new(ConstantImage { dim: 4, value: 0.0 });
         let v = VisionFallbackVideoEncoder::new(img, 0);
         assert_eq!(v.num_frames(), 1);
     }

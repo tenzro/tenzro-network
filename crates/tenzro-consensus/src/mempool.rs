@@ -352,7 +352,8 @@ impl Mempool {
                     ctrl.record_rejected_mempool_full(lane);
                 }
                 return Err(ConsensusError::Mempool(
-                    "Mempool full and new transaction has lower gas price than all existing ones".to_string(),
+                    "Mempool full and new transaction has lower gas price than all existing ones"
+                        .to_string(),
                 ));
             }
         }
@@ -447,7 +448,9 @@ impl Mempool {
         let needed_to_free = needed_size - available;
 
         // Collect transactions sorted by gas price (lowest first)
-        let mut txs: Vec<(Hash, u64, usize)> = self.transactions.iter()
+        let mut txs: Vec<(Hash, u64, usize)> = self
+            .transactions
+            .iter()
             .map(|entry| {
                 let hash = *entry.key();
                 let tx = entry.value();
@@ -529,11 +532,7 @@ impl Mempool {
     /// blocks finalizes, the other proposal is dropped wholesale, and the
     /// `contains_key` check on subsequent selections filters out anything
     /// already finalized.
-    pub fn select_transactions(
-        &self,
-        max_count: usize,
-        max_gas: u64,
-    ) -> Vec<SignedTransaction> {
+    pub fn select_transactions(&self, max_count: usize, max_gas: u64) -> Vec<SignedTransaction> {
         let mut selected = Vec::new();
         let mut total_gas = 0u64;
         let mut reinsert = Vec::new();
@@ -741,9 +740,9 @@ impl Mempool {
 mod tests {
     use super::*;
     use tenzro_crypto::pq::MlDsaSigningKey;
+    use tenzro_types::Signature;
     use tenzro_types::primitives::{Address, ChainId, Nonce};
     use tenzro_types::transaction::{Transaction, TransactionType};
-    use tenzro_types::Signature;
 
     fn create_test_transaction(gas_price: u64, nonce: u64) -> SignedTransaction {
         let pq_key = MlDsaSigningKey::generate();
@@ -881,13 +880,21 @@ mod tests {
         let mempool = Mempool::new(Arc::new(config));
 
         // Add 3 transactions with different gas prices
-        mempool.add_transaction(create_test_transaction(100, 1)).unwrap();
-        mempool.add_transaction(create_test_transaction(200, 2)).unwrap();
-        mempool.add_transaction(create_test_transaction(150, 3)).unwrap();
+        mempool
+            .add_transaction(create_test_transaction(100, 1))
+            .unwrap();
+        mempool
+            .add_transaction(create_test_transaction(200, 2))
+            .unwrap();
+        mempool
+            .add_transaction(create_test_transaction(150, 3))
+            .unwrap();
         assert_eq!(mempool.len(), 3);
 
         // Add a 4th transaction with higher gas price - should evict lowest (100)
-        mempool.add_transaction(create_test_transaction(300, 4)).unwrap();
+        mempool
+            .add_transaction(create_test_transaction(300, 4))
+            .unwrap();
         assert_eq!(mempool.len(), 3);
 
         // The mempool should now have gas prices: 200, 150, 300
@@ -907,8 +914,12 @@ mod tests {
         let mempool = Mempool::new(Arc::new(config));
 
         // Add 2 transactions with higher gas prices
-        mempool.add_transaction(create_test_transaction(200, 1)).unwrap();
-        mempool.add_transaction(create_test_transaction(300, 2)).unwrap();
+        mempool
+            .add_transaction(create_test_transaction(200, 1))
+            .unwrap();
+        mempool
+            .add_transaction(create_test_transaction(300, 2))
+            .unwrap();
         assert_eq!(mempool.len(), 2);
 
         // Try to add transaction with lower gas price - should fail
@@ -1021,8 +1032,12 @@ mod tests {
         assert_eq!(depths, [0, 0, 0]);
 
         // Admit two transactions — both land in Open via the default resolver.
-        mempool.add_transaction(create_test_transaction(1_000_000_000, 1)).unwrap();
-        mempool.add_transaction(create_test_transaction(1_000_000_000, 2)).unwrap();
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 1))
+            .unwrap();
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 2))
+            .unwrap();
 
         let depths = mempool.lane_depths();
         assert_eq!(depths[Lane::Verified as usize], 0);
@@ -1044,9 +1059,15 @@ mod tests {
         let mempool = Mempool::new(Arc::new(config));
 
         // No `set_admission` call. Insert 3 txs.
-        mempool.add_transaction(create_test_transaction(1_000_000_000, 1)).unwrap();
-        mempool.add_transaction(create_test_transaction(1_000_000_000, 2)).unwrap();
-        mempool.add_transaction(create_test_transaction(1_000_000_000, 3)).unwrap();
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 1))
+            .unwrap();
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 2))
+            .unwrap();
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 3))
+            .unwrap();
 
         let depths = mempool.lane_depths();
         assert_eq!(depths[Lane::Verified as usize], 0);

@@ -21,9 +21,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow_array::{
-    Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, StringArray,
-};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures_util::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -108,9 +106,12 @@ impl LanceVectorBackend {
     }
 
     async fn open_or_create_table(&self, first_batch: RecordBatch) -> Result<Table> {
-        let names = self.conn.table_names().execute().await.map_err(|e| {
-            MemoryError::Vector(format!("table_names: {}", e))
-        })?;
+        let names = self
+            .conn
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| MemoryError::Vector(format!("table_names: {}", e)))?;
         if names.iter().any(|n| n == TABLE_NAME) {
             let tbl = self
                 .conn
@@ -135,9 +136,12 @@ impl LanceVectorBackend {
     }
 
     async fn open_table(&self) -> Result<Option<Table>> {
-        let names = self.conn.table_names().execute().await.map_err(|e| {
-            MemoryError::Vector(format!("table_names: {}", e))
-        })?;
+        let names = self
+            .conn
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| MemoryError::Vector(format!("table_names: {}", e)))?;
         if !names.iter().any(|n| n == TABLE_NAME) {
             return Ok(None);
         }
@@ -303,10 +307,7 @@ impl LanceVectorBackend {
             return Ok(Vec::new());
         };
         let where_sql = build_where_sql(filter);
-        let q = tbl
-            .query()
-            .only_if(where_sql)
-            .limit(limit.max(1));
+        let q = tbl.query().only_if(where_sql).limit(limit.max(1));
         let stream = q
             .execute()
             .await
@@ -348,9 +349,8 @@ impl LanceVectorBackend {
         for i in 0..n {
             let kind = MemoryKind::parse(kind_col.value(i))
                 .ok_or_else(|| MemoryError::Vector(format!("bad kind: {}", kind_col.value(i))))?;
-            let source = MemorySource::parse(src_col.value(i)).ok_or_else(|| {
-                MemoryError::Vector(format!("bad source: {}", src_col.value(i)))
-            })?;
+            let source = MemorySource::parse(src_col.value(i))
+                .ok_or_else(|| MemoryError::Vector(format!("bad source: {}", src_col.value(i))))?;
             let metadata: serde_json::Value = serde_json::from_str(meta_col.value(i))?;
             let da_pointer = if ptr_col.is_null(i) {
                 None
@@ -449,8 +449,18 @@ mod tests {
     async fn insert_and_knn_returns_nearest_first() {
         let dir = tempdir().unwrap();
         let backend = LanceVectorBackend::new(dir.path(), 4).await.unwrap();
-        let near = rec("did:tenzro:machine:a", "near", vec![1.0, 0.0, 0.0, 0.0], MemoryKind::Granted);
-        let far = rec("did:tenzro:machine:a", "far", vec![0.0, 1.0, 0.0, 0.0], MemoryKind::Granted);
+        let near = rec(
+            "did:tenzro:machine:a",
+            "near",
+            vec![1.0, 0.0, 0.0, 0.0],
+            MemoryKind::Granted,
+        );
+        let far = rec(
+            "did:tenzro:machine:a",
+            "far",
+            vec![0.0, 1.0, 0.0, 0.0],
+            MemoryKind::Granted,
+        );
         backend.insert(&near).await.unwrap();
         backend.insert(&far).await.unwrap();
 
@@ -468,8 +478,18 @@ mod tests {
     async fn knn_filters_by_agent_did() {
         let dir = tempdir().unwrap();
         let backend = LanceVectorBackend::new(dir.path(), 3).await.unwrap();
-        let a = rec("did:tenzro:machine:alpha", "alpha", vec![0.5, 0.5, 0.5], MemoryKind::Granted);
-        let b = rec("did:tenzro:machine:beta", "beta", vec![0.5, 0.5, 0.5], MemoryKind::Granted);
+        let a = rec(
+            "did:tenzro:machine:alpha",
+            "alpha",
+            vec![0.5, 0.5, 0.5],
+            MemoryKind::Granted,
+        );
+        let b = rec(
+            "did:tenzro:machine:beta",
+            "beta",
+            vec![0.5, 0.5, 0.5],
+            MemoryKind::Granted,
+        );
         backend.insert(&a).await.unwrap();
         backend.insert(&b).await.unwrap();
 
@@ -486,8 +506,18 @@ mod tests {
     async fn knn_filters_by_kind() {
         let dir = tempdir().unwrap();
         let backend = LanceVectorBackend::new(dir.path(), 2).await.unwrap();
-        let g = rec("did:tenzro:machine:x", "g", vec![1.0, 0.0], MemoryKind::Granted);
-        let s = rec("did:tenzro:machine:x", "s", vec![1.0, 0.0], MemoryKind::SelfNoted);
+        let g = rec(
+            "did:tenzro:machine:x",
+            "g",
+            vec![1.0, 0.0],
+            MemoryKind::Granted,
+        );
+        let s = rec(
+            "did:tenzro:machine:x",
+            "s",
+            vec![1.0, 0.0],
+            MemoryKind::SelfNoted,
+        );
         backend.insert(&g).await.unwrap();
         backend.insert(&s).await.unwrap();
         let mut f = MemoryFilter::for_agent("did:tenzro:machine:x");
@@ -501,8 +531,19 @@ mod tests {
     async fn dim_mismatch_rejected() {
         let dir = tempdir().unwrap();
         let backend = LanceVectorBackend::new(dir.path(), 4).await.unwrap();
-        let bad = rec("did:tenzro:machine:a", "bad", vec![1.0, 0.0], MemoryKind::Granted);
+        let bad = rec(
+            "did:tenzro:machine:a",
+            "bad",
+            vec![1.0, 0.0],
+            MemoryKind::Granted,
+        );
         let err = backend.insert(&bad).await.unwrap_err();
-        assert!(matches!(err, MemoryError::DimMismatch { expected: 4, actual: 2 }));
+        assert!(matches!(
+            err,
+            MemoryError::DimMismatch {
+                expected: 4,
+                actual: 2
+            }
+        ));
     }
 }

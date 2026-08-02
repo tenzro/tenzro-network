@@ -93,9 +93,7 @@ impl ListResourcesCmd {
             params.insert("offset".to_string(), json!(o));
         }
         let client = rpc::RpcClient::new("http://127.0.0.1:8545");
-        let result: serde_json::Value = client
-            .call("tenzro_listResources", json!(params))
-            .await?;
+        let result: serde_json::Value = client.call("tenzro_listResources", json!(params)).await?;
         output::print_json(&result)?;
         Ok(())
     }
@@ -130,8 +128,7 @@ impl UseResourceCmd {
             p.insert("payer_wallet".to_string(), json!(w));
         }
         let client = rpc::RpcClient::new("http://127.0.0.1:8545");
-        let result: serde_json::Value =
-            client.call("tenzro_useResource", json!(p)).await?;
+        let result: serde_json::Value = client.call("tenzro_useResource", json!(p)).await?;
         output::print_json(&result)?;
         Ok(())
     }
@@ -186,8 +183,7 @@ impl SpawnChildCmd {
         p.insert("key_type".to_string(), json!(self.key_type));
 
         let client = rpc::RpcClient::new("http://127.0.0.1:8545");
-        let result: serde_json::Value =
-            client.call("tenzro_spawnChildAgent", json!(p)).await?;
+        let result: serde_json::Value = client.call("tenzro_spawnChildAgent", json!(p)).await?;
         output::print_json(&result)?;
         Ok(())
     }

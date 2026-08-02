@@ -332,8 +332,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(err) => println!("  Canton participant rejected: {err}"),
             }
         } else {
-            println!("  Canton offline — would dispatch DamlCommand variant `{}`", leg_variant(&leg.command));
-            println!("  prepared tx: from={} bytes, calldata={} bytes, vm={:?}",
+            println!(
+                "  Canton offline — would dispatch DamlCommand variant `{}`",
+                leg_variant(&leg.command)
+            );
+            println!(
+                "  prepared tx: from={} bytes, calldata={} bytes, vm={:?}",
                 party_bytes.len(),
                 tx.data.len(),
                 tx.vm_type,
@@ -358,7 +362,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let oversized = 75_000_000 * ONE_USD; // exceeds $50M per-leg cap
     match registry.enforce_operation(&agent_did, "repo", Some(oversized)) {
         Ok(()) => println!("→ unexpected: oversized $75M repo was allowed"),
-        Err(err) => println!("→ oversized ${}M repo rejected: {err}", oversized / ONE_USD / 1_000_000),
+        Err(err) => println!(
+            "→ oversized ${}M repo rejected: {err}",
+            oversized / ONE_USD / 1_000_000
+        ),
     }
 
     println!("\nCanton institutional repo walkthrough complete.");

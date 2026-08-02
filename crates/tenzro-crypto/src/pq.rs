@@ -34,10 +34,8 @@ use ml_dsa::{
     VerifyingKey as MlDsaVerifyingKey,
 };
 use ml_kem::{
+    Ciphertext as MlKemCiphertext, EncapsulationKey as MlKemEncapsulationKey, MlKem768,
     kem::{Decapsulate, Encapsulate, Kem, KeyExport},
-    Ciphertext as MlKemCiphertext,
-    EncapsulationKey as MlKemEncapsulationKey,
-    MlKem768,
 };
 use rand_core::{TryCryptoRng, TryRng, UnwrapErr};
 use std::convert::Infallible;
@@ -303,12 +301,11 @@ pub fn ml_kem_encapsulate(ek_bytes: &[u8]) -> Result<(Vec<u8>, [u8; ML_KEM_SS_LE
             ek_bytes.len()
         )));
     }
-    let ek = MlKemEncapsulationKey::<MlKem768>::new(
-        ek_bytes
-            .try_into()
-            .map_err(|_| CryptoError::InvalidPublicKey("ML-KEM-768 encap-key slice".to_string()))?,
-    )
-    .map_err(|e| CryptoError::InvalidPublicKey(format!("ML-KEM-768 decode: {:?}", e)))?;
+    let ek =
+        MlKemEncapsulationKey::<MlKem768>::new(ek_bytes.try_into().map_err(|_| {
+            CryptoError::InvalidPublicKey("ML-KEM-768 encap-key slice".to_string())
+        })?)
+        .map_err(|e| CryptoError::InvalidPublicKey(format!("ML-KEM-768 decode: {:?}", e)))?;
     let (ct, ss) = ek.encapsulate();
     let mut ss_out = [0u8; ML_KEM_SS_LEN];
     ss_out.copy_from_slice(ss.as_slice());

@@ -90,7 +90,10 @@ impl DisputeListByChannelCmd {
             .context("calling tenzro_listDisputesByChannel")?;
         output::print_field(
             "Channel",
-            result.get("channel_id").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         output::print_field(
             "Count",

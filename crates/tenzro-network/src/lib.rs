@@ -85,45 +85,38 @@ pub mod transport;
 // Re-export commonly used types
 pub use behaviour::{TenzroBehaviour, TenzroNetwork};
 pub use block_sync_proto::{
-    BlockSyncBehaviour, BlockSyncError, BlockSyncRequest, BlockSyncResponse,
-    BLOCK_SYNC_PROTOCOL, MAX_BLOCKS_PER_RANGE, MAX_BLOCK_HASHES_PER_REQUEST,
-    MAX_INBOUND_STREAMS_PER_PEER, MAX_INFLIGHT_REQUESTS_PER_PEER,
+    BLOCK_SYNC_PROTOCOL, BlockSyncBehaviour, BlockSyncError, BlockSyncRequest, BlockSyncResponse,
+    MAX_BLOCK_HASHES_PER_REQUEST, MAX_BLOCKS_PER_RANGE, MAX_INBOUND_STREAMS_PER_PEER,
+    MAX_INFLIGHT_REQUESTS_PER_PEER,
 };
 pub use cluster_tunnel_proto::{
-    ClusterTunnelBehaviour, ClusterTunnelError, ClusterTunnelRequest, ClusterTunnelResponse,
-    TunnelFrame, TunnelFrameKind, CLUSTER_TUNNEL_PROTOCOL, MAX_FRAME_PAYLOAD,
+    CLUSTER_TUNNEL_PROTOCOL, ClusterTunnelBehaviour, ClusterTunnelError, ClusterTunnelRequest,
+    ClusterTunnelResponse, MAX_FRAME_PAYLOAD,
     MAX_INBOUND_STREAMS_PER_PEER as TUNNEL_MAX_INBOUND_STREAMS_PER_PEER,
-    MAX_INFLIGHT_FRAMES_PER_PEER,
+    MAX_INFLIGHT_FRAMES_PER_PEER, TunnelFrame, TunnelFrameKind,
 };
+pub use config::NetworkConfig;
 pub use consensus_direct_proto::{
-    ConsensusDirectBehaviour, ConsensusDirectError, ConsensusDirectRequest,
-    ConsensusDirectResponse, CONSENSUS_DIRECT_PROTOCOL,
+    CONSENSUS_DIRECT_PROTOCOL, ConsensusDirectBehaviour, ConsensusDirectError,
+    ConsensusDirectRequest, ConsensusDirectResponse,
 };
 pub use da_committee_relay::{
-    DaCommitteeBehaviour, DaCommitteeError, DaCommitteeRequest, DaCommitteeResponse,
-    WireMemberAttestation, DA_COMMITTEE_PROTOCOL,
-    MAX_INBOUND_STREAMS_PER_PEER as DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
+    DA_COMMITTEE_PROTOCOL, DaCommitteeBehaviour, DaCommitteeError, DaCommitteeRequest,
+    DaCommitteeResponse, MAX_INBOUND_STREAMS_PER_PEER as DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
     MAX_REQUEST_SIZE as DA_COMMITTEE_MAX_REQUEST_SIZE,
     MAX_RESPONSE_SIZE as DA_COMMITTEE_MAX_RESPONSE_SIZE,
-    REQUEST_TIMEOUT as DA_COMMITTEE_REQUEST_TIMEOUT,
+    REQUEST_TIMEOUT as DA_COMMITTEE_REQUEST_TIMEOUT, WireMemberAttestation,
 };
 pub use db_replicate_proto::{
-    DbReplicateBehaviour, DbReplicateError, DbReplicateRequest, DbReplicateResponse,
-    DB_REPLICATE_PROTOCOL,
-    MAX_INBOUND_STREAMS_PER_PEER as DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
+    DB_REPLICATE_PROTOCOL, DbReplicateBehaviour, DbReplicateError, DbReplicateRequest,
+    DbReplicateResponse, MAX_INBOUND_STREAMS_PER_PEER as DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
     MAX_REQUEST_SIZE as DB_REPLICATE_MAX_REQUEST_SIZE,
     MAX_RESPONSE_SIZE as DB_REPLICATE_MAX_RESPONSE_SIZE,
     REQUEST_TIMEOUT as DB_REPLICATE_REQUEST_TIMEOUT,
 };
-pub use mpc_relay::{
-    session_topic as mpc_session_topic, MpcDidResolver, MpcRelayBehaviour, MpcRelayError,
-    MpcRelayRequest, MpcRelayResponse, MPC_RELAY_GOSSIP_TOPIC_PREFIX, MPC_RELAY_PROTOCOL,
-};
-pub use config::NetworkConfig;
 pub use discovery::{BootstrapConfig, DiscoveryConfig, ProviderType};
 pub use error::{NetworkError, Result};
 pub use gossip::{GossipTopics, MessageDeduplicator, MessageValidation, TopicSubscriptions};
-pub use metrics::NetworkMetrics;
 pub use message::{
     AgentAnnouncementMessage, AttestationMessage, BlobAnnouncementMessage, ConsensusMessage,
     DatabaseAnnouncementMessage, InferenceRequestMessage, InferenceResponseMessage, MessagePayload,
@@ -131,19 +124,26 @@ pub use message::{
     ProviderAnnouncementMessage, ShardReplicationEntry, ShardReplicationMessage, StatusMessage,
     VoteType,
 };
-pub use peer_binding::{
-    binding_payload, encode_agent_binding, parse_agent_binding, verify_peer_binding,
-    AGENT_BINDING_PREFIX, PEER_BINDING_DOMAIN,
+pub use metrics::NetworkMetrics;
+pub use mpc_relay::{
+    MPC_RELAY_GOSSIP_TOPIC_PREFIX, MPC_RELAY_PROTOCOL, MpcDidResolver, MpcRelayBehaviour,
+    MpcRelayError, MpcRelayRequest, MpcRelayResponse, session_topic as mpc_session_topic,
 };
-pub use peer_manager::{BanStore, ManagedPeer, PeerManager, PeerManagerStats, ValidatorRegistry, VALIDATOR_ONLY_TOPICS};
-pub use peer_status::{PeerStatus as PeerChainStatus, PeerStatusTracker, DEFAULT_FRESHNESS};
+pub use peer_binding::{
+    AGENT_BINDING_PREFIX, PEER_BINDING_DOMAIN, binding_payload, encode_agent_binding,
+    parse_agent_binding, verify_peer_binding,
+};
+pub use peer_manager::{
+    BanStore, ManagedPeer, PeerManager, PeerManagerStats, VALIDATOR_ONLY_TOPICS, ValidatorRegistry,
+};
+pub use peer_status::{DEFAULT_FRESHNESS, PeerStatus as PeerChainStatus, PeerStatusTracker};
 pub use reachability::{
-    LocalPeerSet, ReachabilityEvent, ReachabilityTier, ReachabilityTracker, CONFIDENCE_THRESHOLD,
+    CONFIDENCE_THRESHOLD, LocalPeerSet, ReachabilityEvent, ReachabilityTier, ReachabilityTracker,
 };
 pub use service::{
-    load_or_generate_keypair, BlockSyncOutboundError, InboundBlockSync, InboundClusterTunnel,
-    NetworkService, OutboundBlockSyncResult, OutboundClusterTunnelResult, PeerEvent,
-    TenzroNetworkService,
+    BlockSyncOutboundError, InboundBlockSync, InboundClusterTunnel, NetworkService,
+    OutboundBlockSyncResult, OutboundClusterTunnelResult, PeerEvent, TenzroNetworkService,
+    load_or_generate_keypair,
 };
 
 // Re-export libp2p types that are commonly used

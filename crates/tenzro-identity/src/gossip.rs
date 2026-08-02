@@ -35,8 +35,9 @@ pub enum IdentityGossipMessage {
 /// Bincode-encode an [`IdentityGossipMessage::RevocationBroadcast`] payload.
 pub fn encode_revocation_broadcast(signed: &SignedRevocationEntry) -> Result<Vec<u8>> {
     let msg = IdentityGossipMessage::RevocationBroadcast(signed.clone());
-    bincode::serialize(&msg)
-        .map_err(|e| IdentityError::SerializationError(format!("encode RevocationBroadcast: {}", e)))
+    bincode::serialize(&msg).map_err(|e| {
+        IdentityError::SerializationError(format!("encode RevocationBroadcast: {}", e))
+    })
 }
 
 /// Decode an inbound gossip payload and reject any message that does not

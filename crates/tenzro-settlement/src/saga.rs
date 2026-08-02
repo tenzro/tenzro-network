@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -239,7 +239,10 @@ impl DvpSaga {
                 to: next.to_string(),
             });
         }
-        debug!("Saga {} transition {} -> {}", self.saga_id, self.state, next);
+        debug!(
+            "Saga {} transition {} -> {}",
+            self.saga_id, self.state, next
+        );
         self.state = next;
         Ok(())
     }
@@ -314,7 +317,10 @@ impl std::fmt::Debug for SagaOrchestrator {
         f.debug_struct("SagaOrchestrator")
             .field("sagas", &self.sagas.len())
             .field("in_flight", &self.in_flight.len())
-            .field("storage", &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"))
+            .field(
+                "storage",
+                &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"),
+            )
             .finish()
     }
 }
@@ -354,7 +360,11 @@ impl SagaOrchestrator {
     }
 
     fn creator_index_key(addr: &Address) -> Vec<u8> {
-        [SAGA_CREATOR_KEY_PREFIX, hex::encode(addr.as_bytes()).as_bytes()].concat()
+        [
+            SAGA_CREATOR_KEY_PREFIX,
+            hex::encode(addr.as_bytes()).as_bytes(),
+        ]
+        .concat()
     }
 
     fn hydrate(&self) {
@@ -535,7 +545,10 @@ impl SagaOrchestrator {
         for i in 0..saga.legs.len() {
             let leg = saga.legs[i].clone();
             if saga.executed_result(&leg.leg_id).is_some() {
-                debug!("Saga {} leg {} already executed; skipping", saga_id, leg.leg_id);
+                debug!(
+                    "Saga {} leg {} already executed; skipping",
+                    saga_id, leg.leg_id
+                );
                 continue;
             }
 
@@ -698,8 +711,7 @@ impl SagaOrchestrator {
             .iter()
             .filter(|e| {
                 let s = e.value();
-                matches!(s.state, SagaState::Open | SagaState::Executing { .. })
-                    && s.is_expired()
+                matches!(s.state, SagaState::Open | SagaState::Executing { .. }) && s.is_expired()
             })
             .map(|e| e.key().clone())
             .collect();
@@ -918,16 +930,21 @@ mod tests {
         assert_eq!(driven.state, SagaState::Verifying);
         assert_eq!(*exec.executed.lock(), vec!["pay", "deliver"]);
         assert_eq!(driven.leg_results.len(), 2);
-        assert!(driven
-            .leg_results
-            .iter()
-            .all(|r| r.outcome == LegOutcome::Executed && r.receipt.is_some()));
+        assert!(
+            driven
+                .leg_results
+                .iter()
+                .all(|r| r.outcome == LegOutcome::Executed && r.receipt.is_some())
+        );
 
         let finalized = orch.finalize(&saga.saga_id).unwrap();
         assert_eq!(finalized.state, SagaState::Finalized);
 
         // Idempotent finalize + execute on terminal state.
-        assert_eq!(orch.finalize(&saga.saga_id).unwrap().state, SagaState::Finalized);
+        assert_eq!(
+            orch.finalize(&saga.saga_id).unwrap().state,
+            SagaState::Finalized
+        );
         let again = orch.execute(&saga.saga_id, &exec).await.unwrap();
         assert_eq!(again.state, SagaState::Finalized);
         assert_eq!(exec.executed.lock().len(), 2);
@@ -1143,6 +1160,9 @@ mod tests {
         // Mutations after rehydration write through.
         orch2.finalize(&saga_id).unwrap();
         let orch3 = SagaOrchestrator::with_storage(storage);
-        assert_eq!(orch3.get_saga(&saga_id).unwrap().state, SagaState::Finalized);
+        assert_eq!(
+            orch3.get_saga(&saga_id).unwrap().state,
+            SagaState::Finalized
+        );
     }
 }

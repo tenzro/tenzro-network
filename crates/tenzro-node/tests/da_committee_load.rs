@@ -35,13 +35,13 @@ use async_trait::async_trait;
 use tenzro_crypto::keys::{KeyPair, KeyType};
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_node::da_committee::{
-    attestation_message, challenge_message, committee_address, CommitteeMember, CommitteeView,
-    DaCommitteeBackend, DaCommitteeError, DaCommitteeStore, DaCommitteeSurface, MemberAttestation,
-    PossessionProof, StoredSliver,
+    CommitteeMember, CommitteeView, DaCommitteeBackend, DaCommitteeError, DaCommitteeStore,
+    DaCommitteeSurface, MemberAttestation, PossessionProof, StoredSliver, attestation_message,
+    challenge_message, committee_address,
 };
+use tenzro_storage::RocksDbStore;
 use tenzro_storage::da::DaBackend;
 use tenzro_storage::redstuff::{self, CommitteeShape, SliverPair};
-use tenzro_storage::RocksDbStore;
 use tenzro_types::primitives::{Address, Hash};
 
 const MIB: usize = 1024 * 1024;
@@ -135,10 +135,10 @@ impl DaCommitteeSurface for WireMeshSurface {
             bincode::serialize(sliver).map_err(|e| DaCommitteeError::Core(e.to_string()))?;
         let shape_bytes =
             bincode::serialize(&shape).map_err(|e| DaCommitteeError::Core(e.to_string()))?;
-        let shape: CommitteeShape =
-            bincode::deserialize(&shape_bytes).map_err(|e| DaCommitteeError::Core(e.to_string()))?;
-        let sliver: SliverPair =
-            bincode::deserialize(&sliver_bytes).map_err(|e| DaCommitteeError::Core(e.to_string()))?;
+        let shape: CommitteeShape = bincode::deserialize(&shape_bytes)
+            .map_err(|e| DaCommitteeError::Core(e.to_string()))?;
+        let sliver: SliverPair = bincode::deserialize(&sliver_bytes)
+            .map_err(|e| DaCommitteeError::Core(e.to_string()))?;
 
         if !redstuff::verify_sliver(&sliver, shape, blob_len, symbol_len, commitment) {
             return Err(DaCommitteeError::Transport(
@@ -217,7 +217,13 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[idx]
 }
 
-fn report(label: &str, n: usize, blob_bytes: usize, mut latencies: Vec<Duration>, elapsed: Duration) {
+fn report(
+    label: &str,
+    n: usize,
+    blob_bytes: usize,
+    mut latencies: Vec<Duration>,
+    elapsed: Duration,
+) {
     latencies.sort_unstable();
     let count = latencies.len();
     let total_bytes = (count * blob_bytes) as f64;
@@ -254,7 +260,9 @@ async fn run_committee(n: usize, blobs: usize, blob_bytes: usize, fetches: usize
     let mut write_lat = Vec::with_capacity(blobs);
     let write_start = Instant::now();
     for i in 0..blobs {
-        let payload: Vec<u8> = (0..blob_bytes).map(|b| ((b + i * 31) % 251) as u8).collect();
+        let payload: Vec<u8> = (0..blob_bytes)
+            .map(|b| ((b + i * 31) % 251) as u8)
+            .collect();
         let t = Instant::now();
         let pointer = backend
             .submit(b"bench", &payload)

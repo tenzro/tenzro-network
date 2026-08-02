@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tenzro_iroh::{IrohError, IrohResult, JsonRpcDispatcher};
 
-use super::server::{dispatch_jsonrpc, A2aState, JsonRpcRequest, JsonRpcResponse};
+use super::server::{A2aState, JsonRpcRequest, JsonRpcResponse, dispatch_jsonrpc};
 
 /// `JsonRpcDispatcher` impl that decodes the request body as A2A
 /// JSON-RPC 2.0 and delegates to the shared `dispatch_jsonrpc` router.
@@ -50,10 +50,9 @@ impl JsonRpcDispatcher for IrohA2aDispatcher {
         let req: JsonRpcRequest = match serde_json::from_slice(&request) {
             Ok(r) => r,
             Err(e) => {
-                let body = serde_json::to_vec(&JsonRpcResponse::parse_error(format!(
-                    "Parse error: {e}"
-                )))
-                .map_err(|e| IrohError::Backend(format!("encode parse-error: {e}")))?;
+                let body =
+                    serde_json::to_vec(&JsonRpcResponse::parse_error(format!("Parse error: {e}")))
+                        .map_err(|e| IrohError::Backend(format!("encode parse-error: {e}")))?;
                 return Ok(Bytes::from(body));
             }
         };

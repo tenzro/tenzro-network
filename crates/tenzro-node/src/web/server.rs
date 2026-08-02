@@ -1,21 +1,22 @@
-use axum::{Router, routing::{get, post}};
-use tower::limit::ConcurrencyLimitLayer;
-use tower_http::cors::{CorsLayer, Any};
-use tower_http::limit::RequestBodyLimitLayer;
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use std::collections::HashSet;
 use std::sync::Arc;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 
-use tenzro_payments::middleware::{
-    payment_gate_handler, PaymentGateConfig, PaymentGateMiddleware,
-};
+use tenzro_payments::middleware::{PaymentGateConfig, PaymentGateMiddleware, payment_gate_handler};
 
-use crate::error::Result;
 use super::handlers::{self, WebState};
 use super::oauth;
 use super::wallet_frost;
 use super::wallet_mldsa;
 use super::wallet_new;
 use super::wallet_share;
+use crate::error::Result;
 
 /// Configuration for the HTTP 402 payment gate, plus the set of routes
 /// that should be wrapped with the [`payment_gate_handler`] middleware.
@@ -128,8 +129,16 @@ async fn forward_to_serving_node(
     // ingress handler resolves (`/sites/<id><suffix>`), so the serving node
     // does not depend on its own alias/domain tables to identify the site.
     let path = req.uri().path();
-    let suffix = if path == "/" { String::new() } else { path.to_string() };
-    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let suffix = if path == "/" {
+        String::new()
+    } else {
+        path.to_string()
+    };
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
     let forwarded_target = format!("/sites/{site_id}{suffix}{query}");
 
     // Build the raw HTTP/1.1 head. Preserve the caller's headers (Host,
@@ -143,16 +152,17 @@ async fn forward_to_serving_node(
     }
     head.push_str("\r\n");
 
-    let body = match axum::body::to_bytes(req.into_body(), crate::ingress::MAX_FORWARD_BODY_BYTES).await {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-                "request body too large to forward",
-            )
-                .into_response();
-        }
-    };
+    let body =
+        match axum::body::to_bytes(req.into_body(), crate::ingress::MAX_FORWARD_BODY_BYTES).await {
+            Ok(b) => b,
+            Err(_) => {
+                return (
+                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body too large to forward",
+                )
+                    .into_response();
+            }
+        };
 
     for serving_node in remotes {
         match crate::ingress::forward_request(&node, serving_node, head.as_bytes(), &body).await {
@@ -195,8 +205,7 @@ fn is_reserved_path(path: &str) -> bool {
         "/chat",
         "/providers",
     ];
-    RESERVED.iter().any(|p| path.starts_with(p))
-        || RESERVED_EXACT.contains(&path)
+    RESERVED.iter().any(|p| path.starts_with(p)) || RESERVED_EXACT.contains(&path)
 }
 
 pub struct WebServer {
@@ -239,7 +248,28 @@ impl WebServer {
             .allow_methods(Any)
             .allow_headers(Any);
 
-        let app = self.build_app()
+        let mut app = self.build_app();
+
+        // Operator admission gate. Mounted only when the web state carries a
+        // node handle — a `WebServer` built without one (the unit tests) has
+        // no gate to consult and nothing to protect. Inner relative to CORS
+        // so a browser preflight, which cannot carry the service-key header,
+        // is answered before the gate sees it.
+        if let Some(node) = self.state.node.clone() {
+            app = app.layer(axum::middleware::from_fn_with_state(
+                node.admission_gate().clone(),
+                |state, req, next| {
+                    crate::admission::gate_request(
+                        tenzro_auth::ServiceSurface::WebApi,
+                        state,
+                        req,
+                        next,
+                    )
+                },
+            ));
+        }
+
+        let app = app
             // Host-header alias rewrite: an aliased custom hostname is
             // rewritten to its `/sites/<site_id>` path before routing. Inner
             // relative to CORS so preflight is untouched.
@@ -282,11 +312,11 @@ impl WebServer {
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.recv().await;
-                tracing::info!("Web API server shutting down gracefully");
-            })
-            .await?;
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.recv().await;
+            tracing::info!("Web API server shutting down gracefully");
+        })
+        .await?;
 
         Ok(())
     }
@@ -319,10 +349,19 @@ impl WebServer {
         let mut open = Router::new()
             .route("/verify/did-envelope", post(handlers::verify_did_envelope))
             .route("/verify/zk-proof", post(handlers::verify_zk_proof))
-            .route("/verify/tee-attestation", post(handlers::verify_tee_attestation))
+            .route(
+                "/verify/tee-attestation",
+                post(handlers::verify_tee_attestation),
+            )
             .route("/verify/transaction", post(handlers::verify_transaction))
             .route("/verify/settlement", post(handlers::verify_settlement))
             .route("/verify/inference", post(handlers::verify_inference))
+            // W3C DID resolution well-known path. Open, and outside the
+            // service-key gate would be wrong — but it is inside it, because
+            // a gated node's operator has said who may talk to it at all, and
+            // addressing information is a service like any other. A node that
+            // wants to be discoverable simply does not gate.
+            .route("/.well-known/did.json", get(handlers::node_did_document))
             .route("/verify/health", get(handlers::health))
             .route("/health", get(handlers::health))
             .route("/verify/ready", get(handlers::ready))
@@ -533,10 +572,8 @@ impl WebServer {
                 .as_ref()
                 .and_then(|n| n.visa_tap_verifier().cloned());
             if let Some(verifier) = verifier {
-                let tap_state = tenzro_payments::visa_tap::TapFacilitatorState::new(
-                    verifier,
-                    "api.tenzro.xyz",
-                );
+                let tap_state =
+                    tenzro_payments::visa_tap::TapFacilitatorState::new(verifier, "api.tenzro.xyz");
                 let tap_router = tenzro_payments::visa_tap::tap_facilitator_router(tap_state);
                 open.nest("/facilitator/visa-tap", tap_router)
             } else {
@@ -554,10 +591,8 @@ impl WebServer {
                 .as_ref()
                 .and_then(|n| n.x402_facilitator().cloned());
             if let Some(facilitator) = facilitator {
-                let x402_state =
-                    tenzro_payments::x402::FacilitatorServerState::new(facilitator);
-                let x402_router =
-                    tenzro_payments::x402::facilitator_router(x402_state);
+                let x402_state = tenzro_payments::x402::FacilitatorServerState::new(facilitator);
+                let x402_router = tenzro_payments::x402::facilitator_router(x402_state);
                 open.nest("/facilitator/x402", x402_router)
             } else {
                 open
@@ -569,13 +604,17 @@ impl WebServer {
         // same final type (`Router`), which is what axum's merge expects.
         if any_gated {
             // Safe: any_gated implies payment_gate.is_some()
-            let gate = self.payment_gate.as_ref().expect("payment_gate set when any_gated");
-            let gated_with_state = gated.with_state(self.state.clone()).layer(
-                axum::middleware::from_fn_with_state(
-                    gate.middleware.clone(),
-                    payment_gate_handler,
-                ),
-            );
+            let gate = self
+                .payment_gate
+                .as_ref()
+                .expect("payment_gate set when any_gated");
+            let gated_with_state =
+                gated
+                    .with_state(self.state.clone())
+                    .layer(axum::middleware::from_fn_with_state(
+                        gate.middleware.clone(),
+                        payment_gate_handler,
+                    ));
             open.merge(gated_with_state)
         } else {
             open
@@ -586,17 +625,17 @@ impl WebServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use chrono::Utc;
+    use std::collections::HashMap;
     use tenzro_payments::challenge_store::ChallengeStore;
     use tenzro_payments::gateway::TenzroPaymentGateway;
     use tenzro_payments::traits::PaymentProtocol;
     use tenzro_payments::types::{
         PaymentChallenge, PaymentCredential, PaymentReceipt, PaymentVerification,
     };
-    use async_trait::async_trait;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use chrono::Utc;
-    use std::collections::HashMap;
     use tower::ServiceExt;
 
     /// Trivial protocol used to drive the gated-route smoke test.
@@ -689,9 +728,7 @@ mod tests {
 
     fn build_setup() -> PaymentGateSetup {
         let store = ChallengeStore::new();
-        let gateway = Arc::new(
-            TenzroPaymentGateway::new().with_challenge_store(store.clone()),
-        );
+        let gateway = Arc::new(TenzroPaymentGateway::new().with_challenge_store(store.clone()));
         gateway.register_protocol(Arc::new(AlwaysOkProtocol));
 
         let middleware = PaymentGateMiddleware::new(
@@ -712,8 +749,7 @@ mod tests {
     async fn test_unprotected_routes_skip_middleware() {
         // /health is never gated; even when /chat is gated, /health
         // must continue to return 200 without a payment header.
-        let server = WebServer::new("127.0.0.1:0".to_string())
-            .with_payment_gate(build_setup());
+        let server = WebServer::new("127.0.0.1:0".to_string()).with_payment_gate(build_setup());
 
         let app = server.build_app();
         let request = Request::builder()
@@ -726,8 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_paid_route_returns_402_without_credential() {
-        let server = WebServer::new("127.0.0.1:0".to_string())
-            .with_payment_gate(build_setup());
+        let server = WebServer::new("127.0.0.1:0".to_string()).with_payment_gate(build_setup());
 
         let app = server.build_app();
         let request = Request::builder()
@@ -737,10 +772,7 @@ mod tests {
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
-        assert_eq!(
-            response.headers().get("Payment-Required").unwrap(),
-            "true"
-        );
+        assert_eq!(response.headers().get("Payment-Required").unwrap(), "true");
     }
 
     #[tokio::test]

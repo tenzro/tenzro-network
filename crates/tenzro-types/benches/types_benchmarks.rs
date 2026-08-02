@@ -1,8 +1,8 @@
 //! Criterion benches for tenzro-types hot paths. Bounds are pinned in
 //! `tools/bench-gate/thresholds.toml`.
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use tenzro_types::intent_7683::{compute_order_id, CrossChainOrder};
+use criterion::{Criterion, criterion_group, criterion_main};
+use tenzro_types::intent_7683::{CrossChainOrder, compute_order_id};
 use tenzro_types::primitives::{Address, Hash};
 
 /// ERC-7683 `compute_order_id` over a canonical preimage. Bound is

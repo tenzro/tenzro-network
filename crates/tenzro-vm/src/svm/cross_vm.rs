@@ -114,10 +114,8 @@ use sha2::{Digest, Sha256};
 /// Hex: `5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695`
 /// Base58: `7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC`
 pub const TENZRO_CROSS_VM_PROGRAM_ID: [u8; 32] = [
-    0x5c, 0x03, 0xdd, 0x6c, 0xf5, 0x80, 0xec, 0xaf,
-    0xb5, 0xca, 0x11, 0xa9, 0xe1, 0xd6, 0x44, 0x81,
-    0x76, 0xbb, 0x1d, 0xfa, 0x9d, 0x48, 0x86, 0xc6,
-    0x5d, 0x90, 0x24, 0xdf, 0x77, 0x54, 0x26, 0x95,
+    0x5c, 0x03, 0xdd, 0x6c, 0xf5, 0x80, 0xec, 0xaf, 0xb5, 0xca, 0x11, 0xa9, 0xe1, 0xd6, 0x44, 0x81,
+    0x76, 0xbb, 0x1d, 0xfa, 0x9d, 0x48, 0x86, 0xc6, 0x5d, 0x90, 0x24, 0xdf, 0x77, 0x54, 0x26, 0x95,
 ];
 
 /// Domain string used to derive [`TENZRO_CROSS_VM_PROGRAM_ID`].
@@ -195,7 +193,7 @@ pub enum CrossVmDecodeError {
     #[error("instruction data too short: need at least 8 bytes for discriminator, got {0}")]
     MissingDiscriminator(usize),
 
-    #[error("unknown discriminator: {0}", )]
+    #[error("unknown discriminator: {0}")]
     UnknownDiscriminator(String),
 
     #[error("payload size mismatch for {instruction}: expected {expected}, got {actual}")]
@@ -236,7 +234,12 @@ impl CrossVmInstruction {
                 evm_dest.copy_from_slice(&payload[32..52]);
                 let amount = u64::from_le_bytes(payload[52..60].try_into().unwrap());
                 let nonce = u64::from_le_bytes(payload[60..68].try_into().unwrap());
-                Ok(Self::BridgeToEvm { mint, evm_dest, amount, nonce })
+                Ok(Self::BridgeToEvm {
+                    mint,
+                    evm_dest,
+                    amount,
+                    nonce,
+                })
             }
             d if d == discriminators::BRIDGE_FROM_EVM => {
                 if payload.len() != BRIDGE_FROM_EVM_PAYLOAD_SIZE {
@@ -252,7 +255,12 @@ impl CrossVmInstruction {
                 svm_dest.copy_from_slice(&payload[32..64]);
                 let amount = u64::from_le_bytes(payload[64..72].try_into().unwrap());
                 let nonce = u64::from_le_bytes(payload[72..80].try_into().unwrap());
-                Ok(Self::BridgeFromEvm { mint, svm_dest, amount, nonce })
+                Ok(Self::BridgeFromEvm {
+                    mint,
+                    svm_dest,
+                    amount,
+                    nonce,
+                })
             }
             d if d == discriminators::REGISTER_TOKEN_POINTER => {
                 if payload.len() != REGISTER_TOKEN_POINTER_PAYLOAD_SIZE {
@@ -268,7 +276,11 @@ impl CrossVmInstruction {
                 evm_token_address.copy_from_slice(&payload[32..52]);
                 let mut token_id = [0u8; 32];
                 token_id.copy_from_slice(&payload[52..84]);
-                Ok(Self::RegisterTokenPointer { mint, evm_token_address, token_id })
+                Ok(Self::RegisterTokenPointer {
+                    mint,
+                    evm_token_address,
+                    token_id,
+                })
             }
             d if d == discriminators::TRANSFER_CROSS_VM => {
                 if payload.len() != TRANSFER_CROSS_VM_PAYLOAD_SIZE {
@@ -288,7 +300,13 @@ impl CrossVmInstruction {
                 dest_address.copy_from_slice(&payload[33..65]);
                 let amount = u64::from_le_bytes(payload[65..73].try_into().unwrap());
                 let nonce = u64::from_le_bytes(payload[73..81].try_into().unwrap());
-                Ok(Self::TransferCrossVm { mint, dest_vm, dest_address, amount, nonce })
+                Ok(Self::TransferCrossVm {
+                    mint,
+                    dest_vm,
+                    dest_address,
+                    amount,
+                    nonce,
+                })
             }
             _ => Err(CrossVmDecodeError::UnknownDiscriminator(hex::encode(disc))),
         }
@@ -297,7 +315,12 @@ impl CrossVmInstruction {
     /// Encode this instruction as raw instruction-data bytes (discriminator + payload).
     pub fn encode(&self) -> Vec<u8> {
         match self {
-            Self::BridgeToEvm { mint, evm_dest, amount, nonce } => {
+            Self::BridgeToEvm {
+                mint,
+                evm_dest,
+                amount,
+                nonce,
+            } => {
                 let mut out = Vec::with_capacity(8 + BRIDGE_TO_EVM_PAYLOAD_SIZE);
                 out.extend_from_slice(&discriminators::BRIDGE_TO_EVM);
                 out.extend_from_slice(mint);
@@ -306,7 +329,12 @@ impl CrossVmInstruction {
                 out.extend_from_slice(&nonce.to_le_bytes());
                 out
             }
-            Self::BridgeFromEvm { mint, svm_dest, amount, nonce } => {
+            Self::BridgeFromEvm {
+                mint,
+                svm_dest,
+                amount,
+                nonce,
+            } => {
                 let mut out = Vec::with_capacity(8 + BRIDGE_FROM_EVM_PAYLOAD_SIZE);
                 out.extend_from_slice(&discriminators::BRIDGE_FROM_EVM);
                 out.extend_from_slice(mint);
@@ -315,7 +343,11 @@ impl CrossVmInstruction {
                 out.extend_from_slice(&nonce.to_le_bytes());
                 out
             }
-            Self::RegisterTokenPointer { mint, evm_token_address, token_id } => {
+            Self::RegisterTokenPointer {
+                mint,
+                evm_token_address,
+                token_id,
+            } => {
                 let mut out = Vec::with_capacity(8 + REGISTER_TOKEN_POINTER_PAYLOAD_SIZE);
                 out.extend_from_slice(&discriminators::REGISTER_TOKEN_POINTER);
                 out.extend_from_slice(mint);
@@ -323,7 +355,13 @@ impl CrossVmInstruction {
                 out.extend_from_slice(token_id);
                 out
             }
-            Self::TransferCrossVm { mint, dest_vm, dest_address, amount, nonce } => {
+            Self::TransferCrossVm {
+                mint,
+                dest_vm,
+                dest_address,
+                amount,
+                nonce,
+            } => {
                 let mut out = Vec::with_capacity(8 + TRANSFER_CROSS_VM_PAYLOAD_SIZE);
                 out.extend_from_slice(&discriminators::TRANSFER_CROSS_VM);
                 out.extend_from_slice(mint);
@@ -478,7 +516,7 @@ mod tests {
     fn rejects_invalid_dest_vm() {
         let mut data = discriminators::TRANSFER_CROSS_VM.to_vec();
         data.extend_from_slice(&[0u8; 32]); // mint
-        data.push(99);                       // bogus dest_vm
+        data.push(99); // bogus dest_vm
         data.extend_from_slice(&[0u8; 32]); // dest_addr
         data.extend_from_slice(&0u64.to_le_bytes()); // amount
         data.extend_from_slice(&0u64.to_le_bytes()); // nonce

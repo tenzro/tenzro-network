@@ -13,8 +13,8 @@ use crate::tnzo::TnzoToken;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tenzro_types::primitives::Address;
 use tracing::{debug, info};
 
@@ -227,10 +227,7 @@ impl CrosschainTokenManager {
                 Ok(())
             }
             None => Err(TokenError::Unauthorized {
-                reason: format!(
-                    "Bridge 0x{} is not authorized",
-                    hex::encode(bridge_address)
-                ),
+                reason: format!("Bridge 0x{} is not authorized", hex::encode(bridge_address)),
             }),
         }
     }
@@ -248,10 +245,7 @@ impl CrosschainTokenManager {
             .authorized_bridges
             .get_mut(bridge_address)
             .ok_or_else(|| TokenError::Unauthorized {
-                reason: format!(
-                    "Bridge 0x{} is not authorized",
-                    hex::encode(bridge_address)
-                ),
+                reason: format!("Bridge 0x{} is not authorized", hex::encode(bridge_address)),
             })?;
 
         let auth = entry.value_mut();
@@ -282,11 +276,7 @@ impl CrosschainTokenManager {
             BridgeInfo {
                 bridge_address: format!("0x{}", hex::encode(auth.bridge_address)),
                 name: auth.name.clone(),
-                authorized_tokens: auth
-                    .authorized_tokens
-                    .iter()
-                    .map(|t| t.to_hex())
-                    .collect(),
+                authorized_tokens: auth.authorized_tokens.iter().map(|t| t.to_hex()).collect(),
                 max_mint_per_tx: auth.max_mint_per_tx,
                 max_burn_per_tx: auth.max_burn_per_tx,
                 daily_mint_limit: auth.daily_mint_limit,
@@ -329,11 +319,7 @@ impl CrosschainTokenManager {
                 BridgeInfo {
                     bridge_address: format!("0x{}", hex::encode(auth.bridge_address)),
                     name: auth.name.clone(),
-                    authorized_tokens: auth
-                        .authorized_tokens
-                        .iter()
-                        .map(|t| t.to_hex())
-                        .collect(),
+                    authorized_tokens: auth.authorized_tokens.iter().map(|t| t.to_hex()).collect(),
                     max_mint_per_tx: auth.max_mint_per_tx,
                     max_burn_per_tx: auth.max_burn_per_tx,
                     daily_mint_limit: auth.daily_mint_limit,
@@ -356,24 +342,17 @@ impl CrosschainTokenManager {
         amount: u128,
         is_mint: bool,
     ) -> Result<()> {
-        let entry =
-            self.authorized_bridges
-                .get(bridge_address)
-                .ok_or_else(|| TokenError::Unauthorized {
-                    reason: format!(
-                        "Bridge 0x{} is not authorized",
-                        hex::encode(bridge_address)
-                    ),
-                })?;
+        let entry = self.authorized_bridges.get(bridge_address).ok_or_else(|| {
+            TokenError::Unauthorized {
+                reason: format!("Bridge 0x{} is not authorized", hex::encode(bridge_address)),
+            }
+        })?;
 
         let auth = entry.value();
 
         if !auth.enabled {
             return Err(TokenError::Unauthorized {
-                reason: format!(
-                    "Bridge 0x{} is disabled",
-                    hex::encode(bridge_address)
-                ),
+                reason: format!("Bridge 0x{} is disabled", hex::encode(bridge_address)),
             });
         }
 
@@ -459,12 +438,12 @@ impl CrosschainTokenManager {
         self.validate_bridge(&bridge, amount, true)?;
 
         // 2. Mint tokens via TnzoToken. The caller must be the treasury.
-        let treasury = self
-            .tnzo_token
-            .treasury_address_ref()
-            .ok_or_else(|| TokenError::Unauthorized {
-                reason: "Treasury address not set; cannot mint cross-chain tokens".to_string(),
-            })?;
+        let treasury =
+            self.tnzo_token
+                .treasury_address_ref()
+                .ok_or_else(|| TokenError::Unauthorized {
+                    reason: "Treasury address not set; cannot mint cross-chain tokens".to_string(),
+                })?;
 
         self.tnzo_token.mint(&to, amount, &treasury)?;
 
@@ -554,22 +533,16 @@ impl CrosschainTokenManager {
 
     /// Returns all recorded mint events, newest first.
     pub fn get_mint_events(&self) -> Vec<CrosschainMintEvent> {
-        let mut events: Vec<CrosschainMintEvent> = self
-            .mint_events
-            .iter()
-            .map(|e| e.value().clone())
-            .collect();
+        let mut events: Vec<CrosschainMintEvent> =
+            self.mint_events.iter().map(|e| e.value().clone()).collect();
         events.sort_by_key(|e| Reverse(e.nonce));
         events
     }
 
     /// Returns all recorded burn events, newest first.
     pub fn get_burn_events(&self) -> Vec<CrosschainBurnEvent> {
-        let mut events: Vec<CrosschainBurnEvent> = self
-            .burn_events
-            .iter()
-            .map(|e| e.value().clone())
-            .collect();
+        let mut events: Vec<CrosschainBurnEvent> =
+            self.burn_events.iter().map(|e| e.value().clone()).collect();
         events.sort_by_key(|e| Reverse(e.nonce));
         events
     }
@@ -719,10 +692,7 @@ mod tests {
 
         assert_eq!(event.amount, 500 * ONE_TNZO);
         assert_eq!(event.from, from);
-        assert_eq!(
-            mgr.tnzo_token.balance_of(&from),
-            999_500 * ONE_TNZO
-        );
+        assert_eq!(mgr.tnzo_token.balance_of(&from), 999_500 * ONE_TNZO);
     }
 
     #[test]

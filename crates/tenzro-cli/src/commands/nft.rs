@@ -2,9 +2,9 @@
 //!
 //! Create collections, mint, transfer, and query NFTs across VMs on the Tenzro Ledger.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// NFT management commands
 #[derive(Debug, Subcommand)]
@@ -73,21 +73,47 @@ impl NftCreateCollectionCmd {
         let spinner = output::create_spinner("Creating collection...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_createNftCollection", serde_json::json!({
-            "name": self.name,
-            "symbol": self.symbol,
-            "creator": self.creator,
-            "standard": self.standard,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createNftCollection",
+                serde_json::json!({
+                    "name": self.name,
+                    "symbol": self.symbol,
+                    "creator": self.creator,
+                    "standard": self.standard,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("NFT collection created successfully!");
-        output::print_field("Collection ID", result.get("collection_id").and_then(|v| v.as_str()).unwrap_or("unknown"));
-        output::print_field("Name", result.get("name").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Symbol", result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Standard", result.get("standard").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Creator", result.get("creator").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Collection ID",
+            result
+                .get("collection_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
+        output::print_field(
+            "Name",
+            result.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Symbol",
+            result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Standard",
+            result
+                .get("standard")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Creator",
+            result.get("creator").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -121,20 +147,44 @@ impl NftMintCmd {
         let spinner = output::create_spinner("Minting NFT...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_mintNft", serde_json::json!({
-            "collection": self.collection,
-            "to": self.to,
-            "token_id": self.token_id,
-            "uri": self.uri,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_mintNft",
+                serde_json::json!({
+                    "collection": self.collection,
+                    "to": self.to,
+                    "token_id": self.token_id,
+                    "uri": self.uri,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("NFT minted successfully!");
-        output::print_field("Collection", result.get("collection").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Token ID", &result.get("token_id").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Owner", result.get("owner").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("URI", result.get("uri").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Collection",
+            result
+                .get("collection")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Token ID",
+            &result
+                .get("token_id")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Owner",
+            result.get("owner").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "URI",
+            result.get("uri").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -164,7 +214,8 @@ impl NftMintBatchCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
 
-        let token_ids: Vec<u64> = self.token_ids
+        let token_ids: Vec<u64> = self
+            .token_ids
             .split(',')
             .map(|s| s.trim().parse::<u64>())
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -172,23 +223,35 @@ impl NftMintBatchCmd {
         let uris: Vec<&str> = self.uris.split(',').map(|s| s.trim()).collect();
 
         if token_ids.len() != uris.len() {
-            anyhow::bail!("Number of token IDs ({}) must match number of URIs ({})", token_ids.len(), uris.len());
+            anyhow::bail!(
+                "Number of token IDs ({}) must match number of URIs ({})",
+                token_ids.len(),
+                uris.len()
+            );
         }
 
         output::print_header("Mint NFT Batch");
         let spinner = output::create_spinner(&format!("Minting {} NFTs...", token_ids.len()));
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_mintNftBatch", serde_json::json!({
-            "collection": self.collection,
-            "to": self.to,
-            "token_ids": token_ids,
-            "uris": uris,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_mintNftBatch",
+                serde_json::json!({
+                    "collection": self.collection,
+                    "to": self.to,
+                    "token_ids": token_ids,
+                    "uris": uris,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(token_ids.len() as u64);
+        let count = result
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(token_ids.len() as u64);
         output::print_success(&format!("{} NFTs minted successfully!", count));
 
         Ok(())
@@ -223,20 +286,41 @@ impl NftTransferCmd {
         let spinner = output::create_spinner("Transferring NFT...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_transferNft", serde_json::json!({
-            "collection": self.collection,
-            "from": self.from,
-            "to": self.to,
-            "token_id": self.token_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_transferNft",
+                serde_json::json!({
+                    "collection": self.collection,
+                    "from": self.from,
+                    "to": self.to,
+                    "token_id": self.token_id,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("NFT transferred successfully!");
-        output::print_field("From", result.get("from").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("To", result.get("to").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Token ID", &result.get("token_id").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "From",
+            result.get("from").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "To",
+            result.get("to").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Token ID",
+            &result
+                .get("token_id")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Status",
+            result.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -264,14 +348,25 @@ impl NftOwnerCmd {
         let spinner = output::create_spinner("Querying owner...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_nftOwnerOf", serde_json::json!({
-            "collection": self.collection,
-            "token_id": self.token_id,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_nftOwnerOf",
+                serde_json::json!({
+                    "collection": self.collection,
+                    "token_id": self.token_id,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        output::print_field("Owner", result.get("owner").and_then(|v| v.as_str()).unwrap_or("unknown"));
+        output::print_field(
+            "Owner",
+            result
+                .get("owner")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
 
         Ok(())
     }
@@ -299,15 +394,27 @@ impl NftBalanceCmd {
         let spinner = output::create_spinner("Querying balance...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_nftBalanceOf", serde_json::json!({
-            "collection": self.collection,
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_nftBalanceOf",
+                serde_json::json!({
+                    "collection": self.collection,
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_field("Address", &self.address);
-        output::print_field("Balance", &result.get("balance").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
+        output::print_field(
+            "Balance",
+            &result
+                .get("balance")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
 
         Ok(())
     }
@@ -332,18 +439,51 @@ impl NftInfoCmd {
         let spinner = output::create_spinner("Querying collection...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getNftCollection", serde_json::json!({
-            "collection": self.collection,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getNftCollection",
+                serde_json::json!({
+                    "collection": self.collection,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        output::print_field("Collection ID", result.get("collection_id").and_then(|v| v.as_str()).unwrap_or("unknown"));
-        output::print_field("Name", result.get("name").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Symbol", result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Total Supply", &result.get("total_supply").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Standard", result.get("standard").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Creator", result.get("creator").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Collection ID",
+            result
+                .get("collection_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        );
+        output::print_field(
+            "Name",
+            result.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Symbol",
+            result.get("symbol").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Total Supply",
+            &result
+                .get("total_supply")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Standard",
+            result
+                .get("standard")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Creator",
+            result.get("creator").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -368,9 +508,14 @@ impl NftListCmd {
         let spinner = output::create_spinner("Loading collections...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_listNftCollections", serde_json::json!({
-            "limit": self.limit,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_listNftCollections",
+                serde_json::json!({
+                    "limit": self.limit,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -381,7 +526,10 @@ impl NftListCmd {
                 let headers = vec!["Collection ID", "Name", "Symbol", "Supply", "Standard"];
                 let mut rows = Vec::new();
                 for c in collections {
-                    let id = c.get("collection_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let id = c
+                        .get("collection_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let truncated_id = if id.len() > 16 {
                         format!("{}...", &id[..16])
                     } else {
@@ -389,10 +537,22 @@ impl NftListCmd {
                     };
                     rows.push(vec![
                         truncated_id,
-                        c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        c.get("symbol").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        c.get("total_supply").and_then(|v| v.as_u64()).map(|v| v.to_string()).unwrap_or_default(),
-                        c.get("standard").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        c.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        c.get("symbol")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        c.get("total_supply")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                        c.get("standard")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
@@ -428,19 +588,42 @@ impl NftRegisterPointerCmd {
         let spinner = output::create_spinner("Registering pointer...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_registerNftPointer", serde_json::json!({
-            "collection": self.collection,
-            "vm": self.vm,
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_registerNftPointer",
+                serde_json::json!({
+                    "collection": self.collection,
+                    "vm": self.vm,
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("NFT pointer registered successfully!");
-        output::print_field("Collection", result.get("collection").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("VM", result.get("vm").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Pointer Address", result.get("pointer_address").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Collection",
+            result
+                .get("collection")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "VM",
+            result.get("vm").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Pointer Address",
+            result
+                .get("pointer_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+        output::print_field(
+            "Status",
+            result.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }

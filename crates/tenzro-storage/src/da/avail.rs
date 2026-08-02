@@ -55,8 +55,8 @@
 //! Celestia and EigenDA backends.
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -165,18 +165,17 @@ fn encode_locator(block_number: u64, index: u32) -> Vec<u8> {
 
 /// Inverse of [`encode_locator`].
 fn decode_locator(locator: &[u8]) -> Result<(u64, u32)> {
-    let s = std::str::from_utf8(locator).map_err(|e| {
-        StorageError::InvalidValue(format!("Avail locator not valid UTF-8: {e}"))
-    })?;
+    let s = std::str::from_utf8(locator)
+        .map_err(|e| StorageError::InvalidValue(format!("Avail locator not valid UTF-8: {e}")))?;
     let (n_str, i_str) = s.split_once(':').ok_or_else(|| {
         StorageError::InvalidValue(format!("Avail locator missing ':' separator: {s}"))
     })?;
     let block_number = n_str.parse::<u64>().map_err(|e| {
         StorageError::InvalidValue(format!("Avail locator block_number invalid: {e}"))
     })?;
-    let index = i_str.parse::<u32>().map_err(|e| {
-        StorageError::InvalidValue(format!("Avail locator index invalid: {e}"))
-    })?;
+    let index = i_str
+        .parse::<u32>()
+        .map_err(|e| StorageError::InvalidValue(format!("Avail locator index invalid: {e}")))?;
     Ok((block_number, index))
 }
 
@@ -184,9 +183,8 @@ fn decode_locator(locator: &[u8]) -> Result<(u64, u32)> {
 /// translating Avail's `hash` and `block_hash` strings.
 fn decode_hex_opt(s: &str) -> Result<Vec<u8>> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
-    hex::decode(stripped).map_err(|e| {
-        StorageError::InvalidValue(format!("Avail hex value invalid: {e}"))
-    })
+    hex::decode(stripped)
+        .map_err(|e| StorageError::InvalidValue(format!("Avail hex value invalid: {e}")))
 }
 
 /// Coerce a hex string into a 32-byte `Hash`. Returns `None` if the string
@@ -271,7 +269,9 @@ impl DaBackend for AvailBackend {
             .send()
             .await
             .map_err(|e| {
-                StorageError::Generic(format!("Avail GET /v2/blocks/{block_number}/data failed: {e}"))
+                StorageError::Generic(format!(
+                    "Avail GET /v2/blocks/{block_number}/data failed: {e}"
+                ))
             })?;
         let status = resp.status();
         if !status.is_success() {
@@ -431,9 +431,6 @@ mod tests {
         let fetched = backend.fetch(&pointer).await.expect("fetch");
         assert_eq!(fetched, payload);
         assert_eq!(compute_commitment(&fetched), sha);
-        backend
-            .verify_availability(&pointer)
-            .await
-            .expect("verify");
+        backend.verify_availability(&pointer).await.expect("verify");
     }
 }

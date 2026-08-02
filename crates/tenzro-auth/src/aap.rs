@@ -418,10 +418,14 @@ mod tests {
     #[test]
     fn delegation_child_increments_and_appends() {
         let root = AapDelegationClaim::root("did:tenzro:human:abc", 3);
-        let child = AapDelegationClaim::child(&root, "did:tenzro:machine:def", "parent-jti-1").unwrap();
+        let child =
+            AapDelegationClaim::child(&root, "did:tenzro:machine:def", "parent-jti-1").unwrap();
         assert_eq!(child.depth, 1);
         assert_eq!(child.max_depth, 3);
-        assert_eq!(child.chain, vec!["did:tenzro:human:abc", "did:tenzro:machine:def"]);
+        assert_eq!(
+            child.chain,
+            vec!["did:tenzro:human:abc", "did:tenzro:machine:def"]
+        );
         assert_eq!(child.parent_jti.as_deref(), Some("parent-jti-1"));
     }
 
@@ -436,7 +440,7 @@ mod tests {
 
     #[test]
     fn rar_to_aap_action_covers_all_variants() {
-        use tenzro_types::{AssetId, Address};
+        use tenzro_types::{Address, AssetId};
         // Smoke test — instantiate every variant and check mapping.
         let asset = AssetId::tnzo();
         let addr = Address::new([0u8; 32]);

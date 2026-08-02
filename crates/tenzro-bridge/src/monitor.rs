@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 /// Event emitted when a transfer status changes
@@ -185,9 +185,7 @@ impl TransferMonitor {
 
     /// Returns the current status of a monitored transfer
     pub fn get_status(&self, transfer_id: &str) -> Option<TransferStatus> {
-        self.transfers
-            .get(transfer_id)
-            .map(|t| t.current_status)
+        self.transfers.get(transfer_id).map(|t| t.current_status)
     }
 
     /// Returns the number of actively monitored transfers
@@ -326,10 +324,7 @@ impl TransferMonitor {
                     }
                 }
                 Err(e) => {
-                    debug!(
-                        "Monitor: Failed to get status for {}: {}",
-                        transfer_id, e
-                    );
+                    debug!("Monitor: Failed to get status for {}: {}", transfer_id, e);
 
                     // Increment failure count
                     if let Some(mut entry) = transfers.get_mut(transfer_id) {
@@ -392,10 +387,7 @@ mod tests {
             .await;
 
         assert_eq!(monitor.active_transfer_count(), 1);
-        assert_eq!(
-            monitor.get_status("tx-123"),
-            Some(TransferStatus::Pending)
-        );
+        assert_eq!(monitor.get_status("tx-123"), Some(TransferStatus::Pending));
     }
 
     #[tokio::test]
@@ -434,16 +426,9 @@ mod tests {
         // registered for status queries.
         let transfer_id = "lz-oft-ethereum-arbitrum-test-1";
 
+        monitor.register_adapter("layerzero", lz_adapter).await;
         monitor
-            .register_adapter("layerzero", lz_adapter)
-            .await;
-        monitor
-            .track_transfer(
-                transfer_id,
-                "layerzero",
-                "ethereum",
-                "arbitrum",
-            )
+            .track_transfer(transfer_id, "layerzero", "ethereum", "arbitrum")
             .await;
 
         assert_eq!(monitor.active_transfer_count(), 1);

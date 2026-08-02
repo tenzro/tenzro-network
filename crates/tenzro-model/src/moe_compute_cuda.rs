@@ -20,8 +20,8 @@
 use ndarray::{Array2, ArrayView2};
 use parking_lot::Mutex;
 
-use cudarc::cublas::{CudaBlas, Gemm, GemmConfig};
 use cudarc::cublas::sys::cublasOperation_t;
+use cudarc::cublas::{CudaBlas, Gemm, GemmConfig};
 use cudarc::driver::CudaDevice;
 
 use crate::moe_compute::{ExpertCompute, Weight};

@@ -422,7 +422,14 @@ mod tests {
         let g5 = arr1(&[100.0_f32, 100.0]);
         let agg = KrumAggregator { f: 1 };
         let out = agg
-            .aggregate(&[g0.view(), g1.view(), g2.view(), g3.view(), g4.view(), g5.view()])
+            .aggregate(&[
+                g0.view(),
+                g1.view(),
+                g2.view(),
+                g3.view(),
+                g4.view(),
+                g5.view(),
+            ])
             .expect("krum ok");
         // Picked gradient must be within the honest cluster.
         assert!(out[0].abs() < 1.0 && out[1].abs() < 1.0);

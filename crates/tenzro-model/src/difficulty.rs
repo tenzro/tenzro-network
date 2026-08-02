@@ -197,7 +197,9 @@ impl ClusterMapState {
         }
 
         match self.assign(embedding) {
-            Some((idx, sim)) if sim >= self.split_threshold || self.centroids.len() >= self.capacity => {
+            Some((idx, sim))
+                if sim >= self.split_threshold || self.centroids.len() >= self.capacity =>
+            {
                 let i = idx as usize;
                 let n = self.counts[i];
                 let centroid = &mut self.centroids[i];
@@ -465,11 +467,7 @@ impl DifficultyIndex {
                 .models
                 .entry(model_id.to_string())
                 .or_insert_with(|| ModelClusterStats::new(model_id));
-            entry
-                .clusters
-                .entry(cluster)
-                .or_default()
-                .record(outcome);
+            entry.clusters.entry(cluster).or_default().record(outcome);
             entry.value().clone()
         };
         debug!(
@@ -563,8 +561,12 @@ mod tests {
     fn escalations_raise_expected_error_above_resolutions() {
         let index = DifficultyIndex::new(4);
         for _ in 0..20 {
-            index.record_outcome("weak", 0, RouteOutcome::Escalated).unwrap();
-            index.record_outcome("strong", 0, RouteOutcome::Resolved).unwrap();
+            index
+                .record_outcome("weak", 0, RouteOutcome::Escalated)
+                .unwrap();
+            index
+                .record_outcome("strong", 0, RouteOutcome::Resolved)
+                .unwrap();
         }
         assert!(index.has_observations(0));
         assert!(index.expected_error("weak", 0) > index.expected_error("strong", 0));
@@ -574,7 +576,9 @@ mod tests {
     fn cold_model_keeps_optimism_bonus() {
         let index = DifficultyIndex::new(4);
         for _ in 0..50 {
-            index.record_outcome("known", 0, RouteOutcome::Resolved).unwrap();
+            index
+                .record_outcome("known", 0, RouteOutcome::Resolved)
+                .unwrap();
         }
         // A model with no data on this cluster sits at the prior minus the
         // uncertainty bonus, so it stays reachable rather than being frozen out.
@@ -600,7 +604,9 @@ mod tests {
             index.observe_prompt(&vec3(1.0, 0.0, 0.0)).unwrap();
             index.observe_prompt(&vec3(0.0, 1.0, 0.0)).unwrap();
             for _ in 0..5 {
-                index.record_outcome("m", 1, RouteOutcome::Escalated).unwrap();
+                index
+                    .record_outcome("m", 1, RouteOutcome::Escalated)
+                    .unwrap();
             }
         }
         let reloaded = DifficultyIndex::with_storage(4, store).unwrap();
@@ -614,7 +620,10 @@ mod tests {
     #[test]
     fn outcome_parses_aliases() {
         assert_eq!(RouteOutcome::parse("OK"), Some(RouteOutcome::Resolved));
-        assert_eq!(RouteOutcome::parse("retried"), Some(RouteOutcome::Escalated));
+        assert_eq!(
+            RouteOutcome::parse("retried"),
+            Some(RouteOutcome::Escalated)
+        );
         assert_eq!(RouteOutcome::parse("error"), Some(RouteOutcome::Failed));
         assert_eq!(RouteOutcome::parse("maybe"), None);
         assert_eq!(RouteOutcome::Escalated.as_str(), "escalated");

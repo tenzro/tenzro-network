@@ -177,7 +177,10 @@ impl PrincipalChain {
         bond: Option<u128>,
         block: impl Into<BlockHeight>,
     ) -> Self {
-        debug_assert!(!chain.is_empty(), "use PrincipalChain::direct for empty chain");
+        debug_assert!(
+            !chain.is_empty(),
+            "use PrincipalChain::direct for empty chain"
+        );
         debug_assert!(
             chain.len() <= MAX_DELEGATION_DEPTH as usize,
             "chain exceeds MAX_DELEGATION_DEPTH"
@@ -337,11 +340,8 @@ pub trait PrincipalChainResolver: Send + Sync {
     /// When no DID is bound to the address, return a synthetic
     /// "anonymous" chain rooted at a tombstoned link with the address
     /// hex-encoded as the DID.
-    fn resolve_by_address(
-        &self,
-        address: &Address,
-        frozen_at_block: BlockHeight,
-    ) -> PrincipalChain;
+    fn resolve_by_address(&self, address: &Address, frozen_at_block: BlockHeight)
+    -> PrincipalChain;
 }
 
 /// Synthetic-DID prefix used by the default resolver when an address has
@@ -355,14 +355,12 @@ pub fn anonymous_chain_for_address(
     address: &Address,
     frozen_at_block: impl Into<BlockHeight>,
 ) -> PrincipalChain {
-    let did = format!("{}{}", ANONYMOUS_DID_PREFIX, hex::encode(address.as_bytes()));
-    let mut pc = PrincipalChain::direct(
-        did,
-        IdentityType::Machine,
-        0,
-        None,
-        frozen_at_block,
+    let did = format!(
+        "{}{}",
+        ANONYMOUS_DID_PREFIX,
+        hex::encode(address.as_bytes())
     );
+    let mut pc = PrincipalChain::direct(did, IdentityType::Machine, 0, None, frozen_at_block);
     pc.controller.tombstone = true;
     pc
 }
@@ -376,13 +374,7 @@ pub fn anonymous_chain_for_did(
     did: impl Into<String>,
     frozen_at_block: impl Into<BlockHeight>,
 ) -> PrincipalChain {
-    let mut pc = PrincipalChain::direct(
-        did,
-        IdentityType::Machine,
-        0,
-        None,
-        frozen_at_block,
-    );
+    let mut pc = PrincipalChain::direct(did, IdentityType::Machine, 0, None, frozen_at_block);
     pc.controller.tombstone = true;
     pc
 }
@@ -460,13 +452,7 @@ mod tests {
                 PrincipalRole::DelegatedAgent,
             ),
         ];
-        let pc = PrincipalChain::from_chain(
-            "did:tenzro:machine:actor:uuid",
-            chain,
-            2,
-            None,
-            1,
-        );
+        let pc = PrincipalChain::from_chain("did:tenzro:machine:actor:uuid", chain, 2, None, 1);
         assert!(pc.has_tombstone());
     }
 
@@ -518,5 +504,4 @@ mod tests {
         assert_eq!(s.actor_bond, pc.actor_bond);
         assert_eq!(s.controller_bond_aggregate, pc.controller_bond_aggregate);
     }
-
 }

@@ -21,7 +21,7 @@ use tenzro_consensus::validator::ValidatorInfo;
 use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
 use tenzro_crypto::{KeyPair, KeyType, PublicKey};
 use tenzro_token::validator_registry::{
-    ValidatorRegistry, ValidatorRegistryStatus, DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+    DEFAULT_MIN_VALIDATOR_SELF_STAKE, ValidatorRegistry, ValidatorRegistryStatus,
 };
 use tenzro_types::primitives::Address;
 
@@ -32,11 +32,7 @@ use tenzro_types::primitives::Address;
 /// EpochManager's pending queues. The EpochManager's own `transition_epoch`
 /// (called by HotStuff-2 at the same boundary) then promotes those pending
 /// entries into the next epoch's active set.
-fn apply_epoch_transition(
-    registry: &ValidatorRegistry,
-    em: &EpochManager,
-    new_epoch: u64,
-) {
+fn apply_epoch_transition(registry: &ValidatorRegistry, em: &EpochManager, new_epoch: u64) {
     let plan = registry.compute_epoch_transition(new_epoch);
 
     for addr in &plan.effective_activations {
@@ -91,9 +87,7 @@ async fn full_lifecycle_register_activate_produce_exit() {
         genesis_bls.clone(),
         DEFAULT_MIN_VALIDATOR_SELF_STAKE,
     );
-    let em = Arc::new(
-        EpochManager::new(vec![genesis_validator], 100).expect("epoch manager"),
-    );
+    let em = Arc::new(EpochManager::new(vec![genesis_validator], 100).expect("epoch manager"));
 
     // Bootstrap ValidatorRegistry with the genesis validator pre-seeded as
     // Active (mirrors `Node::start()` post task #413).
@@ -211,7 +205,11 @@ async fn jail_blocks_reactivation_until_governance() {
         ValidatorRegistryStatus::Jailed,
         "jail flips status to Jailed"
     );
-    assert_eq!(registry.list_active().len(), 0, "Jailed leaves the active set");
+    assert_eq!(
+        registry.list_active().len(),
+        0,
+        "Jailed leaves the active set"
+    );
 
     // ---- Future epoch transitions must NOT silently re-promote a jailed entry ----
     let plan_6 = registry.compute_epoch_transition(6);
@@ -245,8 +243,7 @@ async fn jail_blocks_reactivation_until_governance() {
         .unwrap_err();
     let msg = format!("{}", err);
     assert!(
-        msg.to_lowercase().contains("already registered")
-            || msg.to_lowercase().contains("jailed"),
+        msg.to_lowercase().contains("already registered") || msg.to_lowercase().contains("jailed"),
         "re-registration must reject the address while it has any non-Exited entry; got: {}",
         msg
     );

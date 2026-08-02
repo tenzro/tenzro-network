@@ -21,9 +21,9 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tenzro_types::AssetId;
 use tenzro_types::primitives::{Address, Hash, Nonce};
 use tenzro_types::transaction::Transaction;
-use tenzro_types::AssetId;
 use tracing::{debug, info, warn};
 
 /// Configuration for the wallet service
@@ -44,8 +44,8 @@ pub struct WalletServiceConfig {
 impl Default for WalletServiceConfig {
     fn default() -> Self {
         Self {
-            keystore_path: PathBuf::from("./data/wallets"),
-            contacts_path: PathBuf::from("./data/contacts.json"),
+            keystore_path: tenzro_types::paths::default_data_dir().join("wallets"),
+            contacts_path: tenzro_types::paths::default_data_dir().join("contacts.json"),
             provisioning_config: ProvisioningConfig::default(),
             default_password: None,
             validation_config: ValidationConfig::default(),
@@ -235,10 +235,8 @@ impl TenzroWalletService {
         classical_key_type: tenzro_crypto::KeyType,
         bls_verifying_key: Vec<u8>,
     ) -> Result<MpcWallet> {
-        let public_key = tenzro_crypto::PublicKey::new(
-            classical_key_type,
-            signer.classical_public_key(),
-        );
+        let public_key =
+            tenzro_crypto::PublicKey::new(classical_key_type, signer.classical_public_key());
         let pq_verifying_key = signer.pq_verifying_key();
 
         let wallet_id = WalletId::new();
@@ -267,11 +265,14 @@ impl TenzroWalletService {
 
     /// Connect a chain state provider for on-chain synchronization.
     pub fn connect_chain_provider(&mut self, provider: Arc<dyn ChainStateProvider>) {
-        self.state_sync = Arc::new(WalletStateSync::new(
-            self.balances.clone(),
-            self.nonces.clone(),
-            self.history.clone(),
-        ).with_chain_provider(provider));
+        self.state_sync = Arc::new(
+            WalletStateSync::new(
+                self.balances.clone(),
+                self.nonces.clone(),
+                self.history.clone(),
+            )
+            .with_chain_provider(provider),
+        );
     }
 
     /// Load a wallet from keystore.
@@ -327,11 +328,7 @@ impl TenzroWalletService {
 
     /// Store a wallet to keystore (FROST bundle + PQ signing seed + BLS
     /// signing seed).
-    async fn store_wallet_to_keystore(
-        &self,
-        wallet: &MpcWallet,
-        password: &str,
-    ) -> Result<()> {
+    async fn store_wallet_to_keystore(&self, wallet: &MpcWallet, password: &str) -> Result<()> {
         let mut keystore = self.keystore.lock().await;
         let pubkey_package = wallet.frost_pubkey_package()?;
         keystore.store_shares(
@@ -419,7 +416,8 @@ impl WalletService for TenzroWalletService {
         );
 
         // Store in cache
-        self.wallets.insert(wallet.wallet_id.clone(), wallet.clone());
+        self.wallets
+            .insert(wallet.wallet_id.clone(), wallet.clone());
 
         // Store to keystore if default password is set
         if let Some(password) = &self.config.default_password {
@@ -428,11 +426,8 @@ impl WalletService for TenzroWalletService {
 
         // Initialize balances for supported assets
         for asset_id in &wallet.supported_assets {
-            self.balances.set_balance(
-                &wallet.address,
-                asset_id,
-                Balance::zero(),
-            );
+            self.balances
+                .set_balance(&wallet.address, asset_id, Balance::zero());
         }
 
         info!(
@@ -550,16 +545,15 @@ impl WalletService for TenzroWalletService {
             .hybrid_signers
             .get(wallet_id)
             .map(|r| r.value().clone());
-        let HybridSignatureBytes { classical, pq } =
-            if let Some(signer) = external_signer {
-                signer.sign_hybrid(tx_hash.as_bytes()).await?
-            } else {
-                // Classical leg — threshold MPC signature with post-signing verification.
-                let classical = TransactionSigner::sign_transaction(&wallet, tx_hash.as_bytes())?;
-                // Post-quantum leg — ML-DSA-65 signature over the same hash.
-                let pq = wallet.pq_signing_key()?.sign(tx_hash.as_bytes());
-                HybridSignatureBytes::new(classical, pq)
-            };
+        let HybridSignatureBytes { classical, pq } = if let Some(signer) = external_signer {
+            signer.sign_hybrid(tx_hash.as_bytes()).await?
+        } else {
+            // Classical leg — threshold MPC signature with post-signing verification.
+            let classical = TransactionSigner::sign_transaction(&wallet, tx_hash.as_bytes())?;
+            // Post-quantum leg — ML-DSA-65 signature over the same hash.
+            let pq = wallet.pq_signing_key()?.sign(tx_hash.as_bytes());
+            HybridSignatureBytes::new(classical, pq)
+        };
 
         // Record in history
         let record = TxRecord::new_outgoing(
@@ -582,11 +576,7 @@ impl WalletService for TenzroWalletService {
         Ok(HybridSignatureBytes { classical, pq })
     }
 
-    async fn sign_data(
-        &self,
-        wallet_id: &WalletId,
-        data: &[u8],
-    ) -> Result<HybridSignatureBytes> {
+    async fn sign_data(&self, wallet_id: &WalletId, data: &[u8]) -> Result<HybridSignatureBytes> {
         let external_signer = self
             .hybrid_signers
             .get(wallet_id)
@@ -659,7 +649,9 @@ impl WalletService for TenzroWalletService {
 
     async fn add_asset_support(&self, wallet_id: &WalletId, asset_id: AssetId) -> Result<()> {
         if !self.assets.is_supported(&asset_id) {
-            return Err(WalletError::AssetNotSupported(asset_id.as_str().to_string()));
+            return Err(WalletError::AssetNotSupported(
+                asset_id.as_str().to_string(),
+            ));
         }
 
         let mut wallet = self
@@ -669,11 +661,8 @@ impl WalletService for TenzroWalletService {
 
         wallet.add_supported_asset(asset_id.clone());
 
-        self.balances.set_balance(
-            &wallet.address,
-            &asset_id,
-            Balance::zero(),
-        );
+        self.balances
+            .set_balance(&wallet.address, &asset_id, Balance::zero());
 
         self.wallets.insert(wallet_id.clone(), wallet);
         Ok(())
@@ -859,10 +848,7 @@ mod tests {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
 
-        let contact = Contact::new(
-            "Alice".to_string(),
-            Address::new([1u8; 32]),
-        );
+        let contact = Contact::new("Alice".to_string(), Address::new([1u8; 32]));
 
         service.add_contact(contact).await.unwrap();
 
@@ -870,10 +856,7 @@ mod tests {
         assert!(resolved.is_some());
         assert_eq!(resolved.unwrap(), Address::new([1u8; 32]));
 
-        let contact = service
-            .get_contact(&Address::new([1u8; 32]))
-            .await
-            .unwrap();
+        let contact = service.get_contact(&Address::new([1u8; 32])).await.unwrap();
         assert!(contact.is_some());
     }
 
@@ -926,7 +909,11 @@ mod tests {
             .await
             .unwrap();
 
-        let updated_wallet = service.get_wallet(&wallet.wallet_id).await.unwrap().unwrap();
+        let updated_wallet = service
+            .get_wallet(&wallet.wallet_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(updated_wallet.supports_asset(&new_asset));
     }
 

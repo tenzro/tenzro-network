@@ -63,45 +63,94 @@ impl OperationalMetrics {
         let mut s = String::with_capacity(1024);
 
         // workflows_by_status
-        let _ = writeln!(s, "# HELP tenzro_workflow_workflows_total Workflows partitioned by current status.");
+        let _ = writeln!(
+            s,
+            "# HELP tenzro_workflow_workflows_total Workflows partitioned by current status."
+        );
         let _ = writeln!(s, "# TYPE tenzro_workflow_workflows_total gauge");
         for (status, n) in &self.workflows_by_status {
-            let _ = writeln!(s, "tenzro_workflow_workflows_total{{status=\"{}\"}} {}", status, n);
+            let _ = writeln!(
+                s,
+                "tenzro_workflow_workflows_total{{status=\"{}\"}} {}",
+                status, n
+            );
         }
 
         // obligations_by_status
-        let _ = writeln!(s, "# HELP tenzro_workflow_obligations_total Obligations partitioned by current status.");
+        let _ = writeln!(
+            s,
+            "# HELP tenzro_workflow_obligations_total Obligations partitioned by current status."
+        );
         let _ = writeln!(s, "# TYPE tenzro_workflow_obligations_total gauge");
         for (status, n) in &self.obligations_by_status {
-            let _ = writeln!(s, "tenzro_workflow_obligations_total{{status=\"{}\"}} {}", status, n);
+            let _ = writeln!(
+                s,
+                "tenzro_workflow_obligations_total{{status=\"{}\"}} {}",
+                status, n
+            );
         }
 
         // approvals_by_status
-        let _ = writeln!(s, "# HELP tenzro_workflow_approvals_total Approval requests partitioned by current status.");
+        let _ = writeln!(
+            s,
+            "# HELP tenzro_workflow_approvals_total Approval requests partitioned by current status."
+        );
         let _ = writeln!(s, "# TYPE tenzro_workflow_approvals_total gauge");
         for (status, n) in &self.approvals_by_status {
-            let _ = writeln!(s, "tenzro_workflow_approvals_total{{status=\"{}\"}} {}", status, n);
+            let _ = writeln!(
+                s,
+                "tenzro_workflow_approvals_total{{status=\"{}\"}} {}",
+                status, n
+            );
         }
 
         // signatures_collected_total
-        let _ = writeln!(s, "# HELP tenzro_workflow_signatures_collected_total Sum of participant signatures across all workflows.");
+        let _ = writeln!(
+            s,
+            "# HELP tenzro_workflow_signatures_collected_total Sum of participant signatures across all workflows."
+        );
         let _ = writeln!(s, "# TYPE tenzro_workflow_signatures_collected_total gauge");
-        let _ = writeln!(s, "tenzro_workflow_signatures_collected_total {}", self.signatures_collected_total);
+        let _ = writeln!(
+            s,
+            "tenzro_workflow_signatures_collected_total {}",
+            self.signatures_collected_total
+        );
 
         // canton_mirrored_total
-        let _ = writeln!(s, "# HELP tenzro_workflow_canton_mirrored_total Workflows with a Canton synchronizer mirror.");
+        let _ = writeln!(
+            s,
+            "# HELP tenzro_workflow_canton_mirrored_total Workflows with a Canton synchronizer mirror."
+        );
         let _ = writeln!(s, "# TYPE tenzro_workflow_canton_mirrored_total gauge");
-        let _ = writeln!(s, "tenzro_workflow_canton_mirrored_total {}", self.canton_mirrored_total);
+        let _ = writeln!(
+            s,
+            "tenzro_workflow_canton_mirrored_total {}",
+            self.canton_mirrored_total
+        );
 
         // fee_routes_total
-        let _ = writeln!(s, "# HELP tenzro_workflow_fee_routes_total Registered fee routes.");
+        let _ = writeln!(
+            s,
+            "# HELP tenzro_workflow_fee_routes_total Registered fee routes."
+        );
         let _ = writeln!(s, "# TYPE tenzro_workflow_fee_routes_total gauge");
-        let _ = writeln!(s, "tenzro_workflow_fee_routes_total {}", self.fee_routes_total);
+        let _ = writeln!(
+            s,
+            "tenzro_workflow_fee_routes_total {}",
+            self.fee_routes_total
+        );
 
         // privacy_domains_total
-        let _ = writeln!(s, "# HELP tenzro_workflow_privacy_domains_total Registered privacy domains.");
+        let _ = writeln!(
+            s,
+            "# HELP tenzro_workflow_privacy_domains_total Registered privacy domains."
+        );
         let _ = writeln!(s, "# TYPE tenzro_workflow_privacy_domains_total gauge");
-        let _ = writeln!(s, "tenzro_workflow_privacy_domains_total {}", self.privacy_domains_total);
+        let _ = writeln!(
+            s,
+            "tenzro_workflow_privacy_domains_total {}",
+            self.privacy_domains_total
+        );
 
         s
     }
@@ -151,6 +200,9 @@ mod tests {
         let active = s.find("active").unwrap();
         let completed = s.find("completed").unwrap();
         let draft = s.find("draft").unwrap();
-        assert!(active < completed && completed < draft, "BTreeMap iteration must yield alphabetical order");
+        assert!(
+            active < completed && completed < draft,
+            "BTreeMap iteration must yield alphabetical order"
+        );
     }
 }

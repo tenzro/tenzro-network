@@ -35,12 +35,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+
+use base64::Engine as _;
 
 use super::handlers::WebState;
 use crate::rpc::JsonRpcError;
@@ -118,6 +120,27 @@ pub async fn session_info(
             .map(hex::encode)
             .collect();
         info["credential_ids_hex"] = json!(ids);
+
+        // Adding a device is a custody change, so the page needs a second
+        // challenge: the one an *already-enrolled* credential must sign to
+        // prove the person adding the device owns the account. Issued here
+        // rather than by the page so the digest is the node's, not the
+        // browser's — a challenge a caller chose themselves proves nothing.
+        //
+        // The target is bound at completion time (the new credential id is
+        // not known until `create()` runs), so this challenge is issued
+        // against an empty target and the handler re-derives it. See
+        // `CustodyOperation::AddPasskey`.
+        if matches!(session.kind, crate::passkey_rpc::AuthSessionKind::Add) {
+            let (challenge_id, digest) = node.custody_challenges().issue(
+                &account,
+                crate::passkey_rpc::CustodyOperation::AddPasskey,
+                &[],
+            );
+            info["custody_challenge_id"] = json!(challenge_id);
+            info["custody_challenge_b64"] =
+                json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest));
+        }
     }
 
     (StatusCode::OK, Json(info)).into_response()
@@ -287,11 +310,57 @@ const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
           type: 'public-key', id: hexToBytes(h),
         }));
       }
+      // Adding a device to an existing account is a custody change, so it
+      // takes two ceremonies, in this order:
+      //
+      //   1. `get()` from a credential ALREADY on the account — proof the
+      //      person doing this is the owner. Done first, so a user who cannot
+      //      satisfy it is not asked to create a credential that would then
+      //      be thrown away.
+      //   2. `create()` for the new device.
+      //
+      // Without step 1 an add needed only the account address, which is a
+      // public identifier — that was an unauthenticated takeover of any
+      // account whose address you knew.
+      let authorization = null;
+      if (info.kind === 'add') {
+        if (!info.custody_challenge_b64 || !info.custody_challenge_id) {
+          throw new Error('this node did not issue a custody challenge; cannot add a device safely');
+        }
+        if (!Array.isArray(info.credential_ids_hex) || !info.credential_ids_hex.length) {
+          throw new Error('no existing passkey on this account to authorise the addition');
+        }
+        msg('Confirm with a device already on this account…');
+        const proof = await navigator.credentials.get({
+          publicKey: {
+            challenge: b64urlToBytes(info.custody_challenge_b64),
+            allowCredentials: info.credential_ids_hex.map((h) => ({
+              type: 'public-key', id: hexToBytes(h),
+            })),
+            userVerification: 'required',
+            timeout: 120000,
+          },
+        });
+        const pr = proof.response;
+        authorization = {
+          challenge_id: info.custody_challenge_id,
+          credential_id_hex: bytesToHex(proof.rawId),
+          assertion: {
+            authenticator_data: bytesToArray(pr.authenticatorData),
+            client_data_json: bytesToArray(pr.clientDataJSON),
+            signature: bytesToArray(pr.signature),
+            user_handle: pr.userHandle ? bytesToArray(pr.userHandle) : null,
+          },
+        };
+        msg('Now register the new device…');
+      }
       const cred = await navigator.credentials.create({ publicKey: opts });
-      return {
+      const out = {
         credential_id_hex: bytesToHex(cred.rawId),
         passkey_public_key_hex: extractP256(cred),
       };
+      if (authorization) out.authorization = authorization;
+      return out;
     }
     // sign — the challenge IS the op hash.
     const opts = {

@@ -14,9 +14,9 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -155,11 +155,7 @@ impl BridgeRouter {
     /// # Arguments
     /// * `name` - Unique name for this adapter
     /// * `adapter` - The bridge adapter implementation
-    pub async fn register_adapter(
-        &self,
-        name: impl Into<String>,
-        adapter: Box<dyn BridgeAdapter>,
-    ) {
+    pub async fn register_adapter(&self, name: impl Into<String>, adapter: Box<dyn BridgeAdapter>) {
         let name = name.into();
         info!("Registering bridge adapter: {}", name);
         self.adapters.write().await.insert(name, adapter);
@@ -518,12 +514,13 @@ impl BridgeRouter {
         let mut by_chain: HashMap<String, ChainCoverage> = HashMap::new();
         for (adapter_name, adapter) in adapters.iter() {
             for chain in adapter.supported_chains() {
-                let entry = by_chain
-                    .entry(chain.chain_id.clone())
-                    .or_insert_with(|| ChainCoverage {
-                        chain: chain.clone(),
-                        adapters: Vec::new(),
-                    });
+                let entry =
+                    by_chain
+                        .entry(chain.chain_id.clone())
+                        .or_insert_with(|| ChainCoverage {
+                            chain: chain.clone(),
+                            adapters: Vec::new(),
+                        });
                 if !entry.adapters.contains(adapter_name) {
                     entry.adapters.push(adapter_name.clone());
                 }
@@ -557,7 +554,11 @@ impl BridgeRouter {
             RoutingStrategy::Balanced => {
                 // Balance fee and time (normalize and combine scores)
                 let max_fee = routes.iter().map(|r| r.estimated_fee).max().unwrap_or(1);
-                let max_time = routes.iter().map(|r| r.estimated_time_secs).max().unwrap_or(1);
+                let max_time = routes
+                    .iter()
+                    .map(|r| r.estimated_time_secs)
+                    .max()
+                    .unwrap_or(1);
 
                 routes.iter().min_by_key(|r| {
                     // Normalize fee and time to 0-100 range and combine
@@ -604,7 +605,8 @@ impl BridgeRouter {
             }
         };
 
-        best.cloned().ok_or_else(|| BridgeError::AdapterError("No suitable route found".to_string()))
+        best.cloned()
+            .ok_or_else(|| BridgeError::AdapterError("No suitable route found".to_string()))
     }
 }
 
@@ -820,20 +822,28 @@ mod tests {
         );
         let lz_adapter = LayerZeroAdapter::new(lz_config);
         lz_adapter.set_peer("arbitrum", "0x0000000000000000000000000000000000000001");
-        router.register_adapter("layerzero", Box::new(lz_adapter)).await;
+        router
+            .register_adapter("layerzero", Box::new(lz_adapter))
+            .await;
 
         let payload = b"test message payload".to_vec();
 
         // Without a signer, the underlying adapter returns ConfigurationError
         let result1 = router.send_message("arbitrum", payload.clone()).await;
-        assert!(result1.is_err(), "send_message should fail without a signer");
+        assert!(
+            result1.is_err(),
+            "send_message should fail without a signer"
+        );
 
         // Nonce still increments even on failure (consumed before adapter call)
         assert_eq!(router.current_message_nonce(), 1);
 
         // Second call also fails but gets a different nonce
         let result2 = router.send_message("arbitrum", payload.clone()).await;
-        assert!(result2.is_err(), "send_message should fail without a signer");
+        assert!(
+            result2.is_err(),
+            "send_message should fail without a signer"
+        );
         assert_eq!(router.current_message_nonce(), 2);
 
         // Failed sends should NOT be recorded in the replay cache
@@ -854,7 +864,9 @@ mod tests {
         );
         let lz_adapter = LayerZeroAdapter::new(lz_config);
         lz_adapter.set_peer("arbitrum", "0x0000000000000000000000000000000000000001");
-        router.register_adapter("layerzero", Box::new(lz_adapter)).await;
+        router
+            .register_adapter("layerzero", Box::new(lz_adapter))
+            .await;
 
         // Send a message
         let _ = router.send_message("arbitrum", b"test".to_vec()).await;
@@ -892,12 +904,13 @@ mod tests {
         );
         let lz_adapter = LayerZeroAdapter::new(lz_config);
         lz_adapter.set_peer("arbitrum", "0x0000000000000000000000000000000000000001");
-        router.register_adapter("layerzero", Box::new(lz_adapter)).await;
+        router
+            .register_adapter("layerzero", Box::new(lz_adapter))
+            .await;
 
         // Start status polling with a short interval
-        let (handle, shutdown_tx, mut event_rx) = router
-            .start_status_polling(Duration::from_millis(50))
-            .await;
+        let (handle, shutdown_tx, mut event_rx) =
+            router.start_status_polling(Duration::from_millis(50)).await;
 
         // Let it run for a bit
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -928,7 +941,9 @@ mod tests {
         );
         let lz_adapter = LayerZeroAdapter::new(lz_config);
         lz_adapter.set_peer("arbitrum", "0x0000000000000000000000000000000000000001");
-        router.register_adapter("layerzero", Box::new(lz_adapter)).await;
+        router
+            .register_adapter("layerzero", Box::new(lz_adapter))
+            .await;
 
         // Without a signer, bridge_tokens returns ConfigurationError
         let request1 = BridgeTokenRequest::new(
@@ -940,7 +955,10 @@ mod tests {
             "0xrecipient",
         );
         let result1 = router.bridge_tokens(request1).await;
-        assert!(result1.is_err(), "bridge_tokens should fail without a signer");
+        assert!(
+            result1.is_err(),
+            "bridge_tokens should fail without a signer"
+        );
 
         // Nonce still increments even on failure (consumed before adapter call)
         assert_eq!(router.current_nonce(), 1);
@@ -955,7 +973,10 @@ mod tests {
             "0xrecipient",
         );
         let result2 = router.bridge_tokens(request2).await;
-        assert!(result2.is_err(), "bridge_tokens should fail without a signer");
+        assert!(
+            result2.is_err(),
+            "bridge_tokens should fail without a signer"
+        );
         assert_eq!(router.current_nonce(), 2);
 
         // Failed transfers should NOT be recorded in the replay cache
@@ -1007,7 +1028,10 @@ mod tests {
             {
                 let messages = router.processed_messages.read().await;
                 assert_eq!(messages.len(), 1, "Old message should be pruned");
-                assert!(messages.contains_key("msg:recent"), "Recent message should survive pruning");
+                assert!(
+                    messages.contains_key("msg:recent"),
+                    "Recent message should survive pruning"
+                );
             }
         }
     }
@@ -1022,7 +1046,7 @@ mod tests {
             adapter: BridgeAdapterId::LayerZero,
             dest_chain: "arbitrum".into(),
             rate_q18: 3 * 1_000_000_000_000_000_000u128, // 3.0
-            markup_bps: 100,                              // 1%
+            markup_bps: 100,                             // 1%
             valid_window_ms: 60_000,
             updated_at_ms: 0,
         });
@@ -1146,7 +1170,9 @@ mod tests {
         // on the same lane. CCIP supports Ethereum + Arbitrum out of the
         // box; LayerZero supports the same two via its config.
         let ccip = ChainlinkCcipAdapter::new(CcipConfig::ethereum_mainnet(FeeToken::Native));
-        router.register_adapter("chainlink_ccip", Box::new(ccip)).await;
+        router
+            .register_adapter("chainlink_ccip", Box::new(ccip))
+            .await;
 
         let lz_config = LayerZeroConfig::new(
             "0x1a44076050125825900e736c501f859c50fE728c",

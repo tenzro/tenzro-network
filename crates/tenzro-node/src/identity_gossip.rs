@@ -17,9 +17,9 @@
 
 use std::sync::Arc;
 
-use tenzro_identity::gossip::{encode_revocation_broadcast, IDENTITY_TOPIC};
-use tenzro_identity::registry::{RevocationBroadcaster, SignedRevocationEntry};
 use tenzro_identity::IdentityError;
+use tenzro_identity::gossip::{IDENTITY_TOPIC, encode_revocation_broadcast};
+use tenzro_identity::registry::{RevocationBroadcaster, SignedRevocationEntry};
 use tenzro_network::{MessagePayload, NetworkMessage, NetworkService, TenzroNetworkService};
 
 /// Channel-backed [`RevocationBroadcaster`] whose forwarder task publishes

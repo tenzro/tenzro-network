@@ -40,7 +40,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{info, warn};
 
@@ -367,8 +367,7 @@ impl SponsorshipManager {
             .filter(|s| s.controller_did == controller_did)
             .count() as u64
             + 1;
-        let controller_allowed =
-            1u64.max(total_after * MAX_CONTROLLER_SLOT_BPS as u64 / 10_000);
+        let controller_allowed = 1u64.max(total_after * MAX_CONTROLLER_SLOT_BPS as u64 / 10_000);
         if controller_after > controller_allowed {
             return Err(TokenError::Unauthorized {
                 reason: format!(
@@ -783,7 +782,11 @@ mod tests {
         // next AS64500 slot breaches: allowance at 11 slots is
         // max(1, 11*15%) = 1, so a second AS64500 slot must reject.
         for i in 1..=10u8 {
-            let asn = if i == 1 { Some("AS64500".to_string()) } else { None };
+            let asn = if i == 1 {
+                Some("AS64500".to_string())
+            } else {
+                None
+            };
             m.delegate(
                 &format!("did:tenzro:machine:op-{i}"),
                 &format!("did:tenzro:human:ctl-{i}"),
@@ -901,10 +904,7 @@ mod tests {
         // vesting, then owned stake.
         let consumed = m.slash_bond(did, T2_JUNIOR_BOND).expect("over");
         assert_eq!(consumed, T2_JUNIOR_BOND / 2);
-        assert_eq!(
-            m.get_slot(did).expect("slot").junior_bond_remaining,
-            0
-        );
+        assert_eq!(m.get_slot(did).expect("slot").junior_bond_remaining, 0);
         assert_eq!(m.slash_bond(did, 100).expect("empty"), 0);
     }
 
@@ -954,18 +954,19 @@ mod tests {
         delegate_ok(&m, 11, SponsorshipTrack::RpcProvider);
 
         // Nothing due before the lifetime elapses.
-        assert!(m
-            .expire_due(Timestamp::new(SLOT_EXPIRY_MS - 1))
-            .expect("early")
-            .is_empty());
+        assert!(
+            m.expire_due(Timestamp::new(SLOT_EXPIRY_MS - 1))
+                .expect("early")
+                .is_empty()
+        );
 
-        let expired = m
-            .expire_due(Timestamp::new(SLOT_EXPIRY_MS))
-            .expect("sweep");
+        let expired = m.expire_due(Timestamp::new(SLOT_EXPIRY_MS)).expect("sweep");
         assert_eq!(expired.len(), 2);
-        assert!(expired
-            .iter()
-            .all(|s| s.status == SponsorshipStatus::Expired));
+        assert!(
+            expired
+                .iter()
+                .all(|s| s.status == SponsorshipStatus::Expired)
+        );
         assert_eq!(m.pool_snapshot().delegated_outstanding, 0);
         assert_eq!(
             m.pool_snapshot().cumulative_returned,

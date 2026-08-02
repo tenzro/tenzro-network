@@ -22,7 +22,11 @@ pub fn print_banner() {
     println!("{}", colors::BOLD);
     println!("╔═══════════════════════════════════════════════════════════╗");
     println!("║                                                           ║");
-    println!("║              {}Tenzro Network CLI v0.1.0{}               ║", colors::CYAN, colors::BOLD);
+    println!(
+        "║              {}Tenzro Network CLI v0.1.0{}               ║",
+        colors::CYAN,
+        colors::BOLD
+    );
     println!("║                                                           ║");
     println!("║      AI-Native, Agentic, Tokenized Settlement Layer      ║");
     println!("║                                                           ║");
@@ -32,7 +36,13 @@ pub fn print_banner() {
 
 /// Print a section header
 pub fn print_header(title: &str) {
-    println!("\n{}{}{}{}:", colors::BOLD, colors::CYAN, title, colors::RESET);
+    println!(
+        "\n{}{}{}{}:",
+        colors::BOLD,
+        colors::CYAN,
+        title,
+        colors::RESET
+    );
     println!("{}", "─".repeat(60));
 }
 
@@ -68,16 +78,36 @@ pub fn print_status(label: &str, status: &str, active: bool) {
     } else {
         (colors::RED, "○")
     };
-    println!("  {}{:20}{} {}{}{}", colors::BOLD, label, colors::RESET, color, symbol, colors::RESET);
+    println!(
+        "  {}{:20}{} {}{}{}",
+        colors::BOLD,
+        label,
+        colors::RESET,
+        color,
+        symbol,
+        colors::RESET
+    );
     println!("  {:20}   {}", "", status);
 }
 
 /// Format load info from JSON for display
 pub fn format_load_info(load: &serde_json::Value) -> String {
-    let active = load.get("active_requests").and_then(|v| v.as_u64()).unwrap_or(0);
-    let max = load.get("max_concurrent").and_then(|v| v.as_u64()).unwrap_or(0);
-    let util = load.get("utilization_percent").and_then(|v| v.as_u64()).unwrap_or(0);
-    let level = load.get("load_level").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let active = load
+        .get("active_requests")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let max = load
+        .get("max_concurrent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let util = load
+        .get("utilization_percent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let level = load
+        .get("load_level")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
     let color = match level {
         "idle" => colors::CYAN,
@@ -88,7 +118,15 @@ pub fn format_load_info(load: &serde_json::Value) -> String {
         _ => colors::RESET,
     };
 
-    format!("{}{} ({}/{}  {}%){}", color, level, active, max, util, colors::RESET)
+    format!(
+        "{}{} ({}/{}  {}%){}",
+        color,
+        level,
+        active,
+        max,
+        util,
+        colors::RESET
+    )
 }
 
 /// Create a progress bar for downloads or long operations
@@ -134,7 +172,11 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     // Print header
     print!("  {}", colors::BOLD);
     for (i, header) in headers.iter().enumerate() {
-        print!("{:width$}", header, width = widths.get(i).copied().unwrap_or(15) + 2);
+        print!(
+            "{:width$}",
+            header,
+            width = widths.get(i).copied().unwrap_or(15) + 2
+        );
     }
     println!("{}", colors::RESET);
 
@@ -149,7 +191,11 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     for row in rows {
         print!("  ");
         for (i, cell) in row.iter().enumerate() {
-            print!("{:width$}", cell, width = widths.get(i).copied().unwrap_or(15) + 2);
+            print!(
+                "{:width$}",
+                cell,
+                width = widths.get(i).copied().unwrap_or(15) + 2
+            );
         }
         println!();
     }
@@ -181,7 +227,7 @@ pub fn format_balance(amount: u128, decimals: u8) -> String {
 /// Format a hash for display (shortened)
 pub fn format_hash(hash: &str) -> String {
     if hash.len() > 16 {
-        format!("{}...{}", &hash[..8], &hash[hash.len()-8..])
+        format!("{}...{}", &hash[..8], &hash[hash.len() - 8..])
     } else {
         hash.to_string()
     }
@@ -190,7 +236,7 @@ pub fn format_hash(hash: &str) -> String {
 /// Format an address for display (shortened)
 pub fn format_address(address: &str) -> String {
     if address.len() > 16 {
-        format!("{}...{}", &address[..8], &address[address.len()-8..])
+        format!("{}...{}", &address[..8], &address[address.len() - 8..])
     } else {
         address.to_string()
     }

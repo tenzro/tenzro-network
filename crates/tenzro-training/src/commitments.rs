@@ -23,11 +23,7 @@ use tenzro_types::training::{FragmentQuorumStatus, OuterGradient, SyncRound};
 ///         || for each accepted_hash in order: hash_bytes
 ///         || post_step_hash_bytes
 ///   )
-pub fn compute_state_root(
-    task_id: &str,
-    round: u32,
-    fragments: &[FragmentQuorumStatus],
-) -> Hash {
+pub fn compute_state_root(task_id: &str, round: u32, fragments: &[FragmentQuorumStatus]) -> Hash {
     let mut hasher = Sha256::new();
     hasher.update(b"tenzro/train/state-root");
     hasher.update(task_id.as_bytes());

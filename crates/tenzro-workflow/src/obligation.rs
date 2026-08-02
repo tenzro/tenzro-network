@@ -16,11 +16,22 @@ pub type ObligationId = Hash;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ObligationStatus {
     Pending,
-    InProgress { since: i64 },
-    Discharged { receipt: Hash, at: i64 },
-    Defaulted { reason: String, at: i64 },
+    InProgress {
+        since: i64,
+    },
+    Discharged {
+        receipt: Hash,
+        at: i64,
+    },
+    Defaulted {
+        reason: String,
+        at: i64,
+    },
     /// Forgiven by the obligee — discharges the obligation without proof.
-    Forgiven { by: String, at: i64 },
+    Forgiven {
+        by: String,
+        at: i64,
+    },
 }
 
 impl ObligationStatus {
@@ -37,8 +48,8 @@ impl ObligationStatus {
 /// Reference to an asset on Tenzro or another chain (CAIP-19-like).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetRef {
-    pub chain: String,        // "tenzro" | "ethereum" | "canton:mainnet" | ...
-    pub symbol: String,       // "TNZO" | "USDC" | ...
+    pub chain: String,  // "tenzro" | "ethereum" | "canton:mainnet" | ...
+    pub symbol: String, // "TNZO" | "USDC" | ...
     pub token_address: Option<Vec<u8>>,
 }
 
@@ -73,7 +84,9 @@ pub enum DischargeProofKind {
     SettlementReceipt,
     Credential,
     TeeAttestation,
-    ZkProof { circuit_id: String },
+    ZkProof {
+        circuit_id: String,
+    },
     /// A choice exercise on a mirrored DAML contract (CantonAdapter populates
     /// this when it consumes the inbound event).
     CantonExercise {

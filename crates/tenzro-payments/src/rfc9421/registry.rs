@@ -161,7 +161,10 @@ impl AgentRegistryClient for TenzroAgentRegistry {
 
         let is_active = matches!(identity.status, IdentityStatus::Active);
         if !is_active {
-            debug!("Agent {} is not active (status: {:?})", did, identity.status);
+            debug!(
+                "Agent {} is not active (status: {:?})",
+                did, identity.status
+            );
         }
 
         if identity.public_keys.is_empty() {
@@ -273,7 +276,9 @@ mod tests {
 
         let agent_registry = TenzroAgentRegistry::new(Arc::new(registry));
 
-        let result = agent_registry.get_public_key(&machine.did.to_string()).await;
+        let result = agent_registry
+            .get_public_key(&machine.did.to_string())
+            .await;
         assert!(result.is_ok());
 
         let key_info = result.unwrap();
@@ -288,9 +293,14 @@ mod tests {
         let registry = IdentityRegistry::new();
         let agent_registry = TenzroAgentRegistry::new(Arc::new(registry));
 
-        let result = agent_registry.get_public_key("did:tenzro:machine:nonexistent").await;
+        let result = agent_registry
+            .get_public_key("did:tenzro:machine:nonexistent")
+            .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PaymentError::AgentRegistryError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            PaymentError::AgentRegistryError(_)
+        ));
     }
 
     #[tokio::test]
@@ -318,11 +328,20 @@ mod tests {
 
         // Revoke the machine identity
         let signer = revocation_test_signer();
-        registry.revoke(&machine.did.to_string(), "Test revocation".to_string(), human.did.to_string(), &signer).unwrap();
+        registry
+            .revoke(
+                &machine.did.to_string(),
+                "Test revocation".to_string(),
+                human.did.to_string(),
+                &signer,
+            )
+            .unwrap();
 
         let agent_registry = TenzroAgentRegistry::new(Arc::new(registry));
 
-        let result = agent_registry.get_public_key(&machine.did.to_string()).await;
+        let result = agent_registry
+            .get_public_key(&machine.did.to_string())
+            .await;
         assert!(result.is_ok());
 
         let key_info = result.unwrap();
@@ -384,7 +403,14 @@ mod tests {
 
         // Revoke the machine
         let signer = revocation_test_signer();
-        registry.revoke(&machine.did.to_string(), "Test revocation".to_string(), human.did.to_string(), &signer).unwrap();
+        registry
+            .revoke(
+                &machine.did.to_string(),
+                "Test revocation".to_string(),
+                human.did.to_string(),
+                &signer,
+            )
+            .unwrap();
 
         let agent_registry = TenzroAgentRegistry::new(Arc::new(registry));
 
@@ -398,7 +424,9 @@ mod tests {
         let registry = IdentityRegistry::new();
         let agent_registry = TenzroAgentRegistry::new(Arc::new(registry));
 
-        let result = agent_registry.verify_agent("did:tenzro:machine:nonexistent").await;
+        let result = agent_registry
+            .verify_agent("did:tenzro:machine:nonexistent")
+            .await;
         assert!(result.is_err());
     }
 

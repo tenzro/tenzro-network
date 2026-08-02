@@ -101,10 +101,16 @@ impl NodeLaneResolver {
                 IdentityData::Institution { kyb_tier, .. } => {
                     return Some((identity.wallet_address, *kyb_tier));
                 }
-                IdentityData::Machine { controller_did: Some(c), .. } => {
+                IdentityData::Machine {
+                    controller_did: Some(c),
+                    ..
+                } => {
                     current_did = c.clone();
                 }
-                IdentityData::Machine { controller_did: None, .. } => {
+                IdentityData::Machine {
+                    controller_did: None,
+                    ..
+                } => {
                     // Autonomous machine — itself is the principal, but it
                     // has no human KYC. Treat as Open / Delegated only via
                     // bond promotion.
@@ -183,14 +189,17 @@ impl LaneResolver for NodeLaneResolver {
 
                 let Some(controller) = controller_did.as_deref() else {
                     // Autonomous machine. Active bond → Delegated, else Open.
-                    return if has_bond { Lane::Delegated } else { Lane::Open };
+                    return if has_bond {
+                        Lane::Delegated
+                    } else {
+                        Lane::Open
+                    };
                 };
 
                 match self.resolve_controller_address(controller) {
                     Some((controller_addr, kyc_tier))
                         if kyc_tier >= KycTier::Enhanced
-                            && self.bonded_stake(&controller_addr)
-                                >= self.min_verified_stake =>
+                            && self.bonded_stake(&controller_addr) >= self.min_verified_stake =>
                     {
                         // Controller is Verified → machine sits in
                         // Delegated lane (one tier below the human).
@@ -220,12 +229,17 @@ impl LaneResolver for NodeLaneResolver {
             IdentityData::Human { .. } | IdentityData::Institution { .. } => {
                 identity.wallet_address
             }
-            IdentityData::Machine { controller_did: Some(c), .. } => {
-                self.resolve_controller_address(c)
-                    .map(|(addr, _)| addr)
-                    .unwrap_or(*from)
-            }
-            IdentityData::Machine { controller_did: None, .. } => *from,
+            IdentityData::Machine {
+                controller_did: Some(c),
+                ..
+            } => self
+                .resolve_controller_address(c)
+                .map(|(addr, _)| addr)
+                .unwrap_or(*from),
+            IdentityData::Machine {
+                controller_did: None,
+                ..
+            } => *from,
         }
     }
 }

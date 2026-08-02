@@ -1,8 +1,8 @@
 //! Inference request commands for the Tenzro CLI
 
-use clap::{Parser, Subcommand};
-use anyhow::{Context, Result};
 use crate::output;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 
 /// Inference commands
 #[derive(Debug, Subcommand)]
@@ -158,10 +158,7 @@ impl RouteCmd {
             params.insert("budget".to_string(), serde_json::Value::String(b.clone()));
         }
         if let Some(o) = self.optimize {
-            params.insert(
-                "optimize".to_string(),
-                serde_json::json!(o),
-            );
+            params.insert("optimize".to_string(), serde_json::json!(o));
         }
         if let Some(q) = &self.quality_floor {
             params.insert(
@@ -395,7 +392,10 @@ impl DifficultyStatsCmd {
 
         let mut params = serde_json::Map::new();
         if let Some(id) = &self.model_id {
-            params.insert("model_id".to_string(), serde_json::Value::String(id.clone()));
+            params.insert(
+                "model_id".to_string(),
+                serde_json::Value::String(id.clone()),
+            );
         }
 
         let rpc = RpcClient::new(&self.rpc);
@@ -453,7 +453,10 @@ impl DifficultyStatsCmd {
             for c in per_model {
                 let id = c.get("cluster").map(|v| v.to_string()).unwrap_or_default();
                 let resolved = c.get("resolved").map(|v| v.to_string()).unwrap_or_default();
-                let escalated = c.get("escalated").map(|v| v.to_string()).unwrap_or_default();
+                let escalated = c
+                    .get("escalated")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
                 let failed = c.get("failed").map(|v| v.to_string()).unwrap_or_default();
                 let rate = c
                     .get("error_rate")
@@ -575,10 +578,20 @@ impl VerifyCommitmentCmd {
                 output::print_field(key, v);
             }
         }
-        let steps_total = result.get("steps_total").and_then(|v| v.as_u64()).unwrap_or(0);
-        let steps_passed = result.get("steps_passed").and_then(|v| v.as_u64()).unwrap_or(0);
+        let steps_total = result
+            .get("steps_total")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let steps_passed = result
+            .get("steps_passed")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         output::print_field("steps", &format!("{steps_passed}/{steps_total} passed"));
-        if result.get("pass").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if result
+            .get("pass")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             output::print_success("Commitment verified: provider output matches re-execution");
         } else {
             output::print_warning("Commitment FAILED verification");
@@ -1040,14 +1053,19 @@ impl InferenceRequestCmd {
         spinner.set_message("Finding available provider...");
 
         // Submit inference request
-        let result: serde_json::Value = rpc.call("tenzro_inferenceRequest", serde_json::json!([{
-            "model_id": self.model_id,
-            "input": self.input,
-            "max_price": self.max_price,
-            "require_tee": self.require_tee,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_inferenceRequest",
+                serde_json::json!([{
+                    "model_id": self.model_id,
+                    "input": self.input,
+                    "max_price": self.max_price,
+                    "require_tee": self.require_tee,
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens
+                }]),
+            )
+            .await?;
 
         spinner.set_message("Receiving response...");
 
@@ -1094,24 +1112,26 @@ impl InferenceRequestCmd {
         }
 
         if self.require_tee
-            && let Some(attestation) = result.get("attestation") {
-                println!();
-                output::print_success("TEE Attestation verified");
-                if let Some(vendor) = attestation.get("vendor").and_then(|v| v.as_str()) {
-                    output::print_field("Vendor", vendor);
-                }
-                if let Some(enclave_id) = attestation.get("enclave_id").and_then(|v| v.as_str()) {
-                    output::print_field("Enclave ID", enclave_id);
-                }
+            && let Some(attestation) = result.get("attestation")
+        {
+            println!();
+            output::print_success("TEE Attestation verified");
+            if let Some(vendor) = attestation.get("vendor").and_then(|v| v.as_str()) {
+                output::print_field("Vendor", vendor);
             }
+            if let Some(enclave_id) = attestation.get("enclave_id").and_then(|v| v.as_str()) {
+                output::print_field("Enclave ID", enclave_id);
+            }
+        }
 
         // Save to file if requested
         if let Some(output_file) = &self.output_file
-            && let Some(response_text) = result.get("response").and_then(|v| v.as_str()) {
-                std::fs::write(output_file, response_text)?;
-                println!();
-                output::print_success(&format!("Response saved to: {}", output_file));
-            }
+            && let Some(response_text) = result.get("response").and_then(|v| v.as_str())
+        {
+            std::fs::write(output_file, response_text)?;
+            println!();
+            output::print_success(&format!("Response saved to: {}", output_file));
+        }
 
         Ok(())
     }
@@ -1210,7 +1230,10 @@ impl InferenceStreamCmd {
             .unwrap_or("");
         if !response_text.is_empty() {
             println!();
-            println!("{}", tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(response_text));
+            println!(
+                "{}",
+                tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(response_text)
+            );
         }
 
         if let Some(usage) = result.get("usage") {

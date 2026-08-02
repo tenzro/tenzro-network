@@ -35,8 +35,7 @@ use tracing::{info, warn};
 /// service-provider slots. Per WHITEPAPER §5 + TOKENOMICS §7, Tier 1
 /// (resource-only) validators require **no stake**; only Tier 2 must meet
 /// this minimum.
-pub const DEFAULT_MIN_VALIDATOR_SELF_STAKE: u128 =
-    tenzro_types::constants::MIN_VALIDATOR_STAKE;
+pub const DEFAULT_MIN_VALIDATOR_SELF_STAKE: u128 = tenzro_types::constants::MIN_VALIDATOR_STAKE;
 
 /// Default minimum self-bonded stake to register as a **Tier 3** (RPC
 /// provider) validator. Tier 3 implies Tier 2 — the RPC bond satisfies the
@@ -51,8 +50,7 @@ pub const DEFAULT_MIN_VALIDATOR_SELF_STAKE: u128 =
 /// credentials (Canton participants, AI provider keys, data feed
 /// subscriptions), front cross-chain mint/burn flows, and mediate
 /// per-tenant billing. The 10× multiple over Tier 2 reflects this.
-pub const DEFAULT_MIN_RPC_PROVIDER_STAKE: u128 =
-    tenzro_types::constants::MIN_RPC_OPERATOR_STAKE;
+pub const DEFAULT_MIN_RPC_PROVIDER_STAKE: u128 = tenzro_types::constants::MIN_RPC_OPERATOR_STAKE;
 
 /// Default activation churn cap: percentage of active set, in basis points.
 /// 400 bps = 4% per epoch (matching EIP-8061 conservative profile).
@@ -462,7 +460,11 @@ impl ValidatorRegistry {
 
     fn persist_entry(&self, entry: &ValidatorRegistryEntry) {
         if let Some(storage) = &self.storage {
-            let key = format!("{}{}", VALIDATOR_PREFIX, hex::encode(entry.address.as_bytes()));
+            let key = format!(
+                "{}{}",
+                VALIDATOR_PREFIX,
+                hex::encode(entry.address.as_bytes())
+            );
             match bincode::serialize(entry) {
                 Ok(data) => {
                     if let Err(e) = storage.put(REGISTRY_CF, key.as_bytes(), &data) {
@@ -663,7 +665,10 @@ impl ValidatorRegistry {
         self.persist_index();
         info!(
             "Registered validator candidate {} at epoch {} with stake {} (tier={})",
-            address, current_epoch, self_stake, tier.as_str()
+            address,
+            current_epoch,
+            self_stake,
+            tier.as_str()
         );
         Ok(())
     }
@@ -744,7 +749,9 @@ impl ValidatorRegistry {
         self.persist_index();
         info!(
             "Seeded genesis Active validator {} with stake {} (tier={})",
-            address, self_stake, tier.as_str()
+            address,
+            self_stake,
+            tier.as_str()
         );
         Ok(true)
     }
@@ -1173,8 +1180,17 @@ mod tests {
         let a = make_address(1);
 
         // Zero stake → Tier 1 admission succeeds.
-        reg.register_candidate(a, ck.clone(), pk.clone(), bk.clone(), a, 0, 0, String::new())
-            .unwrap();
+        reg.register_candidate(
+            a,
+            ck.clone(),
+            pk.clone(),
+            bk.clone(),
+            a,
+            0,
+            0,
+            String::new(),
+        )
+        .unwrap();
         let entry = reg.get(&a).unwrap();
         assert_eq!(entry.tier, ValidatorTier::ResourceOnly);
         assert_eq!(entry.self_stake, 0);
@@ -1440,10 +1456,16 @@ mod tests {
         let reg = ValidatorRegistry::new();
         let (ck, pk, bk) = make_keys();
         let a = make_address(12);
-        reg.register_candidate(a, ck, pk, bk, a, 0, 0, String::new()).unwrap();
+        reg.register_candidate(a, ck, pk, bk, a, 0, 0, String::new())
+            .unwrap();
 
         // 31-byte consensus key — rejected.
-        let bad = reg.rotate_keys(&a, vec![1u8; 31], vec![2u8; ML_DSA_65_VK_LEN], vec![3u8; 48]);
+        let bad = reg.rotate_keys(
+            &a,
+            vec![1u8; 31],
+            vec![2u8; ML_DSA_65_VK_LEN],
+            vec![3u8; 48],
+        );
         assert!(bad.is_err(), "31-byte consensus_pubkey must be rejected");
 
         // Wrong PQ length — rejected.
@@ -1451,7 +1473,12 @@ mod tests {
         assert!(bad.is_err(), "wrong-length pq_pubkey must be rejected");
 
         // Wrong BLS length — rejected.
-        let bad = reg.rotate_keys(&a, vec![1u8; 32], vec![2u8; ML_DSA_65_VK_LEN], vec![3u8; 47]);
+        let bad = reg.rotate_keys(
+            &a,
+            vec![1u8; 32],
+            vec![2u8; ML_DSA_65_VK_LEN],
+            vec![3u8; 47],
+        );
         assert!(bad.is_err(), "wrong-length bls_pubkey must be rejected");
     }
 
@@ -1474,11 +1501,10 @@ mod tests {
 
         // Force the entry into Exited state without going through the
         // governance path — direct mutation for the test fixture.
-        reg.entries
-            .alter(&a, |_, mut e| {
-                e.status = ValidatorRegistryStatus::Exited;
-                e
-            });
+        reg.entries.alter(&a, |_, mut e| {
+            e.status = ValidatorRegistryStatus::Exited;
+            e
+        });
 
         let new_ck = vec![1u8; 32];
         let err = reg

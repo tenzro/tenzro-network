@@ -40,7 +40,7 @@ use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 // `RandCoreOsRng` is the `TryCryptoRng` from rand_core 0.9 that, once lifted
 // via `.unwrap_err()`, satisfies the `CryptoRng` bound on
 // `ecdsa::signing::SigningKey::random` in the RustCrypto 0.14-RC line.
-use getrandom_0_4::{rand_core::UnwrapErr, SysRng};
+use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::ZeroizeOnDrop;
@@ -180,7 +180,9 @@ pub struct P256Signature {
 impl P256Signature {
     /// Build from a raw 64-byte `r ‖ s` payload.
     pub fn from_bytes(bytes: [u8; P256_SIGNATURE_LEN]) -> Self {
-        Self { bytes: bytes.to_vec() }
+        Self {
+            bytes: bytes.to_vec(),
+        }
     }
 
     /// Build from a slice of length 64.
@@ -191,13 +193,17 @@ impl P256Signature {
                 bytes.len()
             )));
         }
-        Ok(Self { bytes: bytes.to_vec() })
+        Ok(Self {
+            bytes: bytes.to_vec(),
+        })
     }
 
     /// Build from a `p256::ecdsa::Signature`.
     pub fn from_signature(sig: &Signature) -> Self {
         let bytes = sig.to_bytes();
-        Self { bytes: bytes.to_vec() }
+        Self {
+            bytes: bytes.to_vec(),
+        }
     }
 
     /// Raw 64-byte `r ‖ s` view.

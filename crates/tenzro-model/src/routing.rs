@@ -16,16 +16,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tenzro_types::{
     hardware::HardwareClass,
-    model::{
-        BillableUnits, InferenceRequest, InferenceResponse, InferenceMetadata, ModelModality,
-    },
+    model::{BillableUnits, InferenceMetadata, InferenceRequest, InferenceResponse, ModelModality},
     primitives::{Address, Timestamp},
 };
 use tracing::{debug, info, warn};
 
 /// Strategy for routing inference requests
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RoutingStrategy {
     /// Route to provider with lowest price
     LowestPrice,
@@ -43,7 +40,6 @@ pub enum RoutingStrategy {
     /// ties by reputation. Intended for recurrent-depth reasoning models.
     ReasoningDepth,
 }
-
 
 /// Typed inference payload — discriminated by modality so the router
 /// can dispatch to the correct backend runtime without re-parsing the
@@ -429,7 +425,10 @@ enum DispatchFailure {
     /// The provider failed in a way that warrants excluding it and trying
     /// another (unreachable, non-2xx, missing signed manifest). Carries the
     /// provider address so the caller can add it to the exclusion set.
-    Retryable { provider: Address, error: ModelError },
+    Retryable {
+        provider: Address,
+        error: ModelError,
+    },
     /// Both legs of a hedged race failed. Carries each leg's underlying
     /// error (if any) for diagnostics.
     Both {
@@ -585,10 +584,7 @@ impl InferenceRouter {
     ///
     /// [`ProvenanceStore`]: crate::provenance::ProvenanceStore
     #[must_use]
-    pub fn with_provenance_store(
-        mut self,
-        store: Arc<crate::provenance::ProvenanceStore>,
-    ) -> Self {
+    pub fn with_provenance_store(mut self, store: Arc<crate::provenance::ProvenanceStore>) -> Self {
         self.provenance_store = Some(store);
         self
     }
@@ -757,8 +753,11 @@ impl InferenceRouter {
         // routing outside the requested jurisdiction. Providers with no
         // declared claim never satisfy a pin.
         if let Some(pin) = request.parameters.custom.get("jurisdiction") {
-            let tokens: Vec<&str> =
-                pin.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
+            let tokens: Vec<&str> = pin
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .collect();
             if !tokens.is_empty() {
                 providers.retain(|p| {
                     p.provider
@@ -791,9 +790,8 @@ impl InferenceRouter {
             && model.size_bytes > 0
         {
             let model_gb = model.size_bytes as f32 / 1_073_741_824.0;
-            providers.retain(|p| {
-                p.provider.capacity.hardware.can_hold_model(model_gb) != Some(false)
-            });
+            providers
+                .retain(|p| p.provider.capacity.hardware.can_hold_model(model_gb) != Some(false));
             if providers.is_empty() {
                 return Err(ModelError::NoProvidersAvailable(format!(
                     "{} (memory fit: {:.1} GiB model exceeds every detected provider envelope)",
@@ -943,10 +941,8 @@ impl InferenceRouter {
                 // when the prompt or the provider's advertised prefix is
                 // empty, so this reduces to the plain score in that case.
                 providers.sort_by(|a, b| {
-                    let sa = a.calculate_score()
-                        + Self::prefix_bias(a, prompt_run_hashes);
-                    let sb = b.calculate_score()
-                        + Self::prefix_bias(b, prompt_run_hashes);
+                    let sa = a.calculate_score() + Self::prefix_bias(a, prompt_run_hashes);
+                    let sb = b.calculate_score() + Self::prefix_bias(b, prompt_run_hashes);
                     sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
@@ -971,7 +967,12 @@ impl InferenceRouter {
             && providers.len() > 1
             && let Some(best_len) = providers
                 .iter()
-                .map(|p| p.provider.capacity.prefix_cache.longest_match_len(prompt_run_hashes))
+                .map(|p| {
+                    p.provider
+                        .capacity
+                        .prefix_cache
+                        .longest_match_len(prompt_run_hashes)
+                })
                 .max()
             && best_len > 0
         {
@@ -982,7 +983,10 @@ impl InferenceRouter {
             let tie_len = Self::leading_tie_group_len(&providers, config);
             if tie_len > 1
                 && let Some(pos) = providers[..tie_len].iter().position(|p| {
-                    p.provider.capacity.prefix_cache.longest_match_len(prompt_run_hashes)
+                    p.provider
+                        .capacity
+                        .prefix_cache
+                        .longest_match_len(prompt_run_hashes)
                         == best_len
                 })
             {
@@ -1049,7 +1053,10 @@ impl InferenceRouter {
                 providers
                     .iter()
                     .take_while(|p| {
-                        p.metrics.latency_p95_ms().unwrap_or(p.metrics.avg_latency_ms) == head
+                        p.metrics
+                            .latency_p95_ms()
+                            .unwrap_or(p.metrics.avg_latency_ms)
+                            == head
                     })
                     .count()
             }
@@ -1130,7 +1137,9 @@ impl InferenceRouter {
                 && let Some(deadline) = deadline
                 && request_start.elapsed() >= deadline
             {
-                self.metrics.deadline_exceeded.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .deadline_exceeded
+                    .fetch_add(1, Ordering::Relaxed);
                 last_error = Some(last_error.take().unwrap_or_else(|| {
                     ModelError::InferenceError(format!(
                         "request deadline of {}ms exceeded after {} attempt(s)",
@@ -1167,14 +1176,12 @@ impl InferenceRouter {
             // and (d) has a usable endpoint. `hedge_eligible` also gates on
             // the request being hedgeable (idempotent) — see
             // `is_request_hedgeable`.
-            let hedge_address = if attempt == 0
-                && config.enable_hedging
-                && self.is_request_hedgeable(request)
-            {
-                self.pick_hedge_target(request, config, provider_address)
-            } else {
-                None
-            };
+            let hedge_address =
+                if attempt == 0 && config.enable_hedging && self.is_request_hedgeable(request) {
+                    self.pick_hedge_target(request, config, provider_address)
+                } else {
+                    None
+                };
 
             match hedge_address {
                 Some(hedge_address) => {
@@ -1291,7 +1298,8 @@ impl InferenceRouter {
             return None;
         }
         let prompt_run_hashes = tenzro_types::prefix_run_hashes(&request.input);
-        self.select_provider(providers, config, &prompt_run_hashes).ok()
+        self.select_provider(providers, config, &prompt_run_hashes)
+            .ok()
     }
 
     /// Races a primary dispatch against a hedge dispatch. The primary
@@ -1342,7 +1350,9 @@ impl InferenceRouter {
             None => {}
         }
 
-        self.metrics.hedges_dispatched.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .hedges_dispatched
+            .fetch_add(1, Ordering::Relaxed);
         info!(
             "Hedging request {} to {} after {}ms (primary {} still pending)",
             request.request_id,
@@ -1460,10 +1470,7 @@ impl InferenceRouter {
                 .temperature
                 .map(|t| t as f64 / 100.0)
                 .unwrap_or(0.7);
-            let top_p = request
-                .parameters
-                .top_p
-                .map(|t| t as f64 / 100.0);
+            let top_p = request.parameters.top_p.map(|t| t as f64 / 100.0);
             let max_tokens = request.parameters.max_tokens;
 
             let mut body = serde_json::json!({
@@ -1489,10 +1496,7 @@ impl InferenceRouter {
             let body_bytes = match serde_json::to_vec(&body) {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!(
-                        "Failed to serialize inference request body: {}",
-                        e
-                    );
+                    warn!("Failed to serialize inference request body: {}", e);
                     return Err(DispatchFailure::Retryable {
                         provider: provider_address,
                         error: ModelError::InferenceError(format!(
@@ -1716,9 +1720,7 @@ impl InferenceRouter {
                     // pinned tokenizer) and a TEE-attested or redundant-
                     // execution oracle for `output_tokens`. Tracked
                     // separately from this audit.
-                    let raw_input = resp_body["usage"]["prompt_tokens"]
-                        .as_u64()
-                        .unwrap_or(0);
+                    let raw_input = resp_body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
                     let raw_output = resp_body["usage"]["completion_tokens"]
                         .as_u64()
                         .unwrap_or(0);
@@ -1745,16 +1747,16 @@ impl InferenceRouter {
                     // the cached share is split out and the remainder billed at
                     // the fresh-input rate — otherwise a cached token would be
                     // charged twice, once at each rate.
-                    let cached_read_tokens = resp_body["usage"]["prompt_tokens_details"]
-                        ["cached_tokens"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .min(prompt_tokens as u64) as u32;
-                    let cached_write_tokens = resp_body["usage"]["prompt_tokens_details"]
-                        ["cache_write_tokens"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .min(prompt_tokens as u64) as u32;
+                    let cached_read_tokens =
+                        resp_body["usage"]["prompt_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .unwrap_or(0)
+                            .min(prompt_tokens as u64) as u32;
+                    let cached_write_tokens =
+                        resp_body["usage"]["prompt_tokens_details"]["cache_write_tokens"]
+                            .as_u64()
+                            .unwrap_or(0)
+                            .min(prompt_tokens as u64) as u32;
                     let input_tokens = prompt_tokens.saturating_sub(cached_read_tokens);
 
                     let finish_reason = resp_body["choices"]
@@ -1903,10 +1905,7 @@ impl InferenceRouter {
                     })
                 }
                 Err(e) => {
-                    warn!(
-                        "Provider {} request failed: {}",
-                        provider_address, e
-                    );
+                    warn!("Provider {} request failed: {}", provider_address, e);
                     self.record_provider_failure(&provider_address);
                     self.provider_manager.record_call_failure(&provider_address);
                     Err(DispatchFailure::Retryable {
@@ -2043,14 +2042,15 @@ mod tests {
         let pm = Arc::new(ProviderManager::new());
         let router = InferenceRouter::new(pm);
 
-        let mut req =
-            InferenceRequest::new("m".to_string(), Address::zero(), vec![], 0);
+        let mut req = InferenceRequest::new("m".to_string(), Address::zero(), vec![], 0);
         assert!(router.is_request_hedgeable(&req));
 
         req.parameters.custom.insert("no_hedge".into(), "1".into());
         assert!(!router.is_request_hedgeable(&req));
 
-        req.parameters.custom.insert("no_hedge".into(), "true".into());
+        req.parameters
+            .custom
+            .insert("no_hedge".into(), "true".into());
         assert!(!router.is_request_hedgeable(&req));
 
         req.parameters.custom.insert("no_hedge".into(), "0".into());
@@ -2140,7 +2140,10 @@ mod tests {
             horizon: 8,
         };
         let err = router.check_modality(&bad).unwrap_err();
-        assert!(matches!(err, ModelError::ModalityMismatch { .. }), "got {err:?}");
+        assert!(
+            matches!(err, ModelError::ModalityMismatch { .. }),
+            "got {err:?}"
+        );
 
         // Chat payload to the same model → OK.
         let good = InferencePayload::Chat(InferenceRequest::new(

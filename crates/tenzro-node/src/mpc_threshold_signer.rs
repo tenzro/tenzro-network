@@ -43,9 +43,7 @@ use tenzro_bridge::mpc::committee::{CommitteeRole, build_committee_bound_sign_co
 use tenzro_bridge::mpc::libp2p_relay::{MpcLibp2pRelay, MpcLibp2pSurface};
 use tenzro_bridge::mpc::sealing::KeyshareSealer;
 use tenzro_bridge::mpc::setup::{InstanceId, MpcParameters, SESSION_NONCE_LEN};
-use tenzro_bridge::mpc::sign::{
-    SignConfig, SignError, SignOutput, SignSession, ThresholdSigner,
-};
+use tenzro_bridge::mpc::sign::{SignConfig, SignError, SignOutput, SignSession, ThresholdSigner};
 use tenzro_bridge::mpc::store::{GroupId, KeyshareStore};
 use tenzro_types::Hash;
 
@@ -93,10 +91,7 @@ impl ChainEntropyProvider for BlockStoreEntropyProvider {
             .latest_height()
             .await
             .map_err(|e| {
-                SignError::InvalidParameters(format!(
-                    "block store latest_height failed: {}",
-                    e
-                ))
+                SignError::InvalidParameters(format!("block store latest_height failed: {}", e))
             })?
             .ok_or_else(|| {
                 SignError::InvalidParameters(
@@ -269,9 +264,7 @@ impl ThresholdSigner for NodeThresholdSigner {
                 // `SignConfig::validate` taxonomy.
                 Err(SignError::LocalNotInQuorum)
             }
-            CommitteeRole::Participant(cfg) => {
-                self.run_participant(cfg).await
-            }
+            CommitteeRole::Participant(cfg) => self.run_participant(cfg).await,
         }
     }
 }

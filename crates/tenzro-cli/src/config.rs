@@ -61,8 +61,7 @@ pub struct PersistedConfig {
 
 /// Get the path to the config file: `~/.tenzro/config.json`
 pub fn config_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".tenzro").join("config.json")
+    tenzro_types::paths::cli_config_path()
 }
 
 /// Load persisted config from disk. Returns default if file doesn't exist.

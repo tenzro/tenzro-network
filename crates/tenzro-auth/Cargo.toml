@@ -39,7 +39,12 @@ tracing = { workspace = true }
 
 # Utilities
 hex = { workspace = true }
+# Constant-time comparison for the admission gate's hashed service keys.
+subtle = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = "3"
+
+[lints]
+workspace = true

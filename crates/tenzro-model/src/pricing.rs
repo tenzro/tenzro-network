@@ -4,6 +4,7 @@
 //! for inference requests on Tenzro Network.
 
 use crate::error::{ModelError, Result};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -12,7 +13,6 @@ use tenzro_types::{
     model::{BillableUnits, InferenceMetadata, PricingConfig, PricingModel},
     primitives::Timestamp,
 };
-use parking_lot::RwLock;
 
 /// Price estimate for an inference request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,7 +370,8 @@ impl PricingEngine {
 
         let mut prices = Vec::new();
         for config in &pricing_configs {
-            let price = self.estimate_cost(config, estimated_input_tokens, estimated_output_tokens)?;
+            let price =
+                self.estimate_cost(config, estimated_input_tokens, estimated_output_tokens)?;
             prices.push(price);
         }
 
@@ -619,7 +620,9 @@ mod tests {
         let pricing = token_pricing(10, 20, 100, PricingModel::PerToken);
         let metadata = metadata_for(BillableUnits::tokens(100, 50), 1000);
 
-        let cost = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
+        let cost = engine
+            .calculate_cost("model-1", &pricing, &metadata)
+            .unwrap();
         assert_eq!(cost, 2000); // 100*10 + 50*20 = 2000
     }
 
@@ -640,7 +643,12 @@ mod tests {
             price_per_frame: 50,
         };
 
-        let units = BillableUnits::tokens(100, 50)
+        // Generation-shaped call: denoising work is present, so frames are NOT
+        // charged separately. `pixel_steps` is width × height × steps × frames,
+        // so the frame count is already a factor of it — billing
+        // `price_per_frame` on top would charge the same work twice. The frame
+        // count is still carried, for observability.
+        let generated = BillableUnits::tokens(100, 50)
             .with_cache(1_000, 200)
             .with_reasoning_loops(4)
             .with_image_tokens(300)
@@ -650,7 +658,7 @@ mod tests {
             .with_pixel_steps(1_000, 8);
 
         let cost = engine
-            .calculate_cost("model-1", &pricing, &metadata_for(units, 1_000))
+            .calculate_cost("model-1", &pricing, &metadata_for(generated, 1_000))
             .unwrap();
 
         let expected = 100 * 10      // input tokens
@@ -661,9 +669,23 @@ mod tests {
             + 300 * 3                // image tokens
             + 3 * 400                // audio seconds, rounded up
             + 6 * 900                // video seconds
-            + 1_000 * 7              // pixel steps
-            + 8 * 50; // frames
-        assert_eq!(cost, expected);
+            + 1_000 * 7; // pixel steps — frames are folded into this
+        assert_eq!(cost, expected, "generation must not double-bill frames");
+
+        // Consumption-shaped call: a video encoder reads frames and emits one
+        // vector, synthesizing no pixels. With no denoising work to fold them
+        // into, frames meter at their own rate. This is the other half of the
+        // `price_per_frame` dimension and the reason `with_frames` exists
+        // alongside `with_pixel_steps`.
+        let consumed = BillableUnits::default().with_frames(8);
+        let frame_cost = engine
+            .calculate_cost("model-1", &pricing, &metadata_for(consumed, 0))
+            .unwrap();
+        assert_eq!(
+            frame_cost,
+            8 * 50,
+            "frames must be charged when there is no pixel_steps to absorb them"
+        );
     }
 
     #[test]
@@ -715,7 +737,9 @@ mod tests {
         let metadata = metadata_for(BillableUnits::tokens(100, 50), 1_000);
 
         // No market history yet: the metered cost stands.
-        let cold = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
+        let cold = engine
+            .calculate_cost("model-1", &pricing, &metadata)
+            .unwrap();
         assert_eq!(cold, 2_000);
 
         // A market trading well above the configured floor lifts the quote, but
@@ -723,12 +747,16 @@ mod tests {
         for _ in 0..3 {
             engine.update_market_price("model-1".to_string(), 9_000);
         }
-        let hot = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
+        let hot = engine
+            .calculate_cost("model-1", &pricing, &metadata)
+            .unwrap();
         assert_eq!(hot, 4_000);
 
         // A soft market discounts, but not below half.
         engine.update_market_price("model-2".to_string(), 1);
-        let soft = engine.calculate_cost("model-2", &pricing, &metadata).unwrap();
+        let soft = engine
+            .calculate_cost("model-2", &pricing, &metadata)
+            .unwrap();
         assert_eq!(soft, 1_000);
     }
 
@@ -738,7 +766,9 @@ mod tests {
         let pricing = token_pricing(1, 1, 1000, PricingModel::PerToken);
         let metadata = metadata_for(BillableUnits::tokens(10, 10), 1000);
 
-        let cost = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
+        let cost = engine
+            .calculate_cost("model-1", &pricing, &metadata)
+            .unwrap();
         assert_eq!(cost, 1000); // Should use minimum price
     }
 
@@ -802,10 +832,12 @@ mod tests {
         let base_pricing = token_pricing(10, 20, 1000, PricingModel::PerToken);
 
         // Low load
-        let price_low_load = engine.calculate_price("model-1", "provider-1", &base_pricing, 10.0, 0.2);
+        let price_low_load =
+            engine.calculate_price("model-1", "provider-1", &base_pricing, 10.0, 0.2);
 
         // High load
-        let price_high_load = engine.calculate_price("model-1", "provider-1", &base_pricing, 10.0, 0.9);
+        let price_high_load =
+            engine.calculate_price("model-1", "provider-1", &base_pricing, 10.0, 0.9);
 
         // Higher load should result in higher price
         assert!(price_high_load > price_low_load);

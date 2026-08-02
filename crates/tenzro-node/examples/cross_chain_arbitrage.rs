@@ -50,9 +50,7 @@ const ONE_USDC: u128 = 1_000_000;
 
 /// EVM bytecode that copies calldata[0..32] -> storage[0]
 /// PUSH1 0x00, CALLDATALOAD, PUSH1 0x00, SSTORE, STOP
-const DEX_RUNTIME_CODE: &[u8] = &[
-    0x60, 0x00, 0x35, 0x60, 0x00, 0x55, 0x00,
-];
+const DEX_RUNTIME_CODE: &[u8] = &[0x60, 0x00, 0x35, 0x60, 0x00, 0x55, 0x00];
 
 #[derive(Debug, Clone, Copy)]
 struct ArbOpportunity {
@@ -170,9 +168,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.set_code(&dex_eth, DEX_RUNTIME_CODE.to_vec());
     state.set_code(&dex_arb, DEX_RUNTIME_CODE.to_vec());
     state.set_code(&dex_base, DEX_RUNTIME_CODE.to_vec());
-    println!("→ installed DEX runtime on ethereum   = 0x{}", hex::encode(&dex_eth));
-    println!("→ installed DEX runtime on arbitrum   = 0x{}", hex::encode(&dex_arb));
-    println!("→ installed DEX runtime on base       = 0x{}", hex::encode(&dex_base));
+    println!(
+        "→ installed DEX runtime on ethereum   = 0x{}",
+        hex::encode(&dex_eth)
+    );
+    println!(
+        "→ installed DEX runtime on arbitrum   = 0x{}",
+        hex::encode(&dex_arb)
+    );
+    println!(
+        "→ installed DEX runtime on base       = 0x{}",
+        hex::encode(&dex_base)
+    );
 
     // ------------------------------------------------------------------
     // Step 4: build the BridgeRouter and register adapters
@@ -189,7 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lz_adapter = LayerZeroAdapter::new(lz_config);
     lz_adapter.set_peer("arbitrum", "0x0000000000000000000000000000000000000010");
     lz_adapter.set_peer("base", "0x0000000000000000000000000000000000000020");
-    router.register_adapter("layerzero", Box::new(lz_adapter)).await;
+    router
+        .register_adapter("layerzero", Box::new(lz_adapter))
+        .await;
 
     let debridge_config = DeBridgeConfig::new(
         "https://dln.debridge.finance",
@@ -198,7 +207,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "0x0000000000000000000000000000000000000000",
     );
     let debridge_adapter = DeBridgeAdapter::new(debridge_config);
-    router.register_adapter("debridge", Box::new(debridge_adapter)).await;
+    router
+        .register_adapter("debridge", Box::new(debridge_adapter))
+        .await;
     println!("→ adapters registered: {:?}", router.list_adapters().await);
 
     // ------------------------------------------------------------------
@@ -223,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             asset: "USDC",
             buy_chain: "base",
             sell_chain: "arbitrum",
-            buy_price: 999_500, // 0.9995 USDC
+            buy_price: 999_500,    // 0.9995 USDC
             sell_price: 1_002_000, // 1.0020 USDC
             size_usdc: 800 * ONE_USDC,
         },
@@ -265,7 +276,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // (5a) Enforce delegation BEFORE doing anything.
         match registry.enforce_operation(&agent_did, "arbitrage", Some(opp.size_usdc)) {
-            Ok(()) => println!("  delegation OK ({} USDC ≤ 1000 USDC cap)", opp.size_usdc / ONE_USDC),
+            Ok(()) => println!(
+                "  delegation OK ({} USDC ≤ 1000 USDC cap)",
+                opp.size_usdc / ONE_USDC
+            ),
             Err(e) => {
                 println!("  BLOCKED by delegation: {e}");
                 continue;
@@ -294,7 +308,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (fee_wei as i128) * 2_500 / 1_000_000_000_000
                 }
                 Ok(_) => {
-                    println!("  no adapters support {} → {}", opp.buy_chain, opp.sell_chain);
+                    println!(
+                        "  no adapters support {} → {}",
+                        opp.buy_chain, opp.sell_chain
+                    );
                     continue;
                 }
                 Err(e) => {

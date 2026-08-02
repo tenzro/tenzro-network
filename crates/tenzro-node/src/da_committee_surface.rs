@@ -47,18 +47,18 @@ use libp2p::PeerId;
 use tenzro_consensus::EpochManager;
 use tenzro_crypto::keys::{KeyPair, PublicKey};
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+use tenzro_network::NetworkService;
 use tenzro_network::da_committee_relay::{
     DaCommitteeError as WireError, DaCommitteeRequest, DaCommitteeResponse, WireMemberAttestation,
     WirePossessionProof,
 };
-use tenzro_network::NetworkService;
 use tenzro_storage::redstuff::{CommitteeShape, SliverPair};
 use tenzro_types::primitives::{Address, Hash};
 
 use crate::da_committee::{
-    attestation_message, challenge_message, committee_address, committee_address_from_pubkey,
     CommitteeMember, CommitteeView, DaCommitteeError, DaCommitteeStore, DaCommitteeSurface,
-    MemberAttestation, PossessionProof, StoredSliver,
+    MemberAttestation, PossessionProof, StoredSliver, attestation_message, challenge_message,
+    committee_address, committee_address_from_pubkey,
 };
 
 type Result<T> = std::result::Result<T, DaCommitteeError>;
@@ -238,11 +238,7 @@ impl DaCommitteeSurface for NetworkDaCommitteeSurface {
         }
     }
 
-    async fn fetch_sliver(
-        &self,
-        to_index: usize,
-        commitment: &Hash,
-    ) -> Result<Option<SliverPair>> {
+    async fn fetch_sliver(&self, to_index: usize, commitment: &Hash) -> Result<Option<SliverPair>> {
         let peer = self.resolve_peer(to_index)?;
         let request = DaCommitteeRequest::FetchSliver {
             commitment: commitment.0,

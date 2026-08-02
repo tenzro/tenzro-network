@@ -13,7 +13,7 @@
 //! Options::default() per-CF descriptors, and tuned is the proposed fix. That
 //! way the sim is a faithful model of what the node actually does on disk.
 
-use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};
+use rocksdb::{ColumnFamilyDescriptor, DB, Options, WriteBatch, WriteOptions};
 use std::path::Path;
 use std::time::Instant;
 
@@ -25,10 +25,10 @@ const HOT_KEYS_PER_BLOCK: &[(&str, &str, usize)] = &[
     ("metadata", "latest_height", 8),
     ("metadata", "latest_block_hash", 32),
     ("metadata", "consensus_view", 8),
-    ("metadata", "high_qc", 256),       // quorum cert blob, rewritten each view
+    ("metadata", "high_qc", 256), // quorum cert blob, rewritten each view
     ("metadata", "finality_marker", 48),
-    ("state", "validator_set", 512),    // re-serialized each block
-    ("audit", "last_vote_marker", 75),  // bounded vote (pruned), still churns
+    ("state", "validator_set", 512),   // re-serialized each block
+    ("audit", "last_vote_marker", 75), // bounded vote (pruned), still churns
 ];
 
 // Per-block append-only rows (block index). These are NOT overwrites — they
@@ -322,7 +322,10 @@ fn main() {
     println!("    sst         : {:>10.1} MB", mb(sst));
     println!("    wal         : {:>10.1} MB", mb(wal));
     println!("    other       : {:>10.1} MB", mb(other));
-    println!("  genuine data  : {:>10.1} MB (append rows only)", mb(genuine));
+    println!(
+        "  genuine data  : {:>10.1} MB (append rows only)",
+        mb(genuine)
+    );
     println!(
         "  bloat factor  : {:>10.1}x over genuine data",
         total as f64 / genuine.max(1) as f64

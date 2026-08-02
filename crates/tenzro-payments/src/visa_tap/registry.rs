@@ -1,9 +1,9 @@
 //! HTTP client for Visa's external agent registry
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use crate::error::{PaymentError, Result};
 use crate::rfc9421::{AgentPublicKeyInfo, AgentRegistryClient, SignatureAlgorithm};
@@ -58,9 +58,10 @@ impl VisaAgentRegistryClient {
                 match key.alg.as_deref() {
                     Some("EdDSA") | Some("Ed25519") | None => SignatureAlgorithm::Ed25519,
                     Some(alg) => {
-                        return Err(PaymentError::AgentRegistryError(
-                            format!("Unsupported OKP algorithm: {}", alg),
-                        ))
+                        return Err(PaymentError::AgentRegistryError(format!(
+                            "Unsupported OKP algorithm: {}",
+                            alg
+                        )));
                     }
                 }
             }
@@ -69,16 +70,18 @@ impl VisaAgentRegistryClient {
                 match key.alg.as_deref() {
                     Some("PS256") | Some("RS256") | None => SignatureAlgorithm::RsaPssSha256,
                     Some(alg) => {
-                        return Err(PaymentError::AgentRegistryError(
-                            format!("Unsupported RSA algorithm: {}", alg),
-                        ))
+                        return Err(PaymentError::AgentRegistryError(format!(
+                            "Unsupported RSA algorithm: {}",
+                            alg
+                        )));
                     }
                 }
             }
             kty => {
-                return Err(PaymentError::AgentRegistryError(
-                    format!("Unsupported key type: {}", kty),
-                ))
+                return Err(PaymentError::AgentRegistryError(format!(
+                    "Unsupported key type: {}",
+                    kty
+                )));
             }
         };
 
@@ -86,29 +89,34 @@ impl VisaAgentRegistryClient {
         let public_key_bytes = match algorithm {
             SignatureAlgorithm::Ed25519 => {
                 let x = key.x.as_ref().ok_or_else(|| {
-                    PaymentError::AgentRegistryError("Missing 'x' parameter for Ed25519 key".to_string())
+                    PaymentError::AgentRegistryError(
+                        "Missing 'x' parameter for Ed25519 key".to_string(),
+                    )
                 })?;
-                URL_SAFE_NO_PAD.decode(x)
-                    .map_err(|e| PaymentError::AgentRegistryError(format!("Invalid base64 in 'x': {}", e)))?
+                URL_SAFE_NO_PAD.decode(x).map_err(|e| {
+                    PaymentError::AgentRegistryError(format!("Invalid base64 in 'x': {}", e))
+                })?
             }
             SignatureAlgorithm::RsaPssSha256 => {
                 let n = key.n.as_ref().ok_or_else(|| {
-                    PaymentError::AgentRegistryError("Missing 'n' parameter for RSA key".to_string())
+                    PaymentError::AgentRegistryError(
+                        "Missing 'n' parameter for RSA key".to_string(),
+                    )
                 })?;
                 let e = key.e.as_ref().ok_or_else(|| {
-                    PaymentError::AgentRegistryError("Missing 'e' parameter for RSA key".to_string())
+                    PaymentError::AgentRegistryError(
+                        "Missing 'e' parameter for RSA key".to_string(),
+                    )
                 })?;
 
                 // Concatenate n and e for RSA public key representation
                 let mut bytes = Vec::new();
-                bytes.extend_from_slice(
-                    &URL_SAFE_NO_PAD.decode(n)
-                        .map_err(|e| PaymentError::AgentRegistryError(format!("Invalid base64 in 'n': {}", e)))?,
-                );
-                bytes.extend_from_slice(
-                    &URL_SAFE_NO_PAD.decode(e)
-                        .map_err(|e| PaymentError::AgentRegistryError(format!("Invalid base64 in 'e': {}", e)))?,
-                );
+                bytes.extend_from_slice(&URL_SAFE_NO_PAD.decode(n).map_err(|e| {
+                    PaymentError::AgentRegistryError(format!("Invalid base64 in 'n': {}", e))
+                })?);
+                bytes.extend_from_slice(&URL_SAFE_NO_PAD.decode(e).map_err(|e| {
+                    PaymentError::AgentRegistryError(format!("Invalid base64 in 'e': {}", e))
+                })?);
                 bytes
             }
             // Visa TAP §JWKS only emits OKP/Ed25519 and RSA/RS256|PS256 →
@@ -156,10 +164,9 @@ impl VisaAgentRegistryClient {
             )));
         }
 
-        let jwks: JwkResponse = response
-            .json()
-            .await
-            .map_err(|e| PaymentError::AgentRegistryError(format!("Failed to parse JWKS: {}", e)))?;
+        let jwks: JwkResponse = response.json().await.map_err(|e| {
+            PaymentError::AgentRegistryError(format!("Failed to parse JWKS: {}", e))
+        })?;
 
         let mut out = Vec::with_capacity(jwks.keys.len());
         for key in &jwks.keys {
@@ -179,28 +186,32 @@ impl AgentRegistryClient for VisaAgentRegistryClient {
 
         let url = format!("{}/keys/{}", self.registry_url, key_id);
 
-        let response = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| PaymentError::AgentRegistryError(format!("HTTP request failed: {}", e)))?;
+        let response =
+            self.http_client.get(&url).send().await.map_err(|e| {
+                PaymentError::AgentRegistryError(format!("HTTP request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
-            warn!("Failed to fetch key {}: status {}", key_id, response.status());
+            warn!(
+                "Failed to fetch key {}: status {}",
+                key_id,
+                response.status()
+            );
             return Err(PaymentError::AgentRegistryError(format!(
                 "Registry returned status: {}",
                 response.status()
             )));
         }
 
-        let key_response: JwkKey = response
-            .json()
-            .await
-            .map_err(|e| PaymentError::AgentRegistryError(format!("Failed to parse response: {}", e)))?;
+        let key_response: JwkKey = response.json().await.map_err(|e| {
+            PaymentError::AgentRegistryError(format!("Failed to parse response: {}", e))
+        })?;
 
         if key_response.kid != key_id {
-            warn!("Key ID mismatch: expected {}, got {}", key_id, key_response.kid);
+            warn!(
+                "Key ID mismatch: expected {}, got {}",
+                key_id, key_response.kid
+            );
             return Err(PaymentError::AgentRegistryError(
                 "Key ID mismatch in response".to_string(),
             ));
@@ -291,7 +302,12 @@ mod tests {
 
         let result = VisaAgentRegistryClient::parse_jwk_key(&key);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported key type"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported key type")
+        );
     }
 
     #[test]

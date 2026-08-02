@@ -25,7 +25,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
@@ -33,6 +33,7 @@ use tenzro_auth::{
     ApprovalRecord, ApprovalStatus, AuthorityAction, AuthorityRequest, AuthorizationDetail,
     AuthorizationDetails, DpopProof, DpopValidation, ResourceConstraint,
 };
+use tenzro_identity::envelope::{TenzroDidEnvelope, canonical_preimage, params_hash};
 use tenzro_node::{NodeConfig, RpcServer, TenzroNode};
 use tenzro_types::AssetId;
 
@@ -64,6 +65,13 @@ async fn setup_test_server() -> (
     Arc<TenzroNode>,
 ) {
     let (cfg, tmp) = test_config();
+    // The node captures `TENZRO_ADMIN_TOKEN` once at startup, so it has to be
+    // in the environment before `TenzroNode::new`. nextest gives each test its
+    // own process, so this cannot race another test.
+    //
+    // SAFETY: single-threaded at this point — the node, its runtime, and the
+    // RPC server are all constructed after this line.
+    unsafe { std::env::set_var("TENZRO_ADMIN_TOKEN", TEST_ADMIN_TOKEN) };
     let mut node = TenzroNode::new(cfg).await.expect("node creation");
     node.start().await.expect("node start");
     let node = Arc::new(node);
@@ -72,9 +80,8 @@ async fn setup_test_server() -> (
     let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
     let rpc = RpcServer::new(node.clone(), "127.0.0.1:0".to_string());
-    let handle = tokio::spawn(async move {
-        rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await
-    });
+    let handle =
+        tokio::spawn(async move { rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await });
 
     let addr = addr_rx.await.expect("bound address");
     let base_url = format!("http://{}", addr);
@@ -96,6 +103,95 @@ async fn rpc_call(client: &reqwest::Client, url: &str, body: Value) -> Value {
         .json::<Value>()
         .await
         .expect("JSON")
+}
+
+/// Admin token the test node starts with. See [`setup_test_server`].
+const TEST_ADMIN_TOKEN: &str = "test-admin-token";
+
+/// `rpc_call` plus the operator admin header.
+///
+/// Operator-only mutation RPCs (`tenzro_revokeDid`, the API-key surface, stake
+/// and provider registration) sit behind a fail-closed admin gate: without
+/// `X-Tenzro-Admin-Token` matching the node's configured token they return
+/// `-32001` before the handler runs.
+async fn rpc_call_admin(client: &reqwest::Client, url: &str, body: Value) -> Value {
+    client
+        .post(url)
+        .header("X-Tenzro-Admin-Token", TEST_ADMIN_TOKEN)
+        .json(&body)
+        .send()
+        .await
+        .expect("HTTP")
+        .json::<Value>()
+        .await
+        .expect("JSON")
+}
+
+/// An identity whose signing key the test holds.
+///
+/// The onboarding RPCs auto-provision an MPC wallet and keep the key inside
+/// the node, which is right for production and useless for a test that has to
+/// *prove* ownership. `tenzro_registerIdentity` accepts a caller-supplied
+/// public key, so registering through it leaves the private half here.
+struct SigningIdentity {
+    did: String,
+    key: SigningKey,
+}
+
+impl SigningIdentity {
+    async fn register(client: &reqwest::Client, url: &str, seed: u8) -> Self {
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        let pk_hex = hex::encode(key.verifying_key().to_bytes());
+        let resp = rpc_call(
+            client,
+            url,
+            rpc_request(
+                "tenzro_registerIdentity",
+                json!({
+                    "identity_type": "human",
+                    "display_name": "Envelope Signer",
+                    "public_key": pk_hex,
+                }),
+            ),
+        )
+        .await;
+        let did = resp["result"]["did"]
+            .as_str()
+            .unwrap_or_else(|| panic!("registerIdentity returned no did: {resp}"))
+            .to_string();
+        Self { did, key }
+    }
+
+    /// A valid envelope over `(method, canonical)` — the same binding
+    /// `require_did_owner` recomputes on the node side.
+    fn envelope(&self, method: &str, canonical: &[u8]) -> String {
+        let mut env = TenzroDidEnvelope {
+            did: self.did.clone(),
+            method: method.to_string(),
+            params_hash: params_hash(canonical),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as u64,
+            // Nonces only need to differ within a run, and are burned on
+            // acceptance; deriving one from the clock keeps this free of an
+            // RNG dependency. An all-zero nonce is rejected outright.
+            nonce: {
+                let mut n = [0u8; 16];
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+                    .to_le_bytes();
+                n.copy_from_slice(&now[..16]);
+                n[15] |= 1;
+                n
+            },
+            signature: vec![],
+        };
+        env.signature = self.key.sign(&canonical_preimage(&env)).to_bytes().to_vec();
+        env.to_header_value()
+    }
 }
 
 async fn shutdown(
@@ -124,12 +220,13 @@ impl DpopHolder {
         let pubkey = signing_key.verifying_key();
         let x = URL_SAFE_NO_PAD.encode(pubkey.to_bytes());
         // RFC 7638 canonical form: sorted required members, no whitespace.
-        let jwk_json = format!(
-            r#"{{"crv":"Ed25519","kty":"OKP","x":"{}"}}"#,
-            x
-        );
+        let jwk_json = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{}"}}"#, x);
         let jkt = DpopProof::compute_jkt(&jwk_json).expect("compute jkt");
-        Self { signing_key, jwk_json, jkt }
+        Self {
+            signing_key,
+            jwk_json,
+            jkt,
+        }
     }
 
     /// Sign a fresh DPoP proof for (htm, htu) at the current wall clock.
@@ -137,8 +234,7 @@ impl DpopHolder {
     fn sign_proof(&self, htm: &str, htu: &str) -> String {
         // Header: typ=dpop+jwt, alg=EdDSA, jwk=<this holder's pubkey JWK>.
         // We embed the *full* JWK JSON, not just the thumbprint.
-        let jwk_value: Value =
-            serde_json::from_str(&self.jwk_json).expect("jwk parse");
+        let jwk_value: Value = serde_json::from_str(&self.jwk_json).expect("jwk parse");
         let header = json!({
             "typ": "dpop+jwt",
             "alg": "EdDSA",
@@ -201,10 +297,12 @@ async fn test_onboard_human_returns_jwt_identity_and_wallet() {
         result["identity"]["did"]
     );
     assert!(result["wallet"]["wallet_id"].is_string());
-    assert!(result["wallet"]["address"]
-        .as_str()
-        .unwrap()
-        .starts_with("0x"));
+    assert!(
+        result["wallet"]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x")
+    );
     assert!(result["access_token"].is_string());
     assert_eq!(result["token_type"], "Bearer");
     assert_eq!(result["dpop_bound"], true);
@@ -229,10 +327,7 @@ async fn test_onboard_human_returns_jwt_identity_and_wallet() {
         .validate_jwt(&token, Some(dpop_ctx))
         .expect("JWT validates with matching DPoP");
     // sub == bearer DID == controller DID (self-custody for humans).
-    assert_eq!(
-        claims.sub,
-        result["identity"]["did"].as_str().unwrap()
-    );
+    assert_eq!(claims.sub, result["identity"]["did"].as_str().unwrap());
     assert_eq!(claims.controller_did, claims.sub);
     assert_eq!(
         claims.cnf.as_ref().map(|c| c.jkt.as_str()),
@@ -464,8 +559,22 @@ fn uuid_v4() -> String {
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -564,11 +673,12 @@ async fn test_hitl_approval_decide_rejects_wrong_approver() {
     )
     .await;
 
-    assert!(resp["error"].is_object(), "wrong approver must error: {}", resp);
-    assert_eq!(
-        resp["error"]["code"], -32001,
-        "expected forbidden (-32001)"
+    assert!(
+        resp["error"].is_object(),
+        "wrong approver must error: {}",
+        resp
     );
+    assert_eq!(resp["error"]["code"], -32001, "expected forbidden (-32001)");
 
     shutdown(tx, handle).await;
 }
@@ -600,7 +710,10 @@ async fn test_hitl_approval_deny_path() {
 
     // A denied approval cannot be consumed.
     let consume_err = engine.consume_approval(&approval_id);
-    assert!(consume_err.is_err(), "denied approval must not be consumable");
+    assert!(
+        consume_err.is_err(),
+        "denied approval must not be consumable"
+    );
 
     shutdown(tx, handle).await;
 }
@@ -609,23 +722,41 @@ async fn test_hitl_approval_deny_path() {
 // Cascading revocation
 // ---------------------------------------------------------------------------
 
+/// A `jti` identifies a token; it does not authorize destroying one.
+///
+/// Every audit row carries the jti, and so does the token itself, so treating
+/// knowledge of one as authority would mean anyone who ever saw a token — or
+/// read the audit log — could revoke it, and the act-chain cascade would take
+/// every token minted under it along too.
+///
+/// The controller that authorized the token is the one exercised here. It is
+/// the case the two-owner rule exists for: an agent whose key is compromised
+/// cannot be trusted to revoke its own token, and its controller must be able
+/// to.
 #[tokio::test]
 async fn test_revoke_jti_invalidates_subsequent_validation() {
     let (base_url, tx, handle, _tmp, node) = setup_test_server().await;
     let client = reqwest::Client::new();
     let engine = node.auth_engine().expect("auth engine");
-    let holder = DpopHolder::new();
+
+    let controller = SigningIdentity::register(&client, &base_url, 11).await;
 
     let resp = rpc_call(
         &client,
         &base_url,
         rpc_request(
-            "tenzro_onboardHuman",
-            json!({ "display_name": "Dave", "dpop_jkt": holder.jkt }),
+            "tenzro_onboardDelegatedAgent",
+            json!({
+                "controller_did": controller.did,
+                "capabilities": ["inference"],
+            }),
         ),
     )
     .await;
-    let token = resp["result"]["access_token"].as_str().unwrap().to_string();
+    let token = resp["result"]["access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("onboardDelegatedAgent returned no token: {resp}"))
+        .to_string();
 
     // Validate first (no DPoP — exercise unbound path).
     let claims = engine
@@ -633,13 +764,56 @@ async fn test_revoke_jti_invalidates_subsequent_validation() {
         .expect("first validation succeeds");
     let jti = claims.jti.clone();
 
-    // Revoke via RPC.
-    let revoke_resp = rpc_call(
+    // Knowing the jti is not enough.
+    let bare = rpc_call(
         &client,
         &base_url,
         rpc_request(
             "tenzro_revokeJwt",
             json!({ "jti": jti, "reason": "test revocation" }),
+        ),
+    )
+    .await;
+    assert!(
+        bare.get("error").is_some(),
+        "revokeJwt accepted a bare jti with no owner proof: {bare}"
+    );
+    assert!(
+        engine.validate_jwt(&token, None).is_ok(),
+        "an unauthorized revoke must leave the token usable"
+    );
+
+    // An envelope from a DID that is neither the bearer nor the controller is
+    // a valid signature by the wrong party, which is still not authorization.
+    let stranger = SigningIdentity::register(&client, &base_url, 12).await;
+    let wrong = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(
+            "tenzro_revokeJwt",
+            json!({
+                "jti": jti,
+                "did_envelope": stranger.envelope("tenzro_revokeJwt", jti.as_bytes()),
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        wrong.get("error").is_some(),
+        "revokeJwt accepted an envelope from an unrelated DID: {wrong}"
+    );
+
+    // The controller can.
+    let revoke_resp = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(
+            "tenzro_revokeJwt",
+            json!({
+                "jti": jti,
+                "reason": "test revocation",
+                "did_envelope": controller.envelope("tenzro_revokeJwt", jti.as_bytes()),
+            }),
         ),
     )
     .await;
@@ -657,30 +831,56 @@ async fn test_revoke_jti_invalidates_subsequent_validation() {
     shutdown(tx, handle).await;
 }
 
+/// A `jti` with no issuance record is refused rather than revoked.
+///
+/// Otherwise "a jti this node has never seen" is the way past the ownership
+/// gate: there is no bearer and no controller to check against, so a permissive
+/// reading would treat the token as unowned and revoke it — and the cascade
+/// would run.
+#[tokio::test]
+async fn test_revoke_unknown_jti_is_refused() {
+    let (base_url, tx, handle, _tmp, _node) = setup_test_server().await;
+    let client = reqwest::Client::new();
+
+    let signer = SigningIdentity::register(&client, &base_url, 13).await;
+    let jti = "01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    let resp = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(
+            "tenzro_revokeJwt",
+            json!({
+                "jti": jti,
+                "did_envelope": signer.envelope("tenzro_revokeJwt", jti.as_bytes()),
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        resp.get("error").is_some(),
+        "an unattributable jti was accepted for revocation: {resp}"
+    );
+
+    shutdown(tx, handle).await;
+}
+
+/// Revoking a DID cascades to every token in its act-chain — and requires
+/// proof from the DID, on top of the operator admin token.
+///
+/// Two gates rather than one. The revocation is signed with this node's
+/// validator key and gossiped to peer registries, so the operator answers for
+/// it; but it destroys a tenant's identity network-wide, which is not the
+/// operator's call to make alone.
 #[tokio::test]
 async fn test_revoke_did_cascades_to_act_chain() {
     let (base_url, tx, handle, _tmp, node) = setup_test_server().await;
     let client = reqwest::Client::new();
     let engine = node.auth_engine().expect("auth engine");
 
-    // Onboard human controller.
-    let human = rpc_call(
-        &client,
-        &base_url,
-        rpc_request(
-            "tenzro_onboardHuman",
-            json!({ "display_name": "Root" }),
-        ),
-    )
-    .await;
-    let controller_did = human["result"]["identity"]["did"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let controller_token = human["result"]["access_token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // A controller whose signing key this test holds, so it can produce the
+    // envelope the gate now demands.
+    let controller = SigningIdentity::register(&client, &base_url, 21).await;
+    let controller_did = controller.did.clone();
 
     // Onboard a delegated agent under that controller.
     let agent = rpc_call(
@@ -700,22 +900,67 @@ async fn test_revoke_did_cascades_to_act_chain() {
         .unwrap()
         .to_string();
 
-    // Both tokens validate before revocation.
-    engine
-        .validate_jwt(&controller_token, None)
-        .expect("controller token valid");
+    // Token validates before revocation.
     engine
         .validate_jwt(&agent_token, None)
         .expect("agent token valid");
 
-    // Revoke the controller DID.  Cascade must invalidate the agent token
-    // too (its `controller_did` claim points back at the revoked DID).
-    let resp = rpc_call(
+    // The admin token alone is not enough: a shared node's host does not get
+    // to revoke a tenant's identity network-wide on their own say-so.
+    let admin_only = rpc_call_admin(
         &client,
         &base_url,
         rpc_request(
             "tenzro_revokeDid",
             json!({ "did": controller_did, "reason": "key compromise" }),
+        ),
+    )
+    .await;
+    assert!(
+        admin_only.get("error").is_some(),
+        "revokeDid accepted the operator admin token with no owner proof: {admin_only}"
+    );
+    assert!(
+        engine.validate_jwt(&agent_token, None).is_ok(),
+        "an unauthorized revoke must leave the act-chain intact"
+    );
+
+    // Nor is the envelope alone: the gate is both, not either.
+    let owner_only = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(
+            "tenzro_revokeDid",
+            json!({
+                "did": controller_did,
+                "did_envelope": controller.envelope(
+                    "tenzro_revokeDid",
+                    controller_did.as_bytes(),
+                ),
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        owner_only.get("error").is_some(),
+        "revokeDid accepted an owner envelope with no admin token: {owner_only}"
+    );
+
+    // Revoke the controller DID.  Cascade must invalidate the agent token
+    // (its `controller_did` claim points back at the revoked DID).
+    let resp = rpc_call_admin(
+        &client,
+        &base_url,
+        rpc_request(
+            "tenzro_revokeDid",
+            json!({
+                "did": controller_did,
+                "reason": "key compromise",
+                "did_envelope": controller.envelope(
+                    "tenzro_revokeDid",
+                    controller_did.as_bytes(),
+                ),
+            }),
         ),
     )
     .await;
@@ -726,11 +971,6 @@ async fn test_revoke_did_cascades_to_act_chain() {
         resp
     );
 
-    // Controller token rejected.
-    assert!(
-        engine.validate_jwt(&controller_token, None).is_err(),
-        "controller token must be rejected after DID revocation"
-    );
     // Agent token rejected via cascade.
     assert!(
         engine.validate_jwt(&agent_token, None).is_err(),
@@ -808,10 +1048,7 @@ async fn test_authority_request_within_rar_envelope_permits() {
     let resp = rpc_call(
         &client,
         &base_url,
-        rpc_request(
-            "tenzro_onboardHuman",
-            json!({ "display_name": "Eve" }),
-        ),
+        rpc_request("tenzro_onboardHuman", json!({ "display_name": "Eve" })),
     )
     .await;
     let token = resp["result"]["access_token"].as_str().unwrap().to_string();
@@ -880,9 +1117,7 @@ async fn test_link_wallet_for_auth_reuses_existing_identity() {
     )
     .await;
     assert!(linked.get("error").is_none(), "link error: {}", linked);
-    let did_after = linked["result"]["identity"]["did"]
-        .as_str()
-        .expect("did");
+    let did_after = linked["result"]["identity"]["did"].as_str().expect("did");
     assert_eq!(
         did_after, did_before,
         "linkWalletForAuth must reuse the wallet's existing DID, not mint a new one"
@@ -965,10 +1200,7 @@ async fn test_empty_rar_envelope_denies_privileged_action() {
     let resp = rpc_call(
         &client,
         &base_url,
-        rpc_request(
-            "tenzro_onboardHuman",
-            json!({ "display_name": "Mallory" }),
-        ),
+        rpc_request("tenzro_onboardHuman", json!({ "display_name": "Mallory" })),
     )
     .await;
     let token = resp["result"]["access_token"].as_str().unwrap().to_string();

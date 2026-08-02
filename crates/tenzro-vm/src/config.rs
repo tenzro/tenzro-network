@@ -55,9 +55,9 @@ impl Default for VmConfig {
             enabled_vms: vec![VmType::Evm, VmType::Svm, VmType::Daml, VmType::Tenzro],
             enable_evm_precompiles: true,
             enable_tenzro_precompiles: true,
-            gas_price_update_interval: 12, // 12 seconds (1 block)
+            gas_price_update_interval: 12,   // 12 seconds (1 block)
             base_fee_per_gas: 1_000_000_000, // 1 Gwei
-            chain_id: 1337, // Default testnet chain ID
+            chain_id: 1337,                  // Default testnet chain ID
             debug: false,
         }
     }
@@ -113,7 +113,9 @@ impl VmConfig {
     /// Validate gas limit
     pub fn validate_gas_limit(&self, gas_limit: u64) -> crate::error::Result<()> {
         if gas_limit == 0 {
-            return Err(crate::VmError::InvalidTransaction("Gas limit must be greater than 0".to_string()));
+            return Err(crate::VmError::InvalidTransaction(
+                "Gas limit must be greater than 0".to_string(),
+            ));
         }
         if gas_limit > self.max_gas_limit {
             return Err(crate::VmError::InvalidTransaction(format!(

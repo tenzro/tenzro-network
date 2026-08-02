@@ -3,7 +3,7 @@
 **Tenzro is the open, distributed execution layer for AI.** Inference, agents, and workflows run across a network of independent nodes instead of one company's servers. Any machine can serve a model, rent out spare compute, and hold data — one stake covers every role, and TNZO settles all of it: consumers pay from their balance, providers earn into theirs. Underneath sit the substrate layers that make execution open — multi-VM settlement (EVM, SVM, Canton/DAML), cross-chain reach, one identity (TDIP), and one settlement asset (TNZO).
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-51%20suites%2C%200%20failures-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-5%2C158%20passing-brightgreen)]()
 [![Website](https://img.shields.io/badge/Website-tenzro.com-green)](https://tenzro.com)
 [![Testnet](https://img.shields.io/badge/Testnet-Live-blue)](https://rpc.tenzro.xyz)
 
@@ -112,7 +112,7 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-events** | Event sourcing and subscription system with replay, webhooks, websockets |
 | **tenzro-workflow** | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | **tenzro-wasm** | WASI 0.2 component host for sandboxed agent skills and MCP tools: language-agnostic, capability-based, deterministic fuel metering, content-addressed component identity |
-| **tenzro-node** | Full node binary: JSON-RPC (855 methods), MCP (526 tools), A2A (41 skills), Web API |
+| **tenzro-node** | Full node binary: JSON-RPC (929 methods), MCP (535 tools), A2A (70 skills), Web API |
 | **tenzro-cli** | CLI tool: 103 command modules with interactive mode and full RPC coverage |
 
 ## Quick Start
@@ -222,9 +222,9 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 
 | Server | Port | Protocol | Endpoints |
 |--------|------|----------|-----------|
-| **JSON-RPC** | 8545 | HTTP | 855 methods across 31+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video; generative media; MoE sharded serving; LAN clustering; managed databases; app hosting: sites, functions, machines, leases; CAIP discovery; EIP-7702 delegation; Permit2; Secure-Mint; Capital Intent; Workflow). The same listener also serves the OpenAI-compatible HTTP routes `/v1/chat/completions`, `/v1/responses`, and the HTTP 402-gated `/api/paid/chat/completions` |
+| **JSON-RPC** | 8545 | HTTP | 929 methods across 31+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video; generative media; MoE sharded serving; LAN clustering; managed databases; app hosting: sites, functions, machines, leases; CAIP discovery; EIP-7702 delegation; Permit2; Secure-Mint; Capital Intent; Workflow). The same listener also serves the OpenAI-compatible HTTP routes `/v1/chat/completions`, `/v1/responses`, and the HTTP 402-gated `/api/paid/chat/completions` |
 | **Web API** | 8080 | REST | Verification (`/verify/*`), `/status`, `/faucet`, `/health`, `/chat`, `/providers`, `/discovery/resources`, OAuth token/introspect/revoke, passkey wallet |
-| **MCP** | 3001 | Streamable HTTP | 526 tools + OAuth 2.1 |
+| **MCP** | 3001 | Streamable HTTP | 535 tools + OAuth 2.1 |
 | **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 41 skills, task streaming |
 
 ### Ecosystem MCP Servers
@@ -382,11 +382,63 @@ The workflow runtime is its own state machine. It runs alongside (not inside) th
 - **Channel disputes**: durable lifecycle records readable via `tenzro dispute status` and `tenzro dispute list-by-channel`.
 - **Provider reputation**: `tenzro reputation get <provider>` reads the durable score (0–1000, +1 success / −5 failure) used by the inference router.
 
+## Where a node keeps things
+
+Everything Tenzro writes on a machine lives under one root: `$TENZRO_HOME`, or
+`~/.tenzro` when unset. Model weights, the HuggingFace cache, and dataset shards
+are shared across every Tenzro process on the box — content-addressed and
+read-only once written, so two nodes never hold separate copies of the same
+weights. Chain state is per-instance under `instances/<name>/`, because RocksDB
+cannot be shared: the second process to open the same directory fails on its
+lock file.
+
+```
+$TENZRO_HOME
+├── models/          shared — GGUF weights, ONNX bundles
+├── hf/              shared — HuggingFace cache (exported to child processes)
+├── trainer-cache/   shared — dataset shards, keyed by digest
+└── instances/
+    └── default/     RocksDB, keys, wallets, snapshots, iroh blobs
+```
+
+`--data-dir` still overrides the per-instance directory and `models_dir`
+overrides the shared store, for operators who keep large data on separate
+volumes. The container images set `TENZRO_HOME=/data/tenzro` so the model store
+sits on the mounted volume rather than the ephemeral layer.
+
+## Authorization model
+
+Three layers, each answering a different question:
+
+- **Admission** (`admission.rs`) — an optional operator-set service key gates
+  all four service surfaces at once. It has no consensus or gossip variant, so
+  a gated node structurally cannot stop validating.
+- **Classification** (`rpc_gates.rs`) — every dispatched method is named in
+  exactly one of `ADMIN_METHODS` (105) or `OPEN_METHODS` (824); a method in
+  neither is refused before its handler runs. Tests read the dispatcher's own
+  source, so adding an RPC without deciding its gate is a build failure rather
+  than an audit finding.
+- **Ownership** — methods acting on a tenant's resource require a signed DID
+  envelope from that resource's owner, bound to the method name and to the
+  call's parameters. The operator's admin token authenticates whoever runs the
+  machine; it is the wrong gate for something belonging to somebody *using* it,
+  because accepting it would let a shared node's host mutate their tenants'
+  resources.
+
+`submitBlock`, `offerSnapshot`, and `applySnapshotChunk` are not on the
+JSON-RPC surface. They were peer traffic reachable over the user-facing port —
+`submitBlock` pushed a caller-supplied block onto the finalized path, which by
+contract has already been through consensus and therefore verifies nothing.
+Blocks arrive over peer-authenticated gossip and block-sync; the inbound half of
+state-sync is driven in-process. The read half (`listSnapshots`,
+`getSnapshotManifest`, `getSnapshotChunk`) is what a syncing node calls on a
+serving one and is unchanged.
+
 ## Ecosystem
 
 | Component | Repository | Description |
 |-----------|------------|-------------|
-| **MCP Server** (Python) | [tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) | 361 tools, FastMCP 3.x |
+| **MCP Server** (Python) | [tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) | 360 tools, FastMCP 3.x |
 | **A2A Server** (Python) | [tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) | 72 skills, FastAPI |
 | **TenzroClaw** (Python) | [tenzro/TenzroClaw](https://github.com/tenzro/TenzroClaw) | 685 commands, OpenClaw skill |
 | **Rust SDK** | [tenzro/tenzro-sdk-rust](https://github.com/tenzro/tenzro-sdk-rust) | 85 modules |

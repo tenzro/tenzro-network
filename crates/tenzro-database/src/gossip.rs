@@ -6,9 +6,24 @@
 //! placement without polling. Local- and LAN-tier databases stay off the topic —
 //! they have no network holders to announce.
 //!
-//! The topic carries a single bincode-encoded [`DatabaseGossipMessage`]. The
-//! enum is externally-tagged (serde default), the same encoding the rest of
-//! `tenzro-network` uses for `MessagePayload`. The consumer-side helper
+//! The topic carries a single JSON-encoded [`DatabaseGossipMessage`], matching
+//! how [`DatabaseDescriptor`] is already persisted in `database.rs`.
+//!
+//! JSON rather than bincode because the descriptor is not encodable by a
+//! non-self-describing format, and encoding it with one fails on *decode*
+//! rather than encode — so it looks fine until a peer tries to read it:
+//!
+//! - [`tenzro_types::access_policy::AccessPolicy`] is an internally-tagged enum
+//!   (`#[serde(tag = "kind")]`). Serde has to buffer the content to find the tag,
+//!   which means `deserialize_any`, which bincode refuses.
+//! - `confidential` is `#[serde(skip_serializing_if = "Option::is_none")]`, so
+//!   the field is omitted when absent while the derived `Deserialize` still
+//!   expects it — a field-count desync in any fixed-layout format.
+//! - `engine_config` is a `serde_json::Value`, whose shape is only knowable from
+//!   the data, so it too needs `deserialize_any`.
+//!
+//! Those are properties of the descriptor, not of this module, and the rest of
+//! the crate already treats it as a JSON-shaped type. The consumer-side helper
 //! [`decode_for_topic`] rejects a payload that arrived on the wrong topic so the
 //! event loop never has to know the wire format.
 
@@ -20,7 +35,7 @@ use crate::error::{DatabaseError, Result};
 /// Registration/rescale broadcast topic for network-tier databases.
 pub const DATABASES_TOPIC: &str = "tenzro/databases";
 
-/// Bincode-serialised envelope for the database gossip topic.
+/// JSON-serialised envelope for the database gossip topic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DatabaseGossipMessage {
     /// A newly-created network-tier database. Receivers upsert the descriptor
@@ -42,17 +57,17 @@ impl DatabaseGossipMessage {
     }
 }
 
-/// Bincode-encode a `Registered` announcement for [`DATABASES_TOPIC`].
+/// JSON-encode a `Registered` announcement for [`DATABASES_TOPIC`].
 pub fn encode_registered(descriptor: &DatabaseDescriptor) -> Result<Vec<u8>> {
     let msg = DatabaseGossipMessage::Registered(descriptor.clone());
-    bincode::serialize(&msg)
+    serde_json::to_vec(&msg)
         .map_err(|e| DatabaseError::Persistence(format!("encode Registered: {}", e)))
 }
 
-/// Bincode-encode a `Rescaled` announcement for [`DATABASES_TOPIC`].
+/// JSON-encode a `Rescaled` announcement for [`DATABASES_TOPIC`].
 pub fn encode_rescaled(descriptor: &DatabaseDescriptor) -> Result<Vec<u8>> {
     let msg = DatabaseGossipMessage::Rescaled(descriptor.clone());
-    bincode::serialize(&msg)
+    serde_json::to_vec(&msg)
         .map_err(|e| DatabaseError::Persistence(format!("encode Rescaled: {}", e)))
 }
 
@@ -65,7 +80,7 @@ pub fn decode_for_topic(topic: &str, bytes: &[u8]) -> Result<DatabaseGossipMessa
             topic
         )));
     }
-    bincode::deserialize(bytes)
+    serde_json::from_slice(bytes)
         .map_err(|e| DatabaseError::Persistence(format!("decode gossip message: {}", e)))
 }
 

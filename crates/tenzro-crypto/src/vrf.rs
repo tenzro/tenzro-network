@@ -261,8 +261,9 @@ fn decode_proof(pi: &VrfProof) -> Result<(EdwardsPoint, [u8; CHALLENGE_LEN], Sca
     let mut s_bytes = [0u8; 32];
     s_bytes.copy_from_slice(&pi.0[48..]);
     // s must be canonical (< L). `from_canonical_bytes` rejects non-canonical encodings.
-    let s = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes))
-        .ok_or_else(|| CryptoError::InvalidSignature("VRF scalar s is non-canonical".to_string()))?;
+    let s = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes)).ok_or_else(|| {
+        CryptoError::InvalidSignature("VRF scalar s is non-canonical".to_string())
+    })?;
 
     Ok((gamma, c, s))
 }
@@ -352,7 +353,10 @@ mod tests {
         let alpha = b"deterministic input";
         let pi1 = prove(&sk, alpha).unwrap();
         let pi2 = prove(&sk, alpha).unwrap();
-        assert_eq!(pi1, pi2, "VRF must be deterministic for a given (sk, alpha)");
+        assert_eq!(
+            pi1, pi2,
+            "VRF must be deterministic for a given (sk, alpha)"
+        );
     }
 
     #[test]
@@ -388,7 +392,10 @@ mod tests {
         let mut pi = prove(&sk, b"alpha").unwrap();
         pi.0[0] ^= 0x01;
         let err = verify(&pk, b"alpha", &pi).unwrap_err();
-        matches!(err, CryptoError::VerificationFailed | CryptoError::InvalidSignature(_));
+        matches!(
+            err,
+            CryptoError::VerificationFailed | CryptoError::InvalidSignature(_)
+        );
     }
 
     #[test]

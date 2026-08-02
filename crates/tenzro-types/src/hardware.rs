@@ -325,6 +325,7 @@ impl HardwareCapabilities {
             }
         }
 
+        resolve_unified_vram(&mut caps.gpus, caps.ram_gb);
         caps.vram_gb = caps.gpus.iter().map(|g| g.vram_gb).sum();
         caps
     }
@@ -408,11 +409,27 @@ fn detect_nvidia_gpus() -> Vec<GpuDevice> {
             if parts.len() < 3 || parts[0].is_empty() {
                 return None;
             }
-            let mib: u64 = parts[1].parse().ok()?;
+            // A coherent CPU/GPU part has no separate VRAM to report, so
+            // `nvidia-smi` answers `[N/A]` rather than a number — GB10 and
+            // Jetson both do this.
+            //
+            // This used to be `parts[1].parse().ok()?`, and inside a
+            // `filter_map` that `?` dropped the **whole device**: the GPU
+            // vanished from `gpus` entirely. A DGX Spark then looked like a
+            // machine with no accelerator, so the node refused the `compute`
+            // role at startup and `class()` graded it CPU-only.
+            //
+            // Report the device with zero VRAM instead and let
+            // `resolve_unified_vram` below fill in the shared pool. Losing the
+            // size is recoverable; losing the device is not.
+            let vram_gb = parts[1]
+                .parse::<u64>()
+                .map(|mib| ((mib + 512) / 1024) as u32)
+                .unwrap_or(0);
             Some(GpuDevice::new(
                 GpuVendor::Nvidia,
                 parts[0],
-                ((mib + 512) / 1024) as u32,
+                vram_gb,
                 parts[2],
             ))
         })
@@ -452,8 +469,10 @@ fn detect_amd_gpus() -> Vec<GpuDevice> {
             let card = cards.get(*key)?.as_object()?;
             let name = card
                 .iter()
-                .find(|(k, _)| k.to_ascii_lowercase().contains("card series")
-                    || k.to_ascii_lowercase().contains("card model"))
+                .find(|(k, _)| {
+                    k.to_ascii_lowercase().contains("card series")
+                        || k.to_ascii_lowercase().contains("card model")
+                })
                 .and_then(|(_, v)| v.as_str())
                 .unwrap_or("AMD GPU")
                 .to_string();
@@ -513,6 +532,65 @@ fn rocminfo_gfx_targets() -> Vec<String> {
 /// correctly excluded — its HBM3 is a genuinely separate pool an order of
 /// magnitude smaller than the host LPDDR5X. A discrete card would have to
 /// carry nearly as much VRAM as the host has RAM to trip this, and that
+/// Resolve a lone GPU that shares the system memory pool, filling in its size.
+///
+/// **Single source of truth for the coherent-memory rule.** Every accelerator
+/// probe in the workspace must route through this rather than re-deriving it —
+/// the rule was previously reimplemented per call site and each copy got it
+/// wrong differently.
+///
+/// Two shapes both mean "one coherent pool", and neither is vendor-specific:
+///
+/// 1. **The vendor tool reports the shared pool**, so the GPU and system
+///    figures coincide (within an eighth). Grace-Hopper class parts do this.
+/// 2. **The vendor tool reports nothing**, because there is no separate VRAM to
+///    report. A discrete card always has a figure; an integrated or coherent
+///    part has none. Covers NVIDIA GB10 / Jetson (`nvidia-smi` answers
+///    `[N/A]`), AMD APUs such as Strix Halo and Ryzen AI Max, Intel iGPUs and
+///    integrated Arc, and Arm Mali / Qualcomm Adreno — most of which ship no
+///    tool that answers at all.
+///
+/// In shape 2 the size is set to the system pool, so the memory is counted
+/// once. Leaving it at zero is what made a DGX Spark grade as CPU-class and be
+/// refused the compute role despite holding a Blackwell GPU.
+///
+/// A single GPU is a precondition for either shape: more than one accelerator
+/// implies discrete cards with their own memory.
+pub fn resolve_unified_vram(gpus: &mut [GpuDevice], ram_gb: u32) -> bool {
+    let [gpu] = gpus else {
+        return false;
+    };
+    match shared_memory_pool(gpu.vram_gb, ram_gb) {
+        Some(resolved) => {
+            gpu.vram_gb = resolved;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The coherent-memory rule on plain numbers, so callers that do not use
+/// [`GpuDevice`] share one implementation instead of re-deriving it.
+///
+/// Returns `Some(effective_vram_gb)` when the accelerator shares the system
+/// pool, `None` when it has memory of its own. See [`resolve_unified_vram`] for
+/// why the two shapes exist and which parts each covers.
+pub fn shared_memory_pool(vram_gb: u32, ram_gb: u32) -> Option<u32> {
+    if ram_gb == 0 {
+        return None;
+    }
+    // Shape 1: the tool reports the shared pool, so the figures coincide.
+    if vram_gb > 0 && vram_gb.saturating_mul(8) >= ram_gb.saturating_mul(7) {
+        return Some(vram_gb);
+    }
+    // Shape 2: the tool reports nothing, because there is nothing separate to
+    // report. Count the pool once, as system memory.
+    if vram_gb == 0 {
+        return Some(ram_gb);
+    }
+    None
+}
+
 /// direction under-claims capacity, which is the safe error.
 #[cfg(target_os = "linux")]
 fn coherent_with_system_ram(gpus: &[GpuDevice], ram_gb: u32) -> bool {
@@ -538,6 +616,60 @@ fn nvlink_present() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The bug this rule exists to prevent: a coherent part reports no VRAM,
+    /// and treating that as "0 GB" graded a DGX Spark as CPU-class and made
+    /// the node refuse the compute role despite holding a Blackwell GPU.
+    #[test]
+    fn absent_vram_resolves_to_the_system_pool() {
+        assert_eq!(shared_memory_pool(0, 122), Some(122));
+    }
+
+    /// Grace-Hopper class: the tool already reports the shared pool.
+    #[test]
+    fn vram_matching_system_ram_is_a_shared_pool() {
+        assert_eq!(shared_memory_pool(120, 122), Some(120));
+    }
+
+    /// A discrete card reports its own figure, well under system RAM.
+    #[test]
+    fn discrete_vram_is_not_a_shared_pool() {
+        assert_eq!(shared_memory_pool(24, 122), None);
+    }
+
+    #[test]
+    fn shared_pool_threshold_is_seven_eighths() {
+        // 106 / 122 = 0.869 -> discrete; 107 / 122 = 0.877 -> shared.
+        assert_eq!(shared_memory_pool(106, 122), None);
+        assert_eq!(shared_memory_pool(107, 122), Some(107));
+    }
+
+    /// Without a system-memory reading there is nothing to compare against.
+    #[test]
+    fn unknown_system_memory_yields_no_claim() {
+        assert_eq!(shared_memory_pool(0, 0), None);
+        assert_eq!(shared_memory_pool(24, 0), None);
+    }
+
+    /// More than one accelerator means discrete cards with their own memory,
+    /// so the rule must not fire however the figures look.
+    #[test]
+    fn multiple_accelerators_are_never_a_shared_pool() {
+        let mut gpus = vec![
+            GpuDevice::new(GpuVendor::Nvidia, "A", 0, "9.0"),
+            GpuDevice::new(GpuVendor::Nvidia, "B", 0, "9.0"),
+        ];
+        assert!(!resolve_unified_vram(&mut gpus, 122));
+        assert_eq!(gpus[0].vram_gb, 0, "sizes are left untouched");
+    }
+
+    /// A coherent single GPU is resolved in place.
+    #[test]
+    fn lone_zero_vram_gpu_is_given_the_pool() {
+        let mut gpus = vec![GpuDevice::new(GpuVendor::Nvidia, "NVIDIA GB10", 0, "12.1")];
+        assert!(resolve_unified_vram(&mut gpus, 122));
+        assert_eq!(gpus[0].vram_gb, 122);
+    }
+
     use super::*;
 
     #[test]

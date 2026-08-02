@@ -22,11 +22,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 use tenzro_database::{
-    catalog::engine_ids, DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth,
-    QueryRequest, QueryResponse, Result,
+    DatabaseEngine, DatabaseError, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
+    Result, catalog::engine_ids,
 };
 use tokio::sync::Mutex;
 
@@ -61,7 +61,10 @@ impl TantivyEngine {
     /// Roots the store at `root` (`{data_dir}/databases/tantivy`). Partitions
     /// land in subdirectories under it.
     pub fn new(root: PathBuf) -> Self {
-        Self { root, indexes: Mutex::new(HashMap::new()) }
+        Self {
+            root,
+            indexes: Mutex::new(HashMap::new()),
+        }
     }
 
     fn partition_key(database_id: &str, partition_index: usize) -> String {
@@ -111,7 +114,10 @@ impl TantivyEngine {
             writer: parking_lot::Mutex::new(writer),
             fields,
         });
-        self.indexes.lock().await.insert(key.to_string(), partition.clone());
+        self.indexes
+            .lock()
+            .await
+            .insert(key.to_string(), partition.clone());
         Ok(partition)
     }
 }
@@ -155,8 +161,9 @@ impl DatabaseEngine for TantivyEngine {
                         // Idempotent overwrite by primary key.
                         w.delete_term(Term::from_field_text(idx.fields.id, &d.id));
                         let fields_json = match &d.fields {
-                            Some(v) => serde_json::to_string(v)
-                                .map_err(|e| DatabaseError::InvalidRequest(format!("tantivy fields: {e}")))?,
+                            Some(v) => serde_json::to_string(v).map_err(|e| {
+                                DatabaseError::InvalidRequest(format!("tantivy fields: {e}"))
+                            })?,
                             None => String::new(),
                         };
                         w.add_document(doc!(
@@ -172,14 +179,16 @@ impl DatabaseEngine for TantivyEngine {
                 idx.reader
                     .reload()
                     .map_err(|e| DatabaseError::Query(format!("tantivy reload: {e}")))?;
-                Ok(QueryResponse { body: serde_json::json!({ "added": added }) })
+                Ok(QueryResponse {
+                    body: serde_json::json!({ "added": added }),
+                })
             }
             TantivyOp::Search { query, limit } => {
                 let searcher = idx.reader.searcher();
                 let parser = QueryParser::for_index(&idx.index, vec![idx.fields.text]);
-                let parsed = parser
-                    .parse_query(&query)
-                    .map_err(|e| DatabaseError::InvalidRequest(format!("tantivy parse_query: {e}")))?;
+                let parsed = parser.parse_query(&query).map_err(|e| {
+                    DatabaseError::InvalidRequest(format!("tantivy parse_query: {e}"))
+                })?;
                 let hits = searcher
                     .search(&parsed, &TopDocs::with_limit(limit.max(1)).order_by_score())
                     .map_err(|e| DatabaseError::Query(format!("tantivy search: {e}")))?;
@@ -190,14 +199,18 @@ impl DatabaseEngine for TantivyEngine {
                         .map_err(|e| DatabaseError::Query(format!("tantivy fetch doc: {e}")))?;
                     rows.push(doc_to_json(&d, &idx.fields, score));
                 }
-                Ok(QueryResponse { body: serde_json::json!({ "rows": rows }) })
+                Ok(QueryResponse {
+                    body: serde_json::json!({ "rows": rows }),
+                })
             }
             TantivyOp::Count => {
                 let searcher = idx.reader.searcher();
                 let count = searcher
                     .search(&tantivy::query::AllQuery, &Count)
                     .map_err(|e| DatabaseError::Query(format!("tantivy count: {e}")))?;
-                Ok(QueryResponse { body: serde_json::json!({ "count": count }) })
+                Ok(QueryResponse {
+                    body: serde_json::json!({ "count": count }),
+                })
             }
         }
     }
@@ -223,7 +236,8 @@ fn doc_to_json(doc: &TantivyDocument, fields: &Fields, score: f32) -> serde_json
 }
 
 fn first_text(doc: &TantivyDocument, field: Field) -> Option<String> {
-    doc.get_first(field).and_then(|v| v.as_str().map(|s| s.to_string()))
+    doc.get_first(field)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
 }
 
 /// A single document to add: id, the BM25-searched text, and an opaque JSON

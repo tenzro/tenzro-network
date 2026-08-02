@@ -8,7 +8,7 @@ use crate::latency::LatencyTail;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::kv::{KvStore, CF_PROVIDERS};
+use tenzro_storage::kv::{CF_PROVIDERS, KvStore};
 use tenzro_types::{
     model::{InferenceProvider, ProviderStatus},
     primitives::{Address, Timestamp},
@@ -138,12 +138,12 @@ impl ProviderMetrics {
         self.total_requests += 1;
         self.failed_requests += 1;
         self.stream_failures += 1;
-        self.consecutive_stream_failures =
-            self.consecutive_stream_failures.saturating_add(1);
+        self.consecutive_stream_failures = self.consecutive_stream_failures.saturating_add(1);
         if self.consecutive_stream_failures >= STREAM_FAILURE_QUARANTINE_THRESHOLD {
             let now = Timestamp::now();
-            self.quarantined_until =
-                Some(Timestamp::new(now.as_millis() + STREAM_FAILURE_QUARANTINE_MS));
+            self.quarantined_until = Some(Timestamp::new(
+                now.as_millis() + STREAM_FAILURE_QUARANTINE_MS,
+            ));
         }
     }
 
@@ -271,7 +271,8 @@ impl ProviderWithMetrics {
         let uptime_score = (self.metrics.uptime_percentage / 100.0) * uptime_weight;
 
         // Reputation component. Normalize to 0-1 range (assuming max 1000)
-        let reputation_score = (self.provider.reputation as f64 / 1000.0).min(1.0) * reputation_weight;
+        let reputation_score =
+            (self.provider.reputation as f64 / 1000.0).min(1.0) * reputation_weight;
 
         // Advertised-hardware component, gated on observed performance. The
         // provider's declared hardware class sets the ceiling; the observed
@@ -340,9 +341,9 @@ impl ProviderManager {
     pub fn new() -> Self {
         Self {
             providers: Arc::new(DashMap::new()),
-            max_heartbeat_age_ms: 300_000, // 5 minutes default
+            max_heartbeat_age_ms: 300_000,    // 5 minutes default
             health_check_interval_ms: 60_000, // 1 minute default
-            max_consecutive_failures: 3, // 3 failures before marking unhealthy
+            max_consecutive_failures: 3,      // 3 failures before marking unhealthy
             storage: None,
         }
     }
@@ -441,7 +442,11 @@ impl ProviderManager {
     /// Updates the provider index in storage (list of all provider key hexes).
     fn persist_index(&self) {
         if let Some(ref storage) = self.storage {
-            let keys: Vec<String> = self.providers.iter().map(|e| format!("{}", e.key())).collect();
+            let keys: Vec<String> = self
+                .providers
+                .iter()
+                .map(|e| format!("{}", e.key()))
+                .collect();
             match serde_json::to_vec(&keys) {
                 Ok(data) => {
                     if let Err(e) = storage.put(CF_PROVIDERS, b"__index__", &data) {
@@ -471,11 +476,7 @@ impl ProviderManager {
     /// # Errors
     ///
     /// Returns error if provider already exists or signature is invalid.
-    pub fn register_provider(
-        &self,
-        provider: InferenceProvider,
-        has_tee: bool,
-    ) -> Result<()> {
+    pub fn register_provider(&self, provider: InferenceProvider, has_tee: bool) -> Result<()> {
         self.register_provider_authenticated(provider, has_tee, None, None)
     }
 
@@ -929,13 +930,17 @@ impl ProviderManager {
                 format!("{}/health", base)
             }
             None => {
-                return Err(ModelError::ProviderNotAvailable(
-                    format!("Provider {} has no endpoint_url configured", provider_address),
-                ));
+                return Err(ModelError::ProviderNotAvailable(format!(
+                    "Provider {} has no endpoint_url configured",
+                    provider_address
+                )));
             }
         };
 
-        info!("Checking health for provider {} at {}", provider_address, health_url);
+        info!(
+            "Checking health for provider {} at {}",
+            provider_address, health_url
+        );
 
         let start = std::time::Instant::now();
 
@@ -943,7 +948,9 @@ impl ProviderManager {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| ModelError::ProviderNotAvailable(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| {
+                ModelError::ProviderNotAvailable(format!("Failed to create HTTP client: {}", e))
+            })?;
 
         let response_result = client.get(&health_url).send().await;
 
@@ -962,7 +969,8 @@ impl ProviderManager {
                     // Update uptime percentage
                     let total_checks = entry.metrics.total_requests + 1;
                     let successful_checks = entry.metrics.successful_requests + 1;
-                    entry.metrics.uptime_percentage = (successful_checks as f64 / total_checks as f64) * 100.0;
+                    entry.metrics.uptime_percentage =
+                        (successful_checks as f64 / total_checks as f64) * 100.0;
 
                     debug!(
                         "Provider {} health check passed in {}ms",

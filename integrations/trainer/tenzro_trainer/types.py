@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Primitive helpers
 # ---------------------------------------------------------------------------
@@ -136,15 +135,15 @@ class GradientQuantization:
     block_size: int = 0
 
     @classmethod
-    def none(cls) -> "GradientQuantization":
+    def none(cls) -> GradientQuantization:
         return cls(kind="None")
 
     @classmethod
-    def int8(cls, block_size: int) -> "GradientQuantization":
+    def int8(cls, block_size: int) -> GradientQuantization:
         return cls(kind="Int8", block_size=int(block_size))
 
     @classmethod
-    def int4(cls, block_size: int) -> "GradientQuantization":
+    def int4(cls, block_size: int) -> GradientQuantization:
         return cls(kind="Int4", block_size=int(block_size))
 
     @property
@@ -165,7 +164,7 @@ class GradientQuantization:
         return {self.kind: {"block_size": self.block_size}}
 
     @classmethod
-    def from_json(cls, j: str | dict[str, Any]) -> "GradientQuantization":
+    def from_json(cls, j: str | dict[str, Any]) -> GradientQuantization:
         if j == "None":
             return cls.none()
         if isinstance(j, dict):
@@ -211,7 +210,7 @@ class SparseTopKParams:
         return {"chunk_size": self.chunk_size, "k": self.k}
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "SparseTopKParams":
+    def from_json(cls, j: dict[str, Any]) -> SparseTopKParams:
         return cls(chunk_size=int(j["chunk_size"]), k=int(j["k"]))
 
 
@@ -230,11 +229,11 @@ class PayloadKind:
     sparse: SparseTopKParams | None = None
 
     @classmethod
-    def dense(cls) -> "PayloadKind":
+    def dense(cls) -> PayloadKind:
         return cls(kind="Dense", sparse=None)
 
     @classmethod
-    def sparse_topk(cls, params: SparseTopKParams) -> "PayloadKind":
+    def sparse_topk(cls, params: SparseTopKParams) -> PayloadKind:
         return cls(kind="SparseTopK", sparse=params)
 
     @property
@@ -253,7 +252,7 @@ class PayloadKind:
         return {"SparseTopK": self.sparse.to_json()}
 
     @classmethod
-    def from_json(cls, j: str | dict[str, Any]) -> "PayloadKind":
+    def from_json(cls, j: str | dict[str, Any]) -> PayloadKind:
         if j == "Dense":
             return cls.dense()
         if isinstance(j, dict) and "SparseTopK" in j:
@@ -278,11 +277,11 @@ class OuterUpdateMode:
     momentum: float = 0.9
 
     @classmethod
-    def nesterov(cls, lr: float = 0.7, momentum: float = 0.9) -> "OuterUpdateMode":
+    def nesterov(cls, lr: float = 0.7, momentum: float = 0.9) -> OuterUpdateMode:
         return cls(kind="Nesterov", lr=float(lr), momentum=float(momentum))
 
     @classmethod
-    def sparse_ef(cls, lr: float = 0.7) -> "OuterUpdateMode":
+    def sparse_ef(cls, lr: float = 0.7) -> OuterUpdateMode:
         return cls(kind="SparseEf", lr=float(lr), momentum=0.0)
 
     @property
@@ -295,7 +294,7 @@ class OuterUpdateMode:
         return {"Nesterov": {"lr": self.lr, "momentum": self.momentum}}
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "OuterUpdateMode":
+    def from_json(cls, j: dict[str, Any]) -> OuterUpdateMode:
         if isinstance(j, dict):
             if "SparseEf" in j:
                 return cls.sparse_ef(float(j["SparseEf"]["lr"]))
@@ -323,11 +322,11 @@ class SyncStrategy:
     num_shards: int | None = None
 
     @classmethod
-    def full(cls) -> "SyncStrategy":
+    def full(cls) -> SyncStrategy:
         return cls(num_shards=None)
 
     @classmethod
-    def streaming(cls, num_shards: int) -> "SyncStrategy":
+    def streaming(cls, num_shards: int) -> SyncStrategy:
         return cls(num_shards=int(num_shards))
 
     def shard_count(self) -> int:
@@ -357,7 +356,7 @@ class SyncStrategy:
         return {"Streaming": {"num_shards": self.num_shards}}
 
     @classmethod
-    def from_json(cls, j: str | dict[str, Any]) -> "SyncStrategy":
+    def from_json(cls, j: str | dict[str, Any]) -> SyncStrategy:
         if j == "Full":
             return cls.full()
         if isinstance(j, dict) and "Streaming" in j:
@@ -388,7 +387,7 @@ class PipelineConfig:
         return {"num_stages": self.num_stages}
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "PipelineConfig":
+    def from_json(cls, j: dict[str, Any]) -> PipelineConfig:
         return cls(num_stages=int(j["num_stages"]))
 
 
@@ -408,7 +407,7 @@ class PipelineAssignment:
         return {"group_id": self.group_id, "stage": self.stage}
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "PipelineAssignment":
+    def from_json(cls, j: dict[str, Any]) -> PipelineAssignment:
         return cls(group_id=int(j["group_id"]), stage=int(j["stage"]))
 
 
@@ -437,7 +436,7 @@ class ArchitectureSpec:
         }
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "ArchitectureSpec":
+    def from_json(cls, j: dict[str, Any]) -> ArchitectureSpec:
         return cls(
             family=j["family"],
             param_count=int(j["param_count"]),
@@ -480,7 +479,7 @@ class RlConfig:
         }
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "RlConfig":
+    def from_json(cls, j: dict[str, Any]) -> RlConfig:
         return cls(
             group_size=int(j["group_size"]),
             kl_coeff=float(j["kl_coeff"]),
@@ -577,7 +576,7 @@ class TrainingTaskSpec:
         }
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "TrainingTaskSpec":
+    def from_json(cls, j: dict[str, Any]) -> TrainingTaskSpec:
         return cls(
             task_id=j["task_id"],
             sponsor_did=j["sponsor_did"],
@@ -644,7 +643,7 @@ class TrainingAttestation:
         }
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "TrainingAttestation":
+    def from_json(cls, j: dict[str, Any]) -> TrainingAttestation:
         return cls(
             vendor=j["vendor"],
             report_hex=j["report_hex"],
@@ -681,7 +680,7 @@ class DeltaProbe:
         return {"index": self.index, "value": self.value}
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "DeltaProbe":
+    def from_json(cls, j: dict[str, Any]) -> DeltaProbe:
         return cls(index=int(j["index"]), value=float(j["value"]))
 
 
@@ -728,7 +727,7 @@ class ActivationCommitment:
         }
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "ActivationCommitment":
+    def from_json(cls, j: dict[str, Any]) -> ActivationCommitment:
         return cls(
             k=int(j["k"]),
             loss_trajectory=[float(v) for v in j["loss_trajectory"]],
@@ -748,7 +747,7 @@ class Signature:
         }
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "Signature":
+    def from_json(cls, j: dict[str, Any]) -> Signature:
         return cls(bytes_=bytes(j["bytes"]), public_key=bytes(j["public_key"]))
 
 
@@ -795,7 +794,7 @@ class OuterGradient:
         }
 
     @classmethod
-    def from_json(cls, j: dict[str, Any]) -> "OuterGradient":
+    def from_json(cls, j: dict[str, Any]) -> OuterGradient:
         return cls(
             task_id=j["task_id"],
             round=int(j["round"]),

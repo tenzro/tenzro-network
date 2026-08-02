@@ -174,8 +174,7 @@ impl AxelarValidatorSet {
                 self.threshold
             )));
         }
-        let mut seen: std::collections::HashSet<[u8; 20]> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
         let mut valid = 0;
         for (claimed_addr, sig) in signatures {
             if !self.validators.contains(claimed_addr) {
@@ -197,11 +196,7 @@ impl AxelarValidatorSet {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let recovered = match VerifyingKey::recover_from_prehash(
-                message_digest,
-                &k,
-                rid,
-            ) {
+            let recovered = match VerifyingKey::recover_from_prehash(message_digest, &k, rid) {
                 Ok(vk) => vk,
                 Err(_) => continue,
             };
@@ -272,10 +267,7 @@ impl AxelarAdapter {
     /// Attach RocksDB persistence: hydrates the replay cache from
     /// `CF_SETTLEMENTS / bridge_seen:axelar:*` and swaps the inbound
     /// nonce tracker to its persistent variant.
-    pub fn with_storage(
-        mut self,
-        storage: Arc<dyn tenzro_storage::KvStore>,
-    ) -> Self {
+    pub fn with_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
         for key in crate::message_format::load_seen_keys(&storage, "axelar") {
             self.seen_commands.insert(key, ());
         }
@@ -392,11 +384,13 @@ impl BridgeAdapter for AxelarAdapter {
         // trailing signature trailer format as Hyperlane: `body || u8
         // sig_count || sig_count * (addr20 || sig65)`. A validator set
         // MUST be installed; absence rejects all inbound traffic.
-        let set = self.validator_set.read().clone().ok_or_else(|| BridgeError::AdapterError(
-            "Axelar adapter has no validator set installed — inbound \
+        let set = self.validator_set.read().clone().ok_or_else(|| {
+            BridgeError::AdapterError(
+                "Axelar adapter has no validator set installed — inbound \
              traffic refused. Call install_validator_set at startup."
-                .into(),
-        ))?;
+                    .into(),
+            )
+        })?;
         let n = payload.len();
         if n < 1 {
             return Err(BridgeError::InvalidParameter(
@@ -412,8 +406,7 @@ impl BridgeAdapter for AxelarAdapter {
             ));
         }
         let body = &payload[..n - trailer_len];
-        let mut signatures: Vec<([u8; 20], [u8; 65])> =
-            Vec::with_capacity(sig_count);
+        let mut signatures: Vec<([u8; 20], [u8; 65])> = Vec::with_capacity(sig_count);
         for i in 0..sig_count {
             let off = n - trailer_len + i * sig_record_len;
             let mut a = [0u8; 20];

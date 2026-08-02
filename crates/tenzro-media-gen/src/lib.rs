@@ -65,17 +65,17 @@ pub use commitments::{
 };
 pub use error::{MediaGenError, Result};
 pub use gossip::{
-    decode_for_topic, encode_handoff_published, encode_job_claimed, encode_job_posted,
-    encode_receipt_submitted, encode_worker_enrolled, MediaGenClaim, MediaGenGossipMessage,
-    MEDIA_GEN_TOPIC,
+    MEDIA_GEN_TOPIC, MediaGenClaim, MediaGenGossipMessage, decode_for_topic,
+    encode_handoff_published, encode_job_claimed, encode_job_posted, encode_receipt_submitted,
+    encode_worker_enrolled,
 };
 pub use output_store::{
-    compute_output_hash, verify_input, verify_latent, verify_output, InMemoryOutputStore,
-    MediaGenOutputStore,
+    InMemoryOutputStore, MediaGenOutputStore, compute_output_hash, verify_input, verify_latent,
+    verify_output,
 };
 pub use pricing::{
-    enforce_ceiling, pixel_steps, split_payout, MediaGenPricing, DEFAULT_BASE_FEE,
-    DEFAULT_PER_PIXEL_STEP,
+    DEFAULT_BASE_FEE, DEFAULT_PER_PIXEL_STEP, MediaGenPricing, enforce_ceiling, pixel_steps,
+    split_payout,
 };
 pub use runtime::{HydratedCounts, MediaGenRuntime};
 
@@ -83,8 +83,8 @@ pub use runtime::{HydratedCounts, MediaGenRuntime};
 // downstream crates can `use tenzro_media_gen::MediaGenTaskSpec` instead of
 // `use tenzro_types::media_gen::MediaGenTaskSpec`.
 pub use tenzro_types::media_gen::{
+    MAX_MEDIA_GEN_DIMENSION, MAX_MEDIA_GEN_FRAMES, MAX_MEDIA_GEN_PROMPT_BYTES, MAX_MEDIA_GEN_STEPS,
     MediaGenAssignment, MediaGenExpertHolding, MediaGenExpertRole, MediaGenHandoff, MediaGenJob,
     MediaGenKind, MediaGenParams, MediaGenReceipt, MediaGenStatus, MediaGenTaskSpec,
-    MediaGenWorkerCapability, MAX_MEDIA_GEN_DIMENSION, MAX_MEDIA_GEN_FRAMES,
-    MAX_MEDIA_GEN_PROMPT_BYTES, MAX_MEDIA_GEN_STEPS,
+    MediaGenWorkerCapability,
 };

@@ -17,13 +17,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
-use console::{style, Style};
-use dialoguer::{theme::ColorfulTheme, Input, Select};
+use console::{Style, style};
+use dialoguer::{Input, Select, theme::ColorfulTheme};
 use rand::Rng;
 
-use crate::commands::hardware::{detect_hardware_profile, HardwareProfile};
+use crate::commands::hardware::{HardwareProfile, detect_hardware_profile};
 use crate::commands::join::JoinCmd;
 use crate::config;
 use crate::output;
@@ -148,8 +148,17 @@ impl SetupCmd {
                     "Provide — serve models from this machine and earn TNZO",
                     "Validate — run a validator node securing the network",
                 ];
-                let default = if !hw.gpus.is_empty() || hw.unified_memory { 1 } else { 0 };
-                match prompt_select(interactive, "How do you want to participate?", &items, default)? {
+                let default = if !hw.gpus.is_empty() || hw.unified_memory {
+                    1
+                } else {
+                    0
+                };
+                match prompt_select(
+                    interactive,
+                    "How do you want to participate?",
+                    &items,
+                    default,
+                )? {
                     1 => "provide".to_string(),
                     2 => "validate".to_string(),
                     _ => "consume".to_string(),
@@ -187,10 +196,13 @@ impl SetupCmd {
     async fn run_public_validator(&self, interactive: bool, name: &str) -> Result<()> {
         wiz_section("Validator setup");
 
-        let default_dir = default_home().join(".tenzro").join("node");
+        let default_dir = tenzro_types::paths::default_data_dir();
         let data_dir = match &self.data_dir {
-            Some(d) => d.clone(),
-            None => PathBuf::from(prompt_string(
+            Some(d) => tenzro_types::paths::expand_tilde(d),
+            // A tilde typed at a prompt was never seen by a shell, so nothing
+            // has expanded it; taken literally it creates a directory named
+            // `~` in the current folder.
+            None => tenzro_types::paths::expand_tilde(prompt_string(
                 interactive,
                 "Node data directory",
                 &default_dir.display().to_string(),
@@ -203,7 +215,10 @@ impl SetupCmd {
 
         wiz_gap();
         wiz_kv("Data directory", &data_dir.display().to_string());
-        wiz_kv("Validator pubkey", &format!("0x{}", hex::encode(&pubkeys.ed25519)));
+        wiz_kv(
+            "Validator pubkey",
+            &format!("0x{}", hex::encode(&pubkeys.ed25519)),
+        );
         wiz_kv("Peer id", &peer_id);
 
         let unit_path = write_service_unit(&data_dir, None, None, "validator")?;
@@ -221,7 +236,10 @@ impl SetupCmd {
             "tenzro stake deposit 10000".to_string(),
         ]);
         wiz_note("3. Optional: run the node as a service.");
-        wiz_note(&format!("   A unit file was written to {}", unit_path.display()));
+        wiz_note(&format!(
+            "   A unit file was written to {}",
+            unit_path.display()
+        ));
 
         let mut cfg = config::load_config();
         cfg.endpoint = Some("http://127.0.0.1:8545".to_string());
@@ -244,11 +262,12 @@ impl SetupCmd {
             None => prompt_string(interactive, "Network name", "local")?,
         };
 
-        let base = default_home()
-            .join(".tenzro")
-            .join("networks")
-            .join(&network_name);
-        let data_dir = self.data_dir.clone().unwrap_or_else(|| base.join("data"));
+        let base = tenzro_types::paths::network_dir(&network_name);
+        let data_dir = self
+            .data_dir
+            .as_ref()
+            .map(tenzro_types::paths::expand_tilde)
+            .unwrap_or_else(|| base.join("data"));
 
         let chain_id = match self.chain_id {
             Some(id) => id,
@@ -270,8 +289,7 @@ impl SetupCmd {
         let peer_id = local_peer_id(&data_dir)?;
         let lan_ip = detect_lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
 
-        std::fs::create_dir_all(&base)
-            .map_err(|e| anyhow!("create {}: {}", base.display(), e))?;
+        std::fs::create_dir_all(&base).map_err(|e| anyhow!("create {}: {}", base.display(), e))?;
 
         let genesis_path = base.join("genesis.toml");
         if genesis_path.exists() {
@@ -299,8 +317,7 @@ impl SetupCmd {
             wiz_done(&format!("Genesis written to {}", genesis_path.display()));
         }
 
-        let unit_path =
-            write_service_unit(&data_dir, Some(&genesis_path), None, "validator,ai")?;
+        let unit_path = write_service_unit(&data_dir, Some(&genesis_path), None, "validator,ai")?;
 
         wiz_gap();
         wiz_kv("Network", &network_name);
@@ -325,12 +342,18 @@ impl SetupCmd {
         wiz_note("Then on the peer:");
         wiz_cmd(&[
             "tenzro-node --roles ai \\".to_string(),
-            format!("  --genesis ~/.tenzro/networks/{}/genesis.toml \\", network_name),
+            format!(
+                "  --genesis ~/.tenzro/networks/{}/genesis.toml \\",
+                network_name
+            ),
             format!("  --data-dir ~/.tenzro/networks/{}/data \\", network_name),
             format!("  --boot-nodes /ip4/{}/tcp/9000/p2p/{}", lan_ip, peer_id),
         ]);
         wiz_note("Optional: run the node as a service.");
-        wiz_note(&format!("A unit file was written to {}", unit_path.display()));
+        wiz_note(&format!(
+            "A unit file was written to {}",
+            unit_path.display()
+        ));
 
         let mut cfg = config::load_config();
         cfg.endpoint = Some("http://127.0.0.1:8545".to_string());
@@ -357,7 +380,7 @@ impl SetupCmd {
             None => {
                 return Err(anyhow!(
                     "--genesis is required in non-interactive mode (path to the network's genesis.toml)"
-                ))
+                ));
             }
         };
         if !genesis.exists() {
@@ -377,17 +400,22 @@ impl SetupCmd {
             None => {
                 return Err(anyhow!(
                     "--bootstrap is required in non-interactive mode (multiaddr of an existing peer)"
-                ))
+                ));
             }
         };
         if bootstrap.trim().is_empty() {
-            return Err(anyhow!("a bootstrap peer multiaddr is required to join a private network"));
+            return Err(anyhow!(
+                "a bootstrap peer multiaddr is required to join a private network"
+            ));
         }
 
-        let default_dir = default_home().join(".tenzro").join("node");
+        let default_dir = tenzro_types::paths::default_data_dir();
         let data_dir = match &self.data_dir {
-            Some(d) => d.clone(),
-            None => PathBuf::from(prompt_string(
+            Some(d) => tenzro_types::paths::expand_tilde(d),
+            // A tilde typed at a prompt was never seen by a shell, so nothing
+            // has expanded it; taken literally it creates a directory named
+            // `~` in the current folder.
+            None => tenzro_types::paths::expand_tilde(prompt_string(
                 interactive,
                 "Node data directory",
                 &default_dir.display().to_string(),
@@ -412,8 +440,7 @@ impl SetupCmd {
             println!("{}", pubkeys.to_genesis_toml(self.stake));
         }
 
-        let unit_path =
-            write_service_unit(&data_dir, Some(&genesis), Some(&bootstrap), roles)?;
+        let unit_path = write_service_unit(&data_dir, Some(&genesis), Some(&bootstrap), roles)?;
 
         wiz_section("Start your node");
         wiz_cmd(&[
@@ -423,7 +450,10 @@ impl SetupCmd {
             format!("  --boot-nodes {}", bootstrap),
         ]);
         wiz_note("Optional: run the node as a service.");
-        wiz_note(&format!("A unit file was written to {}", unit_path.display()));
+        wiz_note(&format!(
+            "A unit file was written to {}",
+            unit_path.display()
+        ));
 
         let mut cfg = config::load_config();
         cfg.endpoint = Some("http://127.0.0.1:8545".to_string());
@@ -445,7 +475,10 @@ impl SetupCmd {
 fn print_hardware_summary(hw: &HardwareProfile) {
     wiz_kv(
         "CPU",
-        &format!("{} ({} cores / {} threads)", hw.cpu_model, hw.cpu_cores, hw.cpu_threads),
+        &format!(
+            "{} ({} cores / {} threads)",
+            hw.cpu_model, hw.cpu_cores, hw.cpu_threads
+        ),
     );
     wiz_kv(
         "Memory",
@@ -462,10 +495,15 @@ fn print_hardware_summary(hw: &HardwareProfile) {
             wiz_kv("GPU", &format!("{} ({:.0} GB)", gpu.name, gpu.memory_gb));
         }
     }
-    wiz_kv("Storage available", &format!("{:.0} GB", hw.storage_available_gb));
+    wiz_kv(
+        "Storage available",
+        &format!("{:.0} GB", hw.storage_available_gb),
+    );
     wiz_kv(
         "TEE",
-        &hw.tee_type.clone().unwrap_or_else(|| "not available".to_string()),
+        &hw.tee_type
+            .clone()
+            .unwrap_or_else(|| "not available".to_string()),
     );
 }
 
@@ -492,10 +530,6 @@ fn prompt_select(interactive: bool, prompt: &str, items: &[&str], default: usize
     } else {
         Ok(default)
     }
-}
-
-fn default_home() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Load the validator keyset from `data_dir` if all three key files
@@ -525,8 +559,7 @@ fn ensure_keyset(data_dir: &Path) -> Result<tenzro_node::keygen::ValidatorKeyset
 /// persisting `{data_dir}/p2p_key` if it does not exist yet — so the
 /// join command printed for peers is valid before the node's first start.
 fn local_peer_id(data_dir: &Path) -> Result<String> {
-    let keypair =
-        tenzro_network::service::load_or_generate_keypair(&Some(data_dir.to_path_buf()))?;
+    let keypair = tenzro_network::service::load_or_generate_keypair(&Some(data_dir.to_path_buf()))?;
     Ok(keypair.public().to_peer_id().to_string())
 }
 
@@ -680,9 +713,15 @@ fn wiz_box_line(plain: &str, styled: &str) {
 
 fn wiz_intro() {
     println!();
-    println!("{}", style(format!("╭{}╮", "─".repeat(BANNER_INNER_WIDTH))).dim());
+    println!(
+        "{}",
+        style(format!("╭{}╮", "─".repeat(BANNER_INNER_WIDTH))).dim()
+    );
     wiz_box_line("", "");
-    wiz_box_line("Tenzro Setup", &style("Tenzro Setup").cyan().bold().to_string());
+    wiz_box_line(
+        "Tenzro Setup",
+        &style("Tenzro Setup").cyan().bold().to_string(),
+    );
     wiz_box_line(
         "Join, provide, validate, or bootstrap a network",
         &style("Join, provide, validate, or bootstrap a network")
@@ -690,7 +729,10 @@ fn wiz_intro() {
             .to_string(),
     );
     wiz_box_line("", "");
-    println!("{}", style(format!("╰{}╯", "─".repeat(BANNER_INNER_WIDTH))).dim());
+    println!(
+        "{}",
+        style(format!("╰{}╯", "─".repeat(BANNER_INNER_WIDTH))).dim()
+    );
 }
 
 /// A bare rail connector line.

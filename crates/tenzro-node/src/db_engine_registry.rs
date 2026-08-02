@@ -18,9 +18,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tenzro_database::{
-    DatabaseEngine, PartitionHandle, QueryRequest, QueryResponse, Result,
-};
+use tenzro_database::{DatabaseEngine, PartitionHandle, QueryRequest, QueryResponse, Result};
 
 /// Live database-engine backends this node serves, keyed by catalog engine id.
 #[derive(Default)]
@@ -31,13 +29,16 @@ pub struct EngineRegistry {
 impl EngineRegistry {
     /// An empty registry — no engine backends linked yet.
     pub fn new() -> Self {
-        Self { backends: DashMap::new() }
+        Self {
+            backends: DashMap::new(),
+        }
     }
 
     /// Registers `backend` under the engine id it reports. Replaces any prior
     /// backend for that engine id.
     pub fn register(&self, backend: Arc<dyn DatabaseEngine>) {
-        self.backends.insert(backend.engine_id().to_string(), backend);
+        self.backends
+            .insert(backend.engine_id().to_string(), backend);
     }
 
     /// The backend serving `engine_id`, if this node runs one.

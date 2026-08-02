@@ -53,10 +53,7 @@ impl SecureEnclaveUnlocker {
     /// Convenience: store the ciphertext as `keystore.pwd.enc` under `data_dir`
     /// and use the default label.
     pub fn under_data_dir(data_dir: impl AsRef<Path>) -> Self {
-        Self::new(
-            DEFAULT_LABEL,
-            data_dir.as_ref().join("keystore.pwd.enc"),
-        )
+        Self::new(DEFAULT_LABEL, data_dir.as_ref().join("keystore.pwd.enc"))
     }
 
     fn read_ciphertext(&self) -> Option<Vec<u8>> {

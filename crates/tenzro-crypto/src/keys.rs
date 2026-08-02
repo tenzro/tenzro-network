@@ -12,8 +12,7 @@
 use crate::error::{CryptoError, Result};
 use crate::hash::keccak256;
 use ed25519_dalek::{
-    SigningKey as Ed25519SigningKey,
-    SECRET_KEY_LENGTH as ED25519_SECRET_KEY_LENGTH,
+    SECRET_KEY_LENGTH as ED25519_SECRET_KEY_LENGTH, SigningKey as Ed25519SigningKey,
 };
 use k256::ecdsa::SigningKey as Secp256k1SigningKey;
 use rand::rngs::OsRng;
@@ -24,7 +23,7 @@ use rand::rngs::OsRng;
 // infallible `CryptoRng` that `SigningKey::random` requires. We keep
 // `rand::rngs::OsRng` in scope for ed25519-dalek 2.x, which still pins
 // `rand_core 0.6`.
-use getrandom_0_4::{rand_core::UnwrapErr, SysRng};
+use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -217,14 +216,9 @@ impl KeyPair {
                 let signing_key = Ed25519SigningKey::generate(&mut OsRng);
                 let verifying_key = signing_key.verifying_key();
 
-                let secret_key = SecretKey::new(
-                    KeyType::Ed25519,
-                    signing_key.to_bytes().to_vec(),
-                );
-                let public_key = PublicKey::new(
-                    KeyType::Ed25519,
-                    verifying_key.to_bytes().to_vec(),
-                );
+                let secret_key = SecretKey::new(KeyType::Ed25519, signing_key.to_bytes().to_vec());
+                let public_key =
+                    PublicKey::new(KeyType::Ed25519, verifying_key.to_bytes().to_vec());
 
                 Ok(Self {
                     key_type,
@@ -241,17 +235,13 @@ impl KeyPair {
                     Secp256k1SigningKey::generate_from_rng(&mut UnwrapErr(SysRng));
                 let verifying_key = signing_key.verifying_key();
 
-                let secret_key = SecretKey::new(
-                    KeyType::Secp256k1,
-                    signing_key.to_bytes().to_vec(),
-                );
+                let secret_key =
+                    SecretKey::new(KeyType::Secp256k1, signing_key.to_bytes().to_vec());
 
                 // Use uncompressed public key (65 bytes)
                 let public_key_point = verifying_key.to_sec1_point(false);
-                let public_key = PublicKey::new(
-                    KeyType::Secp256k1,
-                    public_key_point.as_bytes().to_vec(),
-                );
+                let public_key =
+                    PublicKey::new(KeyType::Secp256k1, public_key_point.as_bytes().to_vec());
 
                 Ok(Self {
                     key_type,
@@ -276,7 +266,8 @@ impl KeyPair {
                     )));
                 }
 
-                let secret_bytes: [u8; ED25519_SECRET_KEY_LENGTH] = secret_key.bytes
+                let secret_bytes: [u8; ED25519_SECRET_KEY_LENGTH] = secret_key
+                    .bytes
                     .as_slice()
                     .try_into()
                     .map_err(|_| CryptoError::InvalidSecretKey("Invalid length".to_string()))?;
@@ -284,10 +275,8 @@ impl KeyPair {
                 let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
                 let verifying_key = signing_key.verifying_key();
 
-                let public_key = PublicKey::new(
-                    KeyType::Ed25519,
-                    verifying_key.to_bytes().to_vec(),
-                );
+                let public_key =
+                    PublicKey::new(KeyType::Ed25519, verifying_key.to_bytes().to_vec());
 
                 Ok(Self {
                     key_type,
@@ -303,7 +292,8 @@ impl KeyPair {
                     )));
                 }
 
-                let secret_bytes: [u8; 32] = secret_key.bytes
+                let secret_bytes: [u8; 32] = secret_key
+                    .bytes
                     .as_slice()
                     .try_into()
                     .map_err(|_| CryptoError::InvalidSecretKey("Invalid length".to_string()))?;
@@ -314,10 +304,8 @@ impl KeyPair {
 
                 // Use uncompressed public key (65 bytes)
                 let public_key_point = verifying_key.to_sec1_point(false);
-                let public_key = PublicKey::new(
-                    KeyType::Secp256k1,
-                    public_key_point.as_bytes().to_vec(),
-                );
+                let public_key =
+                    PublicKey::new(KeyType::Secp256k1, public_key_point.as_bytes().to_vec());
 
                 Ok(Self {
                     key_type,
@@ -379,7 +367,10 @@ mod tests {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         assert_eq!(keypair.key_type(), KeyType::Ed25519);
         assert_eq!(keypair.public_key().as_bytes().len(), 32); // Ed25519 public key is 32 bytes
-        assert_eq!(keypair.secret_key().as_bytes().len(), ED25519_SECRET_KEY_LENGTH);
+        assert_eq!(
+            keypair.secret_key().as_bytes().len(),
+            ED25519_SECRET_KEY_LENGTH
+        );
     }
 
     #[test]

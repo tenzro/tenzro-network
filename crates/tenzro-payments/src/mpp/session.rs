@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::kv::{KvStore, CF_CHANNELS};
+use tenzro_storage::kv::{CF_CHANNELS, KvStore};
 use tracing::{debug, info, warn};
 
 /// A signed voucher for incremental payment within an MPP session
@@ -166,11 +166,17 @@ impl MppSessionManager {
             match serde_json::to_vec(session) {
                 Ok(bytes) => {
                     if let Err(e) = store.put(CF_CHANNELS, key.as_bytes(), &bytes) {
-                        warn!("Failed to persist MPP session {}: {}", session.session_id, e);
+                        warn!(
+                            "Failed to persist MPP session {}: {}",
+                            session.session_id, e
+                        );
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to serialize MPP session {}: {}", session.session_id, e);
+                    warn!(
+                        "Failed to serialize MPP session {}: {}",
+                        session.session_id, e
+                    );
                 }
             }
         }
@@ -213,23 +219,26 @@ impl MppSessionManager {
     /// 4. Nonce is strictly greater than last seen nonce (replay protection)
     /// 5. Cumulative amount does not exceed deposit
     /// 6. Cumulative amount is monotonically non-decreasing
-    pub fn process_voucher_verified(
-        &self,
-        voucher: &MppVoucher,
-    ) -> crate::error::Result<u128> {
+    pub fn process_voucher_verified(&self, voucher: &MppVoucher) -> crate::error::Result<u128> {
         // 1. Verify signature first (before any state changes)
         if !voucher.verify() {
-            return Err(crate::error::PaymentError::VerificationFailed("voucher signature verification failed".to_string()));
+            return Err(crate::error::PaymentError::VerificationFailed(
+                "voucher signature verification failed".to_string(),
+            ));
         }
 
-        let mut session = self
-            .sessions
-            .get_mut(&voucher.session_id)
-            .ok_or_else(|| crate::error::PaymentError::SessionError(format!("session not found: {}", voucher.session_id)))?;
+        let mut session = self.sessions.get_mut(&voucher.session_id).ok_or_else(|| {
+            crate::error::PaymentError::SessionError(format!(
+                "session not found: {}",
+                voucher.session_id
+            ))
+        })?;
 
         // 2. Check session is open
         if session.state != MppSessionState::Open {
-            return Err(crate::error::PaymentError::SessionError("session is not open".to_string()));
+            return Err(crate::error::PaymentError::SessionError(
+                "session is not open".to_string(),
+            ));
         }
 
         // 3. Check nonce is strictly monotonically increasing (replay protection)
@@ -250,7 +259,9 @@ impl MppSessionManager {
 
         // 5. Check cumulative amount doesn't exceed deposit
         if voucher.cumulative_amount > session.total_deposit {
-            return Err(crate::error::PaymentError::InsufficientFunds("voucher cumulative amount exceeds session deposit".to_string()));
+            return Err(crate::error::PaymentError::InsufficientFunds(
+                "voucher cumulative amount exceeds session deposit".to_string(),
+            ));
         }
 
         debug!(
@@ -268,10 +279,9 @@ impl MppSessionManager {
 
     /// Closes a session and returns the final balance
     pub fn close_session(&self, session_id: &str) -> crate::error::Result<MppSession> {
-        let mut session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| crate::error::PaymentError::SessionError(format!("session not found: {}", session_id)))?;
+        let mut session = self.sessions.get_mut(session_id).ok_or_else(|| {
+            crate::error::PaymentError::SessionError(format!("session not found: {}", session_id))
+        })?;
 
         session.state = MppSessionState::Closed;
         session.last_activity = Utc::now();
@@ -324,8 +334,7 @@ mod tests {
         msg.extend_from_slice(&cumulative_amount.to_le_bytes());
         msg.extend_from_slice(&nonce.to_le_bytes());
 
-        let kp =
-            KeyPair::from_bytes(KeyType::Ed25519, &keys.priv_bytes).expect("from_bytes");
+        let kp = KeyPair::from_bytes(KeyType::Ed25519, &keys.priv_bytes).expect("from_bytes");
         let classical = Ed25519SignerImpl::new(kp).expect("signer");
         let pq = MlDsaSigningKey::from_seed(&keys.pq_seed).expect("pq from_seed");
         let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq);

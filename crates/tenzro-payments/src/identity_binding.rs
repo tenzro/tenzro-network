@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tenzro_identity::{IdentityRegistry, IdentityVerifier, TenzroIdentity};
 use tenzro_types::primitives::BlockHeight;
 use tenzro_types::principal_chain::{
-    anonymous_chain_for_did, PrincipalChain, PrincipalChainResolver,
+    PrincipalChain, PrincipalChainResolver, anonymous_chain_for_did,
 };
 use tracing::debug;
 
@@ -253,10 +253,7 @@ impl IdentityPaymentBinder {
     /// fails closed when the payer machine is in a kill-switch posture
     /// (Paused / Quarantined / Terminated). When no resolver is wired the
     /// gate is silently skipped — useful for human payers and tests.
-    pub fn with_lifecycle_resolver(
-        mut self,
-        resolver: Arc<dyn LifecycleStateResolver>,
-    ) -> Self {
+    pub fn with_lifecycle_resolver(mut self, resolver: Arc<dyn LifecycleStateResolver>) -> Self {
         self.lifecycle_resolver = Some(resolver);
         self
     }
@@ -288,12 +285,7 @@ impl IdentityPaymentBinder {
     /// 4. Operation allowed by delegation scope
     /// 5. Payment protocol allowed by delegation scope
     /// 6. Chain allowed by delegation scope
-    pub fn validate_payer(
-        &self,
-        payer_did: &str,
-        amount: u128,
-        operation: &str,
-    ) -> Result<()> {
+    pub fn validate_payer(&self, payer_did: &str, amount: u128, operation: &str) -> Result<()> {
         self.validate_payer_for_protocol(payer_did, amount, operation, None, None)
     }
 
@@ -386,7 +378,10 @@ impl IdentityPaymentBinder {
             }
         }
 
-        debug!("Payer {} validated for {} amount={}", payer_did, operation, amount);
+        debug!(
+            "Payer {} validated for {} amount={}",
+            payer_did, operation, amount
+        );
         Ok(())
     }
 
@@ -426,10 +421,9 @@ impl IdentityPaymentBinder {
         // *and* an SptCeilingResolver is wired. Either being absent
         // collapses to the three-ceiling enforcement above (graceful
         // degradation for non-card MPP flows).
-        if let (Some(token_id), Some(resolver)) = (
-            granted_token_id,
-            self.spt_ceiling_resolver.as_deref(),
-        ) {
+        if let (Some(token_id), Some(resolver)) =
+            (granted_token_id, self.spt_ceiling_resolver.as_deref())
+        {
             match resolver.resolve(token_id)? {
                 Some(snap) => {
                     snap.check(spt_amount, spt_currency)?;
@@ -457,9 +451,10 @@ impl IdentityPaymentBinder {
         identity: &TenzroIdentity,
     ) -> Result<()> {
         credential.payer_did = identity.did_string();
-        credential
-            .extra
-            .insert("wallet_id".to_string(), serde_json::json!(identity.wallet_id));
+        credential.extra.insert(
+            "wallet_id".to_string(),
+            serde_json::json!(identity.wallet_id),
+        );
         Ok(())
     }
 

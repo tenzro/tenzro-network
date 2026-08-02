@@ -14,15 +14,15 @@
 //! | 0x49a7a26d | getImplementation()                               | 2,600   |
 //! | 0x8abf6077 | getTokenCount()                                   | 2,600   |
 
+use crate::VmError;
+use crate::error::Result;
 use crate::evm::wtnzo::abi;
 use crate::precompiles::PrecompileResult;
-use crate::error::Result;
-use crate::VmError;
 use sha3::{Digest, Keccak256};
 use std::sync::Arc;
 use tenzro_token::{
-    TokenRegistry, TokenDefinition, TokenId, TokenType,
-    cross_vm::{VmAddresses, TokenPermissions, TokenMetadata},
+    TokenDefinition, TokenId, TokenRegistry, TokenType,
+    cross_vm::{TokenMetadata, TokenPermissions, VmAddresses},
 };
 use tracing::{debug, info};
 
@@ -47,31 +47,28 @@ pub mod selectors {
 /// Well-known address of the ERC-20 implementation contract
 /// All clones delegate to this implementation.
 const ERC20_IMPLEMENTATION: [u8; 20] = [
-    0x10, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x10, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01,
 ];
 
 /// ERC-1167 minimal proxy bytecode prefix
 /// 3d602d80600a3d3981f3363d3d373d3d3d363d73
 const CLONE_PREFIX: &[u8] = &[
-    0x3d, 0x60, 0x2d, 0x80, 0x60, 0x0a, 0x3d, 0x39, 0x81, 0xf3,
-    0x36, 0x3d, 0x3d, 0x37, 0x3d, 0x3d, 0x3d, 0x36, 0x3d, 0x73,
+    0x3d, 0x60, 0x2d, 0x80, 0x60, 0x0a, 0x3d, 0x39, 0x81, 0xf3, 0x36, 0x3d, 0x3d, 0x37, 0x3d, 0x3d,
+    0x3d, 0x36, 0x3d, 0x73,
 ];
 
 /// ERC-1167 minimal proxy bytecode suffix
 /// 5af43d82803e903d91602b57fd5bf3
 const CLONE_SUFFIX: &[u8] = &[
-    0x5a, 0xf4, 0x3d, 0x82, 0x80, 0x3e, 0x90, 0x3d, 0x91, 0x60,
-    0x2b, 0x57, 0xfd, 0x5b, 0xf3,
+    0x5a, 0xf4, 0x3d, 0x82, 0x80, 0x3e, 0x90, 0x3d, 0x91, 0x60, 0x2b, 0x57, 0xfd, 0x5b, 0xf3,
 ];
 
 /// Creates the token factory precompile function
 pub fn create_token_factory_precompile(
     registry: Arc<TokenRegistry>,
 ) -> Arc<dyn Fn(&[u8], u64) -> Result<PrecompileResult> + Send + Sync> {
-    Arc::new(move |input: &[u8], gas_limit: u64| {
-        execute_token_factory(&registry, input, gas_limit)
-    })
+    Arc::new(move |input: &[u8], gas_limit: u64| execute_token_factory(&registry, input, gas_limit))
 }
 
 /// Main dispatch for the token factory precompile.
@@ -113,7 +110,8 @@ fn execute_token_factory(
             if after_selector.len() < 32 {
                 return Err(VmError::PrecompileFailed(
                     "createToken requires trusted msg.sender; invoke precompile \
-                     via PrecompileRegistry::execute (EVM runtime path).".to_string(),
+                     via PrecompileRegistry::execute (EVM runtime path)."
+                        .to_string(),
                 ));
             }
             let split = after_selector.len() - 32;
@@ -121,9 +119,7 @@ fn execute_token_factory(
             caller.copy_from_slice(&after_selector[split + 12..]);
             handle_create_token(registry, &caller, &after_selector[..split], gas_limit)
         }
-        s if s == selectors::PREDICT_ADDRESS => {
-            handle_predict_address(after_selector, gas_limit)
-        }
+        s if s == selectors::PREDICT_ADDRESS => handle_predict_address(after_selector, gas_limit),
         s if s == selectors::GET_IMPLEMENTATION => handle_get_implementation(gas_limit),
         s if s == selectors::GET_TOKEN_COUNT => handle_get_token_count(registry, gas_limit),
         _ => Ok(PrecompileResult::failed(gas_limit)),
@@ -192,7 +188,11 @@ fn handle_create_token(
         symbol: symbol.clone(),
         decimals,
         total_supply: initial_supply,
-        max_supply: if permissions.mintable { None } else { Some(initial_supply) },
+        max_supply: if permissions.mintable {
+            None
+        } else {
+            Some(initial_supply)
+        },
         creator,
         token_type: TokenType::Erc20,
         vm_addresses: VmAddresses {
@@ -263,7 +263,10 @@ fn handle_get_token_count(registry: &TokenRegistry, gas_limit: u64) -> Result<Pr
     }
 
     let count = registry.token_count() as u128;
-    Ok(PrecompileResult::success(abi::encode_uint256(count), GAS_READ))
+    Ok(PrecompileResult::success(
+        abi::encode_uint256(count),
+        GAS_READ,
+    ))
 }
 
 // -----------------------------------------------------------------------

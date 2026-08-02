@@ -3,10 +3,10 @@
 //! Provides per-model active request tracking with RAII guards, hardware-based
 //! capacity estimation, and load level classification.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 use dashmap::DashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Load level for a model service instance, derived from utilization percentage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +59,7 @@ pub struct ModelLoadSnapshot {
 }
 
 /// Per-model atomic request counter.
+#[derive(Debug)]
 struct ModelLoadState {
     active: AtomicU32,
     max_concurrent: u32,
@@ -173,6 +174,7 @@ impl Default for LoadTracker {
 ///
 /// This ensures that the count is always correct, even if the inference
 /// call panics or returns early.
+#[derive(Debug)]
 pub struct LoadGuard {
     state: Arc<ModelLoadState>,
 }
@@ -190,34 +192,53 @@ impl Drop for LoadGuard {
 /// be queued/in-flight (mutex waiters + 1 running).
 ///
 /// For GPU inference, each request needs a separate context in VRAM.
+/// Ceiling on per-model concurrency, whatever the memory arithmetic says.
+///
+/// Matched to the batching engine's sequence-slot pool: a request past the
+/// last KV slot cannot be interleaved into a decode however much memory is
+/// free, so admitting more only deepens a queue. Keeping the two numbers
+/// equal means the per-model cap and the engine agree about what "full"
+/// means instead of one silently binding before the other.
+///
+/// The previous ceiling of 8 predates the batching engine and was the reason
+/// a 0.6B model on a 121 GiB machine served two requests at a time.
+pub const MAX_CONCURRENT_CEILING: u32 = 32;
+
 pub fn estimate_max_concurrent(
     model_min_ram_gb: u32,
     total_ram_gb: f64,
     gpu_vram_gb: f64,
     has_gpu: bool,
 ) -> u32 {
-    if has_gpu && gpu_vram_gb > 0.0 {
-        // GPU: model weights on VRAM, each concurrent request needs ~model_size * 0.1 for KV cache
-        let kv_cache_per_request_gb = (model_min_ram_gb as f64) * 0.1;
-        let available_for_kv = (gpu_vram_gb - model_min_ram_gb as f64).max(0.0);
-        let gpu_concurrent = if kv_cache_per_request_gb > 0.0 {
-            (available_for_kv / kv_cache_per_request_gb).floor() as u32
-        } else {
-            1
-        };
-        gpu_concurrent.clamp(1, 8)
+    // One formula over whichever memory pool the weights land in.
+    //
+    // The GPU and CPU cases were previously two different calculations, which
+    // is how a unified-memory machine — where they are the same pool — ended
+    // up with an answer that depended on which branch happened to be taken.
+    // The question is the same either way: after the weights, how many
+    // requests' worth of KV cache is there room for?
+    //
+    // The old CPU branch also carried a comment that llama.cpp holds a mutex
+    // so only one request runs at a time. The batching engine replaced that:
+    // requests are interleaved through one context across a slot pool, so
+    // memory headroom is the real bound.
+    let pool_gb = if has_gpu && gpu_vram_gb > 0.0 {
+        gpu_vram_gb
     } else {
-        // CPU-only: llama.cpp holds a Mutex so only 1 runs at a time.
-        // Allow queueing based on RAM headroom.
-        let ram_ratio = total_ram_gb / model_min_ram_gb.max(1) as f64;
-        if ram_ratio >= 4.0 {
-            4
-        } else if ram_ratio >= 2.0 {
-            2
-        } else {
-            1
-        }
-    }
+        total_ram_gb
+    };
+
+    // Per-request KV cost as a fraction of the model's footprint. Rough — the
+    // real cost scales with context length, which this signature does not see
+    // — but the right order of magnitude, and it errs high for small models.
+    let kv_per_request_gb = (model_min_ram_gb as f64) * 0.1;
+    let headroom_gb = (pool_gb - model_min_ram_gb as f64).max(0.0);
+    let by_memory = if kv_per_request_gb > 0.0 {
+        (headroom_gb / kv_per_request_gb).floor() as u32
+    } else {
+        MAX_CONCURRENT_CEILING
+    };
+    by_memory.clamp(1, MAX_CONCURRENT_CEILING)
 }
 
 #[cfg(test)]
@@ -339,30 +360,54 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_max_concurrent_cpu_only() {
-        // Tight: 2GB model, 4GB total -> ratio 2.0 -> 2 concurrent
-        assert_eq!(estimate_max_concurrent(2, 4.0, 0.0, false), 2);
-
-        // Comfortable: 2GB model, 8GB total -> ratio 4.0 -> 4 concurrent
-        assert_eq!(estimate_max_concurrent(2, 8.0, 0.0, false), 4);
-
-        // Very tight: 4GB model, 4GB total -> ratio 1.0 -> 1 concurrent
-        assert_eq!(estimate_max_concurrent(4, 4.0, 0.0, false), 1);
-
-        // Small model on big machine: 1GB model, 16GB total -> ratio 16.0 -> 4 concurrent
-        assert_eq!(estimate_max_concurrent(1, 16.0, 0.0, false), 4);
+    fn concurrency_scales_with_memory_headroom_not_with_the_branch_taken() {
+        // The unified-memory bug this replaced: GPU and CPU were two separate
+        // formulas, so a machine where VRAM *is* system RAM got an answer that
+        // depended on which branch detection happened to pick. Same pool, same
+        // headroom, same answer.
+        let as_gpu = estimate_max_concurrent(2, 121.0, 121.0, true);
+        let as_cpu = estimate_max_concurrent(2, 121.0, 0.0, false);
+        assert_eq!(as_gpu, as_cpu, "one pool must give one answer");
     }
 
     #[test]
-    fn test_estimate_max_concurrent_gpu() {
-        // 2GB model, 8GB VRAM -> available 6GB, KV cache 0.2GB per req -> 30, clamped to 8
-        assert_eq!(estimate_max_concurrent(2, 16.0, 8.0, true), 8);
+    fn a_small_model_on_a_large_machine_is_not_throttled_to_a_handful() {
+        // The concrete regression from bring-up: qwen3-0.6b (min_ram 2 GiB) on
+        // a 121 GiB box served TWO concurrent requests. It should saturate the
+        // batching engine's slot pool instead.
+        assert_eq!(
+            estimate_max_concurrent(2, 121.0, 121.0, true),
+            MAX_CONCURRENT_CEILING
+        );
+        assert_eq!(
+            estimate_max_concurrent(1, 121.0, 0.0, false),
+            MAX_CONCURRENT_CEILING
+        );
+    }
 
-        // 4GB model, 6GB VRAM -> available 2GB, KV cache 0.4GB per req -> 5
-        assert_eq!(estimate_max_concurrent(4, 16.0, 6.0, true), 5);
-
-        // 8GB model, 8GB VRAM -> available 0GB -> min 1
+    #[test]
+    fn a_model_that_barely_fits_gets_a_single_slot() {
+        // No headroom for KV means no room for a second sequence, whichever
+        // pool it is in.
         assert_eq!(estimate_max_concurrent(8, 16.0, 8.0, true), 1);
+        assert_eq!(estimate_max_concurrent(4, 4.0, 0.0, false), 1);
+    }
+
+    #[test]
+    fn concurrency_never_exceeds_the_batching_engines_slot_pool() {
+        // Past the last KV slot a request cannot be interleaved into a decode
+        // however much memory is free, so admitting more only deepens a queue.
+        for (model_gb, pool_gb) in [(1u32, 1024.0), (2, 512.0), (4, 4096.0)] {
+            assert!(estimate_max_concurrent(model_gb, pool_gb, pool_gb, true) <= 32);
+        }
+    }
+
+    #[test]
+    fn headroom_translates_into_slots_proportionally() {
+        // 4 GiB model, 6 GiB pool -> 2 GiB headroom at 0.4 GiB per request.
+        assert_eq!(estimate_max_concurrent(4, 16.0, 6.0, true), 5);
+        // Double the headroom, double the slots.
+        assert_eq!(estimate_max_concurrent(4, 16.0, 8.0, true), 10);
     }
 
     #[test]

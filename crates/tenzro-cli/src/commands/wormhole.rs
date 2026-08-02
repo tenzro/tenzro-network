@@ -3,9 +3,9 @@
 //! Wraps `tenzro_wormhole*` RPCs: chain id lookup, VAA id parsing,
 //! and token bridging through the BridgeRouter's Wormhole adapter.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Wormhole cross-chain operations
 #[derive(Debug, Subcommand)]
@@ -88,7 +88,10 @@ impl WormholeParseVaaCmd {
         }
         output::print_field(
             "Emitter Address",
-            result.get("emitter_address").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("emitter_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         if let Some(s) = result.get("sequence").and_then(|v| v.as_u64()) {
             output::print_field("Sequence", &s.to_string());
@@ -160,15 +163,24 @@ impl WormholeBridgeCmd {
         output::print_success("Transfer submitted");
         output::print_field(
             "Transfer ID",
-            result.get("transfer_id").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("transfer_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         output::print_field(
             "Source Chain",
-            result.get("source_chain").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("source_chain")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         output::print_field(
             "Dest Chain",
-            result.get("dest_chain").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("dest_chain")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         output::print_field(
             "Tx Hash",
@@ -176,7 +188,10 @@ impl WormholeBridgeCmd {
         );
         output::print_field(
             "Fee Paid",
-            result.get("fee_paid").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("fee_paid")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         if let Some(eta) = result.get("estimated_arrival_ms").and_then(|v| v.as_u64()) {
             output::print_field("ETA (ms)", &eta.to_string());

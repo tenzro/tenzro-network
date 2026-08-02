@@ -16,9 +16,9 @@
 
 use dashmap::{DashMap, DashSet};
 use governor::{
+    Quota, RateLimiter,
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
 };
 use libp2p::{Multiaddr, PeerId};
 use std::collections::{HashSet, VecDeque};
@@ -30,7 +30,8 @@ use tenzro_types::network::{NetworkRole, PeerStatus, RoleSet};
 
 /// Type alias for a keyed rate limiter over IP addresses.
 /// Each IP gets its own token bucket; eviction is handled by governor internally.
-type IpRateLimiter = RateLimiter<IpAddr, dashmap::DashMap<IpAddr, governor::state::InMemoryState>, DefaultClock>;
+type IpRateLimiter =
+    RateLimiter<IpAddr, dashmap::DashMap<IpAddr, governor::state::InMemoryState>, DefaultClock>;
 
 /// Type alias for a global (non-keyed) rate limiter.
 type GlobalRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -216,10 +217,18 @@ pub struct PeerManager {
     /// These are critical infrastructure peers (e.g., boot nodes from --boot-nodes CLI).
     /// They may trigger rate limits due to high block production rates, but banning them
     /// would isolate the node from the network entirely.
-    /// Peers protected from auto-ban. Boot nodes are added at startup; any
-    /// peer that completes a libp2p Identify handshake announcing a
-    /// `tenzro/` protocol is promoted here, so cluster validators can never
-    /// ban each other via reputation decay or rate-limit penalties.
+    /// Peers protected from auto-ban. Boot nodes are added at startup; a peer
+    /// is promoted here when it presents a **signed validator binding** in its
+    /// Identify `agent_version` — a signature over the transport-authenticated
+    /// `PeerId` by a key the validator registry recognises — so cluster
+    /// validators can never ban each other via reputation decay or rate-limit
+    /// penalties.
+    ///
+    /// The binding, not the protocol string. An Identify string is
+    /// peer-supplied and unauthenticated, so promoting on one would make
+    /// "claim to be a Tenzro node" sufficient to become unbannable. See
+    /// [`Self::try_register_validator_on_identify`], which verifies the
+    /// signature and checks `is_validator_identity` before promoting.
     ///
     /// Stored as a lock-free `DashSet` so Identify-time promotion can mutate
     /// it from the `&self` swarm event path (see
@@ -254,13 +263,19 @@ impl PeerManager {
         // dialling from one IP. Legitimate boot-node reconnects use ≤1 dial/min.
         let ip_quota = Quota::per_minute(NonZeroU32::new(10).unwrap())
             .allow_burst(NonZeroU32::new(5).unwrap());
-        let ip_dial_limiter = Arc::new(RateLimiter::dashmap_with_clock(ip_quota, DefaultClock::default()));
+        let ip_dial_limiter = Arc::new(RateLimiter::dashmap_with_clock(
+            ip_quota,
+            DefaultClock::default(),
+        ));
 
         // Global dial limit: 200/min, burst 20. Aggregate protection against
         // dial floods spread across many IPs (distributed Sybil).
         let global_quota = Quota::per_minute(NonZeroU32::new(200).unwrap())
             .allow_burst(NonZeroU32::new(20).unwrap());
-        let global_dial_limiter = Arc::new(RateLimiter::direct_with_clock(global_quota, DefaultClock::default()));
+        let global_dial_limiter = Arc::new(RateLimiter::direct_with_clock(
+            global_quota,
+            DefaultClock::default(),
+        ));
 
         Self {
             peers: DashMap::new(),
@@ -485,7 +500,9 @@ impl PeerManager {
 
     /// Adds a new peer or updates existing peer
     pub fn add_peer(&self, peer_id: PeerId) {
-        self.peers.entry(peer_id).or_insert_with(|| ManagedPeer::new(peer_id));
+        self.peers
+            .entry(peer_id)
+            .or_insert_with(|| ManagedPeer::new(peer_id));
     }
 
     /// Removes a peer
@@ -624,7 +641,11 @@ impl PeerManager {
         }
         peer.status = PeerStatus::Banned;
         peer.ban_until = Some(Instant::now() + self.ban_duration);
-        tracing::warn!("Banned peer {} for {} seconds", peer.peer_id, self.ban_duration.as_secs());
+        tracing::warn!(
+            "Banned peer {} for {} seconds",
+            peer.peer_id,
+            self.ban_duration.as_secs()
+        );
 
         // Write through to durable storage so the ban survives a restart.
         if let Some(store) = &self.ban_store {
@@ -755,7 +776,11 @@ impl PeerManager {
             let window_start = now - self.rate_limit_window;
 
             // Evict timestamps outside the sliding window
-            while peer.message_timestamps.front().is_some_and(|&t| t < window_start) {
+            while peer
+                .message_timestamps
+                .front()
+                .is_some_and(|&t| t < window_start)
+            {
                 peer.message_timestamps.pop_front();
             }
 

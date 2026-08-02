@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore, WriteOp};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -99,9 +99,7 @@ fn sort_obligations(obligations: &mut [Obligation]) {
 
 /// Computes the deterministic batch id over canonically-sorted obligations.
 pub fn compute_batch_id(sorted_obligations: &[Obligation]) -> String {
-    let mut preimage = Vec::with_capacity(
-        NETTING_ID_DOMAIN.len() + sorted_obligations.len() * 96,
-    );
+    let mut preimage = Vec::with_capacity(NETTING_ID_DOMAIN.len() + sorted_obligations.len() * 96);
     preimage.extend_from_slice(NETTING_ID_DOMAIN);
     for ob in sorted_obligations {
         preimage.extend_from_slice(ob.debtor.as_bytes());
@@ -163,7 +161,13 @@ fn reduce(positions: &PositionMap) -> BTreeMap<(String, [u8; 32]), (bool, u128)>
 fn net_positions(obligations: &[Obligation]) -> Result<PositionMap> {
     let mut positions = PositionMap::new();
     for ob in obligations {
-        accumulate(&mut positions, &ob.asset, &ob.debtor, &ob.creditor, ob.amount)?;
+        accumulate(
+            &mut positions,
+            &ob.asset,
+            &ob.debtor,
+            &ob.creditor,
+            ob.amount,
+        )?;
     }
     Ok(positions)
 }
@@ -246,9 +250,8 @@ fn compute_netting(
     let mut net_total: u128 = 0;
     for (asset, (mut debtors, mut creditors)) in per_asset {
         // Largest amount first; ties broken by ascending address bytes.
-        let cmp = |a: &([u8; 32], u128), b: &([u8; 32], u128)| {
-            b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
-        };
+        let cmp =
+            |a: &([u8; 32], u128), b: &([u8; 32], u128)| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0));
         while !debtors.is_empty() && !creditors.is_empty() {
             debtors.sort_by(cmp);
             creditors.sort_by(cmp);
@@ -289,7 +292,10 @@ impl std::fmt::Debug for NettingManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NettingManager")
             .field("batches", &self.batches.len())
-            .field("storage", &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"))
+            .field(
+                "storage",
+                &self.storage.as_ref().map(|_| "Some(Arc<dyn KvStore>)"),
+            )
             .finish()
     }
 }
@@ -346,7 +352,10 @@ impl NettingManager {
                     }
                     Err(e) => {
                         let key_str = std::str::from_utf8(key_bytes).unwrap_or("<binary>");
-                        warn!("Failed to deserialize netting batch at key {}: {}", key_str, e);
+                        warn!(
+                            "Failed to deserialize netting batch at key {}: {}",
+                            key_str, e
+                        );
                     }
                 },
                 Ok(None) => {}
@@ -354,7 +363,10 @@ impl NettingManager {
             }
         }
         if hydrated > 0 {
-            info!("Hydrated {} netting batch(es) from RocksDB CF_SETTLEMENTS", hydrated);
+            info!(
+                "Hydrated {} netting batch(es) from RocksDB CF_SETTLEMENTS",
+                hydrated
+            );
         }
     }
 
@@ -502,7 +514,12 @@ mod tests {
     #[test]
     fn multilateral_netting_matches_positions() {
         let mgr = NettingManager::new();
-        // Net positions: 1 -> -100, 2 -> +40, 3 -> +60.
+        // `ob(a, b, _, n)` is "a owes b n".
+        //
+        //   1 owes 2: 70,  1 owes 3: 60   → 1 = -130
+        //   2 owes 3: 30,  3 owes 2: 30   → these cancel between 2 and 3
+        //
+        // Net positions: 1 → -130, 2 → +70, 3 → +60 (sums to zero).
         let batch = mgr
             .compute_batch(vec![
                 ob(1, 2, TNZO, 70),
@@ -513,11 +530,11 @@ mod tests {
             .unwrap();
         verify_netting_invariant(&batch.obligations, &batch.instructions).unwrap();
 
-        // Only the single net debtor pays; total paid = 100.
+        // Only the single net debtor pays; total paid = 130.
         assert!(batch.instructions.iter().all(|i| i.from == addr(1)));
         let total: u128 = batch.instructions.iter().map(|i| i.amount).sum();
-        assert_eq!(total, 100);
-        assert_eq!(batch.net_total, 100);
+        assert_eq!(total, 130);
+        assert_eq!(batch.net_total, 130);
         // Minimal set: 2 instructions for 1 debtor x 2 creditors.
         assert_eq!(batch.instructions.len(), 2);
     }
@@ -526,10 +543,7 @@ mod tests {
     fn assets_net_independently() {
         let mgr = NettingManager::new();
         let batch = mgr
-            .compute_batch(vec![
-                ob(1, 2, TNZO, 100),
-                ob(2, 1, USDC, 100),
-            ])
+            .compute_batch(vec![ob(1, 2, TNZO, 100), ob(2, 1, USDC, 100)])
             .unwrap();
         // Different assets do not offset each other.
         assert_eq!(batch.instructions.len(), 2);
@@ -604,10 +618,7 @@ mod tests {
     #[test]
     fn overflow_is_typed_error() {
         let mgr = NettingManager::new();
-        let r = mgr.compute_batch(vec![
-            ob(1, 2, TNZO, u128::MAX),
-            ob(3, 2, TNZO, 1),
-        ]);
+        let r = mgr.compute_batch(vec![ob(1, 2, TNZO, u128::MAX), ob(3, 2, TNZO, 1)]);
         assert!(matches!(
             r.unwrap_err(),
             SettlementError::ArithmeticOverflow(_)
@@ -653,6 +664,9 @@ mod tests {
         // Mutations after rehydration write through.
         mgr2.mark_settled(&batch_id).unwrap();
         let mgr3 = NettingManager::with_storage(storage);
-        assert_eq!(mgr3.get_batch(&batch_id).unwrap().status, NettingStatus::Settled);
+        assert_eq!(
+            mgr3.get_batch(&batch_id).unwrap().status,
+            NettingStatus::Settled
+        );
     }
 }

@@ -7,10 +7,10 @@ use crate::error::{ModelError, Result};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::kv::{KvStore, WriteOp, CF_MODELS};
+use tenzro_storage::kv::{CF_MODELS, KvStore, WriteOp};
 use tenzro_storage::{
-    compute_commitment, InlineFallbackBackend, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode,
-    ReceiptSummary,
+    InlineFallbackBackend, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+    compute_commitment,
 };
 use tenzro_types::model::BillableUnits;
 use tenzro_types::primitives::{Address, Timestamp};
@@ -66,7 +66,9 @@ impl BillableTotals {
     /// Folds one call's units into the running totals.
     pub fn add(&mut self, units: &BillableUnits) {
         self.input_tokens = self.input_tokens.saturating_add(units.input_tokens as u64);
-        self.output_tokens = self.output_tokens.saturating_add(units.output_tokens as u64);
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(units.output_tokens as u64);
         self.cached_read_tokens = self
             .cached_read_tokens
             .saturating_add(units.cached_read_tokens as u64);
@@ -223,7 +225,9 @@ impl ModelUsageStats {
 
     /// Average cost per inference
     pub fn avg_cost(&self) -> u64 {
-        self.total_cost.checked_div(self.inference_count).unwrap_or(0)
+        self.total_cost
+            .checked_div(self.inference_count)
+            .unwrap_or(0)
     }
 
     /// Total bytes (in + out) at the HTTP boundary across all inferences
@@ -742,7 +746,9 @@ impl UsageTracker {
         debug_assert_eq!(kind.default_mode(), ReceiptStorageMode::OffloadedDA);
 
         let commitment = compute_commitment(&payload);
-        let pointer = self.da_backend.submit_sync(INFERENCE_DA_NAMESPACE, &payload);
+        let pointer = self
+            .da_backend
+            .submit_sync(INFERENCE_DA_NAMESPACE, &payload);
         let envelope = ReceiptEnvelope::offloaded(kind, summary, pointer, commitment);
 
         // Belt-and-suspenders: refuse to persist a malformed envelope.

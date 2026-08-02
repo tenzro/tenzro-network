@@ -13,11 +13,11 @@
 //!
 //! [`ProvenanceSigner`]: super::ProvenanceSigner
 
-use super::{hash_content, ProvenanceError, ProvenanceSigner};
+use super::{ProvenanceError, ProvenanceSigner, hash_content};
 use std::sync::Arc;
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
-use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::ProvenanceManifest;
+use tenzro_types::primitives::{Address, Timestamp};
 
 /// Provenance signer that stamps manifests with an Ed25519 signature.
 ///
@@ -86,7 +86,7 @@ impl ProvenanceSigner for Ed25519ProvenanceSigner {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{verify_manifest, ASSERTION_AI_GENERATED, ASSERTION_DEEPFAKE};
+    use super::super::{ASSERTION_AI_GENERATED, ASSERTION_DEEPFAKE, verify_manifest};
     use super::*;
 
     #[test]

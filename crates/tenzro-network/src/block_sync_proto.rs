@@ -26,8 +26,8 @@
 //!     empty blocks, header+body)
 
 use libp2p::{
-    request_response::{self, ProtocolSupport},
     StreamProtocol,
+    request_response::{self, ProtocolSupport},
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -136,7 +136,9 @@ pub enum BlockSyncError {
     ServerBusy { limit: usize },
 
     /// `start` is below the peer's `lowest_available` (peer pruned the range).
-    #[error("requested block below pruned tail (start={start}, lowest_available={lowest_available})")]
+    #[error(
+        "requested block below pruned tail (start={start}, lowest_available={lowest_available})"
+    )]
     BelowPrunedTail {
         start: BlockHeight,
         lowest_available: BlockHeight,
@@ -161,12 +163,8 @@ pub type BlockSyncBehaviour =
 /// appropriate.
 pub fn new_behaviour() -> BlockSyncBehaviour {
     let protocol = StreamProtocol::new(BLOCK_SYNC_PROTOCOL);
-    let cfg = request_response::Config::default()
-        .with_request_timeout(REQUEST_TIMEOUT_BODIES);
-    request_response::cbor::Behaviour::new(
-        std::iter::once((protocol, ProtocolSupport::Full)),
-        cfg,
-    )
+    let cfg = request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT_BODIES);
+    request_response::cbor::Behaviour::new(std::iter::once((protocol, ProtocolSupport::Full)), cfg)
 }
 
 #[cfg(test)]
@@ -192,8 +190,7 @@ mod tests {
         ];
         for req in cases {
             let bytes = bincode::serialize(&req).expect("encode");
-            let decoded: BlockSyncRequest =
-                bincode::deserialize(&bytes).expect("decode");
+            let decoded: BlockSyncRequest = bincode::deserialize(&bytes).expect("decode");
             assert_eq!(req, decoded);
         }
     }
@@ -221,8 +218,7 @@ mod tests {
         ];
         for resp in cases {
             let bytes = bincode::serialize(&resp).expect("encode");
-            let decoded: BlockSyncResponse =
-                bincode::deserialize(&bytes).expect("decode");
+            let decoded: BlockSyncResponse = bincode::deserialize(&bytes).expect("decode");
             assert_eq!(resp, decoded);
         }
     }

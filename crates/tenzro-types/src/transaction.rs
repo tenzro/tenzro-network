@@ -4,7 +4,7 @@
 //! to represent state transitions on the Tenzro Network blockchain.
 
 use crate::asset::AssetId;
-use crate::primitives::{Address, Hash, Nonce, Signature, Timestamp, ChainId};
+use crate::primitives::{Address, ChainId, Hash, Nonce, Signature, Timestamp};
 use crate::settlement::{ReleaseConditions, ServiceProof};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -659,8 +659,16 @@ impl SignedTransaction {
                     return Err("Too many signatures in escrow release proof");
                 }
             }
-            TransactionType::PauseAgent { agent_did, reason_text, .. }
-            | TransactionType::QuarantineAgent { agent_did, reason_text, .. } => {
+            TransactionType::PauseAgent {
+                agent_did,
+                reason_text,
+                ..
+            }
+            | TransactionType::QuarantineAgent {
+                agent_did,
+                reason_text,
+                ..
+            } => {
                 if agent_did.len() > 256 {
                     return Err("agent_did exceeds maximum length");
                 }
@@ -670,7 +678,11 @@ impl SignedTransaction {
                     return Err("reason_text exceeds 256 bytes");
                 }
             }
-            TransactionType::TerminateAgent { agent_did, slash_bps, .. } => {
+            TransactionType::TerminateAgent {
+                agent_did,
+                slash_bps,
+                ..
+            } => {
                 if agent_did.len() > 256 {
                     return Err("agent_did exceeds maximum length");
                 }

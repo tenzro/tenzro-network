@@ -27,7 +27,11 @@ use std::path::Path;
 use ort::session::Session;
 use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 
-#[cfg(any(feature = "onnx-cuda", feature = "onnx-tensorrt", feature = "onnx-coreml"))]
+#[cfg(any(
+    feature = "onnx-cuda",
+    feature = "onnx-tensorrt",
+    feature = "onnx-coreml"
+))]
 use ort::execution_providers::ExecutionProvider;
 
 use crate::error::{ModelError, Result};
@@ -115,8 +119,7 @@ fn register_execution_provider(name: &str, builder: &mut SessionBuilder) -> bool
     match name {
         #[cfg(feature = "onnx-tensorrt")]
         "tensorrt" => {
-            match ort::execution_providers::TensorRTExecutionProvider::default().register(builder)
-            {
+            match ort::execution_providers::TensorRTExecutionProvider::default().register(builder) {
                 Ok(()) => true,
                 Err(e) => {
                     tracing::warn!(

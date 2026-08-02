@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tenzro_types::primitives::Timestamp;
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 /// Lifecycle state of an agent
@@ -303,7 +303,9 @@ impl AgentLifecycleInfo {
     /// Checks if the agent is healthy (recent heartbeat)
     pub fn is_healthy(&self, max_heartbeat_age_secs: i64) -> bool {
         if let Some(last_heartbeat) = self.last_heartbeat {
-            let age = Utc::now().signed_duration_since(last_heartbeat).num_seconds();
+            let age = Utc::now()
+                .signed_duration_since(last_heartbeat)
+                .num_seconds();
             age < max_heartbeat_age_secs
         } else {
             // No heartbeat received yet, check if recently created
@@ -539,7 +541,10 @@ impl AgentLifecycle {
 
         entry.value_mut().transition(AgentState::Active)?;
 
-        info!("Agent {} resumed from pause by {}", agent_id, controller_did);
+        info!(
+            "Agent {} resumed from pause by {}",
+            agent_id, controller_did
+        );
 
         self.emit_event(AgentLifecycleEvent::ResumedFromPause {
             agent_id: agent_id.to_string(),
@@ -587,11 +592,7 @@ impl AgentLifecycle {
     }
 
     /// Returns a quarantined agent to Active after investigation.
-    pub fn resume_from_quarantine(
-        &self,
-        agent_id: &str,
-        controller_did: String,
-    ) -> Result<()> {
+    pub fn resume_from_quarantine(&self, agent_id: &str, controller_did: String) -> Result<()> {
         let mut entry = self
             .lifecycles
             .get_mut(agent_id)
@@ -667,8 +668,8 @@ impl AgentLifecycle {
             .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
 
         // Update with specific timestamp (from_timestamp expects seconds)
-        let datetime = DateTime::<Utc>::from_timestamp(timestamp.as_secs(), 0)
-            .unwrap_or_else(Utc::now);
+        let datetime =
+            DateTime::<Utc>::from_timestamp(timestamp.as_secs(), 0).unwrap_or_else(Utc::now);
         entry.value_mut().last_heartbeat = Some(datetime);
 
         debug!("Heartbeat recorded for agent {} at {}", agent_id, datetime);
@@ -706,10 +707,9 @@ impl AgentLifecycle {
                 "Agent {} missed heartbeat (timeout: {}s), suspending",
                 agent_id, timeout_secs
             );
-            if let Err(e) = self.suspend(
-                &agent_id,
-                format!("Heartbeat timeout ({}s)", timeout_secs),
-            ) {
+            if let Err(e) =
+                self.suspend(&agent_id, format!("Heartbeat timeout ({}s)", timeout_secs))
+            {
                 warn!("Failed to suspend agent {}: {}", agent_id, e);
             } else {
                 suspended_agents.push(agent_id);
@@ -717,7 +717,10 @@ impl AgentLifecycle {
         }
 
         if !suspended_agents.is_empty() {
-            info!("Suspended {} agents due to heartbeat timeout", suspended_agents.len());
+            info!(
+                "Suspended {} agents due to heartbeat timeout",
+                suspended_agents.len()
+            );
         }
 
         Ok(suspended_agents)
@@ -804,10 +807,7 @@ impl AgentLifecycle {
                 "Agent {} idle beyond TTL ({}s), suspending",
                 agent_id, ttl_secs
             );
-            if let Err(e) = self.suspend(
-                &agent_id,
-                format!("Idle TTL exceeded ({}s)", ttl_secs),
-            ) {
+            if let Err(e) = self.suspend(&agent_id, format!("Idle TTL exceeded ({}s)", ttl_secs)) {
                 warn!("Failed to suspend idle agent {}: {}", agent_id, e);
             } else {
                 suspended_agents.push(agent_id);
@@ -952,7 +952,10 @@ mod tests {
 
         // Cannot resume a terminated agent
         let result = lifecycle.resume(&agent_id);
-        assert!(matches!(result, Err(AgentError::InvalidStateTransition { .. })));
+        assert!(matches!(
+            result,
+            Err(AgentError::InvalidStateTransition { .. })
+        ));
     }
 
     #[test]
@@ -1089,8 +1092,7 @@ mod tests {
         lifecycle.activate(&agent_id).unwrap();
 
         // Active is not Paused — must be rejected.
-        let result =
-            lifecycle.resume_from_pause(&agent_id, "did:tenzro:human:c".to_string());
+        let result = lifecycle.resume_from_pause(&agent_id, "did:tenzro:human:c".to_string());
         assert!(matches!(
             result,
             Err(AgentError::InvalidStateTransition { .. })

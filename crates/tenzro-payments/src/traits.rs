@@ -58,8 +58,5 @@ pub trait PaymentGateway: Send + Sync {
     ) -> Result<PaymentChallenge>;
 
     /// Verifies a credential (auto-detects protocol from the credential)
-    async fn verify_and_settle(
-        &self,
-        credential: &PaymentCredential,
-    ) -> Result<PaymentReceipt>;
+    async fn verify_and_settle(&self, credential: &PaymentCredential) -> Result<PaymentReceipt>;
 }

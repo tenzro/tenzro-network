@@ -70,9 +70,7 @@ impl PruneSkillsCmd {
             Some(s) => serde_json::json!({ "purge_after_secs": s }),
             None => serde_json::Value::Null,
         };
-        let result: serde_json::Value = rpc
-            .call("tenzro_pruneSkillRegistry", params)
-            .await?;
+        let result: serde_json::Value = rpc.call("tenzro_pruneSkillRegistry", params).await?;
         spinner.finish_and_clear();
 
         if self.format == "json" {
@@ -132,7 +130,9 @@ impl ListSkillsCmd {
             filter["active_only"] = serde_json::json!(false);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_listSkills", serde_json::json!([filter])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_listSkills", serde_json::json!([filter]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -143,7 +143,8 @@ impl ListSkillsCmd {
                 println!();
                 for skill in &arr {
                     let skill_id = skill["skill_id"].as_str().unwrap_or("?");
-                    let name = skill["name"].as_str()
+                    let name = skill["name"]
+                        .as_str()
                         .or_else(|| skill["skill_id"].as_str())
                         .unwrap_or("Unnamed");
                     let status = skill["status"].as_str().unwrap_or("unknown");
@@ -154,12 +155,13 @@ impl ListSkillsCmd {
                     output::print_field("Name", name);
                     output::print_field("Category", category);
                     output::print_field("Status", status);
-                    output::print_field("Description", &description.chars().take(80).collect::<String>());
+                    output::print_field(
+                        "Description",
+                        &description.chars().take(80).collect::<String>(),
+                    );
 
                     if let Some(caps) = skill["required_capabilities"].as_array() {
-                        let cap_list: Vec<&str> = caps.iter()
-                            .filter_map(|c| c.as_str())
-                            .collect();
+                        let cap_list: Vec<&str> = caps.iter().filter_map(|c| c.as_str()).collect();
                         if !cap_list.is_empty() {
                             output::print_field("Capabilities", &cap_list.join(", "));
                         }
@@ -260,7 +262,9 @@ impl RegisterSkillCmd {
             });
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_registerSkill", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_registerSkill", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -308,7 +312,9 @@ impl SearchSkillsCmd {
             "limit": self.limit,
         });
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_searchSkills", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_searchSkills", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -319,7 +325,8 @@ impl SearchSkillsCmd {
                 println!();
                 for skill in &arr {
                     let skill_id = skill["skill_id"].as_str().unwrap_or("?");
-                    let name = skill["name"].as_str()
+                    let name = skill["name"]
+                        .as_str()
                         .or_else(|| skill["skill_id"].as_str())
                         .unwrap_or("Unnamed");
                     let status = skill["status"].as_str().unwrap_or("unknown");
@@ -330,7 +337,10 @@ impl SearchSkillsCmd {
                     output::print_field("Name", name);
                     output::print_field("Category", category);
                     output::print_field("Status", status);
-                    output::print_field("Description", &description.chars().take(80).collect::<String>());
+                    output::print_field(
+                        "Description",
+                        &description.chars().take(80).collect::<String>(),
+                    );
                     println!();
                 }
                 if arr.is_empty() {
@@ -383,7 +393,9 @@ impl UseSkillCmd {
             params["expected_sha256"] = serde_json::json!(h);
         }
 
-        let result: Result<serde_json::Value> = rpc.call("tenzro_useSkill", serde_json::json!([params])).await;
+        let result: Result<serde_json::Value> = rpc
+            .call("tenzro_useSkill", serde_json::json!([params]))
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -428,10 +440,12 @@ impl GetSkillCmd {
         let spinner = output::create_spinner("Fetching skill...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let result: Result<serde_json::Value> = rpc.call(
-            "tenzro_getSkill",
-            serde_json::json!([{ "skill_id": self.skill_id }]),
-        ).await;
+        let result: Result<serde_json::Value> = rpc
+            .call(
+                "tenzro_getSkill",
+                serde_json::json!([{ "skill_id": self.skill_id }]),
+            )
+            .await;
         spinner.finish_and_clear();
 
         match result {
@@ -440,12 +454,11 @@ impl GetSkillCmd {
                 if let Some(obj) = skill.as_object() {
                     for (key, val) in obj {
                         let display = match val {
-                            serde_json::Value::Array(arr) => {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            }
+                            serde_json::Value::Array(arr) => arr
+                                .iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
                             _ => val.to_string().trim_matches('"').to_string(),
                         };
                         output::print_field(key, &display);
@@ -473,12 +486,38 @@ impl SkillUsageCmd {
         output::print_header("Skill Usage");
         let spinner = output::create_spinner("Fetching usage...");
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_getSkillUsage", serde_json::json!([{ "skill_id": self.skill_id }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getSkillUsage",
+                serde_json::json!([{ "skill_id": self.skill_id }]),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_field("Skill ID", &self.skill_id);
-        output::print_field("Total Invocations", &result.get("total_invocations").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
-        output::print_field("Success Rate", &result.get("success_rate").and_then(|v| v.as_f64()).map(|r| format!("{:.1}%", r * 100.0)).unwrap_or_else(|| "N/A".to_string()));
-        output::print_field("Avg Latency", &result.get("avg_latency_ms").and_then(|v| v.as_u64()).map(|l| format!("{}ms", l)).unwrap_or_else(|| "N/A".to_string()));
+        output::print_field(
+            "Total Invocations",
+            &result
+                .get("total_invocations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+        output::print_field(
+            "Success Rate",
+            &result
+                .get("success_rate")
+                .and_then(|v| v.as_f64())
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "N/A".to_string()),
+        );
+        output::print_field(
+            "Avg Latency",
+            &result
+                .get("avg_latency_ms")
+                .and_then(|v| v.as_u64())
+                .map(|l| format!("{}ms", l))
+                .unwrap_or_else(|| "N/A".to_string()),
+        );
         Ok(())
     }
 }
@@ -522,11 +561,21 @@ impl UpdateSkillCmd {
         let spinner = output::create_spinner("Updating...");
         let rpc = rpc::RpcClient::new(&self.rpc);
         let mut params = serde_json::json!({ "skill_id": self.skill_id });
-        if let Some(ref d) = self.description { params["description"] = serde_json::json!(d); }
-        if let Some(ref v) = self.version { params["version"] = serde_json::json!(v); }
-        if let Some(ref e) = self.endpoint { params["endpoint"] = serde_json::json!(e); }
-        if let Some(ref c) = self.category { params["category"] = serde_json::json!(c); }
-        if let Some(ref s) = self.status { params["status"] = serde_json::json!(s); }
+        if let Some(ref d) = self.description {
+            params["description"] = serde_json::json!(d);
+        }
+        if let Some(ref v) = self.version {
+            params["version"] = serde_json::json!(v);
+        }
+        if let Some(ref e) = self.endpoint {
+            params["endpoint"] = serde_json::json!(e);
+        }
+        if let Some(ref c) = self.category {
+            params["category"] = serde_json::json!(c);
+        }
+        if let Some(ref s) = self.status {
+            params["status"] = serde_json::json!(s);
+        }
         if let (Some(uri), Some(sha), Some(size)) =
             (&self.bundle_uri, &self.bundle_sha256, self.bundle_size)
         {
@@ -536,7 +585,9 @@ impl UpdateSkillCmd {
                 "size_bytes": size,
             });
         }
-        let _result: serde_json::Value = rpc.call("tenzro_updateSkill", serde_json::json!([params])).await?;
+        let _result: serde_json::Value = rpc
+            .call("tenzro_updateSkill", serde_json::json!([params]))
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Skill updated!");
         Ok(())

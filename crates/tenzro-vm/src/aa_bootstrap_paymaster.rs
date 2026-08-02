@@ -400,7 +400,10 @@ mod tests {
         let pm = build_paymaster(oracle, Arc::new(PermissiveRegistry));
         let op = bootstrap_op(vec![0x01; 20], vec![]);
         let err = pm.check(&op).unwrap_err();
-        assert!(err.to_string().contains("not enrolled with a TEE-bound key"));
+        assert!(
+            err.to_string()
+                .contains("not enrolled with a TEE-bound key")
+        );
     }
 
     #[test]

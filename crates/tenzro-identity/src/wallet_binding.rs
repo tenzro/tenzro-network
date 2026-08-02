@@ -53,8 +53,9 @@ impl WalletBinder {
     /// Suitable for tests; production node startup must use
     /// [`Self::from_service`] so the binder shares the node's `WalletService`.
     pub fn new() -> Result<Self> {
-        let wallet_service =
-            Arc::new(TenzroWalletService::new().map_err(|e| IdentityError::WalletError(e.to_string()))?);
+        let wallet_service = Arc::new(
+            TenzroWalletService::new().map_err(|e| IdentityError::WalletError(e.to_string()))?,
+        );
         Ok(Self { wallet_service })
     }
 

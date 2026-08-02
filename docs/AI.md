@@ -111,7 +111,7 @@ Listed in the catalog with `mtp_kind: DraftMtp`: DeepSeek V3 (native MTP head), 
 
 ### 2.6 Per-model serving profile
 
-The catalog is the single source of truth for serving behaviour. Each `HfModelEntry` carries a `serving: ServingProfile` (temperature, top_p, top_k, min_p, `jinja_required`, `reasoning_default`) stamped from the model author's recommended values (Unsloth per-family guidance) by a single post-construction pass keyed on family + architecture — the per-family knowledge lives in one `ServingProfile::for_family` function rather than being duplicated across the struct literals. Clients consume the profile two ways: the `tenzro_modelMetadata` RPC returns it (alongside `drafter_id`, `mtp_kind`, MoE shape, and multimodal/`mmproj` flags) so any client can render or apply the recommended config, and the local serving sidecar stamps each on-disk GGUF's preset section with the profile's samplers, `--jinja`, speculative (`spec-type`), and MoE-offload (`n-cpu-moe`) flags. Request-level parameters override the profile; the profile is the default, not a ceiling.
+The catalog is the single source of truth for serving behaviour. Each `HfModelEntry` carries a `serving: ServingProfile` (temperature, top_p, top_k, min_p, `presence_penalty`, `jinja_required`, `reasoning_default`) stamped from the model author's recommended values (Unsloth per-family guidance) by a single post-construction pass keyed on family + architecture — the per-family knowledge lives in one `ServingProfile::for_family` function rather than being duplicated across the struct literals. Clients consume the profile two ways: the `tenzro_modelMetadata` RPC returns it (alongside `drafter_id`, `mtp_kind`, MoE shape, and multimodal/`mmproj` flags) so any client can render or apply the recommended config, and the local serving sidecar stamps each on-disk GGUF's preset section with the profile's samplers, `--jinja`, speculative (`spec-type`), and MoE-offload (`n-cpu-moe`) flags. Request-level parameters override the profile; the profile is the default, not a ceiling.
 
 ### 2.7 Hardware backends
 
@@ -133,6 +133,23 @@ A provider can serve inference on whatever accelerator it has. llama.cpp's ggml 
 | IBM Z Telum | zDNN | `zdnn` | zDNN library |
 | CPU (BLAS-accelerated) | BLAS | `blas` | OpenBLAS / Intel MKL / Apple Accelerate |
 | CPU (fallback) | — | none | — |
+
+#### NVFP4 is a different runtime, not another quant
+
+NVFP4 is NVIDIA's Blackwell-native 4-bit format (RTX 50-series, B200, B300,
+DGX Spark). Unsloth publishes NVFP4 builds alongside their GGUFs, and on
+Blackwell they are materially faster — up to 2.5× on Qwen 3.6 27B — with an
+FP8 KV cache that roughly doubles usable context.
+
+They are **not loadable by llama.cpp**, and therefore not by this runtime.
+NVFP4 is served through vLLM or SGLang. That is why no NVFP4 repo appears in
+the model catalog: an entry the loader cannot open is worse than no entry,
+because it fails at download time on the operator's machine rather than at
+review time in this repo.
+
+An operator on Blackwell hardware who wants NVFP4 runs vLLM or SGLang beside
+the node and registers it as an external provider endpoint, the same way any
+other non-llama.cpp backend is integrated. The catalog stays GGUF-only.
 
 **Build recipes.** Pass the backend feature to `tenzro-node` at build time:
 
@@ -319,19 +336,27 @@ Catalog entries that declare a `moe: Some(MoeShape { ... })` topology:
 
 | Family | Catalog id | num_experts | top-k | shared |
 |---|---|---:|---:|---:|
-| Qwen 3 | `qwen3-30b-a3b` | 128 | 8 | 0 |
-| Qwen 3 Coder | `qwen3-coder-30b-a3b` | 128 | 8 | 0 |
-| Qwen 3.5 | `qwen3.5-35b-a3b`, `qwen3.5-122b-a10b`, `qwen3.5-397b-a17b` | 128 | 8 | 0 |
-| Qwen 3.5 MTP | every Qwen 3.5 MoE size has a paired `-mtp` entry | 128 | 8 | 0 |
-| Qwen 3.6 | `qwen3.6-35b-a3b`, `qwen3.6-35b-a3b-mtp` | 128 | 8 | 0 |
+| Qwen 3 | `qwen3-30b-a3b`, `qwen3-coder-30b-a3b` | 128 | 8 | 0 |
+| Qwen 3.5 | `qwen3.5-35b-a3b`, `qwen3.5-122b-a10b` | 256 | 8 | 1 |
+| Qwen 3.5 | `qwen3.5-397b-a17b` | 512 | 10 | 1 |
+| Qwen 3.6 | `qwen3.6-35b-a3b`, `qwen3.6-35b-a3b-mtp` | 256 | 8 | 1 |
+| Qwen3-Next | `qwen3-coder-next` | 512 | 10 | 1 |
+| Qwen-AgentWorld | `qwen-agentworld-35b-a3b` | 256 | 8 | 1 |
 | Gemma 4 | `gemma4-26b-a4b`, `gemma4-26b-a4b-qat`, `gemma4-26b-a4b-mtp-draft` | 128 | 4 | 1 |
 | DiffusionGemma | `diffusiongemma-26b-a4b` | 128 | 4 | 1 |
 | Kimi | `kimi-k2-instruct`, `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code` | 384 | 8 | 1 |
 | Kimi K3 | `kimi-k3` | 896 | 16 | 2 |
-| MiniMax | `minimax-m1-40b`, `minimax-m3` | 32 | 2 | 0 |
-| DeepSeek | `deepseek-v3-0324`, `deepseek-v4-flash`, `deepseek-v4-pro` | 256 / 256 / 512 | 8 | 1 |
-| GLM | `glm-5`, `glm-5.1`, `glm-5.2` | 160 | 8 | 1 |
-| Nemotron Nano | `nemotron-nano-30b-a3b` | 16 | 4 | 0 |
+| Ornith | `ornith-1.0-35b` | 256 | 8 | 1 |
+| Ornith | `ornith-1.0-397b` | 512 | 10 | 1 |
+| Laguna | `laguna-s-2.1` | 256 | 10 | 1 |
+| MiniMax | `minimax-m2.7` | 256 | 8 | 0 |
+| MiniMax | `minimax-m3` | 128 | 4 | 1 |
+| DeepSeek | `deepseek-v3-0324` | 256 | 8 | 1 |
+| DeepSeek | `deepseek-v4-flash` | 256 | 6 | 1 |
+| DeepSeek | `deepseek-v4-pro` | 384 | 6 | 1 |
+| GLM | `glm-5`, `glm-5.1`, `glm-5.2` | 256 | 8 | 1 |
+| Nemotron Nano | `nemotron-nano-30b-a3b`, `nemotron-3-nano-omni-30b-a3b` | 128 | 6 | 1 |
+| Inkling | `inkling`, `inkling-small` | 256 | 6 | 2 |
 | OpenAI | `gpt-oss-120b` | 128 | 4 | 0 |
 
 Per-expert extraction (`tenzro_moePrepareExperts`) additionally needs a safetensors checkpoint source mapped in `moe_safetensors_repo`. Currently mapped: `qwen3-30b-a3b`, `deepseek-v3-0324`, `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k2-instruct`, `kimi-k2.6`, and `kimi-k3`. The mapping is independent of `hf_repo`, so an entry can serve both paths: `kimi-k3` extracts experts from `moonshotai/Kimi-K3` while its whole-model artifact is the `UD-IQ1_S` quant in `unsloth/Kimi-K3-GGUF`. At 594GB for the smallest quant, that whole-model path is a pipeline cluster rather than a single host.
@@ -349,7 +374,7 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 
 | Modality | Catalog families | RPC | RPC alias |
 |---|---|---|---|
-| Forecast | TimesFM 2.5 200M | `tenzro_forecast` | |
+| Forecast | TimesFM 2.5 200M, TiRex 35M, Chronos-2 Small | `tenzro_forecast` | |
 | Vision embedding | CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16, DINOv2 | `tenzro_imageEmbed` | `tenzro_visionEmbed` |
 | Text embedding | Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, Snowflake Arctic Embed L v2.0, ModernBERT-embed base/large (8192-context RoPE encoder) | `tenzro_textEmbed` | `tenzro_embed` |
 | Segmentation (point/box) | SAM 2 base/large, EdgeSAM, MobileSAM | `tenzro_segment` | |
@@ -357,6 +382,10 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 | Detection | RF-DETR n/s/m/b/l/2xl (90-class COCO), D-FINE n/s/m/l/x (80-class) | `tenzro_detect` | |
 | Audio ASR | Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash | `tenzro_transcribe` | |
 | Video | Vision-fallback encoder over uniformly-sampled frames | `tenzro_videoEmbed` | |
+
+Forecast entries carry a `family` that selects the tensor adapter. Most are single-input graphs returning `[B, T]` or `[B, T, Q]` and use the generic path. **Chronos-2 is not**: it takes five tensors (`context`, `group_ids`, a **float** `attention_mask`, and a covariate pair) and returns `quantile_preds` shaped `[B, 13, 672]` — quantiles *before* time. Read through the generic path, a quantile index becomes a timestep and the result is a plausible-looking series of the wrong numbers, so the family gets its own adapter and the loader verifies the graph's inputs before accepting it.
+
+Two Chronos-2 details are easy to get wrong and are checked rather than assumed: the attention mask is float where every other transformer export uses int64, and the covariate tensors cannot be sent empty even with no covariates — the graph reshapes them to `[B, 42, 16]`, so a zero-length tensor fails *inside* the model. They are passed full-width with an all-zero mask. Horizon is fixed at 672 (42 patches × 16) by the export; shorter requests truncate that single pass.
 
 Each modality has a dedicated runtime in `tenzro-model` with model-specific preprocessing (mel-spectrogram for ASR, ImageNet / CLIP / SigLIP normalization for vision, BPE tokenization for text-embed). The runtime dispatch hides the per-family ABI differences (SAM 1 vs SAM 2 decoder, RF-DETR vs D-FINE post-processing, Parakeet RNN-T vs Canary NeMo Conformer-AED).
 
@@ -1057,7 +1086,19 @@ Rows with an image-conditioned kind resolve to a sibling pipeline class where th
 
 `qwen-image-flash` is `qwen-image` distilled onto a four-step trajectory with guidance disabled — the same 20.4B transformer and the same VRAM floor, one twelfth of the pixel-steps, so it quotes at one twelfth of the price. It is the one row not under a permissive license: the NVIDIA Open Model License puts it in the `CommercialCustom` tier, and a worker naming it must enroll on a node started with `--accept-license nvidia-open-model`. Every other row is admitted by default. The check runs at `tenzro_mediaGen_enrollWorker` rather than at load, because the node never loads media-gen weights — the Python worker does — so enrollment is the only point at which the protocol sees what an operator is about to serve.
 
-### 8.4 Split-expert rendering
+### 8.4 Precision
+
+The worker loads a transformer at one of six weight formats, coarsest first: `nf4`, `int4`, `int8`, `float16`, `bfloat16`, `float32`. The three floating-point tiers are just `torch_dtype`. The three sub-8-bit tiers quantize through bitsandbytes, with the floating-point `--dtype` remaining the *compute* type — 4-bit weights are dequantized into it per matmul.
+
+Verified on this project's target hardware rather than assumed: bitsandbytes 0.50.0 executes both `Linear4bit` and `Linear8bitLt` on a GB10 at compute capability 12.1. Where the kernels are unavailable the load raises rather than falling back, because a caller who asked for 4-bit to make a model fit needs to know it did not.
+
+Quantization is scoped to the **transformer**, not the whole pipeline. The text encoder and VAE are a small share of the weights and are where quality degrades most visibly — a quantized VAE shows up as colour banding in every frame. The transformer is both the bulk of the memory and the part that tolerates it. `nf4` is the default 4-bit type over plain `fp4`, with double quantization on: transformer weights are roughly normally distributed, which is what nf4 is for, and quantizing the quantization constants buys a further ~0.4 bits per weight for no measurable quality cost.
+
+Precision is a **worker runtime choice, not a catalog property**. Unlike the GGUF language tiers — where each quantization is a distinct artifact with its own download — this is one set of safetensors quantized at load time, so `MediaGenModelEntry` carries no precision field and a worker can serve the same catalog row at different precisions on different hardware.
+
+Two consequences a caller has to know about. A bitsandbytes-quantized pipeline is placed on its device by the loader and **cannot be moved afterwards** — `LoadedPipeline.is_quantized` exists so callers can ask before they try. And precision is part of the pipeline cache key: the same model at `nf4` and at `bfloat16` are different objects with different VRAM costs and different outputs, so keying on the model alone would hand a caller whichever precision happened to load first.
+
+### 8.5 Split-expert rendering
 
 Two distinct model shapes are called mixture-of-experts in the generative-media literature. Only one of them is a distribution primitive.
 
@@ -1079,7 +1120,7 @@ Timesteps descend through the schedule, so that set is always a prefix and one i
 
 **Assignment.** `MediaGenWorkerCapability` carries `supported_models` (models the worker serves whole) and `expert_holdings` (individual halves, for models it cannot). A worker with the VRAM for both halves lists the model in `supported_models`, and claims each half separately anyway — the protocol makes no exception for co-location, which keeps the signed step counts and the payment split identical whether the two halves run on one machine or two.
 
-### 8.5 Pricing and the payment split
+### 8.6 Pricing and the payment split
 
 The work unit is the pixel-step: `width × height × steps × frames`, with frames defaulting to 1 for image kinds. A quote is `base_fee + per_pixel_step × pixel_steps`, with `DEFAULT_BASE_FEE = 1 × 10¹⁵` attoTNZO and `DEFAULT_PER_PIXEL_STEP = 1 × 10⁹` attoTNZO. A job whose ceiling falls below the quote is rejected at admission rather than claimed and abandoned.
 
@@ -1096,7 +1137,7 @@ The money moves when the receipt is accepted, not before: `tenzro_mediaGen_submi
 
 The full debit is checked before any of it moves, so a requester who cannot cover the job does not pay one expert and strand the other. A transfer that fails after that check leaves the job completed and short-paid rather than unwinding what already moved: the render happened and the receipt is valid, so the shortfall is the requester's to make good. Every leg that could not be paid is written as an unpaid marker for retry and named in the JSON-RPC error (`-32023`). The response carries a `settlement` block — `price_paid`, `commission_wei`, and one payout per assignment — which the CLI prints and the Python worker logs against its own DID.
 
-### 8.6 Commitments
+### 8.7 Commitments
 
 Three SHA-256 preimages under three distinct domain tags:
 
@@ -1110,13 +1151,13 @@ Distinct tags keep a handoff signature from being replayed as a receipt signatur
 
 The job id is the digest of its own contents, so a spec carrying someone else's id still hashes to what it actually says. `tenzro_mediaGen_getReceipt` returns the signature alongside the receipt; the Python and Rust implementations recompute the same preimages, and `integrations/media_gen/tests/` pins the field order against the same fixture values the Rust suite uses.
 
-### 8.7 Payload store
+### 8.8 Payload store
 
 Three payload kinds share one content-addressed store: the rendered output, the intermediate latent on a split job, and the requester's conditioning image. All three are addressed by `tenzro://blob/`, fetched over the node's iroh endpoint, and verified on read.
 
 `Hash` is SHA-256 — the canonical Tenzro hash, and what the commitments bind. iroh-blobs indexes by BLAKE3. `tenzro_mediaGen_publishOutput` therefore returns both: `output_hash` for the commitment and `locator` for the fetch. A worker that publishes a latent records the SHA-256 in the handoff it signs; its partner fetches by locator and verifies the SHA-256 before resuming, so iroh-blobs' own BLAKE3 verification and the protocol's hash check are independent.
 
-### 8.8 Lifecycle
+### 8.9 Lifecycle
 
 ```
 postJob → claimJob → markRunning → render
@@ -1128,7 +1169,7 @@ postJob → claimJob → markRunning → render
 
 Job status is `pending` | `claimed` | `running` | `completed` | `failed` | `cancelled`. Expert role is `high_noise` | `low_noise`.
 
-### 8.9 Surfaces
+### 8.10 Surfaces
 
 Eighteen JSON-RPC methods under `tenzro_mediaGen_`:
 

@@ -5,9 +5,9 @@
 //! (1-indexed) allocated by the registry at `register*()` time —
 //! server-allocated, never derivable client-side.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// ERC-8004 Trustless Agents Registry operations
 #[derive(Debug, Subcommand)]
@@ -105,7 +105,10 @@ impl EncodeRegisterCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -135,7 +138,10 @@ impl EncodeRegisterWithUriCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -164,9 +170,9 @@ impl EncodeRegisterWithMetadataCmd {
             .entries
             .iter()
             .map(|kv| {
-                let (key, value) = kv.split_once('=').ok_or_else(|| {
-                    anyhow::anyhow!("--entry must be KEY=HEX_VALUE, got: {}", kv)
-                })?;
+                let (key, value) = kv
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("--entry must be KEY=HEX_VALUE, got: {}", kv))?;
                 Ok::<_, anyhow::Error>(serde_json::json!({
                     "key": key,
                     "value": value,
@@ -184,7 +190,10 @@ impl EncodeRegisterWithMetadataCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -214,7 +223,10 @@ impl EncodeGetAgentCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -244,11 +256,17 @@ impl DecodeGetAgentCmd {
             .await?;
         output::print_field(
             "Agent Address",
-            result.get("agent_address").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("agent_address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         output::print_field(
             "Metadata URI",
-            result.get("metadata_uri").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("metadata_uri")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -288,7 +306,10 @@ impl EncodeFeedbackCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -333,7 +354,10 @@ impl EncodeValidationRequestCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -382,7 +406,10 @@ impl EncodeValidationResponseCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -422,7 +449,10 @@ impl EncodeSetAgentUriCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -466,7 +496,10 @@ impl EncodeSetAgentWalletCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -506,7 +539,10 @@ impl EncodeSetMetadataCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -546,7 +582,10 @@ impl EncodeGetMetadataCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -576,7 +615,10 @@ impl DecodeGetMetadataCmd {
             .await?;
         output::print_field(
             "Metadata Value (hex)",
-            result.get("metadata_value").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("metadata_value")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -606,7 +648,10 @@ impl EncodeGetAgentUriCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -636,7 +681,10 @@ impl EncodeGetAgentWalletCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -676,7 +724,10 @@ impl EncodeRevokeFeedbackCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -716,7 +767,10 @@ impl EncodeAppendResponseCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -752,7 +806,10 @@ impl EncodeIsFeedbackRevokedCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -788,7 +845,10 @@ impl EncodeGetFeedbackResponsesCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -824,7 +884,10 @@ impl EncodeGetFeedbackCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -854,7 +917,10 @@ impl EncodeGetFeedbackCountCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }
@@ -884,7 +950,10 @@ impl EncodeGetValidationCmd {
             .await?;
         output::print_field(
             "Calldata",
-            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+            result
+                .get("calldata")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         Ok(())
     }

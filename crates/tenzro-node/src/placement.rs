@@ -296,7 +296,8 @@ impl PlacementScheduler {
     }
 
     fn drop_lease_row(&self, app_id: &str, node_id: &str) -> Result<(), PlacementError> {
-        self.leases.remove(&(app_id.to_string(), node_id.to_string()));
+        self.leases
+            .remove(&(app_id.to_string(), node_id.to_string()));
         if let Some(storage) = &self.storage {
             storage
                 .delete(CF_METADATA, &lease_key(app_id, node_id))
@@ -317,7 +318,9 @@ impl PlacementScheduler {
     ) -> Result<Vec<String>, PlacementError> {
         let chosen = select(req, candidates);
         if chosen.is_empty() {
-            return Err(PlacementError::NoCapableNode(req.class.as_str().to_string()));
+            return Err(PlacementError::NoCapableNode(
+                req.class.as_str().to_string(),
+            ));
         }
         let want = req.replica_count();
         if chosen.len() < want {
@@ -613,8 +616,14 @@ impl PlacementScheduler {
                 .filter(|c| c.endpoint_id != dead_node)
                 .cloned()
                 .collect();
-            match self.handle_liveness_loss(&app_id, &dead_node, &req, &fresh, now_ms, DEFAULT_LEASE_MS)
-            {
+            match self.handle_liveness_loss(
+                &app_id,
+                &dead_node,
+                &req,
+                &fresh,
+                now_ms,
+                DEFAULT_LEASE_MS,
+            ) {
                 Ok(serving) => {
                     evicted += 1;
                     info!(
@@ -736,7 +745,10 @@ mod tests {
         let r = req(RuntimeClass::Function, 3);
         let chosen = select(&r, &cands);
         assert_eq!(
-            chosen.iter().map(|c| c.endpoint_id.as_str()).collect::<Vec<_>>(),
+            chosen
+                .iter()
+                .map(|c| c.endpoint_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["b", "c", "a"]
         );
     }

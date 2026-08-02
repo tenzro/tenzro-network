@@ -1,8 +1,8 @@
 //! JSON-RPC client for communicating with Tenzro nodes
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use anyhow::Result;
 
 /// RPC client for Tenzro node communication
 pub struct RpcClient {
@@ -158,8 +158,14 @@ impl RpcClient {
     /// Forwards `X-Tenzro-Api-Key: <key>` when `TENZRO_API_KEY` is set —
     /// required for scoped RPCs (currently `tenzro_*Canton*`) that the
     /// node mediates on the caller's behalf.
-    pub async fn call<T: serde::de::DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
-        let id = self.request_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    pub async fn call<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T> {
+        let id = self
+            .request_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Canton network selection travels in the params, not a header. A
         // network already named by the caller wins over the client-wide one.
         let params = match (&self.canton_network, params) {
@@ -180,13 +186,15 @@ impl RpcClient {
 
         let mut req = self.http.post(&self.rpc_url).json(&request);
         if let Ok(bearer) = std::env::var("TENZRO_BEARER_JWT")
-            && !bearer.is_empty() {
-                req = req.header("Authorization", format!("DPoP {}", bearer));
-            }
+            && !bearer.is_empty()
+        {
+            req = req.header("Authorization", format!("DPoP {}", bearer));
+        }
         if let Ok(dpop) = std::env::var("TENZRO_DPOP_PROOF")
-            && !dpop.is_empty() {
-                req = req.header("DPoP", dpop);
-            }
+            && !dpop.is_empty()
+        {
+            req = req.header("DPoP", dpop);
+        }
         if let Some(ref api_key) = self.api_key_override {
             req = req.header("X-Tenzro-Api-Key", api_key);
         } else if let Ok(api_key) = std::env::var("TENZRO_API_KEY")
@@ -213,7 +221,8 @@ impl RpcClient {
             anyhow::bail!("RPC error [{}]: {}", err.code, err.message);
         }
 
-        body.result.ok_or_else(|| anyhow::anyhow!("Empty RPC response"))
+        body.result
+            .ok_or_else(|| anyhow::anyhow!("Empty RPC response"))
     }
 
     /// Make a GET request to the Web API
@@ -225,7 +234,11 @@ impl RpcClient {
     }
 
     /// Make a POST request to the Web API
-    pub async fn api_post<T: serde::de::DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T> {
+    pub async fn api_post<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> Result<T> {
         let url = format!("{}{}", self.api_url, path);
         let response = self.http.post(&url).json(body).send().await?;
         let result: T = response.json().await?;

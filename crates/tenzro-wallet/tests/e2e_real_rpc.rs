@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tenzro_types::primitives::{Address, Signature};
 use tenzro_types::AssetId;
+use tenzro_types::primitives::{Address, Signature};
 use tenzro_wallet::balance::BalanceTracker;
 use tenzro_wallet::builder::TransactionBuilder;
 use tenzro_wallet::history::TransactionHistory;
@@ -238,8 +238,7 @@ impl Drop for TenzroNode {
 async fn e2e_block_number_via_rpc() {
     let node = TenzroNode::spawn().await.expect("node spawn");
 
-    let provider = TenzroRpcChainProvider::new(node.rpc_url())
-        .expect("rpc provider");
+    let provider = TenzroRpcChainProvider::new(node.rpc_url()).expect("rpc provider");
     let height = provider.get_block_height().await.expect("block height");
     // A freshly-genesis'd node may report 0; any height in range is fine.
     assert!(height < 1_000_000, "implausible block height {}", height);
@@ -249,8 +248,7 @@ async fn e2e_block_number_via_rpc() {
 async fn e2e_unfunded_address_balance_and_nonce() {
     let node = TenzroNode::spawn().await.expect("node spawn");
 
-    let provider = TenzroRpcChainProvider::new(node.rpc_url())
-        .expect("rpc provider");
+    let provider = TenzroRpcChainProvider::new(node.rpc_url()).expect("rpc provider");
 
     // An arbitrary 32-byte address that is unlikely to ever be funded.
     let addr = Address::new([0xab; 32]);
@@ -262,10 +260,7 @@ async fn e2e_unfunded_address_balance_and_nonce() {
         .expect("balance");
     assert_eq!(bal, 0, "unfunded address should have zero balance");
 
-    let nonce = provider
-        .get_on_chain_nonce(&addr)
-        .await
-        .expect("nonce");
+    let nonce = provider.get_on_chain_nonce(&addr).await.expect("nonce");
     assert_eq!(nonce, 0, "unfunded address should have zero nonce");
 }
 
@@ -273,9 +268,8 @@ async fn e2e_unfunded_address_balance_and_nonce() {
 async fn e2e_wallet_state_sync_round_trip() {
     let node = TenzroNode::spawn().await.expect("node spawn");
 
-    let provider: Arc<dyn ChainStateProvider> = Arc::new(
-        TenzroRpcChainProvider::new(node.rpc_url()).expect("rpc provider"),
-    );
+    let provider: Arc<dyn ChainStateProvider> =
+        Arc::new(TenzroRpcChainProvider::new(node.rpc_url()).expect("rpc provider"));
 
     let balances = Arc::new(BalanceTracker::new());
     let nonces = Arc::new(NonceManager::new());
@@ -363,8 +357,7 @@ async fn e2e_signed_transaction_wire_format() {
     );
 
     // Submit via the structured trait method.
-    let provider = TenzroRpcChainProvider::new(node.rpc_url())
-        .expect("rpc provider");
+    let provider = TenzroRpcChainProvider::new(node.rpc_url()).expect("rpc provider");
     let result = ChainStateProvider::submit_signed_transaction(
         &provider,
         &tx,
@@ -418,4 +411,3 @@ async fn e2e_signed_transaction_wire_format() {
         }
     }
 }
-

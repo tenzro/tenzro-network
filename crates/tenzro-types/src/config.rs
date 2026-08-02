@@ -96,7 +96,7 @@ pub struct ConsensusConfig {
 impl Default for ConsensusConfig {
     fn default() -> Self {
         Self {
-            block_time_ms: 2000, // 2 seconds
+            block_time_ms: 2000,         // 2 seconds
             max_block_size: 1024 * 1024, // 1 MB
             max_transactions_per_block: 1000,
             min_validator_stake: 10_000 * 10u64.pow(18), // 10,000 TNZO
@@ -129,7 +129,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             node_name: "tenzro-node".to_string(),
-            data_dir: PathBuf::from("./data"),
+            data_dir: crate::paths::default_data_dir(),
             network: NetworkConfig::default(),
             p2p: P2pConfig::default(),
             rpc: RpcConfig::default(),
@@ -218,7 +218,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             backend: StorageBackend::RocksDb,
-            db_path: PathBuf::from("./data/db"),
+            db_path: crate::paths::default_data_dir().join("db"),
             cache_size_mb: 512,
             enable_pruning: false,
             pruning_interval: 1000,

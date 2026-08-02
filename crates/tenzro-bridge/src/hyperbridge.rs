@@ -297,7 +297,9 @@ impl HyperbridgeAdapter {
             timeout_secs,
             asset_transfer,
         };
-        self.sent.write().insert(id, (req, PostRequestStatus::Pending));
+        self.sent
+            .write()
+            .insert(id, (req, PostRequestStatus::Pending));
         Ok(id)
     }
 

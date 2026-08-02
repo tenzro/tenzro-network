@@ -3,9 +3,9 @@
 //! Register compliance rules, check transfer compliance, manage frozen addresses,
 //! recover tokens, and administer identity claims and trusted issuers.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// ERC-3643 compliance management commands
 #[derive(Debug, Subcommand)]
@@ -110,7 +110,13 @@ impl ComplianceRegisterCmd {
         spinner.finish_and_clear();
 
         output::print_success("Compliance rules registered successfully!");
-        output::print_field("Token", result.get("token_id").and_then(|v| v.as_str()).unwrap_or(&self.token));
+        output::print_field(
+            "Token",
+            result
+                .get("token_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.token),
+        );
 
         let mut rules = Vec::new();
         if self.require_kyc {
@@ -168,16 +174,24 @@ impl ComplianceCheckCmd {
         let spinner = output::create_spinner("Checking compliance...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_checkCompliance", serde_json::json!({
-            "token_id": self.token,
-            "from": self.from,
-            "to": self.to,
-            "amount": self.amount,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_checkCompliance",
+                serde_json::json!({
+                    "token_id": self.token,
+                    "from": self.from,
+                    "to": self.to,
+                    "amount": self.amount,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        let compliant = result.get("compliant").and_then(|v| v.as_bool()).unwrap_or(false);
+        let compliant = result
+            .get("compliant")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if compliant {
             output::print_success("Transfer is COMPLIANT");
         } else {
@@ -187,14 +201,15 @@ impl ComplianceCheckCmd {
         output::print_field("Compliant", if compliant { "Yes" } else { "No" });
 
         if let Some(violations) = result.get("violations").and_then(|v| v.as_array())
-            && !violations.is_empty() {
-                output::print_field("Violations", "");
-                for v in violations {
-                    if let Some(msg) = v.as_str() {
-                        output::print_field("  -", msg);
-                    }
+            && !violations.is_empty()
+        {
+            output::print_field("Violations", "");
+            for v in violations {
+                if let Some(msg) = v.as_str() {
+                    output::print_field("  -", msg);
                 }
             }
+        }
 
         if let Some(rules) = result.get("checked_rules").and_then(|v| v.as_array()) {
             let rule_names: Vec<String> = rules
@@ -235,18 +250,41 @@ impl ComplianceFreezeCmd {
         let spinner = output::create_spinner("Freezing address...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_freezeAddress", serde_json::json!({
-            "token_id": self.token,
-            "address": self.address,
-            "reason": self.reason,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_freezeAddress",
+                serde_json::json!({
+                    "token_id": self.token,
+                    "address": self.address,
+                    "reason": self.reason,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Address frozen successfully!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(&self.address));
-        output::print_field("Reason", result.get("reason").and_then(|v| v.as_str()).unwrap_or(&self.reason));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or("frozen"));
+        output::print_field(
+            "Address",
+            result
+                .get("address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.address),
+        );
+        output::print_field(
+            "Reason",
+            result
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.reason),
+        );
+        output::print_field(
+            "Status",
+            result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("frozen"),
+        );
 
         Ok(())
     }
@@ -274,16 +312,33 @@ impl ComplianceUnfreezeCmd {
         let spinner = output::create_spinner("Unfreezing address...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_unfreezeAddress", serde_json::json!({
-            "token_id": self.token,
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_unfreezeAddress",
+                serde_json::json!({
+                    "token_id": self.token,
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Address unfrozen successfully!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(&self.address));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or("unfrozen"));
+        output::print_field(
+            "Address",
+            result
+                .get("address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.address),
+        );
+        output::print_field(
+            "Status",
+            result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unfrozen"),
+        );
 
         Ok(())
     }
@@ -320,22 +375,57 @@ impl ComplianceRecoverCmd {
         let spinner = output::create_spinner("Recovering tokens...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_recoverTokens", serde_json::json!({
-            "token_id": self.token,
-            "from": self.from,
-            "to": self.to,
-            "amount": self.amount,
-            "reason": self.reason,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_recoverTokens",
+                serde_json::json!({
+                    "token_id": self.token,
+                    "from": self.from,
+                    "to": self.to,
+                    "amount": self.amount,
+                    "reason": self.reason,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Tokens recovered successfully!");
-        output::print_field("From", result.get("from").and_then(|v| v.as_str()).unwrap_or(&self.from));
-        output::print_field("To", result.get("to").and_then(|v| v.as_str()).unwrap_or(&self.to));
-        output::print_field("Amount", result.get("amount").and_then(|v| v.as_str()).unwrap_or(&self.amount));
-        output::print_field("Reason", result.get("reason").and_then(|v| v.as_str()).unwrap_or(&self.reason));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or("recovered"));
+        output::print_field(
+            "From",
+            result
+                .get("from")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.from),
+        );
+        output::print_field(
+            "To",
+            result
+                .get("to")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.to),
+        );
+        output::print_field(
+            "Amount",
+            result
+                .get("amount")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.amount),
+        );
+        output::print_field(
+            "Reason",
+            result
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.reason),
+        );
+        output::print_field(
+            "Status",
+            result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("recovered"),
+        );
 
         Ok(())
     }
@@ -423,20 +513,31 @@ impl ComplianceAddClaimCmd {
         let spinner = output::create_spinner("Adding identity claim...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_addIdentityClaim", serde_json::json!({
-            "address": self.address,
-            "topic": self.topic,
-            "issuer": self.issuer,
-            "data": self.data,
-            "valid_from": self.valid_from,
-            "valid_to": self.valid_to,
-            "envelope": envelope,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_addIdentityClaim",
+                serde_json::json!({
+                    "address": self.address,
+                    "topic": self.topic,
+                    "issuer": self.issuer,
+                    "data": self.data,
+                    "valid_from": self.valid_from,
+                    "valid_to": self.valid_to,
+                    "envelope": envelope,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Identity claim added successfully!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(&self.address));
+        output::print_field(
+            "Address",
+            result
+                .get("address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.address),
+        );
 
         let topic_label = match self.topic {
             1 => "KYC (1)",
@@ -455,9 +556,27 @@ impl ComplianceAddClaimCmd {
             output::print_field("Topic", topic_label);
         }
 
-        output::print_field("Issuer", result.get("issuer").and_then(|v| v.as_str()).unwrap_or(&self.issuer));
-        output::print_field("Valid From", result.get("valid_from").and_then(|v| v.as_str()).unwrap_or(&self.valid_from));
-        output::print_field("Valid To", result.get("valid_to").and_then(|v| v.as_str()).unwrap_or(&self.valid_to));
+        output::print_field(
+            "Issuer",
+            result
+                .get("issuer")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.issuer),
+        );
+        output::print_field(
+            "Valid From",
+            result
+                .get("valid_from")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.valid_from),
+        );
+        output::print_field(
+            "Valid To",
+            result
+                .get("valid_to")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.valid_to),
+        );
 
         Ok(())
     }
@@ -494,17 +613,34 @@ impl ComplianceAddIssuerCmd {
             .filter_map(|s| s.trim().parse::<u64>().ok())
             .collect();
 
-        let result: serde_json::Value = rpc.call("tenzro_addTrustedIssuer", serde_json::json!({
-            "issuer_did": self.issuer_did,
-            "name": self.name,
-            "topics": topics,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_addTrustedIssuer",
+                serde_json::json!({
+                    "issuer_did": self.issuer_did,
+                    "name": self.name,
+                    "topics": topics,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Trusted issuer registered successfully!");
-        output::print_field("Issuer DID", result.get("issuer_did").and_then(|v| v.as_str()).unwrap_or(&self.issuer_did));
-        output::print_field("Name", result.get("name").and_then(|v| v.as_str()).unwrap_or(&self.name));
+        output::print_field(
+            "Issuer DID",
+            result
+                .get("issuer_did")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.issuer_did),
+        );
+        output::print_field(
+            "Name",
+            result
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.name),
+        );
 
         let topic_strs: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
         output::print_field("Topics", &topic_strs.join(", "));
@@ -547,7 +683,10 @@ impl ComplianceListIssuersCmd {
         for issuer in &issuers {
             output::print_field(
                 "Issuer DID",
-                issuer.get("issuer_did").and_then(|v| v.as_str()).unwrap_or(""),
+                issuer
+                    .get("issuer_did")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
             output::print_field(
                 "Name",
@@ -556,16 +695,33 @@ impl ComplianceListIssuersCmd {
             let topics: Vec<String> = issuer
                 .get("topics")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|t| t.as_u64()).map(|t| t.to_string()).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_u64())
+                        .map(|t| t.to_string())
+                        .collect()
+                })
                 .unwrap_or_default();
             let topics_str = topics.join(", ");
             output::print_field(
                 "Topics",
-                if topics.is_empty() { "unrestricted" } else { &topics_str },
+                if topics.is_empty() {
+                    "unrestricted"
+                } else {
+                    &topics_str
+                },
             );
             output::print_field(
                 "Active",
-                if issuer.get("active").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" },
+                if issuer
+                    .get("active")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    "yes"
+                } else {
+                    "no"
+                },
             );
             println!();
         }
@@ -597,17 +753,40 @@ impl ComplianceWhitelistCmd {
         let spinner = output::create_spinner("Adding to whitelist...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_whitelistAddress", serde_json::json!({
-            "token_id": self.token,
-            "address": self.address,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_whitelistAddress",
+                serde_json::json!({
+                    "token_id": self.token,
+                    "address": self.address,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Address whitelisted successfully!");
-        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(&self.address));
-        output::print_field("Token", result.get("token_id").and_then(|v| v.as_str()).unwrap_or(&self.token));
-        output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or("whitelisted"));
+        output::print_field(
+            "Address",
+            result
+                .get("address")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.address),
+        );
+        output::print_field(
+            "Token",
+            result
+                .get("token_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.token),
+        );
+        output::print_field(
+            "Status",
+            result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("whitelisted"),
+        );
 
         Ok(())
     }
@@ -638,16 +817,27 @@ impl ComplianceSetCountryCmd {
         let spinner = output::create_spinner("Setting country restriction...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_setCountryRestriction", serde_json::json!({
-            "token_id": self.token,
-            "country_code": self.country,
-            "allowed": self.allowed,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_setCountryRestriction",
+                serde_json::json!({
+                    "token_id": self.token,
+                    "country_code": self.country,
+                    "allowed": self.allowed,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Country restriction updated!");
-        output::print_field("Token", result.get("token_id").and_then(|v| v.as_str()).unwrap_or(&self.token));
+        output::print_field(
+            "Token",
+            result
+                .get("token_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.token),
+        );
         output::print_field("Country Code", &self.country.to_string());
         output::print_field("Status", if self.allowed { "Allowed" } else { "Blocked" });
 

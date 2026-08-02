@@ -26,9 +26,9 @@ use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_node::{NodeConfig, TenzroNode};
+use tenzro_types::Signature;
 use tenzro_types::primitives::{Address, ChainId, Nonce};
 use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
-use tenzro_types::Signature;
 
 // ---------------------------------------------------------------------------
 // 1. Hybrid signed-tx round-trip
@@ -222,8 +222,8 @@ fn legacy_classical_only_tx_rejected() {
 async fn restart_survives_pq_genesis() {
     use tenzro_node::config::GenesisConfig;
     use tenzro_node::genesis::PQ_HYBRID_PROTOCOL_VERSION;
-    use tenzro_storage::traits::BlockStore;
     use tenzro_storage::block_store::BlockStoreImpl;
+    use tenzro_storage::traits::BlockStore;
     use tenzro_types::primitives::BlockHeight;
 
     let tmp = tempfile::tempdir().expect("create temp dir");
@@ -273,10 +273,10 @@ async fn restart_survives_pq_genesis() {
 async fn revocation_broadcast_signature_required() {
     use chrono::Utc;
     use tenzro_crypto::composite::{HybridSigner, InMemoryHybridSigner};
+    use tenzro_identity::IdentityStatus;
     use tenzro_identity::error::IdentityError;
     use tenzro_identity::identity::RevocationEntry;
     use tenzro_identity::registry::{IdentityRegistry, SignedRevocationEntry};
-    use tenzro_identity::IdentityStatus;
     use tenzro_types::identity::KycTier;
 
     // Seed a local registry with an identity that the remote peer claims to
@@ -303,8 +303,8 @@ async fn revocation_broadcast_signature_required() {
         reason: "remote-revocation".to_string(),
         revoked_by: "did:tenzro:human:peer".to_string(),
     };
-    let signed = SignedRevocationEntry::sign(entry.clone(), signer.as_ref())
-        .expect("sign revocation");
+    let signed =
+        SignedRevocationEntry::sign(entry.clone(), signer.as_ref()).expect("sign revocation");
     assert!(
         !signed.signature.pq.is_empty(),
         "broadcast must carry both classical and PQ legs"
@@ -334,8 +334,8 @@ async fn revocation_broadcast_signature_required() {
         reason: "remote-revocation".to_string(),
         revoked_by: "did:tenzro:human:peer".to_string(),
     };
-    let mut tampered = SignedRevocationEntry::sign(entry2, signer.as_ref())
-        .expect("sign revocation");
+    let mut tampered =
+        SignedRevocationEntry::sign(entry2, signer.as_ref()).expect("sign revocation");
     tampered.entry.reason = "FORGED".to_string();
 
     let err = registry

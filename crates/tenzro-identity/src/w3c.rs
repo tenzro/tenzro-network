@@ -41,7 +41,10 @@ pub fn identity_to_did_document(identity: &TenzroIdentity) -> DidDocument {
             id: format!("{}#{}", did_string, key_info.key_id),
             controller: did_string.clone(),
             method_type: method_type.to_string(),
-            public_key_multibase: Some(format!("z{}", bs58::encode(&key_info.public_key).into_string())),
+            public_key_multibase: Some(format!(
+                "z{}",
+                bs58::encode(&key_info.public_key).into_string()
+            )),
             public_key_jwk: None,
             purposes,
         };
@@ -87,9 +90,7 @@ pub fn identity_to_did_document(identity: &TenzroIdentity) -> DidDocument {
 ///
 /// This performs a best-effort import; not all DID Document fields map
 /// to TenzroIdentity fields.
-pub fn extract_public_keys_from_document(
-    doc: &DidDocument,
-) -> Vec<(String, String, Vec<u8>)> {
+pub fn extract_public_keys_from_document(doc: &DidDocument) -> Vec<(String, String, Vec<u8>)> {
     doc.verification_method
         .iter()
         .filter_map(|method| {
@@ -106,11 +107,7 @@ pub fn extract_public_keys_from_document(
                     .and_then(|b58| bs58::decode(b58).into_vec().ok())
             })?;
 
-            Some((
-                method.id.clone(),
-                key_type.to_string(),
-                public_key,
-            ))
+            Some((method.id.clone(), key_type.to_string(), public_key))
         })
         .collect()
 }
@@ -238,10 +235,7 @@ mod tests {
         };
 
         let doc = identity_to_did_document(&identity);
-        assert_eq!(
-            doc.controller,
-            Some("did:tenzro:human:ctrl".to_string())
-        );
+        assert_eq!(doc.controller, Some("did:tenzro:human:ctrl".to_string()));
     }
 
     #[test]
@@ -265,6 +259,9 @@ mod tests {
         let json = serde_json::to_string(&doc).unwrap();
         let parsed: DidDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, doc.id);
-        assert_eq!(parsed.verification_method.len(), doc.verification_method.len());
+        assert_eq!(
+            parsed.verification_method.len(),
+            doc.verification_method.len()
+        );
     }
 }

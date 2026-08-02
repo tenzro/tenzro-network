@@ -204,10 +204,7 @@ impl BabylonAdapter {
     }
 
     /// Look up a registered finality provider.
-    pub fn finality_provider(
-        &self,
-        validator: &Address,
-    ) -> Option<FinalityProvider> {
+    pub fn finality_provider(&self, validator: &Address) -> Option<FinalityProvider> {
         self.finality_providers
             .read()
             .get(&hex::encode(validator.as_bytes()))
@@ -252,16 +249,11 @@ impl BabylonAdapter {
     /// Submit a finality signature. Babylon's contract relays this back
     /// to BTC L1, where it acts as slash-on-fork insurance for the
     /// underlying BTC stake.
-    pub fn submit_finality_signature(
-        &self,
-        signature: FinalitySignature,
-    ) -> Result<()> {
+    pub fn submit_finality_signature(&self, signature: FinalitySignature) -> Result<()> {
         let provider = self
             .finality_provider(&signature.validator_address)
             .ok_or_else(|| {
-                BridgeError::InvalidParameter(
-                    "finality provider not registered".into(),
-                )
+                BridgeError::InvalidParameter("finality provider not registered".into())
             })?;
         if !provider.active {
             return Err(BridgeError::InvalidParameter(

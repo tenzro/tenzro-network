@@ -28,7 +28,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tenzro_crypto::keys::PublicKey;
-use tenzro_crypto::signatures::{verify, Signature, Signer};
+use tenzro_crypto::signatures::{Signature, Signer, verify};
 use tenzro_types::Address;
 
 use crate::error::{ModelError, Result};
@@ -254,8 +254,7 @@ pub fn verify_activation_commitment(
         }
     }
     let rows_total = commitment.rows.len();
-    let pass = rows_total > 0
-        && (rows_passed as f32 / rows_total as f32) >= MIN_ROW_PASS_FRACTION;
+    let pass = rows_total > 0 && (rows_passed as f32 / rows_total as f32) >= MIN_ROW_PASS_FRACTION;
     Ok(ActivationVerification {
         rows_total,
         rows_passed,
@@ -488,27 +487,31 @@ mod tests {
         .unwrap();
 
         // Tampered layer fails the signature check.
-        assert!(verify_expert_receipt(
-            &receipt,
-            "qwen3.5-397b-a17b",
-            4,
-            42,
-            &tokens,
-            &input_hash,
-            &commitment,
-        )
-        .is_err());
+        assert!(
+            verify_expert_receipt(
+                &receipt,
+                "qwen3.5-397b-a17b",
+                4,
+                42,
+                &tokens,
+                &input_hash,
+                &commitment,
+            )
+            .is_err()
+        );
 
         // Mismatched commitment fails before signature.
-        assert!(verify_expert_receipt(
-            &receipt,
-            "qwen3.5-397b-a17b",
-            3,
-            42,
-            &tokens,
-            &input_hash,
-            &[0u8; 32],
-        )
-        .is_err());
+        assert!(
+            verify_expert_receipt(
+                &receipt,
+                "qwen3.5-397b-a17b",
+                3,
+                42,
+                &tokens,
+                &input_hash,
+                &[0u8; 32],
+            )
+            .is_err()
+        );
     }
 }

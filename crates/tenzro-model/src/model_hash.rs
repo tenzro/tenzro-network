@@ -29,7 +29,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_storage::kv::{KvStore, CF_MODEL_HASHES};
+use tenzro_storage::kv::{CF_MODEL_HASHES, KvStore};
 use tenzro_types::primitives::Hash;
 use tracing::{debug, info, warn};
 
@@ -87,10 +87,7 @@ impl ModelFileRecord {
     /// Computes both hashes for a file on disk. The record's `filename` is the
     /// provided logical name, not the on-disk path, so a peer can request the
     /// file by its repository-relative name.
-    pub fn from_path(
-        filename: impl Into<String>,
-        path: &std::path::Path,
-    ) -> Result<Self> {
+    pub fn from_path(filename: impl Into<String>, path: &std::path::Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .map_err(|e| ModelError::StorageError(format!("read {}: {e}", path.display())))?;
         Ok(Self::from_bytes(filename, &bytes))
@@ -216,7 +213,8 @@ impl ModelHashRegistry {
                 let mut hydrated = 0usize;
                 for key_bytes in keys {
                     match storage.get(CF_MODEL_HASHES, &key_bytes) {
-                        Ok(Some(data)) => match serde_json::from_slice::<CanonicalModelHash>(&data) {
+                        Ok(Some(data)) => match serde_json::from_slice::<CanonicalModelHash>(&data)
+                        {
                             Ok(rec) => {
                                 records.insert(rec.model_id.clone(), rec);
                                 hydrated += 1;
@@ -227,11 +225,16 @@ impl ModelHashRegistry {
                             ),
                         },
                         Ok(None) => {}
-                        Err(e) => warn!("Failed to read CF_MODEL_HASHES key during hydration: {}", e),
+                        Err(e) => {
+                            warn!("Failed to read CF_MODEL_HASHES key during hydration: {}", e)
+                        }
                     }
                 }
                 if hydrated > 0 {
-                    info!("Hydrated {} model-hash record(s) from CF_MODEL_HASHES", hydrated);
+                    info!(
+                        "Hydrated {} model-hash record(s) from CF_MODEL_HASHES",
+                        hydrated
+                    );
                 }
             }
             Err(e) => warn!("Failed to scan CF_MODEL_HASHES during hydration: {}", e),
@@ -279,7 +282,10 @@ impl ModelHashRegistry {
 
         if let Some(existing) = self.records.get(&model_id) {
             if existing.manifest_hash == manifest_hash.0 {
-                debug!("Canonical hash for {} re-asserted identically; no-op", model_id);
+                debug!(
+                    "Canonical hash for {} re-asserted identically; no-op",
+                    model_id
+                );
                 return Ok(existing.clone());
             }
             return Err(ModelError::HashAlreadyRecorded(model_id));
@@ -296,7 +302,10 @@ impl ModelHashRegistry {
         };
         self.persist(&rec);
         self.records.insert(model_id.clone(), rec.clone());
-        info!("Recorded canonical hash for {} at epoch {}", model_id, epoch);
+        info!(
+            "Recorded canonical hash for {} at epoch {}",
+            model_id, epoch
+        );
         Ok(rec)
     }
 
@@ -324,7 +333,10 @@ impl ModelHashRegistry {
         };
         self.persist(&rec);
         self.records.insert(model_id.clone(), rec.clone());
-        info!("Governance override of canonical hash for {} at epoch {}", model_id, epoch);
+        info!(
+            "Governance override of canonical hash for {} at epoch {}",
+            model_id, epoch
+        );
         Ok(rec)
     }
 
@@ -398,7 +410,10 @@ mod tests {
             model_id: "qwen3-0.6b".to_string(),
             files: vec![file("b.gguf", 2), file("a.gguf", 1)],
         };
-        assert_eq!(compute_model_manifest_hash(&m1), compute_model_manifest_hash(&m2));
+        assert_eq!(
+            compute_model_manifest_hash(&m1),
+            compute_model_manifest_hash(&m2)
+        );
     }
 
     #[test]
@@ -418,7 +433,10 @@ mod tests {
         ));
 
         // recorder is still the first one
-        assert_eq!(reg.get("m").unwrap().recorder_did, "did:tenzro:machine:alice");
+        assert_eq!(
+            reg.get("m").unwrap().recorder_did,
+            "did:tenzro:machine:alice"
+        );
     }
 
     #[test]
@@ -437,13 +455,19 @@ mod tests {
     fn verify_matches_and_mismatches() {
         let reg = ModelHashRegistry::new();
         let m = ModelManifest::single_file("m", "m.gguf", [1; 32], [2; 32], 10);
-        assert!(matches!(reg.verify(&m), Err(ModelError::HashNotRecorded(_))));
+        assert!(matches!(
+            reg.verify(&m),
+            Err(ModelError::HashNotRecorded(_))
+        ));
 
         reg.record(&m, "did:tenzro:machine:alice", 1).unwrap();
         assert!(reg.verify(&m).is_ok());
 
         let tampered = ModelManifest::single_file("m", "m.gguf", [9; 32], [8; 32], 10);
-        assert!(matches!(reg.verify(&tampered), Err(ModelError::HashMismatch(_))));
+        assert!(matches!(
+            reg.verify(&tampered),
+            Err(ModelError::HashMismatch(_))
+        ));
     }
 
     #[test]
@@ -455,7 +479,10 @@ mod tests {
             reg.record(&m, "did:tenzro:machine:alice", 1).unwrap();
         }
         let reg2 = ModelHashRegistry::with_storage(storage.clone());
-        assert_eq!(reg2.get("m").unwrap().recorder_did, "did:tenzro:machine:alice");
+        assert_eq!(
+            reg2.get("m").unwrap().recorder_did,
+            "did:tenzro:machine:alice"
+        );
         assert_eq!(reg2.list().len(), 1);
     }
 }

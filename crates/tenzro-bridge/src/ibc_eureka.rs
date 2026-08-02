@@ -442,7 +442,10 @@ mod tests {
         let con = sample_consensus_state(100);
         adapter.create_client("07-tendermint-0", cs, con).unwrap();
         assert_eq!(
-            adapter.client_state("07-tendermint-0").unwrap().latest_height,
+            adapter
+                .client_state("07-tendermint-0")
+                .unwrap()
+                .latest_height,
             100
         );
         assert!(adapter.consensus_state("07-tendermint-0", 100).is_some());

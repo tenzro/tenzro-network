@@ -22,10 +22,10 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tracing;
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::Signature as CryptoSignature;
 use tenzro_types::primitives::{Hash, Timestamp};
+use tracing;
 
 /// Standardized cross-chain message format for Tenzro Network
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +95,12 @@ impl TenzroMessage {
     }
 
     /// Computes the SHA-256 hash of the message for integrity verification
-    fn compute_hash(source_chain_id: u64, dest_chain_id: u64, nonce: u64, payload: &[u8]) -> [u8; 32] {
+    fn compute_hash(
+        source_chain_id: u64,
+        dest_chain_id: u64,
+        nonce: u64,
+        payload: &[u8],
+    ) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(source_chain_id.to_le_bytes());
         hasher.update(dest_chain_id.to_le_bytes());
@@ -140,16 +145,20 @@ impl TenzroMessage {
 
         let signature = match key_type {
             KeyType::Ed25519 => {
-                let signer = Ed25519SignerImpl::new(keypair)
-                    .map_err(|e| BridgeError::AdapterError(format!("Ed25519 signer creation failed: {}", e)))?;
-                signer.sign(&self.message_hash)
-                    .map_err(|e| BridgeError::AdapterError(format!("Ed25519 signing failed: {}", e)))?
+                let signer = Ed25519SignerImpl::new(keypair).map_err(|e| {
+                    BridgeError::AdapterError(format!("Ed25519 signer creation failed: {}", e))
+                })?;
+                signer.sign(&self.message_hash).map_err(|e| {
+                    BridgeError::AdapterError(format!("Ed25519 signing failed: {}", e))
+                })?
             }
             KeyType::Secp256k1 => {
-                let signer = Secp256k1SignerImpl::new(keypair)
-                    .map_err(|e| BridgeError::AdapterError(format!("Secp256k1 signer creation failed: {}", e)))?;
-                signer.sign(&self.message_hash)
-                    .map_err(|e| BridgeError::AdapterError(format!("Secp256k1 signing failed: {}", e)))?
+                let signer = Secp256k1SignerImpl::new(keypair).map_err(|e| {
+                    BridgeError::AdapterError(format!("Secp256k1 signer creation failed: {}", e))
+                })?;
+                signer.sign(&self.message_hash).map_err(|e| {
+                    BridgeError::AdapterError(format!("Secp256k1 signing failed: {}", e))
+                })?
             }
         };
 
@@ -195,10 +204,14 @@ impl TenzroMessage {
 
         // Check addresses are not empty
         if self.sender.is_empty() {
-            return Err(BridgeError::AdapterError("Sender cannot be empty".to_string()));
+            return Err(BridgeError::AdapterError(
+                "Sender cannot be empty".to_string(),
+            ));
         }
         if self.receiver.is_empty() {
-            return Err(BridgeError::AdapterError("Receiver cannot be empty".to_string()));
+            return Err(BridgeError::AdapterError(
+                "Receiver cannot be empty".to_string(),
+            ));
         }
 
         // Check timestamp is reasonable
@@ -243,9 +256,12 @@ impl TenzroMessage {
                 match pubkey_bytes.len() {
                     32 => KeyType::Ed25519,
                     33 | 65 => KeyType::Secp256k1,
-                    _ => return Err(BridgeError::AdapterError(
-                        format!("Cannot determine key type from public key length: {}", pubkey_bytes.len()),
-                    )),
+                    _ => {
+                        return Err(BridgeError::AdapterError(format!(
+                            "Cannot determine key type from public key length: {}",
+                            pubkey_bytes.len()
+                        )));
+                    }
                 }
             }
         };
@@ -322,11 +338,10 @@ impl NonceTracker {
         let mut prefix = b"bridge_nonce:".to_vec();
         prefix.extend_from_slice(self.scope.as_bytes());
         prefix.push(b':');
-        let entries =
-            match storage.scan_prefix(tenzro_storage::CF_SETTLEMENTS, &prefix) {
-                Ok(e) => e,
-                Err(_) => return,
-            };
+        let entries = match storage.scan_prefix(tenzro_storage::CF_SETTLEMENTS, &prefix) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
         let prefix_len = prefix.len();
         for (key, value) in entries {
             if key.len() <= prefix_len || value.len() != 8 {
@@ -397,18 +412,14 @@ impl Default for NonceTracker {
 /// `CF_SETTLEMENTS / bridge_seen:<scope>:<key>`. Used by adapters to
 /// hydrate their in-memory seen-message maps on construction so replay
 /// protection survives node restart.
-pub fn load_seen_keys(
-    storage: &Arc<dyn tenzro_storage::KvStore>,
-    scope: &str,
-) -> Vec<String> {
+pub fn load_seen_keys(storage: &Arc<dyn tenzro_storage::KvStore>, scope: &str) -> Vec<String> {
     let mut prefix = b"bridge_seen:".to_vec();
     prefix.extend_from_slice(scope.as_bytes());
     prefix.push(b':');
-    let entries =
-        match storage.scan_prefix(tenzro_storage::CF_SETTLEMENTS, &prefix) {
-            Ok(e) => e,
-            Err(_) => return Vec::new(),
-        };
+    let entries = match storage.scan_prefix(tenzro_storage::CF_SETTLEMENTS, &prefix) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
     let prefix_len = prefix.len();
     entries
         .into_iter()
@@ -425,11 +436,7 @@ pub fn load_seen_keys(
 
 /// Write-through a single replay-protection dedup key to
 /// `CF_SETTLEMENTS / bridge_seen:<scope>:<key>`.
-pub fn persist_seen_key(
-    storage: &Arc<dyn tenzro_storage::KvStore>,
-    scope: &str,
-    key: &str,
-) {
+pub fn persist_seen_key(storage: &Arc<dyn tenzro_storage::KvStore>, scope: &str, key: &str) {
     let mut k = b"bridge_seen:".to_vec();
     k.extend_from_slice(scope.as_bytes());
     k.push(b':');
@@ -716,8 +723,8 @@ mod tests {
 
         let message = TenzroMessage::new(
             MessageType::TokenTransfer,
-            1,      // source_chain_id
-            42161,  // dest_chain_id (Arbitrum)
+            1,     // source_chain_id
+            42161, // dest_chain_id (Arbitrum)
             "sender123",
             "receiver456",
             payload,
@@ -934,8 +941,7 @@ mod tests {
             1,
         );
 
-        let envelope =
-            MessageEnvelope::new(message, "ethereum", "arbitrum", "LayerZero", 100000);
+        let envelope = MessageEnvelope::new(message, "ethereum", "arbitrum", "LayerZero", 100000);
 
         assert_eq!(envelope.source_chain, "ethereum");
         assert_eq!(envelope.dest_chain, "arbitrum");

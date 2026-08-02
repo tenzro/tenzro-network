@@ -3,9 +3,9 @@
 //! Implements RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI. Used for
 //! provably-fair NFT reveals, lotteries, and randomized trait assignment.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// VRF (Verifiable Random Function) operations
 #[derive(Debug, Subcommand)]
@@ -50,18 +50,32 @@ impl VrfProveCmd {
         let spinner = output::create_spinner("Proving...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_generateVrfProof", serde_json::json!({
-            "secret_key": self.secret_key,
-            "alpha": self.alpha,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_generateVrfProof",
+                serde_json::json!({
+                    "secret_key": self.secret_key,
+                    "alpha": self.alpha,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
         output::print_success("Proof generated!");
         output::print_field("Ciphersuite", "ECVRF-EDWARDS25519-SHA512-TAI");
-        output::print_field("Public Key", result.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Proof (80B)", result.get("proof").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Output (64B)", result.get("output").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field(
+            "Public Key",
+            result.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Proof (80B)",
+            result.get("proof").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        output::print_field(
+            "Output (64B)",
+            result.get("output").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         Ok(())
     }
@@ -92,22 +106,33 @@ impl VrfVerifyCmd {
         let spinner = output::create_spinner("Verifying...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_verifyVrfProof", serde_json::json!({
-            "pubkey": self.pubkey,
-            "proof": self.proof,
-            "alpha": self.alpha,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_verifyVrfProof",
+                serde_json::json!({
+                    "pubkey": self.pubkey,
+                    "proof": self.proof,
+                    "alpha": self.alpha,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
-        let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        let valid = result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if valid {
             output::print_success("VRF proof is valid!");
             if let Some(output_hex) = result.get("output").and_then(|v| v.as_str()) {
                 output::print_field("Output (64B)", output_hex);
             }
         } else {
-            let err = result.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+            let err = result
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
             output::print_error(&format!("VRF verification failed: {}", err));
         }
 
@@ -133,7 +158,9 @@ impl VrfKeygenCmd {
         output::print_header("New VRF Keypair");
         output::print_field("Ciphersuite", "ECVRF-EDWARDS25519-SHA512-TAI");
         output::print_field("Secret Key (32B)", &format!("0x{}", hex::encode(seed)));
-        output::print_info("Derive the public key via: tenzro vrf prove --secret-key <sk> --alpha 0x00");
+        output::print_info(
+            "Derive the public key via: tenzro vrf prove --secret-key <sk> --alpha 0x00",
+        );
         output::print_info("Treat the secret key as a signing key — keep it offline.");
 
         Ok(())

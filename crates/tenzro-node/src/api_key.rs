@@ -30,7 +30,7 @@ use parking_lot::RwLock;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tenzro_storage::{KvStore, CF_API_KEYS};
+use tenzro_storage::{CF_API_KEYS, KvStore};
 
 use crate::error::{NodeError, Result};
 
@@ -86,6 +86,22 @@ pub enum ApiKeyScope {
     /// scope — the scope authorizes *who may operate* an issuer's unit, not
     /// the reserve invariant itself.
     Issuer,
+    /// Multi-tenant object storage — the `/v1/files` surface and the
+    /// storage MCP tools. Held by a subject whose DID becomes the
+    /// `owner` on every file they upload, which is why a key without a
+    /// subject cannot carry it usefully: a file with no owner is a file
+    /// nobody can list, retrieve, or be billed for.
+    ///
+    /// Unlike `Inference`, this scope is not optional for the operator to
+    /// enforce. Inference is stateless and an operator may reasonably run
+    /// it open; storage writes to their disk on a tenant's behalf, so
+    /// `/v1/files` has no unauthenticated path at all.
+    Storage,
+    /// Multi-tenant databases — the database REST surface, the database
+    /// MCP tools, and the `tenzro_*Database*` RPCs. Same ownership model
+    /// as [`ApiKeyScope::Storage`]: the key's subject is the tenant whose
+    /// isolation boundary the database sits inside.
+    Database,
 }
 
 impl ApiKeyScope {
@@ -101,6 +117,8 @@ impl ApiKeyScope {
             ApiKeyScope::Bridge => "bridge",
             ApiKeyScope::Chainlink => "chainlink",
             ApiKeyScope::Issuer => "issuer",
+            ApiKeyScope::Storage => "storage",
+            ApiKeyScope::Database => "database",
         }
     }
 }
@@ -425,7 +443,6 @@ pub struct AgentDelegation {
     // restriction in this class". Non-empty means the RPC layer
     // refuses invocations against resources outside the set. The seven
     // resource classes mirror the operator-brokerage model.
-
     /// Tool / MCP resource_ids the key is allowed to invoke. Gated at
     /// `tenzro_useTool` / `tenzro_invokeMcpTool`. Includes stdio
     /// MCPs, remote MCPs, and API tools alike.
@@ -576,7 +593,6 @@ pub struct ApiKeyRecord {
     // against resources outside the set. The seven classes mirror the
     // operator-brokerage model: tools / skills / knowledge / workflow
     // templates / agent templates / models / per-resource TNZO caps.
-
     /// Tool / MCP resource_ids the key is allowed to invoke. Gated at
     /// `tenzro_useTool` and the `tenzro_invokeMcpTool` wrapper.
     /// Includes stdio + remote MCPs + native + API tools alike.
@@ -675,8 +691,7 @@ impl ApiKeyRecord {
     /// `can_act_as_parties` restriction, or if the requested party is
     /// in the allowed set.
     pub fn can_act_as(&self, party_fq: &str) -> bool {
-        self.can_act_as_parties.is_empty()
-            || self.can_act_as_parties.iter().any(|p| p == party_fq)
+        self.can_act_as_parties.is_empty() || self.can_act_as_parties.iter().any(|p| p == party_fq)
     }
 
     /// Returns true if this key is authorized to read for the given
@@ -691,16 +706,14 @@ impl ApiKeyRecord {
     /// Returns true if this key is authorized for the given template id.
     /// Returns true if the key has no `allowed_templates` restriction.
     pub fn allows_template(&self, template_id: &str) -> bool {
-        self.allowed_templates.is_empty()
-            || self.allowed_templates.iter().any(|t| t == template_id)
+        self.allowed_templates.is_empty() || self.allowed_templates.iter().any(|t| t == template_id)
     }
 
     /// Returns true if this key is authorized for the given command
     /// shape (DAML choice name or command kind like `Transfer`).
     /// Returns true if the key has no `allowed_commands` restriction.
     pub fn allows_command(&self, command: &str) -> bool {
-        self.allowed_commands.is_empty()
-            || self.allowed_commands.iter().any(|c| c == command)
+        self.allowed_commands.is_empty() || self.allowed_commands.iter().any(|c| c == command)
     }
 
     /// Returns true if the given command shape requires a mandate to
@@ -1270,6 +1283,30 @@ pub fn required_scope_for_method(method: &str) -> Option<ApiKeyScope> {
     ) {
         return Some(ApiKeyScope::Chainlink);
     }
+    // Managed databases. Same reasoning as `Storage` below: the key's subject
+    // is the tenant whose isolation boundary the database sits inside, and is
+    // one of the two ways a caller proves the DID a query is adjudicated
+    // against (the other being a signed envelope).
+    //
+    // `tenzro_listDatabaseEngines` is deliberately *not* here. It reports which
+    // engines this node can serve — node capability advertisement, the same
+    // class of fact as `tenzro_listModels` — and gating it would mean a caller
+    // cannot discover what a node offers without first being issued a key by
+    // its operator, which defeats network-level resource discovery. Everything
+    // that names or touches an actual database is gated.
+    if method.starts_with("tenzro_")
+        && method != "tenzro_listDatabaseEngines"
+        && (method.contains("Database") || method.contains("database"))
+    {
+        return Some(ApiKeyScope::Database);
+    }
+    // Tenant-facing object storage. Unlike the scopes above, this one is not
+    // an operator's optional monetisation gate: the key's subject *is* the
+    // file's owner, so a call without one has no owner to record and the
+    // surface has no meaningful unauthenticated mode.
+    if crate::files_rpc::is_file_method(method) {
+        return Some(ApiKeyScope::Storage);
+    }
     // Stable-asset issuance surface. The subject operates a stable unit on
     // this node; the SecureMint floor still bounds every mint independently.
     if matches!(
@@ -1319,7 +1356,16 @@ mod tests {
     fn admin_revoke_makes_key_unusable() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "to revoke", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None, None)
+            .issue(
+                None,
+                "to revoke",
+                vec![ApiKeyScope::Canton],
+                KeyClass::Subject,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let outcome = mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
         assert_eq!(outcome, AdminRevokeOutcome::Revoked);
@@ -1464,9 +1510,11 @@ mod tests {
 
         let alice = mgr.list_by_subject("did:tenzro:human:alice");
         assert_eq!(alice.len(), 2);
-        assert!(alice.iter().all(|r| {
-            r.subject.as_deref() == Some("did:tenzro:human:alice")
-        }));
+        assert!(
+            alice
+                .iter()
+                .all(|r| { r.subject.as_deref() == Some("did:tenzro:human:alice") })
+        );
     }
 
     #[test]
@@ -1507,7 +1555,16 @@ mod tests {
     fn authorize_rejects_revoked_key() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "tmp", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None, None)
+            .issue(
+                None,
+                "tmp",
+                vec![ApiKeyScope::Canton],
+                KeyClass::Subject,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
         let outcome = mgr.authorize(Some(&issued.key), "tenzro_listCantonDomains");
@@ -1540,7 +1597,10 @@ mod tests {
 
     #[test]
     fn admin_token_accepts_exact_match() {
-        assert!(verify_admin_token("s3cret-token-value", "s3cret-token-value"));
+        assert!(verify_admin_token(
+            "s3cret-token-value",
+            "s3cret-token-value"
+        ));
     }
 
     #[test]
@@ -1548,7 +1608,10 @@ mod tests {
         assert!(!verify_admin_token("wrong", "s3cret-token-value"));
         // Same length, different bytes — exercises the ct_eq path rather
         // than the length-prefix short-circuit.
-        assert!(!verify_admin_token("s3cret-token-valuX", "s3cret-token-value"));
+        assert!(!verify_admin_token(
+            "s3cret-token-valuX",
+            "s3cret-token-value"
+        ));
     }
 
     #[test]
@@ -1570,6 +1633,9 @@ mod tests {
         // Confirms that a partial prefix does not authenticate — the
         // length-prefix check short-circuits before ct_eq.
         assert!(!verify_admin_token("s3cret", "s3cret-token-value"));
-        assert!(!verify_admin_token("s3cret-token-value-extra", "s3cret-token-value"));
+        assert!(!verify_admin_token(
+            "s3cret-token-value-extra",
+            "s3cret-token-value"
+        ));
     }
 }

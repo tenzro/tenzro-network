@@ -9,11 +9,11 @@
 //! compute bond, provider registration, default pricing, automatic model
 //! selection + download + serving, and TEE detection where hardware exists.
 
-use clap::Parser;
-use anyhow::Result;
 use crate::config;
 use crate::output;
 use crate::rpc::RpcClient;
+use anyhow::Result;
+use clap::Parser;
 
 /// Join the Tenzro Network as a MicroNode participant.
 ///
@@ -74,7 +74,8 @@ impl JoinCmd {
         let spinner = output::create_spinner("Connecting to network...");
 
         let rpc = RpcClient::new(&rpc_url);
-        let chain_id_hex: String = rpc.call("eth_chainId", serde_json::json!([]))
+        let chain_id_hex: String = rpc
+            .call("eth_chainId", serde_json::json!([]))
             .await
             .map_err(|e| {
                 if self.provider && self.rpc.is_none() {
@@ -83,7 +84,8 @@ impl JoinCmd {
                          Provider mode registers on your own node. Start it first:\n\
                          \n    tenzro-node --roles model-provider\n\
                          \nor point at a node you operate with --rpc <url>.",
-                        rpc_url, e
+                        rpc_url,
+                        e
                     )
                 } else {
                     anyhow::anyhow!("Cannot connect to {}: {}", rpc_url, e)
@@ -99,11 +101,17 @@ impl JoinCmd {
         // Step 2: Try tenzro_joinAsMicroNode first, fall back to tenzro_participate
         let spinner = output::create_spinner("Provisioning MicroNode identity and wallet...");
 
-        let (result, is_micro_node) = match rpc.call::<serde_json::Value>("tenzro_joinAsMicroNode", serde_json::json!([{
-            "display_name": clean_name,
-            "origin": self.origin,
-            "participant_type": self.r#type,
-        }])).await {
+        let (result, is_micro_node) = match rpc
+            .call::<serde_json::Value>(
+                "tenzro_joinAsMicroNode",
+                serde_json::json!([{
+                    "display_name": clean_name,
+                    "origin": self.origin,
+                    "participant_type": self.r#type,
+                }]),
+            )
+            .await
+        {
             Ok(r) => {
                 spinner.finish_and_clear();
                 output::print_success("MicroNode provisioned on Tenzro Network");
@@ -111,11 +119,15 @@ impl JoinCmd {
             }
             Err(_) => {
                 // Fall back to legacy tenzro_participate
-                let r: serde_json::Value = rpc.call("tenzro_participate", serde_json::json!([{
-                    "display_name": clean_name
-                }]))
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to join network: {}", e))?;
+                let r: serde_json::Value = rpc
+                    .call(
+                        "tenzro_participate",
+                        serde_json::json!([{
+                            "display_name": clean_name
+                        }]),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to join network: {}", e))?;
                 spinner.finish_and_clear();
                 output::print_success("Identity and wallet provisioned on Tenzro Ledger");
                 (r, false)
@@ -124,14 +136,34 @@ impl JoinCmd {
 
         // Extract identity from RPC response
         let identity = result.get("identity").cloned().unwrap_or_default();
-        let did = identity.get("did").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let display_name = identity.get("display_name").and_then(|v| v.as_str()).unwrap_or(&clean_name).to_string();
-        let identity_type = identity.get("identity_type").and_then(|v| v.as_str()).unwrap_or(&self.r#type).to_string();
+        let did = identity
+            .get("did")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let display_name = identity
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&clean_name)
+            .to_string();
+        let identity_type = identity
+            .get("identity_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&self.r#type)
+            .to_string();
 
         // Extract wallet from RPC response
         let wallet = result.get("wallet").cloned().unwrap_or_default();
-        let wallet_id = wallet.get("wallet_id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let wallet_address = wallet.get("address").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let wallet_id = wallet
+            .get("wallet_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let wallet_address = wallet
+            .get("address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         // Display identity
         println!();
@@ -140,8 +172,20 @@ impl JoinCmd {
         output::print_field("DID", &did);
         output::print_field("Display Name", &display_name);
         output::print_field("Type", &identity_type);
-        output::print_field("Role", result.get("role").and_then(|v| v.as_str()).unwrap_or("MicroNode"));
-        output::print_field("Status", identity.get("status").and_then(|v| v.as_str()).unwrap_or("active"));
+        output::print_field(
+            "Role",
+            result
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("MicroNode"),
+        );
+        output::print_field(
+            "Status",
+            identity
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("active"),
+        );
 
         // Display wallet
         println!();
@@ -150,10 +194,15 @@ impl JoinCmd {
         output::print_field("Wallet ID", &wallet_id);
         output::print_field("Address", &wallet_address);
         if let Some(pk) = wallet.get("public_key").and_then(|v| v.as_str())
-            && !pk.is_empty() {
-                let truncated = if pk.len() > 20 { format!("{}...", &pk[..20]) } else { pk.to_string() };
-                output::print_field("Public Key", &truncated);
-            }
+            && !pk.is_empty()
+        {
+            let truncated = if pk.len() > 20 {
+                format!("{}...", &pk[..20])
+            } else {
+                pk.to_string()
+            };
+            output::print_field("Public Key", &truncated);
+        }
 
         // Display MicroNode capabilities (only when joinAsMicroNode is supported)
         if is_micro_node {
@@ -162,16 +211,16 @@ impl JoinCmd {
                 output::print_header("Network Capabilities");
                 println!();
                 let cap_names = [
-                    ("inference",          "AI Model Inference"),
-                    ("payments",           "TNZO Payments"),
-                    ("agent_collaboration","Agent Collaboration (A2A)"),
-                    ("mcp_tools",          "MCP Tools (24 tools)"),
-                    ("task_execution",     "Task Marketplace"),
-                    ("chain_query",        "Chain State Queries"),
-                    ("smart_contracts",    "Smart Contracts (EVM/SVM/DAML)"),
-                    ("tee_services",       "TEE Confidential Compute"),
-                    ("bridge",             "Cross-Chain Bridge"),
-                    ("governance",         "Governance & Voting"),
+                    ("inference", "AI Model Inference"),
+                    ("payments", "TNZO Payments"),
+                    ("agent_collaboration", "Agent Collaboration (A2A)"),
+                    ("mcp_tools", "MCP Tools (24 tools)"),
+                    ("task_execution", "Task Marketplace"),
+                    ("chain_query", "Chain State Queries"),
+                    ("smart_contracts", "Smart Contracts (EVM/SVM/DAML)"),
+                    ("tee_services", "TEE Confidential Compute"),
+                    ("bridge", "Cross-Chain Bridge"),
+                    ("governance", "Governance & Voting"),
                 ];
                 for (key, label) in &cap_names {
                     let enabled = caps.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -207,9 +256,18 @@ impl JoinCmd {
                 output::print_header("Hardware Profile");
                 println!();
                 if let Some(cpu) = hardware.get("cpu_model").and_then(|v| v.as_str()) {
-                    let cores = hardware.get("cpu_cores").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let threads = hardware.get("cpu_threads").and_then(|v| v.as_u64()).unwrap_or(0);
-                    output::print_field("CPU", &format!("{} ({} cores, {} threads)", cpu, cores, threads));
+                    let cores = hardware
+                        .get("cpu_cores")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let threads = hardware
+                        .get("cpu_threads")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    output::print_field(
+                        "CPU",
+                        &format!("{} ({} cores, {} threads)", cpu, cores, threads),
+                    );
                 }
                 if let Some(ram) = hardware.get("total_ram_gb").and_then(|v| v.as_f64()) {
                     output::print_field("RAM", &format!("{:.1} GB", ram));
@@ -219,9 +277,15 @@ impl JoinCmd {
                         output::print_field("GPUs", "None detected");
                     } else {
                         for (i, gpu) in gpus.iter().enumerate() {
-                            let name = gpu.get("name").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                            let name = gpu
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown");
                             let mem = gpu.get("memory_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            output::print_field(&format!("GPU {}", i + 1), &format!("{} ({:.1} GB)", name, mem));
+                            output::print_field(
+                                &format!("GPU {}", i + 1),
+                                &format!("{} ({:.1} GB)", name, mem),
+                            );
                         }
                     }
                 }
@@ -268,21 +332,27 @@ impl JoinCmd {
         if let Some((pricing, served_model)) = provider_result {
             cfg.pricing = Some(pricing);
             if let Some(model_id) = served_model
-                && !cfg.served_models.contains(&model_id) {
-                    cfg.served_models.push(model_id);
-                }
+                && !cfg.served_models.contains(&model_id)
+            {
+                cfg.served_models.push(model_id);
+            }
         }
 
         config::save_config(&cfg)?;
 
         spinner.finish_and_clear();
 
-        output::print_success(&format!("Configuration saved to: {}", config::config_path().display()));
+        output::print_success(&format!(
+            "Configuration saved to: {}",
+            config::config_path().display()
+        ));
 
         println!();
         if self.provider {
             output::print_success("You are now a Tenzro Network provider!");
-            output::print_info("Your node advertises its capacity on the provider gossip topic; inference demand routes to you automatically and settles in TNZO.");
+            output::print_info(
+                "Your node advertises its capacity on the provider gossip topic; inference demand routes to you automatically and settles in TNZO.",
+            );
         } else {
             output::print_success("You are now part of the Tenzro Network!");
         }
@@ -307,7 +377,10 @@ const ZERO_ADDRESS: &str = "0x00000000000000000000000000000000000000000000000000
 /// Query nonce + chain_id for the sender.
 async fn fetch_nonce_and_chain_id(rpc: &RpcClient, address: &str) -> (u64, u64) {
     let nonce = rpc
-        .call::<serde_json::Value>("eth_getTransactionCount", serde_json::json!([address, "latest"]))
+        .call::<serde_json::Value>(
+            "eth_getTransactionCount",
+            serde_json::json!([address, "latest"]),
+        )
         .await
         .ok()
         .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
@@ -340,20 +413,39 @@ async fn run_provider_flow(
     let hw = crate::commands::hardware::detect_hardware_profile().await;
     spinner.finish_and_clear();
 
-    output::print_field("CPU", &format!("{} ({} cores, {} threads)", hw.cpu_model, hw.cpu_cores, hw.cpu_threads));
-    output::print_field("RAM", &format!("{:.1} GB{}", hw.total_ram_gb, if hw.unified_memory { " (unified)" } else { "" }));
+    output::print_field(
+        "CPU",
+        &format!(
+            "{} ({} cores, {} threads)",
+            hw.cpu_model, hw.cpu_cores, hw.cpu_threads
+        ),
+    );
+    output::print_field(
+        "RAM",
+        &format!(
+            "{:.1} GB{}",
+            hw.total_ram_gb,
+            if hw.unified_memory { " (unified)" } else { "" }
+        ),
+    );
     if hw.gpus.is_empty() {
         output::print_field("GPU", "None detected (CPU inference)");
     } else {
         for (i, gpu) in hw.gpus.iter().enumerate() {
-            output::print_field(&format!("GPU {}", i + 1), &format!("{} ({:.1} GB)", gpu.name, gpu.memory_gb));
+            output::print_field(
+                &format!("GPU {}", i + 1),
+                &format!("{} ({:.1} GB)", gpu.name, gpu.memory_gb),
+            );
         }
     }
-    output::print_field("TEE", if hw.tee_available {
-        hw.tee_type.as_deref().unwrap_or("available")
-    } else {
-        "not available"
-    });
+    output::print_field(
+        "TEE",
+        if hw.tee_available {
+            hw.tee_type.as_deref().unwrap_or("available")
+        } else {
+            "not available"
+        },
+    );
 
     // Memory budget for model selection: discrete GPU VRAM when present,
     // otherwise a conservative share of system RAM (covers unified-memory
@@ -374,9 +466,15 @@ async fn run_provider_flow(
     let mut balance_wei = get_balance_wei(rpc, wallet_address).await;
     if balance_wei < COMPUTE_BOND_MIN_WEI {
         spinner.set_message("Requesting testnet TNZO from faucet...");
-        match rpc.call::<serde_json::Value>("tenzro_faucet", serde_json::json!({
-            "address": wallet_address,
-        })).await {
+        match rpc
+            .call::<serde_json::Value>(
+                "tenzro_faucet",
+                serde_json::json!({
+                    "address": wallet_address,
+                }),
+            )
+            .await
+        {
             Ok(_) => {
                 balance_wei = get_balance_wei(rpc, wallet_address).await;
             }
@@ -399,7 +497,10 @@ async fn run_provider_flow(
 
     // 3. Compute bond (skip when one is already posted for this DID).
     let existing_bond: serde_json::Value = rpc
-        .call("tenzro_getComputeBond", serde_json::json!([{ "provider_did": did }]))
+        .call(
+            "tenzro_getComputeBond",
+            serde_json::json!([{ "provider_did": did }]),
+        )
         .await
         .unwrap_or(serde_json::Value::Null);
     if existing_bond.is_null() {
@@ -408,22 +509,26 @@ async fn run_provider_flow(
             crate::rpc::format_tnzo(COMPUTE_BOND_MIN_WEI)
         ));
         let (nonce, chain_id) = fetch_nonce_and_chain_id(rpc, wallet_address).await;
-        rpc.call::<serde_json::Value>("tenzro_signAndSendTransaction", serde_json::json!({
-            "from": wallet_address,
-            "to": ZERO_ADDRESS,
-            "value": 0u64,
-            "gas_limit": COMPUTE_BOND_POST_GAS,
-            "gas_price": 1_000_000_000u64,
-            "nonce": nonce,
-            "chain_id": chain_id,
-            "tx_type": {
-                "PostComputeBond": {
-                    "provider_did": did,
-                    "amount": COMPUTE_BOND_MIN_WEI.to_string(),
-                }
-            },
-        })).await
-            .map_err(|e| anyhow::anyhow!("Compute bond failed: {}", e))?;
+        rpc.call::<serde_json::Value>(
+            "tenzro_signAndSendTransaction",
+            serde_json::json!({
+                "from": wallet_address,
+                "to": ZERO_ADDRESS,
+                "value": 0u64,
+                "gas_limit": COMPUTE_BOND_POST_GAS,
+                "gas_price": 1_000_000_000u64,
+                "nonce": nonce,
+                "chain_id": chain_id,
+                "tx_type": {
+                    "PostComputeBond": {
+                        "provider_did": did,
+                        "amount": COMPUTE_BOND_MIN_WEI.to_string(),
+                    }
+                },
+            }),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Compute bond failed: {}", e))?;
         spinner.finish_and_clear();
         output::print_success(&format!(
             "Compute bond posted ({})",
@@ -436,12 +541,17 @@ async fn run_provider_flow(
     // 4. Provider registration. The node advertises registered capacity on
     // the provider gossip topic automatically — no separate publish step.
     let spinner = output::create_spinner("Registering as model provider...");
-    let reg: serde_json::Value = rpc.call("tenzro_registerProvider", serde_json::json!([{
-        "provider_type": "model-provider",
-        "name": name,
-        "provider_did": did,
-        "max_concurrent": max_concurrent,
-    }])).await
+    let reg: serde_json::Value = rpc
+        .call(
+            "tenzro_registerProvider",
+            serde_json::json!([{
+                "provider_type": "model-provider",
+                "name": name,
+                "provider_did": did,
+                "max_concurrent": max_concurrent,
+            }]),
+        )
+        .await
         .map_err(|e| anyhow::anyhow!("Provider registration failed: {}", e))?;
     spinner.finish_and_clear();
     output::print_success("Registered as model provider");
@@ -473,11 +583,17 @@ async fn run_provider_flow(
 
     let mut best: Option<(&serde_json::Value, bool, u64)> = None;
     for m in &models {
-        let min_ram = m.get("min_ram_gb").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+        let min_ram = m
+            .get("min_ram_gb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::MAX);
         if (min_ram as f64) > budget_gb {
             continue;
         }
-        let downloaded = m.get("downloaded").and_then(|v| v.as_bool()).unwrap_or(false);
+        let downloaded = m
+            .get("downloaded")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let size = m.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
         let better = match &best {
             None => true,
@@ -492,46 +608,68 @@ async fn run_provider_flow(
         output::print_warning(&format!(
             "No catalog model fits within {:.1} GB — provider is registered but not serving. \
              Serve one manually with `tenzro model serve <model-id> --rpc {}`.",
-            budget_gb, rpc.url()
+            budget_gb,
+            rpc.url()
         ));
         return Ok((pricing, None));
     };
-    let model_id = model.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let model_name = model.get("name").and_then(|v| v.as_str()).unwrap_or(&model_id);
-    output::print_field("Selected model", &format!("{} ({:.1} GB)", model_name, size as f64 / 1e9));
+    let model_id = model
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let model_name = model
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&model_id);
+    output::print_field(
+        "Selected model",
+        &format!("{} ({:.1} GB)", model_name, size as f64 / 1e9),
+    );
 
     // 7. Download on the node (async on the node side; poll listModels
     // for per-model download_status until it completes).
     if !downloaded {
-        rpc.call::<serde_json::Value>("tenzro_downloadModel", serde_json::json!({
-            "model_id": model_id,
-        })).await
-            .map_err(|e| anyhow::anyhow!("Download request failed: {}", e))?;
+        rpc.call::<serde_json::Value>(
+            "tenzro_downloadModel",
+            serde_json::json!({
+                "model_id": model_id,
+            }),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Download request failed: {}", e))?;
 
         let spinner = output::create_spinner(&format!("Downloading {} on node...", model_id));
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let models: Vec<serde_json::Value> = match rpc
-                .call("tenzro_listModels", serde_json::json!({}))
-                .await
-            {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let Some(entry) = models.iter().find(|m| {
-                m.get("id").and_then(|v| v.as_str()) == Some(model_id.as_str())
-            }) else {
+            let models: Vec<serde_json::Value> =
+                match rpc.call("tenzro_listModels", serde_json::json!({})).await {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+            let Some(entry) = models
+                .iter()
+                .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(model_id.as_str()))
+            else {
                 continue;
             };
-            let status = entry.get("download_status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let status = entry
+                .get("download_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             match status {
                 "completed" => break,
                 "failed" => {
                     spinner.finish_and_clear();
-                    anyhow::bail!("Model download failed on node — check the node logs and re-run `tenzro join --provider`.");
+                    anyhow::bail!(
+                        "Model download failed on node — check the node logs and re-run `tenzro join --provider`."
+                    );
                 }
                 _ => {
-                    let pct = entry.get("download_progress").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let pct = entry
+                        .get("download_progress")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
                     spinner.set_message(format!("Downloading {} on node... {:.0}%", model_id, pct));
                 }
             }
@@ -542,12 +680,17 @@ async fn run_provider_flow(
 
     // 8. Serve on the network.
     let spinner = output::create_spinner(&format!("Serving {} to the network...", model_id));
-    let serve: serde_json::Value = rpc.call("tenzro_serveModel", serde_json::json!({
-        "model_id": model_id,
-        "user_forced": false,
-        "force_single": false,
-        "visibility": "network",
-    })).await
+    let serve: serde_json::Value = rpc
+        .call(
+            "tenzro_serveModel",
+            serde_json::json!({
+                "model_id": model_id,
+                "user_forced": false,
+                "force_single": false,
+                "visibility": "network",
+            }),
+        )
+        .await
         .map_err(|e| anyhow::anyhow!("Serve request failed: {}", e))?;
     spinner.finish_and_clear();
     output::print_success(&format!("Model {} is serving on the network", model_id));
@@ -559,14 +702,28 @@ async fn run_provider_flow(
     // report what the node sees so the operator knows the confidential
     // tier is (or is not) in play.
     if hw.tee_available {
-        match rpc.call::<serde_json::Value>("tenzro_detectTee", serde_json::json!([])).await {
+        match rpc
+            .call::<serde_json::Value>("tenzro_detectTee", serde_json::json!([]))
+            .await
+        {
             Ok(tee) => {
-                let available = tee.get("available").and_then(|v| v.as_bool()).unwrap_or(false);
+                let available = tee
+                    .get("available")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if available {
-                    let vendor = tee.get("vendor").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    output::print_success(&format!("TEE detected on node: {} — attestation is announced with your capacity", vendor));
+                    let vendor = tee
+                        .get("vendor")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    output::print_success(&format!(
+                        "TEE detected on node: {} — attestation is announced with your capacity",
+                        vendor
+                    ));
                 } else {
-                    output::print_info("TEE hardware detected locally but not visible to the node — confidential-tier serving stays off until the node runs on the TEE host.");
+                    output::print_info(
+                        "TEE hardware detected locally but not visible to the node — confidential-tier serving stays off until the node runs on the TEE host.",
+                    );
                 }
             }
             Err(e) => output::print_warning(&format!("TEE detection on node failed: {}", e)),
@@ -577,7 +734,10 @@ async fn run_provider_flow(
 }
 
 async fn get_balance_wei(rpc: &RpcClient, address: &str) -> u128 {
-    match rpc.call::<serde_json::Value>("eth_getBalance", serde_json::json!([address, "latest"])).await {
+    match rpc
+        .call::<serde_json::Value>("eth_getBalance", serde_json::json!([address, "latest"]))
+        .await
+    {
         Ok(v) => {
             let hex = v.as_str().unwrap_or("0x0");
             u128::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or(0)

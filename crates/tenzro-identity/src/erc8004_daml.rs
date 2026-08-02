@@ -44,7 +44,7 @@
 //! [`crate::registry::IdentityRegistry`].
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::{IdentityError, Result};
 
@@ -303,7 +303,11 @@ pub mod commands {
         metadata_uri: &str,
         did_for_command_id: &str,
     ) -> Value {
-        let tid = template_id(package_ids, templates::IDENTITY_MODULE, templates::REGISTRY_ADMIN);
+        let tid = template_id(
+            package_ids,
+            templates::IDENTITY_MODULE,
+            templates::REGISTRY_ADMIN,
+        );
         let choice_argument = json!({
             "controller": controller_party,
             "metadataUri": metadata_uri,
@@ -327,7 +331,11 @@ pub mod commands {
         new_uri: &str,
         did_for_command_id: &str,
     ) -> Value {
-        let tid = template_id(package_ids, templates::IDENTITY_MODULE, templates::REGISTERED);
+        let tid = template_id(
+            package_ids,
+            templates::IDENTITY_MODULE,
+            templates::REGISTERED,
+        );
         let choice_argument = json!({ "newUri": new_uri });
         build_submit_and_wait(
             &tid,
@@ -350,7 +358,11 @@ pub mod commands {
         new_controller_party: &str,
         did_for_command_id: &str,
     ) -> Value {
-        let tid = template_id(package_ids, templates::IDENTITY_MODULE, templates::REGISTERED);
+        let tid = template_id(
+            package_ids,
+            templates::IDENTITY_MODULE,
+            templates::REGISTERED,
+        );
         let choice_argument = json!({ "newController": new_controller_party });
         build_submit_and_wait(
             &tid,
@@ -358,7 +370,10 @@ pub mod commands {
             choices::SET_AGENT_WALLET,
             choice_argument,
             &[current_controller_party, new_controller_party],
-            &command_id(&format!("{}-set-wallet", APPLICATION_ID), did_for_command_id),
+            &command_id(
+                &format!("{}-set-wallet", APPLICATION_ID),
+                did_for_command_id,
+            ),
         )
     }
 
@@ -453,7 +468,11 @@ mod tests {
 
     #[test]
     fn template_id_format_is_three_part_colon() {
-        let id = template_id(&pkg(), templates::IDENTITY_MODULE, templates::REGISTRY_ADMIN);
+        let id = template_id(
+            &pkg(),
+            templates::IDENTITY_MODULE,
+            templates::REGISTRY_ADMIN,
+        );
         let parts: Vec<&str> = id.split(':').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0].len(), 64); // package id is 64 hex chars

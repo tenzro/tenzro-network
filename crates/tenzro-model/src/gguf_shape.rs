@@ -147,7 +147,10 @@ impl<R: Read> Reader<R> {
                 self.inner.read_exact(&mut b)?;
                 Ok(u16::from_le_bytes(b) as u32)
             }
-            _ => Err(GgufShapeError::UnexpectedType { key: key.to_string(), ty }),
+            _ => Err(GgufShapeError::UnexpectedType {
+                key: key.to_string(),
+                ty,
+            }),
         }
     }
 }
@@ -228,8 +231,7 @@ mod tests {
             Ok(h) => h,
             Err(_) => return,
         };
-        let path = std::path::Path::new(&home)
-            .join(".tenzro/models/gemma3-270m.gguf");
+        let path = std::path::Path::new(&home).join(".tenzro/models/gemma3-270m.gguf");
         if !path.exists() {
             return;
         }
@@ -239,6 +241,120 @@ mod tests {
         assert!(shape.total_vram_gb > 0.0);
         // Boundary activation is hidden_dim * 2 bytes (fp16).
         assert_eq!(shape.activation_bytes_per_token(), 640 * 2);
+    }
+
+    /// Build a GGUF header in memory, so the parser is covered without a
+    /// multi-gigabyte artifact.
+    ///
+    /// The pre-existing local-file test above skips silently when no model has
+    /// been downloaded, which on CI means it never runs at all — a parser
+    /// guarded only by a test that does not execute is a parser with no tests.
+    fn synthetic_gguf(
+        arch: &str,
+        layers: u32,
+        hidden: u32,
+        filler_kvs: &[(&str, &str)],
+    ) -> Vec<u8> {
+        fn push_str(buf: &mut Vec<u8>, s: &str) {
+            buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        }
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes()); // version
+        b.extend_from_slice(&0u64.to_le_bytes()); // tensor count
+        b.extend_from_slice(&((3 + filler_kvs.len()) as u64).to_le_bytes());
+
+        push_str(&mut b, "general.architecture");
+        b.extend_from_slice(&GGUF_TYPE_STRING.to_le_bytes());
+        push_str(&mut b, arch);
+
+        // Interleave unrelated keys, because a real header has hundreds of them
+        // and the parser has to skip every value type it does not want.
+        for (k, v) in filler_kvs {
+            push_str(&mut b, k);
+            b.extend_from_slice(&GGUF_TYPE_STRING.to_le_bytes());
+            push_str(&mut b, v);
+        }
+
+        push_str(&mut b, &format!("{arch}.block_count"));
+        b.extend_from_slice(&GGUF_TYPE_UINT32.to_le_bytes());
+        b.extend_from_slice(&layers.to_le_bytes());
+
+        push_str(&mut b, &format!("{arch}.embedding_length"));
+        b.extend_from_slice(&GGUF_TYPE_UINT32.to_le_bytes());
+        b.extend_from_slice(&hidden.to_le_bytes());
+        b
+    }
+
+    fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(name);
+        std::fs::write(&p, bytes).expect("write fixture");
+        p
+    }
+
+    #[test]
+    fn reads_layers_and_hidden_dim_from_a_synthetic_header() {
+        // The numbers are Qwen3-0.6B's, checked against the real artifact on
+        // disk: 28 layers, hidden 1024.
+        let bytes = synthetic_gguf("qwen3", 28, 1024, &[]);
+        let path = write_temp("tenzro_gguf_plain.gguf", &bytes);
+        let shape = read_model_shape(&path).expect("parses");
+        assert_eq!(shape.layers, 28);
+        assert_eq!(shape.hidden_dim, 1024);
+        assert_eq!(shape.activation_bytes_per_token(), 1024 * 2);
+        assert!(shape.total_vram_gb > 0.0, "size comes from the file length");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn skips_over_unrelated_keys_before_the_ones_it_wants() {
+        // A real header carries hundreds of keys — tokenizer tables, chat
+        // templates, quantization notes — ahead of the two that matter. A
+        // parser that only works when its keys come first works on nothing.
+        let bytes = synthetic_gguf(
+            "gemma3",
+            18,
+            640,
+            &[
+                ("general.name", "Gemma 3 270M"),
+                ("general.license", "gemma"),
+                ("tokenizer.ggml.model", "llama"),
+                (
+                    "tokenizer.chat_template",
+                    "{% for m in messages %}...{% endfor %}",
+                ),
+            ],
+        );
+        let path = write_temp("tenzro_gguf_filled.gguf", &bytes);
+        let shape = read_model_shape(&path).expect("parses");
+        assert_eq!(shape.layers, 18);
+        assert_eq!(shape.hidden_dim, 640);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_header_missing_the_layer_count_is_an_error_not_a_guess() {
+        // Returning a default here would hand the planner an invented layer
+        // count it cannot distinguish from a measured one — and layers is what
+        // decides whether a long-context serve fits.
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&("general.architecture".len() as u64).to_le_bytes());
+        b.extend_from_slice(b"general.architecture");
+        b.extend_from_slice(&GGUF_TYPE_STRING.to_le_bytes());
+        b.extend_from_slice(&5u64.to_le_bytes());
+        b.extend_from_slice(b"qwen3");
+        let path = write_temp("tenzro_gguf_nolayers.gguf", &b);
+        assert!(matches!(
+            read_model_shape(&path),
+            Err(GgufShapeError::MissingKey(_))
+        ));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

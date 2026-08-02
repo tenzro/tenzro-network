@@ -22,3 +22,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
+
+[lints]
+workspace = true

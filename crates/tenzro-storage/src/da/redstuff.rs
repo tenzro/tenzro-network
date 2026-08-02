@@ -200,7 +200,11 @@ fn merkle_tree(leaves: &[Hash]) -> (Hash, Vec<Vec<Hash>>) {
             let sibling = if *pos % 2 == 0 {
                 // Left child: sibling is the right node, or self when promoted.
                 let s = *pos + 1;
-                if s < level.len() { level[s] } else { level[*pos] }
+                if s < level.len() {
+                    level[s]
+                } else {
+                    level[*pos]
+                }
             } else {
                 level[*pos - 1]
             };
@@ -230,7 +234,12 @@ fn merkle_root_from_proof(leaf: Hash, mut index: usize, proof: &[Hash]) -> Hash 
 
 /// Fold the sliver-leaf Merkle root together with the shape/length metadata into
 /// the final blob commitment.
-fn blob_commitment(shape: CommitteeShape, blob_len: u64, symbol_len: usize, sliver_root: &Hash) -> Hash {
+fn blob_commitment(
+    shape: CommitteeShape,
+    blob_len: u64,
+    symbol_len: usize,
+    sliver_root: &Hash,
+) -> Hash {
     let mut h = Sha256::new();
     h.update(BLOB_TAG);
     h.update((shape.f as u64).to_le_bytes());
@@ -365,9 +374,13 @@ pub fn verify_sliver(
     }
     let primary_leaf = hash_leaf(0, sliver.node_index, &sliver.primary);
     let secondary_leaf = hash_leaf(1, sliver.node_index, &sliver.secondary);
-    let primary_root = merkle_root_from_proof(primary_leaf, sliver.node_index, &sliver.primary_proof);
-    let secondary_root =
-        merkle_root_from_proof(secondary_leaf, n + sliver.node_index, &sliver.secondary_proof);
+    let primary_root =
+        merkle_root_from_proof(primary_leaf, sliver.node_index, &sliver.primary_proof);
+    let secondary_root = merkle_root_from_proof(
+        secondary_leaf,
+        n + sliver.node_index,
+        &sliver.secondary_proof,
+    );
     // Both proofs must reach the same sliver-leaf root, which folds into the
     // commitment. Recompute the commitment from that root and compare.
     if primary_root != secondary_root {
@@ -497,7 +510,13 @@ mod tests {
         let data = b"red stuff two-dimensional erasure encoding round trip".to_vec();
         let enc = encode(&data, shape).unwrap();
         for s in &enc.slivers {
-            assert!(verify_sliver(s, shape, enc.blob_len, enc.symbol_len, &enc.commitment));
+            assert!(verify_sliver(
+                s,
+                shape,
+                enc.blob_len,
+                enc.symbol_len,
+                &enc.commitment
+            ));
         }
     }
 
@@ -508,7 +527,14 @@ mod tests {
         let enc = encode(&data, shape).unwrap();
         // Take exactly cols() = 5 secondary slivers.
         let subset: Vec<SliverPair> = enc.slivers.iter().take(shape.cols()).cloned().collect();
-        let back = reconstruct(&subset, shape, enc.blob_len, enc.symbol_len, &enc.commitment).unwrap();
+        let back = reconstruct(
+            &subset,
+            shape,
+            enc.blob_len,
+            enc.symbol_len,
+            &enc.commitment,
+        )
+        .unwrap();
         assert_eq!(back, data);
     }
 
@@ -518,10 +544,21 @@ mod tests {
         let data: Vec<u8> = (0..8000u32).map(|i| (i % 251) as u8).collect();
         let enc = encode(&data, shape).unwrap();
         // Drop f = 3 slivers (nodes 0,1,2): 7 remain == quorum.
-        let subset: Vec<SliverPair> =
-            enc.slivers.iter().filter(|s| s.node_index >= 3).cloned().collect();
+        let subset: Vec<SliverPair> = enc
+            .slivers
+            .iter()
+            .filter(|s| s.node_index >= 3)
+            .cloned()
+            .collect();
         assert_eq!(subset.len(), 7);
-        let back = reconstruct(&subset, shape, enc.blob_len, enc.symbol_len, &enc.commitment).unwrap();
+        let back = reconstruct(
+            &subset,
+            shape,
+            enc.blob_len,
+            enc.symbol_len,
+            &enc.commitment,
+        )
+        .unwrap();
         assert_eq!(back, data);
     }
 
@@ -531,7 +568,16 @@ mod tests {
         let data = vec![1u8; 1000];
         let enc = encode(&data, shape).unwrap();
         let subset: Vec<SliverPair> = enc.slivers.iter().take(4).cloned().collect();
-        assert!(reconstruct(&subset, shape, enc.blob_len, enc.symbol_len, &enc.commitment).is_err());
+        assert!(
+            reconstruct(
+                &subset,
+                shape,
+                enc.blob_len,
+                enc.symbol_len,
+                &enc.commitment
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -551,7 +597,14 @@ mod tests {
         ));
         // With the forged sliver plus 4 honest = only 4 valid < quorum 5 → fail;
         // but all 7 present (1 forged, 6 honest) still reconstruct.
-        let back = reconstruct(&tampered, shape, enc.blob_len, enc.symbol_len, &enc.commitment).unwrap();
+        let back = reconstruct(
+            &tampered,
+            shape,
+            enc.blob_len,
+            enc.symbol_len,
+            &enc.commitment,
+        )
+        .unwrap();
         assert_eq!(back, data);
     }
 
@@ -562,7 +615,13 @@ mod tests {
         let enc = encode(&data, shape).unwrap();
         let bogus = Hash::new([0xAAu8; 32]);
         for s in &enc.slivers {
-            assert!(!verify_sliver(s, shape, enc.blob_len, enc.symbol_len, &bogus));
+            assert!(!verify_sliver(
+                s,
+                shape,
+                enc.blob_len,
+                enc.symbol_len,
+                &bogus
+            ));
         }
         assert!(reconstruct(&enc.slivers, shape, enc.blob_len, enc.symbol_len, &bogus).is_err());
     }
@@ -573,8 +632,14 @@ mod tests {
         for data in [Vec::new(), vec![1u8], b"hi".to_vec()] {
             let enc = encode(&data, shape).unwrap();
             let subset: Vec<SliverPair> = enc.slivers.iter().take(shape.cols()).cloned().collect();
-            let back =
-                reconstruct(&subset, shape, enc.blob_len, enc.symbol_len, &enc.commitment).unwrap();
+            let back = reconstruct(
+                &subset,
+                shape,
+                enc.blob_len,
+                enc.symbol_len,
+                &enc.commitment,
+            )
+            .unwrap();
             assert_eq!(back, data);
         }
     }

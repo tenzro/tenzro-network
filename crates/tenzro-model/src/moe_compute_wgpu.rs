@@ -122,21 +122,27 @@ impl WgpuCompute {
         let x_contig: Vec<f32> = x.iter().copied().collect();
         let dims = [n as u32, k as u32, m as u32, 0u32];
 
-        let dims_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("dims"),
-            contents: bytemuck::cast_slice(&dims),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let x_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("x"),
-            contents: bytemuck::cast_slice(&x_contig),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let w_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("w"),
-            contents: bytemuck::cast_slice(w_rowmajor),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let dims_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("dims"),
+                contents: bytemuck::cast_slice(&dims),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let x_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("x"),
+                contents: bytemuck::cast_slice(&x_contig),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let w_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("w"),
+                contents: bytemuck::cast_slice(w_rowmajor),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
         let out_len = (n * m * std::mem::size_of::<f32>()) as u64;
         let y_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("y"),
@@ -155,16 +161,30 @@ impl WgpuCompute {
             label: Some("moe-bind"),
             layout: &self.bind_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: dims_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: x_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: w_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: y_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: dims_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: x_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: w_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: y_buf.as_entire_binding(),
+                },
             ],
         });
 
         let mut enc = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("moe-enc") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("moe-enc"),
+            });
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("moe-pass"),

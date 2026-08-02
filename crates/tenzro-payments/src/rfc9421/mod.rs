@@ -10,22 +10,15 @@
 //! - **registry** — Agent public key registry abstraction for key lookup
 //! - **jwks** — JWK / JWK Set publication per RFC 7517 / RFC 7518
 
-pub mod signature;
+pub mod jwks;
 pub mod nonce;
 pub mod registry;
-pub mod jwks;
+pub mod signature;
 
-pub use signature::{
-    SignatureAlgorithm,
-    SignatureParams,
-    SignatureInput,
-    RequestParts,
-    SignedHeaders,
-    parse_signature_input,
-    build_signature_base,
-    verify_http_signature,
-    create_http_signature,
-};
-pub use nonce::NonceCache;
-pub use registry::{AgentRegistryClient, AgentPublicKeyInfo, TenzroAgentRegistry};
 pub use jwks::{Jwk, JwkSet};
+pub use nonce::NonceCache;
+pub use registry::{AgentPublicKeyInfo, AgentRegistryClient, TenzroAgentRegistry};
+pub use signature::{
+    RequestParts, SignatureAlgorithm, SignatureInput, SignatureParams, SignedHeaders,
+    build_signature_base, create_http_signature, parse_signature_input, verify_http_signature,
+};

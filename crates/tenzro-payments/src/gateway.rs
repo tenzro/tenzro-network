@@ -109,6 +109,56 @@ impl ConversionHook for IdentityConversionHook {
     }
 }
 
+/// Resolves a payee's declared settlement preference.
+///
+/// Separated from the gateway because the preference lives with the payee's
+/// identity, not with the payment: the same payee settles the same way
+/// whichever protocol a payer used to reach them.
+///
+/// A gateway with no resolver treats every payee as
+/// [`SettlementAsset::KeepInbound`](crate::settlement_asset::SettlementAsset::KeepInbound),
+/// which is the default and the behaviour before this existed.
+pub trait SettlementPreferencesResolver: Send + Sync {
+    /// The preferences to apply to this settlement.
+    fn preferences(&self) -> crate::settlement_asset::SettlementPreferences;
+}
+
+/// Adapts a [`ConversionHook`] into the [`SwapQuoter`] the settlement router
+/// asks for a TNZO route.
+///
+/// The hook is the node's swap venue; the router only needs to know whether a
+/// route exists and what comes out. Keeping the adapter here rather than
+/// making `ConversionHook` implement `SwapQuoter` directly means a node can
+/// have a conversion hook for stable-unit spending without thereby claiming it
+/// can swap anything to TNZO.
+struct HookQuoter<'a> {
+    hook: &'a dyn ConversionHook,
+    handle: tokio::runtime::Handle,
+}
+
+impl crate::settlement_asset::SwapQuoter for HookQuoter<'_> {
+    fn quote_to_tnzo(
+        &self,
+        from: &crate::settlement_asset::Caip19,
+        amount_in: u128,
+    ) -> Result<Option<u128>> {
+        // The router is synchronous by design — it is a policy decision, not
+        // an I/O path — so the async hook is driven to completion here rather
+        // than making every caller of `route_settlement` async.
+        let asset = from.to_string();
+        let result = tokio::task::block_in_place(|| {
+            self.handle
+                .block_on(async { self.hook.convert(&asset, "TNZO", amount_in).await })
+        });
+        match result {
+            Ok(conv) => Ok(Some(conv.amount_out)),
+            // "No route" is a normal answer from a venue that does not cover
+            // this pair, not a failure of the venue.
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 /// Multi-protocol payment gateway for Tenzro Network
 pub struct TenzroPaymentGateway {
     protocols: DashMap<String, Arc<dyn PaymentProtocol>>,
@@ -116,6 +166,9 @@ pub struct TenzroPaymentGateway {
     challenge_store: ChallengeStore,
     /// Optional on-chain settlement callback (bridges to SettlementEngine + TnzoToken)
     settlement_callback: Option<Arc<dyn SettlementCallback>>,
+    /// Optional payee settlement-preference resolver. When unset, every payee
+    /// keeps the asset that arrived.
+    settlement_preferences: Option<Arc<dyn SettlementPreferencesResolver>>,
     /// Optional stable-unit conversion hook. When unset, the payer's asset
     /// settles directly (no conversion).
     conversion_hook: Option<Arc<dyn ConversionHook>>,
@@ -128,6 +181,7 @@ impl TenzroPaymentGateway {
             protocols: DashMap::new(),
             challenge_store: ChallengeStore::new(),
             settlement_callback: None,
+            settlement_preferences: None,
             conversion_hook: None,
         }
     }
@@ -141,6 +195,7 @@ impl TenzroPaymentGateway {
             protocols: DashMap::new(),
             challenge_store: ChallengeStore::with_storage(storage),
             settlement_callback: None,
+            settlement_preferences: None,
             conversion_hook: None,
         }
     }
@@ -150,6 +205,15 @@ impl TenzroPaymentGateway {
     /// When set, `verify_and_settle` will invoke the callback after
     /// successful protocol-level settlement to record the transfer
     /// on the TNZO token layer.
+    /// Attach the payee settlement-preference resolver.
+    pub fn with_settlement_preferences(
+        mut self,
+        resolver: Arc<dyn SettlementPreferencesResolver>,
+    ) -> Self {
+        self.settlement_preferences = Some(resolver);
+        self
+    }
+
     pub fn with_settlement_callback(mut self, callback: Arc<dyn SettlementCallback>) -> Self {
         self.settlement_callback = Some(callback);
         self
@@ -199,6 +263,68 @@ impl Default for TenzroPaymentGateway {
     }
 }
 
+impl TenzroPaymentGateway {
+    /// Which asset this payee settles in, per their declared preference.
+    ///
+    /// `Ok(None)` means "no preference configured" — keep whatever the
+    /// protocol produced, which is the default and the pre-existing behaviour.
+    /// `Err` means the payee asked for something this node cannot deliver, and
+    /// the settlement must not proceed.
+    fn resolve_settlement_asset(
+        &self,
+        challenge: &PaymentChallenge,
+        receipt: &PaymentReceipt,
+    ) -> Result<Option<String>> {
+        use crate::settlement_asset::{Caip19, SettlementRoute, route_settlement};
+
+        let Some(resolver) = self.settlement_preferences.as_ref() else {
+            return Ok(None);
+        };
+
+        // The payee is identified by DID where the challenge carries one —
+        // a settlement preference belongs to an identity, not to an address,
+        // and the same payee may be paid at several addresses.
+        let payee_did = challenge
+            .extra
+            .get("payee_did")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&challenge.recipient);
+
+        // A non-CAIP asset string (bare "USDC", "TNZO") is what most protocols
+        // produce today. Routing needs a chain-qualified identifier to quote
+        // against, so a bare symbol means "nothing to route" rather than a
+        // parse failure that would block an otherwise fine payment.
+        let Ok(inbound) = Caip19::parse(&receipt.asset) else {
+            return Ok(None);
+        };
+
+        let prefs = resolver.preferences();
+        let quoter = self.conversion_hook.as_ref().and_then(|hook| {
+            tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|handle| HookQuoter {
+                    hook: hook.as_ref(),
+                    handle,
+                })
+        });
+
+        let route = route_settlement(
+            payee_did,
+            &inbound,
+            receipt.amount,
+            &prefs,
+            quoter
+                .as_ref()
+                .map(|q| q as &dyn crate::settlement_asset::SwapQuoter),
+        )?;
+
+        Ok(match route {
+            SettlementRoute::Direct { asset, .. } => Some(asset.to_string()),
+            SettlementRoute::Swap { .. } => Some("TNZO".to_string()),
+        })
+    }
+}
+
 #[async_trait]
 impl PaymentGateway for TenzroPaymentGateway {
     fn supported_protocols(&self) -> Vec<String> {
@@ -217,22 +343,24 @@ impl PaymentGateway for TenzroPaymentGateway {
         recipient: &str,
     ) -> Result<PaymentChallenge> {
         let proto = self.get_protocol(protocol)?;
-        proto.create_challenge(resource, amount, asset, recipient).await
+        proto
+            .create_challenge(resource, amount, asset, recipient)
+            .await
     }
 
-    async fn verify_and_settle(
-        &self,
-        credential: &PaymentCredential,
-    ) -> Result<PaymentReceipt> {
+    async fn verify_and_settle(&self, credential: &PaymentCredential) -> Result<PaymentReceipt> {
         let proto = self.get_protocol(&credential.protocol)?;
 
         // Look up the original challenge from the shared store
-        let challenge = self.challenge_store.get(&credential.challenge_id).map_err(|_| {
-            PaymentError::ChallengeError(format!(
-                "Challenge {} not found — it may have expired or already been settled",
-                credential.challenge_id
-            ))
-        })?;
+        let challenge = self
+            .challenge_store
+            .get(&credential.challenge_id)
+            .map_err(|_| {
+                PaymentError::ChallengeError(format!(
+                    "Challenge {} not found — it may have expired or already been settled",
+                    credential.challenge_id
+                ))
+            })?;
 
         debug!(
             "Found challenge {} for credential {} (amount={}, chain={})",
@@ -244,24 +372,42 @@ impl PaymentGateway for TenzroPaymentGateway {
 
         // Settle on-chain if a settlement callback is configured
         if let Some(callback) = &self.settlement_callback {
-            let payer_bytes = hex::decode(
-                credential.payer_address.trim_start_matches("0x"),
-            )
-            .unwrap_or_default();
-            let payee_bytes = hex::decode(
-                challenge.recipient.trim_start_matches("0x"),
-            )
-            .unwrap_or_default();
+            let payer_bytes =
+                hex::decode(credential.payer_address.trim_start_matches("0x")).unwrap_or_default();
+            let payee_bytes =
+                hex::decode(challenge.recipient.trim_start_matches("0x")).unwrap_or_default();
+
+            // What asset the payee actually settles in. A payee who declared
+            // TNZO gets TNZO or nothing: crediting them the inbound stablecoin
+            // instead would hand them an asset they did not choose, and the
+            // discrepancy would be silent exactly where it matters. The router
+            // refuses rather than falling back.
+            let target_asset = self
+                .resolve_settlement_asset(&challenge, &receipt)
+                .map_err(|e| {
+                    warn!(
+                        "settlement routing refused for receipt {}: {}",
+                        receipt.receipt_id, e
+                    );
+                    e
+                })?;
+            if let Some(asset) = target_asset.as_ref() {
+                receipt.extra.insert(
+                    "settlement_asset".to_string(),
+                    serde_json::Value::String(asset.clone()),
+                );
+            }
+            let payee_asset = target_asset.unwrap_or_else(|| receipt.asset.clone());
 
             // Dual-mode settlement: if the payer spends a stable unit
-            // (`credential.asset`) different from the payee's asset
-            // (`receipt.asset`), convert at the oracle rate before recording
-            // the on-chain transfer. Direct-token mode (assets equal, or no
-            // hook configured) settles the payer's amount unchanged.
-            let (settle_amount, settle_asset) = if credential.asset != receipt.asset {
+            // (`credential.asset`) different from the asset the payee settles
+            // in, convert at the oracle rate before recording the on-chain
+            // transfer. Direct-token mode (assets equal, or no hook
+            // configured) settles the payer's amount unchanged.
+            let (settle_amount, settle_asset) = if credential.asset != payee_asset {
                 if let Some(hook) = &self.conversion_hook {
                     match hook
-                        .convert(&credential.asset, &receipt.asset, receipt.amount)
+                        .convert(&credential.asset, &payee_asset, receipt.amount)
                         .await
                     {
                         Ok(conv) => {
@@ -289,16 +435,16 @@ impl PaymentGateway for TenzroPaymentGateway {
                         Err(e) => {
                             warn!(
                                 "Conversion {}->{} failed for receipt {}: {}",
-                                credential.asset, receipt.asset, receipt.receipt_id, e
+                                credential.asset, payee_asset, receipt.receipt_id, e
                             );
                             return Err(e);
                         }
                     }
                 } else {
-                    (receipt.amount, receipt.asset.clone())
+                    (receipt.amount, payee_asset.clone())
                 }
             } else {
-                (receipt.amount, receipt.asset.clone())
+                (receipt.amount, payee_asset.clone())
             };
 
             // Developer-margin attribution snapshot from challenge creation:
@@ -316,13 +462,11 @@ impl PaymentGateway for TenzroPaymentGateway {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
             if margin_bps > 0 {
-                let developer_margin = settle_amount
-                    .saturating_mul(margin_bps as u128)
+                let developer_margin = settle_amount.saturating_mul(margin_bps as u128)
                     / (10_000u128 + margin_bps as u128);
-                receipt.extra.insert(
-                    "margin_bps".to_string(),
-                    serde_json::json!(margin_bps),
-                );
+                receipt
+                    .extra
+                    .insert("margin_bps".to_string(), serde_json::json!(margin_bps));
                 receipt.extra.insert(
                     "developer_margin".to_string(),
                     serde_json::Value::String(developer_margin.to_string()),
@@ -412,8 +556,14 @@ mod tests {
             credential: &PaymentCredential,
         ) -> Result<PaymentVerification> {
             // Verify the challenge has the correct data (not empty defaults)
-            assert!(!challenge.resource.is_empty(), "resource should not be empty");
-            assert!(!challenge.recipient.is_empty(), "recipient should not be empty");
+            assert!(
+                !challenge.resource.is_empty(),
+                "resource should not be empty"
+            );
+            assert!(
+                !challenge.recipient.is_empty(),
+                "recipient should not be empty"
+            );
             assert!(!challenge.chain.is_empty(), "chain should not be empty");
             assert_eq!(challenge.amount, credential.amount);
 
@@ -612,7 +762,10 @@ mod tests {
         assert_eq!(amt, 1500);
         assert_eq!(asset, "USDC");
         assert_eq!(
-            receipt.extra.get("conversion_quote").and_then(|v| v.as_str()),
+            receipt
+                .extra
+                .get("conversion_quote")
+                .and_then(|v| v.as_str()),
             Some("quote-1")
         );
         assert_eq!(

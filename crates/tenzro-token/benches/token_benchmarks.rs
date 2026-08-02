@@ -6,12 +6,12 @@
 //! - `adaptive_burn::compute_recommendation` — pure governance-dial transfer
 //!   function. Read RPCs call this per query.
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 
-use tenzro_token::adaptive_burn::{
-    compute_recommendation, BurnBreakdown, EmissionBreakdown, SupplyMetricsSnapshot, SupplyTargets,
-};
 use tenzro_token::TnzoToken;
+use tenzro_token::adaptive_burn::{
+    BurnBreakdown, EmissionBreakdown, SupplyMetricsSnapshot, SupplyTargets, compute_recommendation,
+};
 use tenzro_types::primitives::{Address, BlockHeight, Timestamp};
 
 fn addr(byte: u8) -> Address {

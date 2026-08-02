@@ -10,15 +10,13 @@
 //! - Merkle Patricia Trie `insert` + `root_hash` (state-commitment hot path)
 //! - Trie `generate_proof` + `verify_proof` round-trip
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
-use tenzro_storage::{
-    KvStore, MemoryStore, MerklePatriciaTrie, RocksDbStore, WriteOp, CF_STATE,
-};
+use tenzro_storage::{CF_STATE, KvStore, MemoryStore, MerklePatriciaTrie, RocksDbStore, WriteOp};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -29,7 +27,10 @@ fn unique_db_path(label: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("tenzro-storage-bench-{}-{}-{}-{}", label, pid, id, nanos))
+    std::env::temp_dir().join(format!(
+        "tenzro-storage-bench-{}-{}-{}-{}",
+        label, pid, id, nanos
+    ))
 }
 
 fn open_rocksdb(label: &str) -> (Arc<RocksDbStore>, std::path::PathBuf) {

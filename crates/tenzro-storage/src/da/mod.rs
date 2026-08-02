@@ -77,9 +77,9 @@ impl ReceiptKind {
     /// Default storage mode for this kind. See `da-offload.md` §"Per-receipt-kind defaults".
     pub fn default_mode(&self) -> ReceiptStorageMode {
         match self {
-            ReceiptKind::SettlementChannel
-            | ReceiptKind::Inference
-            | ReceiptKind::AgentMessage => ReceiptStorageMode::OffloadedDA,
+            ReceiptKind::SettlementChannel | ReceiptKind::Inference | ReceiptKind::AgentMessage => {
+                ReceiptStorageMode::OffloadedDA
+            }
             ReceiptKind::SettlementEscrow
             | ReceiptKind::KillSwitch
             | ReceiptKind::Lifecycle
@@ -144,10 +144,10 @@ pub struct DaPointer {
     /// Backend-attested commitment. May differ from
     /// `ReceiptEnvelope::commitment` (KZG vs SHA-256). `None` for backends
     /// that do not produce one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub commitment_kzg: Option<Vec<u8>>,
     /// EigenDA attestation service root (or analogous backend root).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub attestation_root: Option<Hash>,
 }
 
@@ -158,16 +158,16 @@ pub struct DaPointer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptSummary {
     pub receipt_id: Hash,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub payer: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub payee: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub amount_wei: Option<u128>,
     pub timestamp: Timestamp,
     /// Compact view of the principal chain (Spec 5) when applicable. Full
     /// chain (delegation_scope_ids etc.) lives in the offloaded payload.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub principal_chain_summary: Option<PrincipalChainSummary>,
 }
 
@@ -194,7 +194,7 @@ pub struct MandateRef {
     /// Optional mandate body URI (e.g. `https://`, `tenzro://`,
     /// `eigenda://`). When absent the verifier is expected to resolve
     /// the body out of band.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub mandate_uri: Option<String>,
     /// Mandate expiry (unix seconds). `0` = no expiry.
     #[serde(default)]
@@ -229,6 +229,16 @@ impl MandateRef {
 /// records a commitment + DA pointer (OffloadedDA). The chain's only guarantee
 /// is `commitment = SHA-256(canonical_payload)` — same model L2s use against
 /// EigenDA / Celestia / Avail.
+///
+/// The `Option` fields deliberately carry `#[serde(default)]` **without**
+/// `skip_serializing_if`. This envelope is bincoded into RocksDB (usage
+/// records, settlement receipts), and `skip_serializing_if` omits the field
+/// from the output entirely while the derived `Deserialize` still expects it.
+/// In a self-describing format that is fine — the decoder matches on field
+/// names. In a fixed-layout one it desynchronises the stream, so every envelope
+/// with a `None` field became unreadable the moment it was written. Keeping the
+/// fields always-present costs one tag byte each and makes the type safe in
+/// both. `default` is retained so JSON input may still omit them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptEnvelope {
     pub kind: ReceiptKind,
@@ -237,10 +247,10 @@ pub struct ReceiptEnvelope {
     /// Present iff `storage_mode == Inline`. Canonical-encoded payload bytes
     /// (the encoding is the receipt-kind's responsibility — bincode for
     /// settlement, JSON for inference, etc.).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub inline_payload: Option<Vec<u8>>,
     /// Present iff `storage_mode == OffloadedDA`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub da_pointer: Option<DaPointer>,
     /// SHA-256 over the canonical payload bytes — the chain-of-custody
     /// commitment, regardless of storage mode.
@@ -248,7 +258,7 @@ pub struct ReceiptEnvelope {
     /// Optional reference to a signed off-chain mandate authorizing this
     /// receipt. Present for settlements, inferences, and agent actions
     /// that flow from a signed user intent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub mandate_ref: Option<MandateRef>,
 }
 
@@ -354,10 +364,10 @@ pub struct DaBackendStatus {
     pub backend: DaBackendId,
     pub healthy: bool,
     /// Last successful submission, ms-since-epoch. `None` if never submitted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_submission_ms: Option<i64>,
     /// Last successful fetch, ms-since-epoch. `None` if never fetched.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_fetch_ms: Option<i64>,
     /// Recent error rate in basis points (0-10000). 0 = fully healthy.
     pub error_rate_bps: u16,
@@ -479,12 +489,17 @@ impl InlineFallbackBackend {
         let locator = Self::make_locator(payload);
         self.store.insert(locator.clone(), payload.to_vec());
         if let Some(storage) = &self.storage
-            && let Err(e) = storage.put(crate::kv::CF_METADATA, &Self::storage_key(&locator), payload) {
-                tracing::warn!(
-                    "InlineFallbackBackend: failed to mirror-write payload to storage: {}",
-                    e
-                );
-            }
+            && let Err(e) = storage.put(
+                crate::kv::CF_METADATA,
+                &Self::storage_key(&locator),
+                payload,
+            )
+        {
+            tracing::warn!(
+                "InlineFallbackBackend: failed to mirror-write payload to storage: {}",
+                e
+            );
+        }
         *self.last_submission_ms.lock() = Some(Self::now_ms());
         DaPointer {
             backend: DaBackendId::InlineFallback,
@@ -515,11 +530,11 @@ impl InlineFallbackBackend {
             && let Some(bytes) = storage
                 .get(crate::kv::CF_METADATA, &Self::storage_key(&pointer.locator))
                 .map_err(|e| StorageError::Generic(format!("storage read: {}", e)))?
-            {
-                self.store.insert(pointer.locator.clone(), bytes.clone());
-                *self.last_fetch_ms.lock() = Some(Self::now_ms());
-                return Ok(bytes);
-            }
+        {
+            self.store.insert(pointer.locator.clone(), bytes.clone());
+            *self.last_fetch_ms.lock() = Some(Self::now_ms());
+            return Ok(bytes);
+        }
         Err(StorageError::KeyNotFound(format!(
             "InlineFallbackBackend has no payload for locator {}",
             String::from_utf8_lossy(&pointer.locator)
@@ -580,9 +595,9 @@ impl DaBackend for InlineFallbackBackend {
                 .get(crate::kv::CF_METADATA, &Self::storage_key(&pointer.locator))
                 .map_err(|e| StorageError::Generic(format!("storage read: {}", e)))?
                 .is_some()
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
+        }
         Err(StorageError::KeyNotFound(format!(
             "InlineFallbackBackend has no payload for locator {}",
             String::from_utf8_lossy(&pointer.locator)
@@ -686,8 +701,12 @@ mod tests {
             commitment_kzg: Some(vec![0xab; 48]),
             attestation_root: Some(Hash::new([3u8; 32])),
         };
-        let env =
-            ReceiptEnvelope::offloaded(ReceiptKind::Inference, sample_summary(), pointer, commitment);
+        let env = ReceiptEnvelope::offloaded(
+            ReceiptKind::Inference,
+            sample_summary(),
+            pointer,
+            commitment,
+        );
         env.validate().unwrap();
         assert_eq!(env.storage_mode, ReceiptStorageMode::OffloadedDA);
         assert!(env.inline_payload.is_none());

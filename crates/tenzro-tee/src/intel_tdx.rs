@@ -33,11 +33,11 @@ use sha2::{Digest, Sha384};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use tenzro_types::tee::*;
 use crate::attestation::{self, ParsedCertificate};
 use crate::certs;
 use crate::error::{Result, TeeError};
 use crate::traits::TeeProvider;
+use tenzro_types::tee::*;
 
 // ============================================================================
 // TDX ioctl structures (matching Linux kernel's tdx-guest.h)
@@ -67,30 +67,30 @@ const TDX_CMD_GET_REPORT0_NR: u8 = 1;
 /// and integration tests can reference the same canonical layout.
 pub mod tdreport_offsets {
     // REPORTMACSTRUCT (256 bytes at offset 0)
-    pub const REPORT_TYPE: usize = 0;           // 4 bytes
-    pub const CPU_SVN: usize = 48;              // 16 bytes
-    pub const TEE_TCB_INFO_HASH: usize = 64;    // 48 bytes (SHA-384)
-    pub const TEE_INFO_HASH: usize = 112;       // 48 bytes (SHA-384)
-    pub const REPORT_DATA: usize = 128;         // 64 bytes
-    pub const MAC: usize = 224;                 // 32 bytes
+    pub const REPORT_TYPE: usize = 0; // 4 bytes
+    pub const CPU_SVN: usize = 48; // 16 bytes
+    pub const TEE_TCB_INFO_HASH: usize = 64; // 48 bytes (SHA-384)
+    pub const TEE_INFO_HASH: usize = 112; // 48 bytes (SHA-384)
+    pub const REPORT_DATA: usize = 128; // 64 bytes
+    pub const MAC: usize = 224; // 32 bytes
 
     // TEE_TCB_INFO (239 bytes at offset 256)
-    pub const TEE_TCB_SVN: usize = 264;         // 16 bytes
-    pub const MR_SEAM: usize = 280;             // 48 bytes (SHA-384)
-    pub const MR_SIGNER_SEAM: usize = 328;      // 48 bytes (SHA-384)
-    pub const SEAM_ATTRIBUTES: usize = 376;     // 8 bytes
+    pub const TEE_TCB_SVN: usize = 264; // 16 bytes
+    pub const MR_SEAM: usize = 280; // 48 bytes (SHA-384)
+    pub const MR_SIGNER_SEAM: usize = 328; // 48 bytes (SHA-384)
+    pub const SEAM_ATTRIBUTES: usize = 376; // 8 bytes
 
     // TDINFO (512 bytes at offset 512)
-    pub const TD_ATTRIBUTES: usize = 512;       // 8 bytes
-    pub const XFAM: usize = 520;                // 8 bytes
-    pub const MR_TD: usize = 528;               // 48 bytes (SHA-384) — measurement of initial TD
-    pub const MR_CONFIG_ID: usize = 576;        // 48 bytes
-    pub const MR_OWNER: usize = 624;            // 48 bytes
-    pub const MR_OWNER_CONFIG: usize = 672;     // 48 bytes
-    pub const RTMR0: usize = 720;               // 48 bytes (SHA-384)
-    pub const RTMR1: usize = 768;               // 48 bytes
-    pub const RTMR2: usize = 816;               // 48 bytes
-    pub const RTMR3: usize = 864;               // 48 bytes
+    pub const TD_ATTRIBUTES: usize = 512; // 8 bytes
+    pub const XFAM: usize = 520; // 8 bytes
+    pub const MR_TD: usize = 528; // 48 bytes (SHA-384) — measurement of initial TD
+    pub const MR_CONFIG_ID: usize = 576; // 48 bytes
+    pub const MR_OWNER: usize = 624; // 48 bytes
+    pub const MR_OWNER_CONFIG: usize = 672; // 48 bytes
+    pub const RTMR0: usize = 720; // 48 bytes (SHA-384)
+    pub const RTMR1: usize = 768; // 48 bytes
+    pub const RTMR2: usize = 816; // 48 bytes
+    pub const RTMR3: usize = 864; // 48 bytes
 }
 
 /// TDX Quote v4 header offsets.
@@ -99,33 +99,33 @@ pub mod tdreport_offsets {
 /// downstream verifiers and audit tooling can reference the same canonical
 /// layout when parsing or constructing TDX Quotes off-path.
 pub mod quote_offsets {
-    pub const VERSION: usize = 0;               // 2 bytes (should be 4)
-    pub const ATT_KEY_TYPE: usize = 2;          // 2 bytes (2=ECDSA-256, 3=ECDSA-384)
-    pub const TEE_TYPE: usize = 4;              // 4 bytes (0x81=TDX)
-    pub const RESERVED: usize = 8;              // 2 bytes
-    pub const QE_VENDOR_ID: usize = 12;         // 16 bytes
-    pub const USER_DATA: usize = 28;            // 20 bytes
-    pub const BODY: usize = 48;                 // 584 bytes (Report Body)
+    pub const VERSION: usize = 0; // 2 bytes (should be 4)
+    pub const ATT_KEY_TYPE: usize = 2; // 2 bytes (2=ECDSA-256, 3=ECDSA-384)
+    pub const TEE_TYPE: usize = 4; // 4 bytes (0x81=TDX)
+    pub const RESERVED: usize = 8; // 2 bytes
+    pub const QE_VENDOR_ID: usize = 12; // 16 bytes
+    pub const USER_DATA: usize = 28; // 20 bytes
+    pub const BODY: usize = 48; // 584 bytes (Report Body)
 
     // Body offsets (relative to BODY)
-    pub const BODY_TEE_TCB_SVN: usize = 0;      // 16 bytes
-    pub const BODY_MR_SEAM: usize = 16;          // 48 bytes
-    pub const BODY_MR_SIGNER_SEAM: usize = 64;   // 48 bytes
-    pub const BODY_SEAM_ATTRIBUTES: usize = 112;  // 8 bytes
-    pub const BODY_TD_ATTRIBUTES: usize = 120;    // 8 bytes
-    pub const BODY_XFAM: usize = 128;            // 8 bytes
-    pub const BODY_MR_TD: usize = 136;           // 48 bytes
-    pub const BODY_MR_CONFIG_ID: usize = 184;    // 48 bytes
-    pub const BODY_MR_OWNER: usize = 232;        // 48 bytes
+    pub const BODY_TEE_TCB_SVN: usize = 0; // 16 bytes
+    pub const BODY_MR_SEAM: usize = 16; // 48 bytes
+    pub const BODY_MR_SIGNER_SEAM: usize = 64; // 48 bytes
+    pub const BODY_SEAM_ATTRIBUTES: usize = 112; // 8 bytes
+    pub const BODY_TD_ATTRIBUTES: usize = 120; // 8 bytes
+    pub const BODY_XFAM: usize = 128; // 8 bytes
+    pub const BODY_MR_TD: usize = 136; // 48 bytes
+    pub const BODY_MR_CONFIG_ID: usize = 184; // 48 bytes
+    pub const BODY_MR_OWNER: usize = 232; // 48 bytes
     pub const BODY_MR_OWNER_CONFIG: usize = 280; // 48 bytes
-    pub const BODY_RTMR0: usize = 328;           // 48 bytes
-    pub const BODY_RTMR1: usize = 376;           // 48 bytes
-    pub const BODY_RTMR2: usize = 424;           // 48 bytes
-    pub const BODY_RTMR3: usize = 472;           // 48 bytes
-    pub const BODY_REPORT_DATA: usize = 520;     // 64 bytes
+    pub const BODY_RTMR0: usize = 328; // 48 bytes
+    pub const BODY_RTMR1: usize = 376; // 48 bytes
+    pub const BODY_RTMR2: usize = 424; // 48 bytes
+    pub const BODY_RTMR3: usize = 472; // 48 bytes
+    pub const BODY_REPORT_DATA: usize = 520; // 64 bytes
     pub const BODY_LEN: usize = 584;
 
-    pub const SIGNATURE_DATA: usize = 48 + 584;  // After header + body
+    pub const SIGNATURE_DATA: usize = 48 + 584; // After header + body
 }
 
 /// Parsed TDX Quote for verification
@@ -199,7 +199,9 @@ impl IntelTdxProvider {
         };
 
         Self {
-            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new("intel-tdx")),
+            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new(
+                "intel-tdx",
+            )),
             available,
             simulate,
         }
@@ -249,9 +251,12 @@ impl IntelTdxProvider {
                 .read(true)
                 .write(true)
                 .open("/dev/tdx_guest")
-                .map_err(|e| TeeError::AttestationGenerationFailed(
-                    format!("Failed to open /dev/tdx_guest: {}", e)
-                ))?;
+                .map_err(|e| {
+                    TeeError::AttestationGenerationFailed(format!(
+                        "Failed to open /dev/tdx_guest: {}",
+                        e
+                    ))
+                })?;
 
             // Issue TDX_CMD_GET_REPORT0 ioctl
             // _IOWR('T', 1, struct tdx_report_req)
@@ -263,14 +268,19 @@ impl IntelTdxProvider {
             );
 
             let ret = unsafe {
-                libc::ioctl(file.as_raw_fd(), ioctl_nr as libc::c_ulong, buf.as_mut_ptr())
+                libc::ioctl(
+                    file.as_raw_fd(),
+                    ioctl_nr as libc::c_ulong,
+                    buf.as_mut_ptr(),
+                )
             };
 
             if ret != 0 {
                 let errno = std::io::Error::last_os_error();
-                return Err(TeeError::AttestationGenerationFailed(
-                    format!("TDX_CMD_GET_REPORT0 ioctl failed: {} (errno: {})", errno, ret)
-                ));
+                return Err(TeeError::AttestationGenerationFailed(format!(
+                    "TDX_CMD_GET_REPORT0 ioctl failed: {} (errno: {})",
+                    errno, ret
+                )));
             }
 
             // Extract TDREPORT (bytes 64..1088)
@@ -284,7 +294,7 @@ impl IntelTdxProvider {
         {
             let _ = user_data;
             Err(TeeError::not_available(
-                "Intel TDX requires Linux (ioctl to /dev/tdx_guest)"
+                "Intel TDX requires Linux (ioctl to /dev/tdx_guest)",
             ))
         }
     }
@@ -304,9 +314,12 @@ impl IntelTdxProvider {
             let report_dir = format!("/sys/kernel/config/tsm/report/{}", report_name);
 
             // Create report entry
-            fs::create_dir(&report_dir).map_err(|e| TeeError::AttestationGenerationFailed(
-                format!("Failed to create configfs-tsm report entry: {}", e)
-            ))?;
+            fs::create_dir(&report_dir).map_err(|e| {
+                TeeError::AttestationGenerationFailed(format!(
+                    "Failed to create configfs-tsm report entry: {}",
+                    e
+                ))
+            })?;
 
             // Prepare inblob (up to 64 bytes of user data)
             let mut inblob = vec![0u8; 64];
@@ -316,23 +329,25 @@ impl IntelTdxProvider {
             // Write user data to inblob
             fs::write(format!("{}/inblob", report_dir), &inblob).map_err(|e| {
                 let _ = fs::remove_dir(&report_dir);
-                TeeError::AttestationGenerationFailed(
-                    format!("Failed to write inblob: {}", e)
-                )
+                TeeError::AttestationGenerationFailed(format!("Failed to write inblob: {}", e))
             })?;
 
             // Read the generated quote
             let quote = fs::read(format!("{}/outblob", report_dir)).map_err(|e| {
                 let _ = fs::remove_dir(&report_dir);
-                TeeError::AttestationGenerationFailed(
-                    format!("Failed to read outblob (quote): {}", e)
-                )
+                TeeError::AttestationGenerationFailed(format!(
+                    "Failed to read outblob (quote): {}",
+                    e
+                ))
             })?;
 
             // Clean up
             let _ = fs::remove_dir(&report_dir);
 
-            tracing::info!("TDX Quote generated via configfs-tsm ({} bytes)", quote.len());
+            tracing::info!(
+                "TDX Quote generated via configfs-tsm ({} bytes)",
+                quote.len()
+            );
             Ok(quote)
         }
 
@@ -340,7 +355,7 @@ impl IntelTdxProvider {
         {
             let _ = user_data;
             Err(TeeError::not_available(
-                "configfs-tsm requires Linux kernel 6.7+"
+                "configfs-tsm requires Linux kernel 6.7+",
             ))
         }
     }
@@ -369,7 +384,7 @@ impl IntelTdxProvider {
 
         if quote_data.len() < quote_offsets::SIGNATURE_DATA + SIG_DATA_HEADER {
             return Err(TeeError::InvalidAttestationReport(
-                "Quote too short to contain signature section".to_string()
+                "Quote too short to contain signature section".to_string(),
             ));
         }
 
@@ -383,7 +398,8 @@ impl IntelTdxProvider {
         if auth_end > quote_data.len() {
             tracing::debug!(
                 "Quote sig_data_size {} exceeds buffer {} bytes",
-                sig_data_size, quote_data.len()
+                sig_data_size,
+                quote_data.len()
             );
             return Ok(vec![]);
         }
@@ -397,13 +413,16 @@ impl IntelTdxProvider {
         }
         let outer_type = u16::from_le_bytes([auth[outer_type_offset], auth[outer_type_offset + 1]]);
         let outer_size = u32::from_le_bytes(
-            auth[outer_type_offset + 2..outer_type_offset + 6].try_into().unwrap(),
+            auth[outer_type_offset + 2..outer_type_offset + 6]
+                .try_into()
+                .unwrap(),
         ) as usize;
         let outer_body_offset = outer_type_offset + 6;
         if auth.len() < outer_body_offset + outer_size {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Certification data size {} exceeds available data", outer_size)
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Certification data size {} exceeds available data",
+                outer_size
+            )));
         }
         let outer_body = &auth[outer_body_offset..outer_body_offset + outer_size];
 
@@ -438,13 +457,16 @@ impl IntelTdxProvider {
                     return Ok(vec![]);
                 }
                 let inner_size = u32::from_le_bytes(
-                    outer_body[inner_type_offset + 2..inner_type_offset + 6].try_into().unwrap(),
+                    outer_body[inner_type_offset + 2..inner_type_offset + 6]
+                        .try_into()
+                        .unwrap(),
                 ) as usize;
                 let inner_body_offset = inner_type_offset + 6;
                 if outer_body.len() < inner_body_offset + inner_size {
-                    return Err(TeeError::InvalidAttestationReport(
-                        format!("Inner certification data size {} exceeds available data", inner_size)
-                    ));
+                    return Err(TeeError::InvalidAttestationReport(format!(
+                        "Inner certification data size {} exceeds available data",
+                        inner_size
+                    )));
                 }
                 &outer_body[inner_body_offset..inner_body_offset + inner_size]
             }
@@ -455,8 +477,9 @@ impl IntelTdxProvider {
         };
 
         // Parse PEM certificates
-        let pem_str = std::str::from_utf8(pem_data)
-            .map_err(|e| TeeError::CertificateValidationFailed(format!("Invalid PEM UTF-8: {}", e)))?;
+        let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
+            TeeError::CertificateValidationFailed(format!("Invalid PEM UTF-8: {}", e))
+        })?;
 
         let mut certs = Vec::new();
         for cert_pem in pem_str.split("-----END CERTIFICATE-----") {
@@ -469,7 +492,10 @@ impl IntelTdxProvider {
             }
         }
 
-        tracing::info!("Extracted {} certificates from Quote signature section", certs.len());
+        tracing::info!(
+            "Extracted {} certificates from Quote signature section",
+            certs.len()
+        );
         Ok(certs)
     }
 
@@ -484,34 +510,40 @@ impl IntelTdxProvider {
     #[cfg(feature = "intel-tdx")]
     async fn fetch_pcs_certificates(&self, _qe_vendor_id: &[u8]) -> Result<Vec<Vec<u8>>> {
         // QE Identity endpoint
-        let qe_identity_url = "https://api.trustedservices.intel.com/sgx/certification/v4/qe/identity";
+        let qe_identity_url =
+            "https://api.trustedservices.intel.com/sgx/certification/v4/qe/identity";
 
         tracing::info!("Fetching QE identity from Intel PCS: {}", qe_identity_url);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| {
+                TeeError::AttestationGenerationFailed(format!("Failed to build HTTP client: {}", e))
+            })?;
 
-        let qe_identity_resp = client.get(qe_identity_url)
-            .send()
-            .await
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to fetch QE identity: {}", e)))?;
+        let qe_identity_resp = client.get(qe_identity_url).send().await.map_err(|e| {
+            TeeError::AttestationGenerationFailed(format!("Failed to fetch QE identity: {}", e))
+        })?;
 
         if !qe_identity_resp.status().is_success() {
-            return Err(TeeError::AttestationGenerationFailed(
-                format!("Intel PCS QE identity request failed: {}", qe_identity_resp.status())
-            ));
+            return Err(TeeError::AttestationGenerationFailed(format!(
+                "Intel PCS QE identity request failed: {}",
+                qe_identity_resp.status()
+            )));
         }
 
-        let qe_identity_data = qe_identity_resp.text().await
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to read QE identity: {}", e)))?;
+        let qe_identity_data = qe_identity_resp.text().await.map_err(|e| {
+            TeeError::AttestationGenerationFailed(format!("Failed to read QE identity: {}", e))
+        })?;
 
         tracing::debug!("QE identity response: {} bytes", qe_identity_data.len());
 
         // PCK Certificate endpoint (requires fmspc, pce_id, etc - simplified for now)
         // In production, extract FMSPC from Quote and construct proper URL
-        tracing::warn!("Intel PCS PCK certificate fetching not fully implemented (requires FMSPC extraction)");
+        tracing::warn!(
+            "Intel PCS PCK certificate fetching not fully implemented (requires FMSPC extraction)"
+        );
 
         // Return empty cert chain - caller should use embedded certs from Quote
         Ok(vec![])
@@ -519,7 +551,9 @@ impl IntelTdxProvider {
 
     #[cfg(not(feature = "intel-tdx"))]
     async fn fetch_pcs_certificates(&self, _qe_vendor_id: &[u8]) -> Result<Vec<Vec<u8>>> {
-        tracing::warn!("Intel PCS certificate fetching requires reqwest (enable intel-tdx feature)");
+        tracing::warn!(
+            "Intel PCS certificate fetching requires reqwest (enable intel-tdx feature)"
+        );
         Ok(vec![])
     }
 
@@ -604,7 +638,10 @@ impl IntelTdxProvider {
         // Copy TCB SVN
         if tdreport.len() >= tdreport_offsets::TEE_TCB_SVN + 16 {
             body[quote_offsets::BODY_TEE_TCB_SVN..quote_offsets::BODY_TEE_TCB_SVN + 16]
-                .copy_from_slice(&tdreport[tdreport_offsets::TEE_TCB_SVN - 256..tdreport_offsets::TEE_TCB_SVN - 256 + 16]);
+                .copy_from_slice(
+                    &tdreport[tdreport_offsets::TEE_TCB_SVN - 256
+                        ..tdreport_offsets::TEE_TCB_SVN - 256 + 16],
+                );
         }
 
         // Copy MRTD
@@ -620,23 +657,30 @@ impl IntelTdxProvider {
             tdreport_offsets::RTMR1,
             tdreport_offsets::RTMR2,
             tdreport_offsets::RTMR3,
-        ].iter().enumerate() {
+        ]
+        .iter()
+        .enumerate()
+        {
             let body_off = quote_offsets::BODY_RTMR0 + i * 48;
             if tdreport.len() >= rtmr_off + 48 {
-                body[body_off..body_off + 48]
-                    .copy_from_slice(&tdreport[*rtmr_off..*rtmr_off + 48]);
+                body[body_off..body_off + 48].copy_from_slice(&tdreport[*rtmr_off..*rtmr_off + 48]);
             }
         }
 
         // Copy report data
         if tdreport.len() >= tdreport_offsets::REPORT_DATA + 64 {
             body[quote_offsets::BODY_REPORT_DATA..quote_offsets::BODY_REPORT_DATA + 64]
-                .copy_from_slice(&tdreport[tdreport_offsets::REPORT_DATA..tdreport_offsets::REPORT_DATA + 64]);
+                .copy_from_slice(
+                    &tdreport[tdreport_offsets::REPORT_DATA..tdreport_offsets::REPORT_DATA + 64],
+                );
         }
 
         quote.extend_from_slice(&body);
 
-        tracing::info!("TDX Quote constructed from TDREPORT ({} bytes, no QE signature)", quote.len());
+        tracing::info!(
+            "TDX Quote constructed from TDREPORT ({} bytes, no QE signature)",
+            quote.len()
+        );
         Ok(quote)
     }
 
@@ -680,7 +724,10 @@ impl IntelTdxProvider {
     fn parse_quote(&self, data: &[u8]) -> Result<TdxQuote> {
         // Try JSON first (simulated)
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data)
-            && json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false)
+            && json
+                .get("simulated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             return self.parse_simulated_quote(&json, data);
         }
@@ -702,7 +749,8 @@ impl IntelTdxProvider {
             version: 4,
             att_key_type: 2,
             tee_type: 0x81,
-            tee_tcb_svn: json.get("tee_tcb_svn")
+            tee_tcb_svn: json
+                .get("tee_tcb_svn")
                 .and_then(|v| v.as_str())
                 .and_then(|s| hex::decode(s).ok())
                 .unwrap_or_else(|| vec![0u8; 16]),
@@ -724,14 +772,17 @@ impl IntelTdxProvider {
         let min_len = quote_offsets::BODY + quote_offsets::BODY_LEN;
         if data.len() < min_len {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "TDX Quote too short: {} bytes (need at least {})", data.len(), min_len
+                "TDX Quote too short: {} bytes (need at least {})",
+                data.len(),
+                min_len
             )));
         }
 
         let version = u16::from_le_bytes([data[0], data[1]]);
         if version != 4 {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "Unsupported TDX Quote version: {} (expected 4)", version
+                "Unsupported TDX Quote version: {} (expected 4)",
+                version
             )));
         }
 
@@ -740,7 +791,8 @@ impl IntelTdxProvider {
 
         if tee_type != 0x81 {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "Not a TDX quote: tee_type=0x{:X} (expected 0x81)", tee_type
+                "Not a TDX quote: tee_type=0x{:X} (expected 0x81)",
+                tee_type
             )));
         }
 
@@ -783,7 +835,11 @@ impl IntelTdxProvider {
     ///
     /// For simulated quotes:
     /// - Parse JSON format, return validation result with simulated flag
-    async fn verify_td_quote(&self, quote_data: &[u8], certificates: &[Vec<u8>]) -> Result<AttestationResult> {
+    async fn verify_td_quote(
+        &self,
+        quote_data: &[u8],
+        certificates: &[Vec<u8>],
+    ) -> Result<AttestationResult> {
         let quote = self.parse_quote(quote_data)?;
 
         let mut details = HashMap::new();
@@ -811,25 +867,31 @@ impl IntelTdxProvider {
             tracing::info!("Verifying real Intel TDX quote");
 
             // If certificates not provided but quote has signature data, extract embedded certs
-            let mut certs_to_verify = if certificates.is_empty() && quote.raw.len() > quote_offsets::SIGNATURE_DATA {
-                tracing::debug!("Attempting to extract QE certificate chain from Quote signature section");
-                match Self::extract_qe_cert_chain_from_quote(&quote.raw) {
-                    Ok(extracted_certs) if !extracted_certs.is_empty() => {
-                        tracing::info!("Using {} embedded certificates from Quote", extracted_certs.len());
-                        extracted_certs
+            let mut certs_to_verify =
+                if certificates.is_empty() && quote.raw.len() > quote_offsets::SIGNATURE_DATA {
+                    tracing::debug!(
+                        "Attempting to extract QE certificate chain from Quote signature section"
+                    );
+                    match Self::extract_qe_cert_chain_from_quote(&quote.raw) {
+                        Ok(extracted_certs) if !extracted_certs.is_empty() => {
+                            tracing::info!(
+                                "Using {} embedded certificates from Quote",
+                                extracted_certs.len()
+                            );
+                            extracted_certs
+                        }
+                        Ok(_) => {
+                            tracing::debug!("No embedded certificates found in Quote");
+                            vec![]
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to extract QE certs from Quote: {}", e);
+                            vec![]
+                        }
                     }
-                    Ok(_) => {
-                        tracing::debug!("No embedded certificates found in Quote");
-                        vec![]
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to extract QE certs from Quote: {}", e);
-                        vec![]
-                    }
-                }
-            } else {
-                certificates.to_vec()
-            };
+                } else {
+                    certificates.to_vec()
+                };
 
             // PCS fallback: if no caller-supplied AND no embedded certs, fetch from
             // Intel Provisioning Certification Service (the canonical collateral source).
@@ -842,12 +904,17 @@ impl IntelTdxProvider {
                 };
                 match self.fetch_pcs_certificates(qe_vendor_id).await {
                     Ok(pcs_certs) if !pcs_certs.is_empty() => {
-                        tracing::info!("Using {} certificates from Intel PCS fallback", pcs_certs.len());
+                        tracing::info!(
+                            "Using {} certificates from Intel PCS fallback",
+                            pcs_certs.len()
+                        );
                         details.insert("cert_source".to_string(), "intel_pcs".to_string());
                         certs_to_verify = pcs_certs;
                     }
                     Ok(_) => {
-                        tracing::debug!("Intel PCS returned no certificates; chain verification will be skipped");
+                        tracing::debug!(
+                            "Intel PCS returned no certificates; chain verification will be skipped"
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("Intel PCS fetch failed: {}", e);
@@ -892,7 +959,10 @@ impl IntelTdxProvider {
             }
         }
 
-        let measurements: Vec<Measurement> = quote.rtmrs.iter().enumerate()
+        let measurements: Vec<Measurement> = quote
+            .rtmrs
+            .iter()
+            .enumerate()
             .filter(|(_, rtmr)| !rtmr.is_empty())
             .map(|(i, rtmr)| Measurement {
                 index: i as u32,
@@ -960,7 +1030,8 @@ impl IntelTdxProvider {
         if sig_data_end > raw.len() || sig_data_size < ECDSA_SIG_LEN + ECDSA_PUBKEY_LEN {
             tracing::warn!(
                 "TDX Quote sig_data_size {} is inconsistent with buffer {} bytes",
-                sig_data_size, raw.len()
+                sig_data_size,
+                raw.len()
             );
             return Ok(false);
         }
@@ -977,10 +1048,9 @@ impl IntelTdxProvider {
 
     /// Verifies the Intel certificate chain against pinned root CA.
     fn verify_intel_cert_chain(&self, certificates: &[Vec<u8>]) -> Result<bool> {
-        let root_der = certs::pem_to_der(certs::INTEL_SGX_ROOT_CA_PEM)
-            .map_err(|e| TeeError::CertificateValidationFailed(
-                format!("Failed to decode Intel root CA: {}", e)
-            ))?;
+        let root_der = certs::pem_to_der(certs::INTEL_SGX_ROOT_CA_PEM).map_err(|e| {
+            TeeError::CertificateValidationFailed(format!("Failed to decode Intel root CA: {}", e))
+        })?;
 
         let root_cert = attestation::parse_x509_certificate(&root_der)?;
 
@@ -1002,10 +1072,7 @@ impl IntelTdxProvider {
         // Verify the last certificate in chain is signed by Intel root
         let last = chain.last().unwrap();
         if last.issuer_cn == root_cert.subject_cn || last.subject_cn == root_cert.subject_cn {
-            let verified = attestation::verify_certificate_signature(
-                last,
-                &root_cert.spki_der,
-            )?;
+            let verified = attestation::verify_certificate_signature(last, &root_cert.spki_der)?;
             if verified {
                 tracing::info!("Intel TDX certificate chain verified against pinned root CA");
             }
@@ -1013,7 +1080,8 @@ impl IntelTdxProvider {
         } else {
             tracing::warn!(
                 "Intel chain does not terminate at Intel SGX Root CA: last issuer='{}', root='{}'",
-                last.issuer_cn, root_cert.subject_cn
+                last.issuer_cn,
+                root_cert.subject_cn
             );
             Ok(false)
         }
@@ -1064,24 +1132,28 @@ impl TeeProvider for IntelTdxProvider {
         };
 
         // In real mode, extract embedded certificates from Quote if available
-        let certificates = if !self.simulate && attestation_data.len() > quote_offsets::SIGNATURE_DATA {
-            match Self::extract_qe_cert_chain_from_quote(&attestation_data) {
-                Ok(certs) if !certs.is_empty() => {
-                    tracing::info!("Extracted {} QE certificates from generated Quote", certs.len());
-                    certs
+        let certificates =
+            if !self.simulate && attestation_data.len() > quote_offsets::SIGNATURE_DATA {
+                match Self::extract_qe_cert_chain_from_quote(&attestation_data) {
+                    Ok(certs) if !certs.is_empty() => {
+                        tracing::info!(
+                            "Extracted {} QE certificates from generated Quote",
+                            certs.len()
+                        );
+                        certs
+                    }
+                    Ok(_) => {
+                        tracing::debug!("No embedded certificates in generated Quote");
+                        vec![]
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to extract QE certs from generated Quote: {}", e);
+                        vec![]
+                    }
                 }
-                Ok(_) => {
-                    tracing::debug!("No embedded certificates in generated Quote");
-                    vec![]
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to extract QE certs from generated Quote: {}", e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
+            } else {
+                vec![]
+            };
 
         Ok(AttestationReport {
             id: Uuid::new_v4(),
@@ -1103,7 +1175,8 @@ impl TeeProvider for IntelTdxProvider {
             ));
         }
 
-        self.verify_td_quote(&report.attestation_data, &report.certificates).await
+        self.verify_td_quote(&report.attestation_data, &report.certificates)
+            .await
     }
 
     async fn execute_in_enclave(&self, request: EnclaveRequest) -> Result<EnclaveResponse> {
@@ -1113,16 +1186,28 @@ impl TeeProvider for IntelTdxProvider {
 
         tracing::info!("Executing in TDX enclave: {:?}", request.operation);
 
-        // In real mode, operations execute inside the Trust Domain boundary.
-        // The TD's memory is encrypted by the CPU — all computation here is protected.
-        // In simulation mode, this is a passthrough.
+        // The node process already runs inside the Trust Domain — its memory is
+        // encrypted by the CPU, so this computation is inside the boundary by
+        // construction. See `TeeProvider::execute_in_enclave`.
+        let data = request.params;
+
+        // Bind the result to this TD when the caller asked to be able to prove
+        // where it came from. Fails closed: a caller that requested evidence
+        // must not receive a response it cannot prove.
+        let attestation = if request.include_attestation {
+            let binding =
+                crate::traits::enclave_response_binding(&request.id, &request.operation, &data);
+            Some(self.generate_attestation(&binding).await?)
+        } else {
+            None
+        };
 
         Ok(EnclaveResponse {
             request_id: request.id,
             success: true,
-            data: request.params,
+            data,
             error: None,
-            attestation: None,
+            attestation,
         })
     }
 
@@ -1169,8 +1254,7 @@ impl TeeProvider for IntelTdxProvider {
 /// Returns true only when simulation is explicitly requested via env var.
 /// Real hardware is the default — set `TENZRO_SIMULATE_TDX=1` to override.
 fn is_simulation_mode() -> bool {
-    std::env::var("TENZRO_SIMULATE_TDX")
-        .unwrap_or_else(|_| "0".to_string()) == "1"
+    std::env::var("TENZRO_SIMULATE_TDX").unwrap_or_else(|_| "0".to_string()) == "1"
 }
 
 /// Builds an _IOWR ioctl number.
@@ -1193,7 +1277,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_tdx_simulation_mode() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_TDX", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
         let provider = IntelTdxProvider::new();
         assert!(provider.simulate);
         assert!(provider.available);
@@ -1201,7 +1287,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_tdx_generate_simulated_quote() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_TDX", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
         let provider = IntelTdxProvider::new();
 
         let user_data = b"tenzro-test-data";
@@ -1222,7 +1310,9 @@ mod tests {
         // still inspect the measurements / details) but `valid` MUST be
         // false. Any relying party that branches on `result.valid` will
         // therefore reject the simulated attestation outright.
-        unsafe { std::env::set_var("TENZRO_SIMULATE_TDX", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
         let provider = IntelTdxProvider::new();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
@@ -1246,7 +1336,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_tdx_parse_simulated_quote() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_TDX", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
         let provider = IntelTdxProvider::new();
 
         let quote_bytes = provider.generate_simulated_quote(b"hello").unwrap();
@@ -1265,7 +1357,9 @@ mod tests {
         // (`platform_measurement()` returns NotAvailable), so
         // `enclave_keygen` must also return NotAvailable. There is no
         // software-fabrication fallback path.
-        unsafe { std::env::set_var("TENZRO_SIMULATE_TDX", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
         let provider = IntelTdxProvider::new();
 
         let params = KeyGenParams {
@@ -1302,13 +1396,13 @@ mod tests {
         let msg = b"intel-tdx real Ed25519";
         let sig = ks.sign(&handle, msg).await.unwrap();
 
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(
-            <&[u8; 32]>::try_from(pk.as_slice()).unwrap(),
-        )
-        .unwrap();
+        let vk =
+            ed25519_dalek::VerifyingKey::from_bytes(<&[u8; 32]>::try_from(pk.as_slice()).unwrap())
+                .unwrap();
         let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
         let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
-        vk.verify(msg, &signature).expect("real Ed25519 signature must verify");
+        vk.verify(msg, &signature)
+            .expect("real Ed25519 signature must verify");
     }
 
     #[test]
@@ -1333,7 +1427,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_tdx_wrong_vendor_rejected() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_TDX", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
         let provider = IntelTdxProvider::new();
 
         let mut report = provider.generate_attestation(b"test").await.unwrap();
@@ -1341,5 +1437,76 @@ mod tests {
 
         let result = provider.verify_attestation(&report).await;
         assert!(result.is_err());
+    }
+
+    /// `include_attestation` is a documented field on `EnclaveRequest`. Every
+    /// provider used to ignore it and hand back `attestation: None`, which made
+    /// the response indistinguishable from one produced outside any enclave.
+    #[tokio::test]
+    async fn execute_in_enclave_attests_when_asked() {
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
+        let provider = IntelTdxProvider::new();
+
+        let mut request = EnclaveRequest::new("infer".to_string(), b"payload".to_vec());
+        request.include_attestation = true;
+
+        let response = provider.execute_in_enclave(request.clone()).await.unwrap();
+        assert!(response.success);
+        assert_eq!(response.request_id, request.id);
+
+        let report = response
+            .attestation
+            .expect("a request with include_attestation must carry a report");
+
+        // The report must commit to *this* response — the binding is what lets a
+        // relying party tie the output to the enclave measurement.
+        let expected = crate::traits::enclave_response_binding(
+            &request.id,
+            &request.operation,
+            &response.data,
+        );
+        assert_eq!(
+            report.user_data, expected,
+            "report must bind the request id, operation, and returned data"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_in_enclave_skips_attestation_by_default() {
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_TDX", "1");
+        }
+        let provider = IntelTdxProvider::new();
+
+        // Attestation costs a hardware round-trip; a caller that does not ask
+        // for evidence should not pay for it.
+        let request = EnclaveRequest::new("infer".to_string(), b"payload".to_vec());
+        assert!(!request.include_attestation, "default is off");
+
+        let response = provider.execute_in_enclave(request).await.unwrap();
+        assert!(response.attestation.is_none());
+    }
+
+    /// Changing any bound field must move the commitment, or a response could be
+    /// lifted from one request and presented as the answer to another.
+    #[test]
+    fn enclave_response_binding_separates_its_fields() {
+        use crate::traits::enclave_response_binding;
+        let id_a = uuid::Uuid::new_v4();
+        let id_b = uuid::Uuid::new_v4();
+        let base = enclave_response_binding(&id_a, "infer", b"result");
+
+        assert_ne!(base, enclave_response_binding(&id_b, "infer", b"result"));
+        assert_ne!(base, enclave_response_binding(&id_a, "train", b"result"));
+        assert_ne!(base, enclave_response_binding(&id_a, "infer", b"other!"));
+
+        // Length prefixing stops a boundary shift from colliding: "ab" + "c"
+        // must not hash the same as "a" + "bc".
+        assert_ne!(
+            enclave_response_binding(&id_a, "ab", b"c"),
+            enclave_response_binding(&id_a, "a", b"bc"),
+        );
     }
 }

@@ -183,10 +183,7 @@ class RpcClient:
 
     def list_workers(self) -> list[MediaGenWorkerCapability]:
         result = self._call("tenzro_mediaGen_listWorkers")
-        return [
-            MediaGenWorkerCapability.from_json(w)
-            for w in (result or {}).get("workers") or []
-        ]
+        return [MediaGenWorkerCapability.from_json(w) for w in (result or {}).get("workers") or []]
 
     def claim_job(
         self,

@@ -79,7 +79,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use tenzro_bridge::evm_signer::EvmTransactionSigner;
-use tenzro_identity::erc8004::{abi, addresses, selectors, OnChainAgentRegistry};
+use tenzro_identity::erc8004::{OnChainAgentRegistry, abi, addresses, selectors};
 use tenzro_payments::visa_tap::{AgentTag, VerificationResult};
 
 use crate::error::{NodeError, Result};
@@ -257,14 +257,16 @@ pub fn dispatch_payer_auth_outcome(
 
     // 4. Resolve the machine DID to its allocated ERC-8004 `agentId`
     //    via the off-chain DID index. No fallback.
-    let agent_id = agent_registry.lookup_agent_id_by_did(machine_did).ok_or_else(|| {
-        NodeError::Other(format!(
-            "TAP reputation dispatcher: machine DID {} has no allocated \
+    let agent_id = agent_registry
+        .lookup_agent_id_by_did(machine_did)
+        .ok_or_else(|| {
+            NodeError::Other(format!(
+                "TAP reputation dispatcher: machine DID {} has no allocated \
              agentId on the on-chain mirror — register the machine identity \
              and wait for the Registered event before submitting TAP outcomes",
-            machine_did
-        ))
-    })?;
+                machine_did
+            ))
+        })?;
 
     let rating = outcome.reputation_score() as i8;
     let context_uri = match merchant_id {
@@ -282,12 +284,8 @@ pub fn dispatch_payer_auth_outcome(
     };
 
     // 5. Build calldata synchronously.
-    let calldata = abi::encode_submit_feedback(
-        selectors::SUBMIT_FEEDBACK,
-        agent_id,
-        rating,
-        &context_uri,
-    );
+    let calldata =
+        abi::encode_submit_feedback(selectors::SUBMIT_FEEDBACK, agent_id, rating, &context_uri);
 
     // 6. Detached signed-tx submission.
     let signer = Arc::clone(signer);
@@ -418,18 +416,14 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let did = "did:tenzro:machine:test:unverified";
-        mirror.mirror_register_agent(did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         let mut bad = ok_payer_auth_result(did, "key-1");
         bad.verified = false;
 
-        let res = dispatch_payer_auth_outcome(
-            &bad,
-            TapOutcome::Succeeded,
-            None,
-            &signer,
-            &mirror,
-        );
+        let res = dispatch_payer_auth_outcome(&bad, TapOutcome::Succeeded, None, &signer, &mirror);
         assert!(res.is_err(), "verified=false must be rejected");
     }
 
@@ -438,19 +432,19 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let did = "did:tenzro:machine:test:browse";
-        mirror.mirror_register_agent(did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         let mut browse = ok_payer_auth_result(did, "key-1");
         browse.verified_tag = Some(AgentTag::BrowserAuth);
 
-        let res = dispatch_payer_auth_outcome(
-            &browse,
-            TapOutcome::Succeeded,
-            None,
-            &signer,
-            &mirror,
+        let res =
+            dispatch_payer_auth_outcome(&browse, TapOutcome::Succeeded, None, &signer, &mirror);
+        assert!(
+            res.is_err(),
+            "BrowserAuth tag must be rejected — identity-only, no payment semantics"
         );
-        assert!(res.is_err(), "BrowserAuth tag must be rejected — identity-only, no payment semantics");
     }
 
     #[tokio::test]
@@ -458,18 +452,15 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let did = "did:tenzro:machine:test:notag";
-        mirror.mirror_register_agent(did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         let mut untagged = ok_payer_auth_result(did, "key-1");
         untagged.verified_tag = None;
 
-        let res = dispatch_payer_auth_outcome(
-            &untagged,
-            TapOutcome::Succeeded,
-            None,
-            &signer,
-            &mirror,
-        );
+        let res =
+            dispatch_payer_auth_outcome(&untagged, TapOutcome::Succeeded, None, &signer, &mirror);
         assert!(res.is_err(), "missing verified_tag must be rejected");
     }
 
@@ -481,13 +472,8 @@ mod tests {
         let mut no_did = ok_payer_auth_result("did:tenzro:machine:test:placeholder", "key-1");
         no_did.agent_did = None;
 
-        let res = dispatch_payer_auth_outcome(
-            &no_did,
-            TapOutcome::Succeeded,
-            None,
-            &signer,
-            &mirror,
-        );
+        let res =
+            dispatch_payer_auth_outcome(&no_did, TapOutcome::Succeeded, None, &signer, &mirror);
         assert!(res.is_err(), "missing agent_did must be rejected");
     }
 
@@ -503,7 +489,10 @@ mod tests {
             &signer,
             &mirror,
         );
-        assert!(res.is_err(), "unknown DID must be rejected, not silently mapped");
+        assert!(
+            res.is_err(),
+            "unknown DID must be rejected, not silently mapped"
+        );
     }
 
     #[tokio::test]
@@ -511,7 +500,9 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let did = "did:tenzro:machine:test:succeed";
-        mirror.mirror_register_agent(did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
         let agent_id = mirror.lookup_agent_id_by_did(did).unwrap();
 
         let outcome = dispatch_payer_auth_outcome(
@@ -536,7 +527,9 @@ mod tests {
         let signer = test_signer();
         let mirror: Arc<dyn OnChainAgentRegistry> = StubMirror::new();
         let did = "did:tenzro:machine:test:declined";
-        mirror.mirror_register_agent(did, &[0u8; 20], "ipfs://meta").unwrap();
+        mirror
+            .mirror_register_agent(did, &[0u8; 20], "ipfs://meta")
+            .unwrap();
 
         let outcome = dispatch_payer_auth_outcome(
             &ok_payer_auth_result(did, "key-fail"),
@@ -554,7 +547,10 @@ mod tests {
 
     #[test]
     fn outcome_score_ordering() {
-        assert!(TapOutcome::Succeeded.reputation_score() > TapOutcome::SettlementFailed.reputation_score());
+        assert!(
+            TapOutcome::Succeeded.reputation_score()
+                > TapOutcome::SettlementFailed.reputation_score()
+        );
         assert_eq!(TapOutcome::Succeeded.reputation_score(), 100);
         assert_eq!(TapOutcome::SettlementFailed.reputation_score(), 0);
     }

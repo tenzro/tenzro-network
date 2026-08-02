@@ -28,7 +28,6 @@ pub enum SkillStatus {
     Deprecated,
 }
 
-
 /// URI prefix for a content-addressed blob locator.
 pub const BLOB_URI_PREFIX: &str = "tenzro://blob/";
 
@@ -85,7 +84,9 @@ impl SkillBundle {
 }
 
 fn is_hash_hex(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Why a caller's version/hash pin was refused.
@@ -404,7 +405,10 @@ mod tests {
         assert_eq!(skill.version, "1.0.0");
         assert!(skill.is_available());
         assert!(skill.is_paid());
-        assert!(skill.creator_wallet.is_none(), "wallet starts unset; caller must populate before paid registration");
+        assert!(
+            skill.creator_wallet.is_none(),
+            "wallet starts unset; caller must populate before paid registration"
+        );
         assert_eq!(skill.status, SkillStatus::Active);
         assert_eq!(skill.invocation_count, 0);
     }

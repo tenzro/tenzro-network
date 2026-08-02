@@ -54,14 +54,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dkls23_core::protocols::dkg::{
-    KeepInitMulPhase3to4, KeepInitZeroSharePhase2to3, KeepInitZeroSharePhase3to4,
-    ProofCommitment, TransmitInitMulPhase3to4, TransmitInitZeroSharePhase2to4,
-    TransmitInitZeroSharePhase3to4,
+    KeepInitMulPhase3to4, KeepInitZeroSharePhase2to3, KeepInitZeroSharePhase3to4, ProofCommitment,
+    TransmitInitMulPhase3to4, TransmitInitZeroSharePhase2to4, TransmitInitZeroSharePhase3to4,
 };
 use dkls23_core::protocols::{Abort, AbortKind, Parameters, PartyIndex};
 use dkls23_secp256k1::Party;
-use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::Secp256k1;
+use k256::elliptic_curve::sec1::ToSec1Point;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -207,7 +206,10 @@ pub enum RefreshError {
     /// Inbound message arrived in the wrong logical phase (driver state
     /// machine guard).
     #[error("unexpected payload kind in {expected:?}: got {got}")]
-    UnexpectedPayloadKind { expected: MpcPhase, got: &'static str },
+    UnexpectedPayloadKind {
+        expected: MpcPhase,
+        got: &'static str,
+    },
     /// Inbound message did not match the active `InstanceId` — cross-session
     /// splice attempt or routing bug.
     #[error("instance id mismatch on inbound message")]
@@ -461,8 +463,7 @@ where
         // upstream `refresh_complete_*` methods take `&self`, so we don't
         // need the constructed `PartyIndex` value — but we want the
         // validation error to surface before any I/O.
-        PartyIndex::new(local_index)
-            .map_err(|e| RefreshError::InvalidParameters(e.to_string()))?;
+        PartyIndex::new(local_index).map_err(|e| RefreshError::InvalidParameters(e.to_string()))?;
         let total = self.cfg.parameters.total_parties as usize;
         // Build dkls23 Parameters to fail-fast on shape mismatch — the rebuilt
         // `Party<C>` already encodes these, but we surface the error here
@@ -531,13 +532,12 @@ where
             let (from_index, payload) = self.decode_inbound(&msg, MpcPhase::Refresh, 0)?;
             match payload {
                 RefreshRoundPayload::PolyFragment { fragment, .. } => {
-                    let scalar: k256::Scalar =
-                        bincode::deserialize(&fragment).map_err(|e| {
-                            RefreshError::MalformedPayload {
-                                from_did: msg.from_did.clone(),
-                                detail: e.to_string(),
-                            }
-                        })?;
+                    let scalar: k256::Scalar = bincode::deserialize(&fragment).map_err(|e| {
+                        RefreshError::MalformedPayload {
+                            from_did: msg.from_did.clone(),
+                            detail: e.to_string(),
+                        }
+                    })?;
                     received_fragments.insert(from_index, scalar);
                 }
                 other => {
@@ -550,15 +550,13 @@ where
         }
         let mut poly_fragments_vec: Vec<k256::Scalar> = Vec::with_capacity(total);
         for i in 1..=total as u8 {
-            poly_fragments_vec.push(
-                *received_fragments
-                    .get(&i)
-                    .ok_or(RefreshError::ProtocolAbort {
-                        party: local_index,
-                        kind: AbortKindWire::Recoverable,
-                        reason: format!("missing poly fragment from party {i}"),
-                    })?,
-            );
+            poly_fragments_vec.push(*received_fragments.get(&i).ok_or(
+                RefreshError::ProtocolAbort {
+                    party: local_index,
+                    kind: AbortKindWire::Recoverable,
+                    reason: format!("missing poly fragment from party {i}"),
+                },
+            )?);
         }
 
         // -------------------- Phase 2 ---------------------------------------
@@ -630,8 +628,7 @@ where
         for z in &local_zero_transmit_p3 {
             routed_zero_p3.insert(z.parties.receiver.as_u8(), z);
         }
-        let mut routed_mul_p3: BTreeMap<u8, &TransmitInitMulPhase3to4<Secp256k1>> =
-            BTreeMap::new();
+        let mut routed_mul_p3: BTreeMap<u8, &TransmitInitMulPhase3to4<Secp256k1>> = BTreeMap::new();
         for m in &local_mul_transmit_p3 {
             routed_mul_p3.insert(m.parties.receiver.as_u8(), m);
         }
@@ -690,15 +687,13 @@ where
         // -------------------- Phase 4 (finalise) ----------------------------
         let mut proofs_commitments: Vec<ProofCommitment<Secp256k1>> = Vec::with_capacity(total);
         for i in 1..=total as u8 {
-            proofs_commitments.push(
-                proofs_commitments_map
-                    .remove(&i)
-                    .ok_or(RefreshError::ProtocolAbort {
-                        party: local_index,
-                        kind: AbortKindWire::Recoverable,
-                        reason: format!("missing phase2 proof commitment from party {i}"),
-                    })?,
-            );
+            proofs_commitments.push(proofs_commitments_map.remove(&i).ok_or(
+                RefreshError::ProtocolAbort {
+                    party: local_index,
+                    kind: AbortKindWire::Recoverable,
+                    reason: format!("missing phase2 proof commitment from party {i}"),
+                },
+            )?);
         }
 
         let refreshed_party = party
@@ -765,8 +760,8 @@ where
         round_index: u32,
         to_index: u8,
     ) -> Result<(), RefreshError> {
-        let bytes = bincode::serialize(payload)
-            .map_err(|e| RefreshError::PartyCodec(e.to_string()))?;
+        let bytes =
+            bincode::serialize(payload).map_err(|e| RefreshError::PartyCodec(e.to_string()))?;
         let to_did = self.cfg.participant_dids[(to_index - 1) as usize].clone();
         let msg = MpcRoundMessage {
             instance_id: self.cfg.instance_id,
@@ -802,12 +797,11 @@ where
             .position(|d| d == &msg.from_did)
             .ok_or_else(|| RefreshError::UnknownSender(msg.from_did.clone()))?;
         let from_index = (from_index0 + 1) as u8;
-        let payload: RefreshRoundPayload = bincode::deserialize(&msg.payload).map_err(|e| {
-            RefreshError::MalformedPayload {
+        let payload: RefreshRoundPayload =
+            bincode::deserialize(&msg.payload).map_err(|e| RefreshError::MalformedPayload {
                 from_did: msg.from_did.clone(),
                 detail: e.to_string(),
-            }
-        })?;
+            })?;
         Ok((from_index, payload))
     }
 }
@@ -864,8 +858,7 @@ mod tests {
 
     impl MockTransport {
         fn fan_out(dids: &[String]) -> Vec<Self> {
-            let mut inboxes_map: HashMap<String, UnboundedSender<MpcRoundMessage>> =
-                HashMap::new();
+            let mut inboxes_map: HashMap<String, UnboundedSender<MpcRoundMessage>> = HashMap::new();
             let mut my_rxs: Vec<(String, UnboundedReceiver<MpcRoundMessage>)> =
                 Vec::with_capacity(dids.len());
             for d in dids {
@@ -941,7 +934,10 @@ mod tests {
         };
         assert!(matches!(
             cfg.validate(),
-            Err(RefreshError::ParticipantCountMismatch { expected: 3, got: 2 })
+            Err(RefreshError::ParticipantCountMismatch {
+                expected: 3,
+                got: 2
+            })
         ));
     }
 

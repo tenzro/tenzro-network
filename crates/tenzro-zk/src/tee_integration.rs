@@ -13,7 +13,7 @@
 //!
 //! Pure cryptographic helpers ([`sign_tee_zk_proof`],
 //! [`verify_tee_zk_signature`], [`extract_tee_public_key`],
-//! [`get_expected_measurement`]) operate on the byte-oriented
+//! operate on the byte-oriented
 //! [`TeeZkProof`] / [`AttestationReport`] types and are independent of the
 //! underlying proof system.
 
@@ -26,10 +26,9 @@ use crate::plonky3::config::{TenzroStarkConfig, Val};
 use crate::plonky3::envelope::{decode_proof, encode_proof, encode_public_inputs};
 use crate::plonky3::{Plonky3Prover, Plonky3Verifier};
 use crate::proof::{Proof, TeeZkProof};
-use tenzro_crypto::composite::{CompositePublicKey, HybridSigner, StandardHybridVerifier};
 use tenzro_crypto::composite::CompositeSignature;
 use tenzro_crypto::composite::HybridVerifier as _;
-use tenzro_crypto::hash::sha256;
+use tenzro_crypto::composite::{CompositePublicKey, HybridSigner, StandardHybridVerifier};
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::{Signature, Signer};
 use tenzro_types::tee::{AttestationReport, AttestationResult, TeeVendor};
@@ -48,46 +47,64 @@ use tracing::{debug, warn};
 ///
 /// The caller is responsible for producing the trace and public-input vector
 /// from their AIR's witness — see `circuits::airs::*::generate_*_trace`.
+///
+/// # The attestation is supplied, never invented
+///
+/// `attestation` must come from the running enclave — a TDX TDREPORT, an
+/// SEV-SNP report, a Nitro NSM document. This crate has no way to obtain one
+/// and no business inventing one: it does not know what hardware it is on.
+///
+/// This used to build a placeholder itself, with an empty quote and a
+/// measurement derived from `sha256("CODE_MEASUREMENT_<circuit>_<vendor>")` —
+/// a constant, not a hardware measurement. The result was a `TeeZkProof`
+/// carrying an attestation that attested to nothing, indistinguishable in
+/// shape from a real one to anything that did not verify the quote chain. On
+/// a node with no TEE at all it still produced one.
+///
+/// The same separation already applies to [`bind_external_attestation_result`],
+/// which takes an externally-verified appraisal rather than performing one.
+///
+/// # Errors
+///
+/// Returns [`ZkError`] when the trace does not satisfy the AIR's constraints,
+/// rather than panicking — the prover's debug constraint checker aborts the
+/// thread, and a caller-supplied witness must not be able to do that.
 pub fn generate_tee_zk_proof<A>(
     air: &A,
     trace: RowMajorMatrix<Val>,
     public_inputs: Vec<Val>,
     circuit_id: &str,
-    vendor: TeeVendor,
+    attestation: AttestationReport,
 ) -> Result<TeeZkProof>
 where
     A: Air<SymbolicAirBuilder<Val>>
         + for<'a> Air<ProverConstraintFolder<'a, TenzroStarkConfig>>
         + for<'a> Air<DebugConstraintBuilder<'a, Val>>,
 {
+    // The Plonky3 prover panics (rather than erroring) when the trace violates
+    // the AIR — `p3_air::check_constraints` asserts. A witness that fails to
+    // satisfy the circuit is an ordinary caller mistake, so catch the unwind
+    // and return it as an error. Without this, any caller able to reach a
+    // proving path can abort a worker thread with a malformed witness.
     let prover = Plonky3Prover::<A>::new();
-    let p3_proof = prover.prove_air(air, trace, &public_inputs);
+    let p3_proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prover.prove_air(air, trace, &public_inputs)
+    }))
+    .map_err(|_| {
+        ZkError::ProofGenerationError(format!(
+            "the supplied trace does not satisfy the {circuit_id} AIR's constraints"
+        ))
+    })?;
 
     let proof_bytes = encode_proof(&p3_proof)?;
     let pi_blobs = encode_public_inputs(&public_inputs);
 
-    let zk_proof = Proof::new(
-        proof_bytes,
-        pi_blobs,
-        circuit_id.to_string(),
-    );
-
-    // Build a placeholder attestation: in production this comes from the
-    // running TEE (TDX TDREPORT / SEV-SNP report / Nitro NSM document).
-    // The measurement field is filled with the expected code measurement
-    // for this circuit so verifiers can compare against a known-good value.
-    let measurement = get_expected_measurement(circuit_id, vendor);
-    let attestation = AttestationReport::new(
-        vendor,
-        Vec::new(),       // quote — populated by hardware adapter
-        measurement,
-        Vec::new(),       // additional_data
-    );
+    let zk_proof = Proof::new(proof_bytes, pi_blobs, circuit_id.to_string());
 
     debug!(
         "TeeZkProof generated: circuit={} vendor={:?} proof_size={}B pi_count={}",
         circuit_id,
-        vendor,
+        attestation.vendor,
         zk_proof.proof_bytes.len(),
         zk_proof.public_inputs.len(),
     );
@@ -106,13 +123,11 @@ where
 /// can additionally bind the proof to a specific enclave.
 pub fn verify_tee_zk_proof<A>(air: &A, proof: &TeeZkProof) -> Result<bool>
 where
-    A: Air<SymbolicAirBuilder<Val>>
-        + for<'a> Air<VerifierConstraintFolder<'a, TenzroStarkConfig>>,
+    A: Air<SymbolicAirBuilder<Val>> + for<'a> Air<VerifierConstraintFolder<'a, TenzroStarkConfig>>,
 {
     let p3_proof = decode_proof(&proof.zk_proof.proof_bytes)?;
-    let public_inputs = crate::plonky3::envelope::decode_public_inputs(
-        &proof.zk_proof.public_inputs,
-    )?;
+    let public_inputs =
+        crate::plonky3::envelope::decode_public_inputs(&proof.zk_proof.public_inputs)?;
 
     let verifier = Plonky3Verifier::<A>::new();
     match verifier.verify_air(air, &p3_proof, &public_inputs) {
@@ -208,8 +223,12 @@ fn decode_signing_pubkey_any(raw: &[u8]) -> Result<DecodedSigningPubkey> {
         ));
     }
     match raw[0] {
-        TAG_ED25519 | TAG_SECP256K1 => decode_signing_pubkey(raw).map(DecodedSigningPubkey::Classical),
-        TAG_HYBRID_ED25519_ML_DSA_65 => decode_hybrid_signing_pubkey(raw).map(DecodedSigningPubkey::Hybrid),
+        TAG_ED25519 | TAG_SECP256K1 => {
+            decode_signing_pubkey(raw).map(DecodedSigningPubkey::Classical)
+        }
+        TAG_HYBRID_ED25519_ML_DSA_65 => {
+            decode_hybrid_signing_pubkey(raw).map(DecodedSigningPubkey::Hybrid)
+        }
         other => Err(ZkError::TeeIntegrationError(format!(
             "unknown signing key type tag: 0x{:02x}",
             other
@@ -232,7 +251,7 @@ fn decode_signing_pubkey(raw: &[u8]) -> Result<PublicKey> {
             return Err(ZkError::TeeIntegrationError(format!(
                 "unknown signing key type tag: 0x{:02x}",
                 other
-            )))
+            )));
         }
     };
     Ok(PublicKey::new(key_type, key_bytes.to_vec()))
@@ -373,9 +392,7 @@ fn sign_tee_zk_proof_with_signer(
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let commitment = proof.commitment_hash();
 
-    let signature = signer
-        .sign(&commitment)
-        .map_err(ZkError::CryptoError)?;
+    let signature = signer.sign(&commitment).map_err(ZkError::CryptoError)?;
 
     let pubkey_bytes = encode_signing_pubkey(signer.public_key());
 
@@ -560,9 +577,7 @@ pub fn bind_external_attestation_result(
         .any(|m| m.value.as_slice() == proof_measurement.as_slice());
 
     if !matched {
-        warn!(
-            "External attestation result measurements do not bind to proof's measurement"
-        );
+        warn!("External attestation result measurements do not bind to proof's measurement");
         return Ok(false);
     }
 
@@ -616,8 +631,9 @@ fn key_binding_from_report_data(report_data: &[u8]) -> Vec<u8> {
 /// that carries an optional `public_key` byte string. Some callers hand us
 /// the payload map directly, so a bare map is also accepted.
 fn nitro_public_key_from_document(evidence: &[u8]) -> Result<Vec<u8>> {
-    let value: ciborium::value::Value = ciborium::de::from_reader(evidence)
-        .map_err(|e| ZkError::TeeAttestationError(format!("Nitro document is not valid CBOR: {e}")))?;
+    let value: ciborium::value::Value = ciborium::de::from_reader(evidence).map_err(|e| {
+        ZkError::TeeAttestationError(format!("Nitro document is not valid CBOR: {e}"))
+    })?;
 
     let payload_value = match value {
         ciborium::value::Value::Array(items) => {
@@ -707,7 +723,10 @@ fn report_data_at(evidence: &[u8], offset: usize, min_len: usize, format: &str) 
 /// otherwise the full 64-byte field is returned. Vendors without a
 /// standardized embedded-key format fail closed.
 pub fn extract_tee_public_key(report: &AttestationReport) -> Result<Vec<u8>> {
-    debug!("Extracting TEE public key from {:?} attestation", report.vendor);
+    debug!(
+        "Extracting TEE public key from {:?} attestation",
+        report.vendor
+    );
 
     let evidence: &[u8] = if !report.attestation_data.is_empty() {
         &report.attestation_data
@@ -746,12 +765,6 @@ pub fn extract_tee_public_key(report: &AttestationReport) -> Result<Vec<u8>> {
     }
 }
 
-/// Get the expected code measurement for a circuit.
-pub fn get_expected_measurement(circuit_id: &str, vendor: TeeVendor) -> Vec<u8> {
-    let measurement_data = format!("CODE_MEASUREMENT_{}_{}", circuit_id, vendor.as_str());
-    sha256(measurement_data.as_bytes()).as_bytes().to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,7 +793,11 @@ mod tests {
     }
 
     /// Helper: raw evidence with a 64-byte REPORT_DATA planted at `offset`.
-    fn evidence_with_report_data(total_len: usize, offset: usize, report_data: &[u8; 64]) -> Vec<u8> {
+    fn evidence_with_report_data(
+        total_len: usize,
+        offset: usize,
+        report_data: &[u8; 64],
+    ) -> Vec<u8> {
         let mut evidence = vec![0xAAu8; total_len];
         evidence[offset..offset + 64].copy_from_slice(report_data);
         evidence
@@ -795,7 +812,9 @@ mod tests {
     }
 
     /// Helper: COSE_Sign1 Nitro attestation document with the given payload map.
-    fn nitro_cose_document(payload_entries: Vec<(ciborium::value::Value, ciborium::value::Value)>) -> Vec<u8> {
+    fn nitro_cose_document(
+        payload_entries: Vec<(ciborium::value::Value, ciborium::value::Value)>,
+    ) -> Vec<u8> {
         use ciborium::value::Value;
         let mut payload_bytes = Vec::new();
         ciborium::ser::into_writer(&Value::Map(payload_entries), &mut payload_bytes).unwrap();
@@ -813,7 +832,11 @@ mod tests {
     #[test]
     fn test_extract_tee_public_key_sgx_padded_32_byte_key() {
         let (key, report_data) = padded_key(0x11);
-        let quote = evidence_with_report_data(SGX_QUOTE_MIN_LEN, SGX_QUOTE_REPORT_DATA_OFFSET, &report_data);
+        let quote = evidence_with_report_data(
+            SGX_QUOTE_MIN_LEN,
+            SGX_QUOTE_REPORT_DATA_OFFSET,
+            &report_data,
+        );
         let report = AttestationReport::new(TeeVendor::IntelSGX, quote, vec![], vec![7, 8, 9]);
 
         let pubkey = extract_tee_public_key(&report).unwrap();
@@ -824,7 +847,11 @@ mod tests {
     fn test_extract_tee_public_key_tdx_full_64_byte_binding() {
         // Non-zero tail → the full 64-byte field is the key material.
         let report_data = [0x22u8; 64];
-        let quote = evidence_with_report_data(TDX_QUOTE_MIN_LEN, TDX_QUOTE_REPORT_DATA_OFFSET, &report_data);
+        let quote = evidence_with_report_data(
+            TDX_QUOTE_MIN_LEN,
+            TDX_QUOTE_REPORT_DATA_OFFSET,
+            &report_data,
+        );
         let report = AttestationReport::new(TeeVendor::IntelTdx, quote, vec![], vec![]);
 
         let pubkey = extract_tee_public_key(&report).unwrap();
@@ -834,7 +861,8 @@ mod tests {
     #[test]
     fn test_extract_tee_public_key_snp_padded_key_via_quote_field() {
         let (key, report_data) = padded_key(0x33);
-        let snp_report = evidence_with_report_data(SNP_REPORT_MIN_LEN, SNP_REPORT_DATA_OFFSET, &report_data);
+        let snp_report =
+            evidence_with_report_data(SNP_REPORT_MIN_LEN, SNP_REPORT_DATA_OFFSET, &report_data);
         // attestation_data empty → falls back to the quote field.
         let report = AttestationReport::new(TeeVendor::AmdSevSnp, vec![], snp_report, vec![]);
 
@@ -847,8 +875,14 @@ mod tests {
         use ciborium::value::Value;
         let enclave_key = vec![0x44u8; 33];
         let doc = nitro_cose_document(vec![
-            (Value::Text("module_id".to_string()), Value::Text("i-0abc".to_string())),
-            (Value::Text("public_key".to_string()), Value::Bytes(enclave_key.clone())),
+            (
+                Value::Text("module_id".to_string()),
+                Value::Text("i-0abc".to_string()),
+            ),
+            (
+                Value::Text("public_key".to_string()),
+                Value::Bytes(enclave_key.clone()),
+            ),
         ]);
         let report = AttestationReport::new(TeeVendor::AWSNitro, doc, vec![], vec![]);
 
@@ -887,16 +921,6 @@ mod tests {
     fn test_extract_tee_public_key_empty_evidence_fails() {
         let report = AttestationReport::new(TeeVendor::IntelTdx, vec![], vec![], vec![]);
         assert!(extract_tee_public_key(&report).is_err());
-    }
-
-    #[test]
-    fn test_get_expected_measurement() {
-        let measurement1 = get_expected_measurement("inference_verification", TeeVendor::IntelSGX);
-        let measurement2 = get_expected_measurement("inference_verification", TeeVendor::AMDSEV);
-
-        assert_eq!(measurement1.len(), 32);
-        assert_eq!(measurement2.len(), 32);
-        assert_ne!(measurement1, measurement2);
     }
 
     #[test]
@@ -989,14 +1013,19 @@ mod tests {
         let trace = generate_inference_trace(model, input, output, 1 << 3);
         let pis = inference_public_inputs(model, input, output);
 
-        generate_tee_zk_proof(
-            &InferenceAir,
-            trace,
-            pis,
-            "inference",
+        // A stand-in for the enclave's report. The function no longer builds
+        // one itself — that was the defect: it fabricated an attestation with
+        // an empty quote and a constant measurement, so a node with no TEE
+        // still produced a bundle that looked attested.
+        let attestation = AttestationReport::new(
             TeeVendor::IntelSGX,
-        )
-        .expect("generate")
+            vec![0xAA; 32], // quote — from the hardware in production
+            vec![0xBB; 48], // measurement
+            Vec::new(),
+        );
+
+        generate_tee_zk_proof(&InferenceAir, trace, pis, "inference", attestation)
+            .expect("generate")
     }
 
     #[test]
@@ -1124,7 +1153,8 @@ mod tests {
 
         // Replace the embedded composite pubkey with a different one.
         let mut tampered = signed.clone();
-        tampered.signing_public_key = encode_hybrid_signing_pubkey(wrong_signer.public_key()).unwrap();
+        tampered.signing_public_key =
+            encode_hybrid_signing_pubkey(wrong_signer.public_key()).unwrap();
 
         assert!(!verify_tee_zk_signature(&tampered).unwrap());
     }
@@ -1138,7 +1168,10 @@ mod tests {
             DecodedSigningPubkey::Classical(_) => panic!("expected hybrid"),
         };
         assert_eq!(decoded.classical.key_type(), KeyType::Ed25519);
-        assert_eq!(decoded.classical.as_bytes(), signer.public_key().classical.as_bytes());
+        assert_eq!(
+            decoded.classical.as_bytes(),
+            signer.public_key().classical.as_bytes()
+        );
         assert_eq!(decoded.pq, signer.public_key().pq);
     }
 

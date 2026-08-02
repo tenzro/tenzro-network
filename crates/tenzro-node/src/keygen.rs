@@ -100,7 +100,10 @@ impl ValidatorPubkeys {
     pub fn to_genesis_toml(&self, stake: u64) -> String {
         let mut s = String::new();
         s.push_str("[[validators]]\n");
-        s.push_str(&format!("public_key = \"0x{}\"\n", hex::encode(&self.ed25519)));
+        s.push_str(&format!(
+            "public_key = \"0x{}\"\n",
+            hex::encode(&self.ed25519)
+        ));
         s.push_str(&format!(
             "pq_public_key = \"0x{}\"\n",
             hex::encode(&self.ml_dsa_65)
@@ -124,10 +127,7 @@ impl ValidatorPubkeys {
 ///   prevents `init` from accidentally overwriting an existing
 ///   validator identity.
 /// - `NodeError::Other` on crypto / IO failures.
-pub fn generate_and_persist_keyset(
-    data_dir: &Path,
-    force: bool,
-) -> Result<ValidatorKeyset> {
+pub fn generate_and_persist_keyset(data_dir: &Path, force: bool) -> Result<ValidatorKeyset> {
     std::fs::create_dir_all(data_dir)
         .map_err(|e| NodeError::Other(format!("create data_dir {}: {}", data_dir.display(), e)))?;
 
@@ -150,8 +150,7 @@ pub fn generate_and_persist_keyset(
     let keypair = KeyPair::generate(KeyType::Ed25519)
         .map_err(|e| NodeError::Other(format!("Ed25519 keygen: {}", e)))?;
     let pq = MlDsaSigningKey::generate();
-    let bls = BlsKeyPair::generate()
-        .map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?;
+    let bls = BlsKeyPair::generate().map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?;
 
     write_secret(&ed_path, &keypair.to_bytes())?;
     write_secret(&pq_path, pq.seed_bytes())?;
@@ -264,8 +263,8 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
     // `SecretKey::random` is deprecated in k256 0.14-rc; use the `Generate`
     // trait (re-exported from `elliptic_curve`). `SysRng: TryCryptoRng` is
     // lifted to `CryptoRng` via `UnwrapErr`.
-    use getrandom_0_4::{rand_core::UnwrapErr, SysRng};
     use ::k256::elliptic_curve::Generate;
+    use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
     let sk: SecretKey = SecretKey::generate_from_rng(&mut UnwrapErr(SysRng));
     let bytes = sk.to_bytes();
     write_secret(&key_path, &bytes)?;
@@ -358,7 +357,10 @@ mod tests {
         assert_eq!(loaded_pq.verifying_key_bytes().to_vec(), pubs.ml_dsa_65);
 
         let loaded_bls = load_validator_bls_key(dir.path()).expect("load bls");
-        assert_eq!(loaded_bls.public_key().to_bytes().to_vec(), pubs.bls12_381_g1);
+        assert_eq!(
+            loaded_bls.public_key().to_bytes().to_vec(),
+            pubs.bls12_381_g1
+        );
     }
 
     #[test]

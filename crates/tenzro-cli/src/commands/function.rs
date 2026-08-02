@@ -87,9 +87,9 @@ pub struct FunctionDeployCmd {
 
 impl FunctionDeployCmd {
     pub async fn execute(&self) -> Result<()> {
-        use base64::Engine as _;
-        use crate::rpc::RpcClient;
         use crate::commands::lease::print_placement;
+        use crate::rpc::RpcClient;
+        use base64::Engine as _;
 
         output::print_header("Deploy Function");
         if !self.wasm.is_file() {

@@ -46,7 +46,7 @@ use parking_lot::Mutex;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tenzro_storage::{KvStore, CF_VALIDATOR_MODULES};
+use tenzro_storage::{CF_VALIDATOR_MODULES, KvStore};
 use tenzro_types::{StdioSpawnSpec, ToolDefinition, ToolTransportMode, UpstreamAuth};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -142,10 +142,7 @@ impl OperatorCredentialVault {
     /// Derive a per-secret AES-256-GCM key. Each secret has its own
     /// key derived from `(ikm, sealed_secret_ref)` so a key
     /// compromise on one secret does not reveal another.
-    fn derive_key(
-        &self,
-        sealed_secret_ref: &str,
-    ) -> Result<Zeroizing<[u8; 32]>, McpPluginError> {
+    fn derive_key(&self, sealed_secret_ref: &str) -> Result<Zeroizing<[u8; 32]>, McpPluginError> {
         let mut salt = Vec::with_capacity(VAULT_LABEL.len() + sealed_secret_ref.len());
         salt.extend_from_slice(VAULT_LABEL);
         salt.extend_from_slice(sealed_secret_ref.as_bytes());
@@ -271,10 +268,8 @@ impl ResolvedAuth {
             return Ok(ResolvedAuth::None);
         };
         let plaintext = vault.reveal_secret(auth.sealed_secret_ref())?;
-        let value_str =
-            String::from_utf8(plaintext.to_vec()).map_err(|_| {
-                McpPluginError::Unseal("credential is not valid UTF-8".to_string())
-            })?;
+        let value_str = String::from_utf8(plaintext.to_vec())
+            .map_err(|_| McpPluginError::Unseal("credential is not valid UTF-8".to_string()))?;
         let value = Zeroizing::new(value_str);
         Ok(match auth {
             UpstreamAuth::Bearer { .. } => ResolvedAuth::Header {
@@ -456,7 +451,10 @@ impl McpPluginHost {
         let auth = ResolvedAuth::resolve(&self.vault, &tool.upstream_auth)?;
         let transport = tool.transport_mode().unwrap_or(ToolTransportMode::Mcp);
         match transport {
-            ToolTransportMode::Mcp => self.invoke_streamable_http(tool, method_name, params, &auth).await,
+            ToolTransportMode::Mcp => {
+                self.invoke_streamable_http(tool, method_name, params, &auth)
+                    .await
+            }
             ToolTransportMode::McpSse => self.invoke_sse(tool, method_name, params, &auth).await,
             ToolTransportMode::McpStdio => {
                 self.invoke_stdio(tool, method_name, params, &auth).await
@@ -623,7 +621,11 @@ impl McpPluginHost {
     /// extra dependency for the rare query-param case.
     fn endpoint_with_query(&self, tool: &ToolDefinition, auth: &ResolvedAuth) -> String {
         if let ResolvedAuth::QueryParam { name, value } = auth {
-            let sep = if tool.endpoint.contains('?') { '&' } else { '?' };
+            let sep = if tool.endpoint.contains('?') {
+                '&'
+            } else {
+                '?'
+            };
             return format!(
                 "{}{}{}={}",
                 tool.endpoint,

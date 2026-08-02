@@ -125,8 +125,7 @@ impl WalletProvisioner {
         let key_shares: Vec<KeyShare> = secret_shares
             .into_iter()
             .map(|s| {
-                let participant_id =
-                    format!("{}-{}", self.config.participant_id_prefix, s.index.0);
+                let participant_id = format!("{}-{}", self.config.participant_id_prefix, s.index.0);
                 KeyShare::new(s.index, participant_id, s)
             })
             .collect();
@@ -139,8 +138,8 @@ impl WalletProvisioner {
         let pq_signing_key = MlDsaSigningKey::generate();
 
         // Mandatory BLS leg for HotStuff-2 vote aggregation.
-        let bls_signing_key = BlsKeyPair::generate()
-            .map_err(|e| WalletError::ProvisioningFailed(e.to_string()))?;
+        let bls_signing_key =
+            BlsKeyPair::generate().map_err(|e| WalletError::ProvisioningFailed(e.to_string()))?;
 
         let wallet = MpcWallet::new(
             wallet_id.clone(),

@@ -142,8 +142,8 @@ mod tests {
     #[test]
     fn should_replicate_includes_self_in_view() {
         let cands = endpoints(3);
-        let selected_somewhere = (0..20)
-            .any(|i| should_replicate(D, &format!("c-{i}"), "endpoint-self", &cands, 2));
+        let selected_somewhere =
+            (0..20).any(|i| should_replicate(D, &format!("c-{i}"), "endpoint-self", &cands, 2));
         assert!(selected_somewhere);
     }
 
@@ -166,8 +166,7 @@ mod tests {
         let cands = endpoints(12);
         let diverged = (0..30).any(|i| {
             let k = format!("k-{i}");
-            select_holders(b"domain/a", &k, &cands, 3)
-                != select_holders(b"domain/b", &k, &cands, 3)
+            select_holders(b"domain/a", &k, &cands, 3) != select_holders(b"domain/b", &k, &cands, 3)
         });
         assert!(diverged, "domain tag had no effect on ranking");
     }

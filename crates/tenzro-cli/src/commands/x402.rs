@@ -432,8 +432,7 @@ impl X402PaymentIdCmd {
         match (&self.requirement_file, &self.offer_commitment) {
             (Some(path), _) => {
                 let requirement: serde_json::Value = serde_json::from_str(
-                    &std::fs::read_to_string(path)
-                        .with_context(|| format!("reading {path}"))?,
+                    &std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
                 )
                 .context("parsing requirement JSON")?;
                 params.insert("requirement".into(), requirement);

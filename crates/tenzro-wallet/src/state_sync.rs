@@ -22,17 +22,10 @@ use tracing::{debug, info, warn};
 #[async_trait]
 pub trait ChainStateProvider: Send + Sync {
     /// Get the current balance for an address and asset from on-chain state.
-    async fn get_on_chain_balance(
-        &self,
-        address: &Address,
-        asset_id: &AssetId,
-    ) -> Result<u128>;
+    async fn get_on_chain_balance(&self, address: &Address, asset_id: &AssetId) -> Result<u128>;
 
     /// Get all asset balances for an address from on-chain state.
-    async fn get_on_chain_balances(
-        &self,
-        address: &Address,
-    ) -> Result<Vec<(AssetId, u128)>>;
+    async fn get_on_chain_balances(&self, address: &Address) -> Result<Vec<(AssetId, u128)>>;
 
     /// Get the current confirmed nonce for an address.
     async fn get_on_chain_nonce(&self, address: &Address) -> Result<u64>;
@@ -115,18 +108,21 @@ impl WalletStateSync {
     /// Syncs balances, nonces, and pending transaction statuses
     /// from on-chain state.
     pub async fn sync_address(&self, address: &Address, assets: &[AssetId]) -> Result<()> {
-        let provider = self.chain_provider.as_ref().ok_or_else(|| {
-            WalletError::Other("No chain state provider connected".to_string())
-        })?;
+        let provider = self
+            .chain_provider
+            .as_ref()
+            .ok_or_else(|| WalletError::Other("No chain state provider connected".to_string()))?;
 
         // Sync balances
-        self.sync_balances(address, assets, provider.as_ref()).await?;
+        self.sync_balances(address, assets, provider.as_ref())
+            .await?;
 
         // Sync nonce
         self.sync_nonce(address, provider.as_ref()).await?;
 
         // Sync pending transactions
-        self.sync_pending_transactions(address, provider.as_ref()).await?;
+        self.sync_pending_transactions(address, provider.as_ref())
+            .await?;
 
         info!("Completed full sync for address {}", address);
         Ok(())
@@ -175,18 +171,11 @@ impl WalletStateSync {
     }
 
     /// Sync the nonce for an address from on-chain state.
-    async fn sync_nonce(
-        &self,
-        address: &Address,
-        provider: &dyn ChainStateProvider,
-    ) -> Result<()> {
+    async fn sync_nonce(&self, address: &Address, provider: &dyn ChainStateProvider) -> Result<()> {
         match provider.get_on_chain_nonce(address).await {
             Ok(on_chain_nonce) => {
                 self.nonces.sync_from_chain(address, on_chain_nonce);
-                debug!(
-                    "Synced nonce for {}: on-chain={}",
-                    address, on_chain_nonce
-                );
+                debug!("Synced nonce for {}: on-chain={}", address, on_chain_nonce);
             }
             Err(e) => {
                 warn!("Failed to sync nonce for {}: {}", address, e);
@@ -223,10 +212,7 @@ impl WalletStateSync {
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to check status for tx {}: {}",
-                        record.tx_hash, e
-                    );
+                    warn!("Failed to check status for tx {}: {}", record.tx_hash, e);
                 }
             }
         }
@@ -277,9 +263,10 @@ impl WalletStateSync {
         pq_sig: &[u8],
         record: TxRecord,
     ) -> Result<Hash> {
-        let provider = self.chain_provider.as_ref().ok_or_else(|| {
-            WalletError::Other("No chain state provider connected".to_string())
-        })?;
+        let provider = self
+            .chain_provider
+            .as_ref()
+            .ok_or_else(|| WalletError::Other("No chain state provider connected".to_string()))?;
 
         // Submit to network
         let tx_hash = provider
@@ -315,18 +302,11 @@ impl LocalStateProvider {
 
 #[async_trait]
 impl ChainStateProvider for LocalStateProvider {
-    async fn get_on_chain_balance(
-        &self,
-        address: &Address,
-        asset_id: &AssetId,
-    ) -> Result<u128> {
+    async fn get_on_chain_balance(&self, address: &Address, asset_id: &AssetId) -> Result<u128> {
         Ok(self.balances.get_balance(address, asset_id).available)
     }
 
-    async fn get_on_chain_balances(
-        &self,
-        address: &Address,
-    ) -> Result<Vec<(AssetId, u128)>> {
+    async fn get_on_chain_balances(&self, address: &Address) -> Result<Vec<(AssetId, u128)>> {
         Ok(self
             .balances
             .get_all_balances(address)
@@ -400,17 +380,10 @@ mod tests {
         // Set up local state
         balances.add_balance(&addr, &asset, 1000);
 
-        let provider = Arc::new(LocalStateProvider::new(
-            balances.clone(),
-            nonces.clone(),
-        ));
+        let provider = Arc::new(LocalStateProvider::new(balances.clone(), nonces.clone()));
 
-        let sync = WalletStateSync::new(
-            balances.clone(),
-            nonces.clone(),
-            history.clone(),
-        )
-        .with_chain_provider(provider);
+        let sync = WalletStateSync::new(balances.clone(), nonces.clone(), history.clone())
+            .with_chain_provider(provider);
 
         assert!(sync.is_connected());
 
@@ -429,19 +402,14 @@ mod tests {
 
         balances.add_balance(&addr, &asset, 5000);
 
-        let provider = Arc::new(LocalStateProvider::new(
-            balances.clone(),
-            nonces.clone(),
-        ));
+        let provider = Arc::new(LocalStateProvider::new(balances.clone(), nonces.clone()));
 
-        let sync = WalletStateSync::new(
-            balances.clone(),
-            nonces.clone(),
-            history.clone(),
-        )
-        .with_chain_provider(provider);
+        let sync = WalletStateSync::new(balances.clone(), nonces.clone(), history.clone())
+            .with_chain_provider(provider);
 
-        sync.sync_address(&addr, std::slice::from_ref(&asset)).await.unwrap();
+        sync.sync_address(&addr, std::slice::from_ref(&asset))
+            .await
+            .unwrap();
 
         let balance = balances.get_balance(&addr, &asset);
         assert_eq!(balance.available, 5000);
@@ -459,11 +427,7 @@ mod tests {
         balances.add_balance(&addr, &asset, 2000);
 
         // No chain provider — offline mode
-        let sync = WalletStateSync::new(
-            balances.clone(),
-            nonces.clone(),
-            history.clone(),
-        );
+        let sync = WalletStateSync::new(balances.clone(), nonces.clone(), history.clone());
 
         assert!(!sync.is_connected());
 

@@ -133,7 +133,18 @@ COPY --from=builder /build/rpc-server /usr/local/bin/rpc-server
 ENV TENZRO_RPC_SERVER_BIN=/usr/local/bin/rpc-server
 
 # Create data directories
-RUN mkdir -p /data/tenzro /config /home/tenzro/.tenzro/models && chown -R tenzro:tenzro /data /config /home/tenzro/.tenzro
+# One root for everything on the persistent volume. `TENZRO_HOME` moves the
+# shared model store, the HuggingFace cache, and any per-instance data dir
+# onto /data/tenzro, which is the mounted volume. Models previously lived at
+# /home/tenzro/.tenzro/models — inside the container's ephemeral layer — so
+# every restart re-downloaded tens of gigabytes of weights.
+#
+# `--data-dir /data/tenzro` stays pinned in CMD below. That is the documented
+# escape hatch, and it is used here deliberately: the running fleet's RocksDB
+# is already at /data/tenzro/db, and letting the default move it to
+# /data/tenzro/instances/default would orphan live chain state.
+ENV TENZRO_HOME=/data/tenzro
+RUN mkdir -p /data/tenzro/models /data/tenzro/hf /config && chown -R tenzro:tenzro /data /config
 
 USER tenzro
 WORKDIR /home/tenzro

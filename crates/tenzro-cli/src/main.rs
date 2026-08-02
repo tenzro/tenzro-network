@@ -3,44 +3,34 @@
 //! Command-line interface for operating Tenzro Network nodes, managing wallets,
 //! models, staking, and governance.
 
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
+use dialoguer::{Input, Select, theme::ColorfulTheme};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use dialoguer::{Select, Input, theme::ColorfulTheme};
 
 use tenzro_cli::{commands, output, rpc};
 
 use commands::{
-    NodeCommand, WalletCommand, ModelCommand, StakeCommand,
-    GovernanceCommand, ProviderCommand, InferenceCommand,
-    IdentityCommand, PaymentCommand, JoinCmd, SetupCmd, ScheduleCommand,
-    SetUsernameCmd, AgentCommand, CantonCommand,
-    EscrowCommand, TaskCommand, MarketplaceCommand, SkillCommand,
-    ToolCommand, McpCommand, ResourcesCommand, TokenCommand, ContractCommand, BridgeCommand,
-    DebridgeCommand, LifiCommand, NftCommand, ComplianceCommand,
-    CrosschainCommand, EventsCommand, CryptoCommand, TeeCommand,
-    ZkCommand, VrfCommand, CustodyCommand, AppCommand,
-    CortexCommand, Ap2Command, Erc8004Command, WormholeCommand, CcipCommand, CctCommand,
-    TrainCommand,
-    MediaGenCommand,
-    DetectCommand, EmbedImageCommand, EmbedTextCommand, EmbedVideoCommand, ForecastCommand,
-    SegmentCommand, TextSegmentCommand, TranscribeCommand,
-    AuthCommand,
-    X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, InteropCommand, CapitalCommand, ProvenanceCommand,
-    BondCommand, InsuranceCommand, CapabilityCommand,
-    ValidatorCommand, MemoryCommand, DaCommand, IrohCommand,
-    AdaptiveBurnCommand, SeedAgentCommand, Erc7683Command, Erc7579Command, PqHybridCommand,
-    AdminCommand,
-    TreasuryCommand,
-    KeyCommand,
-    WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand, StableAssetCommand,
-    HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
-    DiscoverCommand, ClusterCommand, database::DatabaseCommand, site::SiteCommand,
-    function::FunctionCommand,
-    machine::MachineCommand,
-    lease::LeaseCommand,
-    urwa::UrwaCommand, ivms101::Ivms101Command, attested_clock::AttestedClockCommand,
-    bridge_fee::BridgeFeeCommand, wormhole_ntt::WormholeNttCommand,
+    AdaptiveBurnCommand, AdminCommand, AgentCommand, Ap2Command, AppCommand, ApprovalCommand,
+    AuthCommand, AxelarCommand, BabylonCommand, BondCommand, BridgeCommand, CaipCommand,
+    CantonCommand, CapabilityCommand, CapitalCommand, CcipCommand, CctCommand, ClusterCommand,
+    ComplianceCommand, ContractCommand, CortexCommand, CrosschainCommand, CryptoCommand,
+    CustodyCommand, DaCommand, DebridgeCommand, DetectCommand, DiscoverCommand, DisputeCommand,
+    Eip7702Command, EmbedImageCommand, EmbedTextCommand, EmbedVideoCommand, Erc7579Command,
+    Erc7683Command, Erc8004Command, EscrowCommand, EventsCommand, ForecastCommand,
+    GovernanceCommand, HyperlaneCommand, IdentityCommand, InferenceCommand, InsuranceCommand,
+    InteropCommand, IrohCommand, JoinCmd, KeyCommand, LifiCommand, MarketplaceCommand, McpCommand,
+    MediaGenCommand, MemoryCommand, ModelCommand, NftCommand, NodeCommand, PaymentCommand,
+    Permit2Command, PqHybridCommand, ProvenanceCommand, ProviderCommand, ReputationCommand,
+    ResourcesCommand, ScheduleCommand, SecureMintCommand, SeedAgentCommand, SegmentCommand,
+    SetUsernameCmd, SetupCmd, SkillCommand, StableAssetCommand, StakeCommand, TaskCommand,
+    TeeCommand, TextSegmentCommand, TokenCommand, ToolCommand, TrainCommand, TranscribeCommand,
+    TreasuryCommand, ValidatorCommand, VrfCommand, WalletCommand, WorkflowCommand, WormholeCommand,
+    X402Command, ZkCommand, attested_clock::AttestedClockCommand, bridge_fee::BridgeFeeCommand,
+    database::DatabaseCommand, files::FilesCommand, function::FunctionCommand,
+    ivms101::Ivms101Command, lease::LeaseCommand, machine::MachineCommand, rpc_cmd::RpcCommand,
+    site::SiteCommand, status_bar::StatusCmd, urwa::UrwaCommand, visibility::VisibilityCommand,
+    wormhole_ntt::WormholeNttCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -128,6 +118,10 @@ enum Command {
     /// Agent marketplace commands
     #[command(subcommand)]
     Marketplace(MarketplaceCommand),
+
+    /// Interactive access to rented hardware (service key + passkey sign-in)
+    #[command(subcommand)]
+    Shell(commands::shell::ShellCommand),
 
     /// Skill registry commands
     #[command(subcommand)]
@@ -504,6 +498,21 @@ enum Command {
     #[command(subcommand)]
     Database(DatabaseCommand),
 
+    /// Tenant object storage: upload, list, download, and delete files
+    #[command(subcommand)]
+    Files(FilesCommand),
+
+    /// Live resource and traffic status for this node
+    Status(StatusCmd),
+
+    /// Discover and call any JSON-RPC method this node serves
+    #[command(subcommand)]
+    Rpc(RpcCommand),
+
+    /// Control what this node advertises to the network
+    #[command(subcommand)]
+    Visibility(VisibilityCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -631,8 +640,14 @@ async fn main() -> Result<()> {
     // Print banner for interactive commands only when stdout is a TTY
     // This prevents banner pollution in scripts, pipelines, and automated environments
     // Also respect TENZRO_NO_BANNER=1 environment variable
-    let no_banner = std::env::var("TENZRO_NO_BANNER").map(|v| v == "1").unwrap_or(false);
-    if !matches!(cli.command, Command::Version(_)) && !cli.verbose && !no_banner && atty::is(atty::Stream::Stdout) {
+    let no_banner = std::env::var("TENZRO_NO_BANNER")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !matches!(cli.command, Command::Version(_))
+        && !cli.verbose
+        && !no_banner
+        && atty::is(atty::Stream::Stdout)
+    {
         output::print_banner();
     }
 
@@ -655,6 +670,7 @@ async fn main() -> Result<()> {
         Command::Escrow(cmd) => cmd.execute().await?,
         Command::Task(cmd) => cmd.execute().await?,
         Command::Marketplace(cmd) => cmd.execute().await?,
+        Command::Shell(cmd) => cmd.execute().await?,
         Command::Skill(cmd) => cmd.execute().await?,
         Command::Tool(cmd) => cmd.execute().await?,
         Command::Mcp(cmd) => cmd.execute().await?,
@@ -748,6 +764,10 @@ async fn main() -> Result<()> {
         Command::Discover(cmd) => cmd.execute().await?,
         Command::Cluster(cmd) => cmd.execute().await?,
         Command::Database(cmd) => cmd.execute().await?,
+        Command::Files(cmd) => cmd.execute().await?,
+        Command::Status(cmd) => cmd.execute().await?,
+        Command::Rpc(cmd) => cmd.execute().await?,
+        Command::Visibility(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,
@@ -783,9 +803,14 @@ async fn execute_faucet(cmd: FaucetCmd) -> Result<()> {
 
     let rpc = rpc::RpcClient::new(&cmd.rpc);
 
-    let result: Result<serde_json::Value> = rpc.call("tenzro_faucet", serde_json::json!({
-        "address": cmd.address
-    })).await;
+    let result: Result<serde_json::Value> = rpc
+        .call(
+            "tenzro_faucet",
+            serde_json::json!({
+                "address": cmd.address
+            }),
+        )
+        .await;
 
     spinner.finish_and_clear();
 
@@ -833,20 +858,17 @@ fn sniff_image_media_type(bytes: &[u8]) -> Result<&'static str> {
 async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     use std::io::{self, Write};
     use std::sync::Arc;
-    use tenzro_model::{ModelRuntime, HfDownloader, GenerationConfig, ChatMessage as ModelChatMessage, get_model_by_id};
+    use tenzro_model::{
+        ChatMessage as ModelChatMessage, GenerationConfig, HfDownloader, ModelRuntime,
+        get_model_by_id,
+    };
 
     // Initialize model runtime and downloader
-    let models_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".tenzro")
-        .join("models");
+    let models_dir = tenzro_types::paths::models_dir();
     let _ = std::fs::create_dir_all(&models_dir);
 
     // Initialize chat history directory
-    let history_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".tenzro")
-        .join("chat_history");
+    let history_dir = tenzro_types::paths::chat_history_dir();
     let _ = std::fs::create_dir_all(&history_dir);
 
     let runtime = Arc::new(ModelRuntime::new());
@@ -914,15 +936,22 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         if gguf_path.exists() || gguf_path.is_symlink() {
             // Auto-load model if downloaded but not yet loaded
             if !runtime.is_loaded(&model_id) {
-                let spinner = output::create_spinner(&format!("Loading {} into memory...", entry.name));
-                match runtime.load_model_with_context(&model_id, &gguf_path, Some(entry.context_length)).await {
+                let spinner =
+                    output::create_spinner(&format!("Loading {} into memory...", entry.name));
+                match runtime
+                    .load_model_with_context(&model_id, &gguf_path, Some(entry.context_length))
+                    .await
+                {
                     Ok(()) => {
                         spinner.finish_and_clear();
                         output::print_success(&format!("Model {} loaded", entry.name));
                     }
                     Err(e) => {
                         spinner.finish_and_clear();
-                        output::print_warning(&format!("Failed to load locally: {}. Falling back to network.", e));
+                        output::print_warning(&format!(
+                            "Failed to load locally: {}. Falling back to network.",
+                            e
+                        ));
                     }
                 }
                 runtime.is_loaded(&model_id)
@@ -1005,7 +1034,12 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
 
             let mut sessions: Vec<_> = std::fs::read_dir(&history_dir)?
                 .filter_map(|entry| entry.ok())
-                .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "json")
+                        .unwrap_or(false)
+                })
                 .collect();
 
             sessions.sort_by(|a, b| {
@@ -1027,7 +1061,11 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                             .and_then(|m| m.get("content").and_then(|c| c.as_str()))
                             .map(|s| {
                                 let preview = s.chars().take(60).collect::<String>();
-                                if s.len() > 60 { format!("{}...", preview) } else { preview }
+                                if s.len() > 60 {
+                                    format!("{}...", preview)
+                                } else {
+                                    preview
+                                }
                             })
                             .unwrap_or_else(|| "(empty)".to_string())
                     } else {
@@ -1058,19 +1096,33 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                                 history = loaded_history;
                                 session_file = load_path;
                                 println!();
-                                output::print_success(&format!("Loaded session {} ({} messages)", session_id_to_load, history.len()));
+                                output::print_success(&format!(
+                                    "Loaded session {} ({} messages)",
+                                    session_id_to_load,
+                                    history.len()
+                                ));
                                 println!();
 
                                 // Display conversation so far
                                 for msg in &history {
                                     if let (Some(role), Some(content)) = (
                                         msg.get("role").and_then(|r| r.as_str()),
-                                        msg.get("content").and_then(|c| c.as_str())
+                                        msg.get("content").and_then(|c| c.as_str()),
                                     ) {
                                         if role == "user" {
-                                            println!("{}User:{} {}", output::colors::CYAN, output::colors::RESET, content);
+                                            println!(
+                                                "{}User:{} {}",
+                                                output::colors::CYAN,
+                                                output::colors::RESET,
+                                                content
+                                            );
                                         } else if role == "assistant" {
-                                            println!("{}Assistant:{} {}", output::colors::GREEN, output::colors::RESET, content);
+                                            println!(
+                                                "{}Assistant:{} {}",
+                                                output::colors::GREEN,
+                                                output::colors::RESET,
+                                                content
+                                            );
                                         }
                                     }
                                 }
@@ -1143,15 +1195,21 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
             // ── Local inference ──────────────────────────────────────
             // Build chat messages — llama.cpp applies the correct template
             // from GGUF metadata (Gemma, Qwen, Mistral, etc.)
-            let mut messages = vec![
-                ModelChatMessage {
-                    role: "system".to_string(),
-                    content: "You are a helpful assistant.".to_string(),
-                },
-            ];
+            let mut messages = vec![ModelChatMessage {
+                role: "system".to_string(),
+                content: "You are a helpful assistant.".to_string(),
+            }];
             for msg in &history {
-                let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user").to_string();
-                let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let role = msg
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("user")
+                    .to_string();
+                let content = msg
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 messages.push(ModelChatMessage { role, content });
             }
 
@@ -1164,8 +1222,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     .await
                     .map(|r| (r.text, r.input_tokens, r.output_tokens, r.tokens_per_second))
             } else {
-                let images: Vec<Vec<u8>> =
-                    media.iter().map(|(_, bytes)| bytes.clone()).collect();
+                let images: Vec<Vec<u8>> = media.iter().map(|(_, bytes)| bytes.clone()).collect();
                 runtime
                     .generate_chat_multimodal(&model_id, &messages, &images, &[], &gen_config)
                     .await
@@ -1182,18 +1239,22 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     // the disclosure shows up directly in the terminal.
                     // Use the canonical helper so the prefix string lives in
                     // exactly one place across the workspace.
-                    println!("{}", tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(&text));
+                    println!(
+                        "{}",
+                        tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(&text)
+                    );
                     println!();
 
                     output::print_field(
                         "",
-                        &format!("{}[{} in, {} out tokens | {:.1} tok/s | Free (local)]{}",
+                        &format!(
+                            "{}[{} in, {} out tokens | {:.1} tok/s | Free (local)]{}",
                             output::colors::BOLD,
                             input_tokens,
                             output_tokens,
                             tokens_per_second,
                             output::colors::RESET
-                        )
+                        ),
                     );
                     println!();
 
@@ -1203,7 +1264,9 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     }));
 
                     // Save history to session file
-                    if let Err(e) = std::fs::write(&session_file, serde_json::to_string_pretty(&history)?) {
+                    if let Err(e) =
+                        std::fs::write(&session_file, serde_json::to_string_pretty(&history)?)
+                    {
                         output::print_warning(&format!("Failed to save session: {}", e));
                     }
                 }
@@ -1326,7 +1389,10 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     // EU AI Act Art. 50(1) — same disclosure prefix as
                     // local-mode. Network mode reaches the user through
                     // the same terminal surface, so the rule is identical.
-                    println!("{}", tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(&chat_response.output));
+                    println!(
+                        "{}",
+                        tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(&chat_response.output)
+                    );
                     println!();
 
                     let cost_wei: u128 = chat_response.cost_wei.parse().unwrap_or(0);
@@ -1338,16 +1404,20 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
 
                     output::print_field(
                         "",
-                        &format!("{}[{} in, {} out tokens | {}]{}",
+                        &format!(
+                            "{}[{} in, {} out tokens | {}]{}",
                             output::colors::BOLD,
                             chat_response.input_tokens,
                             chat_response.output_tokens,
                             cost_str,
                             output::colors::RESET
-                        )
+                        ),
                     );
                     if let Some(ref load) = chat_response.load {
-                        output::print_field("", &format!("  Load: {}", output::format_load_info(load)));
+                        output::print_field(
+                            "",
+                            &format!("  Load: {}", output::format_load_info(load)),
+                        );
                     }
                     if let Some(ref receipt) = chat_response.tenzro_jurisdiction {
                         let claim = receipt.get("jurisdiction");
@@ -1378,7 +1448,11 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                             &format!(
                                 "  Jurisdiction: {} — {} claim, signed receipt",
                                 label,
-                                if attested { "attestation-bound" } else { "operator-asserted" }
+                                if attested {
+                                    "attestation-bound"
+                                } else {
+                                    "operator-asserted"
+                                }
                             ),
                         );
                     }
@@ -1390,7 +1464,9 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     }));
 
                     // Save history to session file
-                    if let Err(e) = std::fs::write(&session_file, serde_json::to_string_pretty(&history)?) {
+                    if let Err(e) =
+                        std::fs::write(&session_file, serde_json::to_string_pretty(&history)?)
+                    {
                         output::print_warning(&format!("Failed to save session: {}", e));
                     }
                 }
@@ -1414,11 +1490,14 @@ async fn execute_info(cmd: InfoCmd) -> Result<()> {
     let rpc = rpc::RpcClient::new(&cmd.rpc);
 
     // Fetch data from RPC
-    let block_number_result: Result<String> = rpc.call("eth_blockNumber", serde_json::json!([])).await;
+    let block_number_result: Result<String> =
+        rpc.call("eth_blockNumber", serde_json::json!([])).await;
     let chain_id_result: Result<String> = rpc.call("eth_chainId", serde_json::json!([])).await;
     let peer_count_result: Result<String> = rpc.call("net_peerCount", serde_json::json!([])).await;
-    let node_info_result: Result<serde_json::Value> = rpc.call("tenzro_nodeInfo", serde_json::json!([])).await;
-    let total_supply_result: Result<String> = rpc.call("tenzro_totalSupply", serde_json::json!([])).await;
+    let node_info_result: Result<serde_json::Value> =
+        rpc.call("tenzro_nodeInfo", serde_json::json!([])).await;
+    let total_supply_result: Result<String> =
+        rpc.call("tenzro_totalSupply", serde_json::json!([])).await;
 
     spinner.finish_and_clear();
 
@@ -1441,12 +1520,14 @@ async fn execute_info(cmd: InfoCmd) -> Result<()> {
         output::print_field("Best Block", &format!("#{}", block_num));
 
         // Try to query finalized block from RPC, fall back to block_num - 3
-        let finalized = match rpc.call("tenzro_getFinalizedBlock", serde_json::json!([])).await {
+        let finalized = match rpc
+            .call("tenzro_getFinalizedBlock", serde_json::json!([]))
+            .await
+        {
             Ok(val) => {
                 let val: serde_json::Value = val;
-                u64::from_str_radix(
-                    val.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16
-                ).unwrap_or(block_num.saturating_sub(3))
+                u64::from_str_radix(val.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16)
+                    .unwrap_or(block_num.saturating_sub(3))
             }
             Err(_) => block_num.saturating_sub(3),
         };
@@ -1496,15 +1577,25 @@ fn execute_version(cmd: VersionCmd) -> Result<()> {
         output::print_field("Version", env!("CARGO_PKG_VERSION"));
         output::print_field("Git Commit", option_env!("GIT_HASH").unwrap_or("unknown"));
         output::print_field("Build Date", option_env!("BUILD_DATE").unwrap_or("unknown"));
-        output::print_field("Rust Version", option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown"));
+        output::print_field(
+            "Rust Version",
+            option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown"),
+        );
         println!();
         output::print_field("Authors", env!("CARGO_PKG_AUTHORS"));
-        output::print_field("Homepage", option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://tenzro.com"));
+        output::print_field(
+            "Homepage",
+            option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://tenzro.com"),
+        );
         output::print_field("Repository", env!("CARGO_PKG_REPOSITORY"));
         output::print_field("License", env!("CARGO_PKG_LICENSE"));
         println!();
 
-        println!("{}Components:{}", output::colors::BOLD, output::colors::RESET);
+        println!(
+            "{}Components:{}",
+            output::colors::BOLD,
+            output::colors::RESET
+        );
         output::print_field("  tenzro-types", env!("CARGO_PKG_VERSION"));
         output::print_field("  tenzro-crypto", env!("CARGO_PKG_VERSION"));
         output::print_field("  tenzro-wallet", env!("CARGO_PKG_VERSION"));
@@ -1519,26 +1610,70 @@ fn execute_version(cmd: VersionCmd) -> Result<()> {
 /// Interactive mode — activated when `tenzro` is run with no arguments on a TTY
 async fn run_interactive_mode() -> Result<()> {
     println!();
-    println!("  {}████████╗███████╗███╗   ██╗███████╗██████╗  ██████╗ {}", output::colors::CYAN, output::colors::RESET);
-    println!("  {}╚══██╔══╝██╔════╝████╗  ██║╚══███╔╝██╔══██╗██╔═══██╗{}", output::colors::CYAN, output::colors::RESET);
-    println!("  {}   ██║   █████╗  ██╔██╗ ██║  ███╔╝ ██████╔╝██║   ██║{}", output::colors::CYAN, output::colors::RESET);
-    println!("  {}   ██║   ██╔══╝  ██║╚██╗██║ ███╔╝  ██╔══██╗██║   ██║{}", output::colors::CYAN, output::colors::RESET);
-    println!("  {}   ██║   ███████╗██║ ╚████║███████╗██║  ██║╚██████╔╝{}", output::colors::CYAN, output::colors::RESET);
-    println!("  {}   ╚═╝   ╚══════╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝{}", output::colors::CYAN, output::colors::RESET);
+    println!(
+        "  {}████████╗███████╗███╗   ██╗███████╗██████╗  ██████╗ {}",
+        output::colors::CYAN,
+        output::colors::RESET
+    );
+    println!(
+        "  {}╚══██╔══╝██╔════╝████╗  ██║╚══███╔╝██╔══██╗██╔═══██╗{}",
+        output::colors::CYAN,
+        output::colors::RESET
+    );
+    println!(
+        "  {}   ██║   █████╗  ██╔██╗ ██║  ███╔╝ ██████╔╝██║   ██║{}",
+        output::colors::CYAN,
+        output::colors::RESET
+    );
+    println!(
+        "  {}   ██║   ██╔══╝  ██║╚██╗██║ ███╔╝  ██╔══██╗██║   ██║{}",
+        output::colors::CYAN,
+        output::colors::RESET
+    );
+    println!(
+        "  {}   ██║   ███████╗██║ ╚████║███████╗██║  ██║╚██████╔╝{}",
+        output::colors::CYAN,
+        output::colors::RESET
+    );
+    println!(
+        "  {}   ╚═╝   ╚══════╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝{}",
+        output::colors::CYAN,
+        output::colors::RESET
+    );
     println!();
 
     // Determine RPC endpoint from config or default
     let cfg = tenzro_cli::config::load_config();
-    let rpc_url = cfg.endpoint.unwrap_or_else(|| "http://127.0.0.1:8545".to_string());
+    let rpc_url = cfg
+        .endpoint
+        .unwrap_or_else(|| "http://127.0.0.1:8545".to_string());
     let rpc = rpc::RpcClient::new(&rpc_url);
 
     // Show connection status
-    if let Ok(info) = rpc.call::<serde_json::Value>("tenzro_nodeInfo", serde_json::json!([])).await {
-        let height = info.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Ok(info) = rpc
+        .call::<serde_json::Value>("tenzro_nodeInfo", serde_json::json!([]))
+        .await
+    {
+        let height = info
+            .get("block_height")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let peers = info.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        println!("  {}Connected:{} {} | Block: {} | Peers: {}", output::colors::GREEN, output::colors::RESET, rpc.url(), height, peers);
+        println!(
+            "  {}Connected:{} {} | Block: {} | Peers: {}",
+            output::colors::GREEN,
+            output::colors::RESET,
+            rpc.url(),
+            height,
+            peers
+        );
     } else {
-        println!("  {}Not connected to a node{} ({})", output::colors::YELLOW, output::colors::RESET, rpc.url());
+        println!(
+            "  {}Not connected to a node{} ({})",
+            output::colors::YELLOW,
+            output::colors::RESET,
+            rpc.url()
+        );
     }
     println!();
 
@@ -1604,25 +1739,44 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            let result: serde_json::Value = rpc.call("tenzro_createWallet", serde_json::json!(["ed25519"])).await?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_createWallet", serde_json::json!(["ed25519"]))
+                .await?;
             output::print_success("Wallet created!");
-            output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
-            output::print_field("Type", result.get("key_type").and_then(|v| v.as_str()).unwrap_or("ed25519"));
+            output::print_field(
+                "Address",
+                result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
+            );
+            output::print_field(
+                "Type",
+                result
+                    .get("key_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ed25519"),
+            );
         }
         1 => {
             let addr: String = Input::with_theme(&ColorfulTheme::default())
                 .with_prompt("Address (hex)")
                 .interact_text()?;
-            let result: serde_json::Value = rpc.call("eth_getBalance", serde_json::json!([addr, "latest"])).await?;
+            let result: serde_json::Value = rpc
+                .call("eth_getBalance", serde_json::json!([addr, "latest"]))
+                .await?;
             let hex = result.as_str().unwrap_or("0x0");
             let wei = u128::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or(0);
             println!();
             output::print_field("Balance", &rpc::format_tnzo(wei));
         }
         2 => {
-            let from: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("From address").interact_text()?;
-            let to: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("To address").interact_text()?;
-            let amount: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount (TNZO)").interact_text()?;
+            let from: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("From address")
+                .interact_text()?;
+            let to: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("To address")
+                .interact_text()?;
+            let amount: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Amount (TNZO)")
+                .interact_text()?;
             let amount_float: f64 = amount.parse().unwrap_or(0.0);
             let amount_wei = (amount_float * 1e18) as u128;
 
@@ -1649,8 +1803,12 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             }
         }
         3 => {
-            let addr: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Address").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_faucet", serde_json::json!({ "address": addr })).await?;
+            let addr: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Address")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_faucet", serde_json::json!({ "address": addr }))
+                .await?;
             output::print_success("Faucet transaction submitted");
             if let Some(amount) = rpc::faucet_amount(&result) {
                 output::print_field("Amount", &rpc::format_tnzo(amount));
@@ -1660,7 +1818,10 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             }
         }
         4 => {
-            let accounts: Vec<serde_json::Value> = rpc.call("tenzro_listAccounts", serde_json::json!([])).await.unwrap_or_default();
+            let accounts: Vec<serde_json::Value> = rpc
+                .call("tenzro_listAccounts", serde_json::json!([]))
+                .await
+                .unwrap_or_default();
             if accounts.is_empty() {
                 output::print_info("No accounts found.");
             } else {
@@ -1673,15 +1834,24 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             }
         }
         5 => {
-            let addr: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Address").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_getTransactionHistory", serde_json::json!({ "address": addr, "limit": 10 })).await?;
+            let addr: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Address")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_getTransactionHistory",
+                    serde_json::json!({ "address": addr, "limit": 10 }),
+                )
+                .await?;
             if let Some(txs) = result.get("transactions").and_then(|v| v.as_array()) {
                 for tx in txs {
                     let hash = tx.get("hash").and_then(|v| v.as_str()).unwrap_or("?");
                     let value = tx.get("value").and_then(|v| v.as_str()).unwrap_or("0");
                     println!("  {} -> {}", &hash[..18.min(hash.len())], value);
                 }
-            } else { output::print_info("No transactions found."); }
+            } else {
+                output::print_info("No transactions found.");
+            }
         }
         _ => {}
     }
@@ -1704,51 +1874,93 @@ async fn models_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            let result: serde_json::Value = rpc.call("tenzro_listModels", serde_json::json!({})).await?;
+            let result: serde_json::Value =
+                rpc.call("tenzro_listModels", serde_json::json!({})).await?;
             if let Some(models) = result.as_array() {
                 let headers = vec!["Model ID", "Name", "Status"];
                 let mut rows = Vec::new();
                 for m in models {
                     rows.push(vec![
-                        m.get("model_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        m.get("status").and_then(|v| v.as_str()).unwrap_or("available").to_string(),
+                        m.get("model_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        m.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        m.get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("available")
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
-            } else { output::print_json(&result)?; }
+            } else {
+                output::print_json(&result)?;
+            }
         }
         1 => {
-            let model_id: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Model ID").interact_text()?;
-            let message: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Message").interact_text()?;
+            let model_id: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Model ID")
+                .interact_text()?;
+            let message: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Message")
+                .interact_text()?;
             let result: serde_json::Value = rpc.call("tenzro_chat", serde_json::json!({
                 "model_id": model_id, "message": message, "history": [], "max_tokens": 512, "temperature": 0.7,
             })).await?;
             if let Some(output_text) = result.get("output").and_then(|v| v.as_str()) {
                 println!();
                 // EU AI Act Art. 50(1) — match the chat REPL's prefix.
-                println!("{}", tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(output_text));
-            } else { output::print_json(&result)?; }
+                println!(
+                    "{}",
+                    tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(output_text)
+                );
+            } else {
+                output::print_json(&result)?;
+            }
         }
         2 => {
-            let model_id: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Model ID to download").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_downloadModel", serde_json::json!([{ "model_id": model_id }])).await?;
-            output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or("requested"));
+            let model_id: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Model ID to download")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_downloadModel",
+                    serde_json::json!([{ "model_id": model_id }]),
+                )
+                .await?;
+            output::print_field(
+                "Status",
+                result
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("requested"),
+            );
         }
         3 => {
-            let endpoints: Vec<serde_json::Value> = rpc.call("tenzro_listModelEndpoints", serde_json::json!([])).await.unwrap_or_default();
-            if endpoints.is_empty() { output::print_info("No endpoints registered."); }
-            else {
+            let endpoints: Vec<serde_json::Value> = rpc
+                .call("tenzro_listModelEndpoints", serde_json::json!([]))
+                .await
+                .unwrap_or_default();
+            if endpoints.is_empty() {
+                output::print_info("No endpoints registered.");
+            } else {
                 for ep in &endpoints {
                     output::print_field(
                         ep.get("model_name").and_then(|v| v.as_str()).unwrap_or("?"),
-                        ep.get("api_endpoint").and_then(|v| v.as_str()).unwrap_or(""),
+                        ep.get("api_endpoint")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
                     );
                 }
             }
         }
         4 => {
-            let result: serde_json::Value = rpc.call("tenzro_discoverModels", serde_json::json!({ "limit": 10 })).await?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_discoverModels", serde_json::json!({ "limit": 10 }))
+                .await?;
             if let Some(models) = result.as_array() {
                 for m in models {
                     output::print_field(
@@ -1779,42 +1991,89 @@ async fn agents_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            let name: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Agent name").interact_text()?;
-            let creator: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Creator address").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_registerAgent", serde_json::json!({
-                "name": name, "creator": creator, "capabilities": ["general"],
-            })).await?;
+            let name: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Agent name")
+                .interact_text()?;
+            let creator: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Creator address")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_registerAgent",
+                    serde_json::json!({
+                        "name": name, "creator": creator, "capabilities": ["general"],
+                    }),
+                )
+                .await?;
             output::print_success("Agent registered!");
-            output::print_field("Agent ID", result.get("agent_id").and_then(|v| v.as_str()).unwrap_or(""));
+            output::print_field(
+                "Agent ID",
+                result
+                    .get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
         }
         1 => {
-            let agents: Vec<serde_json::Value> = rpc.call("tenzro_listAgents", serde_json::json!([])).await.unwrap_or_default();
-            if agents.is_empty() { output::print_info("No agents registered."); }
-            else {
+            let agents: Vec<serde_json::Value> = rpc
+                .call("tenzro_listAgents", serde_json::json!([]))
+                .await
+                .unwrap_or_default();
+            if agents.is_empty() {
+                output::print_info("No agents registered.");
+            } else {
                 let headers = vec!["Agent ID", "Name", "Status"];
                 let mut rows = Vec::new();
                 for a in &agents {
                     rows.push(vec![
-                        a.get("agent_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        a.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        a.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        a.get("agent_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        a.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        a.get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
             }
         }
         2 => {
-            let from: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("From agent ID").interact_text()?;
-            let to: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("To agent ID").interact_text()?;
-            let msg: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Message").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_sendAgentMessage", serde_json::json!({
-                "from": from, "to": to, "message": msg,
-            })).await?;
+            let from: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("From agent ID")
+                .interact_text()?;
+            let to: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("To agent ID")
+                .interact_text()?;
+            let msg: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Message")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_sendAgentMessage",
+                    serde_json::json!({
+                        "from": from, "to": to, "message": msg,
+                    }),
+                )
+                .await?;
             output::print_success("Message sent!");
-            output::print_field("Message ID", result.get("message_id").and_then(|v| v.as_str()).unwrap_or(""));
+            output::print_field(
+                "Message ID",
+                result
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
         }
         3 => {
-            let result: serde_json::Value = rpc.call("tenzro_discoverAgents", serde_json::json!({ "limit": 10 })).await?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_discoverAgents", serde_json::json!({ "limit": 10 }))
+                .await?;
             if let Some(agents) = result.as_array() {
                 for a in agents {
                     output::print_field(
@@ -1825,12 +2084,25 @@ async fn agents_menu(rpc: &rpc::RpcClient) -> Result<()> {
             }
         }
         4 => {
-            let orch: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Orchestrator agent ID").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_createSwarm", serde_json::json!([{
-                "orchestrator_id": orch, "members": [],
-            }])).await?;
+            let orch: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Orchestrator agent ID")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_createSwarm",
+                    serde_json::json!([{
+                        "orchestrator_id": orch, "members": [],
+                    }]),
+                )
+                .await?;
             output::print_success("Swarm created!");
-            output::print_field("Swarm ID", result.get("swarm_id").and_then(|v| v.as_str()).unwrap_or(""));
+            output::print_field(
+                "Swarm ID",
+                result
+                    .get("swarm_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
         }
         _ => {}
     }
@@ -1852,18 +2124,42 @@ async fn bridge_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            let from: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("From chain").interact_text()?;
-            let to: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("To chain").interact_text()?;
-            let token: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Token").interact_text()?;
-            let amount: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_bridgeQuote", serde_json::json!({
-                "from_chain": from, "to_chain": to, "token": token, "amount": amount,
-            })).await?;
-            output::print_field("Estimated Output", result.get("estimated_output").and_then(|v| v.as_str()).unwrap_or("N/A"));
-            output::print_field("Fee", result.get("fee").and_then(|v| v.as_str()).unwrap_or("N/A"));
+            let from: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("From chain")
+                .interact_text()?;
+            let to: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("To chain")
+                .interact_text()?;
+            let token: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Token")
+                .interact_text()?;
+            let amount: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Amount")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_bridgeQuote",
+                    serde_json::json!({
+                        "from_chain": from, "to_chain": to, "token": token, "amount": amount,
+                    }),
+                )
+                .await?;
+            output::print_field(
+                "Estimated Output",
+                result
+                    .get("estimated_output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A"),
+            );
+            output::print_field(
+                "Fee",
+                result.get("fee").and_then(|v| v.as_str()).unwrap_or("N/A"),
+            );
         }
         1..=3 => {
-            output::print_info("Use the full CLI for this operation: tenzro bridge execute/status/routes");
+            output::print_info(
+                "Use the full CLI for this operation: tenzro bridge execute/status/routes",
+            );
         }
         _ => {}
     }
@@ -1885,36 +2181,62 @@ async fn identity_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            let name: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Display name").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_registerIdentity", serde_json::json!([{
-                "display_name": name, "identity_type": "human",
-            }])).await?;
+            let name: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Display name")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_registerIdentity",
+                    serde_json::json!([{
+                        "display_name": name, "identity_type": "human",
+                    }]),
+                )
+                .await?;
             output::print_success("Identity registered!");
-            output::print_field("DID", result.get("did").and_then(|v| v.as_str()).unwrap_or(""));
+            output::print_field(
+                "DID",
+                result.get("did").and_then(|v| v.as_str()).unwrap_or(""),
+            );
         }
         1 => {
-            let did: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("DID to resolve").interact_text()?;
+            let did: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("DID to resolve")
+                .interact_text()?;
             let result: serde_json::Value = rpc
                 .call("tenzro_resolveIdentity", serde_json::json!({"did": did}))
                 .await?;
-            if let Some(name) = result.get("display_name").and_then(|v| v.as_str()) { output::print_field("Name", name); }
-            if let Some(t) = result.get("identity_type").and_then(|v| v.as_str()) { output::print_field("Type", t); }
-            if let Some(s) = result.get("status").and_then(|v| v.as_str()) { output::print_field("Status", s); }
+            if let Some(name) = result.get("display_name").and_then(|v| v.as_str()) {
+                output::print_field("Name", name);
+            }
+            if let Some(t) = result.get("identity_type").and_then(|v| v.as_str()) {
+                output::print_field("Type", t);
+            }
+            if let Some(s) = result.get("status").and_then(|v| v.as_str()) {
+                output::print_field("Status", s);
+            }
         }
         2 => {
-            let ids: Vec<serde_json::Value> = rpc.call("tenzro_listIdentities", serde_json::json!([{}])).await.unwrap_or_default();
-            if ids.is_empty() { output::print_info("No identities found."); }
-            else {
+            let ids: Vec<serde_json::Value> = rpc
+                .call("tenzro_listIdentities", serde_json::json!([{}]))
+                .await
+                .unwrap_or_default();
+            if ids.is_empty() {
+                output::print_info("No identities found.");
+            } else {
                 for id in &ids {
                     output::print_field(
                         id.get("did").and_then(|v| v.as_str()).unwrap_or("?"),
-                        id.get("display_name").and_then(|v| v.as_str()).unwrap_or(""),
+                        id.get("display_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
                     );
                 }
             }
         }
         3 => {
-            output::print_info("Use the full CLI: tenzro identity set-delegation <DID> --max-tx-value <V>");
+            output::print_info(
+                "Use the full CLI: tenzro identity set-delegation <DID> --max-tx-value <V>",
+            );
         }
         _ => {}
     }
@@ -1936,24 +2258,48 @@ async fn payments_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            let resource: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Resource URI").interact_text()?;
-            let amount: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount").interact_text()?;
+            let resource: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Resource URI")
+                .interact_text()?;
+            let amount: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Amount")
+                .interact_text()?;
             let result: serde_json::Value = rpc.call("tenzro_createPaymentChallenge", serde_json::json!([{
                 "resource": resource, "amount": amount.parse::<u64>().unwrap_or(0), "asset": "USDC", "protocol": "mpp",
             }])).await?;
             output::print_success("Challenge created!");
-            output::print_field("Challenge ID", result.get("challenge_id").and_then(|v| v.as_str()).unwrap_or(""));
+            output::print_field(
+                "Challenge ID",
+                result
+                    .get("challenge_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
         }
         1 => {
-            let url: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Resource URL").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_payMpp", serde_json::json!([{ "url": url }])).await?;
+            let url: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Resource URL")
+                .interact_text()?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_payMpp", serde_json::json!([{ "url": url }]))
+                .await?;
             output::print_success("Payment successful!");
-            output::print_field("Receipt", result.get("receipt_id").and_then(|v| v.as_str()).unwrap_or(""));
+            output::print_field(
+                "Receipt",
+                result
+                    .get("receipt_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
         }
         2 => {
-            let sessions: Vec<serde_json::Value> = rpc.call("tenzro_listPaymentSessions", serde_json::json!([{}])).await.unwrap_or_default();
-            if sessions.is_empty() { output::print_info("No sessions."); }
-            else {
+            let sessions: Vec<serde_json::Value> = rpc
+                .call("tenzro_listPaymentSessions", serde_json::json!([{}]))
+                .await
+                .unwrap_or_default();
+            if sessions.is_empty() {
+                output::print_info("No sessions.");
+            } else {
                 for s in &sessions {
                     output::print_field(
                         s.get("session_id").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -1963,8 +2309,15 @@ async fn payments_menu(rpc: &rpc::RpcClient) -> Result<()> {
             }
         }
         3 => {
-            let info: serde_json::Value = rpc.call("tenzro_paymentGatewayInfo", serde_json::json!([])).await?;
-            output::print_field("Status", info.get("status").and_then(|v| v.as_str()).unwrap_or("active"));
+            let info: serde_json::Value = rpc
+                .call("tenzro_paymentGatewayInfo", serde_json::json!([]))
+                .await?;
+            output::print_field(
+                "Status",
+                info.get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("active"),
+            );
             output::print_info("Protocols: MPP, x402, Direct");
         }
         _ => {}
@@ -1993,27 +2346,57 @@ async fn security_menu(rpc: &rpc::RpcClient) -> Result<()> {
                 .items(&["ed25519", "secp256k1"])
                 .default(0)
                 .interact()?;
-            let kt = if key_type == 0 { "ed25519" } else { "secp256k1" };
-            let result: serde_json::Value = rpc.call("tenzro_generateKeypair", serde_json::json!({ "key_type": kt })).await?;
+            let kt = if key_type == 0 {
+                "ed25519"
+            } else {
+                "secp256k1"
+            };
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_generateKeypair",
+                    serde_json::json!({ "key_type": kt }),
+                )
+                .await?;
             output::print_success(&format!("{} keypair generated!", kt));
-            output::print_field("Public Key", result.get("public_key").and_then(|v| v.as_str()).unwrap_or(""));
-            output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
+            output::print_field(
+                "Public Key",
+                result
+                    .get("public_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
+            output::print_field(
+                "Address",
+                result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
+            );
         }
         1 | 2 => {
             output::print_info("Use the full CLI: tenzro crypto sign/verify");
         }
         3 => {
-            let result: serde_json::Value = rpc.call("tenzro_detectTee", serde_json::json!([])).await?;
-            let available = result.get("available").and_then(|v| v.as_bool()).unwrap_or(false);
+            let result: serde_json::Value =
+                rpc.call("tenzro_detectTee", serde_json::json!([])).await?;
+            let available = result
+                .get("available")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if available {
                 output::print_success("TEE hardware detected!");
-                output::print_field("Provider", result.get("provider").and_then(|v| v.as_str()).unwrap_or("unknown"));
+                output::print_field(
+                    "Provider",
+                    result
+                        .get("provider")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown"),
+                );
             } else {
                 output::print_info("No TEE hardware detected. Simulation mode available.");
             }
         }
         4 => {
-            output::print_info("Use the full CLI: tenzro zk prove --circuit <name> --inputs <json>");
+            output::print_info(
+                "Use the full CLI: tenzro zk prove --circuit <name> --inputs <json>",
+            );
         }
         _ => {}
     }
@@ -2036,10 +2419,14 @@ async fn developer_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            output::print_info("Use the full CLI: tenzro contract deploy --vm evm --bytecode <hex> --deployer <addr>");
+            output::print_info(
+                "Use the full CLI: tenzro contract deploy --vm evm --bytecode <hex> --deployer <addr>",
+            );
         }
         1 => {
-            let result: serde_json::Value = rpc.call("tenzro_listSkills", serde_json::json!([{ "limit": 10 }])).await?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_listSkills", serde_json::json!([{ "limit": 10 }]))
+                .await?;
             if let Some(skills) = result.as_array() {
                 for s in skills {
                     output::print_field(
@@ -2047,11 +2434,15 @@ async fn developer_menu(rpc: &rpc::RpcClient) -> Result<()> {
                         s.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                     );
                 }
-                if skills.is_empty() { output::print_info("No skills registered."); }
+                if skills.is_empty() {
+                    output::print_info("No skills registered.");
+                }
             }
         }
         2 => {
-            let result: serde_json::Value = rpc.call("tenzro_listTools", serde_json::json!([{ "limit": 10 }])).await?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_listTools", serde_json::json!([{ "limit": 10 }]))
+                .await?;
             if let Some(tools) = result.as_array() {
                 for t in tools {
                     output::print_field(
@@ -2059,11 +2450,15 @@ async fn developer_menu(rpc: &rpc::RpcClient) -> Result<()> {
                         t.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                     );
                 }
-                if tools.is_empty() { output::print_info("No tools registered."); }
+                if tools.is_empty() {
+                    output::print_info("No tools registered.");
+                }
             }
         }
         3 => {
-            let result: serde_json::Value = rpc.call("tenzro_listTasks", serde_json::json!([{ "limit": 10 }])).await?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_listTasks", serde_json::json!([{ "limit": 10 }]))
+                .await?;
             if let Some(tasks) = result.as_array() {
                 for t in tasks {
                     output::print_field(
@@ -2071,11 +2466,15 @@ async fn developer_menu(rpc: &rpc::RpcClient) -> Result<()> {
                         t.get("status").and_then(|v| v.as_str()).unwrap_or(""),
                     );
                 }
-                if tasks.is_empty() { output::print_info("No tasks in marketplace."); }
+                if tasks.is_empty() {
+                    output::print_info("No tasks in marketplace.");
+                }
             }
         }
         4 => {
-            output::print_info("Use the full CLI: tenzro skill register --name <name> --description <desc> --capabilities <caps>");
+            output::print_info(
+                "Use the full CLI: tenzro skill register --name <name> --description <desc> --capabilities <caps>",
+            );
         }
         _ => {}
     }
@@ -2098,23 +2497,39 @@ async fn network_menu(rpc: &rpc::RpcClient) -> Result<()> {
         .interact()?;
     match sel {
         0 => {
-            let info: serde_json::Value = rpc.call("tenzro_nodeInfo", serde_json::json!([])).await?;
+            let info: serde_json::Value =
+                rpc.call("tenzro_nodeInfo", serde_json::json!([])).await?;
             output::print_success("Node is running");
-            if let Some(v) = info.get("role").and_then(|v| v.as_str()) { output::print_field("Role", v); }
-            if let Some(v) = info.get("version").and_then(|v| v.as_str()) { output::print_field("Version", v); }
-            if let Some(v) = info.get("block_height").and_then(|v| v.as_u64()) { output::print_field("Block", &v.to_string()); }
-            if let Some(v) = info.get("peer_count").and_then(|v| v.as_u64()) { output::print_field("Peers", &v.to_string()); }
+            if let Some(v) = info.get("role").and_then(|v| v.as_str()) {
+                output::print_field("Role", v);
+            }
+            if let Some(v) = info.get("version").and_then(|v| v.as_str()) {
+                output::print_field("Version", v);
+            }
+            if let Some(v) = info.get("block_height").and_then(|v| v.as_u64()) {
+                output::print_field("Block", &v.to_string());
+            }
+            if let Some(v) = info.get("peer_count").and_then(|v| v.as_u64()) {
+                output::print_field("Peers", &v.to_string());
+            }
         }
         1 => {
             let block: String = rpc.call("eth_blockNumber", serde_json::json!([])).await?;
-            let chain_id: String = rpc.call("eth_chainId", serde_json::json!([])).await.unwrap_or_else(|_| "0x539".to_string());
+            let chain_id: String = rpc
+                .call("eth_chainId", serde_json::json!([]))
+                .await
+                .unwrap_or_else(|_| "0x539".to_string());
             output::print_field("Block", &rpc::parse_hex_u64(&block).to_string());
             output::print_field("Chain ID", &rpc::parse_hex_u64(&chain_id).to_string());
         }
         2 => {
-            let proposals: Vec<serde_json::Value> = rpc.call("tenzro_listProposals", serde_json::json!([{}])).await.unwrap_or_default();
-            if proposals.is_empty() { output::print_info("No proposals."); }
-            else {
+            let proposals: Vec<serde_json::Value> = rpc
+                .call("tenzro_listProposals", serde_json::json!([{}]))
+                .await
+                .unwrap_or_default();
+            if proposals.is_empty() {
+                output::print_info("No proposals.");
+            } else {
                 for p in &proposals {
                     output::print_field(
                         p.get("title").and_then(|v| v.as_str()).unwrap_or("?"),

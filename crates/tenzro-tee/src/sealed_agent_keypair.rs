@@ -20,16 +20,22 @@
 //!   `(agent_did, epoch)` pair. [`rotate_agent_key`] increments the epoch
 //!   and returns a new handle; the previous handle is left alive so any
 //!   pending UserOps can finish (verifiers look up by `epoch`).
-//! - [`attest_agent_key`] binds the public key into an
-//!   `AttestationReport`'s `user_data` slot by way of the underlying
-//!   [`crate::traits::TeeProvider::generate_attestation`]. The resulting
-//!   report is the cryptographic predicate behind the
+//! - [`attest_agent_key`] binds the public key **and the machine's
+//!   hardware root** into an `AttestationReport`'s `user_data` slot by way
+//!   of the underlying [`crate::traits::TeeProvider::generate_attestation`].
+//!   The resulting report is the cryptographic predicate behind the
 //!   `ERC8004_IDENTITY.registerAgent` call: the on-chain registry stores
 //!   `(agent_id, agent_address, metadata_uri)` and the metadata URI MUST
 //!   resolve to a document containing this attestation. The verifier
 //!   chain is: read agent record → fetch metadata doc → parse
-//!   attestation → run [`crate::traits::TeeProvider::verify_attestation`]
-//!   → compare the report's `user_data` to the on-chain pubkey commitment.
+//!   attestation → run [`verify_agent_key_binding`] against the recorded
+//!   `(did, epoch, pubkey, hardware_root)` → run
+//!   [`crate::traits::TeeProvider::verify_attestation`].
+//!
+//!   Carrying the hardware root is what makes a machine identity mean a
+//!   machine. Without it, a second host running the same enclave image
+//!   produces an equally valid report for someone else's DID; with it,
+//!   the enclave signs over which physical unit it is running on.
 //!
 //! This module deliberately does **not** depend on `tenzro-identity` or
 //! `tenzro-agent` — those crates depend on `tenzro-tee`, not the other
@@ -48,19 +54,19 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::error::{Result, TeeError};
+use crate::platform_root::platform_root_ikm;
 use crate::traits::TeeProvider;
-use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_crypto::MlDsaSigningKey;
+use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_types::tee::AttestationReport;
 
-/// HKDF info string for agent Ed25519 derivation. Bumped if the
-/// derivation chain ever changes.
-const HKDF_INFO: &[u8] = b"tenzro/sealed-agent-ed25519/v1";
+/// HKDF info string for agent Ed25519 derivation.
+const HKDF_INFO: &[u8] = b"tenzro/sealed-agent-ed25519";
 
 /// HKDF info string for the agent ML-DSA-65 seed derivation. A distinct
 /// info string from [`HKDF_INFO`] so the classical and post-quantum legs
 /// derive to independent secrets from the same TEE root.
-const HKDF_INFO_PQ: &[u8] = b"tenzro/sealed-agent-ml-dsa-65/v1";
+const HKDF_INFO_PQ: &[u8] = b"tenzro/sealed-agent-ml-dsa-65";
 
 /// HKDF info string for the agent BLS12-381 seed derivation. A distinct
 /// info string again, so the BLS leg is independent of the classical and
@@ -68,13 +74,13 @@ const HKDF_INFO_PQ: &[u8] = b"tenzro/sealed-agent-ml-dsa-65/v1";
 /// the verifying key a machine identity needs to satisfy the wallet's
 /// structural invariant and, if the machine ever stakes as a validator,
 /// to aggregate HotStuff-2 votes.
-const HKDF_INFO_BLS: &[u8] = b"tenzro/sealed-agent-bls12-381/v1";
+const HKDF_INFO_BLS: &[u8] = b"tenzro/sealed-agent-bls12-381";
 
 /// Domain-separation prefix for the per-agent salt. Two agents with the
 /// same TEE root **must not** yield the same key — the salt mixes in the
 /// DID and the rotation epoch so the binding is uniquely
 /// `(tee_root, agent_did, epoch) → key`.
-const SALT_DOMAIN: &[u8] = b"tenzro/agent-key-salt/v1";
+const SALT_DOMAIN: &[u8] = b"tenzro/agent-key-salt";
 
 /// An Ed25519 agent signing key whose private scalar is derived from
 /// TEE-rooted material and never written to disk.
@@ -223,28 +229,48 @@ impl AgentKeyHandle {
     }
 }
 
+/// Size of the wire form of [`AgentKeyAttestationPacket`].
+pub const AGENT_KEY_PACKET_LEN: usize = 32 + 8 + 32 + 32;
+
 /// Identification packet carried inside the attestation `user_data`
-/// slot. The packet is `H(agent_did) || epoch_be || pubkey` so a
-/// verifier with the agent record and a candidate report can deduce
-/// (1) which agent it covers, (2) which rotation, and (3) which key
-/// without needing to trust an out-of-band index.
+/// slot. The packet is `H(agent_did) || epoch_be || pubkey ||
+/// hardware_root` so a verifier with the agent record and a candidate
+/// report can deduce (1) which agent it covers, (2) which rotation,
+/// (3) which key, and (4) which physical machine minted it — without
+/// needing to trust an out-of-band index.
 ///
 /// `pubkey` is the raw 32-byte Ed25519 verifying key. `H(agent_did)`
-/// is SHA-256 of the UTF-8 DID. Total packet size is 32 + 8 + 32 = 72
-/// bytes, which fits inside every supported vendor's user-data ceiling
-/// (Intel TDX REPORTDATA is 64 bytes, so for TDX the packet is hashed
-/// down — see [`pack_user_data_for_vendor`] — but for SEV-SNP and
-/// Nitro the raw packet is carried verbatim).
+/// is SHA-256 of the UTF-8 DID. `hardware_root` is
+/// [`crate::HardwareIdentity::root`] — a fold over the machine's
+/// per-unit identifiers (SMBIOS system UUID, baseboard serial, NVIDIA
+/// GPU UUIDs), all-zero on a host where none of those are readable.
+///
+/// Including the root is what stops a second machine from presenting
+/// its own valid attestation for someone else's DID: the enclave
+/// signs over the machine identity, so the report is only accepted
+/// against the root the identity was registered with.
+///
+/// Total packet size is [`AGENT_KEY_PACKET_LEN`] bytes. Intel TDX
+/// REPORTDATA is a fixed 64 bytes, so for TDX the packet is hashed
+/// down — see [`pack_user_data_for_vendor`] — while SEV-SNP and Nitro
+/// carry the raw packet verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentKeyAttestationPacket {
     pub agent_did_hash: [u8; 32],
     pub epoch: u64,
     pub pubkey: [u8; 32],
+    pub hardware_root: [u8; 32],
 }
 
 impl AgentKeyAttestationPacket {
-    /// Construct the packet for a given handle.
-    pub fn from_handle(handle: &AgentKeyHandle) -> Self {
+    /// Construct the packet for a given handle on a given machine.
+    ///
+    /// Pass `[0u8; 32]` for `hardware_root` when the host exposes no
+    /// per-unit identifier ([`crate::HardwareIdentity::is_rooted`] is
+    /// false). That is a legible "unrooted" claim rather than a
+    /// forged one — the all-zero root is identical across every such
+    /// host, so a verifier can tell it apart from a real machine.
+    pub fn from_handle(handle: &AgentKeyHandle, hardware_root: [u8; 32]) -> Self {
         let mut h = Sha256::new();
         h.update(handle.agent_did.as_bytes());
         let mut did_hash = [0u8; 32];
@@ -254,22 +280,23 @@ impl AgentKeyAttestationPacket {
             agent_did_hash: did_hash,
             epoch: handle.epoch,
             pubkey: handle.pubkey(),
+            hardware_root,
         }
     }
 
-    /// Serialize to the 72-byte wire form.
+    /// Serialize to the [`AGENT_KEY_PACKET_LEN`]-byte wire form.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 + 8 + 32);
+        let mut out = Vec::with_capacity(AGENT_KEY_PACKET_LEN);
         out.extend_from_slice(&self.agent_did_hash);
         out.extend_from_slice(&self.epoch.to_be_bytes());
         out.extend_from_slice(&self.pubkey);
+        out.extend_from_slice(&self.hardware_root);
         out
     }
 
-    /// Parse from the 72-byte wire form. Returns `None` on length
-    /// mismatch.
+    /// Parse from the wire form. Returns `None` on length mismatch.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != 72 {
+        if bytes.len() != AGENT_KEY_PACKET_LEN {
             return None;
         }
         let mut agent_did_hash = [0u8; 32];
@@ -277,12 +304,22 @@ impl AgentKeyAttestationPacket {
         let mut epoch_be = [0u8; 8];
         epoch_be.copy_from_slice(&bytes[32..40]);
         let mut pubkey = [0u8; 32];
-        pubkey.copy_from_slice(&bytes[40..]);
+        pubkey.copy_from_slice(&bytes[40..72]);
+        let mut hardware_root = [0u8; 32];
+        hardware_root.copy_from_slice(&bytes[72..]);
         Some(Self {
             agent_did_hash,
             epoch: u64::from_be_bytes(epoch_be),
             pubkey,
+            hardware_root,
         })
+    }
+
+    /// Whether the packet claims a machine-rooted identity, i.e. the
+    /// enclave that signed it could read at least one per-unit
+    /// hardware identifier.
+    pub fn is_hardware_rooted(&self) -> bool {
+        self.hardware_root != [0u8; 32]
     }
 }
 
@@ -353,16 +390,20 @@ pub(crate) fn handle_from_ikm(
     })
 }
 
-/// Seal a fresh Ed25519 agent keypair against the calling TEE.
+/// Seal an Ed25519 agent keypair against the calling TEE.
 ///
-/// On AMD SEV-SNP the IKM is the 64-byte `SNP_GET_DERIVED_KEY` output
-/// (bound to `MEASUREMENT|IMAGE_ID|GUEST_SVN`). On Intel TDX the IKM is
-/// MRTD. On AWS Nitro and NVIDIA GPU we fall back to per-attestation
-/// `user_data` derivation by running a one-shot attestation with the
-/// `(agent_did, epoch)` payload — vendor measurement is read off the
-/// resulting report, and that report doubles as proof-of-residence for
-/// the key. This is the slow path; the SNP / TDX fast path is preferred
-/// when present.
+/// "Seal" rather than "generate": the key is a deterministic function of
+/// `(platform root, vendor measurement, agent_did, epoch)`, so the same
+/// agent on the same measured image recovers the same key after a restart.
+/// That is what lets an ERC-8004 record and its metadata URI stay valid
+/// across the lifetime of the agent.
+///
+/// The platform root is `SNP_GET_DERIVED_KEY` bound to
+/// `MEASUREMENT|IMAGE_ID|GUEST_SVN` on AMD SEV-SNP and MRTD on Intel TDX
+/// (see [`crate::platform_root`]). AWS Nitro and NVIDIA GPU CC expose no
+/// derivation interface, so there the vendor measurement carried in the
+/// attestation report is the whole binding — weaker, because a host that
+/// can forge a measurement can forge the key, but still stable per image.
 ///
 /// Returns `TeeError::NotAvailable` on dev machines per the project's
 /// no-simulation policy.
@@ -388,16 +429,18 @@ async fn seal_agent_keypair_epoch(
         )));
     }
 
-    // We use a one-shot attestation as a uniform IKM source across all
-    // vendors. For SEV-SNP and TDX the underlying provider implementations
-    // bind the report to the platform measurement; for Nitro the COSE
-    // signature transitively binds to the AWS root CA. The report's
-    // `quote` bytes are not predictable to a remote attacker, and the
-    // `measurement` bytes give us the platform binding.
+    // The one-shot attestation serves two purposes: it yields the vendor
+    // measurement the handle commits to, and it is the proof-of-residence
+    // a verifier later replays. Its `(agent_did, epoch)` user_data ties
+    // the report to the identity being sealed.
     //
-    // We include `(agent_did, epoch)` as user_data so two different
-    // epochs of the same DID produce *different* reports → different
-    // IKM → different keys, satisfying forward-security on rotation.
+    // It is deliberately *not* the source of key material. A report is
+    // fresh on every call — the quote carries a timestamp and the report
+    // id is assigned per report — so deriving from it would give the agent
+    // a different key after every restart, and the ERC-8004 record plus
+    // metadata URI written at registration would point at a key nobody
+    // holds. Rotation forward-security comes from the epoch in the HKDF
+    // salt (see `agent_salt`), which is where it belongs.
     let user_data = {
         let mut h = Sha256::new();
         h.update(SALT_DOMAIN);
@@ -420,51 +463,104 @@ async fn seal_agent_keypair_epoch(
         measurement.copy_from_slice(&h.finalize());
     }
 
-    // IKM mixes the platform measurement, the report quote (when
-    // present), and the report id so two seal calls within the same
-    // boot still produce distinct material if the platform refreshes
-    // any of those.
+    // IKM is the platform's stable root, prefixed by the measurement the
+    // handle commits to. On SEV-SNP and TDX `platform_root_ikm` supplies a
+    // root the host cannot forge; on Nitro and NVIDIA GPU CC, which expose
+    // no derivation interface, the measurement alone carries the binding.
+    // Every input here is a function of the measured image, so the same
+    // platform re-seals to the same key.
     let mut ikm_buf = Zeroizing::new(Vec::<u8>::with_capacity(96));
     ikm_buf.extend_from_slice(&measurement);
-    ikm_buf.extend_from_slice(&report.quote);
-    ikm_buf.extend_from_slice(report.id.as_bytes());
+    if let Ok(root) = platform_root_ikm().await {
+        ikm_buf.extend_from_slice(root.as_slice());
+    }
 
     let handle = handle_from_ikm(agent_did, epoch, measurement, &ikm_buf)?;
     Ok(handle)
 }
 
 /// Produce an `AttestationReport` that binds the agent's public key
-/// into the report's user-data slot. The returned report is what the
-/// ERC-8004 metadata URI must resolve to so that an on-chain agent
-/// record can be cryptographically tied back to a TEE-resident key.
+/// and the machine it was minted on into the report's user-data slot.
+/// The returned report is what the ERC-8004 metadata URI must resolve
+/// to so that an on-chain agent record can be cryptographically tied
+/// back to a TEE-resident key on a specific physical machine.
+///
+/// `hardware_root` comes from [`crate::HardwareIdentity::root`]; pass
+/// `[0u8; 32]` on a host with no readable per-unit identifier.
 ///
 /// Verifier protocol:
 ///
 /// 1. Read the `(agent_id, agent_address, metadata_uri)` record from
 ///    `ERC8004_IDENTITY.getAgent`.
 /// 2. Fetch the metadata doc; parse the embedded `AttestationReport`.
-/// 3. Reconstruct the expected packet:
-///    [`AgentKeyAttestationPacket::from_handle`].
-/// 4. Compare `report.user_data` to either the raw 72-byte packet
-///    (SEV-SNP, Nitro) or SHA-256 of the packet (TDX, where
-///    REPORTDATA is 64 bytes — see [`pack_user_data_for_vendor`]).
-/// 5. Run `provider.verify_attestation(&report)` and require
+/// 3. Run [`verify_agent_key_binding`] against the DID, epoch, pubkey
+///    and hardware root the identity was registered with.
+/// 4. Run `provider.verify_attestation(&report)` and require
 ///    `AttestationResult.valid == true`.
-/// 6. (Optional defense-in-depth) sanity-check
+/// 5. (Optional defense-in-depth) sanity-check
 ///    `report.measurement[..32] == handle.measurement()`.
+///
+/// Steps 3 and 4 are independent and neither substitutes for the other:
+/// 3 says the report covers this identity on this machine, 4 says the
+/// report is genuine.
 pub async fn attest_agent_key(
     provider: &dyn TeeProvider,
     handle: &AgentKeyHandle,
+    hardware_root: [u8; 32],
 ) -> Result<AttestationReport> {
-    let packet = AgentKeyAttestationPacket::from_handle(handle);
+    let packet = AgentKeyAttestationPacket::from_handle(handle, hardware_root);
     let packed = pack_user_data_for_vendor(provider.vendor(), &packet.to_bytes());
     provider.generate_attestation(&packed).await
 }
 
+/// Check that `report` was minted for exactly this agent key on this
+/// machine.
+///
+/// Rebuilds the expected packet from the caller's own record of
+/// `(agent_did, epoch, pubkey, hardware_root)`, packs it for the
+/// report's vendor, and compares against `report.user_data`. On TDX
+/// and SEV-SNP the comparison is against the digest the enclave
+/// actually committed to, which is why the packing runs here rather
+/// than the caller comparing raw bytes.
+///
+/// Returns false rather than erroring — a mismatched report is a
+/// routine outcome when a caller is deciding whether to trust a claim,
+/// not an exceptional one. This does **not** verify the report's
+/// signature or certificate chain; run `provider.verify_attestation`
+/// for that.
+pub fn verify_agent_key_binding(
+    report: &AttestationReport,
+    agent_did: &str,
+    epoch: u64,
+    pubkey: &[u8; 32],
+    hardware_root: [u8; 32],
+) -> bool {
+    let mut h = Sha256::new();
+    h.update(agent_did.as_bytes());
+    let mut agent_did_hash = [0u8; 32];
+    agent_did_hash.copy_from_slice(&h.finalize());
+
+    let expected = AgentKeyAttestationPacket {
+        agent_did_hash,
+        epoch,
+        pubkey: *pubkey,
+        hardware_root,
+    };
+    let packed = pack_user_data_for_vendor(report.vendor, &expected.to_bytes());
+    // Length is part of the claim: a report whose user_data is a
+    // prefix of the expected packing is not the same commitment.
+    packed.len() == report.user_data.len()
+        && packed
+            .iter()
+            .zip(report.user_data.iter())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
 /// Adjust the user_data payload to the vendor's per-report ceiling.
 ///
-/// - TDX REPORTDATA is fixed 64 bytes; we SHA-256 the 72-byte packet
-///   and pad to 64 with the hash repeated (matches the conventional
+/// - TDX REPORTDATA is fixed 64 bytes; we SHA-256 the packet and pad
+///   to 64 with the hash repeated (matches the conventional
 ///   `report_data = H(payload) || zeros[..32]` shape).
 /// - SEV-SNP allows 64-byte REPORT_DATA; same treatment as TDX.
 /// - Nitro carries `user_data` directly with no fixed ceiling (up to
@@ -530,6 +626,142 @@ pub async fn rotate_agent_key(
 mod tests {
     use super::*;
 
+    /// A provider whose measurement is stable but whose report id and quote
+    /// are fresh on every call — exactly the shape of a real one. Sealing
+    /// must ignore the volatile fields.
+    struct VolatileReportProvider {
+        measurement: [u8; 32],
+    }
+
+    #[async_trait::async_trait]
+    impl TeeProvider for VolatileReportProvider {
+        fn vendor(&self) -> tenzro_types::tee::TeeVendor {
+            tenzro_types::tee::TeeVendor::AmdSevSnp
+        }
+
+        async fn is_available(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn generate_attestation(&self, user_data: &[u8]) -> Result<AttestationReport> {
+            Ok(AttestationReport {
+                id: uuid::Uuid::new_v4(),
+                vendor: self.vendor(),
+                user_data: user_data.to_vec(),
+                quote: uuid::Uuid::new_v4().as_bytes().to_vec(),
+                measurement: self.measurement.to_vec(),
+                ..Default::default()
+            })
+        }
+
+        async fn verify_attestation(
+            &self,
+            _report: &AttestationReport,
+        ) -> Result<tenzro_types::tee::AttestationResult> {
+            unimplemented!("sealing does not verify")
+        }
+
+        async fn execute_in_enclave(
+            &self,
+            _request: tenzro_types::tee::EnclaveRequest,
+        ) -> Result<tenzro_types::tee::EnclaveResponse> {
+            unimplemented!("sealing does not enter the enclave")
+        }
+
+        async fn enclave_keygen(
+            &self,
+            _params: tenzro_types::tee::KeyGenParams,
+        ) -> Result<tenzro_types::tee::EnclaveKeyHandle> {
+            unimplemented!("sealing derives its own key")
+        }
+
+        async fn enclave_sign(
+            &self,
+            _key: &tenzro_types::tee::EnclaveKeyHandle,
+            _data: &[u8],
+        ) -> Result<Vec<u8>> {
+            unimplemented!("sealing does not sign")
+        }
+
+        async fn enclave_encrypt(
+            &self,
+            _key: &tenzro_types::tee::EnclaveKeyHandle,
+            _plaintext: &[u8],
+        ) -> Result<Vec<u8>> {
+            unimplemented!("sealing does not encrypt")
+        }
+
+        async fn enclave_decrypt(
+            &self,
+            _key: &tenzro_types::tee::EnclaveKeyHandle,
+            _ciphertext: &[u8],
+        ) -> Result<Vec<u8>> {
+            unimplemented!("sealing does not decrypt")
+        }
+    }
+
+    #[tokio::test]
+    async fn sealing_survives_a_restart() {
+        // The whole point of sealing. Two seals of the same agent against
+        // the same measured platform must land on the same key, or the
+        // ERC-8004 record written at registration outlives the key it
+        // names. Folding the report id or quote into the derivation is the
+        // way this breaks, and it breaks silently: each individual seal
+        // succeeds and signs correctly.
+        let provider = VolatileReportProvider {
+            measurement: [0x5Au8; 32],
+        };
+        let did = "did:tenzro:machine:restart";
+
+        let first = seal_agent_keypair(&provider, did).await.unwrap();
+        let second = seal_agent_keypair(&provider, did).await.unwrap();
+
+        assert_eq!(first.pubkey(), second.pubkey());
+        assert_eq!(first.pq_verifying_key(), second.pq_verifying_key());
+        assert_eq!(first.bls_verifying_key(), second.bls_verifying_key());
+    }
+
+    #[tokio::test]
+    async fn a_different_platform_seals_a_different_key() {
+        // The counterpart: reproducibility must not have been bought by
+        // dropping the platform binding altogether.
+        let did = "did:tenzro:machine:restart";
+        let here = seal_agent_keypair(
+            &VolatileReportProvider {
+                measurement: [0x5Au8; 32],
+            },
+            did,
+        )
+        .await
+        .unwrap();
+        let elsewhere = seal_agent_keypair(
+            &VolatileReportProvider {
+                measurement: [0xA5u8; 32],
+            },
+            did,
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(here.pubkey(), elsewhere.pubkey());
+    }
+
+    #[tokio::test]
+    async fn rotation_still_changes_the_key() {
+        // Forward security on rotation now rests entirely on the epoch in
+        // the HKDF salt, since nothing per-call feeds the IKM any more.
+        let provider = VolatileReportProvider {
+            measurement: [0x5Au8; 32],
+        };
+        let first = seal_agent_keypair(&provider, "did:tenzro:machine:rot")
+            .await
+            .unwrap();
+        let rotated = rotate_agent_key(&provider, &first).await.unwrap();
+
+        assert_eq!(rotated.epoch(), 1);
+        assert_ne!(first.pubkey(), rotated.pubkey());
+    }
+
     fn fixed_handle(agent_did: &str, epoch: u64) -> AgentKeyHandle {
         let measurement = {
             let mut h = Sha256::new();
@@ -571,7 +803,10 @@ mod tests {
         let handle = fixed_handle("did:tenzro:machine:alice", 0);
         let msg = b"some bytes";
         let sig = handle.sign(msg);
-        handle.verifying_key().verify(msg, &sig).expect("self-verify");
+        handle
+            .verifying_key()
+            .verify(msg, &sig)
+            .expect("self-verify");
     }
 
     #[test]
@@ -597,19 +832,31 @@ mod tests {
     #[test]
     fn attestation_packet_roundtrip() {
         let handle = fixed_handle("did:tenzro:machine:alice", 7);
-        let packet = AgentKeyAttestationPacket::from_handle(&handle);
+        let root = [0xABu8; 32];
+        let packet = AgentKeyAttestationPacket::from_handle(&handle, root);
         assert_eq!(packet.epoch, 7);
         assert_eq!(packet.pubkey, handle.pubkey());
+        assert_eq!(packet.hardware_root, root);
+        assert!(packet.is_hardware_rooted());
         let bytes = packet.to_bytes();
-        assert_eq!(bytes.len(), 72);
+        assert_eq!(bytes.len(), AGENT_KEY_PACKET_LEN);
         let parsed = AgentKeyAttestationPacket::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, packet);
     }
 
     #[test]
+    fn unrooted_packet_is_reported_as_such() {
+        // A host with no readable per-unit identifier makes a legible
+        // "no machine identity" claim rather than a fabricated one.
+        let handle = fixed_handle("did:tenzro:machine:alice", 0);
+        let packet = AgentKeyAttestationPacket::from_handle(&handle, [0u8; 32]);
+        assert!(!packet.is_hardware_rooted());
+    }
+
+    #[test]
     fn pack_user_data_tdx_fits_64_bytes() {
         use tenzro_types::tee::TeeVendor;
-        let packet = vec![0x55u8; 72];
+        let packet = vec![0x55u8; AGENT_KEY_PACKET_LEN];
         let packed = pack_user_data_for_vendor(TeeVendor::IntelTdx, &packet);
         assert_eq!(packed.len(), 64);
         // First 32 == last 32 (hash repeated).
@@ -619,9 +866,107 @@ mod tests {
     #[test]
     fn pack_user_data_nitro_is_verbatim() {
         use tenzro_types::tee::TeeVendor;
-        let packet = vec![0x55u8; 72];
+        let packet = vec![0x55u8; AGENT_KEY_PACKET_LEN];
         let packed = pack_user_data_for_vendor(TeeVendor::AWSNitro, &packet);
         assert_eq!(packed, packet);
+    }
+
+    /// Build the report `attest_agent_key` would have produced, without
+    /// going through an async provider.
+    fn report_for(
+        vendor: tenzro_types::tee::TeeVendor,
+        handle: &AgentKeyHandle,
+        root: [u8; 32],
+    ) -> AttestationReport {
+        let packet = AgentKeyAttestationPacket::from_handle(handle, root);
+        AttestationReport {
+            id: uuid::Uuid::new_v4(),
+            vendor,
+            user_data: pack_user_data_for_vendor(vendor, &packet.to_bytes()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn binding_accepts_the_report_it_was_minted_from() {
+        use tenzro_types::tee::TeeVendor;
+        // Both packings must verify: Nitro carries the raw packet, TDX
+        // carries only its digest, and the check has to reconstruct
+        // whichever the enclave actually committed to.
+        for vendor in [TeeVendor::AWSNitro, TeeVendor::IntelTdx] {
+            let handle = fixed_handle("did:tenzro:machine:alice", 3);
+            let root = [0x11u8; 32];
+            let report = report_for(vendor, &handle, root);
+            assert!(verify_agent_key_binding(
+                &report,
+                "did:tenzro:machine:alice",
+                3,
+                &handle.pubkey(),
+                root,
+            ));
+        }
+    }
+
+    #[test]
+    fn binding_rejects_a_different_machine() {
+        // The whole point of folding the root in: a genuine report from
+        // another box must not satisfy this identity's binding.
+        use tenzro_types::tee::TeeVendor;
+        let handle = fixed_handle("did:tenzro:machine:alice", 3);
+        let report = report_for(TeeVendor::AWSNitro, &handle, [0x11u8; 32]);
+        assert!(!verify_agent_key_binding(
+            &report,
+            "did:tenzro:machine:alice",
+            3,
+            &handle.pubkey(),
+            [0x22u8; 32],
+        ));
+    }
+
+    #[test]
+    fn binding_rejects_wrong_did_epoch_or_key() {
+        use tenzro_types::tee::TeeVendor;
+        let handle = fixed_handle("did:tenzro:machine:alice", 3);
+        let root = [0x11u8; 32];
+        let report = report_for(TeeVendor::AWSNitro, &handle, root);
+
+        assert!(!verify_agent_key_binding(
+            &report,
+            "did:tenzro:machine:mallory",
+            3,
+            &handle.pubkey(),
+            root,
+        ));
+        assert!(!verify_agent_key_binding(
+            &report,
+            "did:tenzro:machine:alice",
+            4,
+            &handle.pubkey(),
+            root,
+        ));
+        assert!(!verify_agent_key_binding(
+            &report,
+            "did:tenzro:machine:alice",
+            3,
+            &[0u8; 32],
+            root,
+        ));
+    }
+
+    #[test]
+    fn binding_rejects_a_truncated_user_data() {
+        use tenzro_types::tee::TeeVendor;
+        let handle = fixed_handle("did:tenzro:machine:alice", 3);
+        let root = [0x11u8; 32];
+        let mut report = report_for(TeeVendor::AWSNitro, &handle, root);
+        report.user_data.truncate(AGENT_KEY_PACKET_LEN - 1);
+        assert!(!verify_agent_key_binding(
+            &report,
+            "did:tenzro:machine:alice",
+            3,
+            &handle.pubkey(),
+            root,
+        ));
     }
 
     #[test]
@@ -663,7 +1008,10 @@ mod tests {
         // Reach the PQ seed via the public verifying key instead of the
         // secret: two independent secrets yield unrelated pubkeys, and the
         // Ed25519 pubkey (32B) is not a prefix of the ML-DSA vk (1952B).
-        assert_ne!(&handle.pq_verifying_key()[..32], classical_secret.as_slice());
+        assert_ne!(
+            &handle.pq_verifying_key()[..32],
+            classical_secret.as_slice()
+        );
     }
 
     #[test]

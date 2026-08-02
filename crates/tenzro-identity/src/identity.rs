@@ -238,7 +238,15 @@ pub struct TenzroIdentity {
     /// Additional metadata
     pub metadata: HashMap<String, String>,
     /// Optional unique username (lowercase alphanumeric + underscores, 3-20 chars)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// `default` but deliberately **not** `skip_serializing_if`:
+    /// [`TenzroIdentity::to_bytes`] is bincode, and `skip_serializing_if` drops
+    /// the field from the output while the derived `Deserialize` still expects
+    /// it. In a self-describing format the decoder matches on field names and
+    /// copes; in bincode the stream desynchronises, so every identity without a
+    /// username failed to decode from its own canonical bytes with
+    /// `UnexpectedEof`.
+    #[serde(default)]
     pub username: Option<String>,
 }
 
@@ -359,7 +367,9 @@ impl TenzroIdentity {
     /// mirror, and for machines whose mirror call failed.
     pub fn erc8004_agent_id(&self) -> Option<u64> {
         match &self.identity_data {
-            IdentityData::Machine { erc8004_agent_id, .. } => *erc8004_agent_id,
+            IdentityData::Machine {
+                erc8004_agent_id, ..
+            } => *erc8004_agent_id,
             _ => None,
         }
     }
@@ -367,7 +377,10 @@ impl TenzroIdentity {
     /// Set the ERC-8004 `agentId` returned by the on-chain mirror.
     /// Idempotent — overwrites any previous value. No-op for humans.
     pub(crate) fn set_erc8004_agent_id(&mut self, id: u64) {
-        if let IdentityData::Machine { erc8004_agent_id, .. } = &mut self.identity_data {
+        if let IdentityData::Machine {
+            erc8004_agent_id, ..
+        } = &mut self.identity_data
+        {
             *erc8004_agent_id = Some(id);
         }
     }
@@ -567,10 +580,7 @@ mod tests {
         assert!(identity.is_machine());
         assert!(!identity.is_human());
         assert!(identity.is_active());
-        assert_eq!(
-            identity.controller_did(),
-            Some("did:tenzro:human:alice")
-        );
+        assert_eq!(identity.controller_did(), Some("did:tenzro:human:alice"));
         assert!(identity.delegation_scope().is_some());
         assert!(identity.kyc_tier().is_none());
         assert!(identity.controlled_machines().is_none());
@@ -586,11 +596,13 @@ mod tests {
     #[test]
     fn test_add_service() {
         let mut identity = make_test_human();
-        identity.add_service(ServiceEndpoint {
-            id: "svc-1".to_string(),
-            service_type: "InferenceEndpoint".to_string(),
-            service_endpoint: "https://example.com/inference".to_string(),
-        }).unwrap();
+        identity
+            .add_service(ServiceEndpoint {
+                id: "svc-1".to_string(),
+                service_type: "InferenceEndpoint".to_string(),
+                service_endpoint: "https://example.com/inference".to_string(),
+            })
+            .unwrap();
         assert_eq!(identity.services.len(), 1);
     }
 
@@ -609,18 +621,25 @@ mod tests {
     #[test]
     fn test_add_service_rejects_empty_url() {
         let mut identity = make_test_human();
-        assert!(identity.add_service(ServiceEndpoint {
-            id: "svc-bad".to_string(),
-            service_type: "InferenceEndpoint".to_string(),
-            service_endpoint: "".to_string(),
-        }).is_err());
+        assert!(
+            identity
+                .add_service(ServiceEndpoint {
+                    id: "svc-bad".to_string(),
+                    service_type: "InferenceEndpoint".to_string(),
+                    service_endpoint: "".to_string(),
+                })
+                .is_err()
+        );
     }
 
     #[test]
     fn test_set_metadata() {
         let mut identity = make_test_human();
         identity.set_metadata("org", "TenzroLabs");
-        assert_eq!(identity.metadata.get("org"), Some(&"TenzroLabs".to_string()));
+        assert_eq!(
+            identity.metadata.get("org"),
+            Some(&"TenzroLabs".to_string())
+        );
     }
 
     #[test]

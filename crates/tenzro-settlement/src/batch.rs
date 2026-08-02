@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tenzro_storage::{
-    compute_commitment, KvStore, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
-    WriteOp, CF_SETTLEMENTS,
+    CF_SETTLEMENTS, KvStore, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+    WriteOp, compute_commitment,
 };
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
@@ -193,10 +193,7 @@ impl BatchProcessor {
     }
 
     /// Creates a new batch from settlement requests
-    pub fn create_batch(
-        &self,
-        settlements: Vec<SettlementRequest>,
-    ) -> Result<SettlementBatch> {
+    pub fn create_batch(&self, settlements: Vec<SettlementRequest>) -> Result<SettlementBatch> {
         if settlements.is_empty() {
             return Err(SettlementError::BatchError(
                 "Cannot create empty batch".to_string(),
@@ -216,7 +213,11 @@ impl BatchProcessor {
 
         self.batches.insert(batch_id.clone(), batch.clone());
 
-        info!("Created settlement batch {} with {} settlements", batch_id, batch.size());
+        info!(
+            "Created settlement batch {} with {} settlements",
+            batch_id,
+            batch.size()
+        );
 
         Ok(batch)
     }
@@ -282,9 +283,9 @@ impl BatchProcessor {
             let kind = ReceiptKind::SettlementEscrow;
             debug_assert_eq!(kind.default_mode(), ReceiptStorageMode::Inline);
             let envelope = ReceiptEnvelope::inline(kind, summary, payload);
-            envelope.validate().map_err(|e| {
-                SettlementError::BatchError(format!("envelope validate: {}", e))
-            })?;
+            envelope
+                .validate()
+                .map_err(|e| SettlementError::BatchError(format!("envelope validate: {}", e)))?;
             let receipt_value = serde_json::to_vec(&envelope).map_err(|e| {
                 SettlementError::BatchError(format!("Failed to serialize receipt envelope: {}", e))
             })?;
@@ -354,7 +355,11 @@ impl BatchProcessor {
         let settlements = batch.settlements.clone();
         drop(batch_entry);
 
-        info!("Processing batch {} with {} settlements", batch_id, settlements.len());
+        info!(
+            "Processing batch {} with {} settlements",
+            batch_id,
+            settlements.len()
+        );
 
         // Snapshot balances before processing for atomic rollback
         let balance_snapshot = self.snapshot_balances();
@@ -403,7 +408,10 @@ impl BatchProcessor {
             if failed > 0 {
                 batch.status = BatchStatus::Failed;
                 batch.error = last_error.clone();
-                warn!("Batch {} failed with {} errors, all changes rolled back", batch_id, failed);
+                warn!(
+                    "Batch {} failed with {} errors, all changes rolled back",
+                    batch_id, failed
+                );
             } else {
                 batch.status = BatchStatus::Completed;
                 info!("Batch {} completed successfully", batch_id);
@@ -449,7 +457,8 @@ impl BatchProcessor {
                 failed: 1,
                 duration_ms,
             };
-            self.results.insert(batch_id.to_string(), failed_result.clone());
+            self.results
+                .insert(batch_id.to_string(), failed_result.clone());
             return Err(e);
         }
 
@@ -469,9 +478,10 @@ impl BatchProcessor {
         };
 
         let result_key = format!("batch_result:{}", batch_id);
-        match storage.get(CF_SETTLEMENTS, result_key.as_bytes()).map_err(|e| {
-            SettlementError::BatchError(format!("Storage read failed: {}", e))
-        })? {
+        match storage
+            .get(CF_SETTLEMENTS, result_key.as_bytes())
+            .map_err(|e| SettlementError::BatchError(format!("Storage read failed: {}", e)))?
+        {
             Some(bytes) => {
                 let result: BatchSettlementResult =
                     serde_json::from_slice(&bytes).map_err(|e| {
@@ -853,8 +863,7 @@ mod tests {
             .get(CF_SETTLEMENTS, batch_key.as_bytes())
             .unwrap()
             .expect("batch metadata should be persisted");
-        let stored_batch: SettlementBatch =
-            serde_json::from_slice(&stored_batch_bytes).unwrap();
+        let stored_batch: SettlementBatch = serde_json::from_slice(&stored_batch_bytes).unwrap();
         assert_eq!(stored_batch.batch_id, batch_id);
         assert_eq!(stored_batch.status, BatchStatus::Completed);
 

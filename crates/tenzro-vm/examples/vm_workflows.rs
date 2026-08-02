@@ -24,9 +24,7 @@ use tenzro_vm::{
     SvmExecutor, VmConfig, VmExecutor, VmState, VmTransaction, VmType,
 };
 
-use tenzro_types::canton::{
-    DamlCommand, DamlContractId, DamlParty, DamlTemplateId, DamlValue,
-};
+use tenzro_types::canton::{DamlCommand, DamlContractId, DamlParty, DamlTemplateId, DamlValue};
 
 // ----------------------------------------------------------------------
 // Hand-rolled bytecode used by the EVM walkthroughs.
@@ -35,8 +33,8 @@ use tenzro_types::canton::{
 /// Init code that copies its 11-byte runtime suffix into return-data,
 /// installs slot 0 = 0x42, and emits a LOG0 on every runtime invocation.
 const COMMERCE_INIT_CODE: &[u8] = &[
-    0x60, 0x0B, 0x60, 0x0C, 0x60, 0x00, 0x39, 0x60, 0x0B, 0x60, 0x00, 0xF3,
-    0x60, 0x42, 0x60, 0x00, 0x55, 0x60, 0x20, 0x60, 0x00, 0xA0, 0x00,
+    0x60, 0x0B, 0x60, 0x0C, 0x60, 0x00, 0x39, 0x60, 0x0B, 0x60, 0x00, 0xF3, 0x60, 0x42, 0x60, 0x00,
+    0x55, 0x60, 0x20, 0x60, 0x00, 0xA0, 0x00,
 ];
 
 /// Runtime that pushes 0x42 to memory and emits a LOG0 over the first
@@ -47,9 +45,7 @@ const LOG_RUNTIME_CODE: &[u8] = &[
 
 /// Runtime that copies the first 32 bytes of calldata into storage
 /// slot 0 — used as the "DEX" runtime in the trading walkthrough.
-const TRADING_RUNTIME_CODE: &[u8] = &[
-    0x60, 0x00, 0x35, 0x60, 0x00, 0x55, 0x00,
-];
+const TRADING_RUNTIME_CODE: &[u8] = &[0x60, 0x00, 0x35, 0x60, 0x00, 0x55, 0x00];
 
 /// Runtime that pushes 0x42 to memory and emits a LOG1 with topic 0x01
 /// — used as the "release event" runtime in the payments walkthrough.
@@ -121,7 +117,17 @@ fn signed_tx(
     vm_type: VmType,
 ) -> VmTransaction {
     // No signature — unsigned transactions are allowed in testnet mode
-    VmTransaction::new(from, to, value, data, gas_limit, 1_000_000_000u128, nonce, vm_type, 1337)
+    VmTransaction::new(
+        from,
+        to,
+        value,
+        data,
+        gas_limit,
+        1_000_000_000u128,
+        nonce,
+        vm_type,
+        1337,
+    )
 }
 
 async fn canton_available() -> bool {
@@ -182,9 +188,7 @@ async fn evm_commerce_erc20_full_flow() -> Result<(), Box<dyn std::error::Error>
         VmType::Evm,
         1337,
     );
-    let call_result = evm
-        .execute_with_state_adapter(&call_tx, &mut state)
-        .await?;
+    let call_result = evm.execute_with_state_adapter(&call_tx, &mut state).await?;
     println!("  invoke success = {}", call_result.success);
     println!("  logs emitted   = {}", call_result.logs.len());
 
@@ -233,7 +237,10 @@ async fn evm_trading_dex_swap() -> Result<(), Box<dyn std::error::Error>> {
     let price_result = evm
         .execute_with_state_adapter(&price_tx, &mut state)
         .await?;
-    println!("→ recorded price (0x64 = 100) on DEX, success = {}", price_result.success);
+    println!(
+        "→ recorded price (0x64 = 100) on DEX, success = {}",
+        price_result.success
+    );
     let slot0 = state
         .get_storage(&dex, &[0u8; 32])
         .expect("DEX should have price in slot 0");
@@ -254,9 +261,7 @@ async fn evm_trading_dex_swap() -> Result<(), Box<dyn std::error::Error>> {
             VmType::Evm,
             1337,
         );
-        let r = evm
-            .execute_with_state_adapter(&swap_tx, &mut state)
-            .await?;
+        let r = evm.execute_with_state_adapter(&swap_tx, &mut state).await?;
         println!(
             "→ swap log on {label}: success = {}, logs = {}",
             r.success,
@@ -339,7 +344,11 @@ async fn evm_automation_escrow_release() -> Result<(), Box<dyn std::error::Error
     let r = evm
         .execute_with_state_adapter(&release_tx, &mut state)
         .await?;
-    println!("→ release call: success = {}, logs = {}", r.success, r.logs.len());
+    println!(
+        "→ release call: success = {}, logs = {}",
+        r.success,
+        r.logs.len()
+    );
 
     let mut slot1_key = [0u8; 32];
     slot1_key[31] = 0x01;
@@ -375,9 +384,11 @@ async fn evm_automation_escrow_release() -> Result<(), Box<dyn std::error::Error
 // SVM walkthroughs (dispatch-level only — non-ELF payloads)
 // ----------------------------------------------------------------------
 
-async fn svm_dispatch(label: &str, payload: &[u8], sender_byte: u8)
-    -> Result<(), Box<dyn std::error::Error>>
-{
+async fn svm_dispatch(
+    label: &str,
+    payload: &[u8],
+    sender_byte: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
     let svm = fresh_svm_executor();
     let mut state = fresh_state();
 
@@ -396,7 +407,9 @@ async fn svm_dispatch(label: &str, payload: &[u8], sender_byte: u8)
         VmType::Svm,
     );
 
-    let result = svm.execute_transaction(&tx, &mut state as &mut dyn VmState).await?;
+    let result = svm
+        .execute_transaction(&tx, &mut state as &mut dyn VmState)
+        .await?;
     println!(
         "→ {label}: dispatch success = {}, sender nonce = {}",
         result.success,
@@ -409,8 +422,18 @@ async fn svm_workflows_walk() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== SVM dispatch: route four agent payloads through SvmExecutor ===");
     svm_dispatch("commerce token program", b"transfer:alice:bob:100", 0x10).await?;
     svm_dispatch("trading orderbook match", b"match:bid=100,ask=95", 0x20).await?;
-    svm_dispatch("payments channel lifecycle", b"channel:open;update=10;update=20;close", 0x30).await?;
-    svm_dispatch("automation scheduler tick", b"scheduler:tick=1;tasks=[a,b,c]", 0x40).await?;
+    svm_dispatch(
+        "payments channel lifecycle",
+        b"channel:open;update=10;update=20;close",
+        0x30,
+    )
+    .await?;
+    svm_dispatch(
+        "automation scheduler tick",
+        b"scheduler:tick=1;tasks=[a,b,c]",
+        0x40,
+    )
+    .await?;
     Ok(())
 }
 
@@ -424,7 +447,10 @@ fn mk_inventory_create() -> DamlCommand {
         create_arguments: DamlValue::Record {
             record_id: None,
             fields: vec![
-                ("owner".to_string(), DamlValue::Party(DamlParty::new("alice"))),
+                (
+                    "owner".to_string(),
+                    DamlValue::Party(DamlParty::new("alice")),
+                ),
                 ("sku".to_string(), DamlValue::Text("SKU-001".to_string())),
                 ("quantity".to_string(), DamlValue::Int64(10)),
             ],
@@ -444,7 +470,10 @@ fn mk_consume_exercise() -> DamlCommand {
     }
 }
 
-async fn run_canton_command(label: &str, cmd: DamlCommand) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_canton_command(
+    label: &str,
+    cmd: DamlCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !canton_available().await {
         println!("→ {label}: Canton participant unavailable, skipping");
         return Ok(());
@@ -468,7 +497,10 @@ async fn run_canton_command(label: &str, cmd: DamlCommand) -> Result<(), Box<dyn
     )
     .with_signature(vec![0xAAu8; 65]);
 
-    match daml.execute_transaction(&tx, &mut state as &mut dyn VmState).await {
+    match daml
+        .execute_transaction(&tx, &mut state as &mut dyn VmState)
+        .await
+    {
         Ok(result) => println!("→ {label}: dispatched, success = {}", result.success),
         Err(err) => println!("→ {label}: participant rejected ({err})"),
     }
@@ -486,8 +518,14 @@ async fn canton_workflows_walk() -> Result<(), Box<dyn std::error::Error>> {
         create_arguments: DamlValue::Record {
             record_id: None,
             fields: vec![
-                ("buyer".to_string(), DamlValue::Party(DamlParty::new("alice"))),
-                ("seller".to_string(), DamlValue::Party(DamlParty::new("bob"))),
+                (
+                    "buyer".to_string(),
+                    DamlValue::Party(DamlParty::new("alice")),
+                ),
+                (
+                    "seller".to_string(),
+                    DamlValue::Party(DamlParty::new("bob")),
+                ),
                 ("asset".to_string(), DamlValue::Text("TNZO".to_string())),
                 ("price".to_string(), DamlValue::Int64(500)),
             ],
@@ -500,7 +538,10 @@ async fn canton_workflows_walk() -> Result<(), Box<dyn std::error::Error>> {
         create_arguments: DamlValue::Record {
             record_id: None,
             fields: vec![
-                ("payer".to_string(), DamlValue::Party(DamlParty::new("alice"))),
+                (
+                    "payer".to_string(),
+                    DamlValue::Party(DamlParty::new("alice")),
+                ),
                 ("payee".to_string(), DamlValue::Party(DamlParty::new("bob"))),
                 ("amount".to_string(), DamlValue::Int64(1_000)),
             ],
@@ -513,7 +554,10 @@ async fn canton_workflows_walk() -> Result<(), Box<dyn std::error::Error>> {
         create_arguments: DamlValue::Record {
             record_id: None,
             fields: vec![
-                ("owner".to_string(), DamlValue::Party(DamlParty::new("alice"))),
+                (
+                    "owner".to_string(),
+                    DamlValue::Party(DamlParty::new("alice")),
+                ),
                 (
                     "steps".to_string(),
                     DamlValue::List(vec![
@@ -553,7 +597,10 @@ async fn cross_vm_full_stack() -> Result<(), Box<dyn std::error::Error>> {
         VmType::Evm,
     );
     let evm_result = runtime.execute_transaction(&evm_tx, &mut state).await?;
-    println!("→ EVM leg (commerce deploy): success = {}", evm_result.success);
+    println!(
+        "→ EVM leg (commerce deploy): success = {}",
+        evm_result.success
+    );
 
     // SVM leg: dispatch a non-ELF payload to a pre-installed program
     let svm_sender = mk_svm_pubkey(0x66);
@@ -570,7 +617,10 @@ async fn cross_vm_full_stack() -> Result<(), Box<dyn std::error::Error>> {
         VmType::Svm,
     );
     let svm_result = runtime.execute_transaction(&svm_tx, &mut state).await?;
-    println!("→ SVM leg (agent dispatch): success = {}", svm_result.success);
+    println!(
+        "→ SVM leg (agent dispatch): success = {}",
+        svm_result.success
+    );
 
     println!(
         "  EVM nonce = {}, SVM nonce = {}",
@@ -612,8 +662,13 @@ async fn cross_vm_settlement_inference_escrow() -> Result<(), Box<dyn std::error
         0,
         VmType::Svm,
     );
-    let inference_result = runtime.execute_transaction(&inference_tx, &mut state).await?;
-    println!("→ inference dispatch: success = {}", inference_result.success);
+    let inference_result = runtime
+        .execute_transaction(&inference_tx, &mut state)
+        .await?;
+    println!(
+        "→ inference dispatch: success = {}",
+        inference_result.success
+    );
 
     // EVM: arbiter releases the escrow
     let release_tx = signed_tx(

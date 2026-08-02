@@ -24,7 +24,7 @@
 use crate::error::{Result, TokenError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
+use tenzro_storage::{CF_TOKENS, KvStore, WriteOp};
 use tenzro_types::primitives::Timestamp;
 use tracing::{debug, info};
 
@@ -173,9 +173,7 @@ impl BurnQuotaManager {
         self.persist(&snapshot)?;
         info!(
             cap,
-            daily_target,
-            min_reserve_bps,
-            "BurnQuota governance params updated"
+            daily_target, min_reserve_bps, "BurnQuota governance params updated"
         );
         Ok(())
     }
@@ -204,12 +202,11 @@ impl BurnQuotaManager {
                     available: guard.balance,
                 });
             }
-            guard.balance = guard
-                .balance
-                .checked_sub(amount)
-                .ok_or_else(|| TokenError::ArithmeticOverflow {
+            guard.balance = guard.balance.checked_sub(amount).ok_or_else(|| {
+                TokenError::ArithmeticOverflow {
                     operation: "burn_quota.drain".into(),
-                })?;
+                }
+            })?;
             guard.total_drained = guard.total_drained.saturating_add(amount);
             guard.clone()
         };
@@ -298,9 +295,8 @@ impl BurnQuotaManager {
             .map_err(|e| TokenError::StorageError(format!("get burn quota: {}", e)))?
         {
             Some(value) => {
-                let quota: BurnQuota = serde_json::from_slice(&value).map_err(|e| {
-                    TokenError::StorageError(format!("decode burn quota: {}", e))
-                })?;
+                let quota: BurnQuota = serde_json::from_slice(&value)
+                    .map_err(|e| TokenError::StorageError(format!("decode burn quota: {}", e)))?;
                 info!(
                     balance = quota.balance,
                     cap = quota.cap,
@@ -322,18 +318,15 @@ impl BurnQuotaManager {
 
     fn persist(&self, quota: &BurnQuota) -> Result<()> {
         if let Some(storage) = &self.storage {
-            let value = serde_json::to_vec(quota).map_err(|e| {
-                TokenError::StorageError(format!("encode burn quota: {}", e))
-            })?;
+            let value = serde_json::to_vec(quota)
+                .map_err(|e| TokenError::StorageError(format!("encode burn quota: {}", e)))?;
             storage
                 .write_batch_sync(vec![WriteOp::Put {
                     cf: CF_TOKENS.to_string(),
                     key: BURN_QUOTA_KEY.to_vec(),
                     value,
                 }])
-                .map_err(|e| {
-                    TokenError::StorageError(format!("persist burn quota: {}", e))
-                })?;
+                .map_err(|e| TokenError::StorageError(format!("persist burn quota: {}", e)))?;
         }
         Ok(())
     }

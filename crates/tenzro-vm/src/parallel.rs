@@ -58,8 +58,8 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 
 /// Pre-block state reader consulted when a commutative delta lane needs a base
@@ -124,8 +124,7 @@ pub struct ParallelExecutionResult {
     /// shows up across all the transactions trying to touch it. Empty for
     /// blocks that ran sequentially before any conflict was observed.
     #[serde(default)]
-    pub account_contention:
-        std::collections::HashMap<Vec<u8>, crate::hot_state::AccountSample>,
+    pub account_contention: std::collections::HashMap<Vec<u8>, crate::hot_state::AccountSample>,
 }
 
 /// Status of an individual transaction in the parallel batch
@@ -240,16 +239,38 @@ impl MultiVersionData {
     }
 
     /// Write a concrete storage value for a given transaction index.
-    fn write_storage(&self, address: &[u8], key: &[u8], value: Option<Vec<u8>>, tx_index: usize, incarnation: u32) {
+    fn write_storage(
+        &self,
+        address: &[u8],
+        key: &[u8],
+        value: Option<Vec<u8>>,
+        tx_index: usize,
+        incarnation: u32,
+    ) {
         let map_key = (address.to_vec(), key.to_vec());
-        let entry = VersionedValue { tx_index, update: StorageUpdate::Value(value), incarnation };
+        let entry = VersionedValue {
+            tx_index,
+            update: StorageUpdate::Value(value),
+            incarnation,
+        };
         self.data.entry(map_key).or_default().push(entry);
     }
 
     /// Write a commutative storage counter delta for a given transaction index.
-    fn write_storage_delta(&self, address: &[u8], key: &[u8], delta: i128, tx_index: usize, incarnation: u32) {
+    fn write_storage_delta(
+        &self,
+        address: &[u8],
+        key: &[u8],
+        delta: i128,
+        tx_index: usize,
+        incarnation: u32,
+    ) {
         let map_key = (address.to_vec(), key.to_vec());
-        let entry = VersionedValue { tx_index, update: StorageUpdate::Delta(delta), incarnation };
+        let entry = VersionedValue {
+            tx_index,
+            update: StorageUpdate::Delta(delta),
+            incarnation,
+        };
         self.data.entry(map_key).or_default().push(entry);
     }
 
@@ -263,7 +284,13 @@ impl MultiVersionData {
     /// `base` is the pre-block value read from the `StateAdapter` — deltas
     /// applied when no lower-indexed `Value` exists fold onto it. Returns
     /// `None` only when there is no base and no lower-indexed entry.
-    fn read_storage(&self, address: &[u8], key: &[u8], tx_index: usize, base: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    fn read_storage(
+        &self,
+        address: &[u8],
+        key: &[u8],
+        tx_index: usize,
+        base: Option<Vec<u8>>,
+    ) -> Option<Vec<u8>> {
         let map_key = (address.to_vec(), key.to_vec());
         self.data.get(&map_key).and_then(|versions| {
             let mut ordered: Vec<&VersionedValue> =
@@ -289,14 +316,28 @@ impl MultiVersionData {
 
     /// Write a concrete balance for a given transaction index.
     fn write_balance(&self, address: &[u8], balance: u128, tx_index: usize, incarnation: u32) {
-        let entry = VersionedBalance { tx_index, update: BalanceUpdate::Value(balance), incarnation };
-        self.balances.entry(address.to_vec()).or_default().push(entry);
+        let entry = VersionedBalance {
+            tx_index,
+            update: BalanceUpdate::Value(balance),
+            incarnation,
+        };
+        self.balances
+            .entry(address.to_vec())
+            .or_default()
+            .push(entry);
     }
 
     /// Write a commutative balance delta for a given transaction index.
     fn write_balance_delta(&self, address: &[u8], delta: i128, tx_index: usize, incarnation: u32) {
-        let entry = VersionedBalance { tx_index, update: BalanceUpdate::Delta(delta), incarnation };
-        self.balances.entry(address.to_vec()).or_default().push(entry);
+        let entry = VersionedBalance {
+            tx_index,
+            update: BalanceUpdate::Delta(delta),
+            incarnation,
+        };
+        self.balances
+            .entry(address.to_vec())
+            .or_default()
+            .push(entry);
     }
 
     /// Resolve the balance lane visible to `tx_index` by folding every entry
@@ -601,7 +642,10 @@ impl BlockStmExecutor {
 
         // For very small batches, execute sequentially (overhead not worth it)
         if tx_count <= 2 {
-            return (self.execute_sequential(tx_count, &execute_fn), ResolvedDeltas::default());
+            return (
+                self.execute_sequential(tx_count, &execute_fn),
+                ResolvedDeltas::default(),
+            );
         }
 
         let mvd = Arc::new(MultiVersionData::new());
@@ -611,9 +655,7 @@ impl BlockStmExecutor {
         let results: Vec<parking_lot::Mutex<Option<TxExecutionStatus>>> = (0..tx_count)
             .map(|_| parking_lot::Mutex::new(None))
             .collect();
-        let incarnations: Vec<AtomicUsize> = (0..tx_count)
-            .map(|_| AtomicUsize::new(0))
-            .collect();
+        let incarnations: Vec<AtomicUsize> = (0..tx_count).map(|_| AtomicUsize::new(0)).collect();
 
         // Phase 1: Optimistic parallel execution
         debug!("Block-STM: Executing {} transactions in parallel", tx_count);
@@ -682,7 +724,10 @@ impl BlockStmExecutor {
                     "Block-STM: High conflict rate ({:.1}%), falling back to sequential",
                     conflict_rate * 100.0
                 );
-                return (self.execute_sequential(tx_count, &execute_fn), ResolvedDeltas::default());
+                return (
+                    self.execute_sequential(tx_count, &execute_fn),
+                    ResolvedDeltas::default(),
+                );
             }
 
             // Re-execute only conflicting transactions in order
@@ -735,8 +780,7 @@ impl BlockStmExecutor {
         for i in 0..tx_count {
             let rw_set = rw_sets[i].lock();
             let reex_delta = if was_reexecuted[i] { 1u64 } else { 0u64 };
-            let mut seen: std::collections::HashSet<Vec<u8>> =
-                std::collections::HashSet::new();
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
             for (addr, _key) in rw_set.writes.keys() {
                 if seen.insert(addr.clone()) {
                     let entry = account_contention.entry(addr.clone()).or_default();
@@ -784,7 +828,10 @@ impl BlockStmExecutor {
         let mut tx_results = Vec::with_capacity(tx_count);
 
         for result_entry in &results {
-            let result = result_entry.lock().take().unwrap_or(TxExecutionStatus::Skipped);
+            let result = result_entry
+                .lock()
+                .take()
+                .unwrap_or(TxExecutionStatus::Skipped);
             match &result {
                 TxExecutionStatus::Success { gas_used } => {
                     successful += 1;
@@ -800,7 +847,8 @@ impl BlockStmExecutor {
             tx_results.push(result);
         }
 
-        self.total_reexecutions.fetch_add(total_reexec as u64, Ordering::Relaxed);
+        self.total_reexecutions
+            .fetch_add(total_reexec as u64, Ordering::Relaxed);
         self.total_blocks.fetch_add(1, Ordering::Relaxed);
 
         info!(
@@ -832,15 +880,14 @@ impl BlockStmExecutor {
     }
 
     /// Execute transactions sequentially (fallback)
-    fn execute_sequential<F>(
-        &self,
-        tx_count: usize,
-        execute_fn: &F,
-    ) -> ParallelExecutionResult
+    fn execute_sequential<F>(&self, tx_count: usize, execute_fn: &F) -> ParallelExecutionResult
     where
         F: Fn(usize, &mut ReadWriteSet) -> TxExecutionStatus + Send + Sync,
     {
-        debug!("Block-STM: Sequential execution of {} transactions", tx_count);
+        debug!(
+            "Block-STM: Sequential execution of {} transactions",
+            tx_count
+        );
 
         let mut successful = 0;
         let mut failed = 0;
@@ -871,8 +918,7 @@ impl BlockStmExecutor {
 
             // Sequential mode produces zero reexecutions, but write attribution
             // still feeds the rolling contention window (writes=1 per unique address).
-            let mut seen: std::collections::HashSet<Vec<u8>> =
-                std::collections::HashSet::new();
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
             for (addr, _key) in rw_set.writes.keys() {
                 if seen.insert(addr.clone()) {
                     let entry = account_contention.entry(addr.clone()).or_default();
@@ -1032,7 +1078,9 @@ mod tests {
             if i % 2 == 0 {
                 TxExecutionStatus::Success { gas_used: 21_000 }
             } else {
-                TxExecutionStatus::Failed { reason: "test failure".to_string() }
+                TxExecutionStatus::Failed {
+                    reason: "test failure".to_string(),
+                }
             }
         });
 
@@ -1154,7 +1202,10 @@ mod tests {
     fn test_balance_delta_lane_no_conflict_and_folds() {
         let executor = BlockStmExecutor::default();
         let hot = vec![0x11u8; 32];
-        let base = FixedBalanceBase { addr: hot.clone(), balance: 1_000 };
+        let base = FixedBalanceBase {
+            addr: hot.clone(),
+            balance: 1_000,
+        };
 
         // 8 txs each credit the same hot balance by +10.
         let (result, resolved) = executor.execute_block(8, &base, |_i, rw_set| {
@@ -1174,7 +1225,10 @@ mod tests {
     fn test_balance_delta_mixed_signs_fold() {
         let executor = BlockStmExecutor::default();
         let hot = vec![0x22u8; 32];
-        let base = FixedBalanceBase { addr: hot.clone(), balance: 500 };
+        let base = FixedBalanceBase {
+            addr: hot.clone(),
+            balance: 500,
+        };
 
         let (result, resolved) = executor.execute_block(6, &base, |i, rw_set| {
             // even txs credit +30, odd txs debit -10 → net 3*30 - 3*10 = 60.
@@ -1252,7 +1306,10 @@ mod tests {
                 }
             }
         }
-        let base = CounterBase { addr: addr.clone(), key: key.clone() };
+        let base = CounterBase {
+            addr: addr.clone(),
+            key: key.clone(),
+        };
 
         let (result, resolved) = executor.execute_block(5, &base, |_i, rw_set| {
             rw_set.record_storage_delta(&addr, &key, 2);

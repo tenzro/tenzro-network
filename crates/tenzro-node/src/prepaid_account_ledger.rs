@@ -135,9 +135,7 @@ mod tests {
     fn lock_rejects_non_tnzo() {
         let token = Arc::new(TnzoToken::new());
         let ledger = TnzoAccountLedger::new(token);
-        let err = ledger
-            .lock(&addr(1), &AssetId::new("USDT"), 1)
-            .unwrap_err();
+        let err = ledger.lock(&addr(1), &AssetId::new("USDT"), 1).unwrap_err();
         assert!(matches!(err, SettlementError::InvalidAmount(_)));
     }
 

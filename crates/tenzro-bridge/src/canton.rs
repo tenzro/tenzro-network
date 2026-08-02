@@ -39,13 +39,12 @@ use crate::{
     traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
 };
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tenzro_types::primitives::Hash;
 use tenzro_workflow::{
     approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, Decision},
@@ -53,6 +52,7 @@ use tenzro_workflow::{
     obligation::Obligation,
     workflow::{CantonMirror, Workflow},
 };
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -388,14 +388,8 @@ impl CantonAdapter {
         choice: &str,
         choice_argument: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        self.submit_exercise_command_as(
-            contract_id,
-            template_id,
-            choice,
-            choice_argument,
-            None,
-        )
-        .await
+        self.submit_exercise_command_as(contract_id, template_id, choice, choice_argument, None)
+            .await
     }
 
     /// Same as `submit_exercise_command` but allows the caller to override
@@ -409,7 +403,13 @@ impl CantonAdapter {
         act_as_party: Option<&str>,
     ) -> Result<serde_json::Value> {
         let response = self
-            .exercise_choice_as(contract_id, template_id, choice, choice_argument, act_as_party)
+            .exercise_choice_as(
+                contract_id,
+                template_id,
+                choice,
+                choice_argument,
+                act_as_party,
+            )
             .await?;
         Ok(serde_json::json!({
             "command_type": "exercise",
@@ -524,7 +524,10 @@ impl CantonAdapter {
             })?
             .to_string();
 
-        info!("Canton: Party allocated successfully, party_id={}", party_id);
+        info!(
+            "Canton: Party allocated successfully, party_id={}",
+            party_id
+        );
         Ok(party_id)
     }
 
@@ -537,7 +540,8 @@ impl CantonAdapter {
         let Ok(parsed) = serde_json::from_str::<serde_json::Value>(error_body) else {
             return false;
         };
-        let invalid_argument = parsed.get("code").and_then(|v| v.as_str()) == Some("INVALID_ARGUMENT");
+        let invalid_argument =
+            parsed.get("code").and_then(|v| v.as_str()) == Some("INVALID_ARGUMENT");
         let cause_matches = parsed
             .get("cause")
             .and_then(|v| v.as_str())
@@ -702,33 +706,26 @@ impl CantonAdapter {
             builder = builder.bearer_auth(token);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| {
-                let cls = Self::classify_reqwest_error(&e);
-                error!("Canton DAR upload failed: {}", cls);
-                BridgeError::AdapterError(format!("Canton DAR upload failed: {}", cls))
-            })?;
+        let response = builder.send().await.map_err(|e| {
+            let cls = Self::classify_reqwest_error(&e);
+            error!("Canton DAR upload failed: {}", cls);
+            BridgeError::AdapterError(format!("Canton DAR upload failed: {}", cls))
+        })?;
 
         let status = response.status();
-        let body_text = response
-            .text()
-            .await
-            .map_err(|e| BridgeError::AdapterError(format!(
+        let body_text = response.text().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
                 "Failed to read Canton upload response: {}",
                 Self::classify_reqwest_error(&e)
-            )))?;
+            ))
+        })?;
 
         if !status.is_success() {
             // Pass through the structured Canton error (e.g. INVALID_DAR)
             // so the caller sees the real reason.
             let parsed: serde_json::Value = serde_json::from_str(&body_text)
                 .unwrap_or_else(|_| serde_json::json!({ "raw": body_text }));
-            error!(
-                "Canton DAR upload returned HTTP {}: {}",
-                status, parsed
-            );
+            error!("Canton DAR upload returned HTTP {}: {}", status, parsed);
             return Err(BridgeError::AdapterError(format!(
                 "Canton DAR upload HTTP {}: {}",
                 status, parsed
@@ -755,24 +752,29 @@ impl CantonAdapter {
             .await?
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton list-parties failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton list-parties failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(BridgeError::AdapterError(format!(
                 "Canton list-parties HTTP {}: {}",
-                status, Self::sanitize_canton_http_error(status, body.len())
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
             )));
         }
 
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton list-parties response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton list-parties response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Health probe combining `GET /livez` and `GET /readyz` on the
@@ -841,20 +843,24 @@ impl CantonAdapter {
             .await?
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton version probe failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton version probe failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
         if !response.status().is_success() {
             return Err(BridgeError::AdapterError(format!(
                 "Canton version probe HTTP {}",
                 response.status()
             )));
         }
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton version response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton version response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Fetches the participant's transaction tree by update id via
@@ -873,24 +879,29 @@ impl CantonAdapter {
             .await?
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton get-transaction failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton get-transaction failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(BridgeError::AdapterError(format!(
                 "Canton get-transaction HTTP {}: {}",
-                status, Self::sanitize_canton_http_error(status, body.len())
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
             )));
         }
 
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton get-transaction response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton get-transaction response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Returns the Canton Coin (CIP-56) balance for the resolved
@@ -986,24 +997,29 @@ impl CantonAdapter {
             .await?
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton connected-synchronizers query failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton connected-synchronizers query failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(BridgeError::AdapterError(format!(
                 "Canton connected-synchronizers HTTP {}: {}",
-                status, Self::sanitize_canton_http_error(status, body.len())
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
             )));
         }
 
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton connected-synchronizers response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton connected-synchronizers response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Lists every DAML package installed on the participant via
@@ -1016,24 +1032,29 @@ impl CantonAdapter {
             .await?
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton list-packages query failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton list-packages query failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(BridgeError::AdapterError(format!(
                 "Canton list-packages HTTP {}: {}",
-                status, Self::sanitize_canton_http_error(status, body.len())
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
             )));
         }
 
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton list-packages response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton list-packages response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Extracts the `sub` claim from a JWT payload without verifying
@@ -1064,11 +1085,13 @@ impl CantonAdapter {
                 return Ok(sub);
             }
             return Err(BridgeError::AdapterError(
-                "cannot derive Canton user id: configured JWT has no decodable `sub` claim".to_string(),
+                "cannot derive Canton user id: configured JWT has no decodable `sub` claim"
+                    .to_string(),
             ));
         }
         Err(BridgeError::AdapterError(
-            "cannot derive Canton user id: adapter has neither an OAuth2 token provider nor a JWT".to_string(),
+            "cannot derive Canton user id: adapter has neither an OAuth2 token provider nor a JWT"
+                .to_string(),
         ))
     }
 
@@ -1089,22 +1112,27 @@ impl CantonAdapter {
             .await?
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton get-my-user failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton get-my-user failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(BridgeError::AdapterError(format!(
                 "Canton get-my-user HTTP {}: {}",
-                status, Self::sanitize_canton_http_error(status, body.len())
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
             )));
         }
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton get-my-user response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton get-my-user response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Fetches an arbitrary Canton user record by id. Companion to
@@ -1415,20 +1443,19 @@ impl CantonAdapter {
             body["identityProviderId"] = serde_json::Value::String(idp.to_string());
         }
 
-        let path = format!(
-            "/users/{}/rights",
-            urlencoding::encode(&resolved_user_id),
-        );
+        let path = format!("/users/{}/rights", urlencoding::encode(&resolved_user_id),);
         let response = self
             .build_request(reqwest::Method::POST, &path)
             .await?
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton grant-user-rights failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton grant-user-rights failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1440,10 +1467,12 @@ impl CantonAdapter {
             )));
         }
 
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton grant-user-rights response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton grant-user-rights response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Revokes rights previously granted to a Canton user via
@@ -1505,10 +1534,12 @@ impl CantonAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton revoke-user-rights failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton revoke-user-rights failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1520,10 +1551,12 @@ impl CantonAdapter {
             )));
         }
 
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton revoke-user-rights response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton revoke-user-rights response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Lists the rights granted to a Canton user via
@@ -1531,28 +1564,24 @@ impl CantonAdapter {
     /// `{ rights: [{ kind: { CanActAs: { value: { party } } } }, ...] }`.
     /// Pass `user_id = None` to list rights for the OAuth principal's
     /// own user (`<client_id>@clients`).
-    pub async fn list_user_rights(
-        &self,
-        user_id: Option<&str>,
-    ) -> Result<serde_json::Value> {
+    pub async fn list_user_rights(&self, user_id: Option<&str>) -> Result<serde_json::Value> {
         let resolved_user_id = match user_id {
             Some(u) => u.to_string(),
             None => self.derived_self_user_id()?,
         };
 
-        let path = format!(
-            "/users/{}/rights",
-            urlencoding::encode(&resolved_user_id),
-        );
+        let path = format!("/users/{}/rights", urlencoding::encode(&resolved_user_id),);
         let response = self
             .build_request(reqwest::Method::GET, &path)
             .await?
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!(
-                "Canton list-user-rights failed: {}",
-                Self::classify_reqwest_error(&e)
-            )))?;
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton list-user-rights failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1563,16 +1592,22 @@ impl CantonAdapter {
             )));
         }
 
-        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
-            "Invalid Canton list-user-rights response: {}",
-            Self::classify_reqwest_error(&e)
-        )))
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton list-user-rights response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
     }
 
     /// Returns the JSON API root URL (without `/v2`). Used by helpers
     /// that need to hit non-versioned endpoints like `/livez`.
     fn json_api_url_root(&self) -> String {
-        let scheme = if self.config.tls_enabled { "https" } else { "http" };
+        let scheme = if self.config.tls_enabled {
+            "https"
+        } else {
+            "http"
+        };
         if self.config.json_api_port == 443 || self.config.json_api_port == 80 {
             format!("{}://{}", scheme, self.config.participant_host)
         } else {
@@ -1633,7 +1668,11 @@ impl CantonAdapter {
     ///
     /// See: https://docs.digitalasset.com/integrate/devel/Json-Ledger-API/
     fn json_api_url(&self) -> String {
-        let scheme = if self.config.tls_enabled { "https" } else { "http" };
+        let scheme = if self.config.tls_enabled {
+            "https"
+        } else {
+            "http"
+        };
         format!(
             "{}://{}:{}/v2",
             scheme, self.config.participant_host, self.config.json_api_port
@@ -1792,10 +1831,7 @@ impl CantonAdapter {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_default();
             // The sanitized error is what leaves the node toward the
             // caller. We additionally log the upstream body verbatim
             // at DEBUG so operators can diagnose wire-shape problems
@@ -1814,21 +1850,21 @@ impl CantonAdapter {
 
         let tx_tree: JsonApiSubmitAndWaitResponse = response.json().await.map_err(|e| {
             let cls = Self::classify_reqwest_error(&e);
-            error!("Failed to parse Canton JSON Ledger API v2 response: {}", cls);
+            error!(
+                "Failed to parse Canton JSON Ledger API v2 response: {}",
+                cls
+            );
             BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
         // Extract the created event's contract id from the transaction tree.
         // The v2 transaction tree exposes events keyed by node id; we look for
         // the first CreatedEvent variant.
-        let create_response = tx_tree
-            .into_created_response()
-            .ok_or_else(|| {
-                BridgeError::AdapterError(
-                    "Canton v2 submit returned no CreatedEvent in transaction tree"
-                        .to_string(),
-                )
-            })?;
+        let create_response = tx_tree.into_created_response().ok_or_else(|| {
+            BridgeError::AdapterError(
+                "Canton v2 submit returned no CreatedEvent in transaction tree".to_string(),
+            )
+        })?;
 
         info!(
             "Canton: Contract created successfully, contract_id={}",
@@ -1912,10 +1948,7 @@ impl CantonAdapter {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_default();
             let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
             error!("Canton JSON Ledger API v2 exercise error: {}", sanitized);
             return Err(BridgeError::AdapterError(sanitized));
@@ -1923,7 +1956,10 @@ impl CantonAdapter {
 
         let tx_tree: JsonApiSubmitAndWaitResponse = response.json().await.map_err(|e| {
             let cls = Self::classify_reqwest_error(&e);
-            error!("Failed to parse Canton JSON Ledger API v2 exercise response: {}", cls);
+            error!(
+                "Failed to parse Canton JSON Ledger API v2 exercise response: {}",
+                cls
+            );
             BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
@@ -1981,10 +2017,7 @@ impl CantonAdapter {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_default();
             let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
             warn!("Canton JSON Ledger API v2 fetch error: {}", sanitized);
             return Err(BridgeError::AdapterError(sanitized));
@@ -1992,7 +2025,10 @@ impl CantonAdapter {
 
         let fetch_response: JsonApiFetchResponse = response.json().await.map_err(|e| {
             let cls = Self::classify_reqwest_error(&e);
-            error!("Failed to parse Canton JSON Ledger API v2 fetch response: {}", cls);
+            error!(
+                "Failed to parse Canton JSON Ledger API v2 fetch response: {}",
+                cls
+            );
             BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
@@ -2017,10 +2053,7 @@ impl CantonAdapter {
             .map_err(|e| {
                 let cls = Self::classify_reqwest_error(&e);
                 error!("Canton ledger-end fetch failed: {}", cls);
-                BridgeError::AdapterError(format!(
-                    "Canton ledger-end fetch failed: {}",
-                    cls
-                ))
+                BridgeError::AdapterError(format!("Canton ledger-end fetch failed: {}", cls))
             })?;
 
         if !response.status().is_success() {
@@ -2037,10 +2070,7 @@ impl CantonAdapter {
         }
         let parsed: LedgerEnd = response.json().await.map_err(|e| {
             let cls = Self::classify_reqwest_error(&e);
-            BridgeError::AdapterError(format!(
-                "Invalid Canton ledger-end response: {}",
-                cls
-            ))
+            BridgeError::AdapterError(format!("Invalid Canton ledger-end response: {}", cls))
         })?;
         Ok(parsed.offset)
     }
@@ -2080,13 +2110,8 @@ impl CantonAdapter {
         if let Some(ref provider) = self.token_provider {
             let user_id = format!("{}@clients", provider.client_id());
             // urlencoding handles the `@` so the endpoint resolves.
-            let path = format!(
-                "/users/{}",
-                urlencoding::encode(&user_id)
-            );
-            if let Ok(user_resp) = self
-                .build_request(reqwest::Method::GET, &path)
-                .await
+            let path = format!("/users/{}", urlencoding::encode(&user_id));
+            if let Ok(user_resp) = self.build_request(reqwest::Method::GET, &path).await
                 && let Ok(resp) = user_resp.send().await
                 && resp.status().is_success()
                 && let Ok(body) = resp.json::<serde_json::Value>().await
@@ -2135,10 +2160,7 @@ impl CantonAdapter {
             .await
             .map_err(|e| {
                 let cls = Self::classify_reqwest_error(&e);
-                BridgeError::AdapterError(format!(
-                    "Canton party-resolve query failed: {}",
-                    cls
-                ))
+                BridgeError::AdapterError(format!("Canton party-resolve query failed: {}", cls))
             })?;
 
         if !response.status().is_success() {
@@ -2147,10 +2169,7 @@ impl CantonAdapter {
 
         let body: serde_json::Value = response.json().await.map_err(|e| {
             let cls = Self::classify_reqwest_error(&e);
-            BridgeError::AdapterError(format!(
-                "Invalid Canton party-resolve response: {}",
-                cls
-            ))
+            BridgeError::AdapterError(format!("Invalid Canton party-resolve response: {}", cls))
         })?;
 
         if let Some(arr) = body.as_array() {
@@ -2206,13 +2225,15 @@ impl CantonAdapter {
         let mut filters_by_party = serde_json::Map::new();
         let cumulative_filters: Vec<serde_json::Value> = template_ids
             .iter()
-            .map(|tid| serde_json::json!({
-                "identifierFilter": {
-                    "TemplateFilter": {
-                        "value": { "templateId": tid }
+            .map(|tid| {
+                serde_json::json!({
+                    "identifierFilter": {
+                        "TemplateFilter": {
+                            "value": { "templateId": tid }
+                        }
                     }
-                }
-            }))
+                })
+            })
             .collect();
         filters_by_party.insert(
             party_fq,
@@ -2257,10 +2278,7 @@ impl CantonAdapter {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_default();
             let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
             error!("Canton JSON Ledger API v2 query error: {}", sanitized);
             return Err(BridgeError::AdapterError(sanitized));
@@ -2273,7 +2291,10 @@ impl CantonAdapter {
         // of the three shapes without re-pinning the contract.
         let body: serde_json::Value = response.json().await.map_err(|e| {
             let cls = Self::classify_reqwest_error(&e);
-            error!("Failed to parse Canton JSON Ledger API v2 query response: {}", cls);
+            error!(
+                "Failed to parse Canton JSON Ledger API v2 query response: {}",
+                cls
+            );
             BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
@@ -2286,10 +2307,7 @@ impl CantonAdapter {
         } else {
             // Legacy wrapper shape.
             serde_json::from_value(body).map_err(|e| {
-                BridgeError::AdapterError(format!(
-                    "Unexpected Canton response shape: {}",
-                    e
-                ))
+                BridgeError::AdapterError(format!("Unexpected Canton response shape: {}", e))
             })?
         };
 
@@ -2301,13 +2319,9 @@ impl CantonAdapter {
             .into_iter()
             .filter(|contract| match predicate {
                 None => true,
-                Some(map) => map.iter().all(|(k, v)| {
-                    contract
-                        .payload
-                        .get(k)
-                        .map(|cv| cv == v)
-                        .unwrap_or(false)
-                }),
+                Some(map) => map
+                    .iter()
+                    .all(|(k, v)| contract.payload.get(k).map(|cv| cv == v).unwrap_or(false)),
             })
             .collect();
 
@@ -2387,9 +2401,7 @@ impl CantonAdapter {
             "synchronizerId": synchronizer_id,
         });
 
-        let response = self
-            .create_contract(Self::TPL_WORKFLOW, payload)
-            .await?;
+        let response = self.create_contract(Self::TPL_WORKFLOW, payload).await?;
 
         info!(
             "Canton mirror_workflow: workflow {} → contract {} on synchronizer {}",
@@ -2444,9 +2456,7 @@ impl CantonAdapter {
             "tenzroParty": self.config.act_as_party,
         });
 
-        let response = self
-            .create_contract(Self::TPL_OBLIGATION, payload)
-            .await?;
+        let response = self.create_contract(Self::TPL_OBLIGATION, payload).await?;
 
         debug!(
             "Canton mirror_obligation: obligation {} → contract {}",
@@ -2497,9 +2507,7 @@ impl CantonAdapter {
             "tenzroParty": self.config.act_as_party,
         });
 
-        let response = self
-            .create_contract(Self::TPL_APPROVAL, payload)
-            .await?;
+        let response = self.create_contract(Self::TPL_APPROVAL, payload).await?;
 
         debug!(
             "Canton mirror_approval: request {} → contract {}",
@@ -2538,9 +2546,7 @@ impl CantonAdapter {
             tenzro_workflow::lifecycle::TransitionTrigger::KillSwitch { .. } => "kill_switch",
             tenzro_workflow::lifecycle::TransitionTrigger::Governance { .. } => "governance",
             tenzro_workflow::lifecycle::TransitionTrigger::Timeout => "timeout",
-            tenzro_workflow::lifecycle::TransitionTrigger::CantonInbound { .. } => {
-                "canton_inbound"
-            }
+            tenzro_workflow::lifecycle::TransitionTrigger::CantonInbound { .. } => "canton_inbound",
         };
 
         let payload = serde_json::json!({
@@ -2555,9 +2561,7 @@ impl CantonAdapter {
             "tenzroParty": self.config.act_as_party,
         });
 
-        let response = self
-            .create_contract(Self::TPL_LIFECYCLE, payload)
-            .await?;
+        let response = self.create_contract(Self::TPL_LIFECYCLE, payload).await?;
 
         Ok(response.contract_id)
     }
@@ -2698,7 +2702,10 @@ impl BridgeAdapter for CantonAdapter {
             .ok_or_else(|| BridgeError::ChainNotSupported(dest_chain.to_string()))?;
 
         // Verify synchronizer is in our configured list
-        if !self.effective_synchronizer_ids().contains(&synchronizer_id.to_string()) {
+        if !self
+            .effective_synchronizer_ids()
+            .contains(&synchronizer_id.to_string())
+        {
             return Err(BridgeError::ChainNotSupported(dest_chain.to_string()));
         }
 
@@ -2799,38 +2806,48 @@ impl BridgeAdapter for CantonAdapter {
             let sender = payload
                 .get("sender")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| BridgeError::InvalidParameter(format!(
-                    "TenzroBridge:Message contract {} missing 'sender' field",
-                    contract.contract_id
-                )))?;
+                .ok_or_else(|| {
+                    BridgeError::InvalidParameter(format!(
+                        "TenzroBridge:Message contract {} missing 'sender' field",
+                        contract.contract_id
+                    ))
+                })?;
             let recipient = payload
                 .get("recipient")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| BridgeError::InvalidParameter(format!(
-                    "TenzroBridge:Message contract {} missing 'recipient' field",
-                    contract.contract_id
-                )))?;
+                .ok_or_else(|| {
+                    BridgeError::InvalidParameter(format!(
+                        "TenzroBridge:Message contract {} missing 'recipient' field",
+                        contract.contract_id
+                    ))
+                })?;
             let contract_synchronizer = payload
                 .get("synchronizerId")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| BridgeError::InvalidParameter(format!(
-                    "TenzroBridge:Message contract {} missing 'synchronizerId' field",
-                    contract.contract_id
-                )))?;
+                .ok_or_else(|| {
+                    BridgeError::InvalidParameter(format!(
+                        "TenzroBridge:Message contract {} missing 'synchronizerId' field",
+                        contract.contract_id
+                    ))
+                })?;
             let message_id = payload
                 .get("messageId")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| BridgeError::InvalidParameter(format!(
-                    "TenzroBridge:Message contract {} missing 'messageId' field",
-                    contract.contract_id
-                )))?;
+                .ok_or_else(|| {
+                    BridgeError::InvalidParameter(format!(
+                        "TenzroBridge:Message contract {} missing 'messageId' field",
+                        contract.contract_id
+                    ))
+                })?;
             let payload_b64 = payload
                 .get("payload")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| BridgeError::InvalidParameter(format!(
-                    "TenzroBridge:Message contract {} missing 'payload' field",
-                    contract.contract_id
-                )))?;
+                .ok_or_else(|| {
+                    BridgeError::InvalidParameter(format!(
+                        "TenzroBridge:Message contract {} missing 'payload' field",
+                        contract.contract_id
+                    ))
+                })?;
 
             // Defence-in-depth: the contract MUST claim the synchronizer
             // we queried. The participant should already filter this
@@ -2862,14 +2879,18 @@ impl BridgeAdapter for CantonAdapter {
             };
 
             if let Some(tx) = inbound_tx.as_ref() {
-                tx.send(inbound).map_err(|e| BridgeError::AdapterError(format!(
-                    "Canton inbound channel receiver dropped: {e}"
-                )))?;
+                tx.send(inbound).map_err(|e| {
+                    BridgeError::AdapterError(format!(
+                        "Canton inbound channel receiver dropped: {e}"
+                    ))
+                })?;
             } else {
                 debug!(
                     "Canton: decoded inbound message_id={} contract={} sender={} ({} bytes) \
                      (no consumer wired — payload discarded)",
-                    inbound.message_id, inbound.contract_id, inbound.sender,
+                    inbound.message_id,
+                    inbound.contract_id,
+                    inbound.sender,
                     inbound.payload.len()
                 );
             }
@@ -2900,7 +2921,10 @@ impl BridgeAdapter for CantonAdapter {
             .ok_or_else(|| BridgeError::ChainNotSupported(request.dest_chain.clone()))?;
 
         // Verify destination synchronizer is supported
-        if !self.effective_synchronizer_ids().contains(&dest_synchronizer.to_string()) {
+        if !self
+            .effective_synchronizer_ids()
+            .contains(&dest_synchronizer.to_string())
+        {
             return Err(BridgeError::ChainNotSupported(request.dest_chain.clone()));
         }
 
@@ -3116,7 +3140,10 @@ impl BridgeAdapter for CantonAdapter {
             .strip_prefix("canton-")
             .ok_or_else(|| BridgeError::ChainNotSupported(dest_chain.to_string()))?;
 
-        if !self.effective_synchronizer_ids().contains(&synchronizer_id.to_string()) {
+        if !self
+            .effective_synchronizer_ids()
+            .contains(&synchronizer_id.to_string())
+        {
             return Err(BridgeError::ChainNotSupported(dest_chain.to_string()));
         }
 
@@ -3179,22 +3206,15 @@ impl CantonAdapter {
             )
             .await?;
 
-        let payload = contracts
-            .first()
-            .map(|c| &c.payload)
-            .ok_or_else(|| {
-                BridgeError::AdapterError(
-                    "no AmuletRules contract visible to this party".to_string(),
-                )
-            })?;
+        let payload = contracts.first().map(|c| &c.payload).ok_or_else(|| {
+            BridgeError::AdapterError("no AmuletRules contract visible to this party".to_string())
+        })?;
 
         let transfer_config = payload
             .pointer("/configSchedule/initialValue/transferConfig")
             .or_else(|| payload.pointer("/transferConfig"))
             .ok_or_else(|| {
-                BridgeError::AdapterError(
-                    "AmuletRules payload has no transferConfig".to_string(),
-                )
+                BridgeError::AdapterError("AmuletRules payload has no transferConfig".to_string())
             })?;
 
         let create_fee = transfer_config
@@ -3569,7 +3589,13 @@ impl JsonApiSubmitAndWaitResponse {
                 .or_else(|| value.get("Created"))
                 .or_else(|| value.get("created"))
                 // Flat transaction events may have the fields at top level
-                .or_else(|| if value.get("contractId").is_some() { Some(value) } else { None })?;
+                .or_else(|| {
+                    if value.get("contractId").is_some() {
+                        Some(value)
+                    } else {
+                        None
+                    }
+                })?;
             let contract_id = created
                 .get("contractId")
                 .and_then(|v| v.as_str())
@@ -3580,7 +3606,10 @@ impl JsonApiSubmitAndWaitResponse {
                 .or_else(|| created.get("payload"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            Some(JsonApiCreateResponse { contract_id, payload })
+            Some(JsonApiCreateResponse {
+                contract_id,
+                payload,
+            })
         }
 
         // 1. Try flat transaction (Canton 3.5+)
@@ -3623,7 +3652,13 @@ impl JsonApiSubmitAndWaitResponse {
                 .or_else(|| value.get("ExercisedTreeEvent"))
                 .or_else(|| value.get("Exercised"))
                 .or_else(|| value.get("exercised"))
-                .or_else(|| if value.get("exerciseResult").is_some() { Some(value) } else { None })?;
+                .or_else(|| {
+                    if value.get("exerciseResult").is_some() {
+                        Some(value)
+                    } else {
+                        None
+                    }
+                })?;
             exercised.get("exerciseResult").cloned()
         }
 
@@ -3636,7 +3671,10 @@ impl JsonApiSubmitAndWaitResponse {
                 events.push(event);
             }
             if !events.is_empty() {
-                return JsonApiExerciseResponse { exercise_result, events };
+                return JsonApiExerciseResponse {
+                    exercise_result,
+                    events,
+                };
             }
         }
 
@@ -3654,7 +3692,10 @@ impl JsonApiSubmitAndWaitResponse {
             events.push(value);
         }
 
-        JsonApiExerciseResponse { exercise_result, events }
+        JsonApiExerciseResponse {
+            exercise_result,
+            events,
+        }
     }
 }
 
@@ -3916,7 +3957,9 @@ mod tests {
     fn active_contracts_request_uses_event_format_wrapper() {
         // Mirror what `query_contracts` builds for the per-party,
         // per-template case (the production path).
-        let party_fq = "example-party::1220000000000000000000000000000000000000000000000000000000000000".to_string();
+        let party_fq =
+            "example-party::1220000000000000000000000000000000000000000000000000000000000000"
+                .to_string();
         let template_id = "#splice-amulet:Splice.Amulet:Amulet".to_string();
         let offset: i64 = 1_328_472;
 
@@ -3948,7 +3991,10 @@ mod tests {
         let obj = request_body.as_object().unwrap();
         assert!(obj.contains_key("eventFormat"));
         assert!(obj.contains_key("activeAtOffset"));
-        assert!(!obj.contains_key("filter"), "regression: Canton 3.5 dropped top-level 'filter'");
+        assert!(
+            !obj.contains_key("filter"),
+            "regression: Canton 3.5 dropped top-level 'filter'"
+        );
         assert_eq!(obj.len(), 2);
 
         // The eventFormat sub-object MUST carry the three required fields.
@@ -4035,7 +4081,10 @@ mod tests {
     fn test_usd_decimal_to_micro() {
         assert_eq!(CantonAdapter::usd_decimal_to_micro("0.03"), Some(30_000));
         assert_eq!(CantonAdapter::usd_decimal_to_micro("1"), Some(1_000_000));
-        assert_eq!(CantonAdapter::usd_decimal_to_micro(" 2.5 "), Some(2_500_000));
+        assert_eq!(
+            CantonAdapter::usd_decimal_to_micro(" 2.5 "),
+            Some(2_500_000)
+        );
         // Below micro-USD precision truncates rather than rounding.
         assert_eq!(CantonAdapter::usd_decimal_to_micro("0.0000048225"), Some(4));
         assert_eq!(CantonAdapter::usd_decimal_to_micro("-1.0"), None);

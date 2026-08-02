@@ -5,10 +5,10 @@
 //! per-hour price bid and expiry. Leases are cross-app, so they live in
 //! their own command group rather than under `site`/`function`/`machine`.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
 use crate::rpc::RpcClient;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Hosting-lease inspection operations
 #[derive(Debug, Subcommand)]
@@ -66,7 +66,10 @@ impl LeaseGetCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc
-            .call("tenzro_getLeasesForApp", serde_json::json!({ "app_id": self.app_id }))
+            .call(
+                "tenzro_getLeasesForApp",
+                serde_json::json!({ "app_id": self.app_id }),
+            )
             .await?;
 
         output::print_field("App ID", &self.app_id);
@@ -97,8 +100,14 @@ fn print_lease_list(result: &serde_json::Value) -> Result<()> {
         Some(leases) if !leases.is_empty() => {
             for l in leases {
                 let node = l.get("node_id").and_then(|v| v.as_str()).unwrap_or("?");
-                let class = l.get("runtime_class").and_then(|v| v.as_str()).unwrap_or("?");
-                let price = l.get("price_per_hour").and_then(|v| v.as_str()).unwrap_or("0");
+                let class = l
+                    .get("runtime_class")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let price = l
+                    .get("price_per_hour")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0");
                 let region = l.get("region").and_then(|v| v.as_str()).unwrap_or("-");
                 let expires = l.get("expires_at").and_then(|v| v.as_u64()).unwrap_or(0);
                 output::print_field(
@@ -108,7 +117,11 @@ fn print_lease_list(result: &serde_json::Value) -> Result<()> {
             }
             output::print_field(
                 "Count",
-                &result.get("count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                &result
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .to_string(),
             );
         }
         _ => output::print_info("No active leases."),

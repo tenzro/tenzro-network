@@ -19,8 +19,8 @@
 
 use crate::commitments::{compute_run_root, compute_state_root, outer_gradient_signing_bytes};
 use crate::confidential::{
-    validate_confidential_enrollment, verify_manifest_binding, SealedManifestStore,
-    SealedShardStore,
+    SealedManifestStore, SealedShardStore, validate_confidential_enrollment,
+    verify_manifest_binding,
 };
 use crate::error::{Result, TrainingError};
 use crate::payload_store::GradientPayloadStore;
@@ -28,7 +28,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tenzro_storage::{KvStore, CF_TRAINING_RECEIPTS, CF_TRAINING_RUNS};
+use tenzro_storage::{CF_TRAINING_RECEIPTS, CF_TRAINING_RUNS, KvStore};
 use tenzro_types::primitives::{Hash, Timestamp};
 use tenzro_types::training::{
     AggregationRule, FragmentQuorumStatus, OuterGradient, OuterUpdateMode, PayloadKind,
@@ -94,9 +94,7 @@ pub fn validate_payload_kind(spec: &TrainingTaskSpec) -> Result<()> {
     if matches!(spec.outer_update, OuterUpdateMode::SparseEf { .. })
         && !matches!(spec.payload_kind, PayloadKind::SparseTopK(_))
     {
-        return Err(TrainingError::OuterUpdateRequiresSparse {
-            mode: "sparse-ef",
-        });
+        return Err(TrainingError::OuterUpdateRequiresSparse { mode: "sparse-ef" });
     }
     Ok(())
 }
@@ -207,7 +205,11 @@ pub struct SyncerState {
 }
 
 impl SyncerState {
-    pub fn new(task_spec: TrainingTaskSpec, syncer_did: String, syncer_address: tenzro_types::primitives::Address) -> Self {
+    pub fn new(
+        task_spec: TrainingTaskSpec,
+        syncer_did: String,
+        syncer_address: tenzro_types::primitives::Address,
+    ) -> Self {
         let now = Timestamp::now();
         let run = TrainingRun {
             task_id: task_spec.task_id.clone(),
@@ -258,7 +260,9 @@ impl SyncerState {
             run.status,
             TrainingRunStatus::Pending | TrainingRunStatus::Enrolling
         ) {
-            return Err(TrainingError::EnrollmentClosed(self.task_spec.task_id.clone()));
+            return Err(TrainingError::EnrollmentClosed(
+                self.task_spec.task_id.clone(),
+            ));
         }
         if run.trainers.contains(&trainer_did) {
             return Err(TrainingError::AlreadyEnrolled(trainer_did));
@@ -518,8 +522,7 @@ impl SyncerState {
                 .clone()
                 .ok_or(TrainingError::CommitmentRequired)?
         };
-        let verification =
-            crate::activation::verify_activation_commitment(&claimed, recomputed);
+        let verification = crate::activation::verify_activation_commitment(&claimed, recomputed);
         if !verification.passed {
             self.evict_trainer(
                 trainer_did,
@@ -583,10 +586,7 @@ impl SyncerState {
                 accepted,
                 accepted_hashes,
                 quorum_met,
-                post_step_hash: post_step_hashes
-                    .get(&f)
-                    .copied()
-                    .unwrap_or_else(Hash::zero),
+                post_step_hash: post_step_hashes.get(&f).copied().unwrap_or_else(Hash::zero),
             });
         }
         out
@@ -865,6 +865,10 @@ pub struct TrainingRuntime {
     /// at `register_run` / `hydrate` time. `None` on Open-tier local-dev with
     /// no bonding backend.
     slashing: Option<Arc<dyn crate::slashing::TrainerSlashingCallback>>,
+    /// Node-provided TEE attestation checker used to admit Confidential-tier
+    /// trainers. `None` on Open / Verified tier runs; a Confidential-tier
+    /// enrollment with no verifier installed is refused.
+    enclave_verifier: Option<Arc<dyn crate::confidential::EnclaveIdentityVerifier>>,
 }
 
 impl Default for TrainingRuntime {
@@ -876,6 +880,7 @@ impl Default for TrainingRuntime {
             sealed_shard_store: None,
             storage: None,
             slashing: None,
+            enclave_verifier: None,
         }
     }
 }
@@ -896,7 +901,19 @@ impl TrainingRuntime {
             sealed_shard_store: None,
             storage: Some(storage),
             slashing: None,
+            enclave_verifier: None,
         }
+    }
+
+    /// Attach the node's TEE attestation checker (builder). Required for
+    /// Confidential-tier enrollment: without it, a Confidential-tier trainer
+    /// is refused rather than admitted unchecked.
+    pub fn with_enclave_verifier(
+        mut self,
+        verifier: Arc<dyn crate::confidential::EnclaveIdentityVerifier>,
+    ) -> Self {
+        self.enclave_verifier = Some(verifier);
+        self
     }
 
     /// Attach the node's slash-and-evict bridge (builder). Injected into every
@@ -960,7 +977,9 @@ impl TrainingRuntime {
             // Skip terminal runs — they're audit-only.
             if matches!(
                 run.status,
-                TrainingRunStatus::Completed | TrainingRunStatus::Failed | TrainingRunStatus::Cancelled
+                TrainingRunStatus::Completed
+                    | TrainingRunStatus::Failed
+                    | TrainingRunStatus::Cancelled
             ) {
                 continue;
             }
@@ -1035,19 +1054,15 @@ impl TrainingRuntime {
         self.manifests.put(normalized)
     }
 
-    /// Enroll a trainer with Confidential-tier policy enforced. The caller
-    /// supplies the trainer's attestation and the enclave-bound key /
-    /// measurements the syncer's TEE verifier extracted from the
-    /// attestation report. Open/Verified tier callers can pass empty
-    /// `trainer_enclave_pubkey` and `trainer_measurements_hex` — the
-    /// validator short-circuits on tier.
+    /// Enroll a trainer with Confidential-tier policy enforced. The trainer's
+    /// attestation is checked against the sealed manifest by the installed
+    /// enclave verifier; Open/Verified tier callers can pass `None` for the
+    /// attestation, since the validator short-circuits on tier.
     pub fn enroll_trainer(
         &self,
         task_id: &str,
         trainer_did: String,
         trainer_attestation: Option<&TrainingAttestation>,
-        trainer_enclave_pubkey: &[u8],
-        trainer_measurements_hex: &str,
     ) -> Result<()> {
         let state = self
             .syncers
@@ -1061,8 +1076,7 @@ impl TrainingRuntime {
             manifest.as_deref(),
             &trainer_did,
             trainer_attestation,
-            trainer_enclave_pubkey,
-            trainer_measurements_hex,
+            self.enclave_verifier.as_deref(),
         )?;
         state.enroll_trainer(trainer_did)?;
         self.persist_run(&state)?;
@@ -1108,10 +1122,11 @@ impl TrainingRuntime {
             .map_err(|e| TrainingError::Storage(e.to_string()))?;
         match bytes {
             None => Ok(None),
-            Some(b) => Ok(Some(
-                serde_json::from_slice(&b)
-                    .map_err(|e| TrainingError::Serialization(e.to_string()))?,
-            )),
+            Some(b) => {
+                Ok(Some(serde_json::from_slice(&b).map_err(|e| {
+                    TrainingError::Serialization(e.to_string())
+                })?))
+            }
         }
     }
 
@@ -1131,12 +1146,7 @@ impl TrainingRuntime {
     ///
     /// The committee size is [`crate::committee::recommended_committee_size`]
     /// of the enrolled set: `min(5, max(3, n/5))`.
-    pub fn witness_committee(
-        &self,
-        task_id: &str,
-        round: u32,
-        chain_entropy: Hash,
-    ) -> Vec<String> {
+    pub fn witness_committee(&self, task_id: &str, round: u32, chain_entropy: Hash) -> Vec<String> {
         let state = match self.syncers.get(task_id) {
             Some(s) => s.clone(),
             None => return Vec::new(),
@@ -1188,7 +1198,12 @@ mod tests {
         }
     }
 
-    fn make_gradient(spec: &TrainingTaskSpec, trainer_did: &str, round: u32, fragment: u32) -> OuterGradient {
+    fn make_gradient(
+        spec: &TrainingTaskSpec,
+        trainer_did: &str,
+        round: u32,
+        fragment: u32,
+    ) -> OuterGradient {
         use tenzro_crypto::signatures::Signer;
         // Deterministic per-DID Ed25519 key so repeated calls for the same
         // trainer produce a stable address (idempotency tests re-submit).
@@ -1196,11 +1211,9 @@ mod tests {
         for (i, b) in trainer_did.bytes().enumerate() {
             seed[i % 32] ^= b;
         }
-        let keypair = tenzro_crypto::keys::KeyPair::from_bytes(
-            tenzro_crypto::keys::KeyType::Ed25519,
-            &seed,
-        )
-        .unwrap();
+        let keypair =
+            tenzro_crypto::keys::KeyPair::from_bytes(tenzro_crypto::keys::KeyType::Ed25519, &seed)
+                .unwrap();
         let pubkey_bytes = keypair.public_key().as_bytes().to_vec();
         let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair).unwrap();
         let mut gradient = OuterGradient {
@@ -1223,8 +1236,7 @@ mod tests {
         };
         let msg = outer_gradient_signing_bytes(&gradient);
         let sig = signer.sign(&msg).unwrap();
-        gradient.signature =
-            tenzro_types::primitives::Signature::new(sig.to_bytes(), pubkey_bytes);
+        gradient.signature = tenzro_types::primitives::Signature::new(sig.to_bytes(), pubkey_bytes);
         gradient
     }
 
@@ -1361,9 +1373,13 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
         assert_eq!(state.run.read().status, TrainingRunStatus::Enrolling);
-        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t2".into())
+            .unwrap();
         assert_eq!(state.run.read().status, TrainingRunStatus::Training);
     }
 
@@ -1374,7 +1390,9 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
         let err = state.enroll_trainer("did:tenzro:machine:t1".into());
         assert!(matches!(err, Err(TrainingError::AlreadyEnrolled(_))));
     }
@@ -1448,8 +1466,12 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
-        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t2".into())
+            .unwrap();
 
         // Populate round-0 buffers with real accepted gradients on every
         // fragment so the computed root reflects non-empty buffers.
@@ -1666,9 +1688,11 @@ mod tests {
     fn witness_committee_empty_for_unknown_task() {
         let runtime = TrainingRuntime::new();
         let entropy = Hash::from_bytes(&[42u8; 32]).unwrap();
-        assert!(runtime
-            .witness_committee("does-not-exist", 0, entropy)
-            .is_empty());
+        assert!(
+            runtime
+                .witness_committee("does-not-exist", 0, entropy)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1682,8 +1706,12 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
-        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t2".into())
+            .unwrap();
 
         let active = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
         state.accept_outer_gradient(active).unwrap();
@@ -1729,8 +1757,12 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
-        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t2".into())
+            .unwrap();
 
         let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
         gradient.quantization = GradientQuantization::None;
@@ -1756,8 +1788,12 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
-        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t2".into())
+            .unwrap();
 
         // Swap the signature's public_key so it no longer equals trainer_address.
         let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
@@ -1779,8 +1815,12 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
-        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t2".into())
+            .unwrap();
 
         // Keep a matching public_key/address pair but corrupt the signature.
         let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
@@ -1815,7 +1855,9 @@ mod tests {
         }
         // 3 trainers = 1 complete group + 1 partial → still enrolling.
         assert_eq!(state.run.read().status, TrainingRunStatus::Enrolling);
-        state.enroll_trainer("did:tenzro:machine:t3".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t3".into())
+            .unwrap();
         // 4 trainers = 2 complete groups → quorum met.
         assert_eq!(state.run.read().status, TrainingRunStatus::Training);
 
@@ -1866,10 +1908,7 @@ mod tests {
 
     #[test]
     fn min_tier_classification() {
-        assert_eq!(
-            min_tier_for_rule(AggregationRule::Mean),
-            TrainingTier::Open
-        );
+        assert_eq!(min_tier_for_rule(AggregationRule::Mean), TrainingTier::Open);
         assert_eq!(
             min_tier_for_rule(AggregationRule::TrimmedMean { alpha_bps: 1000 }),
             TrainingTier::Verified
@@ -1896,8 +1935,12 @@ mod tests {
             "did:tenzro:machine:syncer".into(),
             Address::new([9u8; 32]),
         );
-        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
-        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t1".into())
+            .unwrap();
+        state
+            .enroll_trainer("did:tenzro:machine:t2".into())
+            .unwrap();
         state
     }
 
@@ -1984,10 +2027,7 @@ mod tests {
             commitment.loss_trajectory.truncate(10);
         }
         let err = state.accept_outer_gradient(gradient);
-        assert!(matches!(
-            err,
-            Err(TrainingError::CommitmentInvalid { .. })
-        ));
+        assert!(matches!(err, Err(TrainingError::CommitmentInvalid { .. })));
     }
 
     #[tokio::test]
@@ -2005,12 +2045,14 @@ mod tests {
             .unwrap();
         assert!(verification.passed);
         // Trainer stays enrolled; buffered gradient stays.
-        assert!(state
-            .run
-            .read()
-            .trainers
-            .iter()
-            .any(|d| d == "did:tenzro:machine:t1"));
+        assert!(
+            state
+                .run
+                .read()
+                .trainers
+                .iter()
+                .any(|d| d == "did:tenzro:machine:t1")
+        );
         assert_eq!(state.buffers.get(&(0, 0)).unwrap().accepted.len(), 1);
     }
 
@@ -2036,12 +2078,14 @@ mod tests {
             .unwrap();
         assert!(!verification.passed);
         // Trainer evicted; its buffered gradient dropped.
-        assert!(!state
-            .run
-            .read()
-            .trainers
-            .iter()
-            .any(|d| d == "did:tenzro:machine:t1"));
+        assert!(
+            !state
+                .run
+                .read()
+                .trainers
+                .iter()
+                .any(|d| d == "did:tenzro:machine:t1")
+        );
         assert!(state.buffers.get(&(0, 0)).unwrap().accepted.is_empty());
     }
 
@@ -2058,12 +2102,14 @@ mod tests {
             Err(TrainingError::GradientNotFound { round: 3, .. })
         ));
         // A challenge miss is a lookup failure, not proof of poisoning.
-        assert!(!TrainingError::GradientNotFound {
-            round: 3,
-            fragment: 0,
-            trainer_did: "did:tenzro:machine:t1".into(),
-        }
-        .is_slashable_rejection());
+        assert!(
+            !TrainingError::GradientNotFound {
+                round: 3,
+                fragment: 0,
+                trainer_did: "did:tenzro:machine:t1".into(),
+            }
+            .is_slashable_rejection()
+        );
     }
 
     #[test]

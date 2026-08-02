@@ -39,9 +39,9 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use hickory_resolver::Resolver;
 use hickory_resolver::config::ResolverOpts;
 use hickory_resolver::proto::rr::RData;
-use hickory_resolver::Resolver;
 use libp2p::Multiaddr;
 use tracing::{info, warn};
 
@@ -71,9 +71,7 @@ pub enum BootstrapDnsError {
 ///
 /// Records that fail to parse are warned about and skipped — a single
 /// malformed entry must not break the rest of the bootstrap set.
-pub async fn resolve_bootstrap_dns(
-    base: &str,
-) -> Result<Vec<Multiaddr>, BootstrapDnsError> {
+pub async fn resolve_bootstrap_dns(base: &str) -> Result<Vec<Multiaddr>, BootstrapDnsError> {
     let mut opts = ResolverOpts::default();
     opts.timeout = Duration::from_secs(5);
     opts.attempts = 2;
@@ -94,13 +92,14 @@ pub async fn resolve_bootstrap_dns(
         "Resolving bootstrap SRV records at {}",
         srv_name
     );
-    let srv = resolver
-        .srv_lookup(srv_name.as_str())
-        .await
-        .map_err(|e| BootstrapDnsError::SrvLookup {
-            name: srv_name.clone(),
-            source: Box::new(e),
-        })?;
+    let srv =
+        resolver
+            .srv_lookup(srv_name.as_str())
+            .await
+            .map_err(|e| BootstrapDnsError::SrvLookup {
+                name: srv_name.clone(),
+                source: Box::new(e),
+            })?;
 
     let mut out: Vec<Multiaddr> = Vec::new();
 

@@ -161,7 +161,7 @@ impl JurisdictionSigner for Ed25519JurisdictionSigner {
 /// key and canonical preimage. Returns `Ok(())` if the signature is valid.
 pub fn verify_receipt(receipt: &JurisdictionReceipt) -> Result<(), JurisdictionError> {
     use tenzro_crypto::keys::{KeyType, PublicKey};
-    use tenzro_crypto::signatures::{verify, Signature};
+    use tenzro_crypto::signatures::{Signature, verify};
 
     let key_type = match receipt.algorithm.as_str() {
         "ed25519" => KeyType::Ed25519,
@@ -173,8 +173,7 @@ pub fn verify_receipt(receipt: &JurisdictionReceipt) -> Result<(), JurisdictionE
     let signature = Signature::new(key_type, receipt.signature.clone());
 
     let preimage = receipt.canonical_preimage();
-    verify(&public_key, &preimage, &signature)
-        .map_err(|_| JurisdictionError::VerificationFailed)
+    verify(&public_key, &preimage, &signature).map_err(|_| JurisdictionError::VerificationFailed)
 }
 
 /// Verify every field of a provider-attached response receipt: the request and
@@ -246,7 +245,13 @@ mod tests {
         let signer = Ed25519JurisdictionSigner::generate().unwrap();
         let provider = Address::new([0x42; 32]);
         let receipt = signer
-            .sign(b"prompt bytes", b"output bytes", "qwen3-8b", provider, &claim())
+            .sign(
+                b"prompt bytes",
+                b"output bytes",
+                "qwen3-8b",
+                provider,
+                &claim(),
+            )
             .unwrap();
 
         assert_eq!(receipt.algorithm, "ed25519");

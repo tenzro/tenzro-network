@@ -30,7 +30,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_iroh::{IrohResolver, TenzroUri};
-use tenzro_storage::{KvStore, CF_SETTLEMENTS};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_types::access_policy::{AccessPolicy, ConfidentialSeal};
 use tracing::{debug, info, warn};
 
@@ -153,10 +153,16 @@ impl StorageProvider {
         match serde_json::to_vec(descriptor) {
             Ok(bytes) => {
                 if let Err(e) = storage.put(CF_SETTLEMENTS, &key, &bytes) {
-                    warn!("Failed to persist object descriptor {}: {}", descriptor.object_id, e);
+                    warn!(
+                        "Failed to persist object descriptor {}: {}",
+                        descriptor.object_id, e
+                    );
                 }
             }
-            Err(e) => warn!("Failed to serialize object descriptor {}: {}", descriptor.object_id, e),
+            Err(e) => warn!(
+                "Failed to serialize object descriptor {}: {}",
+                descriptor.object_id, e
+            ),
         }
     }
 
@@ -241,7 +247,11 @@ impl StorageProvider {
             descriptor.size_bytes as usize,
             object_id,
         )?;
-        debug!("Reconstructed object {} from {} shards", object_id, present.len());
+        debug!(
+            "Reconstructed object {} from {} shards",
+            object_id,
+            present.len()
+        );
         Ok(data)
     }
 
@@ -254,7 +264,10 @@ impl StorageProvider {
             let uri: TenzroUri = match sref.uri.parse() {
                 Ok(u) => u,
                 Err(e) => {
-                    warn!("Object {} shard {} has unparseable URI: {}", descriptor.object_id, sref.index, e);
+                    warn!(
+                        "Object {} shard {} has unparseable URI: {}",
+                        descriptor.object_id, sref.index, e
+                    );
                     continue;
                 }
             };

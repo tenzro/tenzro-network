@@ -44,11 +44,11 @@ use sha2::{Digest, Sha384};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use tenzro_types::tee::*;
 use crate::attestation::{self, ParsedCertificate};
 use crate::certs;
 use crate::error::{Result, TeeError};
 use crate::traits::TeeProvider;
+use tenzro_types::tee::*;
 
 // ============================================================================
 // SEV-SNP ioctl structures (matching Linux kernel's sev-guest.h)
@@ -96,34 +96,34 @@ pub mod guest_field_select {
 /// verifiers, audit tooling, and integration tests can reference the same
 /// canonical layout.
 pub mod report_offsets {
-    pub const VERSION: usize = 0x000;           // 4 bytes (should be 2)
-    pub const GUEST_SVN: usize = 0x004;         // 4 bytes
-    pub const POLICY: usize = 0x008;            // 8 bytes
-    pub const FAMILY_ID: usize = 0x010;         // 16 bytes
-    pub const IMAGE_ID: usize = 0x020;          // 16 bytes
-    pub const VMPL: usize = 0x030;              // 4 bytes (0–3)
-    pub const SIGNATURE_ALGO: usize = 0x034;    // 4 bytes (1=ECDSA P-384 SHA-384)
-    pub const PLATFORM_VERSION: usize = 0x038;  // 8 bytes (TCB version)
-    pub const PLATFORM_INFO: usize = 0x040;     // 8 bytes
-    pub const FLAGS: usize = 0x048;             // 4 bytes (bit 0: AuthorKeyEn)
-    pub const REPORT_DATA: usize = 0x050;       // 64 bytes
-    pub const MEASUREMENT: usize = 0x090;       // 48 bytes (SHA-384)
-    pub const HOST_DATA: usize = 0x0C0;         // 32 bytes
-    pub const ID_KEY_DIGEST: usize = 0x0E0;     // 48 bytes
+    pub const VERSION: usize = 0x000; // 4 bytes (should be 2)
+    pub const GUEST_SVN: usize = 0x004; // 4 bytes
+    pub const POLICY: usize = 0x008; // 8 bytes
+    pub const FAMILY_ID: usize = 0x010; // 16 bytes
+    pub const IMAGE_ID: usize = 0x020; // 16 bytes
+    pub const VMPL: usize = 0x030; // 4 bytes (0–3)
+    pub const SIGNATURE_ALGO: usize = 0x034; // 4 bytes (1=ECDSA P-384 SHA-384)
+    pub const PLATFORM_VERSION: usize = 0x038; // 8 bytes (TCB version)
+    pub const PLATFORM_INFO: usize = 0x040; // 8 bytes
+    pub const FLAGS: usize = 0x048; // 4 bytes (bit 0: AuthorKeyEn)
+    pub const REPORT_DATA: usize = 0x050; // 64 bytes
+    pub const MEASUREMENT: usize = 0x090; // 48 bytes (SHA-384)
+    pub const HOST_DATA: usize = 0x0C0; // 32 bytes
+    pub const ID_KEY_DIGEST: usize = 0x0E0; // 48 bytes
     pub const AUTHOR_KEY_DIGEST: usize = 0x110; // 48 bytes
-    pub const REPORT_ID: usize = 0x140;         // 32 bytes
-    pub const REPORT_ID_MA: usize = 0x160;      // 32 bytes
-    pub const REPORTED_TCB: usize = 0x180;      // 8 bytes
-    pub const CHIP_ID: usize = 0x1A0;           // 64 bytes
-    pub const COMMITTED_TCB: usize = 0x1E0;     // 8 bytes
+    pub const REPORT_ID: usize = 0x140; // 32 bytes
+    pub const REPORT_ID_MA: usize = 0x160; // 32 bytes
+    pub const REPORTED_TCB: usize = 0x180; // 8 bytes
+    pub const CHIP_ID: usize = 0x1A0; // 64 bytes
+    pub const COMMITTED_TCB: usize = 0x1E0; // 8 bytes
 
     // Signature at offset 0x2A0 (512 bytes)
-    pub const SIGNATURE: usize = 0x2A0;         // 512 bytes total
-    pub const SIGNATURE_R: usize = 0x2A0;       // 72 bytes (padded P-384)
-    pub const SIGNATURE_S: usize = 0x2E8;       // 72 bytes (padded P-384)
+    pub const SIGNATURE: usize = 0x2A0; // 512 bytes total
+    pub const SIGNATURE_R: usize = 0x2A0; // 72 bytes (padded P-384)
+    pub const SIGNATURE_S: usize = 0x2E8; // 72 bytes (padded P-384)
 
     /// Body that is signed (bytes 0x000–0x29F)
-    pub const SIGNED_BODY_LEN: usize = 0x2A0;   // 672 bytes
+    pub const SIGNED_BODY_LEN: usize = 0x2A0; // 672 bytes
 }
 
 /// Parsed SNP attestation report
@@ -206,7 +206,9 @@ impl AmdSevSnpProvider {
         };
 
         Self {
-            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new("amd-sev-snp")),
+            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new(
+                "amd-sev-snp",
+            )),
             available,
             simulate,
         }
@@ -296,9 +298,12 @@ impl AmdSevSnpProvider {
                 .read(true)
                 .write(true)
                 .open("/dev/sev-guest")
-                .map_err(|e| TeeError::AttestationGenerationFailed(
-                    format!("Failed to open /dev/sev-guest: {}", e)
-                ))?;
+                .map_err(|e| {
+                    TeeError::AttestationGenerationFailed(format!(
+                        "Failed to open /dev/sev-guest: {}",
+                        e
+                    ))
+                })?;
 
             // SNP_GET_REPORT = _IOWR('S', 0x0, struct snp_guest_request_ioctl)
             // Size in the ioctl number MUST match sizeof(struct snp_guest_request_ioctl) = 32.
@@ -309,17 +314,27 @@ impl AmdSevSnpProvider {
             );
 
             let ret = unsafe {
-                libc::ioctl(file.as_raw_fd(), ioctl_nr as libc::c_ulong, ioctl_buf.as_mut_ptr())
+                libc::ioctl(
+                    file.as_raw_fd(),
+                    ioctl_nr as libc::c_ulong,
+                    ioctl_buf.as_mut_ptr(),
+                )
             };
 
             if ret != 0 {
                 let errno = std::io::Error::last_os_error();
                 // exitinfo2 at offset 24: low 32 bits = fw_error, high 32 bits = vmm_error
                 let fw_error = u32::from_le_bytes([
-                    ioctl_buf[24], ioctl_buf[25], ioctl_buf[26], ioctl_buf[27]
+                    ioctl_buf[24],
+                    ioctl_buf[25],
+                    ioctl_buf[26],
+                    ioctl_buf[27],
                 ]);
                 let vmm_error = u32::from_le_bytes([
-                    ioctl_buf[28], ioctl_buf[29], ioctl_buf[30], ioctl_buf[31]
+                    ioctl_buf[28],
+                    ioctl_buf[29],
+                    ioctl_buf[30],
+                    ioctl_buf[31],
                 ]);
                 return Err(TeeError::AttestationGenerationFailed(format!(
                     "SNP_GET_REPORT ioctl failed: {} (fw_error: 0x{:X}, vmm_error: 0x{:X})",
@@ -345,7 +360,7 @@ impl AmdSevSnpProvider {
         {
             let _ = user_data;
             Err(TeeError::not_available(
-                "AMD SEV-SNP requires Linux (ioctl to /dev/sev-guest)"
+                "AMD SEV-SNP requires Linux (ioctl to /dev/sev-guest)",
             ))
         }
     }
@@ -411,7 +426,10 @@ impl AmdSevSnpProvider {
     fn parse_report(&self, data: &[u8]) -> Result<SnpReport> {
         // Try JSON first (simulated)
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data)
-            && json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false)
+            && json
+                .get("simulated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             return self.parse_simulated_report(&json, data);
         }
@@ -430,7 +448,8 @@ impl AmdSevSnpProvider {
         };
 
         let tcb = &json["reported_tcb"];
-        let reported_tcb = tcb.get("raw")
+        let reported_tcb = tcb
+            .get("raw")
             .and_then(|v| v.as_str())
             .and_then(|s| hex::decode(s).ok())
             .map(|b| {
@@ -445,7 +464,11 @@ impl AmdSevSnpProvider {
         Ok(SnpReport {
             version: json.get("version").and_then(|v| v.as_u64()).unwrap_or(2) as u32,
             guest_svn: json.get("guest_svn").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-            policy: json.get("policy").and_then(|p| p.get("abi_major")).and_then(|v| v.as_u64()).unwrap_or(1),
+            policy: json
+                .get("policy")
+                .and_then(|p| p.get("abi_major"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1),
             vmpl: json.get("vmpl").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             platform_version: 0,
             reported_tcb,
@@ -466,7 +489,9 @@ impl AmdSevSnpProvider {
     fn parse_binary_report(&self, data: &[u8]) -> Result<SnpReport> {
         if data.len() < SNP_REPORT_SIZE {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "SNP report too short: {} bytes (need {})", data.len(), SNP_REPORT_SIZE
+                "SNP report too short: {} bytes (need {})",
+                data.len(),
+                SNP_REPORT_SIZE
             )));
         }
 
@@ -479,27 +504,40 @@ impl AmdSevSnpProvider {
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if !(2..=5).contains(&version) {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "Unsupported SNP report version: {} (expected 2-5)", version
+                "Unsupported SNP report version: {} (expected 2-5)",
+                version
             )));
         }
 
         let guest_svn = u32::from_le_bytes(
-            data[report_offsets::GUEST_SVN..report_offsets::GUEST_SVN + 4].try_into().unwrap()
+            data[report_offsets::GUEST_SVN..report_offsets::GUEST_SVN + 4]
+                .try_into()
+                .unwrap(),
         );
         let policy = u64::from_le_bytes(
-            data[report_offsets::POLICY..report_offsets::POLICY + 8].try_into().unwrap()
+            data[report_offsets::POLICY..report_offsets::POLICY + 8]
+                .try_into()
+                .unwrap(),
         );
         let vmpl = u32::from_le_bytes(
-            data[report_offsets::VMPL..report_offsets::VMPL + 4].try_into().unwrap()
+            data[report_offsets::VMPL..report_offsets::VMPL + 4]
+                .try_into()
+                .unwrap(),
         );
         let platform_version = u64::from_le_bytes(
-            data[report_offsets::PLATFORM_VERSION..report_offsets::PLATFORM_VERSION + 8].try_into().unwrap()
+            data[report_offsets::PLATFORM_VERSION..report_offsets::PLATFORM_VERSION + 8]
+                .try_into()
+                .unwrap(),
         );
         let reported_tcb = u64::from_le_bytes(
-            data[report_offsets::REPORTED_TCB..report_offsets::REPORTED_TCB + 8].try_into().unwrap()
+            data[report_offsets::REPORTED_TCB..report_offsets::REPORTED_TCB + 8]
+                .try_into()
+                .unwrap(),
         );
         let committed_tcb = u64::from_le_bytes(
-            data[report_offsets::COMMITTED_TCB..report_offsets::COMMITTED_TCB + 8].try_into().unwrap()
+            data[report_offsets::COMMITTED_TCB..report_offsets::COMMITTED_TCB + 8]
+                .try_into()
+                .unwrap(),
         );
 
         // Extract ECDSA P-384 signature components (padded to 72 bytes each, actual is 48)
@@ -519,8 +557,10 @@ impl AmdSevSnpProvider {
             platform_version,
             reported_tcb,
             committed_tcb,
-            measurement: data[report_offsets::MEASUREMENT..report_offsets::MEASUREMENT + 48].to_vec(),
-            report_data: data[report_offsets::REPORT_DATA..report_offsets::REPORT_DATA + 64].to_vec(),
+            measurement: data[report_offsets::MEASUREMENT..report_offsets::MEASUREMENT + 48]
+                .to_vec(),
+            report_data: data[report_offsets::REPORT_DATA..report_offsets::REPORT_DATA + 64]
+                .to_vec(),
             host_data: data[report_offsets::HOST_DATA..report_offsets::HOST_DATA + 32].to_vec(),
             chip_id: data[report_offsets::CHIP_ID..report_offsets::CHIP_ID + 64].to_vec(),
             report_id: data[report_offsets::REPORT_ID..report_offsets::REPORT_ID + 32].to_vec(),
@@ -553,9 +593,10 @@ impl AmdSevSnpProvider {
     #[cfg(feature = "amd-sev-snp")]
     async fn fetch_vcek_certificate(&self, chip_id: &[u8], reported_tcb: u64) -> Result<Vec<u8>> {
         if chip_id.len() != 64 {
-            return Err(TeeError::InvalidAttestationReport(
-                format!("Invalid chip_id length: {} (expected 64)", chip_id.len())
-            ));
+            return Err(TeeError::InvalidAttestationReport(format!(
+                "Invalid chip_id length: {} (expected 64)",
+                chip_id.len()
+            )));
         }
 
         let tcb = Self::decode_tcb(reported_tcb);
@@ -567,7 +608,9 @@ impl AmdSevSnpProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| {
+                TeeError::AttestationGenerationFailed(format!("Failed to build HTTP client: {}", e))
+            })?;
 
         for product_name in &product_names {
             let url = format!(
@@ -584,15 +627,30 @@ impl AmdSevSnpProvider {
 
             match client.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    let vcek_der = resp.bytes().await
-                        .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to read VCEK: {}", e)))?
+                    let vcek_der = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| {
+                            TeeError::AttestationGenerationFailed(format!(
+                                "Failed to read VCEK: {}",
+                                e
+                            ))
+                        })?
                         .to_vec();
 
-                    tracing::info!("Fetched VCEK certificate from AMD KDS ({} bytes, product={})", vcek_der.len(), product_name);
+                    tracing::info!(
+                        "Fetched VCEK certificate from AMD KDS ({} bytes, product={})",
+                        vcek_der.len(),
+                        product_name
+                    );
                     return Ok(vcek_der);
                 }
                 Ok(resp) => {
-                    tracing::debug!("AMD KDS VCEK request failed for {}: {}", product_name, resp.status());
+                    tracing::debug!(
+                        "AMD KDS VCEK request failed for {}: {}",
+                        product_name,
+                        resp.status()
+                    );
                 }
                 Err(e) => {
                     tracing::debug!("AMD KDS VCEK request error for {}: {}", product_name, e);
@@ -600,15 +658,18 @@ impl AmdSevSnpProvider {
             }
         }
 
-        Err(TeeError::AttestationGenerationFailed(
-            format!("Failed to fetch VCEK from AMD KDS for chip_id={}", chip_id_hex)
-        ))
+        Err(TeeError::AttestationGenerationFailed(format!(
+            "Failed to fetch VCEK from AMD KDS for chip_id={}",
+            chip_id_hex
+        )))
     }
 
     #[cfg(not(feature = "amd-sev-snp"))]
     async fn fetch_vcek_certificate(&self, _chip_id: &[u8], _reported_tcb: u64) -> Result<Vec<u8>> {
         tracing::warn!("AMD KDS VCEK fetching requires reqwest (enable amd-sev-snp feature)");
-        Err(TeeError::not_available("AMD KDS VCEK fetching not available"))
+        Err(TeeError::not_available(
+            "AMD KDS VCEK fetching not available",
+        ))
     }
 
     /// Fetches the ASK and ARK certificate chain from AMD KDS.
@@ -616,28 +677,34 @@ impl AmdSevSnpProvider {
     /// NOTE: Requires `reqwest` dependency (enabled via amd-sev-snp feature).
     #[cfg(feature = "amd-sev-snp")]
     async fn fetch_cert_chain(&self, product_name: &str) -> Result<Vec<Vec<u8>>> {
-        let url = format!("https://kdsintf.amd.com/vcek/v1/{}/cert_chain", product_name);
+        let url = format!(
+            "https://kdsintf.amd.com/vcek/v1/{}/cert_chain",
+            product_name
+        );
 
         tracing::info!("Fetching ASK+ARK cert chain from AMD KDS: {}", url);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| {
+                TeeError::AttestationGenerationFailed(format!("Failed to build HTTP client: {}", e))
+            })?;
 
-        let resp = client.get(&url)
-            .send()
-            .await
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to fetch cert chain: {}", e)))?;
+        let resp = client.get(&url).send().await.map_err(|e| {
+            TeeError::AttestationGenerationFailed(format!("Failed to fetch cert chain: {}", e))
+        })?;
 
         if !resp.status().is_success() {
-            return Err(TeeError::AttestationGenerationFailed(
-                format!("AMD KDS cert_chain request failed: {}", resp.status())
-            ));
+            return Err(TeeError::AttestationGenerationFailed(format!(
+                "AMD KDS cert_chain request failed: {}",
+                resp.status()
+            )));
         }
 
-        let pem_data = resp.text().await
-            .map_err(|e| TeeError::AttestationGenerationFailed(format!("Failed to read cert chain: {}", e)))?;
+        let pem_data = resp.text().await.map_err(|e| {
+            TeeError::AttestationGenerationFailed(format!("Failed to read cert chain: {}", e))
+        })?;
 
         // Split PEM certificates (ASK and ARK)
         let mut certs = Vec::new();
@@ -651,7 +718,10 @@ impl AmdSevSnpProvider {
             }
         }
 
-        tracing::info!("Fetched {} certificates from AMD KDS cert_chain", certs.len());
+        tracing::info!(
+            "Fetched {} certificates from AMD KDS cert_chain",
+            certs.len()
+        );
         Ok(certs)
     }
 
@@ -671,7 +741,11 @@ impl AmdSevSnpProvider {
     ///
     /// For simulated reports:
     /// - Parse JSON, return result with simulated flag
-    async fn verify_snp_report(&self, report_data: &[u8], certificates: &[Vec<u8>]) -> Result<AttestationResult> {
+    async fn verify_snp_report(
+        &self,
+        report_data: &[u8],
+        certificates: &[Vec<u8>],
+    ) -> Result<AttestationResult> {
         let report = self.parse_report(report_data)?;
 
         let tcb_components = if report.simulated {
@@ -707,8 +781,14 @@ impl AmdSevSnpProvider {
             // (e.g. callers binding nonce in report_data, gating on platform_version,
             // matching host_data against expected VMM config, correlating report_id).
             ("policy".to_string(), format!("0x{:016X}", report.policy)),
-            ("platform_version".to_string(), format!("0x{:016X}", report.platform_version)),
-            ("committed_tcb".to_string(), format!("0x{:016X}", report.committed_tcb)),
+            (
+                "platform_version".to_string(),
+                format!("0x{:016X}", report.platform_version),
+            ),
+            (
+                "committed_tcb".to_string(),
+                format!("0x{:016X}", report.committed_tcb),
+            ),
             ("report_data".to_string(), hex::encode(&report.report_data)),
             ("host_data".to_string(), hex::encode(&report.host_data)),
             ("report_id".to_string(), hex::encode(&report.report_id)),
@@ -733,7 +813,8 @@ impl AmdSevSnpProvider {
             if !report.signature_r.is_empty() && !report.signature_s.is_empty() {
                 tracing::debug!(
                     "SNP report signature: R={} bytes, S={} bytes",
-                    report.signature_r.len(), report.signature_s.len()
+                    report.signature_r.len(),
+                    report.signature_s.len()
                 );
             }
 
@@ -755,7 +836,8 @@ impl AmdSevSnpProvider {
                         }
                         Err(e) => {
                             tracing::warn!("SNP report signature verification error: {}", e);
-                            details.insert("signature_verified".to_string(), format!("error: {}", e));
+                            details
+                                .insert("signature_verified".to_string(), format!("error: {}", e));
                         }
                     }
                 }
@@ -770,15 +852,13 @@ impl AmdSevSnpProvider {
             }
         }
 
-        let measurements = vec![
-            Measurement {
-                index: 0,
-                algorithm: "SHA384".to_string(),
-                value: report.measurement.clone(),
-                register: "MEASUREMENT".to_string(),
-                description: Some("Initial VM state measurement".to_string()),
-            },
-        ];
+        let measurements = vec![Measurement {
+            index: 0,
+            algorithm: "SHA384".to_string(),
+            value: report.measurement.clone(),
+            register: "MEASUREMENT".to_string(),
+            description: Some("Initial VM state measurement".to_string()),
+        }];
 
         // Fail-closed validity. A real SNP report is `valid` only when BOTH
         // the VCEK-anchored report-body signature and the ARK→ASK→VCEK
@@ -808,7 +888,7 @@ impl AmdSevSnpProvider {
         // The signed body is bytes 0x000–0x29F (672 bytes)
         if report.raw.len() < report_offsets::SIGNED_BODY_LEN {
             return Err(TeeError::InvalidAttestationReport(
-                "Report too short for signature verification".to_string()
+                "Report too short for signature verification".to_string(),
             ));
         }
 
@@ -833,10 +913,9 @@ impl AmdSevSnpProvider {
     /// Verifies the AMD certificate chain against pinned root ARK.
     fn verify_amd_cert_chain(&self, certificates: &[Vec<u8>]) -> Result<bool> {
         // Try Milan ARK first (most common)
-        let root_der = certs::pem_to_der(certs::AMD_ARK_MILAN_PEM)
-            .map_err(|e| TeeError::CertificateValidationFailed(
-                format!("Failed to decode AMD ARK: {}", e)
-            ))?;
+        let root_der = certs::pem_to_der(certs::AMD_ARK_MILAN_PEM).map_err(|e| {
+            TeeError::CertificateValidationFailed(format!("Failed to decode AMD ARK: {}", e))
+        })?;
 
         let root_cert = attestation::parse_x509_certificate(&root_der)?;
 
@@ -864,14 +943,17 @@ impl AmdSevSnpProvider {
             Ok(verified)
         } else {
             // Try Genoa ARK
-            let genoa_der = certs::pem_to_der(certs::AMD_ARK_GENOA_PEM)
-                .map_err(|e| TeeError::CertificateValidationFailed(
-                    format!("Failed to decode AMD ARK Genoa: {}", e)
-                ))?;
+            let genoa_der = certs::pem_to_der(certs::AMD_ARK_GENOA_PEM).map_err(|e| {
+                TeeError::CertificateValidationFailed(format!(
+                    "Failed to decode AMD ARK Genoa: {}",
+                    e
+                ))
+            })?;
 
             let genoa_cert = attestation::parse_x509_certificate(&genoa_der)?;
             if last.issuer_cn == genoa_cert.subject_cn || last.subject_cn == genoa_cert.subject_cn {
-                let verified = attestation::verify_certificate_signature(last, &genoa_cert.spki_der)?;
+                let verified =
+                    attestation::verify_certificate_signature(last, &genoa_cert.spki_der)?;
                 if verified {
                     tracing::info!("AMD SEV-SNP certificate chain verified against Genoa ARK");
                 }
@@ -879,7 +961,9 @@ impl AmdSevSnpProvider {
             } else {
                 tracing::warn!(
                     "AMD chain does not terminate at ARK: last issuer='{}', Milan ARK='{}', Genoa ARK='{}'",
-                    last.issuer_cn, root_cert.subject_cn, genoa_cert.subject_cn
+                    last.issuer_cn,
+                    root_cert.subject_cn,
+                    genoa_cert.subject_cn
                 );
                 Ok(false)
             }
@@ -965,9 +1049,9 @@ impl AmdSevSnpProvider {
                 .read(true)
                 .write(true)
                 .open("/dev/sev-guest")
-                .map_err(|e| TeeError::not_available(format!(
-                    "Failed to open /dev/sev-guest: {}", e
-                )))?;
+                .map_err(|e| {
+                    TeeError::not_available(format!("Failed to open /dev/sev-guest: {}", e))
+                })?;
 
             let ioctl_nr = build_ioctl_rw(
                 SEV_IOCTL_MAGIC,
@@ -976,16 +1060,26 @@ impl AmdSevSnpProvider {
             );
 
             let ret = unsafe {
-                libc::ioctl(file.as_raw_fd(), ioctl_nr as libc::c_ulong, ioctl_buf.as_mut_ptr())
+                libc::ioctl(
+                    file.as_raw_fd(),
+                    ioctl_nr as libc::c_ulong,
+                    ioctl_buf.as_mut_ptr(),
+                )
             };
 
             if ret != 0 {
                 let errno = std::io::Error::last_os_error();
                 let fw_error = u32::from_le_bytes([
-                    ioctl_buf[24], ioctl_buf[25], ioctl_buf[26], ioctl_buf[27]
+                    ioctl_buf[24],
+                    ioctl_buf[25],
+                    ioctl_buf[26],
+                    ioctl_buf[27],
                 ]);
                 let vmm_error = u32::from_le_bytes([
-                    ioctl_buf[28], ioctl_buf[29], ioctl_buf[30], ioctl_buf[31]
+                    ioctl_buf[28],
+                    ioctl_buf[29],
+                    ioctl_buf[30],
+                    ioctl_buf[31],
                 ]);
                 return Err(TeeError::AttestationGenerationFailed(format!(
                     "SNP_GET_DERIVED_KEY ioctl failed: {} (fw_error: 0x{:X}, vmm_error: 0x{:X})",
@@ -998,23 +1092,30 @@ impl AmdSevSnpProvider {
             let key_start = 32;
             if resp.len() < key_start + SNP_DERIVED_KEY_SIZE {
                 return Err(TeeError::AttestationGenerationFailed(
-                    "SNP_GET_DERIVED_KEY response truncated".to_string()
+                    "SNP_GET_DERIVED_KEY response truncated".to_string(),
                 ));
             }
             let mut out = [0u8; SNP_DERIVED_KEY_SIZE];
             out.copy_from_slice(&resp[key_start..key_start + SNP_DERIVED_KEY_SIZE]);
             tracing::debug!(
                 "SNP derived key obtained (root_key_select={}, guest_field_select=0x{:X})",
-                root_key_select, guest_field_select
+                root_key_select,
+                guest_field_select
             );
             Ok(out)
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (root_key_select, guest_field_select, vmpl, guest_svn, tcb_version);
+            let _ = (
+                root_key_select,
+                guest_field_select,
+                vmpl,
+                guest_svn,
+                tcb_version,
+            );
             Err(TeeError::not_available(
-                "SNP_GET_DERIVED_KEY requires Linux (ioctl to /dev/sev-guest)"
+                "SNP_GET_DERIVED_KEY requires Linux (ioctl to /dev/sev-guest)",
             ))
         }
     }
@@ -1075,7 +1176,10 @@ impl TeeProvider for AmdSevSnpProvider {
                 let mut certs = Vec::new();
 
                 // Fetch VCEK certificate
-                match self.fetch_vcek_certificate(&report.chip_id, report.reported_tcb).await {
+                match self
+                    .fetch_vcek_certificate(&report.chip_id, report.reported_tcb)
+                    .await
+                {
                     Ok(vcek) => {
                         tracing::info!("Fetched VCEK certificate ({} bytes)", vcek.len());
                         certs.push(vcek);
@@ -1084,15 +1188,26 @@ impl TeeProvider for AmdSevSnpProvider {
                         for product_name in &["Milan", "Genoa"] {
                             match self.fetch_cert_chain(product_name).await {
                                 Ok(chain) if !chain.is_empty() => {
-                                    tracing::info!("Fetched {} certs from AMD KDS cert_chain ({})", chain.len(), product_name);
+                                    tracing::info!(
+                                        "Fetched {} certs from AMD KDS cert_chain ({})",
+                                        chain.len(),
+                                        product_name
+                                    );
                                     certs.extend(chain);
                                     break;
                                 }
                                 Ok(_) => {
-                                    tracing::debug!("No certs in AMD KDS cert_chain for {}", product_name);
+                                    tracing::debug!(
+                                        "No certs in AMD KDS cert_chain for {}",
+                                        product_name
+                                    );
                                 }
                                 Err(e) => {
-                                    tracing::debug!("Failed to fetch cert_chain for {}: {}", product_name, e);
+                                    tracing::debug!(
+                                        "Failed to fetch cert_chain for {}: {}",
+                                        product_name,
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1127,7 +1242,8 @@ impl TeeProvider for AmdSevSnpProvider {
             ));
         }
 
-        self.verify_snp_report(&report.attestation_data, &report.certificates).await
+        self.verify_snp_report(&report.attestation_data, &report.certificates)
+            .await
     }
 
     async fn execute_in_enclave(&self, request: EnclaveRequest) -> Result<EnclaveResponse> {
@@ -1137,12 +1253,28 @@ impl TeeProvider for AmdSevSnpProvider {
 
         tracing::info!("Executing in SEV-SNP VM: {:?}", request.operation);
 
+        // The node process already runs inside the SEV-SNP guest — its memory
+        // is encrypted by the hardware (VMSA/SME), so this computation is inside
+        // the boundary by construction. See `TeeProvider::execute_in_enclave`.
+        let data = request.params;
+
+        // Bind the result to this enclave when the caller asked to be able to
+        // prove where it came from. Fails closed: a caller that requested
+        // evidence must not receive a response it cannot prove.
+        let attestation = if request.include_attestation {
+            let binding =
+                crate::traits::enclave_response_binding(&request.id, &request.operation, &data);
+            Some(self.generate_attestation(&binding).await?)
+        } else {
+            None
+        };
+
         Ok(EnclaveResponse {
             request_id: request.id,
             success: true,
-            data: request.params,
+            data,
             error: None,
-            attestation: None,
+            attestation,
         })
     }
 
@@ -1157,9 +1289,14 @@ impl TeeProvider for AmdSevSnpProvider {
         }
         // Pin the derivation to MEASUREMENT|IMAGE_ID|GUEST_SVN so two
         // different boots of the same workload reproduce the same key
-        // and a tampered boot chain cannot recover prior keys.
+        // and a tampered boot chain cannot recover prior keys. Spell the
+        // selector with the named bits rather than a literal — the two
+        // differ, and a wrong literal silently unbinds the key from the
+        // measurement without failing anything.
         const ROOT_KEY_SELECT: u32 = 0;
-        const GUEST_FIELD_SELECT: u64 = 0b101; // MEASUREMENT|IMAGE_ID|GUEST_SVN
+        const GUEST_FIELD_SELECT: u64 = guest_field_select::MEASUREMENT
+            | guest_field_select::IMAGE_ID
+            | guest_field_select::GUEST_SVN;
         let ikm = self.derived_key(ROOT_KEY_SELECT, GUEST_FIELD_SELECT, 0, 0, 0)?;
         let handle = self.keystore.keygen(params, &ikm).await?;
         tracing::info!(
@@ -1201,7 +1338,8 @@ impl TeeProvider for AmdSevSnpProvider {
 fn is_simulation_mode() -> bool {
     std::env::var("TENZRO_SIMULATE_SEV")
         .or_else(|_| std::env::var("TENZRO_SIMULATE_SEV_SNP"))
-        .unwrap_or_else(|_| "0".to_string()) == "1"
+        .unwrap_or_else(|_| "0".to_string())
+        == "1"
 }
 
 #[cfg(target_os = "linux")]
@@ -1259,9 +1397,24 @@ mod tests {
         assert_eq!(guest_field_select::TCB_VERSION, 0x20);
     }
 
+    #[test]
+    fn test_keygen_selector_binds_measurement() {
+        // enclave_keygen and SealedSecp256k1Key must ask the hardware for the
+        // same derivation, and both must bind the measurement. A selector that
+        // omits MEASUREMENT still returns a key, so nothing fails loudly if
+        // this drifts — pin the composite value.
+        let selector = guest_field_select::MEASUREMENT
+            | guest_field_select::IMAGE_ID
+            | guest_field_select::GUEST_SVN;
+        assert_eq!(selector, 0b11010);
+        assert_ne!(selector & guest_field_select::MEASUREMENT, 0);
+    }
+
     #[tokio::test]
     async fn test_sev_snp_simulation_mode() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1");
+        }
         let provider = AmdSevSnpProvider::new();
         assert!(provider.simulate);
         assert!(provider.available);
@@ -1269,7 +1422,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sev_snp_generate_simulated_report() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1");
+        }
         let provider = AmdSevSnpProvider::new();
 
         let user_data = b"tenzro-sev-test";
@@ -1288,7 +1443,9 @@ mod tests {
         // Simulated reports carry no cryptographic authority — verifier
         // exposes measurements + details for observability but `valid`
         // MUST be false.
-        unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1");
+        }
         let provider = AmdSevSnpProvider::new();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
@@ -1309,7 +1466,9 @@ mod tests {
     async fn test_sev_snp_keygen_in_simulation_returns_not_available() {
         // Simulation cannot supply the SNP_GET_DERIVED_KEY IKM, so
         // `enclave_keygen` rejects with NotAvailable. No fabrication.
-        unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1");
+        }
         let provider = AmdSevSnpProvider::new();
 
         let params = KeyGenParams {
@@ -1328,9 +1487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sev_snp_keystore_real_secp256k1_recovers() {
-        use k256::ecdsa::{
-            RecoveryId, Signature as K256Sig, VerifyingKey as Secp256k1Verifying,
-        };
+        use k256::ecdsa::{RecoveryId, Signature as K256Sig, VerifyingKey as Secp256k1Verifying};
         use k256::elliptic_curve::sec1::ToSec1Point;
         use sha2::{Digest, Sha256};
         let ks = crate::enclave_keystore::EnclaveKeystore::new("amd-sev-snp-test");
@@ -1354,14 +1511,15 @@ mod tests {
         let parsed = K256Sig::from_slice(&r_s).unwrap();
         let rec = RecoveryId::from_byte(v).unwrap();
         let recovered = Secp256k1Verifying::recover_from_prehash(&digest, &parsed, rec).unwrap();
-        let recovered_encoded =
-            k256::PublicKey::from(&recovered).to_sec1_point(false);
+        let recovered_encoded = k256::PublicKey::from(&recovered).to_sec1_point(false);
         assert_eq!(recovered_encoded.as_bytes(), pk_uncompressed.as_slice());
     }
 
     #[tokio::test]
     async fn test_sev_snp_wrong_vendor_rejected() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1");
+        }
         let provider = AmdSevSnpProvider::new();
 
         let mut report = provider.generate_attestation(b"test").await.unwrap();
@@ -1389,7 +1547,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sev_snp_parse_simulated_report() {
-        unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
+        unsafe {
+            std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1");
+        }
         let provider = AmdSevSnpProvider::new();
 
         let data = provider.generate_simulated_report(b"hello").unwrap();

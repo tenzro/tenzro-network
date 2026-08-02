@@ -6,11 +6,11 @@
 //!   per finalize.
 //! - `MeanAggregator::aggregate` — runs at the end of every fragment quorum.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::Array1;
 
 use tenzro_training::{
-    aggregator_for, compute_payload_hash, compute_run_root, compute_state_root, AggregationRule,
+    AggregationRule, aggregator_for, compute_payload_hash, compute_run_root, compute_state_root,
 };
 use tenzro_types::primitives::Hash;
 use tenzro_types::training::FragmentQuorumStatus;
@@ -58,11 +58,8 @@ fn bench_state_root(c: &mut Criterion) {
     let mut group = c.benchmark_group("training_state_root");
     group.bench_function("16_fragments_8_trainers", |b| {
         b.iter(|| {
-            let h = compute_state_root(
-                black_box("task-bench"),
-                black_box(7),
-                black_box(&fragments),
-            );
+            let h =
+                compute_state_root(black_box("task-bench"), black_box(7), black_box(&fragments));
             black_box(h);
         });
     });

@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-from typing import Any, Dict
+from typing import Any
 
 try:
     import torch
-    import torch.nn as nn
+    from torch import nn
 except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
@@ -39,7 +39,7 @@ def _is_rocm() -> bool:
     return torch is not None and getattr(torch.version, "hip", None) is not None
 
 
-def resolve_attn_implementation(metadata: Dict[str, Any]) -> str:
+def resolve_attn_implementation(metadata: dict[str, Any]) -> str:
     """Pick the attention kernel to request from ``from_pretrained``.
 
     FlashAttention-2 resolves when ``flash_attn`` is importable and an
@@ -73,7 +73,7 @@ def _fp8_capable() -> bool:
     return (major, minor) >= (8, 9)
 
 
-def _fp8_module_filter(module: "nn.Module", fqn: str) -> bool:
+def _fp8_module_filter(module: nn.Module, fqn: str) -> bool:
     if not isinstance(module, nn.Linear):
         return False
     lowered = fqn.lower()
@@ -82,7 +82,7 @@ def _fp8_module_filter(module: "nn.Module", fqn: str) -> bool:
     return module.in_features % 16 == 0 and module.out_features % 16 == 0
 
 
-def maybe_convert_fp8(model: "nn.Module", metadata: Dict[str, Any]) -> "nn.Module":
+def maybe_convert_fp8(model: nn.Module, metadata: dict[str, Any]) -> nn.Module:
     """Convert eligible linear layers to FP8 training when requested.
 
     No-op (with a log line explaining why) when FP8 is not requested, the

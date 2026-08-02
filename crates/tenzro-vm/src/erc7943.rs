@@ -346,11 +346,7 @@ impl UrwaRegistry {
         if let Some(ref storage) = self.storage
             && let Ok(bytes) = serde_json::to_vec(state)
         {
-            let _ = storage.put(
-                tenzro_storage::CF_TOKENS,
-                &Self::kill_key(token_id),
-                &bytes,
-            );
+            let _ = storage.put(tenzro_storage::CF_TOKENS, &Self::kill_key(token_id), &bytes);
         }
     }
 
@@ -418,11 +414,7 @@ impl UrwaRegistry {
     /// compliance role bypasses the sender-side KYC check (the sender
     /// may be a sanctioned or defunct party being seized from) but the
     /// recipient must still satisfy the token's tier requirement.
-    pub fn check_forced_transfer(
-        &self,
-        token_id: &[u8; 32],
-        to: &[u8; 20],
-    ) -> Result<(), String> {
+    pub fn check_forced_transfer(&self, token_id: &[u8; 32], to: &[u8; 20]) -> Result<(), String> {
         if let Some(ref gate) = self.kyc_gate {
             gate.check_participant(token_id, to, "recipient")?;
         }
@@ -516,7 +508,9 @@ mod tests {
         );
         assert!(reg.is_kill_switched(&token));
 
-        let err = reg.check_transfer(&token, &alice, &bob, 1000, 1).unwrap_err();
+        let err = reg
+            .check_transfer(&token, &alice, &bob, 1000, 1)
+            .unwrap_err();
         assert!(err.contains("kill-switch active"));
 
         reg.clear_kill_switch(&token);
@@ -549,7 +543,9 @@ mod tests {
         gate.set_resolver(resolver_with(&[(alice, 3), (bob, 1)]));
 
         let reg = UrwaRegistry::new().with_kyc_gate(gate);
-        let err = reg.check_transfer(&token, &alice, &bob, 1000, 100).unwrap_err();
+        let err = reg
+            .check_transfer(&token, &alice, &bob, 1000, 100)
+            .unwrap_err();
         assert!(err.contains("recipient tier 1 below required tier 2"));
     }
 
@@ -564,7 +560,9 @@ mod tests {
         // No resolver installed.
 
         let reg = UrwaRegistry::new().with_kyc_gate(gate);
-        let err = reg.check_transfer(&token, &alice, &bob, 1000, 100).unwrap_err();
+        let err = reg
+            .check_transfer(&token, &alice, &bob, 1000, 100)
+            .unwrap_err();
         assert!(err.contains("no resolver is configured"));
     }
 
@@ -593,9 +591,10 @@ mod tests {
 
         let token = [7u8; 32];
         let reg = UrwaRegistry::new().with_kyc_gate(gate);
-        assert!(reg
-            .check_transfer(&token, &[0xaa; 20], &[0xbb; 20], 1000, 100)
-            .is_ok());
+        assert!(
+            reg.check_transfer(&token, &[0xaa; 20], &[0xbb; 20], 1000, 100)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -612,9 +611,10 @@ mod tests {
         let reg = UrwaRegistry::new().with_kyc_gate(gate);
 
         // Normal transfer from the seized address would fail (sender unresolvable).
-        assert!(reg
-            .check_transfer(&token, &seized, &custodian, 1000, 100)
-            .is_err());
+        assert!(
+            reg.check_transfer(&token, &seized, &custodian, 1000, 100)
+                .is_err()
+        );
 
         // Forced transfer to a qualifying custodian passes.
         assert!(reg.check_forced_transfer(&token, &custodian).is_ok());

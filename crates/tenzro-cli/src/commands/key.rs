@@ -9,7 +9,7 @@
 //! server-side; there is no way to act on a different subject's keys.
 //! See `docs/api-keys.md` for the full key-class model.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 use crate::output;

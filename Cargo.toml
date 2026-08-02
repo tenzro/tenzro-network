@@ -1,54 +1,54 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tenzro-types",
-    "crates/tenzro-crypto",
-    "crates/tenzro-tee",
-    "crates/tenzro-zk",
-    "crates/tenzro-network",
-    "crates/tenzro-storage",
-    "crates/tenzro-wallet",
-    "crates/tenzro-keystore-unlock",
-    "crates/tenzro-device-key",
-    "crates/tenzro-consensus",
-    "crates/tenzro-vm",
-    "crates/tenzro-token",
-    "crates/tenzro-agent",
-    "crates/tenzro-model",
-    "crates/tenzro-settlement",
-    "crates/tenzro-bridge",
-    "crates/tenzro-identity",
-    "crates/tenzro-payments",
-    "crates/tenzro-agent-kit",
-    "crates/tenzro-auth",
-    "crates/tenzro-events",
-    "crates/tenzro-workflow",
-    "crates/tenzro-cortex",
-    "crates/tenzro-training",
-    "crates/tenzro-media-gen",
-    "crates/tenzro-iroh",
-    "crates/tenzro-cluster",
-    "crates/tenzro-storage-provider",
-    "crates/tenzro-database",
-    "crates/tenzro-wasm",
-    "crates/tenzro-node",
-    "crates/tenzro-cli",
-    "tools/genkeys",
+  "crates/tenzro-types",
+  "crates/tenzro-crypto",
+  "crates/tenzro-tee",
+  "crates/tenzro-zk",
+  "crates/tenzro-network",
+  "crates/tenzro-storage",
+  "crates/tenzro-wallet",
+  "crates/tenzro-keystore-unlock",
+  "crates/tenzro-device-key",
+  "crates/tenzro-consensus",
+  "crates/tenzro-vm",
+  "crates/tenzro-token",
+  "crates/tenzro-agent",
+  "crates/tenzro-model",
+  "crates/tenzro-settlement",
+  "crates/tenzro-bridge",
+  "crates/tenzro-identity",
+  "crates/tenzro-payments",
+  "crates/tenzro-agent-kit",
+  "crates/tenzro-auth",
+  "crates/tenzro-events",
+  "crates/tenzro-workflow",
+  "crates/tenzro-cortex",
+  "crates/tenzro-training",
+  "crates/tenzro-media-gen",
+  "crates/tenzro-iroh",
+  "crates/tenzro-cluster",
+  "crates/tenzro-storage-provider",
+  "crates/tenzro-database",
+  "crates/tenzro-wasm",
+  "crates/tenzro-node",
+  "crates/tenzro-cli",
+  "tools/genkeys",
 ]
 exclude = [
-    # Vendored llama-cpp-rs has its own workspace (members: llama-cpp-2,
-    # llama-cpp-sys-2, plus examples/embeddings/server/etc). Exclude the
-    # whole directory so cargo doesn't fold its workspace into ours when
-    # we patch.crates-io against it. The [patch.crates-io] block at the
-    # end of this file is what actually wires the two vendored crates
-    # into our build graph as path overrides.
-    "vendor/llama-cpp-rs",
-    "vendor/llama-cpp-rs/llama-cpp-2",
-    "vendor/llama-cpp-rs/llama-cpp-sys-2",
-    # Vendored DKLs23 (Set A RustCrypto pins). Wired via [patch.crates-io]
-    # at the end of this file.
-    "vendor/dkls23-core",
-    "vendor/dkls23-secp256k1",
+  # Vendored llama-cpp-rs has its own workspace (members: llama-cpp-2,
+  # llama-cpp-sys-2, plus examples/embeddings/server/etc). Exclude the
+  # whole directory so cargo doesn't fold its workspace into ours when
+  # we patch.crates-io against it. The [patch.crates-io] block at the
+  # end of this file is what actually wires the two vendored crates
+  # into our build graph as path overrides.
+  "vendor/llama-cpp-rs",
+  "vendor/llama-cpp-rs/llama-cpp-2",
+  "vendor/llama-cpp-rs/llama-cpp-sys-2",
+  # Vendored DKLs23 (Set A RustCrypto pins). Wired via [patch.crates-io]
+  # at the end of this file.
+  "vendor/dkls23-core",
+  "vendor/dkls23-secp256k1",
 ]
 
 [workspace.package]
@@ -64,6 +64,12 @@ authors = ["Tenzro Network Contributors"]
 too_many_arguments = "allow"
 type_complexity = "allow"
 large_enum_variant = "allow"
+# The RPC/web handlers return `Result<T, axum::Response>`, and an
+# `axum::http::Response<Body>` is ~128 bytes — over the lint's threshold. Boxing
+# it would put an allocation on every error path and churn every call site, to
+# save a stack move on a type that is about to be written to a socket anyway.
+# Same judgement as `large_enum_variant` above.
+result_large_err = "allow"
 
 [workspace.dependencies]
 # Workspace crates. Each entry pins `version = "0.1.0"` alongside the
@@ -115,7 +121,11 @@ serde_json = "1"
 bincode = "1"
 prost = "0.13"
 prost-types = "0.13"
-quick-xml = { version = "0.38", features = ["serialize"] }
+# 0.41+ carries the fixes for RUSTSEC-2026-0194 (quadratic runtime checking a
+# start tag for duplicate attribute names) and RUSTSEC-2026-0195 (unbounded
+# namespace-declaration allocation in `NsReader`). Both are parser-side DoS
+# vectors, and this crate parses ISO-20022 XML off the wire.
+quick-xml = { version = "0.41", features = ["serialize"] }
 
 # Error handling
 thiserror = "2"
@@ -169,28 +179,56 @@ curve25519-dalek = { version = "4", features = ["alloc"] }
 # ML-KEM-768  — FIPS 203 key encapsulation, hybrid with X25519
 # ML-DSA-65   — FIPS 204 digital signature, hybrid with Ed25519
 # SLH-DSA     — FIPS 205 hash-based fallback signature
-# CVE GHSA-5x2r-hc65-25f9 (ml-dsa verifier soundness) requires >= 0.1.0-rc.8.
+# GHSA-5x2r-hc65-25f9 (ml-dsa verifier soundness) requires >= 0.1.0-rc.8; 0.1.1
+# is the first stable release past that advisory and past the rc series.
 # ml-dsa pulls signature 3.0.0-rc which exposes rand_core 0.10's TryCryptoRng;
 # tenzro-crypto adapts a TryRng→OsRng inside `pq` so callers don't see the new traits.
 ml-kem = { version = "0.3.0-rc.2", features = ["getrandom"] }
-ml-dsa = "0.1.0-rc.11"
+ml-dsa = "0.1.1"
 slh-dsa = "0.2.0-rc.5"
 rand_core = "0.10"
 getrandom = { version = "0.3", features = ["std"] }
 
 # TLS — pinned at workspace level so we can install aws-lc-rs as the global
 # rustls CryptoProvider. aws-lc-rs supports X25519MLKEM768 hybrid named group.
-rustls = { version = "0.23.39", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12", "aws-lc-rs", "native-tokio"] }
+rustls = { version = "0.23.39", default-features = false, features = [
+  "std",
+  "aws-lc-rs",
+  "tls12",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+  "aws-lc-rs",
+] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+  "http1",
+  "http2",
+  "tls12",
+  "aws-lc-rs",
+  "native-tokio",
+] }
 aws-lc-rs = { version = "1.16.3", features = ["bindgen"] }
 
 # Networking — 2026 hardened (closes CVE-2026-33040, CVE-2026-34219, CVE-2024-32984, GHSA-jvgw-gccv-q5p8)
 libp2p = { version = "0.56", features = [
-    "gossipsub", "kad", "identify", "tls", "yamux",
-    "tcp", "quic", "dns", "ping", "relay", "rendezvous",
-    "autonat", "dcutr", "request-response", "cbor",
-    "mdns", "macros", "tokio", "metrics",
+  "gossipsub",
+  "kad",
+  "identify",
+  "tls",
+  "yamux",
+  "tcp",
+  "quic",
+  "dns",
+  "ping",
+  "relay",
+  "rendezvous",
+  "autonat",
+  "dcutr",
+  "request-response",
+  "cbor",
+  "mdns",
+  "macros",
+  "tokio",
+  "metrics",
 ] }
 libp2p-metrics = "0.17"
 libp2p-connection-limits = "0.6"
@@ -268,7 +306,13 @@ tower = { version = "0.5", features = ["limit"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # HTTP client — pinned to rustls + aws-lc-rs so it inherits the PQ-hybrid TLS named group.
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots", "http2", "charset"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls-tls-manual-roots",
+  "http2",
+  "charset",
+] }
 base64 = "0.22"
 jsonwebtoken = "9"
 
@@ -307,11 +351,18 @@ toml = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # MCP (Model Context Protocol)
-rmcp = { version = "1.7", features = ["server", "transport-streamable-http-server", "transport-async-rw"] }
+rmcp = { version = "1.7", features = [
+  "server",
+  "transport-streamable-http-server",
+  "transport-async-rw",
+] }
 schemars = "1"
 
 # EVM execution
-revm = { version = "19", default-features = false, features = ["std", "serde-json"] }
+revm = { version = "19", default-features = false, features = [
+  "std",
+  "serde-json",
+] }
 rlp = "0.6"
 ripemd = "0.1"
 num-bigint = "0.4"
@@ -330,14 +381,17 @@ solana-svm-callback = { version = "=4.1.2", features = ["agave-unstable-api"] }
 solana-svm-feature-set = { version = "=4.1.2" }
 solana-program-runtime = { version = "=4.1.2" }
 solana-syscalls = { version = "=4.1.2" }
-solana-bpf-loader-program = { version = "=4.1.2" }
-solana-system-program = { version = "=4.1.2" }
+# The whole crate is `#![cfg(feature = "agave-unstable-api")]`; without the
+# feature it compiles to nothing and `Entrypoint` does not exist.
+solana-bpf-loader-program = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-system-program = { version = "=4.1.2", features = ["agave-unstable-api"] }
 solana-transaction-context = { version = "=4.1.2" }
 solana-account = { version = "4.3.0" }
 solana-clock = { version = "3.0.1" }
 solana-instruction = { version = "3.4.0", features = ["std"] }
 solana-message = { version = "4.1.1" }
-solana-transaction = { version = "4.1.1" }
+# `blake3` gates `SanitizedTransaction::try_from_legacy_transaction`.
+solana-transaction = { version = "4.1.1", features = ["blake3"] }
 solana-pubkey = { version = "4.2.0" }
 solana-sdk-ids = { version = "3.1.0" }
 solana-fee-structure = { version = "3.0.0" }
@@ -348,6 +402,19 @@ solana-rent = { version = "4.2.0" }
 x509-cert = "0.2"
 p256 = { version = "=0.14.0-rc.12", features = ["ecdsa", "pkcs8", "pem"] }
 p384 = { version = "=0.14.0-rc.12", features = ["ecdsa", "pkcs8", "pem"] }
+# RUSTSEC-2023-0071 (Marvin timing sidechannel, potential key recovery) has no
+# patched release — every 0.9.x is affected and there is no 0.10.
+#
+# Reachability assessed 2026-07-31: not exploitable on any production path.
+# The advisory needs an attacker to observe timing on a *private-key*
+# operation. Every production use here is public-key verification:
+#   - `tenzro-tee::attestation` — RSA-PSS verify of attestation payloads
+#   - `tenzro-payments::rfc9421` — RSA-PSS / PKCS#1v15 verify, JWKS parsing
+# `create_http_signature` is the only signing entry point, and its one
+# production caller (`visa_tap::issuer`) is pinned to Ed25519; the
+# `sign_rsa_pss` / `sign_rsa_pkcs1v15` arms are reached only from unit tests.
+# Re-run this analysis if an RSA *signing* or *decryption* path is ever wired
+# to a request handler.
 rsa = { version = "0.9", features = ["sha2"] }
 der = "0.7"
 spki = "0.8"
@@ -363,25 +430,43 @@ llama-cpp-2 = "0.1.147"
 # ONNX Runtime — for non-LLM modalities (timeseries forecasting, vision encoders).
 # 2.0 line is the active 2026 standard; auto-downloads the ONNX Runtime binary on
 # build via the `download-binaries` feature. CoreML on macOS, CUDA on Linux.
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "download-binaries"] }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+  "std",
+  "ndarray",
+  "download-binaries",
+] }
 ndarray = "0.16"
 # Safetensors parsing for MoE per-expert weight blobs and gating networks.
 safetensors = "0.8"
 # f16 / bf16 → f32 decode for safetensors tensor data.
 half = "2"
 # Image decoding + resize for vision encoder preprocessing.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "webp",
+] }
 
 # HF tokenizers — text-embedding runtime (Qwen3-Embedding, BGE-M3, EmbeddingGemma,
 # Snowflake Arctic) and Whisper/Moonshine BPE tokenization. `onig` enables the
 # SentencePiece pre-tokenizer used by XLM-R-family models.
-tokenizers = { version = "0.20", default-features = false, features = ["onig", "esaxx_fast"] }
+tokenizers = { version = "0.20", default-features = false, features = [
+  "onig",
+  "esaxx_fast",
+] }
 
 # Audio decode + resample + FFT for ASR runtime.
 # hound: WAV; symphonia: MP3/FLAC/Ogg/MP4-AAC container; rubato: 48k/44.1k→16k
 # resample; realfft: real-input FFT for mel-spectrogram.
 hound = "3.5"
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "isomp4", "ogg", "vorbis"] }
+symphonia = { version = "0.5", default-features = false, features = [
+  "mp3",
+  "flac",
+  "wav",
+  "isomp4",
+  "ogg",
+  "vorbis",
+] }
 rubato = "0.16"
 realfft = "3.4"
 
@@ -453,4 +538,3 @@ llama-cpp-sys-2 = { path = "vendor/llama-cpp-rs/llama-cpp-sys-2" }
 # ships 0.5.2 that catches up.
 dkls23-core = { path = "vendor/dkls23-core" }
 dkls23-secp256k1 = { path = "vendor/dkls23-secp256k1" }
-

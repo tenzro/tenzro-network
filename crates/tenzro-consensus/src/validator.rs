@@ -6,11 +6,11 @@ use crate::voter::Vote;
 use dashmap::DashMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
+use tenzro_crypto::PublicKey;
 use tenzro_crypto::composite::{
     CompositePublicKey, CompositeSignature, HybridVerifier, StandardHybridVerifier,
 };
 use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
-use tenzro_crypto::PublicKey;
 
 /// BLS12-381 G1-compressed public key length (`min_pk` scheme used by
 /// `tenzro_crypto::bls`). Every validator MUST advertise a BLS verifying key
@@ -216,11 +216,7 @@ impl ValidatorInfo {
 
     /// Returns the voting power of the validator
     pub fn voting_power(&self) -> u128 {
-        if self.is_active() {
-            self.stake
-        } else {
-            0
-        }
+        if self.is_active() { self.stake } else { 0 }
     }
 
     /// Returns the base priority for leader selection.
@@ -736,9 +732,7 @@ impl EquivocationDetector {
         let Some(ref storage) = self.storage else {
             return;
         };
-        if let Ok(entries) =
-            storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/votes/")
-        {
+        if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/votes/") {
             for (key, value) in entries {
                 if let Some(vk) = Self::parse_vote_key(&key)
                     && let Ok(payload) =
@@ -773,14 +767,13 @@ impl EquivocationDetector {
                 }
             }
         }
-        if let Ok(entries) = storage
-            .scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/proposal_evidence/")
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/proposal_evidence/")
         {
             for (key, value) in entries {
                 if let Some((addr, view)) =
                     Self::parse_addr_view_key(b"equivocation/proposal_evidence/", &key)
-                    && let Ok(ev) =
-                        serde_json::from_slice::<ProposalEquivocationEvidence>(&value)
+                    && let Ok(ev) = serde_json::from_slice::<ProposalEquivocationEvidence>(&value)
                 {
                     self.proposal_evidence.insert((addr, view), ev);
                 }
@@ -821,11 +814,7 @@ impl EquivocationDetector {
     // are the guard against re-emitting (and re-slashing) a conviction, so
     // they must be durable before the slashing callback observes them —
     // those go through `write_batch_sync`.
-    fn persist_vote(
-        &self,
-        vk: &ValidatorViewKey,
-        payload: &(Hash, crate::voter::VoteType),
-    ) {
+    fn persist_vote(&self, vk: &ValidatorViewKey, payload: &(Hash, crate::voter::VoteType)) {
         if let Some(ref storage) = self.storage
             && let Ok(bytes) = serde_json::to_vec(payload)
         {
@@ -912,10 +901,8 @@ impl EquivocationDetector {
                 // EquivocationEvidence::is_valid() check inspects only
                 // view/voter/block_hash/vote_type, so this is sufficient for
                 // slashing evidence.
-                let placeholder_sig = tenzro_crypto::composite::CompositeSignature::new(
-                    Vec::new(),
-                    Vec::new(),
-                );
+                let placeholder_sig =
+                    tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
                 // BLS signature follows the same stand-in rationale as the
                 // composite sig + public key above — `EquivocationEvidence::is_valid`
                 // only inspects view/voter/block_hash/vote_type.
@@ -932,12 +919,8 @@ impl EquivocationDetector {
                     vote.high_qc_view,
                 );
 
-                let evidence = EquivocationEvidence::new(
-                    vote.voter,
-                    vote.view,
-                    vote1,
-                    vote.clone(),
-                );
+                let evidence =
+                    EquivocationEvidence::new(vote.voter, vote.view, vote1, vote.clone());
 
                 // Store the evidence — atomic insert-if-absent so two
                 // concurrent detections of the same offence convict once.
@@ -1046,7 +1029,10 @@ impl EquivocationDetector {
 
     /// Gets all detected equivocation evidence
     pub fn get_all_evidence(&self) -> Vec<EquivocationEvidence> {
-        self.evidence.iter().map(|entry| entry.value().clone()).collect()
+        self.evidence
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     /// Gets all detected proposal-equivocation evidence
@@ -1346,8 +1332,11 @@ mod tests {
         assert!(staked_power >= set.quorum_voting_power());
 
         // Adding the zero-stake node's "vote" on top changes nothing.
-        let with_zero: Vec<Address> =
-            staked_addrs.iter().copied().chain(std::iter::once(zero.address)).collect();
+        let with_zero: Vec<Address> = staked_addrs
+            .iter()
+            .copied()
+            .chain(std::iter::once(zero.address))
+            .collect();
         assert_eq!(set.voting_power_of(with_zero.iter()), 3000);
     }
 

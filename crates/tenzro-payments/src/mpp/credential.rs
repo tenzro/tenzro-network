@@ -114,7 +114,7 @@ impl MppCredential {
     /// The Tenzro `mandate` and `settlement_proof` are top-level siblings
     /// to `payload`, in the lowercase-named custom-params namespace allowed by §3.
     pub fn to_ietf_payment_header(&self) -> Result<String, serde_json::Error> {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
         let body = IetfPaymentBody::from(self);
         let json = serde_json::to_vec(&body)?;
         Ok(format!(
@@ -170,7 +170,7 @@ impl From<&MppCredential> for IetfPaymentBody {
         payload.insert(
             "signature".to_string(),
             serde_json::Value::String({
-                use base64::{engine::general_purpose, Engine as _};
+                use base64::{Engine as _, engine::general_purpose};
                 general_purpose::URL_SAFE_NO_PAD.encode(&c.signature)
             }),
         );

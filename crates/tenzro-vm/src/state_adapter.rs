@@ -1,13 +1,13 @@
 //! State adapter between VM and storage layer
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use serde::{Serialize, Deserialize};
 
-use crate::traits::VmState;
 use crate::parallel::BaseState;
+use crate::traits::VmState;
+use tenzro_storage::{CF_ACCOUNTS, CF_STATE, KvStore, MerklePatriciaTrie, WriteOp};
 use tenzro_types::Hash;
-use tenzro_storage::{KvStore, MerklePatriciaTrie, WriteOp, CF_ACCOUNTS, CF_STATE};
 
 /// Build the native TNZO balance key in the same format as
 /// `tenzro_token::tnzo::RocksDbBackend::balance_key()`:
@@ -137,7 +137,9 @@ impl StateAdapter {
         let dirty_code_count = self.dirty_code.len();
         let dirty_balance_count = self.dirty_balance.len();
         let dirty_nonce_count = self.dirty_nonce.len();
-        let dirty_storage_count: usize = self.dirty_storage.iter()
+        let dirty_storage_count: usize = self
+            .dirty_storage
+            .iter()
             .map(|entry| entry.value().len())
             .sum();
 
@@ -247,7 +249,8 @@ impl StateAdapter {
                     for dirty_entry in dirty_keys.iter() {
                         let storage_key = dirty_entry.key();
                         if let Some(value) = storage_map.get(storage_key) {
-                            let key = format!("storage:{}:{}",
+                            let key = format!(
+                                "storage:{}:{}",
                                 hex::encode(addr),
                                 hex::encode(storage_key)
                             );
@@ -265,8 +268,13 @@ impl StateAdapter {
                 // Use sync write for durability
                 store.write_batch_sync(ops)?;
 
-                tracing::debug!("Wrote {} state entries to RocksDB",
-                    dirty_code_count + dirty_balance_count + dirty_nonce_count + dirty_storage_count);
+                tracing::debug!(
+                    "Wrote {} state entries to RocksDB",
+                    dirty_code_count
+                        + dirty_balance_count
+                        + dirty_nonce_count
+                        + dirty_storage_count
+                );
             }
         }
 
@@ -289,7 +297,9 @@ impl StateAdapter {
     pub fn cache_stats(&self) -> CacheStats {
         CacheStats {
             code_entries: self.code_cache.len(),
-            storage_entries: self.storage_cache.iter()
+            storage_entries: self
+                .storage_cache
+                .iter()
                 .map(|entry| entry.value().len())
                 .sum(),
             balance_entries: self.balance_cache.len(),
@@ -313,28 +323,38 @@ impl StateAdapter {
         tracing::debug!("Flushing state to storage");
 
         let snapshot = StateSnapshot {
-            code: self.code_cache.iter()
+            code: self
+                .code_cache
+                .iter()
                 .map(|entry| (entry.key().clone(), entry.value().clone()))
                 .collect(),
-            storage: self.storage_cache.iter()
+            storage: self
+                .storage_cache
+                .iter()
                 .map(|entry| {
-                    let storage_map: Vec<(Vec<u8>, Vec<u8>)> = entry.value()
+                    let storage_map: Vec<(Vec<u8>, Vec<u8>)> = entry
+                        .value()
                         .iter()
                         .map(|inner| (inner.key().clone(), inner.value().clone()))
                         .collect();
                     (entry.key().clone(), storage_map)
                 })
                 .collect(),
-            balances: self.balance_cache.iter()
+            balances: self
+                .balance_cache
+                .iter()
                 .map(|entry| (entry.key().clone(), *entry.value()))
                 .collect(),
-            nonces: self.nonce_cache.iter()
+            nonces: self
+                .nonce_cache
+                .iter()
                 .map(|entry| (entry.key().clone(), *entry.value()))
                 .collect(),
         };
 
-        bincode::serialize(&snapshot)
-            .map_err(|e| crate::VmError::StateError(format!("Failed to serialize state snapshot: {}", e)))
+        bincode::serialize(&snapshot).map_err(|e| {
+            crate::VmError::StateError(format!("Failed to serialize state snapshot: {}", e))
+        })
     }
 
     /// Load state from persistent storage
@@ -343,8 +363,9 @@ impl StateAdapter {
     pub fn load_from_storage(&self, data: &[u8]) -> crate::error::Result<()> {
         tracing::debug!("Loading state from storage");
 
-        let snapshot: StateSnapshot = bincode::deserialize(data)
-            .map_err(|e| crate::VmError::StateError(format!("Failed to deserialize state snapshot: {}", e)))?;
+        let snapshot: StateSnapshot = bincode::deserialize(data).map_err(|e| {
+            crate::VmError::StateError(format!("Failed to deserialize state snapshot: {}", e))
+        })?;
 
         // Clear existing state
         self.clear();
@@ -370,7 +391,10 @@ impl StateAdapter {
             self.nonce_cache.insert(address, nonce);
         }
 
-        tracing::info!("Loaded state from storage: {} accounts", self.balance_cache.len());
+        tracing::info!(
+            "Loaded state from storage: {} accounts",
+            self.balance_cache.len()
+        );
         Ok(())
     }
 
@@ -392,7 +416,9 @@ impl StateAdapter {
         let mut trie = MerklePatriciaTrie::new();
 
         // Insert code entries
-        let mut code_entries: Vec<_> = self.code_cache.iter()
+        let mut code_entries: Vec<_> = self
+            .code_cache
+            .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
         code_entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -406,7 +432,9 @@ impl StateAdapter {
         }
 
         // Insert balance entries
-        let mut balance_entries: Vec<_> = self.balance_cache.iter()
+        let mut balance_entries: Vec<_> = self
+            .balance_cache
+            .iter()
             .map(|entry| (entry.key().clone(), *entry.value()))
             .collect();
         balance_entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -420,7 +448,9 @@ impl StateAdapter {
         }
 
         // Insert nonce entries
-        let mut nonce_entries: Vec<_> = self.nonce_cache.iter()
+        let mut nonce_entries: Vec<_> = self
+            .nonce_cache
+            .iter()
             .map(|entry| (entry.key().clone(), *entry.value()))
             .collect();
         nonce_entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -434,9 +464,12 @@ impl StateAdapter {
         }
 
         // Insert storage entries (sorted for determinism)
-        let mut storage_entries: Vec<_> = self.storage_cache.iter()
+        let mut storage_entries: Vec<_> = self
+            .storage_cache
+            .iter()
             .map(|entry| {
-                let mut inner: Vec<_> = entry.value()
+                let mut inner: Vec<_> = entry
+                    .value()
                     .iter()
                     .map(|e| (e.key().clone(), e.value().clone()))
                     .collect();
@@ -625,9 +658,7 @@ impl VmState for StateAdapter {
             let db_key = format!("storage:{}:{}", hex::encode(address), hex::encode(key));
             if let Ok(Some(value)) = store.get(CF_STATE, db_key.as_bytes()) {
                 // Populate cache
-                let storage = self.storage_cache
-                    .entry(address.to_vec())
-                    .or_default();
+                let storage = self.storage_cache.entry(address.to_vec()).or_default();
                 storage.insert(key.to_vec(), value.clone());
                 return Some(value);
             }
@@ -637,14 +668,10 @@ impl VmState for StateAdapter {
     }
 
     fn set_storage(&mut self, address: &[u8], key: &[u8], value: Vec<u8>) {
-        let storage = self.storage_cache
-            .entry(address.to_vec())
-            .or_default();
+        let storage = self.storage_cache.entry(address.to_vec()).or_default();
         storage.insert(key.to_vec(), value);
 
-        let dirty = self.dirty_storage
-            .entry(address.to_vec())
-            .or_default();
+        let dirty = self.dirty_storage.entry(address.to_vec()).or_default();
         dirty.insert(key.to_vec(), true);
     }
 
@@ -1015,7 +1042,9 @@ mod tests {
         // Manually write to storage bypassing the adapter
         let balance_key = format!("balance:{}", hex::encode(&address));
         let balance: u128 = 99999;
-        store.put(CF_STATE, balance_key.as_bytes(), &balance.to_le_bytes()).unwrap();
+        store
+            .put(CF_STATE, balance_key.as_bytes(), &balance.to_le_bytes())
+            .unwrap();
 
         // Adapter should read from storage on cache miss
         assert_eq!(adapter.get_balance(&address), 99999);
@@ -1113,8 +1142,8 @@ mod tests {
 
     #[test]
     fn test_prefetch_keys_from_transactions() {
-        use crate::types::VmTransaction;
         use crate::VmType;
+        use crate::types::VmTransaction;
 
         let from = vec![1u8; 20];
         let to = vec![2u8; 20];
@@ -1151,7 +1180,10 @@ mod tests {
 
         // BaseState reads the pre-block values a delta lane folds onto.
         assert_eq!(BaseState::base_balance(&adapter, &addr), 1234);
-        assert_eq!(BaseState::base_storage(&adapter, &addr, &key), Some(vec![5, 6, 7]));
+        assert_eq!(
+            BaseState::base_storage(&adapter, &addr, &key),
+            Some(vec![5, 6, 7])
+        );
     }
 
     #[test]

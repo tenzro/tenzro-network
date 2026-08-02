@@ -36,10 +36,7 @@ pub trait MpcLibp2pSurface: Send + Sync {
     /// network layer resolves the DID through the installed
     /// `MpcDidResolver`; an unresolved DID surfaces as
     /// `TransportError::Send`.
-    async fn send_point_to_point(
-        &self,
-        message: &MpcRoundMessage,
-    ) -> Result<(), TransportError>;
+    async fn send_point_to_point(&self, message: &MpcRoundMessage) -> Result<(), TransportError>;
 
     /// Receive the next inbound round message for the local party's
     /// active session. The surface is responsible for demultiplexing

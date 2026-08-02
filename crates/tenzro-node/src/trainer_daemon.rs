@@ -247,8 +247,7 @@ impl TrainerDaemon {
                             );
                             slot.child = None;
                             slot.restarts = slot.restarts.saturating_add(1);
-                            slot.next_spawn_at =
-                                Some(std::time::Instant::now() + backoff);
+                            slot.next_spawn_at = Some(std::time::Instant::now() + backoff);
                             warn!(
                                 task_id = %task_id,
                                 exit = ?status.code(),
@@ -290,10 +289,7 @@ impl TrainerDaemon {
         let mut to_spawn: Vec<TrainingRun> = Vec::new();
         {
             let slots = self.slots.lock();
-            let live = slots
-                .values()
-                .filter(|s| s.child.is_some())
-                .count();
+            let live = slots.values().filter(|s| s.child.is_some()).count();
             let mut budget = self.config.max_concurrent_trainers.saturating_sub(live);
             for (task_id, run) in active.iter() {
                 if budget == 0 {
@@ -348,8 +344,15 @@ impl TrainerDaemon {
         for extra in &self.config.trainer_extra_args {
             cmd.arg(extra);
         }
-        cmd.env("TENZRO_RPC_URL", &self.rpc_url)
-            .stdin(Stdio::null())
+        cmd.env("TENZRO_RPC_URL", &self.rpc_url);
+        // Hand the child the same root this process resolved. Left to itself
+        // the trainer falls back to `~/.cache/huggingface` and
+        // `~/.cache/tenzro-trainer`, building a second copy of every weight
+        // and dataset shard in directories nothing else on the machine reads.
+        for (key, value) in tenzro_types::paths::child_env() {
+            cmd.env(key, value);
+        }
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -541,11 +544,20 @@ mod tests {
         // restarts=0 → immediate.
         assert_eq!(backoff_delay(0, 2_000, 300_000), Duration::ZERO);
         // restarts=1 → base.
-        assert_eq!(backoff_delay(1, 2_000, 300_000), Duration::from_millis(2_000));
+        assert_eq!(
+            backoff_delay(1, 2_000, 300_000),
+            Duration::from_millis(2_000)
+        );
         // restarts=2 → 2x base.
-        assert_eq!(backoff_delay(2, 2_000, 300_000), Duration::from_millis(4_000));
+        assert_eq!(
+            backoff_delay(2, 2_000, 300_000),
+            Duration::from_millis(4_000)
+        );
         // restarts=3 → 4x base.
-        assert_eq!(backoff_delay(3, 2_000, 300_000), Duration::from_millis(8_000));
+        assert_eq!(
+            backoff_delay(3, 2_000, 300_000),
+            Duration::from_millis(8_000)
+        );
         // Large restart count is capped at max.
         assert_eq!(
             backoff_delay(30, 2_000, 300_000),

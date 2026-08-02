@@ -89,7 +89,12 @@ fn sign_mpp_credential(
     let pq_public_key_bytes = pq.verifying_key_bytes().to_vec();
     let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq);
     let composite = hybrid.sign(&message).expect("hybrid sign");
-    (public_key_bytes, composite.classical, pq_public_key_bytes, composite.pq)
+    (
+        public_key_bytes,
+        composite.classical,
+        pq_public_key_bytes,
+        composite.pq,
+    )
 }
 
 /// Build a settlement-engine `ServiceProof` carrying a real Ed25519 signature
@@ -149,7 +154,10 @@ async fn identity_provision_and_wallet_bind() {
 
     // The identity should be Active and classified as a human.
     assert!(identity.is_human(), "registered identity should be human");
-    assert!(identity.is_active(), "newly registered identity should be Active");
+    assert!(
+        identity.is_active(),
+        "newly registered identity should be Active"
+    );
     assert_eq!(identity.kyc_tier(), Some(KycTier::Enhanced));
     assert_eq!(identity.display_name(), "Alice (test)");
 
@@ -159,7 +167,10 @@ async fn identity_provision_and_wallet_bind() {
         &[0u8; 32],
         "wallet binder should produce a non-zero address"
     );
-    assert!(!identity.wallet_id.is_empty(), "wallet id must be populated");
+    assert!(
+        !identity.wallet_id.is_empty(),
+        "wallet id must be populated"
+    );
 
     // The public key we registered must round-trip on the identity record.
     assert_eq!(identity.public_keys.len(), 1);
@@ -195,7 +206,12 @@ async fn mpp_payment_challenge_credential_settle() {
     // server's `construct_credential_message` exactly.
     let payer_did = "did:tenzro:human:test-payer";
     let (public_key_bytes, signature_bytes, pq_public_key_bytes, pq_signature_bytes) =
-        sign_mpp_credential(&challenge.challenge_id, payer_did, challenge.amount, &challenge.asset);
+        sign_mpp_credential(
+            &challenge.challenge_id,
+            payer_did,
+            challenge.amount,
+            &challenge.asset,
+        );
 
     let mut extra = std::collections::HashMap::new();
     extra.insert(
@@ -236,7 +252,12 @@ async fn mpp_payment_challenge_credential_settle() {
     assert_eq!(receipt.challenge_id, challenge.challenge_id);
 
     // After settlement, the challenge should no longer be in the store.
-    assert!(server.challenge_store().get(&challenge.challenge_id).is_err());
+    assert!(
+        server
+            .challenge_store()
+            .get(&challenge.challenge_id)
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -391,7 +412,10 @@ async fn x402_pay_resource() {
         .verify(&requirements, &wrong_network)
         .await
         .expect("verify");
-    assert!(!rejected, "x402 payload on unsupported network must be rejected");
+    assert!(
+        !rejected,
+        "x402 payload on unsupported network must be rejected"
+    );
 
     // A payload missing the signature must be rejected.
     let mut unsigned = payload.clone();

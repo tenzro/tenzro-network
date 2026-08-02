@@ -1,7 +1,7 @@
 //! Errors returned by the iroh-backed resolver.
 
-use thiserror::Error;
 use tenzro_types::tenzro_uri::TenzroUriError;
+use thiserror::Error;
 
 /// Result alias for iroh-backed resolution operations.
 pub type IrohResult<T> = Result<T, IrohError>;

@@ -178,7 +178,8 @@ impl PkrScheduler {
                 self.current_epoch()
             )));
         }
-        self.current_epoch.store(trigger.to_epoch, Ordering::Relaxed);
+        self.current_epoch
+            .store(trigger.to_epoch, Ordering::Relaxed);
         self.last_rotation_secs.store(now_secs, Ordering::Relaxed);
         self.sigs_in_epoch.store(0, Ordering::Relaxed);
         self.rotation_count.fetch_add(1, Ordering::Relaxed);
@@ -274,12 +275,7 @@ mod tests {
 
     #[test]
     fn commit_advances_epoch_and_resets_counters() {
-        let s = PkrScheduler::new(
-            [1u8; 32],
-            PkrCadence::default(),
-            0,
-            1000,
-        );
+        let s = PkrScheduler::new([1u8; 32], PkrCadence::default(), 0, 1000);
         s.record_signing();
         let trigger = s.force_rotate(2000);
         s.commit_rotation(&trigger, 2000).unwrap();
@@ -290,12 +286,7 @@ mod tests {
 
     #[test]
     fn commit_rejects_stale_trigger() {
-        let s = PkrScheduler::new(
-            [1u8; 32],
-            PkrCadence::default(),
-            5,
-            1000,
-        );
+        let s = PkrScheduler::new([1u8; 32], PkrCadence::default(), 5, 1000);
         let bad = RotationTrigger {
             group_id: [1u8; 32],
             from_epoch: 4,
@@ -310,12 +301,7 @@ mod tests {
 
     #[test]
     fn commit_rejects_group_mismatch() {
-        let s = PkrScheduler::new(
-            [1u8; 32],
-            PkrCadence::default(),
-            0,
-            1000,
-        );
+        let s = PkrScheduler::new([1u8; 32], PkrCadence::default(), 0, 1000);
         let bad = RotationTrigger {
             group_id: [9u8; 32],
             from_epoch: 0,

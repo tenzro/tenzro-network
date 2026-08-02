@@ -146,15 +146,12 @@ mod tests {
     impl AgentRegistryClient for TaggedMockRegistry {
         async fn get_public_key(&self, key_id: &str) -> Result<AgentPublicKeyInfo> {
             *self.last_seen.lock().unwrap() = Some(key_id.to_string());
-            self.keys
-                .get(key_id)
-                .cloned()
-                .ok_or_else(|| {
-                    PaymentError::AgentRegistryError(format!(
-                        "{} tier: key {} not found",
-                        self.tier, key_id
-                    ))
-                })
+            self.keys.get(key_id).cloned().ok_or_else(|| {
+                PaymentError::AgentRegistryError(format!(
+                    "{} tier: key {} not found",
+                    self.tier, key_id
+                ))
+            })
         }
 
         async fn verify_agent(&self, key_id: &str) -> Result<bool> {
@@ -210,7 +207,10 @@ mod tests {
 
         let info = composite.get_public_key("visa-key-7").await.unwrap();
         assert_eq!(info.key_id, "visa-key-7");
-        assert_eq!(jwks_mock.last_seen.lock().unwrap().as_deref(), Some("visa-key-7"));
+        assert_eq!(
+            jwks_mock.last_seen.lock().unwrap().as_deref(),
+            Some("visa-key-7")
+        );
         assert!(did_mock.last_seen.lock().unwrap().is_none());
     }
 
@@ -226,9 +226,7 @@ mod tests {
         let composite = DidResolverAgentRegistry::did_only(did_mock);
         let result = composite.get_public_key("visa-key-7").await;
         assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("no JWKS fallback")
-        );
+        assert!(result.unwrap_err().to_string().contains("no JWKS fallback"));
     }
 
     #[tokio::test]
@@ -240,9 +238,7 @@ mod tests {
         let composite = DidResolverAgentRegistry::jwks_only(jwks_mock);
         let result = composite.get_public_key("did:tenzro:machine:abc").await;
         assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("no DID resolver")
-        );
+        assert!(result.unwrap_err().to_string().contains("no DID resolver"));
     }
 
     #[tokio::test]
@@ -260,16 +256,27 @@ mod tests {
 
         assert!(composite.verify_agent(did).await.unwrap());
         assert!(composite.verify_agent("visa-key-7").await.unwrap());
-        assert!(!composite.verify_agent("did:tenzro:machine:nope").await.unwrap_or(true));
+        assert!(
+            !composite
+                .verify_agent("did:tenzro:machine:nope")
+                .await
+                .unwrap_or(true)
+        );
     }
 
     #[test]
     fn detects_did_prefix() {
-        assert!(DidResolverAgentRegistry::is_did_keyid("did:tenzro:machine:abc"));
-        assert!(DidResolverAgentRegistry::is_did_keyid("did:web:example.com"));
+        assert!(DidResolverAgentRegistry::is_did_keyid(
+            "did:tenzro:machine:abc"
+        ));
+        assert!(DidResolverAgentRegistry::is_did_keyid(
+            "did:web:example.com"
+        ));
         assert!(DidResolverAgentRegistry::is_did_keyid("did:key:z6Mk..."));
         assert!(!DidResolverAgentRegistry::is_did_keyid("visa-key-7"));
-        assert!(!DidResolverAgentRegistry::is_did_keyid("urn:tenzro:machine:abc"));
+        assert!(!DidResolverAgentRegistry::is_did_keyid(
+            "urn:tenzro:machine:abc"
+        ));
         assert!(!DidResolverAgentRegistry::is_did_keyid(""));
     }
 }

@@ -43,7 +43,7 @@ fn spawn_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-use tenzro_storage::{KvStore, RocksDbStore, WriteOp, CF_STATE};
+use tenzro_storage::{CF_STATE, KvStore, RocksDbStore, WriteOp};
 
 /// Env var the parent sets when re-execing the test binary as the child
 /// crash-driver. Carries `<db-path>;<batches-to-write>` so the child knows

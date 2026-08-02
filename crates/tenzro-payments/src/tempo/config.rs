@@ -68,7 +68,11 @@ impl TempoConfig {
     }
 
     /// Sets a stablecoin address
-    pub fn with_stablecoin(mut self, symbol: impl Into<String>, address: impl Into<String>) -> Self {
+    pub fn with_stablecoin(
+        mut self,
+        symbol: impl Into<String>,
+        address: impl Into<String>,
+    ) -> Self {
         self.stablecoin_addresses
             .insert(symbol.into(), address.into());
         self

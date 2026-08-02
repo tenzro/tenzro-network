@@ -44,11 +44,7 @@ impl NonceManager {
 
     /// Peek at the next nonce without incrementing.
     pub fn peek_nonce(&self, address: &Address) -> Nonce {
-        let nonce = self
-            .pending_nonces
-            .get(address)
-            .map(|v| *v)
-            .unwrap_or(0);
+        let nonce = self.pending_nonces.get(address).map(|v| *v).unwrap_or(0);
         Nonce(nonce)
     }
 
@@ -73,10 +69,7 @@ impl NonceManager {
             })
             .or_insert(nonce + 1);
 
-        debug!(
-            "Confirmed nonce {} for address {}",
-            nonce, address
-        );
+        debug!("Confirmed nonce {} for address {}", nonce, address);
     }
 
     /// Sync with on-chain state.
@@ -109,11 +102,7 @@ impl NonceManager {
     /// Used after detecting that pending transactions were dropped
     /// (e.g., due to mempool eviction or node restart).
     pub fn reset_pending(&self, address: &Address) {
-        let confirmed = self
-            .confirmed_nonces
-            .get(address)
-            .map(|v| *v)
-            .unwrap_or(0);
+        let confirmed = self.confirmed_nonces.get(address).map(|v| *v).unwrap_or(0);
         self.pending_nonces.insert(*address, confirmed);
 
         debug!(
@@ -124,11 +113,7 @@ impl NonceManager {
 
     /// Get the confirmed nonce for an address.
     pub fn confirmed_nonce(&self, address: &Address) -> Nonce {
-        let nonce = self
-            .confirmed_nonces
-            .get(address)
-            .map(|v| *v)
-            .unwrap_or(0);
+        let nonce = self.confirmed_nonces.get(address).map(|v| *v).unwrap_or(0);
         Nonce(nonce)
     }
 

@@ -105,29 +105,25 @@ impl NodeLegExecutor {
                 tenzro_types::settlement::ProofType::Cryptographic,
                 Vec::new(),
             )),
-            ReleaseConditions::Custom { .. } => self
-                .proofs
-                .get(&leg.leg_id)
-                .cloned()
-                .ok_or_else(|| {
+            ReleaseConditions::Custom { .. } => {
+                self.proofs.get(&leg.leg_id).cloned().ok_or_else(|| {
                     SettlementError::SagaError(format!(
                         "custom-condition escrow {escrow_id} requires a release proof for leg {}",
                         leg.leg_id
                     ))
-                }),
+                })
+            }
             ReleaseConditions::ProviderSignature
             | ReleaseConditions::ConsumerSignature
             | ReleaseConditions::BothSignatures
-            | ReleaseConditions::VerifierSignature => self
-                .proofs
-                .get(&leg.leg_id)
-                .cloned()
-                .ok_or_else(|| {
+            | ReleaseConditions::VerifierSignature => {
+                self.proofs.get(&leg.leg_id).cloned().ok_or_else(|| {
                     SettlementError::SagaError(format!(
                         "signature-gated escrow {escrow_id} requires a release proof for leg {}",
                         leg.leg_id
                     ))
-                }),
+                })
+            }
         }
     }
 }

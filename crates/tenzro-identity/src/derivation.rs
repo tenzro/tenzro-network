@@ -66,7 +66,10 @@ pub enum DerivationError {
     /// probability for a random tweak, but checked).
     InvalidDerivedKey(String),
     /// The (curve, chain) combination is not supported.
-    UnsupportedCombination { curve: TargetCurve, chain: TargetChain },
+    UnsupportedCombination {
+        curve: TargetCurve,
+        chain: TargetChain,
+    },
     /// Internal encoding failure.
     Encoding(String),
 }
@@ -77,7 +80,10 @@ impl std::fmt::Display for DerivationError {
             Self::InvalidPublicKey(m) => write!(f, "invalid public key: {m}"),
             Self::InvalidDerivedKey(m) => write!(f, "invalid derived key: {m}"),
             Self::UnsupportedCombination { curve, chain } => {
-                write!(f, "unsupported curve/chain combination: {curve:?}/{chain:?}")
+                write!(
+                    f,
+                    "unsupported curve/chain combination: {curve:?}/{chain:?}"
+                )
             }
             Self::Encoding(m) => write!(f, "encoding error: {m}"),
         }
@@ -153,8 +159,8 @@ impl ChainDerivation {
     /// `epsilon = Sha256(epsilon_preimage())` reduced into the secp256k1 scalar
     /// field, then `target_point = home_point + GENERATOR * epsilon`.
     fn derive_secp256k1_pubkey(&self, home_pk: &[u8]) -> Result<Vec<u8>, DerivationError> {
-        use k256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
         use k256::elliptic_curve::Group;
+        use k256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
         use k256::{ProjectivePoint, PublicKey as K256PublicKey, Scalar, Sec1Point};
 
         // Parse the home public key (SEC1 compressed or uncompressed).
@@ -268,14 +274,15 @@ impl ChainDerivation {
                         return Err(DerivationError::InvalidPublicKey(format!(
                             "XRPL pubkey must be 32 (ed25519) or 33 (sec1) bytes, got {}",
                             target_pk.len()
-                        )))
+                        )));
                     }
                 };
                 xrpl_classic_address(target_pk, curve)
             }
-            TargetChain::XrplEvm | TargetChain::HyperEvm | TargetChain::Ethereum | TargetChain::Base => {
-                evm_address(target_pk)
-            }
+            TargetChain::XrplEvm
+            | TargetChain::HyperEvm
+            | TargetChain::Ethereum
+            | TargetChain::Base => evm_address(target_pk),
         }
     }
 }
@@ -287,8 +294,8 @@ impl ChainDerivation {
 /// Reduce 32 big-endian bytes into a secp256k1 scalar (mod n) for the epsilon
 /// tweak. Uses `Reduce` so an input ≥ n is reduced rather than rejected.
 fn reduce_be_bytes_to_scalar(bytes: &[u8]) -> k256::Scalar {
-    use k256::elliptic_curve::ops::Reduce;
     use k256::U256;
+    use k256::elliptic_curve::ops::Reduce;
     let n = U256::from_be_slice(bytes);
     <k256::Scalar as Reduce<U256>>::reduce(&n)
 }
@@ -407,8 +414,7 @@ fn base32_rfc4648_nopad(data: &[u8]) -> String {
 
 /// XRPL base58 dictionary. Ref
 /// <https://xrpl.org/docs/references/protocol/data-types/base58-encodings>.
-const XRPL_ALPHABET: &[u8; 58] =
-    b"rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz";
+const XRPL_ALPHABET: &[u8; 58] = b"rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz";
 
 /// XRPL AccountID type-prefix byte for classic `r...` addresses (`0x00`).
 const XRPL_ACCOUNT_PREFIX: u8 = 0x00;
@@ -426,7 +432,10 @@ const XRPL_ED25519_PREFIX: u8 = 0xED;
 /// 3. `payload = 0x00 || AccountID`.
 /// 4. `checksum = SHA256(SHA256(payload))[0..4]`.
 /// 5. base58(`payload || checksum`) with the XRPL dictionary.
-pub fn xrpl_classic_address(public_key: &[u8], curve: TargetCurve) -> Result<String, DerivationError> {
+pub fn xrpl_classic_address(
+    public_key: &[u8],
+    curve: TargetCurve,
+) -> Result<String, DerivationError> {
     // (1) Canonical 33-byte public key.
     let canonical: Vec<u8> = match curve {
         TargetCurve::Ed25519 => match public_key.len() {
@@ -440,7 +449,7 @@ pub fn xrpl_classic_address(public_key: &[u8], curve: TargetCurve) -> Result<Str
             n => {
                 return Err(DerivationError::InvalidPublicKey(format!(
                     "XRPL ed25519 key must be 32 bytes (or 33 with 0xED prefix), got {n}"
-                )))
+                )));
             }
         },
         TargetCurve::Secp256k1 => match public_key.len() {
@@ -448,7 +457,7 @@ pub fn xrpl_classic_address(public_key: &[u8], curve: TargetCurve) -> Result<Str
             _ => {
                 return Err(DerivationError::InvalidPublicKey(
                     "XRPL secp256k1 key must be a 33-byte compressed SEC1 point".to_string(),
-                ))
+                ));
             }
         },
     };
@@ -493,7 +502,7 @@ pub fn evm_address(secp256k1_uncompressed_pub: &[u8]) -> Result<String, Derivati
         n => {
             return Err(DerivationError::InvalidPublicKey(format!(
                 "EVM pubkey must be uncompressed (65 bytes with 0x04, or 64 X||Y), got {n}"
-            )))
+            )));
         }
     };
 
@@ -553,9 +562,8 @@ mod tests {
     // known-answer tests above.
     #[test]
     fn stellar_strkey_known_answer() {
-        let raw =
-            hex::decode("3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")
-                .unwrap();
+        let raw = hex::decode("3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")
+            .unwrap();
         let g = stellar_strkey(&raw).unwrap();
         assert_eq!(
             g,
@@ -572,10 +580,9 @@ mod tests {
     // pubkey_hex 'ED9434...FA32' → rDTXLQ7ZKZVKz33zJbHjgVShjsBnqMBhmN
     #[test]
     fn xrpl_ed25519_known_answer() {
-        let pubkey = hex::decode(
-            "ED9434799226374926EDA3B54B1B461B4ABF7237962EAE18528FEA67595397FA32",
-        )
-        .unwrap();
+        let pubkey =
+            hex::decode("ED9434799226374926EDA3B54B1B461B4ABF7237962EAE18528FEA67595397FA32")
+                .unwrap();
         // Pass the full 33-byte 0xED-prefixed key.
         let r = xrpl_classic_address(&pubkey, TargetCurve::Ed25519).unwrap();
         assert_eq!(r, "rDTXLQ7ZKZVKz33zJbHjgVShjsBnqMBhmN");
@@ -595,16 +602,12 @@ mod tests {
     fn evm_address_eip55_known_answer() {
         let mut pk = vec![0x04u8];
         pk.extend_from_slice(
-            &hex::decode(
-                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
-            )
-            .unwrap(),
+            &hex::decode("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+                .unwrap(),
         );
         pk.extend_from_slice(
-            &hex::decode(
-                "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8",
-            )
-            .unwrap(),
+            &hex::decode("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8")
+                .unwrap(),
         );
         let addr = evm_address(&pk).unwrap();
         assert_eq!(addr, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf");
@@ -628,9 +631,13 @@ mod tests {
         );
 
         let d = ChainDerivation::new("did:tenzro:machine:abc", "hyperevm:1");
-        let derived = d.derive_target_pubkey(&home, TargetCurve::Secp256k1).unwrap();
+        let derived = d
+            .derive_target_pubkey(&home, TargetCurve::Secp256k1)
+            .unwrap();
         // Deterministic.
-        let derived2 = d.derive_target_pubkey(&home, TargetCurve::Secp256k1).unwrap();
+        let derived2 = d
+            .derive_target_pubkey(&home, TargetCurve::Secp256k1)
+            .unwrap();
         assert_eq!(derived, derived2);
         assert_eq!(derived.len(), 65);
         assert_eq!(derived[0], 0x04);
@@ -638,8 +645,7 @@ mod tests {
         // Manually recompute target = G + epsilon*G = (1+epsilon)*G and compare.
         let epsilon = reduce_be_bytes_to_scalar(&Sha256::digest(d.epsilon_preimage()));
         let expected = ProjectivePoint::GENERATOR + (ProjectivePoint::GENERATOR * epsilon);
-        let expected_pk =
-            K256PublicKey::from_affine(expected.to_affine()).unwrap();
+        let expected_pk = K256PublicKey::from_affine(expected.to_affine()).unwrap();
         assert_eq!(
             derived,
             expected_pk.to_sec1_point(false).as_bytes().to_vec()
@@ -647,7 +653,9 @@ mod tests {
 
         // Different path → different key.
         let d2 = ChainDerivation::new("did:tenzro:machine:abc", "xrpl_evm:1");
-        let other = d2.derive_target_pubkey(&home, TargetCurve::Secp256k1).unwrap();
+        let other = d2
+            .derive_target_pubkey(&home, TargetCurve::Secp256k1)
+            .unwrap();
         assert_ne!(derived, other);
     }
 
@@ -728,8 +736,12 @@ mod tests {
                 .unwrap(),
         );
         let de = ChainDerivation::new("did:tenzro:machine:xyz", "hyperevm:1");
-        let tpk = de.derive_target_pubkey(&home, TargetCurve::Secp256k1).unwrap();
-        let addr = de.derive_target_address(&tpk, TargetChain::HyperEvm).unwrap();
+        let tpk = de
+            .derive_target_pubkey(&home, TargetCurve::Secp256k1)
+            .unwrap();
+        let addr = de
+            .derive_target_address(&tpk, TargetChain::HyperEvm)
+            .unwrap();
         assert!(addr.starts_with("0x") && addr.len() == 42);
     }
 }

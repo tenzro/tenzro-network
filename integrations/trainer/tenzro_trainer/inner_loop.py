@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 try:
     import torch
@@ -39,9 +40,9 @@ class TrainerAdapter(Protocol):
     Implementations live in :mod:`tenzro_trainer.adapters`.
     """
 
-    def model(self) -> "torch.nn.Module": ...
+    def model(self) -> torch.nn.Module: ...
 
-    def optimizer(self) -> "torch.optim.Optimizer": ...
+    def optimizer(self) -> torch.optim.Optimizer: ...
 
     def shard_batches(self, shard_uri: str) -> Iterable[object]:
         """Yield training batches from the assigned shard.
@@ -51,7 +52,7 @@ class TrainerAdapter(Protocol):
         """
         ...
 
-    def compute_loss(self, batch: object) -> "torch.Tensor": ...
+    def compute_loss(self, batch: object) -> torch.Tensor: ...
 
 
 @dataclass
@@ -102,7 +103,7 @@ def _batch_sample_count(batch: object) -> int:
     return 1
 
 
-def trainable_param_names(model: "torch.nn.Module") -> set[str]:
+def trainable_param_names(model: torch.nn.Module) -> set[str]:
     """Names of parameters that carry gradient this step (``requires_grad``).
 
     For a full fine-tune every parameter is trainable, so this is the whole
@@ -116,7 +117,7 @@ def trainable_param_names(model: "torch.nn.Module") -> set[str]:
     return {name for name, p in model.named_parameters() if p.requires_grad}
 
 
-def snapshot_state(model: "torch.nn.Module") -> dict[str, "torch.Tensor"]:
+def snapshot_state(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     """Detached, CPU-residing copy of the trainable parameter tensors.
 
     We CPU-copy so the snapshot doesn't pin GPU memory across the loop and
@@ -145,7 +146,7 @@ def snapshot_state(model: "torch.nn.Module") -> dict[str, "torch.Tensor"]:
 
 
 def load_partial_state(
-    model: "torch.nn.Module", partial: dict[str, "torch.Tensor"]
+    model: torch.nn.Module, partial: dict[str, torch.Tensor]
 ) -> None:
     """Copy the given tensors into the model's live parameters, in place.
 
@@ -164,7 +165,7 @@ def load_partial_state(
 
 
 def apply_state_delta(
-    model: "torch.nn.Module", delta: dict[str, "torch.Tensor"]
+    model: torch.nn.Module, delta: dict[str, torch.Tensor]
 ) -> None:
     """Add ``delta[k]`` to the model's live parameter ``k``, in place."""
     if torch is None:
@@ -188,16 +189,16 @@ class OuterUpdateScheduler:
     """
 
     delayed: bool = False
-    _pending: dict[str, "torch.Tensor"] | None = field(default=None, init=False)
+    _pending: dict[str, torch.Tensor] | None = field(default=None, init=False)
 
-    def on_round_start(self, model: "torch.nn.Module") -> None:
+    def on_round_start(self, model: torch.nn.Module) -> None:
         """Apply any update buffered during the previous round."""
         if self._pending is not None:
             apply_state_delta(model, self._pending)
             self._pending = None
 
     def on_outer_update(
-        self, model: "torch.nn.Module", delta: dict[str, "torch.Tensor"]
+        self, model: torch.nn.Module, delta: dict[str, torch.Tensor]
     ) -> None:
         """Route an outer update: apply now, or buffer for the next round."""
         if self.delayed:
@@ -205,7 +206,7 @@ class OuterUpdateScheduler:
         else:
             apply_state_delta(model, delta)
 
-    def flush(self, model: "torch.nn.Module") -> None:
+    def flush(self, model: torch.nn.Module) -> None:
         """Apply a still-buffered update at end of run so no delta is lost."""
         if self._pending is not None:
             apply_state_delta(model, self._pending)
@@ -216,7 +217,7 @@ def run_inner_loop(
     adapter: TrainerAdapter,
     shard_uri: str,
     inner_steps: int,
-) -> tuple[dict[str, "torch.Tensor"], dict[str, "torch.Tensor"], InnerStepReport]:
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], InnerStepReport]:
     """Run ``inner_steps`` SGD steps against ``shard_uri``.
 
     Returns ``(pre_state, post_state, report)`` where both states are CPU

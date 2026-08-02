@@ -55,7 +55,10 @@ impl Nonce {
     /// Default-key nonce: `key = 0`, given `seq`. The legacy ordered-
     /// stream form most wallets use.
     pub const fn from_seq(seq: u64) -> Self {
-        Self { key: [0u8; 24], seq }
+        Self {
+            key: [0u8; 24],
+            seq,
+        }
     }
 
     /// Pack `(key, seq)` into 32-byte big-endian uint256.
@@ -72,7 +75,10 @@ impl Nonce {
         key.copy_from_slice(&bytes[..24]);
         let mut seq_buf = [0u8; 8];
         seq_buf.copy_from_slice(&bytes[24..]);
-        Self { key, seq: u64::from_be_bytes(seq_buf) }
+        Self {
+            key,
+            seq: u64::from_be_bytes(seq_buf),
+        }
     }
 
     /// Hex form of the key portion (48 chars).
@@ -535,7 +541,10 @@ mod tests {
     fn to_rpc_json_emits_hex_strings() {
         let op = sample_op();
         let j = op.to_rpc_json();
-        assert_eq!(j["sender"].as_str().unwrap(), "0x1111111111111111111111111111111111111111");
+        assert_eq!(
+            j["sender"].as_str().unwrap(),
+            "0x1111111111111111111111111111111111111111"
+        );
         assert_eq!(j["nonce"].as_str().unwrap(), "0x7");
         assert!(j["callData"].as_str().unwrap().starts_with("0x"));
     }

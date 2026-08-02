@@ -109,7 +109,9 @@ impl StakeInfo {
     ///
     /// Note: Caller must verify `self.amount >= event.amount` before calling.
     pub fn add_slash(&mut self, event: SlashEvent) {
-        self.amount = self.amount.checked_sub(event.amount)
+        self.amount = self
+            .amount
+            .checked_sub(event.amount)
             .expect("BUG: add_slash called without prior balance check");
         self.slashing_history.push(event);
     }
@@ -126,10 +128,11 @@ impl StakeInfo {
                 self.staker
             )));
         }
-        self.total_rewards = self.total_rewards.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
+        self.total_rewards = self.total_rewards.checked_add(amount).ok_or_else(|| {
+            TokenError::ArithmeticOverflow {
                 operation: "stake add_rewards".to_string(),
-            })?;
+            }
+        })?;
         Ok(())
     }
 }
@@ -306,7 +309,10 @@ impl StakingManager {
                 key: key.into_bytes(),
                 value: amount.to_le_bytes().to_vec(),
             }]) {
-                warn!("Failed to persist total staked for {:?}: {}", provider_type, e);
+                warn!(
+                    "Failed to persist total staked for {:?}: {}",
+                    provider_type, e
+                );
             }
         }
     }
@@ -336,8 +342,13 @@ impl StakingManager {
                             let addr = parse_hex_to_address(addr_hex);
 
                             // Update total staked
-                            if stake_info.status == StakeStatus::Active || stake_info.status == StakeStatus::Unbonding {
-                                let mut total = self.total_staked_by_type.entry(stake_info.provider_type).or_insert(0);
+                            if stake_info.status == StakeStatus::Active
+                                || stake_info.status == StakeStatus::Unbonding
+                            {
+                                let mut total = self
+                                    .total_staked_by_type
+                                    .entry(stake_info.provider_type)
+                                    .or_insert(0);
                                 *total = total.checked_add(stake_info.amount).unwrap_or(u128::MAX);
                             }
 
@@ -359,7 +370,10 @@ impl StakingManager {
             let unbonding_ms = i64::from_le_bytes(config_data[16..24].try_into().unwrap());
             *self.min_stake.write() = min_stake;
             *self.unbonding_period_ms.write() = unbonding_ms;
-            info!("Loaded staking config: min_stake={}, unbonding_period={}ms", min_stake, unbonding_ms);
+            info!(
+                "Loaded staking config: min_stake={}, unbonding_period={}ms",
+                min_stake, unbonding_ms
+            );
         }
 
         Ok(())
@@ -368,7 +382,9 @@ impl StakingManager {
     /// Persists the staker address index
     fn persist_index(&self) {
         if let Some(storage) = &self.storage {
-            let addresses: Vec<String> = self.stakes.iter()
+            let addresses: Vec<String> = self
+                .stakes
+                .iter()
                 .map(|entry| hex::encode(entry.key().as_bytes()))
                 .collect();
 
@@ -468,7 +484,8 @@ impl StakingManager {
 
         // Update total staked
         let mut total = self.total_staked_by_type.entry(provider_type).or_insert(0);
-        *total = total.checked_add(amount)
+        *total = total
+            .checked_add(amount)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "staking total staked".to_string(),
             })?;
@@ -478,7 +495,10 @@ impl StakingManager {
         self.persist_total_staked(provider_type, *total);
         self.persist_index();
 
-        info!("Staked {} for {:?} provider at {}", amount, provider_type, staker);
+        info!(
+            "Staked {} for {:?} provider at {}",
+            amount, provider_type, staker
+        );
         Ok(())
     }
 
@@ -488,7 +508,9 @@ impl StakingManager {
     ///
     /// * `staker` - Address unstaking
     pub fn unstake(&self, staker: &Address) -> Result<()> {
-        let mut stake = self.stakes.get_mut(staker)
+        let mut stake = self
+            .stakes
+            .get_mut(staker)
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
@@ -505,15 +527,11 @@ impl StakingManager {
 
         // Check if already unbonding
         if stake.status == StakeStatus::Unbonding {
-            return Err(TokenError::InvalidAmount(
-                "Already unbonding".to_string()
-            ));
+            return Err(TokenError::InvalidAmount("Already unbonding".to_string()));
         }
 
         if stake.status != StakeStatus::Active {
-            return Err(TokenError::InvalidAmount(
-                "Stake is not active".to_string()
-            ));
+            return Err(TokenError::InvalidAmount("Stake is not active".to_string()));
         }
 
         // Set unbonding period
@@ -529,7 +547,10 @@ impl StakingManager {
         // Persist updated stake
         self.persist_stake(staker, &stake_clone);
 
-        info!("Initiated unstaking for {}. Unbonding completes at {}", staker, unbonding_at);
+        info!(
+            "Initiated unstaking for {}. Unbonding completes at {}",
+            staker, unbonding_at
+        );
         Ok(())
     }
 
@@ -541,7 +562,9 @@ impl StakingManager {
     ///
     /// Returns the withdrawn amount
     pub fn withdraw(&self, staker: &Address) -> Result<u128> {
-        let mut stake = self.stakes.get_mut(staker)
+        let mut stake = self
+            .stakes
+            .get_mut(staker)
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
@@ -559,7 +582,7 @@ impl StakingManager {
         // Check unbonding status
         if stake.status != StakeStatus::Unbonding {
             return Err(TokenError::InvalidAmount(
-                "Stake must be unbonding to withdraw".to_string()
+                "Stake must be unbonding to withdraw".to_string(),
             ));
         }
 
@@ -584,7 +607,8 @@ impl StakingManager {
 
         // Update total staked
         let new_total = if let Some(mut total) = self.total_staked_by_type.get_mut(&provider_type) {
-            *total = total.checked_sub(amount)
+            *total = total
+                .checked_sub(amount)
                 .ok_or_else(|| TokenError::ArithmeticOverflow {
                     operation: "staking withdraw total".to_string(),
                 })?;
@@ -613,8 +637,16 @@ impl StakingManager {
     /// Note: Slashing enforces the minimum unbonding period. The slashed stake
     /// cannot be withdrawn until the full unbonding period has elapsed from the
     /// slash event, even if it was already unbonding.
-    pub fn slash(&self, staker: &Address, amount: u128, reason: String, slashed_by: Address) -> Result<()> {
-        let mut stake = self.stakes.get_mut(staker)
+    pub fn slash(
+        &self,
+        staker: &Address,
+        amount: u128,
+        reason: String,
+        slashed_by: Address,
+    ) -> Result<()> {
+        let mut stake = self
+            .stakes
+            .get_mut(staker)
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
@@ -628,10 +660,13 @@ impl StakingManager {
 
         // Enforce the role bond after slashing (safe: checked above that stake.amount >= amount)
         let min_stake = stake.required_stake().max(*self.min_stake.read());
-        let new_amount = stake.amount.checked_sub(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "staking slash amount".to_string(),
-            })?;
+        let new_amount =
+            stake
+                .amount
+                .checked_sub(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "staking slash amount".to_string(),
+                })?;
 
         // If slashing would bring stake below the bond and stake is active,
         // force it into unbonding state with fresh unbonding period
@@ -670,7 +705,8 @@ impl StakingManager {
 
         // Update total staked
         let new_total = if let Some(mut total) = self.total_staked_by_type.get_mut(&provider_type) {
-            *total = total.checked_sub(amount)
+            *total = total
+                .checked_sub(amount)
                 .ok_or_else(|| TokenError::ArithmeticOverflow {
                     operation: "staking slash total".to_string(),
                 })?;
@@ -738,17 +774,23 @@ impl StakingManager {
             ));
         }
 
-        let mut stake = self.stakes.get_mut(staker)
+        let mut stake = self
+            .stakes
+            .get_mut(staker)
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
 
         // Cap restoration at the cumulative slashed amount minus what has
         // already been restored — cannot mint more than was slashed.
-        let total_slashed: u128 = stake.slashing_history.iter()
+        let total_slashed: u128 = stake
+            .slashing_history
+            .iter()
             .map(|s| s.amount)
             .fold(0u128, |acc, a| acc.saturating_add(a));
-        let total_restored: u128 = stake.restoration_history.iter()
+        let total_restored: u128 = stake
+            .restoration_history
+            .iter()
             .map(|r| r.amount)
             .fold(0u128, |acc, a| acc.saturating_add(a));
         let restorable = total_slashed.saturating_sub(total_restored);
@@ -760,14 +802,18 @@ impl StakingManager {
         }
 
         // Add amount back to the stake balance.
-        let new_amount = stake.amount.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "staking restore amount".to_string(),
-            })?;
+        let new_amount =
+            stake
+                .amount
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "staking restore amount".to_string(),
+                })?;
         stake.amount = new_amount;
 
         // Record the restoration event for audit.
-        let restore_event = RestoreEvent::new(amount, proposal_id.clone(), reason.clone(), authorized_by);
+        let restore_event =
+            RestoreEvent::new(amount, proposal_id.clone(), reason.clone(), authorized_by);
         stake.restoration_history.push(restore_event);
 
         // If the stake was forced into Unbonding by a prior slash that
@@ -777,8 +823,7 @@ impl StakingManager {
         // accounting (the funds have already left the system).
         let provider_type = stake.provider_type;
         let min_stake = stake.required_stake().max(*self.min_stake.read());
-        let return_to_active = stake.status == StakeStatus::Unbonding
-            && stake.amount >= min_stake;
+        let return_to_active = stake.status == StakeStatus::Unbonding && stake.amount >= min_stake;
         if return_to_active {
             stake.status = StakeStatus::Active;
             stake.unbonding_at = None;
@@ -788,10 +833,8 @@ impl StakingManager {
             );
         }
 
-        let counts_toward_total = matches!(
-            stake.status,
-            StakeStatus::Active | StakeStatus::Unbonding
-        );
+        let counts_toward_total =
+            matches!(stake.status, StakeStatus::Active | StakeStatus::Unbonding);
 
         // Clone before persisting to avoid holding the RefMut.
         let stake_clone = stake.clone();
@@ -801,7 +844,8 @@ impl StakingManager {
         // contributes to the total (Active or Unbonding).
         let new_total = if counts_toward_total {
             let mut total = self.total_staked_by_type.entry(provider_type).or_insert(0);
-            *total = total.checked_add(amount)
+            *total = total
+                .checked_add(amount)
                 .ok_or_else(|| TokenError::ArithmeticOverflow {
                     operation: "staking restore total".to_string(),
                 })?;
@@ -837,7 +881,9 @@ impl StakingManager {
     /// `slash` is intentionally NOT gated by `lifecycle_freeze`: the
     /// terminate flow must be able to slash a frozen stake.
     pub fn freeze_stake(&self, staker: &Address) -> Result<()> {
-        let mut stake = self.stakes.get_mut(staker)
+        let mut stake = self
+            .stakes
+            .get_mut(staker)
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
@@ -861,7 +907,9 @@ impl StakingManager {
     /// `ResumedFromQuarantine` log is observed. Idempotent — thawing an
     /// already-thawed stake is a no-op.
     pub fn thaw_stake(&self, staker: &Address) -> Result<()> {
-        let mut stake = self.stakes.get_mut(staker)
+        let mut stake = self
+            .stakes
+            .get_mut(staker)
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
@@ -886,12 +934,18 @@ impl StakingManager {
 
     /// Returns total staked for a provider type
     pub fn get_total_staked(&self, provider_type: ProviderType) -> u128 {
-        self.total_staked_by_type.get(&provider_type).map(|v| *v).unwrap_or(0)
+        self.total_staked_by_type
+            .get(&provider_type)
+            .map(|v| *v)
+            .unwrap_or(0)
     }
 
     /// Returns total staked across all provider types
     pub fn get_total_staked_all(&self) -> u128 {
-        self.total_staked_by_type.iter().map(|entry| *entry.value()).sum()
+        self.total_staked_by_type
+            .iter()
+            .map(|entry| *entry.value())
+            .sum()
     }
 
     /// Returns the cumulative slash burn across all stakes, net of any
@@ -984,7 +1038,9 @@ mod tests {
         let staker = Address::new([1u8; 32]);
         let amount = VALIDATOR_BOND;
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
 
         let stake_info = manager.get_stake(&staker).unwrap();
         assert_eq!(stake_info.amount, amount);
@@ -1011,7 +1067,11 @@ mod tests {
         // The same amount is enough for a storage provider pledging one
         // terabyte's worth of the floor.
         manager
-            .stake(staker, MIN_STORAGE_PROVIDER_STAKE, ProviderType::StorageProvider)
+            .stake(
+                staker,
+                MIN_STORAGE_PROVIDER_STAKE,
+                ProviderType::StorageProvider,
+            )
             .unwrap();
     }
 
@@ -1038,7 +1098,12 @@ mod tests {
         );
 
         let err = manager
-            .stake_with_capacity(staker, required - 1, ProviderType::ComputeProvider, rig.clone())
+            .stake_with_capacity(
+                staker,
+                required - 1,
+                ProviderType::ComputeProvider,
+                rig.clone(),
+            )
             .unwrap_err();
         assert!(matches!(err, TokenError::MinimumStakeNotMet { .. }));
 
@@ -1052,12 +1117,18 @@ mod tests {
     fn test_cloud_tiers_bond_separately() {
         let manager = StakingManager::new();
 
-        let functions = manager
-            .required_stake(ProviderType::CloudProvider, &StakeCapacity::Cloud(CloudTier::Functions));
-        let databases = manager
-            .required_stake(ProviderType::CloudProvider, &StakeCapacity::Cloud(CloudTier::Databases));
-        let machines = manager
-            .required_stake(ProviderType::CloudProvider, &StakeCapacity::Cloud(CloudTier::Machines));
+        let functions = manager.required_stake(
+            ProviderType::CloudProvider,
+            &StakeCapacity::Cloud(CloudTier::Functions),
+        );
+        let databases = manager.required_stake(
+            ProviderType::CloudProvider,
+            &StakeCapacity::Cloud(CloudTier::Databases),
+        );
+        let machines = manager.required_stake(
+            ProviderType::CloudProvider,
+            &StakeCapacity::Cloud(CloudTier::Machines),
+        );
 
         assert!(functions < databases);
         assert!(databases < machines);
@@ -1088,7 +1159,9 @@ mod tests {
         let staker = Address::new([1u8; 32]);
         let amount = VALIDATOR_BOND;
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
         manager.unstake(&staker).unwrap();
 
         let stake_info = manager.get_stake(&staker).unwrap();
@@ -1104,8 +1177,12 @@ mod tests {
         let amount = VALIDATOR_BOND;
         let slash_amount = amount / 10; // 10%
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
-        manager.slash(&staker, slash_amount, "Misbehavior".to_string(), slasher).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
+        manager
+            .slash(&staker, slash_amount, "Misbehavior".to_string(), slasher)
+            .unwrap();
 
         let stake_info = manager.get_stake(&staker).unwrap();
         assert_eq!(stake_info.amount, amount - slash_amount);
@@ -1121,10 +1198,17 @@ mod tests {
         let amount = VALIDATOR_BOND * 2;
         let slash_amount = amount / 10;
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
         let total_before_slash = manager.get_total_staked(ProviderType::Validator);
         manager
-            .slash(&staker, slash_amount, "buggy equivocation detector".to_string(), slasher)
+            .slash(
+                &staker,
+                slash_amount,
+                "buggy equivocation detector".to_string(),
+                slasher,
+            )
             .unwrap();
 
         // Restore the full slashed amount under a governance proposal.
@@ -1160,7 +1244,9 @@ mod tests {
         let amount = VALIDATOR_BOND * 2;
         let slash_amount = amount / 10;
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
         manager
             .slash(&staker, slash_amount, "fault".to_string(), slasher)
             .unwrap();
@@ -1190,7 +1276,9 @@ mod tests {
         let amount = VALIDATOR_BOND * 2;
         let slash_amount = amount / 10;
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
         manager
             .slash(&staker, slash_amount, "fault".to_string(), slasher)
             .unwrap();
@@ -1247,9 +1335,16 @@ mod tests {
         let amount = VALIDATOR_BOND;
         let slash_amount = 1u128;
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
         manager
-            .slash(&staker, slash_amount, "below-min nudge".to_string(), slasher)
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
+        manager
+            .slash(
+                &staker,
+                slash_amount,
+                "below-min nudge".to_string(),
+                slasher,
+            )
             .unwrap();
 
         // After slash: amount < min_stake, status == Unbonding.
@@ -1276,7 +1371,8 @@ mod tests {
     #[test]
     fn test_persistence_stake_and_reload() {
         // Create a temporary directory for this test
-        let temp_dir = std::env::temp_dir().join(format!("tenzro_test_staking_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tenzro_test_staking_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         // Create storage and staking manager with persistence
@@ -1289,14 +1385,21 @@ mod tests {
         let amount1 = VALIDATOR_BOND;
         let amount2 = VALIDATOR_BOND * 2;
 
-        manager.stake(staker1, amount1, ProviderType::Validator).unwrap();
-        manager.stake(staker2, amount2, ProviderType::ModelProvider).unwrap();
+        manager
+            .stake(staker1, amount1, ProviderType::Validator)
+            .unwrap();
+        manager
+            .stake(staker2, amount2, ProviderType::ModelProvider)
+            .unwrap();
 
         // Verify stakes were created
         assert!(manager.get_stake(&staker1).is_some());
         assert!(manager.get_stake(&staker2).is_some());
         assert_eq!(manager.get_total_staked(ProviderType::Validator), amount1);
-        assert_eq!(manager.get_total_staked(ProviderType::ModelProvider), amount2);
+        assert_eq!(
+            manager.get_total_staked(ProviderType::ModelProvider),
+            amount2
+        );
 
         // Drop the manager to simulate shutdown
         drop(manager);
@@ -1317,7 +1420,10 @@ mod tests {
 
         // Verify total staked was recomputed
         assert_eq!(manager2.get_total_staked(ProviderType::Validator), amount1);
-        assert_eq!(manager2.get_total_staked(ProviderType::ModelProvider), amount2);
+        assert_eq!(
+            manager2.get_total_staked(ProviderType::ModelProvider),
+            amount2
+        );
 
         // Clean up
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -1326,7 +1432,10 @@ mod tests {
     #[test]
     fn test_persistence_config() {
         // Create a temporary directory for this test
-        let temp_dir = std::env::temp_dir().join(format!("tenzro_test_staking_config_{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tenzro_test_staking_config_{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         // Create storage and staking manager with persistence
@@ -1354,7 +1463,10 @@ mod tests {
     #[test]
     fn test_persistence_unstake_and_withdraw() {
         // Create a temporary directory for this test
-        let temp_dir = std::env::temp_dir().join(format!("tenzro_test_staking_unstake_{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tenzro_test_staking_unstake_{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         // Create storage and staking manager with persistence
@@ -1364,7 +1476,9 @@ mod tests {
         // Stake and unstake
         let staker = Address::new([1u8; 32]);
         let amount = VALIDATOR_BOND;
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
         manager.unstake(&staker).unwrap();
 
         // Verify unbonding state before reload
@@ -1389,7 +1503,10 @@ mod tests {
     #[test]
     fn test_persistence_slash() {
         // Create a temporary directory for this test
-        let temp_dir = std::env::temp_dir().join(format!("tenzro_test_staking_slash_{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tenzro_test_staking_slash_{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         // Create storage and staking manager with persistence
@@ -1402,8 +1519,12 @@ mod tests {
         let amount = VALIDATOR_BOND;
         let slash_amount = amount / 10;
 
-        manager.stake(staker, amount, ProviderType::Validator).unwrap();
-        manager.slash(&staker, slash_amount, "Test slash".to_string(), slasher).unwrap();
+        manager
+            .stake(staker, amount, ProviderType::Validator)
+            .unwrap();
+        manager
+            .slash(&staker, slash_amount, "Test slash".to_string(), slasher)
+            .unwrap();
 
         // Verify slash before reload
         let stake_before = manager.get_stake(&staker).unwrap();
@@ -1422,7 +1543,10 @@ mod tests {
         assert_eq!(stake_after.slashing_history[0].reason, "Test slash");
 
         // Verify total staked was updated
-        assert_eq!(manager2.get_total_staked(ProviderType::Validator), amount - slash_amount);
+        assert_eq!(
+            manager2.get_total_staked(ProviderType::Validator),
+            amount - slash_amount
+        );
 
         // Clean up
         std::fs::remove_dir_all(&temp_dir).ok();

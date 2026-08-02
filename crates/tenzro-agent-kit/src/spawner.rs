@@ -186,7 +186,10 @@ impl std::fmt::Debug for AgentSpawner {
             .field("identity_registry", &"IdentityRegistry { .. }")
             .field("agent_runtime", &"AgentRuntime { .. }")
             .field("resolver", &self.resolver)
-            .field("auth_issuer", &self.auth_issuer.as_ref().map(|_| "AuthIssuer { .. }"))
+            .field(
+                "auth_issuer",
+                &self.auth_issuer.as_ref().map(|_| "AuthIssuer { .. }"),
+            )
             .finish()
     }
 }
@@ -286,9 +289,8 @@ impl AgentSpawner {
         );
 
         // 2. Provision controller (human) identity.
-        let controller_keypair = KeyPair::generate(KeyType::Ed25519).map_err(|e| {
-            AgentKitError::IdentityProvisioning(format!("controller keypair: {e}"))
-        })?;
+        let controller_keypair = KeyPair::generate(KeyType::Ed25519)
+            .map_err(|e| AgentKitError::IdentityProvisioning(format!("controller keypair: {e}")))?;
 
         let controller = self
             .identity_registry
@@ -308,9 +310,8 @@ impl AgentSpawner {
         );
 
         // 3. Provision machine identity with delegation scope.
-        let machine_keypair = KeyPair::generate(KeyType::Ed25519).map_err(|e| {
-            AgentKitError::IdentityProvisioning(format!("machine keypair: {e}"))
-        })?;
+        let machine_keypair = KeyPair::generate(KeyType::Ed25519)
+            .map_err(|e| AgentKitError::IdentityProvisioning(format!("machine keypair: {e}")))?;
 
         let template_scope = build_delegation_scope(&spec.delegation);
 
@@ -322,17 +323,16 @@ impl AgentSpawner {
         // than its parent on any axis (numeric ceilings, allow-lists,
         // time bound).
         let delegation_scope = if let Some(parent_did) = args.parent_machine_did.as_deref() {
-            let parent_identity = self
-                .identity_registry
-                .resolve(parent_did)
-                .map_err(|e| AgentKitError::DelegationRejected(format!(
+            let parent_identity = self.identity_registry.resolve(parent_did).map_err(|e| {
+                AgentKitError::DelegationRejected(format!(
                     "parent machine DID {parent_did} not resolvable: {e}"
-                )))?;
-            let parent_scope = parent_identity
-                .delegation_scope()
-                .ok_or_else(|| AgentKitError::DelegationRejected(format!(
+                ))
+            })?;
+            let parent_scope = parent_identity.delegation_scope().ok_or_else(|| {
+                AgentKitError::DelegationRejected(format!(
                     "parent DID {parent_did} is not a machine identity (no delegation scope)"
-                )))?;
+                ))
+            })?;
             let attenuated = parent_scope.attenuate(&template_scope);
             tracing::info!(
                 target: "tenzro_agent_kit::spawner",
@@ -374,12 +374,8 @@ impl AgentSpawner {
         // huge declared ceilings collapse to "unbounded" (u64::MAX) here.
         let machine_did_str = machine.did.to_string();
         let runtime_policy = SpendingPolicy::new(
-            spec.delegation
-                .max_transaction_value
-                .min(u64::MAX as u128) as u64,
-            spec.delegation
-                .max_daily_spend
-                .min(u64::MAX as u128) as u64,
+            spec.delegation.max_transaction_value.min(u64::MAX as u128) as u64,
+            spec.delegation.max_daily_spend.min(u64::MAX as u128) as u64,
         );
         self.agent_runtime
             .set_spending_policy(machine_did_str.clone(), runtime_policy);
@@ -445,9 +441,11 @@ impl AgentSpawner {
             let party_id = result
                 .get("party_id")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| AgentKitError::Other(format!(
-                    "tenzro_allocateParty returned unexpected shape: {result}"
-                )))?
+                .ok_or_else(|| {
+                    AgentKitError::Other(format!(
+                        "tenzro_allocateParty returned unexpected shape: {result}"
+                    ))
+                })?
                 .to_string();
             tracing::info!(
                 target: "tenzro_agent_kit::spawner",
@@ -520,11 +518,7 @@ fn build_delegation_scope(spec: &DelegationSpec) -> DelegationScope {
 
 /// Builds the capability string list passed to `register_machine_with_fee`.
 fn derive_machine_capabilities(template: &AgentTemplate, spec: &ExecutionSpec) -> Vec<String> {
-    let mut out: Vec<String> = template
-        .capabilities
-        .iter()
-        .map(|c| c.id.clone())
-        .collect();
+    let mut out: Vec<String> = template.capabilities.iter().map(|c| c.id.clone()).collect();
     if out.is_empty() {
         out.push("agent_template:autonomous".to_string());
     }
@@ -563,10 +557,12 @@ fn build_runtime_capabilities(template: &AgentTemplate) -> Vec<tenzro_types::age
             caps.push(Capability::DataAnalysis {
                 formats: vec!["json".to_string()],
             });
-        } else if id.contains("chain") || id.contains("bridge") || id.contains("evm") || id.contains("svm") {
-            caps.push(Capability::BlockchainInteraction {
-                chains: vec![],
-            });
+        } else if id.contains("chain")
+            || id.contains("bridge")
+            || id.contains("evm")
+            || id.contains("svm")
+        {
+            caps.push(Capability::BlockchainInteraction { chains: vec![] });
         } else if id.contains("contract") {
             caps.push(Capability::SmartContractExecution);
         } else if id.contains("api") {

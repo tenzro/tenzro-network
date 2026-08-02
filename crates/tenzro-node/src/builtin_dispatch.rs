@@ -27,7 +27,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::node::TenzroNode;
 use crate::rpc::JsonRpcError;
@@ -381,7 +381,7 @@ async fn blockchain_query(
             return Err(invalid_params(format!(
                 "Unknown blockchain-query operation '{other}' (expected \
                  balance|nonce|block|transaction|block_number|status)"
-            )))
+            )));
         }
     };
     Ok(json!({ "operation": operation, "result": result }))
@@ -423,7 +423,7 @@ async fn oneinch(
                 "Unknown oneinch-aggregator operation '{other}' (expected \
                  quote|swap|tokens|liquidity_sources|approve_spender|\
                  approve_transaction|approve_allowance)"
-            )))
+            )));
         }
     };
 
@@ -511,7 +511,7 @@ async fn trainer(
                  submit_gradient|finalize_round|decide_round|\
                  challenge_commitment|install_sealed_manifest|\
                  get_sealed_manifest)"
-            )))
+            )));
         }
     };
     Ok(json!({ "operation": operation, "result": result }))
@@ -629,10 +629,7 @@ fn workspace_root(node: &Arc<TenzroNode>) -> PathBuf {
 
 /// Join `rel` under `root`, rejecting anything that could escape:
 /// absolute paths, `..`, and Windows prefixes.
-fn resolve_workspace_path(
-    root: &Path,
-    rel: &str,
-) -> std::result::Result<PathBuf, JsonRpcError> {
+fn resolve_workspace_path(root: &Path, rel: &str) -> std::result::Result<PathBuf, JsonRpcError> {
     let rel_path = Path::new(rel);
     let mut out = root.to_path_buf();
     for component in rel_path.components() {
@@ -642,7 +639,7 @@ fn resolve_workspace_path(
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(invalid_params(
                     "'path' must be relative and must not traverse outside the workspace",
-                ))
+                ));
             }
         }
     }
@@ -673,9 +670,8 @@ async fn da_publish(
             let data = params
                 .get("data")
                 .ok_or_else(|| invalid_params("Missing 'data' (JSON payload) or 'bytes_b64'"))?;
-            let encoded = serde_json::to_vec(data).map_err(|e| {
-                invalid_params(format!("'data' could not be serialized: {e}"))
-            })?;
+            let encoded = serde_json::to_vec(data)
+                .map_err(|e| invalid_params(format!("'data' could not be serialized: {e}")))?;
             base64::engine::general_purpose::STANDARD.encode(encoded)
         }
     };
@@ -710,10 +706,7 @@ fn hex_to_bytes32(value: &str, field: &str) -> std::result::Result<[u8; 32], Jso
 /// the precise form — it round-trips u128 through JSON — but a step
 /// whose amount came from a model output may carry a JSON number, so
 /// both are accepted.
-fn decimal_to_uint256(
-    value: &Value,
-    field: &str,
-) -> std::result::Result<[u8; 32], JsonRpcError> {
+fn decimal_to_uint256(value: &Value, field: &str) -> std::result::Result<[u8; 32], JsonRpcError> {
     let amount: u128 = match value {
         Value::String(s) => s
             .parse()
@@ -777,18 +770,17 @@ async fn erc7683_origin(
             .enumerate()
         {
             inputs.push(TokenAmount {
-                token: hex::decode(str_param(entry, "token")?.trim_start_matches("0x"))
-                    .map_err(|e| {
+                token: hex::decode(str_param(entry, "token")?.trim_start_matches("0x")).map_err(
+                    |e| {
                         invalid_params(format!(
                             "'order_data.inputs[{i}].token' is not valid hex: {e}"
                         ))
-                    })?,
+                    },
+                )?,
                 amount: decimal_to_uint256(
-                    entry
-                        .get("amount")
-                        .ok_or_else(|| {
-                            invalid_params(format!("Missing 'order_data.inputs[{i}].amount'"))
-                        })?,
+                    entry.get("amount").ok_or_else(|| {
+                        invalid_params(format!("Missing 'order_data.inputs[{i}].amount'"))
+                    })?,
                     &format!("order_data.inputs[{i}].amount"),
                 )?,
             });
@@ -803,12 +795,13 @@ async fn erc7683_origin(
             .enumerate()
         {
             outputs.push(Output {
-                token: hex::decode(str_param(entry, "token")?.trim_start_matches("0x"))
-                    .map_err(|e| {
+                token: hex::decode(str_param(entry, "token")?.trim_start_matches("0x")).map_err(
+                    |e| {
                         invalid_params(format!(
                             "'order_data.outputs[{i}].token' is not valid hex: {e}"
                         ))
-                    })?,
+                    },
+                )?,
                 amount: decimal_to_uint256(
                     entry.get("amount").ok_or_else(|| {
                         invalid_params(format!("Missing 'order_data.outputs[{i}].amount'"))
@@ -852,9 +845,8 @@ async fn erc7683_origin(
             bridge_fee_hint: None,
         };
 
-        let encoded = bincode::serialize(&decoded).map_err(|e| {
-            upstream_error(format!("Failed to encode order_data: {e}"))
-        })?;
+        let encoded = bincode::serialize(&decoded)
+            .map_err(|e| upstream_error(format!("Failed to encode order_data: {e}")))?;
         forwarded["order_data"] = Value::String(format!("0x{}", hex::encode(encoded)));
     }
 

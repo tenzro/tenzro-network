@@ -46,11 +46,20 @@ import os
 import secrets
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import nacl.signing
+
+if TYPE_CHECKING:
+    # `typing.Self` is 3.11+; this package supports 3.10, and the annotation
+    # is only ever read by a type checker (`from __future__ import
+    # annotations` is in effect above), so importing it at type-check time
+    # keeps `typing_extensions` out of the runtime dependency set.
+    from typing_extensions import Self
+
 
 def _is_canton_method(method: str) -> bool:
     """Whether a JSON-RPC method carries a Canton scope.
@@ -161,14 +170,14 @@ class TenzroDidEnvelope:
     @classmethod
     def sign(
         cls,
-        signing_key: "nacl.signing.SigningKey",
+        signing_key: nacl.signing.SigningKey,
         did: str,
         method: str,
         params: Any,
         *,
-        timestamp: Optional[int] = None,
-        nonce: Optional[bytes] = None,
-    ) -> "TenzroDidEnvelope":
+        timestamp: int | None = None,
+        nonce: bytes | None = None,
+    ) -> TenzroDidEnvelope:
         """Build and sign an envelope over ``params``.
 
         ``timestamp`` defaults to the current Unix time in **milliseconds**
@@ -190,7 +199,7 @@ class TenzroDidEnvelope:
             signature=sig.hex(),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "did": self.did,
             "method": self.method,
@@ -236,7 +245,7 @@ class TenzroDidEnvelope:
             bytes.fromhex(self.nonce),
         )
 
-    def verify(self, verify_key: "nacl.signing.VerifyKey") -> bool:
+    def verify(self, verify_key: nacl.signing.VerifyKey) -> bool:
         """Verify the signature against ``verify_key``.
 
         Returns ``True`` on success, ``False`` if the signature does not
@@ -294,15 +303,15 @@ class TenzroClient:
 
     def __init__(
         self,
-        rpc_url: Optional[str] = None,
+        rpc_url: str | None = None,
         *,
-        signing_key: Optional["nacl.signing.SigningKey"] = None,
-        did: Optional[str] = None,
-        bearer_jwt: Optional[str] = None,
-        api_key: Optional[str] = None,
-        canton_network: Optional[str] = None,
+        signing_key: nacl.signing.SigningKey | None = None,
+        did: str | None = None,
+        bearer_jwt: str | None = None,
+        api_key: str | None = None,
+        canton_network: str | None = None,
         timeout: float = 30.0,
-        client: Optional[httpx.Client] = None,
+        client: httpx.Client | None = None,
     ) -> None:
         self.rpc_url = rpc_url or os.environ.get(
             "TENZRO_RPC_URL", "https://rpc.tenzro.xyz"
@@ -331,13 +340,13 @@ class TenzroClient:
             self._client.close()
             self._client = None
 
-    def __enter__(self) -> "TenzroClient":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.bearer_jwt:
             headers["Authorization"] = f"DPoP {self.bearer_jwt}"
@@ -388,7 +397,7 @@ class TenzroClient:
             )
         return data.get("result")
 
-    def call_signed(self, method: str, params: Dict[str, Any]) -> Any:
+    def call_signed(self, method: str, params: dict[str, Any]) -> Any:
         """Call ``method`` attaching a DID envelope built over ``params``.
 
         Requires ``signing_key`` and ``did`` to have been configured. The
@@ -413,7 +422,7 @@ class TenzroClient:
         self,
         *,
         node_type: str = "agent",
-        capabilities: Optional[Sequence[str]] = None,
+        capabilities: Sequence[str] | None = None,
         **extra: Any,
     ) -> Any:
         """Provision identity / wallet / ERC-8004 agent id for this agent.
@@ -423,7 +432,7 @@ class TenzroClient:
         node's provisioning result (TDIP DID, derived wallet addresses,
         ERC-8004 agent id).
         """
-        params: Dict[str, Any] = {"node_type": node_type}
+        params: dict[str, Any] = {"node_type": node_type}
         if capabilities is not None:
             params["capabilities"] = list(capabilities)
         params.update(extra)
@@ -436,7 +445,7 @@ class TenzroClient:
         workflow_id: str,
         orchestrator_did: str,
         saga_steps: Sequence[Mapping[str, Any]],
-        participants: Optional[Sequence[str]] = None,
+        participants: Sequence[str] | None = None,
     ) -> Any:
         """Open a multi-agent saga workflow. Wire method: ``tenzro_workflowOpen``."""
         return self.call(
@@ -454,14 +463,14 @@ class TenzroClient:
         workflow_id: str,
         step_idx: int,
         *,
-        proof: Optional[str] = None,
-        escrow_amount: Optional[int] = None,
-        payer: Optional[str] = None,
-        payee: Optional[str] = None,
+        proof: str | None = None,
+        escrow_amount: int | None = None,
+        payer: str | None = None,
+        payee: str | None = None,
     ) -> Any:
         """Execute a saga step (Pending->Executing); optionally lock per-step
         escrow. Wire method: ``tenzro_workflowStepExecute``."""
-        params: Dict[str, Any] = {"workflow_id": workflow_id, "step_idx": step_idx}
+        params: dict[str, Any] = {"workflow_id": workflow_id, "step_idx": step_idx}
         if proof is not None:
             params["proof"] = proof
         if escrow_amount is not None:
@@ -477,12 +486,12 @@ class TenzroClient:
         workflow_id: str,
         step_idx: int,
         *,
-        witness_signatures: Optional[Sequence[str]] = None,
-        outcome_score: Optional[int] = None,
+        witness_signatures: Sequence[str] | None = None,
+        outcome_score: int | None = None,
     ) -> Any:
         """Verify a saga step (releases per-step escrow + writes ERC-8004
         reputation). Wire method: ``tenzro_workflowStepVerify``."""
-        params: Dict[str, Any] = {"workflow_id": workflow_id, "step_idx": step_idx}
+        params: dict[str, Any] = {"workflow_id": workflow_id, "step_idx": step_idx}
         if witness_signatures is not None:
             params["witness_signatures"] = list(witness_signatures)
         if outcome_score is not None:
@@ -537,14 +546,14 @@ class TenzroClient:
         })
 
     def capital_intent_assign(
-        self, intent_id: str, solver_did: Optional[str] = None, *,
-        auto: bool = False, payer: Optional[str] = None, payee: Optional[str] = None,
+        self, intent_id: str, solver_did: str | None = None, *,
+        auto: bool = False, payer: str | None = None, payee: str | None = None,
     ) -> Any:
         """Assign a solver and (if payer given) lock the principal escrow up to
         the authorized ceiling. Pass ``auto=True`` (or omit ``solver_did``) to
         auto-rank the received quotes by ERC-8004 reputation, then lowest price,
         then fastest eta. Wire: ``tenzro_capitalIntentAssign``."""
-        params: Dict[str, Any] = {"intent_id": intent_id}
+        params: dict[str, Any] = {"intent_id": intent_id}
         if solver_did is not None:
             params["solver_did"] = solver_did
         if auto:
@@ -565,10 +574,10 @@ class TenzroClient:
         """Verify proofs / mark all legs settled. Wire: ``tenzro_capitalIntentVerify``."""
         return self.call("tenzro_capitalIntentVerify", {"intent_id": intent_id})
 
-    def capital_intent_settle(self, intent_id: str, *, payee: Optional[str] = None) -> Any:
+    def capital_intent_settle(self, intent_id: str, *, payee: str | None = None) -> Any:
         """Release escrow to the solver + write ERC-8004 feedback + finalize.
         Wire: ``tenzro_capitalIntentSettle``."""
-        params: Dict[str, Any] = {"intent_id": intent_id}
+        params: dict[str, Any] = {"intent_id": intent_id}
         if payee is not None:
             params["payee"] = payee
         return self.call("tenzro_capitalIntentSettle", params)
@@ -695,8 +704,8 @@ def cart_item(
     description: str,
     quantity: int,
     unit_price: int,
-    category: Optional[str] = None,
-) -> Dict[str, Any]:
+    category: str | None = None,
+) -> dict[str, Any]:
     """Build a single AP2 cart line item (``CartItem`` in the Rust model)."""
     return {
         "sku": sku,
@@ -715,14 +724,14 @@ def checkout_mandate(
     description: str,
     max_amount: int,
     asset: str = "USDC",
-    accepted_chains: Optional[Sequence[str]] = None,
-    allowed_merchants: Optional[Sequence[str]] = None,
-    allowed_categories: Optional[Sequence[str]] = None,
-    max_uses: Optional[int] = None,
-    expires_at: Optional[str] = None,
+    accepted_chains: Sequence[str] | None = None,
+    allowed_merchants: Sequence[str] | None = None,
+    allowed_categories: Sequence[str] | None = None,
+    max_uses: int | None = None,
+    expires_at: str | None = None,
     human_present: bool = True,
-    cnf: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+    cnf: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build an AP2 CheckoutMandate dict.
 
     Mirrors ``CheckoutMandate`` in ``crates/tenzro-payments/src/ap2/mod.rs``:
@@ -734,7 +743,7 @@ def checkout_mandate(
     """
     presence = "HumanPresent" if human_present else "HumanNotPresent"
     vct = "mandate.checkout.1" if human_present else "mandate.checkout.open.1"
-    m: Dict[str, Any] = {
+    m: dict[str, Any] = {
         "vct": vct,
         "mandate_id": str(uuid.uuid4()),
         "principal_did": principal_did,
@@ -773,10 +782,10 @@ def payment_mandate(
     items: Sequence[Mapping[str, Any]],
     chain: str,
     asset: str = "USDC",
-    expires_at: Optional[str] = None,
+    expires_at: str | None = None,
     human_present: bool = True,
-    cnf: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+    cnf: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build an AP2 PaymentMandate dict bound to its parent CheckoutMandate.
 
     Mirrors ``PaymentMandate`` in the Rust model:
@@ -788,7 +797,7 @@ def payment_mandate(
     """
     items = [dict(i) for i in items]
     vct = "mandate.payment.1" if human_present else "mandate.payment.open.1"
-    m: Dict[str, Any] = {
+    m: dict[str, Any] = {
         "vct": vct,
         "mandate_id": str(uuid.uuid4()),
         "checkout_mandate_id": checkout["mandate_id"],
@@ -824,7 +833,7 @@ class ReputationHook:
 
     client: TenzroClient
     subject_agent_id: int
-    outcome_ratings: Dict[str, int] = field(
+    outcome_ratings: dict[str, int] = field(
         default_factory=lambda: {"success": 1, "failure": -1}
     )
 
@@ -847,14 +856,14 @@ class ReputationHook:
 
 __all__ = [
     "DOMAIN_TAG",
-    "canonical_params_hash",
-    "canonical_preimage",
+    "ReputationHook",
+    "TenzroClient",
     "TenzroDidEnvelope",
     "TenzroRpcError",
-    "TenzroClient",
+    "canonical_params_hash",
+    "canonical_preimage",
     "cart_item",
-    "checkout_mandate",
     "checkout_hash",
+    "checkout_mandate",
     "payment_mandate",
-    "ReputationHook",
 ]

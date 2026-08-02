@@ -227,9 +227,9 @@ pub struct SiteDeployCmd {
 
 impl SiteDeployCmd {
     pub async fn execute(&self) -> Result<()> {
-        use base64::Engine as _;
-        use crate::rpc::RpcClient;
         use crate::commands::lease::print_placement;
+        use crate::rpc::RpcClient;
+        use base64::Engine as _;
 
         output::print_header("Deploy Site");
         if !self.dir.is_dir() {
@@ -354,7 +354,10 @@ impl SiteGetCmd {
         use crate::rpc::RpcClient;
         let rpc = RpcClient::new(&self.rpc);
         let manifest: serde_json::Value = rpc
-            .call("tenzro_siteGet", serde_json::json!({ "site_id": self.site_id }))
+            .call(
+                "tenzro_siteGet",
+                serde_json::json!({ "site_id": self.site_id }),
+            )
             .await?;
         output::print_json(&manifest)?;
         Ok(())
@@ -726,7 +729,10 @@ impl SiteDomainAddCmd {
         // not published its edge address; fill it in from your operator.
         if let Some(records) = domain.get("dns_records").and_then(|v| v.as_array()) {
             for rec in records {
-                let rtype = rec.get("record_type").and_then(|v| v.as_str()).unwrap_or("");
+                let rtype = rec
+                    .get("record_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let name = rec.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let value = rec
                     .get("value")
@@ -875,12 +881,27 @@ mod tests {
 
     #[test]
     fn content_type_covers_web_surface() {
-        assert_eq!(content_type_for(Path::new("a/index.html")), "text/html; charset=utf-8");
-        assert_eq!(content_type_for(Path::new("app.js")), "text/javascript; charset=utf-8");
-        assert_eq!(content_type_for(Path::new("style.css")), "text/css; charset=utf-8");
+        assert_eq!(
+            content_type_for(Path::new("a/index.html")),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for(Path::new("app.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for(Path::new("style.css")),
+            "text/css; charset=utf-8"
+        );
         assert_eq!(content_type_for(Path::new("logo.svg")), "image/svg+xml");
-        assert_eq!(content_type_for(Path::new("bundle.wasm")), "application/wasm");
-        assert_eq!(content_type_for(Path::new("noext")), "application/octet-stream");
+        assert_eq!(
+            content_type_for(Path::new("bundle.wasm")),
+            "application/wasm"
+        );
+        assert_eq!(
+            content_type_for(Path::new("noext")),
+            "application/octet-stream"
+        );
     }
 
     #[test]

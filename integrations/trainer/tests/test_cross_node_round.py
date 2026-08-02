@@ -40,21 +40,21 @@ torch = pytest.importorskip("torch")
 pd = pytest.importorskip("pandas")
 requests = pytest.importorskip("requests")
 
-from tenzro_trainer.adapters.timeseries import build_adapter  # noqa: E402
-from tenzro_trainer.gradient import (  # noqa: E402
+from tenzro_trainer.adapters.timeseries import build_adapter
+from tenzro_trainer.gradient import (
     TrainerKey,
     build_outer_gradient,
     compute_outer_delta,
     partition_state_dict,
     serialize_fragment,
 )
-from tenzro_trainer.inner_loop import (  # noqa: E402
+from tenzro_trainer.inner_loop import (
     load_partial_state,
     run_inner_loop,
     snapshot_state,
 )
-from tenzro_trainer.rpc_bridge import RpcClient  # noqa: E402
-from tenzro_trainer.types import (  # noqa: E402
+from tenzro_trainer.rpc_bridge import RpcClient, RpcError
+from tenzro_trainer.types import (
     AggregationRule,
     ArchitectureSpec,
     GradientQuantization,
@@ -63,7 +63,6 @@ from tenzro_trainer.types import (  # noqa: E402
     TrainingTaskSpec,
     TrainingTier,
 )
-
 
 ARCHITECTURE = {"metadata": {"d_model": 64, "num_layers": 2, "num_heads": 4}}
 HYPERPARAMS = {"batch_size": 8}
@@ -205,13 +204,13 @@ def _write_shard(tmp_path, seed: int, n_points: int = 4096) -> str:
     return f"file://{path}"
 
 
-def _round_start_state() -> dict[str, "torch.Tensor"]:
+def _round_start_state() -> dict[str, torch.Tensor]:
     return snapshot_state(build_adapter(ARCHITECTURE, HYPERPARAMS).model())
 
 
 def _trainer_delta(
-    shard_uri: str, start_state: dict[str, "torch.Tensor"]
-) -> dict[str, "torch.Tensor"]:
+    shard_uri: str, start_state: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
     adapter = build_adapter(ARCHITECTURE, HYPERPARAMS)
     load_partial_state(adapter.model(), start_state)
     _pre, post, _report = run_inner_loop(adapter, shard_uri, INNER_STEPS)
@@ -345,7 +344,9 @@ def test_cross_node_multi_round_over_rpc(running_node, tmp_path):
             inner_step_count=INNER_STEPS,
             key=keys[0],
         )
-        with pytest.raises(Exception):
+        # Named rather than bare `Exception`: a blind assertion passes on a
+        # typo in the call as readily as on the refusal under test.
+        with pytest.raises(RpcError):
             client.submit_outer_gradient(stale)
 
         # 4. Coordinator finalizes the round. post_step_hashes are the SHA-256

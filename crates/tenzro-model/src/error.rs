@@ -46,7 +46,9 @@ pub enum ModelError {
     /// that payload kind — for example, sending a `Forecast` request to a `Text`
     /// model. Caught early in the router so we surface a typed error rather than
     /// a downstream parse failure inside a runtime.
-    #[error("Modality mismatch: model '{model_id}' is {model_modality:?}, but payload is {payload_modality:?}")]
+    #[error(
+        "Modality mismatch: model '{model_id}' is {model_modality:?}, but payload is {payload_modality:?}"
+    )]
     ModalityMismatch {
         model_id: String,
         model_modality: tenzro_types::model::ModelModality,
@@ -69,7 +71,9 @@ pub enum ModelError {
     /// the load-time admission check before `LlamaModel::load_from_file`, so a
     /// provider fails cleanly with a typed error instead of OOM-killing the
     /// process mid-load.
-    #[error("Insufficient memory to load '{model_id}': need ~{required_mb} MB, {available_mb} MB available")]
+    #[error(
+        "Insufficient memory to load '{model_id}': need ~{required_mb} MB, {available_mb} MB available"
+    )]
     InsufficientMemory {
         model_id: String,
         required_mb: u64,
@@ -80,7 +84,9 @@ pub enum ModelError {
     /// decode on a single model context, so requests wait behind the one in
     /// flight. Past a bound we shed load with this typed error instead of
     /// letting the wait queue grow without limit and time every caller out.
-    #[error("Inference queue full for '{model_id}': {waiting} requests already waiting (max {max})")]
+    #[error(
+        "Inference queue full for '{model_id}': {waiting} requests already waiting (max {max})"
+    )]
     QueueFull {
         model_id: String,
         waiting: usize,
@@ -125,7 +131,9 @@ pub enum ModelError {
     /// policy. NonCommercial models require `--accept-non-commercial`;
     /// CommercialCustom models require `--accept-license <id>` for their
     /// specific license id.
-    #[error("license not accepted for model '{model_id}': tier {tier:?}, license id {license_id:?}")]
+    #[error(
+        "license not accepted for model '{model_id}': tier {tier:?}, license id {license_id:?}"
+    )]
     LicenseNotAccepted {
         model_id: String,
         tier: tenzro_types::model::LicenseTier,
@@ -149,7 +157,9 @@ pub enum ModelError {
 
     /// A fetched artifact's manifest hash does not match the recorded
     /// canonical hash for its model — the weights may be tampered.
-    #[error("Model hash mismatch for '{0}': fetched artifact does not match recorded canonical hash")]
+    #[error(
+        "Model hash mismatch for '{0}': fetched artifact does not match recorded canonical hash"
+    )]
     HashMismatch(String),
 
     /// A model manifest carried no weight files, so no primary hash could be

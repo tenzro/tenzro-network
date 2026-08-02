@@ -46,19 +46,19 @@ use crate::aap::{
     AapOversightClaim, AapTaskClaim,
 };
 use crate::claims::{AuthClaims, Cnf};
-use crate::dpop::{DpopProof, DpopVerification, DPOP_REPLAY_CACHE_TTL_SECS};
+use crate::dpop::{DPOP_REPLAY_CACHE_TTL_SECS, DpopProof, DpopVerification};
 use crate::error::{AuthError, Result};
 use crate::exchange::{TokenExchangeOutcome, TokenExchangeRequest};
 use crate::rar::{AuthorizationDetail, AuthorizationDetails, ResourceConstraint};
 use crate::storage::{
-    approval_key, approval_pending_key, audit_did_key, audit_jti_key, audit_key, ApprovalRecord,
-    ApprovalStatus, AuditEvent, AuditEventKind,
+    ApprovalRecord, ApprovalStatus, AuditEvent, AuditEventKind, approval_key, approval_pending_key,
+    audit_did_key, audit_jti_key, audit_key,
 };
 use dashmap::DashMap;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tenzro_storage::{KvStore, WriteOp, CF_APPROVALS, CF_AUDIT};
+use tenzro_storage::{CF_APPROVALS, CF_AUDIT, KvStore, WriteOp};
 
 /// Configuration for [`AuthEngine`].
 #[derive(Debug, Clone)]
@@ -98,13 +98,17 @@ pub struct AuthEngineConfig {
 
 impl AuthEngineConfig {
     /// Build a config with sane defaults for the V1 testnet.
-    pub fn new(issuer: impl Into<String>, audience: impl Into<String>, signing_secret: Vec<u8>) -> Self {
+    pub fn new(
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        signing_secret: Vec<u8>,
+    ) -> Self {
         Self {
             issuer: issuer.into(),
             audience: audience.into(),
             signing_secret,
-            default_ttl_secs: 3600,        // 1 hour
-            max_ttl_secs: 24 * 3600,       // 24 hours absolute ceiling
+            default_ttl_secs: 3600,           // 1 hour
+            max_ttl_secs: 24 * 3600,          // 24 hours absolute ceiling
             refresh_ttl_secs: 30 * 24 * 3600, // 30 days
         }
     }
@@ -572,10 +576,8 @@ impl AuthEngine {
         )?;
 
         // 2. AAP capability subset (if either side has caps).
-        let parent_caps: Vec<crate::aap::AapCapabilityClaim> = parent_claims
-            .aap_capabilities
-            .clone()
-            .unwrap_or_default();
+        let parent_caps: Vec<crate::aap::AapCapabilityClaim> =
+            parent_claims.aap_capabilities.clone().unwrap_or_default();
         crate::exchange::aap_capabilities_is_subset(
             &parent_caps,
             &request.requested_aap_capabilities,
@@ -590,7 +592,9 @@ impl AuthEngine {
         let requested_ttl = request
             .requested_ttl_secs
             .unwrap_or(self.cfg.default_ttl_secs);
-        let ttl = requested_ttl.min(parent_remaining).clamp(1, self.cfg.max_ttl_secs);
+        let ttl = requested_ttl
+            .min(parent_remaining)
+            .clamp(1, self.cfg.max_ttl_secs);
 
         // 4. Delegation chain.
         let parent_delegation = parent_claims.aap_delegation.clone().unwrap_or_else(|| {
@@ -733,7 +737,10 @@ impl AuthEngine {
                 reason: format!("token {} revoked", claims.jti),
             });
         }
-        if self.revoked_controllers.contains_key(&claims.controller_did) {
+        if self
+            .revoked_controllers
+            .contains_key(&claims.controller_did)
+        {
             return Ok(AuthorityDecision::Deny {
                 reason: format!("controller {} revoked", claims.controller_did),
             });
@@ -785,10 +792,21 @@ impl AuthEngine {
         // ApprovalRecord.
         if let Some(oversight) = &claims.aap_oversight {
             let action_name = crate::aap::authority_action_to_aap(request.action);
+            // Match either the canonical namespaced action ("payments.transfer")
+            // or its bare suffix ("transfer").
+            //
+            // `requires_human_approval_for` is operator-authored policy carried
+            // in a token claim, and an entry that fails to match does not error
+            // — it falls through to Permit. So a policy written in the short
+            // form would silently grant exactly the action it was written to
+            // hold for review. Accepting both spellings can only ever *add* an
+            // approval requirement, never remove one, which is the safe
+            // direction for this check.
+            let bare_action = action_name.rsplit('.').next().unwrap_or(action_name);
             if oversight
                 .requires_human_approval_for
                 .iter()
-                .any(|a| a == action_name)
+                .any(|a| a == action_name || a == bare_action)
             {
                 // Retry path: the caller is presenting an approval granted
                 // out-of-band. Spend it if it genuinely authorizes this
@@ -813,10 +831,7 @@ impl AuthEngine {
                     created_at_ms: now_ms,
                     expires_at_ms: now_ms + ttl_secs * 1000,
                     action: authority_request_to_detail(request),
-                    summary: format!(
-                        "AAP oversight: action {} requires approval",
-                        action_name
-                    ),
+                    summary: format!("AAP oversight: action {} requires approval", action_name),
                     status: ApprovalStatus::Pending,
                     decided_at_ms: None,
                     deny_reason: None,
@@ -918,8 +933,7 @@ impl AuthEngine {
             Some(b) => serde_json::from_slice(&b)?,
             None => return Ok(None),
         };
-        if matches!(record.status, ApprovalStatus::Pending)
-            && record.expires_at_ms <= unix_now_ms()
+        if matches!(record.status, ApprovalStatus::Pending) && record.expires_at_ms <= unix_now_ms()
         {
             record.status = ApprovalStatus::Expired;
             record.decided_at_ms = Some(unix_now_ms());
@@ -969,7 +983,9 @@ impl AuthEngine {
 
         match record.status {
             ApprovalStatus::Pending => { /* fall through */ }
-            ApprovalStatus::Approved | ApprovalStatus::Denied | ApprovalStatus::Expired
+            ApprovalStatus::Approved
+            | ApprovalStatus::Denied
+            | ApprovalStatus::Expired
             | ApprovalStatus::Consumed => {
                 return Err(AuthError::Internal(format!(
                     "approval {} is already in terminal state {:?}",
@@ -1028,9 +1044,9 @@ impl AuthEngine {
         requester_did: &str,
         request: &AuthorityRequest,
     ) -> Result<ApprovalRecord> {
-        let record = self.get_approval(approval_id)?.ok_or_else(|| {
-            AuthError::Forbidden(format!("approval {} not found", approval_id))
-        })?;
+        let record = self
+            .get_approval(approval_id)?
+            .ok_or_else(|| AuthError::Forbidden(format!("approval {} not found", approval_id)))?;
 
         if record.requester_did != requester_did {
             return Err(AuthError::Forbidden(format!(
@@ -1464,7 +1480,14 @@ impl AuthEngine {
     /// strings if no issuance event was ever recorded for this JTI
     /// (which can happen for tokens minted before
     /// [`Self::record_audit`] was wired in).
-    fn lookup_jti_dids(&self, jti: &str) -> Result<(String, String)> {
+    ///
+    /// Public because revocation is an authorization decision made a layer
+    /// up: `tenzro_revokeJwt` has only a `jti` to go on, and needs the two
+    /// DIDs behind it to decide whether the caller may revoke this token.
+    /// Callers must treat the empty-string return as "unattributable" and
+    /// **fail closed** — an unknown `jti` must not be the way around an
+    /// ownership gate.
+    pub fn lookup_jti_dids(&self, jti: &str) -> Result<(String, String)> {
         let event_id_bytes = self
             .storage
             .get(CF_AUDIT, audit_jti_key(jti).as_bytes())
@@ -1645,10 +1668,7 @@ fn detail_covers(detail: &AuthorizationDetail, request: &AuthorityRequest) -> bo
                 && amount_within(*max_amount, request.constraint.amount)
                 && counterparty_allowed(allowed_payees, &request.constraint.counterparty)
         }
-        (
-            AuthorizationDetail::DischargeEscrow { allowed_escrow_ids },
-            A::DischargeEscrow,
-        ) => {
+        (AuthorizationDetail::DischargeEscrow { allowed_escrow_ids }, A::DischargeEscrow) => {
             // If the grant is unrestricted, any escrow is fine.
             // Otherwise the request must name an escrow id (32 bytes
             // hex-encoded into ResourceConstraint::resource_id) that
@@ -1696,14 +1716,13 @@ fn detail_covers(detail: &AuthorizationDetail, request: &AuthorityRequest) -> bo
             amount_within(*max_amount, request.constraint.amount)
                 && counterparty_allowed(allowed_validators, &request.constraint.counterparty)
         }
-        (
-            AuthorizationDetail::Vote { allowed_proposals },
-            A::Vote,
-        ) => match (allowed_proposals, request.constraint.resource_id.as_ref()) {
-            (None, _) => true,
-            (Some(_), None) => false,
-            (Some(ids), Some(p)) => ids.iter().any(|id| id == p),
-        },
+        (AuthorizationDetail::Vote { allowed_proposals }, A::Vote) => {
+            match (allowed_proposals, request.constraint.resource_id.as_ref()) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(ids), Some(p)) => ids.iter().any(|id| id == p),
+            }
+        }
         (
             AuthorizationDetail::Contract {
                 allowed_contracts,
@@ -1723,10 +1742,7 @@ fn detail_covers(detail: &AuthorizationDetail, request: &AuthorityRequest) -> bo
                 },
             }
         }
-        (
-            AuthorizationDetail::RegisterIdentity { .. },
-            A::RegisterIdentity,
-        ) => {
+        (AuthorizationDetail::RegisterIdentity { .. }, A::RegisterIdentity) => {
             // Counter enforcement (max_children) is the engine's
             // responsibility but lives outside the cover-check — the
             // engine tracks issuance counts in the audit log.
@@ -1782,8 +1798,8 @@ fn counterparty_allowed(
     request: &Option<tenzro_types::Address>,
 ) -> bool {
     match (allowed, request) {
-        (None, _) => true,                       // unrestricted grant
-        (Some(_), None) => false,                // grant restricts but request unspecified
+        (None, _) => true,        // unrestricted grant
+        (Some(_), None) => false, // grant restricts but request unspecified
         (Some(list), Some(addr)) => list.iter().any(|a| a == addr),
     }
 }
@@ -1848,9 +1864,9 @@ fn authority_request_to_detail(request: &AuthorityRequest) -> AuthorizationDetai
             allowed_contracts: counterparty.map(|c| vec![c]),
             allow_deploy: request.constraint.counterparty.is_none(),
         },
-        AuthorityAction::RegisterIdentity => AuthorizationDetail::RegisterIdentity {
-            max_children: None,
-        },
+        AuthorityAction::RegisterIdentity => {
+            AuthorizationDetail::RegisterIdentity { max_children: None }
+        }
         AuthorityAction::InvokeResource => {
             let (class, allowed_resource_ids) = match request
                 .constraint
@@ -1909,7 +1925,11 @@ fn aap_constraints_permit(
     if let Some(allowed) = &cs.allowed_assets {
         let req_asset = match &request.asset {
             Some(a) => a.as_str().to_string(),
-            None => return Err("constraint restricts allowed_assets but request has no asset".to_string()),
+            None => {
+                return Err(
+                    "constraint restricts allowed_assets but request has no asset".to_string(),
+                );
+            }
         };
         if !allowed.iter().any(|a| a == &req_asset) {
             return Err(format!("asset {} not in allowed_assets", req_asset));
@@ -1919,14 +1939,19 @@ fn aap_constraints_permit(
     // allowed_counterparties — request.counterparty must be in the
     // list (when the constraint sets one). Compared on hex form.
     if let Some(allowed) = &cs.allowed_counterparties {
-        let req_cp = match &request.counterparty {
-            Some(c) => format!("{}", c),
-            None => return Err(
-                "constraint restricts allowed_counterparties but request has no counterparty".to_string()
-            ),
-        };
+        let req_cp =
+            match &request.counterparty {
+                Some(c) => format!("{}", c),
+                None => return Err(
+                    "constraint restricts allowed_counterparties but request has no counterparty"
+                        .to_string(),
+                ),
+            };
         if !allowed.iter().any(|a| a == &req_cp) {
-            return Err(format!("counterparty {} not in allowed_counterparties", req_cp));
+            return Err(format!(
+                "counterparty {} not in allowed_counterparties",
+                req_cp
+            ));
         }
     }
 
@@ -1934,9 +1959,12 @@ fn aap_constraints_permit(
     if let Some(allowed) = &cs.allowed_resources {
         let req_res = match &request.resource_id {
             Some(r) => r.clone(),
-            None => return Err(
-                "constraint restricts allowed_resources but request has no resource_id".to_string()
-            ),
+            None => {
+                return Err(
+                    "constraint restricts allowed_resources but request has no resource_id"
+                        .to_string(),
+                );
+            }
         };
         if !allowed.iter().any(|a| a == &req_res) {
             return Err(format!("resource {} not in allowed_resources", req_res));
@@ -2002,11 +2030,7 @@ mod tests {
     use tenzro_storage::MemoryStore;
 
     fn engine() -> AuthEngine {
-        let cfg = AuthEngineConfig::new(
-            "did:tenzro:node:test",
-            "https://rpc.test",
-            vec![0x42; 32],
-        );
+        let cfg = AuthEngineConfig::new("did:tenzro:node:test", "https://rpc.test", vec![0x42; 32]);
         AuthEngine::new(cfg, Arc::new(MemoryStore::new())).expect("engine")
     }
 
@@ -2024,7 +2048,10 @@ mod tests {
             .expect("issue");
         let claims = e.validate_jwt(&token, None).expect("validate");
         assert_eq!(claims.sub, "did:tenzro:human:abc");
-        assert_eq!(claims.cnf.as_ref().map(|c| c.jkt.as_str()), Some("fake-jkt"));
+        assert_eq!(
+            claims.cnf.as_ref().map(|c| c.jkt.as_str()),
+            Some("fake-jkt")
+        );
     }
 
     #[test]
@@ -2137,21 +2164,29 @@ mod tests {
         let rec = make_pending_record("apv-1", "did:tenzro:human:alice", 60_000);
         e.record_approval(rec).unwrap();
 
-        let listed = e.list_pending_for_approver("did:tenzro:human:alice").unwrap();
+        let listed = e
+            .list_pending_for_approver("did:tenzro:human:alice")
+            .unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].approval_id, "apv-1");
 
         let decided = e
-            .decide_approval("apv-1", ApprovalStatus::Approved, Some("did:tenzro:human:alice"), None)
+            .decide_approval(
+                "apv-1",
+                ApprovalStatus::Approved,
+                Some("did:tenzro:human:alice"),
+                None,
+            )
             .unwrap();
         assert_eq!(decided.status, ApprovalStatus::Approved);
         assert!(decided.decided_at_ms.is_some());
 
         // Pending index dropped.
-        assert!(e
-            .list_pending_for_approver("did:tenzro:human:alice")
-            .unwrap()
-            .is_empty());
+        assert!(
+            e.list_pending_for_approver("did:tenzro:human:alice")
+                .unwrap()
+                .is_empty()
+        );
 
         let consumed = e.consume_approval("apv-1").unwrap();
         assert_eq!(consumed.status, ApprovalStatus::Consumed);
@@ -2333,11 +2368,7 @@ mod tests {
         let mut impostor = claims.clone();
         impostor.sub = "did:tenzro:machine:impostor".into();
         let err = e
-            .resolve_authority(
-                &impostor,
-                &transfer_request(5_000, Some(approval_id)),
-                None,
-            )
+            .resolve_authority(&impostor, &transfer_request(5_000, Some(approval_id)), None)
             .unwrap_err();
         assert!(matches!(err, AuthError::Forbidden(_)));
     }
@@ -2349,7 +2380,12 @@ mod tests {
         e.record_approval(rec).unwrap();
 
         let err = e
-            .decide_approval("apv-2", ApprovalStatus::Approved, Some("did:tenzro:human:eve"), None)
+            .decide_approval(
+                "apv-2",
+                ApprovalStatus::Approved,
+                Some("did:tenzro:human:eve"),
+                None,
+            )
             .unwrap_err();
         assert!(matches!(err, AuthError::Forbidden(_)));
     }
@@ -2396,10 +2432,11 @@ mod tests {
         assert!(got.decided_at_ms.is_some());
 
         // Pending index should be gone too.
-        assert!(e
-            .list_pending_for_approver("did:tenzro:human:alice")
-            .unwrap()
-            .is_empty());
+        assert!(
+            e.list_pending_for_approver("did:tenzro:human:alice")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2414,20 +2451,9 @@ mod tests {
 
     /// Issue a JWT for `bearer` under `controller`, then return its
     /// claims (which carries the JTI we'll later revoke).
-    fn issue_and_validate(
-        e: &AuthEngine,
-        bearer: &str,
-        controller: &str,
-        jkt: &str,
-    ) -> AuthClaims {
+    fn issue_and_validate(e: &AuthEngine, bearer: &str, controller: &str, jkt: &str) -> AuthClaims {
         let token = e
-            .issue_jwt(
-                bearer,
-                controller,
-                jkt,
-                AuthorizationDetails::empty(),
-                None,
-            )
+            .issue_jwt(bearer, controller, jkt, AuthorizationDetails::empty(), None)
             .unwrap();
         e.validate_jwt(&token, None).unwrap()
     }
@@ -2445,9 +2471,7 @@ mod tests {
 
         // Child's controller_did is the parent's bearer DID, which is
         // now revoked → child should be rejected.
-        let child_jti_revoked = e
-            .revoked_controllers
-            .contains_key("did:tenzro:human:p");
+        let child_jti_revoked = e.revoked_controllers.contains_key("did:tenzro:human:p");
         assert!(
             child_jti_revoked,
             "parent bearer should be in revoked_controllers"
@@ -2551,10 +2575,22 @@ mod tests {
         let e = engine();
         let parent = issue_and_validate(&e, "AUD-P", "AUD-P", "jkt-aud-p");
         let _ = e
-            .issue_jwt("AUD-C1", "AUD-P", "jkt-c1", AuthorizationDetails::empty(), None)
+            .issue_jwt(
+                "AUD-C1",
+                "AUD-P",
+                "jkt-c1",
+                AuthorizationDetails::empty(),
+                None,
+            )
             .unwrap();
         let _ = e
-            .issue_jwt("AUD-C2", "AUD-P", "jkt-c2", AuthorizationDetails::empty(), None)
+            .issue_jwt(
+                "AUD-C2",
+                "AUD-P",
+                "jkt-c2",
+                AuthorizationDetails::empty(),
+                None,
+            )
             .unwrap();
 
         e.revoke(&parent.jti, "audit-test").unwrap();
@@ -2593,10 +2629,22 @@ mod tests {
         // is revoked.
         let e = engine();
         let token_a = e
-            .issue_jwt("CYC-A", "CYC-B", "jkt-ca", AuthorizationDetails::empty(), None)
+            .issue_jwt(
+                "CYC-A",
+                "CYC-B",
+                "jkt-ca",
+                AuthorizationDetails::empty(),
+                None,
+            )
             .unwrap();
         let token_b = e
-            .issue_jwt("CYC-B", "CYC-A", "jkt-cb", AuthorizationDetails::empty(), None)
+            .issue_jwt(
+                "CYC-B",
+                "CYC-A",
+                "jkt-cb",
+                AuthorizationDetails::empty(),
+                None,
+            )
             .unwrap();
         let claims_a = e.validate_jwt(&token_a, None).unwrap();
         e.validate_jwt(&token_b, None).unwrap();
@@ -2660,15 +2708,30 @@ mod tests {
             allowed_resource_ids: Some(vec!["web-search".to_string()]),
         };
 
-        assert!(detail_covers(&grant, &invoke_request(Some("skill:web-search"), 1_000)));
+        assert!(detail_covers(
+            &grant,
+            &invoke_request(Some("skill:web-search"), 1_000)
+        ));
         // Ceiling is per call.
-        assert!(!detail_covers(&grant, &invoke_request(Some("skill:web-search"), 1_001)));
+        assert!(!detail_covers(
+            &grant,
+            &invoke_request(Some("skill:web-search"), 1_001)
+        ));
         // Wrong class.
-        assert!(!detail_covers(&grant, &invoke_request(Some("tool:web-search"), 10)));
+        assert!(!detail_covers(
+            &grant,
+            &invoke_request(Some("tool:web-search"), 10)
+        ));
         // Id outside the allow-list.
-        assert!(!detail_covers(&grant, &invoke_request(Some("skill:code-review"), 10)));
+        assert!(!detail_covers(
+            &grant,
+            &invoke_request(Some("skill:code-review"), 10)
+        ));
         // Unqualified id cannot be checked against either allow-list.
-        assert!(!detail_covers(&grant, &invoke_request(Some("web-search"), 10)));
+        assert!(!detail_covers(
+            &grant,
+            &invoke_request(Some("web-search"), 10)
+        ));
     }
 
     #[test]
@@ -2679,9 +2742,15 @@ mod tests {
             allowed_resource_ids: None,
         };
 
-        assert!(detail_covers(&grant, &invoke_request(Some("tool:code-executor"), 500)));
+        assert!(detail_covers(
+            &grant,
+            &invoke_request(Some("tool:code-executor"), 500)
+        ));
         assert!(detail_covers(&grant, &invoke_request(None, 1)));
-        assert!(!detail_covers(&grant, &invoke_request(Some("tool:code-executor"), 501)));
+        assert!(!detail_covers(
+            &grant,
+            &invoke_request(Some("tool:code-executor"), 501)
+        ));
     }
 
     #[test]

@@ -10,9 +10,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tenzro_crypto::{PublicKey, Signature};
+use tenzro_storage::kv::{CF_METADATA, KvStore};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::Address;
-use tenzro_storage::kv::{KvStore, CF_METADATA};
 use tracing::{debug, info, warn};
 
 /// Domain separator for treasury withdrawal-approval signatures.
@@ -78,8 +78,8 @@ impl Default for FeeDistributionConfig {
     fn default() -> Self {
         Self {
             treasury_share_bps: 4000, // 40%
-            burn_share_bps: 3000,      // 30%
-            staker_share_bps: 3000,    // 30%
+            burn_share_bps: 3000,     // 30%
+            staker_share_bps: 3000,   // 30%
         }
     }
 }
@@ -87,14 +87,16 @@ impl Default for FeeDistributionConfig {
 impl FeeDistributionConfig {
     /// Validates that the configuration is correct
     pub fn validate(&self) -> Result<()> {
-        let total = self.treasury_share_bps
+        let total = self
+            .treasury_share_bps
             .saturating_add(self.burn_share_bps)
             .saturating_add(self.staker_share_bps);
 
         if total != 10000 {
-            return Err(TokenError::InvalidConfig(
-                format!("Fee distribution must sum to 10000 bps, got {}", total)
-            ));
+            return Err(TokenError::InvalidConfig(format!(
+                "Fee distribution must sum to 10000 bps, got {}",
+                total
+            )));
         }
 
         Ok(())
@@ -295,13 +297,18 @@ impl NetworkTreasury {
     }
 
     /// Get a snapshot of all per-bridge sponsorship pools. Read-only.
-    pub fn bridge_sponsorship_pools_snapshot(&self) -> HashMap<String, BridgeSponsorshipPoolRecord> {
+    pub fn bridge_sponsorship_pools_snapshot(
+        &self,
+    ) -> HashMap<String, BridgeSponsorshipPoolRecord> {
         self.bridge_sponsorship_pools.read().clone()
     }
 
     /// Get the per-adapter sponsorship pool record, creating it lazily
     /// from the canonical vault-address derivation.
-    pub fn get_or_create_bridge_sponsorship_pool(&self, adapter: &str) -> BridgeSponsorshipPoolRecord {
+    pub fn get_or_create_bridge_sponsorship_pool(
+        &self,
+        adapter: &str,
+    ) -> BridgeSponsorshipPoolRecord {
         let mut pools = self.bridge_sponsorship_pools.write();
         if let Some(rec) = pools.get(adapter) {
             return rec.clone();
@@ -347,11 +354,7 @@ impl NetworkTreasury {
     /// submits delivery proof. Does NOT touch the TNZO balance — that
     /// is paid out to the relayer via a separate explicit drain step
     /// to keep the audit trail clean.
-    pub fn drain_bridge_sponsorship_outstanding(
-        &self,
-        adapter: &str,
-        native_amount: u128,
-    ) {
+    pub fn drain_bridge_sponsorship_outstanding(&self, adapter: &str, native_amount: u128) {
         let mut pools = self.bridge_sponsorship_pools.write();
         if let Some(rec) = pools.get_mut(adapter) {
             rec.native_outstanding_smallest_unit = rec
@@ -373,7 +376,13 @@ impl NetworkTreasury {
     }
 
     /// Persists balance, collected, and distributed for an asset to storage
-    fn persist_asset_state(&self, asset_id: &AssetId, balance: u128, collected: u128, distributed: u128) {
+    fn persist_asset_state(
+        &self,
+        asset_id: &AssetId,
+        balance: u128,
+        collected: u128,
+        distributed: u128,
+    ) {
         if let Some(storage) = &self.storage {
             if let Err(e) = storage.persist_balance(asset_id, balance) {
                 warn!("Failed to persist treasury balance: {}", e);
@@ -398,12 +407,11 @@ impl NetworkTreasury {
             ));
         }
         if threshold > withdrawers.len() && !withdrawers.is_empty() {
-            return Err(TokenError::InvalidConfig(
-                format!(
-                    "Threshold {} exceeds number of authorized withdrawers {}",
-                    threshold, withdrawers.len()
-                ),
-            ));
+            return Err(TokenError::InvalidConfig(format!(
+                "Threshold {} exceeds number of authorized withdrawers {}",
+                threshold,
+                withdrawers.len()
+            )));
         }
         drop(withdrawers);
         *self.withdrawal_threshold.write() = threshold;
@@ -484,9 +492,10 @@ impl NetworkTreasury {
 
         // Prevent duplicate approvals from the same address
         if entry.approvers.contains(approver) {
-            return Err(TokenError::InvalidAmount(
-                format!("Already approved withdrawal {}", withdrawal_id)
-            ));
+            return Err(TokenError::InvalidAmount(format!(
+                "Already approved withdrawal {}",
+                withdrawal_id
+            )));
         }
 
         entry.approvers.push(*approver);
@@ -517,28 +526,39 @@ impl NetworkTreasury {
     /// * `amount` - Amount to deposit
     pub fn deposit_fee(&self, asset_id: &AssetId, amount: u128) -> Result<()> {
         if amount == 0 {
-            return Err(TokenError::InvalidAmount("Amount must be greater than zero".to_string()));
+            return Err(TokenError::InvalidAmount(
+                "Amount must be greater than zero".to_string(),
+            ));
         }
 
         // Update balance
         let mut balances = self.balances.write();
         let current = balances.get(asset_id).copied().unwrap_or(0);
-        let new_balance = current.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "treasury deposit".to_string(),
-            })?;
+        let new_balance =
+            current
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "treasury deposit".to_string(),
+                })?;
         balances.insert(asset_id.clone(), new_balance);
         drop(balances);
 
         // Update total collected
         let mut total_collected = self.total_fees_collected.write();
         let current_total = total_collected.get(asset_id).copied().unwrap_or(0);
-        let new_total = current_total.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "treasury total fees collected".to_string(),
-            })?;
+        let new_total =
+            current_total
+                .checked_add(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "treasury total fees collected".to_string(),
+                })?;
         total_collected.insert(asset_id.clone(), new_total);
-        let distributed = self.total_distributed.read().get(asset_id).copied().unwrap_or(0);
+        let distributed = self
+            .total_distributed
+            .read()
+            .get(asset_id)
+            .copied()
+            .unwrap_or(0);
         drop(total_collected);
 
         // Persist to storage
@@ -581,7 +601,9 @@ impl NetworkTreasury {
         }
 
         if amount == 0 {
-            return Err(TokenError::InvalidAmount("Amount must be greater than zero".to_string()));
+            return Err(TokenError::InvalidAmount(
+                "Amount must be greater than zero".to_string(),
+            ));
         }
 
         // Check balance
@@ -595,22 +617,30 @@ impl NetworkTreasury {
         }
 
         // Deduct balance (safe: checked above that current >= amount)
-        let new_balance = current.checked_sub(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "treasury withdraw balance".to_string(),
-            })?;
+        let new_balance =
+            current
+                .checked_sub(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "treasury withdraw balance".to_string(),
+                })?;
         balances.insert(asset_id.clone(), new_balance);
         drop(balances);
 
         // Update total distributed
         let mut total_distributed = self.total_distributed.write();
         let current_distributed = total_distributed.get(asset_id).copied().unwrap_or(0);
-        let new_distributed = current_distributed.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
+        let new_distributed = current_distributed.checked_add(amount).ok_or_else(|| {
+            TokenError::ArithmeticOverflow {
                 operation: "treasury total distributed".to_string(),
-            })?;
+            }
+        })?;
         total_distributed.insert(asset_id.clone(), new_distributed);
-        let collected = self.total_fees_collected.read().get(asset_id).copied().unwrap_or(0);
+        let collected = self
+            .total_fees_collected
+            .read()
+            .get(asset_id)
+            .copied()
+            .unwrap_or(0);
         drop(total_distributed);
 
         // Persist to storage
@@ -676,22 +706,30 @@ impl NetworkTreasury {
         }
 
         // Deduct balance (safe: checked above that current >= amount)
-        let new_balance = current.checked_sub(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
-                operation: "treasury execute_withdrawal balance".to_string(),
-            })?;
+        let new_balance =
+            current
+                .checked_sub(amount)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "treasury execute_withdrawal balance".to_string(),
+                })?;
         balances.insert(asset_id.clone(), new_balance);
         drop(balances);
 
         // Update total distributed
         let mut total_distributed = self.total_distributed.write();
         let current_distributed = total_distributed.get(asset_id).copied().unwrap_or(0);
-        let new_distributed = current_distributed.checked_add(amount)
-            .ok_or_else(|| TokenError::ArithmeticOverflow {
+        let new_distributed = current_distributed.checked_add(amount).ok_or_else(|| {
+            TokenError::ArithmeticOverflow {
                 operation: "treasury execute_withdrawal distributed".to_string(),
-            })?;
+            }
+        })?;
         total_distributed.insert(asset_id.clone(), new_distributed);
-        let collected = self.total_fees_collected.read().get(asset_id).copied().unwrap_or(0);
+        let collected = self
+            .total_fees_collected
+            .read()
+            .get(asset_id)
+            .copied()
+            .unwrap_or(0);
         drop(total_distributed);
 
         // Persist to storage
@@ -702,7 +740,9 @@ impl NetworkTreasury {
 
         info!(
             "Executed multisig withdrawal {}: {} of {}",
-            withdrawal_id, amount, asset_id.as_str()
+            withdrawal_id,
+            amount,
+            asset_id.as_str()
         );
         Ok(())
     }
@@ -743,7 +783,11 @@ impl NetworkTreasury {
     /// * `total_fee` - Total fee amount
     ///
     /// Returns the calculated distribution
-    pub fn process_network_fee(&self, asset_id: &AssetId, total_fee: u128) -> Result<FeeDistribution> {
+    pub fn process_network_fee(
+        &self,
+        asset_id: &AssetId,
+        total_fee: u128,
+    ) -> Result<FeeDistribution> {
         let config = self.distribution_config.read();
         config.validate()?;
 
@@ -754,9 +798,7 @@ impl NetworkTreasury {
 
         debug!(
             "Processed fee: treasury={}, burn={}, stakers={}",
-            distribution.treasury_amount,
-            distribution.burn_amount,
-            distribution.staker_amount
+            distribution.treasury_amount, distribution.burn_amount, distribution.staker_amount
         );
 
         Ok(distribution)
@@ -816,26 +858,37 @@ impl NetworkTreasury {
 
         // Invariant: collected = balance + distributed
         // Or equivalently: balance = collected - distributed
-        let expected_balance = collected.checked_sub(distributed)
-            .ok_or_else(|| TokenError::TreasuryError {
-                message: format!(
-                    "Distributed ({}) exceeds collected ({}) for {}",
-                    distributed, collected, asset_id.as_str()
-                ),
-            })?;
+        let expected_balance =
+            collected
+                .checked_sub(distributed)
+                .ok_or_else(|| TokenError::TreasuryError {
+                    message: format!(
+                        "Distributed ({}) exceeds collected ({}) for {}",
+                        distributed,
+                        collected,
+                        asset_id.as_str()
+                    ),
+                })?;
 
         if current_balance != expected_balance {
             return Err(TokenError::TreasuryError {
                 message: format!(
                     "Supply invariant violation for {}: balance {} != expected {} (collected {} - distributed {})",
-                    asset_id.as_str(), current_balance, expected_balance, collected, distributed
+                    asset_id.as_str(),
+                    current_balance,
+                    expected_balance,
+                    collected,
+                    distributed
                 ),
             });
         }
 
         debug!(
             "Supply audit passed for {}: balance={}, collected={}, distributed={}",
-            asset_id.as_str(), current_balance, collected, distributed
+            asset_id.as_str(),
+            current_balance,
+            collected,
+            distributed
         );
         Ok(())
     }
@@ -948,7 +1001,11 @@ mod tests {
         let kp = tenzro_crypto::KeyPair::from_secret_key(keypair.secret_key().clone()).unwrap();
         let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(kp).unwrap();
         signer
-            .sign(&withdrawal_approval_preimage(withdrawal_id, asset_id, amount))
+            .sign(&withdrawal_approval_preimage(
+                withdrawal_id,
+                asset_id,
+                amount,
+            ))
             .unwrap()
     }
 
@@ -1016,9 +1073,11 @@ mod tests {
             .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig)
             .unwrap();
         // Duplicate approval should fail
-        assert!(treasury
-            .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig)
-            .is_err());
+        assert!(
+            treasury
+                .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1033,16 +1092,34 @@ mod tests {
 
         // Signature over a different payload must be rejected
         let sig_wrong_payload = sign_approval(&kp, "w1", &asset_id, 999);
-        assert!(treasury
-            .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig_wrong_payload)
-            .is_err());
+        assert!(
+            treasury
+                .approve_withdrawal(
+                    "w1",
+                    &asset_id,
+                    100,
+                    &signer,
+                    kp.public_key(),
+                    &sig_wrong_payload
+                )
+                .is_err()
+        );
 
         // A key that does not derive to the approver address must be rejected,
         // even with a valid signature over the right payload
         let sig_other = sign_approval(&other_kp, "w1", &asset_id, 100);
-        assert!(treasury
-            .approve_withdrawal("w1", &asset_id, 100, &signer, other_kp.public_key(), &sig_other)
-            .is_err());
+        assert!(
+            treasury
+                .approve_withdrawal(
+                    "w1",
+                    &asset_id,
+                    100,
+                    &signer,
+                    other_kp.public_key(),
+                    &sig_other
+                )
+                .is_err()
+        );
 
         // Payload pinning: valid first approval, then a conflicting payload
         let sig = sign_approval(&kp, "w1", &asset_id, 100);
@@ -1069,7 +1146,9 @@ mod tests {
         treasury.add_authorized_withdrawer(treasury.treasury_address);
 
         // Withdraw 400 (single-sig)
-        treasury.withdraw(&asset_id, 400, &treasury.treasury_address).unwrap();
+        treasury
+            .withdraw(&asset_id, 400, &treasury.treasury_address)
+            .unwrap();
 
         // Audit should still pass: balance=600, collected=1000, distributed=400
         assert!(treasury.audit_supply(&asset_id).is_ok());

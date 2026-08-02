@@ -185,12 +185,9 @@ impl ChainlinkFeedClient {
         if let Some(entry) = self.cache.read().get(&address)
             && entry.cached_at.elapsed() < self.cache_ttl
         {
-            let reg = self
-                .get_registration(&address)
-                .ok_or_else(|| BridgeError::AdapterError(format!(
-                    "feed not registered: {}",
-                    address
-                )))?;
+            let reg = self.get_registration(&address).ok_or_else(|| {
+                BridgeError::AdapterError(format!("feed not registered: {}", address))
+            })?;
             if entry.reading.is_invalid()
                 || entry.reading.is_stale(now, reg.staleness_threshold_secs)
             {
@@ -201,12 +198,9 @@ impl ChainlinkFeedClient {
         }
 
         // Cache miss path: fetch fresh.
-        let reg = self
-            .get_registration(&address)
-            .ok_or_else(|| BridgeError::AdapterError(format!(
-                "feed not registered: {}",
-                address
-            )))?;
+        let reg = self.get_registration(&address).ok_or_else(|| {
+            BridgeError::AdapterError(format!("feed not registered: {}", address))
+        })?;
         let mut reading = self.fetch_latest_round_data(&address).await?;
         reading.decimals = reg.decimals;
         reading.fetched_at_ms = now * 1000;
@@ -350,9 +344,7 @@ impl ChainlinkFeedClient {
         let result = resp
             .get("result")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                BridgeError::AdapterError("latestRoundData: no result".to_string())
-            })?;
+            .ok_or_else(|| BridgeError::AdapterError("latestRoundData: no result".to_string()))?;
         let bytes = hex::decode(result.trim_start_matches("0x"))
             .map_err(|e| BridgeError::AdapterError(format!("latestRoundData hex: {}", e)))?;
         if bytes.len() < 160 {
@@ -557,8 +549,17 @@ mod tests {
 
     #[test]
     fn mainnet_feed_addresses_canonical() {
-        assert_eq!(FEED_ETH_USD_MAINNET.to_lowercase(), "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419");
-        assert_eq!(FEED_BTC_USD_MAINNET.to_lowercase(), "0xf4030086522a5beea4988f8ca5b36dbc97bee88c");
-        assert_eq!(FEED_LINK_USD_MAINNET.to_lowercase(), "0x2c1d072e956affc0d435cb7ac38ef18d24d9127c");
+        assert_eq!(
+            FEED_ETH_USD_MAINNET.to_lowercase(),
+            "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
+        );
+        assert_eq!(
+            FEED_BTC_USD_MAINNET.to_lowercase(),
+            "0xf4030086522a5beea4988f8ca5b36dbc97bee88c"
+        );
+        assert_eq!(
+            FEED_LINK_USD_MAINNET.to_lowercase(),
+            "0x2c1d072e956affc0d435cb7ac38ef18d24d9127c"
+        );
     }
 }

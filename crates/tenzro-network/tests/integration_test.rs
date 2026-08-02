@@ -1,7 +1,7 @@
 //! Integration tests for tenzro-network
 
 use tenzro_network::{
-    NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService, MessagePayload,
+    MessagePayload, NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService,
 };
 
 #[tokio::test]
@@ -103,11 +103,7 @@ async fn test_multiple_subscriptions() {
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     // Subscribe to multiple topics
-    let topics = vec![
-        "tenzro/blocks",
-        "tenzro/transactions",
-        "tenzro/consensus",
-    ];
+    let topics = vec!["tenzro/blocks", "tenzro/transactions", "tenzro/consensus"];
 
     for topic in topics {
         let result = network.subscribe(topic).await;

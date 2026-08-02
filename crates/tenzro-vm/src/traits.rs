@@ -6,7 +6,9 @@ use std::any::Any;
 
 use crate::{
     error::Result,
-    types::{CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction},
+    types::{
+        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction,
+    },
 };
 
 /// Virtual machine type identifier
@@ -26,8 +28,8 @@ impl VmType {
     /// Returns the typical address length for this VM type
     pub fn address_len(&self) -> usize {
         match self {
-            VmType::Evm => 20,  // EVM uses 20-byte addresses
-            VmType::Svm => 32,  // SVM uses 32-byte addresses (Pubkey)
+            VmType::Evm => 20,    // EVM uses 20-byte addresses
+            VmType::Svm => 32,    // SVM uses 32-byte addresses (Pubkey)
             VmType::Daml => 32, // Daml uses 32-byte addresses (same length as SVM, different prefix)
             VmType::Tenzro => 20, // Tenzro native uses 20-byte addresses (EVM-compatible)
         }

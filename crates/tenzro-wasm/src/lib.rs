@@ -32,7 +32,7 @@ pub use engine::WasmEngine;
 pub use error::{WasmError, WasmResult};
 pub use host::{HostInterface, HostInvocation, InvocationResult, SharedHost};
 pub use http::{
-    incoming_body_from_bytes, FunctionResponse, HttpComponent, IncomingBody, OutgoingBody, Scheme,
+    FunctionResponse, HttpComponent, IncomingBody, OutgoingBody, Scheme, incoming_body_from_bytes,
 };
 pub use manifest::{ComponentManifest, ComponentRuntime};
 pub use metrics::{ExecutionReceipt, FuelReport};

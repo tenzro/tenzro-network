@@ -30,8 +30,8 @@ pub mod c2pa;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_types::primitives::{Address, Hash};
 use tenzro_types::ProvenanceManifest;
+use tenzro_types::primitives::{Address, Hash};
 
 /// Standard EU AI Act Art. 50(2) assertion tag for ordinary AI outputs.
 ///
@@ -179,7 +179,7 @@ pub enum ProvenanceError {
 /// and canonical preimage. Returns `Ok(())` if the signature is valid.
 pub fn verify_manifest(manifest: &ProvenanceManifest) -> Result<(), ProvenanceError> {
     use tenzro_crypto::keys::{KeyType, PublicKey};
-    use tenzro_crypto::signatures::{verify, Signature};
+    use tenzro_crypto::signatures::{Signature, verify};
 
     let key_type = match manifest.algorithm.as_str() {
         "ed25519" => KeyType::Ed25519,
@@ -191,8 +191,7 @@ pub fn verify_manifest(manifest: &ProvenanceManifest) -> Result<(), ProvenanceEr
     let signature = Signature::new(key_type, manifest.signature.clone());
 
     let preimage = manifest.canonical_preimage();
-    verify(&public_key, &preimage, &signature)
-        .map_err(|_| ProvenanceError::VerificationFailed)
+    verify(&public_key, &preimage, &signature).map_err(|_| ProvenanceError::VerificationFailed)
 }
 
 /// Verify every field of a provider-attached response manifest: the content

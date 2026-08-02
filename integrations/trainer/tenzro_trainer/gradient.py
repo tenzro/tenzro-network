@@ -25,8 +25,8 @@ from __future__ import annotations
 import hashlib
 import struct
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 import nacl.signing
 import numpy as np
@@ -36,7 +36,7 @@ import numpy as np
 # safetensors installed (e.g. in CI image builds and unit tests).
 # numpy is a hard dependency (the quantization codec runs on it).
 try:
-    import torch  # noqa: F401
+    import torch
 except ImportError:  # pragma: no cover - torch is a runtime dep for serialization
     torch = None  # type: ignore[assignment]
 
@@ -52,7 +52,6 @@ from tenzro_trainer.types import (
     Signature,
     SparseTopKParams,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fragment partitioning
@@ -83,9 +82,9 @@ def fragment_indices(num_params: int, fragment_count: int) -> list[tuple[int, in
 
 
 def partition_state_dict(
-    state_dict: dict[str, "torch.Tensor"],
+    state_dict: dict[str, torch.Tensor],
     fragment_count: int,
-) -> list[dict[str, "torch.Tensor"]]:
+) -> list[dict[str, torch.Tensor]]:
     """Split a torch ``state_dict`` into ``fragment_count`` sub-state-dicts."""
     sorted_keys = sorted(state_dict.keys())
     spans = fragment_indices(len(sorted_keys), fragment_count)
@@ -121,8 +120,8 @@ class FragmentBlob:
 
 
 def flatten_fragment_values(
-    delta_state_dict: dict[str, "torch.Tensor"],
-) -> "np.ndarray":
+    delta_state_dict: dict[str, torch.Tensor],
+) -> np.ndarray:
     """Flatten a fragment's tensors into one float32 numpy vector.
 
     Name-sorted key order, each tensor C-contiguous — the canonical layout
@@ -145,9 +144,9 @@ def flatten_fragment_values(
 
 
 def split_flat_to_fragment(
-    flat: "np.ndarray",
-    reference_state: dict[str, "torch.Tensor"],
-) -> dict[str, "torch.Tensor"]:
+    flat: np.ndarray,
+    reference_state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
     """Inverse of :func:`flatten_fragment_values`.
 
     Reshapes a flat float32 vector back into per-key tensors, consuming the
@@ -164,7 +163,7 @@ def split_flat_to_fragment(
         raise ValueError(
             f"flat length {values.size} != fragment element count {total}"
         )
-    out: dict[str, "torch.Tensor"] = {}
+    out: dict[str, torch.Tensor] = {}
     cursor = 0
     for k in sorted(reference_state.keys()):
         ref = reference_state[k]
@@ -175,7 +174,7 @@ def split_flat_to_fragment(
     return out
 
 
-def top_k_delta_probes(delta: "np.ndarray", k: int) -> list[DeltaProbe]:
+def top_k_delta_probes(delta: np.ndarray, k: int) -> list[DeltaProbe]:
     """Select the top-k probes from a flattened fragment delta.
 
     The ``k`` largest-magnitude coordinates, ordered by descending
@@ -198,7 +197,7 @@ def top_k_delta_probes(delta: "np.ndarray", k: int) -> list[DeltaProbe]:
 
 def build_activation_commitment(
     loss_trajectory: Sequence[float],
-    flat_delta: "np.ndarray",
+    flat_delta: np.ndarray,
     k: int = DEFAULT_PROBE_K,
 ) -> ActivationCommitment:
     """Build the Open-tier activation commitment for one fragment.
@@ -230,7 +229,7 @@ def build_activation_commitment(
 # ---------------------------------------------------------------------------
 
 
-def _sparse_top_k_indices(chunk: "np.ndarray", kept: int) -> "np.ndarray":
+def _sparse_top_k_indices(chunk: np.ndarray, kept: int) -> np.ndarray:
     """Chunk-local indices of the ``kept`` largest-magnitude coordinates,
     ascending (wire order). Ties break toward the lower index — the identical
     deterministic ordering to the Rust ``top_k_indices``."""
@@ -276,7 +275,7 @@ def sparse_encoded_len(length: int, params: SparseTopKParams) -> int:
     return total
 
 
-def sparse_encode(values: "np.ndarray", params: SparseTopKParams) -> bytes:
+def sparse_encode(values: np.ndarray, params: SparseTopKParams) -> bytes:
     """Encode a flattened fragment (the *transmit* vector) into the sparse
     top-k + 2-bit wire format. Byte-identical to Rust ``sparse_encode``."""
     flat = np.asarray(values, dtype=np.float32).reshape(-1)
@@ -308,7 +307,7 @@ def sparse_encode(values: "np.ndarray", params: SparseTopKParams) -> bytes:
 
 def sparse_decode(
     data: bytes, params: SparseTopKParams, expected_len: int
-) -> "np.ndarray":
+) -> np.ndarray:
     """Decode a sparse wire payload into a dense length-``expected_len`` float32
     vector with dropped coordinates zero-filled. Mirrors Rust
     ``sparse_decode``, including the malformed-length and out-of-range-index
@@ -349,7 +348,7 @@ def sparse_decode(
 
 
 def select_transmitted(
-    values: "np.ndarray", params: SparseTopKParams
+    values: np.ndarray, params: SparseTopKParams
 ) -> list[tuple[int, float]]:
     """The exact ``(global_index, transmitted_value)`` pairs
     :func:`sparse_encode` would send for ``values``. Used to subtract the
@@ -399,10 +398,10 @@ class ErrorFeedback:
         return self._decay
 
     @property
-    def accumulator(self) -> "np.ndarray":
+    def accumulator(self) -> np.ndarray:
         return self._acc
 
-    def prepare_transmit(self, grad: "np.ndarray") -> "np.ndarray":
+    def prepare_transmit(self, grad: np.ndarray) -> np.ndarray:
         """Return the transmit vector ``t = decay·acc + grad``."""
         g = np.asarray(grad, dtype=np.float32).reshape(-1)
         if g.size != self._acc.size:
@@ -413,7 +412,7 @@ class ErrorFeedback:
         return (self._decay * self._acc + g).astype(np.float32, copy=False)
 
     def commit_transmitted(
-        self, transmit: "np.ndarray", transmitted: list[tuple[int, float]]
+        self, transmit: np.ndarray, transmitted: list[tuple[int, float]]
     ) -> None:
         """Set ``acc ← transmit`` then subtract the transmitted mass at the
         exact coordinates that were sent (error feedback)."""
@@ -433,7 +432,7 @@ class ErrorFeedback:
         return {"decay": self._decay, "accumulator": self._acc.tolist()}
 
     @classmethod
-    def load_state_dict(cls, state: dict[str, object]) -> "ErrorFeedback":
+    def load_state_dict(cls, state: dict[str, object]) -> ErrorFeedback:
         acc = np.asarray(state["accumulator"], dtype=np.float32)
         ef = cls(acc.size, float(state["decay"]))
         ef._acc = acc
@@ -442,7 +441,7 @@ class ErrorFeedback:
 
 def serialize_fragment(
     fragment_index: int,
-    delta_state_dict: dict[str, "torch.Tensor"],
+    delta_state_dict: dict[str, torch.Tensor],
     quantization: GradientQuantization,
     payload_kind: PayloadKind | None = None,
 ) -> FragmentBlob:
@@ -483,9 +482,9 @@ def serialize_fragment(
 
 def deserialize_fragment_delta(
     payload: bytes,
-    reference_state: dict[str, "torch.Tensor"],
+    reference_state: dict[str, torch.Tensor],
     quantization: GradientQuantization,
-) -> dict[str, "torch.Tensor"]:
+) -> dict[str, torch.Tensor]:
     """Decode a fragment payload back into a per-key delta state-dict.
 
     ``reference_state`` supplies the key set and tensor shapes (any state
@@ -507,7 +506,7 @@ def deserialize_fragment_delta(
         return safetensors_load(payload)
     total = sum(int(t.numel()) for t in reference_state.values())
     values = dequantize(payload, quantization, total)
-    out: dict[str, "torch.Tensor"] = {}
+    out: dict[str, torch.Tensor] = {}
     cursor = 0
     for k in sorted(reference_state.keys()):
         ref = reference_state[k]
@@ -519,9 +518,9 @@ def deserialize_fragment_delta(
 
 
 def compute_outer_delta(
-    pre_step_state: dict[str, "torch.Tensor"],
-    post_step_state: dict[str, "torch.Tensor"],
-) -> dict[str, "torch.Tensor"]:
+    pre_step_state: dict[str, torch.Tensor],
+    post_step_state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
     """Compute ``Δθ = θ⁽ᴴ⁾ − θ⁽⁰⁾`` element-wise.
 
     Both dicts must have identical keys and tensor shapes.
@@ -531,7 +530,7 @@ def compute_outer_delta(
     if pre_step_state.keys() != post_step_state.keys():
         missing = pre_step_state.keys() ^ post_step_state.keys()
         raise ValueError(f"state-dict key mismatch: {missing}")
-    delta: dict[str, "torch.Tensor"] = {}
+    delta: dict[str, torch.Tensor] = {}
     for k in sorted(pre_step_state.keys()):
         a = pre_step_state[k]
         b = post_step_state[k]
@@ -542,7 +541,7 @@ def compute_outer_delta(
     return delta
 
 
-def global_l2_norm(delta_state_dict: dict[str, "torch.Tensor"]) -> float:
+def global_l2_norm(delta_state_dict: dict[str, torch.Tensor]) -> float:
     """L2 norm of a full outer delta, taken over the concatenation of every
     fragment's flattened values (the same quantity the syncer's ``clip_l2_norm``
     budget bounds)."""
@@ -556,9 +555,9 @@ def global_l2_norm(delta_state_dict: dict[str, "torch.Tensor"]) -> float:
 
 
 def clip_outer_delta(
-    delta_state_dict: dict[str, "torch.Tensor"],
+    delta_state_dict: dict[str, torch.Tensor],
     cap: float | None,
-) -> tuple[dict[str, "torch.Tensor"], bool]:
+) -> tuple[dict[str, torch.Tensor], bool]:
     """Scale a full outer delta so its global L2 norm is at most ``cap``.
 
     This is the trainer-side twin of the syncer's per-contributor norm budget
@@ -603,11 +602,11 @@ class TrainerKey:
     signing: nacl.signing.SigningKey
 
     @classmethod
-    def generate(cls) -> "TrainerKey":
+    def generate(cls) -> TrainerKey:
         return cls(signing=nacl.signing.SigningKey.generate())
 
     @classmethod
-    def from_seed(cls, seed: bytes) -> "TrainerKey":
+    def from_seed(cls, seed: bytes) -> TrainerKey:
         if len(seed) != 32:
             raise ValueError("Ed25519 seed must be 32 bytes")
         return cls(signing=nacl.signing.SigningKey(seed))

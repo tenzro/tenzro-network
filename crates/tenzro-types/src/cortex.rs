@@ -376,9 +376,14 @@ impl CortexPricing {
         attestation: AttestationRequirement,
     ) -> u128 {
         let mut cost: u128 = self.base_request_fee_wei as u128;
-        cost = cost.saturating_add((tokens_in as u128).saturating_mul(self.price_per_input_token_wei as u128));
-        cost = cost.saturating_add((tokens_out as u128).saturating_mul(self.price_per_output_token_wei as u128));
-        cost = cost.saturating_add((loops_used as u128).saturating_mul(self.price_per_loop_wei as u128));
+        cost = cost.saturating_add(
+            (tokens_in as u128).saturating_mul(self.price_per_input_token_wei as u128),
+        );
+        cost = cost.saturating_add(
+            (tokens_out as u128).saturating_mul(self.price_per_output_token_wei as u128),
+        );
+        cost = cost
+            .saturating_add((loops_used as u128).saturating_mul(self.price_per_loop_wei as u128));
         match attestation {
             AttestationRequirement::None => {}
             AttestationRequirement::Tee => {

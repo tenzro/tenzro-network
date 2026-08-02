@@ -100,15 +100,18 @@ impl DpopProof {
         let v: serde_json::Value = serde_json::from_str(jwk_json)
             .map_err(|e| AuthError::InvalidDpop(format!("malformed JWK: {}", e)))?;
 
-        let kty = v.get("kty").and_then(|x| x.as_str()).ok_or_else(|| {
-            AuthError::InvalidDpop("JWK missing 'kty'".into())
-        })?;
-        let crv = v.get("crv").and_then(|x| x.as_str()).ok_or_else(|| {
-            AuthError::InvalidDpop("JWK missing 'crv'".into())
-        })?;
-        let x = v.get("x").and_then(|x| x.as_str()).ok_or_else(|| {
-            AuthError::InvalidDpop("JWK missing 'x'".into())
-        })?;
+        let kty = v
+            .get("kty")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| AuthError::InvalidDpop("JWK missing 'kty'".into()))?;
+        let crv = v
+            .get("crv")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| AuthError::InvalidDpop("JWK missing 'crv'".into()))?;
+        let x = v
+            .get("x")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| AuthError::InvalidDpop("JWK missing 'x'".into()))?;
 
         if kty != "OKP" || crv != "Ed25519" {
             return Err(AuthError::InvalidDpop(format!(
@@ -186,9 +189,9 @@ impl DpopProof {
                 alg
             )));
         }
-        let jwk = header.get("jwk").ok_or_else(|| {
-            AuthError::InvalidDpop("DPoP header missing 'jwk'".into())
-        })?;
+        let jwk = header
+            .get("jwk")
+            .ok_or_else(|| AuthError::InvalidDpop("DPoP header missing 'jwk'".into()))?;
         let jwk_json = serde_json::to_string(jwk)?;
 
         // Payload invariants.
@@ -307,7 +310,7 @@ impl DpopProof {
 
 /// Base64url-decode without padding (RFC 7515 §2).
 fn base64_url_decode(s: &str) -> Result<Vec<u8>> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD
         .decode(s)
         .map_err(|e| AuthError::InvalidDpop(format!("base64url decode: {}", e)))
@@ -315,7 +318,7 @@ fn base64_url_decode(s: &str) -> Result<Vec<u8>> {
 
 /// Base64url-encode without padding (RFC 7515 §2).
 fn base64_url_no_pad(bytes: &[u8]) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -327,7 +330,8 @@ mod tests {
     fn jkt_thumbprint_is_stable_for_canonical_jwk() {
         // RFC 7638 §3.1 worked example for an EC key (we only do
         // OKP/Ed25519 in V1, so use a synthetic Ed25519 JWK).
-        let jwk = r#"{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}"#;
+        let jwk =
+            r#"{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}"#;
         let jkt = DpopProof::compute_jkt(jwk).unwrap();
         // Stable output — recompute from canonical form.
         // Canonical = `{"crv":"Ed25519","kty":"OKP","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}`
@@ -348,7 +352,7 @@ mod tests {
     #[test]
     fn parse_rejects_wrong_typ() {
         // Build a fake JWS with typ=jwt instead of dpop+jwt.
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"jwt","alg":"EdDSA","jwk":{}}"#);
         let payload = URL_SAFE_NO_PAD.encode(br#"{"htm":"POST","htu":"x","iat":0,"jti":"a"}"#);
         let sig = URL_SAFE_NO_PAD.encode(b"sig");

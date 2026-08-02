@@ -23,7 +23,8 @@ LangChain is not installed.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Mapping, Optional
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from .core import ReputationHook, TenzroClient, TenzroDidEnvelope
 
@@ -48,8 +49,8 @@ def make_langgraph_callback(
     did: str,
     *,
     signing_key: Any = None,
-    subject_agent_id: Optional[int] = None,
-    mandate_factory: Optional[Callable[[Mapping[str, Any]], Dict[str, Any]]] = None,
+    subject_agent_id: int | None = None,
+    mandate_factory: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ):
     """Construct a ``TenzroLangGraphCallback`` instance.
 
@@ -83,12 +84,12 @@ def make_langgraph_callback(
             self.signing_key = signing_key or client.signing_key
             self.subject_agent_id = subject_agent_id
             self.mandate_factory = mandate_factory
-            self.last_envelope: Optional[TenzroDidEnvelope] = None
+            self.last_envelope: TenzroDidEnvelope | None = None
 
         # -- identity envelope per node ---------------------------------
         def on_tool_start(
             self,
-            serialized: Dict[str, Any],
+            serialized: dict[str, Any],
             input_str: str,
             *,
             run_id: Any,
@@ -124,7 +125,7 @@ def make_langgraph_callback(
         # -- reputation on graph finish ---------------------------------
         def on_chain_end(
             self,
-            outputs: Dict[str, Any],
+            outputs: dict[str, Any],
             *,
             run_id: Any,
             parent_run_id: Any = None,

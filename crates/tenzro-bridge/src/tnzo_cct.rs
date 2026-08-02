@@ -44,7 +44,7 @@
 //! can integrate against the same API shape.
 
 use crate::{
-    chainlink_ccip::{ChainlinkCcipAdapter, CcipMessage, FeeToken, TokenAmount},
+    chainlink_ccip::{CcipMessage, ChainlinkCcipAdapter, FeeToken, TokenAmount},
     error::{BridgeError, Result},
     traits::BridgeAdapter,
 };
@@ -422,9 +422,10 @@ impl TnzoCctBridge {
         source_chain: &str,
         dest_chain: &str,
     ) -> Result<Option<String>> {
-        let src_pool = self.registry.get(source_chain).ok_or_else(|| {
-            BridgeError::ChainNotSupported(source_chain.to_string())
-        })?;
+        let src_pool = self
+            .registry
+            .get(source_chain)
+            .ok_or_else(|| BridgeError::ChainNotSupported(source_chain.to_string()))?;
         let dest_selector = self
             .registry
             .get(dest_chain)
@@ -568,11 +569,23 @@ mod tests {
         // internal mapping — mismatches would cause getFee / ccipSend
         // to go to the wrong lane.
         let r = TnzoCctRegistry::tenzro_mainnet();
-        assert_eq!(r.get("ethereum").unwrap().chain_selector, 5009297550715157269);
+        assert_eq!(
+            r.get("ethereum").unwrap().chain_selector,
+            5009297550715157269
+        );
         assert_eq!(r.get("base").unwrap().chain_selector, 15971525489660198786);
-        assert_eq!(r.get("arbitrum").unwrap().chain_selector, 4949039107694359620);
-        assert_eq!(r.get("optimism").unwrap().chain_selector, 3734403246176062136);
-        assert_eq!(r.get("solana").unwrap().chain_selector, 16423721717087811551);
+        assert_eq!(
+            r.get("arbitrum").unwrap().chain_selector,
+            4949039107694359620
+        );
+        assert_eq!(
+            r.get("optimism").unwrap().chain_selector,
+            3734403246176062136
+        );
+        assert_eq!(
+            r.get("solana").unwrap().chain_selector,
+            16423721717087811551
+        );
     }
 
     #[test]

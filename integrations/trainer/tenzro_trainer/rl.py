@@ -22,8 +22,9 @@ from __future__ import annotations
 import importlib
 import logging
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Iterable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 try:
     import torch
@@ -54,7 +55,7 @@ class Rollout:
 
     completion: str
     token_ids: list[int]
-    old_logprobs: "torch.Tensor"  # [T], detached
+    old_logprobs: torch.Tensor  # [T], detached
 
 
 @runtime_checkable
@@ -66,9 +67,9 @@ class RolloutAdapter(Protocol):
     (``LanguageRolloutAdapter`` / ``build_rollout_adapter``).
     """
 
-    def model(self) -> "torch.nn.Module": ...
+    def model(self) -> torch.nn.Module: ...
 
-    def optimizer(self) -> "torch.optim.Optimizer": ...
+    def optimizer(self) -> torch.optim.Optimizer: ...
 
     def shard_prompts(self, shard_uri: str) -> Iterable[str]:
         """Yield prompts from the assigned shard (one rollout group each)."""
@@ -86,7 +87,7 @@ class RolloutAdapter(Protocol):
 
     def rollout_logprobs(
         self, prompt: str, rollout: Rollout, temperature: float
-    ) -> "torch.Tensor":
+    ) -> torch.Tensor:
         """Per-token logprobs of ``rollout`` under the current policy, with grad.
 
         Must use the same temperature scaling as sampling so the surrogate
@@ -109,13 +110,13 @@ def load_reward(reward_ref: str) -> RewardFn:
     module = importlib.import_module(parts[1])
     fn = getattr(module, parts[2], None)
     if not callable(fn):
-        raise ValueError(
+        raise TypeError(
             f"reward_ref {reward_ref!r} does not resolve to a callable"
         )
     return fn
 
 
-def group_advantages(rewards: list[float]) -> "torch.Tensor":
+def group_advantages(rewards: list[float]) -> torch.Tensor:
     """Group-relative advantages: ``(r - mean) / (std + eps)``.
 
     A group with identical rewards (std 0) yields all-zero advantages — no
@@ -128,12 +129,12 @@ def group_advantages(rewards: list[float]) -> "torch.Tensor":
 
 
 def grpo_loss(
-    new_logprobs: "torch.Tensor",
-    old_logprobs: "torch.Tensor",
-    advantage: "torch.Tensor",
+    new_logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    advantage: torch.Tensor,
     clip_epsilon: float,
     kl_coeff: float,
-) -> "torch.Tensor":
+) -> torch.Tensor:
     """Per-rollout clipped surrogate + k3 KL penalty.
 
     ``ratio = exp(new - old)`` per token; the surrogate is
@@ -166,7 +167,7 @@ def run_rl_inner_loop(
     inner_steps: int,
     rl: RlConfig,
     reward_fn: RewardFn,
-) -> tuple[dict[str, "torch.Tensor"], dict[str, "torch.Tensor"], InnerStepReport]:
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], InnerStepReport]:
     """Run ``inner_steps`` GRPO steps (one prompt group each) against ``shard_uri``.
 
     Returns ``(pre_state, post_state, report)`` — the same contract as the

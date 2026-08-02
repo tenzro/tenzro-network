@@ -102,7 +102,9 @@ impl CapabilityAttestation {
 
     /// Checks if the attestation has expired
     pub fn is_expired(&self, max_age_secs: i64) -> bool {
-        let age = Utc::now().signed_duration_since(self.attested_at).num_seconds();
+        let age = Utc::now()
+            .signed_duration_since(self.attested_at)
+            .num_seconds();
         age > max_age_secs
     }
 }
@@ -318,19 +320,30 @@ impl CapabilityRegistry {
             .get(agent_id)
             .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
 
-        Ok(agent_caps.iter().any(|c| self.capabilities_match(c, capability)))
+        Ok(agent_caps
+            .iter()
+            .any(|c| self.capabilities_match(c, capability)))
     }
 
     /// Checks if two capabilities match
     fn capabilities_match(&self, a: &Capability, b: &Capability) -> bool {
         match (a, b) {
-            (Capability::NaturalLanguageProcessing { .. }, Capability::NaturalLanguageProcessing { .. }) => true,
+            (
+                Capability::NaturalLanguageProcessing { .. },
+                Capability::NaturalLanguageProcessing { .. },
+            ) => true,
             (Capability::ComputerVision { .. }, Capability::ComputerVision { .. }) => true,
             (Capability::CodeGeneration { .. }, Capability::CodeGeneration { .. }) => true,
             (Capability::DataAnalysis { .. }, Capability::DataAnalysis { .. }) => true,
-            (Capability::BlockchainInteraction { .. }, Capability::BlockchainInteraction { .. }) => true,
+            (
+                Capability::BlockchainInteraction { .. },
+                Capability::BlockchainInteraction { .. },
+            ) => true,
             (Capability::SmartContractExecution, Capability::SmartContractExecution) => true,
-            (Capability::ExternalAPIIntegration { .. }, Capability::ExternalAPIIntegration { .. }) => true,
+            (
+                Capability::ExternalAPIIntegration { .. },
+                Capability::ExternalAPIIntegration { .. },
+            ) => true,
             (Capability::MultiAgentCoordination, Capability::MultiAgentCoordination) => true,
             (Capability::Custom { name: n1, .. }, Capability::Custom { name: n2, .. }) => n1 == n2,
             _ => false,
@@ -553,8 +566,7 @@ impl CapabilityRegistry {
         attester_public_key: Option<PublicKey>,
         signature: Option<Vec<u8>>,
     ) -> Result<()> {
-        let mut attestation =
-            CapabilityAttestation::new(agent_id, capability, tee_backed);
+        let mut attestation = CapabilityAttestation::new(agent_id, capability, tee_backed);
         if let (Some(pk), Some(sig)) = (attester_public_key, signature) {
             attestation = attestation.with_signature(pk, sig);
         }
@@ -571,10 +583,10 @@ impl CapabilityRegistry {
 
         // If signature verification is required
         if self.attestation_config.require_signatures {
-            let attester_public_key = attestation
-                .attester_public_key
-                .as_ref()
-                .ok_or_else(|| AgentError::AttestationFailed("No attester public key".to_string()))?;
+            let attester_public_key =
+                attestation.attester_public_key.as_ref().ok_or_else(|| {
+                    AgentError::AttestationFailed("No attester public key".to_string())
+                })?;
 
             let signature_bytes = attestation
                 .signature
@@ -588,9 +600,13 @@ impl CapabilityRegistry {
             let signature = Signature::new(attester_public_key.key_type(), signature_bytes.clone());
 
             // Verify the signature cryptographically using tenzro_crypto::signatures::verify
-            match tenzro_crypto::signatures::verify(attester_public_key, &signing_data, &signature) {
+            match tenzro_crypto::signatures::verify(attester_public_key, &signing_data, &signature)
+            {
                 Ok(()) => {
-                    debug!("Successfully verified attestation signature for agent {}", attestation.agent_id);
+                    debug!(
+                        "Successfully verified attestation signature for agent {}",
+                        attestation.agent_id
+                    );
                     Ok(true)
                 }
                 Err(e) => {
@@ -613,9 +629,7 @@ impl CapabilityRegistry {
 
         attestations
             .into_iter()
-            .filter(|att| {
-                self.verify_attestation(att).unwrap_or(false)
-            })
+            .filter(|att| self.verify_attestation(att).unwrap_or(false))
             .collect()
     }
 
@@ -789,8 +803,7 @@ mod tests {
     #[test]
     fn test_capability_attestation() {
         // Create registry without requiring signatures for testing
-        let config = AttestationConfig::default()
-            .with_require_signatures(false);
+        let config = AttestationConfig::default().with_require_signatures(false);
         let registry = CapabilityRegistry::with_config(config);
 
         let capability = Capability::CodeGeneration {
@@ -853,14 +866,13 @@ mod tests {
 
     #[test]
     fn test_attestation_signature_verification() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
         // Create registry that requires signatures (default config already
         // requires them, but we explicitly set it to make the test intent
         // obvious).
-        let config = AttestationConfig::default()
-            .with_require_signatures(true);
+        let config = AttestationConfig::default().with_require_signatures(true);
         let registry = CapabilityRegistry::with_config(config);
 
         let capability = Capability::CodeGeneration {
@@ -878,19 +890,14 @@ mod tests {
         let public_key = signer.public_key().clone();
 
         // Create attestation and sign it
-        let attestation = CapabilityAttestation::new(
-            "agent1".to_string(),
-            capability.clone(),
-            true,
-        );
+        let attestation =
+            CapabilityAttestation::new("agent1".to_string(), capability.clone(), true);
         let signing_data = attestation.signing_data();
         let signature = signer.sign(&signing_data).unwrap();
 
         // Add signature to attestation
-        let signed_attestation = attestation.with_signature(
-            public_key.clone(),
-            signature.to_bytes(),
-        );
+        let signed_attestation =
+            attestation.with_signature(public_key.clone(), signature.to_bytes());
 
         // Submit the pre-signed attestation envelope. With #52, the
         // registry now eagerly verifies the signature against the same
@@ -905,15 +912,12 @@ mod tests {
 
         // Test with invalid signature: query-time check should still
         // return false (legacy behaviour preserved).
-        let invalid_attestation = CapabilityAttestation::new(
-            "agent1".to_string(),
-            capability.clone(),
-            false,
-        )
-        .with_signature(
-            public_key,
-            vec![0u8; 64], // Invalid signature bytes
-        );
+        let invalid_attestation =
+            CapabilityAttestation::new("agent1".to_string(), capability.clone(), false)
+                .with_signature(
+                    public_key,
+                    vec![0u8; 64], // Invalid signature bytes
+                );
 
         let is_valid = registry.verify_attestation(&invalid_attestation).unwrap();
         assert!(!is_valid, "Invalid signature should fail verification");
@@ -932,11 +936,7 @@ mod tests {
 
         let capability = Capability::SmartContractExecution;
 
-        let attestation = CapabilityAttestation::new(
-            "agent1".to_string(),
-            capability,
-            false,
-        );
+        let attestation = CapabilityAttestation::new("agent1".to_string(), capability, false);
 
         // Should be valid immediately
         assert!(registry.verify_attestation(&attestation).unwrap());
@@ -950,8 +950,8 @@ mod tests {
 
     #[test]
     fn test_verify_signature_with_module_function() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
         let capability = Capability::MultiAgentCoordination;
 
@@ -961,18 +961,12 @@ mod tests {
         let public_key = signer.public_key().clone();
 
         // Create and sign attestation
-        let attestation = CapabilityAttestation::new(
-            "agent1".to_string(),
-            capability,
-            true,
-        );
+        let attestation = CapabilityAttestation::new("agent1".to_string(), capability, true);
         let signing_data = attestation.signing_data();
         let signature = signer.sign(&signing_data).unwrap();
 
-        let signed_attestation = attestation.with_signature(
-            public_key.clone(),
-            signature.to_bytes(),
-        );
+        let signed_attestation =
+            attestation.with_signature(public_key.clone(), signature.to_bytes());
 
         // Verify directly using tenzro_crypto::signatures::verify
         let result = tenzro_crypto::signatures::verify(
@@ -989,9 +983,11 @@ mod tests {
 
     /// Helper: register a capability for an agent and return a fresh
     /// registry with the supplied config.
-    fn registry_with(config: AttestationConfig, agent_id: &str, cap: &Capability)
-        -> CapabilityRegistry
-    {
+    fn registry_with(
+        config: AttestationConfig,
+        agent_id: &str,
+        cap: &Capability,
+    ) -> CapabilityRegistry {
         let registry = CapabilityRegistry::with_config(config);
         registry
             .register_capability(agent_id.to_string(), cap.clone())
@@ -1001,10 +997,12 @@ mod tests {
 
     #[test]
     fn test_attest_capability_rejects_invalid_signature_at_submit_time() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
-        let cap = Capability::CodeGeneration { languages: vec!["rust".to_string()] };
+        let cap = Capability::CodeGeneration {
+            languages: vec!["rust".to_string()],
+        };
         let registry = registry_with(AttestationConfig::default(), "agent1", &cap);
 
         let signer = Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap();
@@ -1031,14 +1029,16 @@ mod tests {
             other => panic!("expected InvalidAttestationSignature, got {:?}", other),
         }
         assert_eq!(registry.rejected_attestation_count(), 1);
-        assert!(registry.get_attestations(&cap).is_empty(),
-            "rejected attestation must not be stored");
+        assert!(
+            registry.get_attestations(&cap).is_empty(),
+            "rejected attestation must not be stored"
+        );
     }
 
     #[test]
     fn test_attest_capability_rejects_self_attestation_by_default() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
         let cap = Capability::SmartContractExecution;
         let registry = registry_with(AttestationConfig::default(), "agent1", &cap);
@@ -1066,7 +1066,11 @@ mod tests {
 
         match result {
             Err(AgentError::InvalidAttestationSignature { reason, .. }) => {
-                assert!(reason.contains("self-attestation"), "unexpected reason: {}", reason);
+                assert!(
+                    reason.contains("self-attestation"),
+                    "unexpected reason: {}",
+                    reason
+                );
             }
             other => panic!("expected self-attestation rejection, got {:?}", other),
         }
@@ -1075,8 +1079,8 @@ mod tests {
 
     #[test]
     fn test_attest_capability_allows_self_attestation_when_enabled() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
         let cap = Capability::SmartContractExecution;
         let registry = registry_with(
@@ -1102,13 +1106,16 @@ mod tests {
 
     #[test]
     fn test_attest_capability_rejects_untrusted_attester_when_whitelist_set() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
-        let cap = Capability::DataAnalysis { formats: vec!["csv".to_string()] };
+        let cap = Capability::DataAnalysis {
+            formats: vec!["csv".to_string()],
+        };
 
         // Build a whitelist that contains some *other* address.
-        let trusted_signer = Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap();
+        let trusted_signer =
+            Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap();
         let trusted_crypto = trusted_signer.public_key().to_address();
         let mut trusted_bytes = [0u8; 32];
         trusted_bytes[..20].copy_from_slice(trusted_crypto.as_bytes());
@@ -1144,10 +1151,12 @@ mod tests {
 
     #[test]
     fn test_attest_capability_accepts_whitelisted_attester() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
-        let cap = Capability::ComputerVision { tasks: vec!["ocr".to_string()] };
+        let cap = Capability::ComputerVision {
+            tasks: vec!["ocr".to_string()],
+        };
 
         let signer = Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap();
         let signer_crypto = signer.public_key().to_address();
@@ -1169,8 +1178,8 @@ mod tests {
 
     #[test]
     fn test_rejected_attestation_count_increments_across_failures() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
         let cap = Capability::MultiAgentCoordination;
         let registry = registry_with(AttestationConfig::default(), "agent1", &cap);
@@ -1192,14 +1201,15 @@ mod tests {
 
     #[test]
     fn test_attest_capability_with_signer_succeeds_end_to_end() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::Ed25519SignerImpl;
+        use tenzro_crypto::{KeyPair, KeyType};
 
-        let cap = Capability::CodeGeneration { languages: vec!["rust".to_string()] };
+        let cap = Capability::CodeGeneration {
+            languages: vec!["rust".to_string()],
+        };
         let registry = registry_with(AttestationConfig::default(), "agent1", &cap);
 
-        let signer =
-            Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap();
+        let signer = Ed25519SignerImpl::new(KeyPair::generate(KeyType::Ed25519).unwrap()).unwrap();
 
         registry
             .attest_capability_with_signer("agent1".to_string(), cap.clone(), true, &signer)
@@ -1227,10 +1237,12 @@ mod tests {
 
     #[test]
     fn test_legacy_attest_capability_still_accepts_valid_signature() {
-        use tenzro_crypto::{KeyPair, KeyType};
         use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
 
-        let cap = Capability::ExternalAPIIntegration { apis: vec!["openai".to_string()] };
+        let cap = Capability::ExternalAPIIntegration {
+            apis: vec!["openai".to_string()],
+        };
         let registry = registry_with(AttestationConfig::default(), "agent1", &cap);
 
         // Build the same attestation envelope the legacy API constructs

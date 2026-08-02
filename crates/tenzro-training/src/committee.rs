@@ -117,7 +117,11 @@ pub fn select_witness_committee(
         .collect();
     // Stable sort by (score, did) so ties (cryptographically negligible) are
     // broken deterministically. `Hash` orders lexicographically by bytes.
-    scored.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then_with(|| a.1.cmp(b.1)));
+    scored.sort_by(|a, b| {
+        a.0.as_bytes()
+            .cmp(b.0.as_bytes())
+            .then_with(|| a.1.cmp(b.1))
+    });
     scored
         .into_iter()
         .take(k.min(validators.len()))

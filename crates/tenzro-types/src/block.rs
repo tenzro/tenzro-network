@@ -4,9 +4,9 @@
 //! and maintain the blockchain state.
 
 use crate::primitives::{Address, BlockHeight, Hash, Timestamp};
-use sha2::{Digest, Sha256};
 use crate::transaction::SignedTransaction;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Maximum number of transactions allowed per block
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 10_000;
@@ -60,7 +60,15 @@ impl BlockHeader {
         proposer: Address,
         consensus_proof: ConsensusProof,
     ) -> Self {
-        Self::new_at_view(height, 0, prev_hash, tx_root, state_root, proposer, consensus_proof)
+        Self::new_at_view(
+            height,
+            0,
+            prev_hash,
+            tx_root,
+            state_root,
+            proposer,
+            consensus_proof,
+        )
     }
 
     /// Creates a new block header stamped with the proposer's view.
@@ -307,7 +315,10 @@ impl Block {
     /// Creates a new block with validation
     ///
     /// Returns an error if the number of transactions exceeds MAX_TRANSACTIONS_PER_BLOCK
-    pub fn new_validated(header: BlockHeader, transactions: Vec<SignedTransaction>) -> Result<Self, crate::error::TenzroError> {
+    pub fn new_validated(
+        header: BlockHeader,
+        transactions: Vec<SignedTransaction>,
+    ) -> Result<Self, crate::error::TenzroError> {
         if transactions.len() > MAX_TRANSACTIONS_PER_BLOCK {
             return Err(crate::error::TenzroError::InvalidBlock(format!(
                 "Too many transactions: {} exceeds maximum of {}",

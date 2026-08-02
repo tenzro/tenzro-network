@@ -1,7 +1,7 @@
 //! Daml-specific VM types
 
 use serde::{Deserialize, Serialize};
-use tenzro_types::canton::{DamlCommand, DamlEvent, DamlTransaction, CantonCommandStatus};
+use tenzro_types::canton::{CantonCommandStatus, DamlCommand, DamlEvent, DamlTransaction};
 
 use crate::types::{ExecutionResult, Log, StateChange};
 
@@ -106,52 +106,65 @@ impl DamlExecutionResult {
                 let estimated_gas = 100_000u64;
 
                 // Convert events to logs
-                let logs = self.events.iter().map(|event| {
-                    match event {
-                        DamlEvent::Created { event_id, contract_id, template_id, .. } => {
-                            Log {
-                                address: template_id.qualified_name().as_bytes().to_vec(),
-                                topics: vec![
-                                    event_id.as_bytes().to_vec(),
-                                    b"Created".to_vec(),
-                                ],
-                                data: contract_id.as_str().as_bytes().to_vec(),
-                            }
-                        }
-                        DamlEvent::Archived { event_id, contract_id, template_id } => {
-                            Log {
-                                address: template_id.qualified_name().as_bytes().to_vec(),
-                                topics: vec![
-                                    event_id.as_bytes().to_vec(),
-                                    b"Archived".to_vec(),
-                                ],
-                                data: contract_id.as_str().as_bytes().to_vec(),
-                            }
-                        }
-                    }
-                }).collect();
+                let logs = self
+                    .events
+                    .iter()
+                    .map(|event| match event {
+                        DamlEvent::Created {
+                            event_id,
+                            contract_id,
+                            template_id,
+                            ..
+                        } => Log {
+                            address: template_id.qualified_name().as_bytes().to_vec(),
+                            topics: vec![event_id.as_bytes().to_vec(), b"Created".to_vec()],
+                            data: contract_id.as_str().as_bytes().to_vec(),
+                        },
+                        DamlEvent::Archived {
+                            event_id,
+                            contract_id,
+                            template_id,
+                        } => Log {
+                            address: template_id.qualified_name().as_bytes().to_vec(),
+                            topics: vec![event_id.as_bytes().to_vec(), b"Archived".to_vec()],
+                            data: contract_id.as_str().as_bytes().to_vec(),
+                        },
+                    })
+                    .collect();
 
                 // Build state changes from Daml events
-                let state_changes: Vec<StateChange> = self.events.iter().map(|event| {
-                    match event {
-                        DamlEvent::Created { contract_id, template_id, .. } => {
-                            StateChange::new(
-                                template_id.qualified_name().as_bytes().to_vec(),
-                                contract_id.as_str().as_bytes().to_vec(),
-                                None, // Contract didn't exist before
-                                Some(serde_json::to_vec(event).unwrap_or_default()),
-                            )
+                let state_changes: Vec<StateChange> = self
+                    .events
+                    .iter()
+                    .map(|event| {
+                        match event {
+                            DamlEvent::Created {
+                                contract_id,
+                                template_id,
+                                ..
+                            } => {
+                                StateChange::new(
+                                    template_id.qualified_name().as_bytes().to_vec(),
+                                    contract_id.as_str().as_bytes().to_vec(),
+                                    None, // Contract didn't exist before
+                                    Some(serde_json::to_vec(event).unwrap_or_default()),
+                                )
+                            }
+                            DamlEvent::Archived {
+                                contract_id,
+                                template_id,
+                                ..
+                            } => {
+                                StateChange::new(
+                                    template_id.qualified_name().as_bytes().to_vec(),
+                                    contract_id.as_str().as_bytes().to_vec(),
+                                    Some(serde_json::to_vec(event).unwrap_or_default()),
+                                    None, // Contract archived (deleted)
+                                )
+                            }
                         }
-                        DamlEvent::Archived { contract_id, template_id, .. } => {
-                            StateChange::new(
-                                template_id.qualified_name().as_bytes().to_vec(),
-                                contract_id.as_str().as_bytes().to_vec(),
-                                Some(serde_json::to_vec(event).unwrap_or_default()),
-                                None, // Contract archived (deleted)
-                            )
-                        }
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 ExecutionResult::success(
                     estimated_gas,
@@ -160,12 +173,8 @@ impl DamlExecutionResult {
                     state_changes,
                 )
             }
-            CantonCommandStatus::Rejected { reason } => {
-                ExecutionResult::failed(0, reason.clone())
-            }
-            _ => {
-                ExecutionResult::failed(0, "Command not committed".to_string())
-            }
+            CantonCommandStatus::Rejected { reason } => ExecutionResult::failed(0, reason.clone()),
+            _ => ExecutionResult::failed(0, "Command not committed".to_string()),
         }
     }
 }

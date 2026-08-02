@@ -11,11 +11,11 @@ from __future__ import annotations
 import nacl.signing
 
 from tenzro_trainer.gradient import (
+    FragmentBlob,
     TrainerKey,
     build_outer_gradient,
     gradient_signing_bytes,
 )
-from tenzro_trainer.gradient import FragmentBlob
 from tenzro_trainer.types import GradientQuantization
 
 

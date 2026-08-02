@@ -38,21 +38,20 @@ use crate::mpc::abort::{MpcAbortEvidence, MpcAbortReporter};
 
 use dkls23_core::protocols::dkg::{
     BroadcastDerivationPhase2to4, BroadcastDerivationPhase3to4, ProofCommitment,
-    TransmitInitMulPhase3to4, TransmitInitZeroSharePhase2to4,
-    TransmitInitZeroSharePhase3to4,
+    TransmitInitMulPhase3to4, TransmitInitZeroSharePhase2to4, TransmitInitZeroSharePhase3to4,
 };
 use dkls23_core::protocols::dkg_session::DkgSession;
 use dkls23_core::protocols::{Abort, AbortKind, Parameters, PartyIndex};
 use dkls23_secp256k1::compute_eth_address;
-use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::Secp256k1;
+use k256::elliptic_curve::sec1::ToSec1Point;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::mpc::sealing::{KeyshareSealer, KeyshareSealerError};
 use crate::mpc::setup::{InstanceId, MpcCurve, MpcParameters};
 use crate::mpc::store::{
-    GroupId, KeyshareEnvelope, KeyshareError, KeyshareStore, GROUP_DOMAIN_TAG,
+    GROUP_DOMAIN_TAG, GroupId, KeyshareEnvelope, KeyshareError, KeyshareStore,
 };
 use crate::mpc::transport::{MpcPhase, MpcRoundMessage, Transport, TransportError};
 
@@ -216,7 +215,10 @@ pub enum KeygenError {
     /// Inbound message arrived in the wrong logical phase (driver state
     /// machine guard).
     #[error("unexpected payload kind in {expected:?}: got {got}")]
-    UnexpectedPayloadKind { expected: MpcPhase, got: &'static str },
+    UnexpectedPayloadKind {
+        expected: MpcPhase,
+        got: &'static str,
+    },
     /// Inbound message did not match the active `InstanceId` — cross-session
     /// splice attempt or routing bug.
     #[error("instance id mismatch on inbound message")]
@@ -359,8 +361,7 @@ where
         .map_err(|e| KeygenError::InvalidParameters(e.to_string()))?;
         let session_id = self.cfg.instance_id.as_bytes().to_vec();
 
-        let mut session: DkgSession<Secp256k1> =
-            DkgSession::new(dkls_params, local_pi, session_id);
+        let mut session: DkgSession<Secp256k1> = DkgSession::new(dkls_params, local_pi, session_id);
 
         // -------------------- Phase 1: poly fragment exchange ---------------
         let local_fragments = session.phase1();
@@ -378,7 +379,8 @@ where
                 fragment: bincode::serialize(fragment)
                     .map_err(|e| KeygenError::PartyEncode(e.to_string()))?,
             };
-            self.send_payload(&payload, MpcPhase::Dkg, 0, to_index).await?;
+            self.send_payload(&payload, MpcPhase::Dkg, 0, to_index)
+                .await?;
         }
         // Receive fragments from all other parties.
         while received_fragments.len() < total {
@@ -405,15 +407,13 @@ where
         // dkls23 phase2 wants the fragments in 1..=n order, including own.
         let mut poly_fragments_vec: Vec<k256::Scalar> = Vec::with_capacity(total);
         for i in 1..=total as u8 {
-            poly_fragments_vec.push(
-                *received_fragments
-                    .get(&i)
-                    .ok_or(KeygenError::ProtocolAbort {
-                        party: local_index,
-                        kind: AbortKindWire::Recoverable,
-                        reason: format!("missing poly fragment from party {i}"),
-                    })?,
-            );
+            poly_fragments_vec.push(*received_fragments.get(&i).ok_or(
+                KeygenError::ProtocolAbort {
+                    party: local_index,
+                    kind: AbortKindWire::Recoverable,
+                    reason: format!("missing poly fragment from party {i}"),
+                },
+            )?);
         }
 
         // -------------------- Phase 2 -------------------------------------
@@ -446,7 +446,8 @@ where
                 broadcast_derivation: local_bcast_p2.clone(),
                 zero_transmit: zero.clone(),
             };
-            self.send_payload(&payload, MpcPhase::Dkg, 1, to_index).await?;
+            self.send_payload(&payload, MpcPhase::Dkg, 1, to_index)
+                .await?;
         }
 
         // Collect inbound Phase2 from every other party.
@@ -492,8 +493,7 @@ where
         for z in &local_zero_transmit_p3 {
             routed_zero_p3.insert(z.parties.receiver.as_u8(), z);
         }
-        let mut routed_mul_p3: BTreeMap<u8, &TransmitInitMulPhase3to4<Secp256k1>> =
-            BTreeMap::new();
+        let mut routed_mul_p3: BTreeMap<u8, &TransmitInitMulPhase3to4<Secp256k1>> = BTreeMap::new();
         for m in &local_mul_transmit_p3 {
             routed_mul_p3.insert(m.parties.receiver.as_u8(), m);
         }
@@ -522,7 +522,8 @@ where
                 zero_transmit: zero.clone(),
                 mul_transmit: mul.clone(),
             };
-            self.send_payload(&payload, MpcPhase::Dkg, 2, to_index).await?;
+            self.send_payload(&payload, MpcPhase::Dkg, 2, to_index)
+                .await?;
         }
 
         let mut bip_broadcast_p3: BTreeMap<PartyIndex, BroadcastDerivationPhase3to4> =
@@ -562,15 +563,13 @@ where
         // dense slice indexed by party.
         let mut proofs_commitments: Vec<ProofCommitment<Secp256k1>> = Vec::with_capacity(total);
         for i in 1..=total as u8 {
-            proofs_commitments.push(
-                proofs_commitments_map
-                    .remove(&i)
-                    .ok_or(KeygenError::ProtocolAbort {
-                        party: local_index,
-                        kind: AbortKindWire::Recoverable,
-                        reason: format!("missing phase2 proof commitment from party {i}"),
-                    })?,
-            );
+            proofs_commitments.push(proofs_commitments_map.remove(&i).ok_or(
+                KeygenError::ProtocolAbort {
+                    party: local_index,
+                    kind: AbortKindWire::Recoverable,
+                    reason: format!("missing phase2 proof commitment from party {i}"),
+                },
+            )?);
         }
 
         let (party, pk_package) = session
@@ -596,8 +595,8 @@ where
         let address = party.address.clone();
 
         // bincode-serialize the entire `Party<Secp256k1>` for sealing.
-        let party_bytes = bincode::serialize(&party)
-            .map_err(|e| KeygenError::PartyEncode(e.to_string()))?;
+        let party_bytes =
+            bincode::serialize(&party).map_err(|e| KeygenError::PartyEncode(e.to_string()))?;
         let share_hash = {
             let mut h = Sha256::new();
             h.update(&party_bytes);
@@ -645,8 +644,8 @@ where
         round_index: u32,
         to_index: u8,
     ) -> Result<(), KeygenError> {
-        let bytes = bincode::serialize(payload)
-            .map_err(|e| KeygenError::PartyEncode(e.to_string()))?;
+        let bytes =
+            bincode::serialize(payload).map_err(|e| KeygenError::PartyEncode(e.to_string()))?;
         let to_did = self.cfg.participant_dids[(to_index - 1) as usize].clone();
         let msg = MpcRoundMessage {
             instance_id: self.cfg.instance_id,
@@ -781,8 +780,7 @@ mod tests {
 
     impl MockTransport {
         fn fan_out(dids: &[String]) -> Vec<Self> {
-            let mut inboxes_map: HashMap<String, UnboundedSender<MpcRoundMessage>> =
-                HashMap::new();
+            let mut inboxes_map: HashMap<String, UnboundedSender<MpcRoundMessage>> = HashMap::new();
             let mut transports = Vec::with_capacity(dids.len());
             // First pass: create channels and remember receivers.
             let mut my_rxs: Vec<(String, UnboundedReceiver<MpcRoundMessage>)> =
@@ -845,7 +843,10 @@ mod tests {
         };
         assert!(matches!(
             cfg.validate(),
-            Err(KeygenError::ParticipantCountMismatch { expected: 3, got: 2 })
+            Err(KeygenError::ParticipantCountMismatch {
+                expected: 3,
+                got: 2
+            })
         ));
     }
 
@@ -933,7 +934,10 @@ mod tests {
         for (store, out) in stores.iter().zip(outputs.iter()) {
             let env = store.get(&out.group_id, 0).await.unwrap();
             assert_eq!(env.party_index, out.local_party_index);
-            assert_eq!(env.group_public_key_compressed, out.group_public_key_compressed);
+            assert_eq!(
+                env.group_public_key_compressed,
+                out.group_public_key_compressed
+            );
             assert_eq!(env.parameters, parameters);
             // Sealed payload non-empty, share_hash matches sha256(party bytes).
             assert!(!env.sealed_payload.is_empty());

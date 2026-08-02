@@ -83,62 +83,61 @@
 //! - **Standardized Messaging**: Consistent message format across all bridges
 //! - **Async/Await**: Full async support for non-blocking operations
 
+pub mod axelar;
+pub mod babylon;
+pub mod bitvm2;
 pub mod canton;
 pub mod canton_auth;
 pub mod chainlink_ccip;
+pub mod chainlink_feed;
+pub mod chainlink_por;
 pub mod circuit_breaker;
 pub mod debridge;
 pub mod error;
 pub mod evm_signer;
+pub mod fee_oracle;
+pub mod fee_sponsor;
+pub mod hyperbridge;
+pub mod hyperlane;
+pub mod ibc_eureka;
 pub mod layerzero;
 pub mod lifi;
 pub mod message_format;
 pub mod monitor;
-pub mod secp256k1_multisig;
 pub mod mpc;
-pub mod axelar;
-pub mod babylon;
-pub mod bitvm2;
-pub mod hyperbridge;
-pub mod hyperlane;
-pub mod ibc_eureka;
 pub mod near_chain_sig;
-pub mod stargate_v2;
+pub mod price_oracle;
 pub mod router;
+pub mod secp256k1_multisig;
+pub mod stargate_v2;
 pub mod tenant_idp;
 pub mod tnzo_cct;
 pub mod traits;
 pub mod wormhole;
 pub mod wormhole_ntt;
-pub mod chainlink_feed;
-pub mod chainlink_por;
-pub mod fee_oracle;
-pub mod fee_sponsor;
-pub mod price_oracle;
 
 // Re-export commonly used types
-pub use circuit_breaker::CircuitBreaker;
-pub use error::{BridgeError, Result};
-pub use evm_signer::{EvmTransactionSigner, EvmSignerConfig};
-pub use monitor::{TransferMonitor, TransferStatusEvent, MonitorConfig};
 pub use chainlink_feed::{
-    ChainlinkFeedClient, FeedReading, FeedRegistration, FEED_BTC_USD_MAINNET,
-    FEED_ETH_USD_MAINNET, FEED_LINK_USD_MAINNET, QUOTE_CACHE_TTL_SECS,
-    SELECTOR_DECIMALS, SELECTOR_LATEST_ROUND_DATA, STALENESS_THRESHOLD_LONGTAIL_SECS,
-    STALENESS_THRESHOLD_MAJOR_SECS,
+    ChainlinkFeedClient, FEED_BTC_USD_MAINNET, FEED_ETH_USD_MAINNET, FEED_LINK_USD_MAINNET,
+    FeedReading, FeedRegistration, QUOTE_CACHE_TTL_SECS, SELECTOR_DECIMALS,
+    SELECTOR_LATEST_ROUND_DATA, STALENESS_THRESHOLD_LONGTAIL_SECS, STALENESS_THRESHOLD_MAJOR_SECS,
 };
 pub use chainlink_por::{
     ChainlinkPorAdapter, PorAttestationInput, PorError, PorFeedConfig, PorReading,
     decode_por_round, validate_freshness,
 };
+pub use circuit_breaker::CircuitBreaker;
+pub use error::{BridgeError, Result};
+pub use evm_signer::{EvmSignerConfig, EvmTransactionSigner};
 pub use fee_oracle::{
-    BridgeAdapterId, BridgeFeeOracle, BridgeFeeQuote, ChainlinkFeedFeeOracle,
-    GovernanceFeeRow, GovernanceSetFeeOracle, OracleBacking,
+    BridgeAdapterId, BridgeFeeOracle, BridgeFeeQuote, ChainlinkFeedFeeOracle, GovernanceFeeRow,
+    GovernanceSetFeeOracle, OracleBacking,
 };
 pub use fee_sponsor::{
     BridgeFeeSponsor, BridgeSponsorshipReceipt, SponsorshipPool, WiredBridgeFeeSurface,
 };
-pub use price_oracle::{PriceOracle, SymbolFeed, UsdPrice, USD_PRICE_DECIMALS};
+pub use monitor::{MonitorConfig, TransferMonitor, TransferStatusEvent};
+pub use price_oracle::{PriceOracle, SymbolFeed, USD_PRICE_DECIMALS, UsdPrice};
 pub use router::{BridgeRouter, ChainCoverage};
 pub use tnzo_cct::{CctPoolType, TnzoCctBridge, TnzoCctPool, TnzoCctRegistry};
 pub use traits::{
@@ -155,17 +154,17 @@ pub mod prelude {
     pub use crate::{
         canton::{CantonAdapter, CantonConfig},
         canton_auth::{CantonAuthConfig, CantonTokenProvider},
-        chainlink_ccip::{ChainlinkCcipAdapter, CcipConfig, CcipMessage, FeeToken},
-        debridge::{DeBridgeAdapter, DeBridgeConfig, DlnOrder, DlnOrderStatus, DlnHook},
+        chainlink_ccip::{CcipConfig, CcipMessage, ChainlinkCcipAdapter, FeeToken},
+        debridge::{DeBridgeAdapter, DeBridgeConfig, DlnHook, DlnOrder, DlnOrderStatus},
         error::{BridgeError, Result},
-        evm_signer::{EvmTransactionSigner, EvmSignerConfig},
+        evm_signer::{EvmSignerConfig, EvmTransactionSigner},
         layerzero::{LayerZeroAdapter, LayerZeroConfig},
         lifi::{LiFiAdapter, LiFiConfig},
         message_format::{
-            AgentMessagePayload, MessageEnvelope, MessageMetadata, MessageType,
-            NonceTracker, TokenTransferPayload, TenzroMessage,
+            AgentMessagePayload, MessageEnvelope, MessageMetadata, MessageType, NonceTracker,
+            TenzroMessage, TokenTransferPayload,
         },
-        monitor::{TransferMonitor, TransferStatusEvent, MonitorConfig},
+        monitor::{MonitorConfig, TransferMonitor, TransferStatusEvent},
         router::{BridgeRouter, FeeComparison, RouteInfo, RoutingPreferences, RoutingStrategy},
         tnzo_cct::{CctPoolType, TnzoCctBridge, TnzoCctPool, TnzoCctRegistry},
         traits::{

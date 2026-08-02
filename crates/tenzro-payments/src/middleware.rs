@@ -10,7 +10,7 @@ use crate::types::PaymentCredential;
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -169,7 +169,7 @@ pub async fn payment_gate_handler(
                             .get("x_payment_response")
                             .and_then(|v| serde_json::to_string(v).ok())
                             .map(|s| {
-                                use base64::{engine::general_purpose, Engine as _};
+                                use base64::{Engine as _, engine::general_purpose};
                                 general_purpose::STANDARD.encode(s.as_bytes())
                             });
 
@@ -251,7 +251,7 @@ fn escape_quoted(s: &str) -> String {
 /// The `Payment` prefix triggers base64url-nopad decoding (per IETF draft);
 /// other prefixes use legacy base64 STANDARD encoding.
 fn parse_credential(header_value: &str) -> crate::error::Result<PaymentCredential> {
-    use base64::{engine::general_purpose, Engine as _};
+    use base64::{Engine as _, engine::general_purpose};
 
     // IETF Payment scheme uses base64url-nopad; everything else uses STANDARD
     let (base64_data, is_url_safe) = if let Some(rest) = header_value.strip_prefix("Payment ") {
@@ -318,7 +318,7 @@ impl IntoResponse for PaymentGateError {
                 // Required params: id, realm, method, intent, request
                 // Optional: expires, digest, description, opaque
                 let request_b64 = {
-                    use base64::{engine::general_purpose, Engine as _};
+                    use base64::{Engine as _, engine::general_purpose};
                     // Embed the JSON challenge body as base64url-nopad-encoded request param
                     general_purpose::URL_SAFE_NO_PAD.encode(body.as_bytes())
                 };
@@ -371,11 +371,11 @@ impl IntoResponse for PaymentGateError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::TenzroPaymentGateway;
     use crate::traits::PaymentProtocol;
     use crate::types::{PaymentChallenge, PaymentReceipt, PaymentVerification};
-    use crate::gateway::TenzroPaymentGateway;
     use async_trait::async_trait;
-    use axum::{routing::get, Router};
+    use axum::{Router, routing::get};
     use chrono::Utc;
     use std::collections::HashMap;
     use tower::ServiceExt;
@@ -475,7 +475,8 @@ mod tests {
     #[tokio::test]
     async fn test_middleware_returns_402_without_credential() {
         let challenge_store = ChallengeStore::new();
-        let gateway = Arc::new(TenzroPaymentGateway::new().with_challenge_store(challenge_store.clone()));
+        let gateway =
+            Arc::new(TenzroPaymentGateway::new().with_challenge_store(challenge_store.clone()));
         gateway.register_protocol(Arc::new(TestProtocol));
 
         let middleware = PaymentGateMiddleware::new(
@@ -520,10 +521,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_middleware_accepts_valid_credential() {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
 
         let challenge_store = ChallengeStore::new();
-        let gateway = Arc::new(TenzroPaymentGateway::new().with_challenge_store(challenge_store.clone()));
+        let gateway =
+            Arc::new(TenzroPaymentGateway::new().with_challenge_store(challenge_store.clone()));
         gateway.register_protocol(Arc::new(TestProtocol));
 
         // Create a challenge and store it
@@ -533,11 +535,8 @@ mod tests {
             .unwrap();
         challenge_store.store(&challenge);
 
-        let middleware = PaymentGateMiddleware::new(
-            gateway,
-            PaymentGateConfig::default(),
-            challenge_store,
-        );
+        let middleware =
+            PaymentGateMiddleware::new(gateway, PaymentGateConfig::default(), challenge_store);
 
         let app = Router::new()
             .route("/paid-resource", get(test_handler))
@@ -577,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_credential_from_x_payment_header() {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
 
         let credential = PaymentCredential {
             credential_id: "cred-1".to_string(),
@@ -603,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_credential_from_authorization_header() {
-        use base64::{engine::general_purpose, Engine as _};
+        use base64::{Engine as _, engine::general_purpose};
 
         let credential = PaymentCredential {
             credential_id: "cred-2".to_string(),

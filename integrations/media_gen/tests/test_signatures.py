@@ -30,9 +30,7 @@ def key() -> WorkerKey:
 def test_a_key_round_trips_through_its_seed(key):
     assert len(key.seed_bytes) == 32
     assert len(key.public_key_bytes) == 32
-    assert WorkerKey.from_seed_hex(key.seed_bytes.hex()).public_key_bytes == (
-        key.public_key_bytes
-    )
+    assert WorkerKey.from_seed_hex(key.seed_bytes.hex()).public_key_bytes == (key.public_key_bytes)
 
 
 def test_generated_keys_are_distinct():
@@ -80,9 +78,7 @@ def test_rewriting_the_executed_spec_invalidates_the_receipt(receipt, key):
     receipt.worker_signature = sign_receipt(receipt, key)
     tampered = replace(
         receipt,
-        task_spec=replace(
-            receipt.task_spec, params=replace(receipt.task_spec.params, steps=4)
-        ),
+        task_spec=replace(receipt.task_spec, params=replace(receipt.task_spec.params, steps=4)),
     )
     assert not verify_receipt(tampered)
 

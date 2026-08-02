@@ -1,8 +1,7 @@
 """In-memory A2A task state machine."""
 
-import uuid
 import time
-from typing import Optional
+import uuid
 
 
 class TaskManager:
@@ -14,8 +13,8 @@ class TaskManager:
     def create_task(
         self,
         message: dict,
-        context_id: str = None,
-        metadata: dict = None,
+        context_id: str | None = None,
+        metadata: dict | None = None,
     ) -> dict:
         """Create a new task from an incoming message."""
         task_id = str(uuid.uuid4())
@@ -38,7 +37,7 @@ class TaskManager:
         self,
         task_id: str,
         state: str,
-        agent_message: dict = None,
+        agent_message: dict | None = None,
     ):
         """Transition a task to a new state, optionally appending an agent message."""
         task = self.tasks[task_id]
@@ -57,22 +56,22 @@ class TaskManager:
     def get_task(
         self,
         task_id: str,
-        history_length: int = None,
-    ) -> Optional[dict]:
+        history_length: int | None = None,
+    ) -> dict | None:
         """Retrieve a task, optionally truncating history."""
         task = self.tasks.get(task_id)
         if task and history_length:
             task = {**task, "history": task["history"][-history_length:]}
         return task
 
-    def list_tasks(self, context_id: str = None) -> list:
+    def list_tasks(self, context_id: str | None = None) -> list:
         """List all tasks, optionally filtered by context ID."""
         tasks = list(self.tasks.values())
         if context_id:
             tasks = [t for t in tasks if t["contextId"] == context_id]
         return tasks
 
-    def cancel_task(self, task_id: str) -> Optional[dict]:
+    def cancel_task(self, task_id: str) -> dict | None:
         """Cancel a task if it exists."""
         task = self.tasks.get(task_id)
         if task:

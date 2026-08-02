@@ -267,9 +267,18 @@ pub fn engine_catalog() -> Vec<EngineEntry> {
             // Patroni-style supervisor needing a leader-election DCS.
             native_cluster: Some(NativeClusterSpec {
                 roles: vec![
-                    NativeRoleSlot { role: NativeRole::Coordinator, min_count: 1 },
-                    NativeRoleSlot { role: NativeRole::Worker, min_count: 2 },
-                    NativeRoleSlot { role: NativeRole::Replica, min_count: 1 },
+                    NativeRoleSlot {
+                        role: NativeRole::Coordinator,
+                        min_count: 1,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::Worker,
+                        min_count: 2,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::Replica,
+                        min_count: 1,
+                    },
                 ],
                 external_dependencies: vec![ExternalDependency::LeaderElection],
             }),
@@ -311,11 +320,26 @@ pub fn engine_catalog() -> Vec<EngineEntry> {
             // in etcd + object storage + the WAL backend, not the role procs.
             native_cluster: Some(NativeClusterSpec {
                 roles: vec![
-                    NativeRoleSlot { role: NativeRole::Coordinator, min_count: 1 },
-                    NativeRoleSlot { role: NativeRole::Router, min_count: 2 },
-                    NativeRoleSlot { role: NativeRole::StreamNode, min_count: 2 },
-                    NativeRoleSlot { role: NativeRole::QueryNode, min_count: 2 },
-                    NativeRoleSlot { role: NativeRole::DataNode, min_count: 2 },
+                    NativeRoleSlot {
+                        role: NativeRole::Coordinator,
+                        min_count: 1,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::Router,
+                        min_count: 2,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::StreamNode,
+                        min_count: 2,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::QueryNode,
+                        min_count: 2,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::DataNode,
+                        min_count: 2,
+                    },
                 ],
                 external_dependencies: vec![
                     ExternalDependency::MetadataStore,
@@ -342,8 +366,14 @@ pub fn engine_catalog() -> Vec<EngineEntry> {
             // coordinator — slot ownership + failover are gossip-emergent.
             native_cluster: Some(NativeClusterSpec {
                 roles: vec![
-                    NativeRoleSlot { role: NativeRole::Primary, min_count: 3 },
-                    NativeRoleSlot { role: NativeRole::Replica, min_count: 3 },
+                    NativeRoleSlot {
+                        role: NativeRole::Primary,
+                        min_count: 3,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::Replica,
+                        min_count: 3,
+                    },
                 ],
                 external_dependencies: vec![],
             }),
@@ -367,8 +397,14 @@ pub fn engine_catalog() -> Vec<EngineEntry> {
             // replaces any external coordinator, so no backing services.
             native_cluster: Some(NativeClusterSpec {
                 roles: vec![
-                    NativeRoleSlot { role: NativeRole::Coordinator, min_count: 3 },
-                    NativeRoleSlot { role: NativeRole::Worker, min_count: 3 },
+                    NativeRoleSlot {
+                        role: NativeRole::Coordinator,
+                        min_count: 3,
+                    },
+                    NativeRoleSlot {
+                        role: NativeRole::Worker,
+                        min_count: 3,
+                    },
                 ],
                 external_dependencies: vec![],
             }),
@@ -503,7 +539,11 @@ mod tests {
             if e.sharding == ShardingModel::EngineNative {
                 assert!(e.native_cluster.is_some(), "{} native but no spec", e.id);
             } else {
-                assert!(e.native_cluster.is_none(), "{} non-native but has spec", e.id);
+                assert!(
+                    e.native_cluster.is_none(),
+                    "{} non-native but has spec",
+                    e.id
+                );
             }
         }
     }
@@ -514,12 +554,23 @@ mod tests {
         // coordinator (Citus/Dgraph/Milvus) or a primary (Valkey). A router-only
         // or worker-only spec would be a mis-modelled topology.
         for e in engine_catalog() {
-            let Some(spec) = e.native_cluster.as_ref() else { continue };
-            assert!(!spec.roles.is_empty(), "{} native cluster with no roles", e.id);
-            let has_anchor = spec.roles.iter().any(|s| {
-                matches!(s.role, NativeRole::Coordinator | NativeRole::Primary)
-            });
-            assert!(has_anchor, "{} native cluster with no coordinator/primary", e.id);
+            let Some(spec) = e.native_cluster.as_ref() else {
+                continue;
+            };
+            assert!(
+                !spec.roles.is_empty(),
+                "{} native cluster with no roles",
+                e.id
+            );
+            let has_anchor = spec
+                .roles
+                .iter()
+                .any(|s| matches!(s.role, NativeRole::Coordinator | NativeRole::Primary));
+            assert!(
+                has_anchor,
+                "{} native cluster with no coordinator/primary",
+                e.id
+            );
             // Every role slot needs a positive HA minimum.
             for s in &spec.roles {
                 assert!(s.min_count >= 1, "{} role {:?} min_count 0", e.id, s.role);
@@ -531,9 +582,18 @@ mod tests {
     fn milvus_declares_its_three_backing_services() {
         let m = engine_by_id(engine_ids::MILVUS).unwrap();
         let spec = m.native_cluster.unwrap();
-        assert!(spec.external_dependencies.contains(&ExternalDependency::MetadataStore));
-        assert!(spec.external_dependencies.contains(&ExternalDependency::ObjectStore));
-        assert!(spec.external_dependencies.contains(&ExternalDependency::WriteAheadLog));
+        assert!(
+            spec.external_dependencies
+                .contains(&ExternalDependency::MetadataStore)
+        );
+        assert!(
+            spec.external_dependencies
+                .contains(&ExternalDependency::ObjectStore)
+        );
+        assert!(
+            spec.external_dependencies
+                .contains(&ExternalDependency::WriteAheadLog)
+        );
         assert!(spec.has_router_tier(), "milvus proxy is a router tier");
     }
 

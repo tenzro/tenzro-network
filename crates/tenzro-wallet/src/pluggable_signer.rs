@@ -120,9 +120,7 @@ pub trait PluggableSigner: Send + Sync {
 
 pub struct GenericSigner {
     public_key: Vec<u8>,
-    sign_fn: std::sync::Arc<
-        dyn Fn(&[u8; 32]) -> Result<Vec<u8>, WalletError> + Send + Sync,
-    >,
+    sign_fn: std::sync::Arc<dyn Fn(&[u8; 32]) -> Result<Vec<u8>, WalletError> + Send + Sync>,
 }
 
 impl GenericSigner {
@@ -159,8 +157,8 @@ impl PluggableSigner for GenericSigner {
 #[cfg(feature = "ledger-signer")]
 pub mod ledger {
     use super::*;
+    use ledger_apdu::{APDUAnswer, APDUCommand};
     use ledger_transport_hid::TransportNativeHID;
-    use ledger_apdu::{APDUCommand, APDUAnswer};
 
     /// Ledger device signer over USB HID. Talks the Ethereum app's APDU
     /// dialect documented at
@@ -225,12 +223,16 @@ pub mod ledger {
         fn parse_pubkey_response(answer: &APDUAnswer<Vec<u8>>) -> Result<Vec<u8>, WalletError> {
             let data = answer.data();
             if data.len() < 2 {
-                return Err(WalletError::SignatureFailed("Ledger pubkey: short response".into()));
+                return Err(WalletError::SignatureFailed(
+                    "Ledger pubkey: short response".into(),
+                ));
             }
             // First byte is the public-key length (65 for uncompressed).
             let pk_len = data[0] as usize;
             if data.len() < 1 + pk_len {
-                return Err(WalletError::SignatureFailed("Ledger pubkey: payload truncated".into()));
+                return Err(WalletError::SignatureFailed(
+                    "Ledger pubkey: payload truncated".into(),
+                ));
             }
             Ok(data[1..1 + pk_len].to_vec())
         }
@@ -289,7 +291,7 @@ pub mod ledger {
 #[cfg(feature = "trezor-signer")]
 pub mod trezor {
     use super::*;
-    use trezor_client::{Trezor, protos::EthereumSignMessage};
+    use trezor_client::{Trezor, client::handle_interaction, protos};
 
     /// Trezor signer via the WebUSB / HID transport.
     pub struct TrezorSigner {
@@ -304,7 +306,9 @@ pub mod trezor {
         fn connect() -> Result<Trezor, WalletError> {
             let mut devices = trezor_client::find_devices(false);
             if devices.is_empty() {
-                return Err(WalletError::SignatureFailed("no Trezor device detected".into()));
+                return Err(WalletError::SignatureFailed(
+                    "no Trezor device detected".into(),
+                ));
             }
             devices
                 .remove(0)
@@ -323,10 +327,35 @@ pub mod trezor {
             let path = self.derivation_path.clone();
             tokio::task::spawn_blocking(move || {
                 let mut trezor = Self::connect()?;
-                let pk = trezor
-                    .ethereum_get_public_key(&path, false)
-                    .map_err(|e| WalletError::SignatureFailed(format!("Trezor get pubkey: {}", e)))?;
-                Ok::<Vec<u8>, WalletError>(pk.public_key().to_vec())
+                // trezor-client has no Ethereum get-public-key wrapper — only
+                // the Bitcoin one, which wants a script type and a network.
+                // The EthereumGetPublicKey message itself is there, so drive
+                // it through the generic `call` and read the compressed key
+                // off the returned HD node.
+                let mut req = protos::EthereumGetPublicKey::new();
+                req.address_n = path;
+                req.set_show_display(false);
+                let pk = handle_interaction(
+                    trezor
+                        .call(
+                            req,
+                            Box::new(|_, m: protos::EthereumPublicKey| {
+                                Ok(m.node.public_key.clone())
+                            }),
+                        )
+                        .map_err(|e| {
+                            WalletError::SignatureFailed(format!("Trezor get pubkey: {}", e))
+                        })?,
+                )
+                .map_err(|e| WalletError::SignatureFailed(format!("Trezor get pubkey: {}", e)))?;
+                // An HD node without a public key is a device that answered
+                // the wrong thing; returning an empty key would let it flow
+                // into an account binding as a silently unusable credential.
+                pk.ok_or_else(|| {
+                    WalletError::SignatureFailed(
+                        "Trezor get pubkey: HD node carried no public key".into(),
+                    )
+                })
             })
             .await
             .map_err(|e| WalletError::SignatureFailed(format!("Trezor join: {}", e)))?
@@ -337,13 +366,20 @@ pub mod trezor {
             let h = *hash;
             tokio::task::spawn_blocking(move || {
                 let mut trezor = Self::connect()?;
-                let mut req = EthereumSignMessage::new();
-                req.set_address_n(path);
-                req.set_message(h.to_vec());
-                let resp = trezor
-                    .ethereum_sign_message(req)
+                // Trezor firmware has no raw-hash signing primitive — blind
+                // signing is refused by design — so the hash goes through
+                // the EIP-191 personal-message path. The Ledger adapter above
+                // lands in the same place (APDU INS 0x08 is
+                // SIGN_PERSONAL_MESSAGE), so both hardware backends agree on
+                // what a `sign_hash` signature covers.
+                let sig = trezor
+                    .ethereum_sign_message(h.to_vec(), path)
                     .map_err(|e| WalletError::SignatureFailed(format!("Trezor sign: {}", e)))?;
-                Ok::<Vec<u8>, WalletError>(resp.signature().to_vec())
+                let mut out = Vec::with_capacity(65);
+                out.extend_from_slice(&sig.r);
+                out.extend_from_slice(&sig.s);
+                out.push(sig.v as u8);
+                Ok::<Vec<u8>, WalletError>(out)
             })
             .await
             .map_err(|e| WalletError::SignatureFailed(format!("Trezor join: {}", e)))?
@@ -472,10 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn generic_signer_roundtrip() {
-        let signer = GenericSigner::new(
-            vec![0u8; 33],
-            |hash| Ok([&[0xAA], &hash[..]].concat()),
-        );
+        let signer = GenericSigner::new(vec![0u8; 33], |hash| Ok([&[0xAA], &hash[..]].concat()));
         assert_eq!(signer.device_kind(), HardwareDeviceKind::Generic);
         let pk = signer.public_key().await.unwrap();
         assert_eq!(pk.len(), 33);

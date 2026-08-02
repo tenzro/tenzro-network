@@ -32,7 +32,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tenzro_crypto::pq::{MlDsaSigningKey, ML_DSA_65_VK_LEN};
+use tenzro_crypto::pq::{ML_DSA_65_VK_LEN, MlDsaSigningKey};
 
 use crate::{DeviceKeyError, Result};
 
@@ -110,7 +110,10 @@ impl PqCompanion {
     /// The 1952-byte ML-DSA-65 verifying key (FIPS-204 §4 Table 2). This is the
     /// `ml_dsa_public_key_hex` value `tenzro_enrollPasskey` expects.
     pub fn verifying_key_bytes(&self) -> &[u8] {
-        debug_assert_eq!(self.signing_key.verifying_key_bytes().len(), ML_DSA_65_VK_LEN);
+        debug_assert_eq!(
+            self.signing_key.verifying_key_bytes().len(),
+            ML_DSA_65_VK_LEN
+        );
         self.signing_key.verifying_key_bytes()
     }
 
@@ -147,7 +150,7 @@ fn write_ciphertext(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_crypto::pq::{ml_dsa_verify, ML_DSA_65_SIG_LEN};
+    use tenzro_crypto::pq::{ML_DSA_65_SIG_LEN, ml_dsa_verify};
 
     // Constructs a companion directly from a seed, bypassing the Secure Enclave
     // so the seed-sealing path (which needs hardware) isn't exercised here. This

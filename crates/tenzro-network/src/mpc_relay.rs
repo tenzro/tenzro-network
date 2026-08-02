@@ -58,8 +58,8 @@
 //!     without letting the session hang indefinitely on a stuck stream.
 
 use libp2p::{
-    request_response::{self, ProtocolSupport},
     PeerId, StreamProtocol,
+    request_response::{self, ProtocolSupport},
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -157,17 +157,13 @@ pub enum MpcRelayError {
 }
 
 /// CBOR-framed request-response behaviour for the MPC relay.
-pub type MpcRelayBehaviour =
-    request_response::cbor::Behaviour<MpcRelayRequest, MpcRelayResponse>;
+pub type MpcRelayBehaviour = request_response::cbor::Behaviour<MpcRelayRequest, MpcRelayResponse>;
 
 /// Constructs a fresh MPC relay `Behaviour` with production-tuned config.
 pub fn new_behaviour() -> MpcRelayBehaviour {
     let protocol = StreamProtocol::new(MPC_RELAY_PROTOCOL);
     let cfg = request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT);
-    request_response::cbor::Behaviour::new(
-        std::iter::once((protocol, ProtocolSupport::Full)),
-        cfg,
-    )
+    request_response::cbor::Behaviour::new(std::iter::once((protocol, ProtocolSupport::Full)), cfg)
 }
 
 /// DID-to-PeerId resolver injected by the node layer.

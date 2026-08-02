@@ -121,30 +121,30 @@ pub use composite::{
 };
 pub use error::{CryptoError, Result};
 pub use frost::{
+    DkgRound1, DkgRound1Public, DkgRound1Secret, DkgRound2, DkgRound2Secret, DkgRound2Unicast,
+    GroupPublicKey as FrostGroupPublicKey, PublicKeyPackage as FrostPublicKeyPackage,
+    SecretShare as FrostSecretShare, SignatureShare as FrostSignatureShare,
+    SignerIndex as FrostSignerIndex, SigningCommitments as FrostSigningCommitments,
+    SigningNonces as FrostSigningNonces, SigningPackage as FrostSigningPackage,
     aggregate_signature as frost_aggregate, build_signing_package as frost_build_signing_package,
     dkg_part1 as frost_dkg_part1, dkg_part2 as frost_dkg_part2, dkg_part3 as frost_dkg_part3,
     keygen_with_trusted_dealer as frost_keygen, round1_commit as frost_round1_commit,
-    round2_sign as frost_round2_sign, DkgRound1, DkgRound1Public, DkgRound1Secret, DkgRound2,
-    DkgRound2Secret, DkgRound2Unicast, GroupPublicKey as FrostGroupPublicKey,
-    PublicKeyPackage as FrostPublicKeyPackage, SecretShare as FrostSecretShare,
-    SignatureShare as FrostSignatureShare, SignerIndex as FrostSignerIndex,
-    SigningCommitments as FrostSigningCommitments, SigningNonces as FrostSigningNonces,
-    SigningPackage as FrostSigningPackage,
+    round2_sign as frost_round2_sign,
 };
-pub use hash::{sha256, keccak256, Hash, Hasher, Keccak256, Sha256};
+pub use hash::{Hash, Hasher, Keccak256, Sha256, keccak256, sha256};
 pub use keys::{Address, KeyPair, KeyType, PublicKey, SecretKey};
+pub use p256::{
+    P256_PUBLIC_KEY_LEN, P256_PUBLIC_KEY_SEC1_LEN, P256_SIGNATURE_LEN, P256KeyPair, P256Signature,
+    P256Signer, P256Verifier, build_p256verify_input,
+};
 pub use pq::{
-    ml_dsa_verify, ml_kem_encapsulate, MlDsaSigningKey, MlKemDecapsulationKey,
     ML_DSA_65_SIG_LEN, ML_DSA_65_VK_LEN, ML_KEM_768_CT_LEN, ML_KEM_768_EK_LEN, ML_KEM_SS_LEN,
+    MlDsaSigningKey, MlKemDecapsulationKey, ml_dsa_verify, ml_kem_encapsulate,
 };
 pub use signatures::{Signature, Signer, Verifier};
-pub use p256::{
-    build_p256verify_input, P256KeyPair, P256Signature, P256Signer, P256Verifier,
-    P256_PUBLIC_KEY_LEN, P256_PUBLIC_KEY_SEC1_LEN, P256_SIGNATURE_LEN,
-};
 pub use webauthn::{
-    unwrap_der_signature, verify_webauthn_assertion, webauthn_signed_hash,
-    webauthn_signed_payload, WebAuthnAssertion, WebAuthnCeremonyType,
+    WebAuthnAssertion, WebAuthnCeremonyType, unwrap_der_signature, verify_webauthn_assertion,
+    webauthn_signed_hash, webauthn_signed_payload,
 };
 
 #[cfg(test)]
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_encryption_workflow() {
-        use encryption::{SymmetricKey, X25519KeyPair, envelope_encrypt, envelope_decrypt};
+        use encryption::{SymmetricKey, X25519KeyPair, envelope_decrypt, envelope_encrypt};
 
         // Symmetric encryption
         let sym_key = SymmetricKey::generate();
@@ -231,5 +231,4 @@ mod tests {
         let decrypted = envelope_decrypt(&recipient, &envelope).unwrap();
         assert_eq!(decrypted, plaintext);
     }
-
 }

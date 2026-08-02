@@ -2,20 +2,22 @@
 //!
 //! Run with: cargo bench -p tenzro-consensus
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 use tenzro_consensus::leader_reputation::LeaderReputation;
 use tenzro_consensus::validator::{EquivocationDetector, ValidatorInfo, ValidatorSet};
-use tenzro_consensus::voter::{bls_payload_for_vote, Vote, VoteCollector, VoteType};
+use tenzro_consensus::voter::{Vote, VoteCollector, VoteType, bls_payload_for_vote};
 use tenzro_consensus::{ConsensusConfig, EpochManager, Mempool};
 use tenzro_crypto::bls::{BlsKeyPair, BlsSignature};
-use tenzro_crypto::composite::{CompositePublicKey, CompositeSignature, HybridSigner, InMemoryHybridSigner};
+use tenzro_crypto::composite::{
+    CompositePublicKey, CompositeSignature, HybridSigner, InMemoryHybridSigner,
+};
 use tenzro_crypto::keys::{KeyPair, KeyType};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::signatures::Ed25519SignerImpl;
+use tenzro_types::Signature;
 use tenzro_types::primitives::{Address, BlockHeight, ChainId, Hash, Nonce};
 use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
-use tenzro_types::Signature;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -88,7 +90,9 @@ fn create_signed_vote(
 }
 
 fn placeholder_bls_sig() -> BlsSignature {
-    BlsKeyPair::generate().unwrap().sign(b"__bench_placeholder__")
+    BlsKeyPair::generate()
+        .unwrap()
+        .sign(b"__bench_placeholder__")
 }
 
 fn create_test_tx(nonce: u64) -> SignedTransaction {
@@ -129,10 +133,7 @@ fn create_plain_validators(count: usize) -> Vec<ValidatorInfo> {
 fn placeholder_composite_pk() -> CompositePublicKey {
     let kp = KeyPair::generate(KeyType::Ed25519).unwrap();
     let pq = MlDsaSigningKey::generate();
-    CompositePublicKey::new(
-        kp.public_key().clone(),
-        pq.verifying_key_bytes().to_vec(),
-    )
+    CompositePublicKey::new(kp.public_key().clone(), pq.verifying_key_bytes().to_vec())
 }
 
 fn placeholder_composite_sig() -> CompositeSignature {

@@ -1,7 +1,7 @@
 //! Error types for the consensus module
 
-use thiserror::Error;
 use tenzro_types::primitives::BlockHeight;
+use thiserror::Error;
 
 /// Result type for consensus operations
 pub type Result<T> = std::result::Result<T, ConsensusError>;
@@ -102,7 +102,9 @@ pub enum ConsensusError {
     AlreadyStarted,
 
     /// Equivocation detected
-    #[error("Equivocation detected: validator {validator} voted for multiple blocks in view {view}")]
+    #[error(
+        "Equivocation detected: validator {validator} voted for multiple blocks in view {view}"
+    )]
     Equivocation { validator: String, view: u64 },
 
     /// Per-DID admission lane bucket exhausted (Spec 2).
@@ -110,7 +112,9 @@ pub enum ConsensusError {
     /// `lane` carries the lane the controller was assigned to; `retry_after_ms`
     /// is the controller's best-effort hint for when one bucket token will be
     /// available; `current_rate` is the lane's per-second refill in tokens/sec.
-    #[error("Rate limit exceeded for lane {lane}: retry after {retry_after_ms}ms (rate {current_rate}/s)")]
+    #[error(
+        "Rate limit exceeded for lane {lane}: retry after {retry_after_ms}ms (rate {current_rate}/s)"
+    )]
     RateLimited {
         lane: &'static str,
         retry_after_ms: u64,

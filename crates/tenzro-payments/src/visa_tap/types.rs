@@ -162,9 +162,17 @@ mod tests {
         let challenge = VisaTapChallenge::default();
         assert_eq!(challenge.max_signature_age_secs, 480);
         assert_eq!(challenge.required_headers.len(), 3);
-        assert!(challenge.required_headers.contains(&"@authority".to_string()));
+        assert!(
+            challenge
+                .required_headers
+                .contains(&"@authority".to_string())
+        );
         assert!(challenge.required_headers.contains(&"@path".to_string()));
-        assert!(challenge.required_headers.contains(&"content-type".to_string()));
+        assert!(
+            challenge
+                .required_headers
+                .contains(&"content-type".to_string())
+        );
     }
 
     #[test]
@@ -210,8 +218,14 @@ mod tests {
     fn test_agent_tag_round_trip() {
         assert_eq!(AgentTag::BrowserAuth.as_str(), "agent-browser-auth");
         assert_eq!(AgentTag::PayerAuth.as_str(), "agent-payer-auth");
-        assert_eq!(AgentTag::parse("agent-browser-auth"), Some(AgentTag::BrowserAuth));
-        assert_eq!(AgentTag::parse("agent-payer-auth"), Some(AgentTag::PayerAuth));
+        assert_eq!(
+            AgentTag::parse("agent-browser-auth"),
+            Some(AgentTag::BrowserAuth)
+        );
+        assert_eq!(
+            AgentTag::parse("agent-payer-auth"),
+            Some(AgentTag::PayerAuth)
+        );
         assert_eq!(AgentTag::parse("agent-checkout"), None);
         assert_eq!(AgentTag::parse(""), None);
     }

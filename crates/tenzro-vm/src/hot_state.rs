@@ -210,7 +210,12 @@ impl HotStateMarket {
             reex as f64 / writes as f64
         };
         let is_hot = score >= HOT_STATE_SCORE_FLOOR && writes >= HOT_STATE_WRITE_FLOOR;
-        ContentionScore { score, reexecutions: reex, writes, is_hot }
+        ContentionScore {
+            score,
+            reexecutions: reex,
+            writes,
+            is_hot,
+        }
     }
 
     /// Convenience: the [`local_multiplier_for_score`] applied to the
@@ -246,11 +251,7 @@ impl HotStateMarket {
     ///
     /// `addresses` may be empty; in that case the result is
     /// `(base_fee, 0)`.
-    pub fn surcharge_multi(
-        &self,
-        addresses: &[&[u8]],
-        base_fee: u128,
-    ) -> (u128, u128) {
+    pub fn surcharge_multi(&self, addresses: &[&[u8]], base_fee: u128) -> (u128, u128) {
         let mut max_effective = base_fee;
         let mut max_surcharge: u128 = 0;
         for addr in addresses {
@@ -332,7 +333,13 @@ mod tests {
         // High score (50% reexec) but only 10 writes — under floor of 50.
         let market = HotStateMarket::new();
         let mut samples = HashMap::new();
-        samples.insert(addr(0xAA), AccountSample { reexecutions: 5, writes: 10 });
+        samples.insert(
+            addr(0xAA),
+            AccountSample {
+                reexecutions: 5,
+                writes: 10,
+            },
+        );
         market.record_block(samples);
 
         let score = market.contention(&addr(0xAA));
@@ -347,7 +354,13 @@ mod tests {
         // High write volume but low reexec rate (well under 0.20).
         let market = HotStateMarket::new();
         let mut samples = HashMap::new();
-        samples.insert(addr(0xAA), AccountSample { reexecutions: 5, writes: 100 });
+        samples.insert(
+            addr(0xAA),
+            AccountSample {
+                reexecutions: 5,
+                writes: 100,
+            },
+        );
         market.record_block(samples);
 
         let score = market.contention(&addr(0xAA));
@@ -362,7 +375,13 @@ mod tests {
         // 30% reexec rate, 100 writes — passes both floors.
         let market = HotStateMarket::new();
         let mut samples = HashMap::new();
-        samples.insert(addr(0xAA), AccountSample { reexecutions: 30, writes: 100 });
+        samples.insert(
+            addr(0xAA),
+            AccountSample {
+                reexecutions: 30,
+                writes: 100,
+            },
+        );
         market.record_block(samples);
 
         let score = market.contention(&addr(0xAA));
@@ -384,7 +403,13 @@ mod tests {
 
         // Block 1: hot
         let mut s1 = HashMap::new();
-        s1.insert(addr(0xAA), AccountSample { reexecutions: 30, writes: 100 });
+        s1.insert(
+            addr(0xAA),
+            AccountSample {
+                reexecutions: 30,
+                writes: 100,
+            },
+        );
         market.record_block(s1);
         assert!(market.contention(&addr(0xAA)).is_hot);
 
@@ -408,11 +433,29 @@ mod tests {
         let market = HotStateMarket::new();
         let mut s = HashMap::new();
         // Account A: score 0.30 → mult 1.5×
-        s.insert(addr(0xAA), AccountSample { reexecutions: 30, writes: 100 });
+        s.insert(
+            addr(0xAA),
+            AccountSample {
+                reexecutions: 30,
+                writes: 100,
+            },
+        );
         // Account B: score 0.50 → mult 2.75×
-        s.insert(addr(0xBB), AccountSample { reexecutions: 50, writes: 100 });
+        s.insert(
+            addr(0xBB),
+            AccountSample {
+                reexecutions: 50,
+                writes: 100,
+            },
+        );
         // Account C: cold
-        s.insert(addr(0xCC), AccountSample { reexecutions: 0, writes: 100 });
+        s.insert(
+            addr(0xCC),
+            AccountSample {
+                reexecutions: 0,
+                writes: 100,
+            },
+        );
         market.record_block(s);
 
         let base = 1_000_000_000u128;
@@ -441,7 +484,13 @@ mod tests {
         let market = HotStateMarket::new();
         for _ in 0..4 {
             let mut s = HashMap::new();
-            s.insert(addr(0xAA), AccountSample { reexecutions: 8, writes: 25 });
+            s.insert(
+                addr(0xAA),
+                AccountSample {
+                    reexecutions: 8,
+                    writes: 25,
+                },
+            );
             market.record_block(s);
         }
         let score = market.contention(&addr(0xAA));
@@ -455,7 +504,13 @@ mod tests {
     fn reset_clears_window() {
         let market = HotStateMarket::new();
         let mut s = HashMap::new();
-        s.insert(addr(0xAA), AccountSample { reexecutions: 30, writes: 100 });
+        s.insert(
+            addr(0xAA),
+            AccountSample {
+                reexecutions: 30,
+                writes: 100,
+            },
+        );
         market.record_block(s);
         assert!(market.contention(&addr(0xAA)).is_hot);
         market.reset();
@@ -465,8 +520,14 @@ mod tests {
 
     #[test]
     fn account_sample_merge() {
-        let mut a = AccountSample { reexecutions: 1, writes: 5 };
-        a.merge(AccountSample { reexecutions: 2, writes: 3 });
+        let mut a = AccountSample {
+            reexecutions: 1,
+            writes: 5,
+        };
+        a.merge(AccountSample {
+            reexecutions: 2,
+            writes: 3,
+        });
         assert_eq!(a.reexecutions, 3);
         assert_eq!(a.writes, 8);
     }

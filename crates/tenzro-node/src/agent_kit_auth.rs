@@ -48,20 +48,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use tenzro_agent_kit::{
-    AgentAuthRequest, AgentCredentials, AgentKitError, AuthIssuer, DpopSigner,
-};
-use tenzro_auth::{
-    AapOverrides, AuthEngine, AuthorizationDetail, AuthorizationDetails,
-};
+use tenzro_agent_kit::{AgentAuthRequest, AgentCredentials, AgentKitError, AuthIssuer, DpopSigner};
+use tenzro_auth::{AapOverrides, AuthEngine, AuthorizationDetail, AuthorizationDetails};
 use tenzro_types::{AssetId, ResourceClass};
 
 /// Canonical [`AuthIssuer`] adapter. Holds an `Arc<AuthEngine>` and mints
@@ -87,10 +83,7 @@ impl NodeAuthIssuer {
 
 #[async_trait]
 impl AuthIssuer for NodeAuthIssuer {
-    async fn issue(
-        &self,
-        request: AgentAuthRequest,
-    ) -> Result<AgentCredentials, AgentKitError> {
+    async fn issue(&self, request: AgentAuthRequest) -> Result<AgentCredentials, AgentKitError> {
         // 1. Generate a fresh DPoP keypair. Ed25519 over OsRng — the
         //    same algorithm the DPoP parser accepts (`alg=EdDSA`,
         //    `kty=OKP`, `crv=Ed25519`).
@@ -105,10 +98,7 @@ impl AuthIssuer for NodeAuthIssuer {
         //    exactly one place in the workspace that knows the canonical
         //    serialization (and any change there propagates here for free).
         let pubkey_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
-        let jwk_json = format!(
-            r#"{{"kty":"OKP","crv":"Ed25519","x":"{}"}}"#,
-            pubkey_b64
-        );
+        let jwk_json = format!(r#"{{"kty":"OKP","crv":"Ed25519","x":"{}"}}"#, pubkey_b64);
         let jkt = tenzro_auth::DpopProof::compute_jkt(&jwk_json)
             .map_err(|e| AgentKitError::Auth(format!("compute jkt: {}", e)))?;
 
@@ -259,8 +249,8 @@ fn project_to_rar(req: &AgentAuthRequest) -> Result<AuthorizationDetails, AgentK
             // the per-tx + per-day caps. Bridges, deposits, swaps, and
             // rebalances ultimately debit the bearer's wallet, so the
             // RAR shape that gates them is the same.
-            "transfer" | "send" | "pay" | "bridge" | "deposit" | "withdraw"
-            | "swap" | "rebalance" | "yield" | "lend" | "borrow" | "settle" => {
+            "transfer" | "send" | "pay" | "bridge" | "deposit" | "withdraw" | "swap"
+            | "rebalance" | "yield" | "lend" | "borrow" | "settle" => {
                 AuthorizationDetail::Transfer {
                     asset: AssetId::tnzo(),
                     max_amount,
@@ -272,21 +262,17 @@ fn project_to_rar(req: &AgentAuthRequest) -> Result<AuthorizationDetails, AgentK
             // Inference / model calls. `max_amount_per_call` mirrors
             // the per-transaction ceiling; per-day inherits from the
             // delegation spec.
-            "inference" | "infer" | "chat" | "model" => {
-                AuthorizationDetail::Inference {
-                    max_amount_per_call: max_amount,
-                    max_daily_amount: max_daily,
-                    allowed_model_ids: None,
-                }
-            }
+            "inference" | "infer" | "chat" | "model" => AuthorizationDetail::Inference {
+                max_amount_per_call: max_amount,
+                max_daily_amount: max_daily,
+                allowed_model_ids: None,
+            },
 
             // Staking / unstaking.
-            "stake" | "unstake" | "delegate" | "undelegate" => {
-                AuthorizationDetail::Stake {
-                    max_amount,
-                    allowed_validators: None,
-                }
-            }
+            "stake" | "unstake" | "delegate" | "undelegate" => AuthorizationDetail::Stake {
+                max_amount,
+                allowed_validators: None,
+            },
 
             // Governance votes.
             "vote" | "governance" => AuthorizationDetail::Vote {
@@ -294,26 +280,23 @@ fn project_to_rar(req: &AgentAuthRequest) -> Result<AuthorizationDetails, AgentK
             },
 
             // Escrow lifecycle.
-            "create_escrow" | "escrow" | "lock" => {
-                AuthorizationDetail::CreateEscrow {
-                    asset: AssetId::tnzo(),
-                    max_amount,
-                    allowed_payees: None,
+            "create_escrow" | "escrow" | "lock" => AuthorizationDetail::CreateEscrow {
+                asset: AssetId::tnzo(),
+                max_amount,
+                allowed_payees: None,
+            },
+            "discharge_escrow" | "release_escrow" | "refund_escrow" | "release" | "refund" => {
+                AuthorizationDetail::DischargeEscrow {
+                    allowed_escrow_ids: None,
                 }
             }
-            "discharge_escrow" | "release_escrow" | "refund_escrow"
-            | "release" | "refund" => AuthorizationDetail::DischargeEscrow {
-                allowed_escrow_ids: None,
-            },
 
             // Contract calls + deploys.
-            "contract" | "call" | "invoke" | "execute"
-            | "evm_dispatch" | "svm_dispatch" | "daml_submit" => {
-                AuthorizationDetail::Contract {
-                    allowed_contracts: None,
-                    allow_deploy: false,
-                }
-            }
+            "contract" | "call" | "invoke" | "execute" | "evm_dispatch" | "svm_dispatch"
+            | "daml_submit" => AuthorizationDetail::Contract {
+                allowed_contracts: None,
+                allow_deploy: false,
+            },
             "deploy" | "deploy_contract" => AuthorizationDetail::Contract {
                 allowed_contracts: None,
                 allow_deploy: true,
@@ -393,7 +376,11 @@ mod tests {
 
     impl KvStore for MemStore {
         fn get(&self, cf: &str, key: &[u8]) -> tenzro_storage::Result<Option<Vec<u8>>> {
-            Ok(self.rows.read().get(&(cf.to_string(), key.to_vec())).cloned())
+            Ok(self
+                .rows
+                .read()
+                .get(&(cf.to_string(), key.to_vec()))
+                .cloned())
         }
         fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> tenzro_storage::Result<()> {
             self.rows
@@ -417,10 +404,7 @@ mod tests {
                 .map(|((_, k), _)| k.clone())
                 .collect())
         }
-        fn write_batch(
-            &self,
-            ops: Vec<tenzro_storage::WriteOp>,
-        ) -> tenzro_storage::Result<()> {
+        fn write_batch(&self, ops: Vec<tenzro_storage::WriteOp>) -> tenzro_storage::Result<()> {
             self.write_batch_sync(ops)
         }
         fn write_batch_sync(

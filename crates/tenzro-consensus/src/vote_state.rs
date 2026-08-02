@@ -127,13 +127,9 @@ pub enum VrsDecision {
     Sign,
     /// Identical to the last signed vote — caller may re-broadcast the
     /// persisted signature (idempotent retry).
-    Reuse {
-        signature: Vec<u8>,
-    },
+    Reuse { signature: Vec<u8> },
     /// Refusal — signing this would equivocate or reverse a finalized step.
-    Reject {
-        reason: String,
-    },
+    Reject { reason: String },
 }
 
 /// Trait for persisting vote state. Sync API — fsync-on-write must complete
@@ -186,14 +182,7 @@ pub trait VoteStateStore: Send + Sync {
             reason: format!(
                 "double-sign refused: candidate (view={}, height={}, step={:?}, hash={}) \
                  conflicts with last (view={}, height={}, step={:?}, hash={:?})",
-                view,
-                height,
-                step,
-                block_hash,
-                last.view,
-                last.height,
-                last.step,
-                last.block_hash,
+                view, height, step, block_hash, last.view, last.height, last.step, last.block_hash,
             ),
         })
     }
@@ -294,10 +283,7 @@ impl FileVoteStateStore {
         use std::io::Write;
 
         let bytes = serde_json::to_vec_pretty(state).map_err(|e| {
-            ConsensusError::Internal(format!(
-                "FileVoteStateStore: serialize failed: {}",
-                e
-            ))
+            ConsensusError::Internal(format!("FileVoteStateStore: serialize failed: {}", e))
         })?;
 
         let tmp_path = self.path.with_extension("tmp");

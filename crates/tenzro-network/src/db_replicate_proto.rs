@@ -31,8 +31,8 @@
 //!   * Outbound request timeout: 30 s.
 
 use libp2p::{
-    request_response::{self, ProtocolSupport},
     StreamProtocol,
+    request_response::{self, ProtocolSupport},
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -124,10 +124,7 @@ pub type DbReplicateBehaviour =
 pub fn new_behaviour() -> DbReplicateBehaviour {
     let protocol = StreamProtocol::new(DB_REPLICATE_PROTOCOL);
     let cfg = request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT);
-    request_response::cbor::Behaviour::new(
-        std::iter::once((protocol, ProtocolSupport::Full)),
-        cfg,
-    )
+    request_response::cbor::Behaviour::new(std::iter::once((protocol, ProtocolSupport::Full)), cfg)
 }
 
 #[cfg(test)]

@@ -224,7 +224,11 @@ mod tests {
         // Announced size is wrong — must be caught.
         let lying = make_gradient(hash, payload.len() as u64 + 1);
         let err = store.fetch(&lying).await.unwrap_err();
-        assert!(matches!(err, TrainingError::PayloadSizeMismatch { .. }), "{:?}", err);
+        assert!(
+            matches!(err, TrainingError::PayloadSizeMismatch { .. }),
+            "{:?}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -241,7 +245,13 @@ mod tests {
         let hash = compute_payload_hash(payload);
         let grad = make_gradient(hash, 10); // lying about size
         let err = verify_payload(&grad, payload).unwrap_err();
-        assert!(matches!(err, TrainingError::PayloadSizeMismatch { header: 10, actual: 3 }));
+        assert!(matches!(
+            err,
+            TrainingError::PayloadSizeMismatch {
+                header: 10,
+                actual: 3
+            }
+        ));
     }
 
     #[test]

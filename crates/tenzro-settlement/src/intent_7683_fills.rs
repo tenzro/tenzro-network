@@ -38,10 +38,8 @@ use crate::error::{Result, SettlementError};
 use dashmap::DashMap;
 use serde_json;
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_SETTLEMENTS};
-use tenzro_types::intent_7683::{
-    fill_storage_key, FillRecord, FILL_KEY_PREFIX,
-};
+use tenzro_storage::{CF_SETTLEMENTS, KvStore, WriteOp};
+use tenzro_types::intent_7683::{FILL_KEY_PREFIX, FillRecord, fill_storage_key};
 use tenzro_types::primitives::Hash;
 use tracing::{info, warn};
 
@@ -166,11 +164,9 @@ impl Spec4FillRegistry {
         // Use entry API to make the check-and-insert atomic w.r.t. other
         // concurrent record_fill calls for the same order_id.
         match self.fills.entry(order_id) {
-            dashmap::mapref::entry::Entry::Occupied(_) => {
-                Err(SettlementError::OrderAlreadyFilled(hex::encode(
-                    order_id.as_bytes(),
-                )))
-            }
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(SettlementError::OrderAlreadyFilled(
+                hex::encode(order_id.as_bytes()),
+            )),
             dashmap::mapref::entry::Entry::Vacant(slot) => {
                 // Persist BEFORE inserting into the in-memory map. If the
                 // disk write fails we leave no in-memory trace — the next
@@ -179,10 +175,7 @@ impl Spec4FillRegistry {
                 // record on restart.
                 if let Some(storage) = &self.storage {
                     let bytes = serde_json::to_vec(&record).map_err(|e| {
-                        SettlementError::StorageError(format!(
-                            "serialize 7683 FillRecord: {}",
-                            e
-                        ))
+                        SettlementError::StorageError(format!("serialize 7683 FillRecord: {}", e))
                     })?;
                     let ops = vec![WriteOp::Put {
                         cf: CF_SETTLEMENTS.to_string(),

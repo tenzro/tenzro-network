@@ -1,0 +1,32 @@
+# cargo-nextest configuration.
+#
+# The only thing here is scheduling: some tests measure wall-clock behaviour
+# and cannot share a machine with each other.
+
+[test-groups]
+# The consensus cluster simulations spin up N HotStuff-2 engines, each with its
+# own tokio runtime and a 100ms pacemaker tick, then assert on how many blocks
+# finalise inside a fixed wall-clock window.
+#
+# Run two of those concurrently and they starve each other's schedulers: the
+# assertion still measures wall-clock, but the CPU to make progress in that
+# window has gone to the other simulation. They pass individually and fail in a
+# batch — the classic shape of a timing test that is really measuring load.
+#
+# Serialising them is the fix rather than loosening the thresholds, because the
+# thresholds are the point: they are what would catch a genuine regression in
+# the adaptive view-change timer.
+cluster-simulations = { max-threads = 1 }
+
+# Every wall-clock-sensitive test shares this one group, not just the consensus
+# sims against each other. A first attempt serialised only the consensus
+# binaries and `bimodal_topology_finalises` still flaked — it was being starved
+# by `da_committee_sustained_write_load`, 195 seconds of sustained RocksDB
+# writes running alongside it. Any heavy neighbour will do it, so the group has
+# to cover all of them.
+[[profile.default.overrides]]
+filter = 'binary(tail_fork_regression) or binary(adversarial_consensus) or binary(da_committee_load)'
+test-group = 'cluster-simulations'
+# These are 10-120s each by construction; the default 60s slow-timeout just
+# produces noise for tests whose whole purpose is to run for 30 seconds.
+slow-timeout = { period = "60s", terminate-after = 5 }

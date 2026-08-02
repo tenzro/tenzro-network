@@ -50,9 +50,7 @@ impl WorkflowStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            WorkflowStatus::Completed
-                | WorkflowStatus::Failed
-                | WorkflowStatus::Cancelled
+            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled
         )
     }
 
@@ -213,9 +211,9 @@ impl Workflow {
 
     /// `true` once every participant DID has at least one matching signature.
     pub fn has_all_signatures(&self) -> bool {
-        self.participants.iter().all(|p| {
-            self.signatures.iter().any(|s| s.did == p.did)
-        })
+        self.participants
+            .iter()
+            .all(|p| self.signatures.iter().any(|s| s.did == p.did))
     }
 }
 
@@ -234,7 +232,10 @@ mod tests {
             description: None,
             participants: vec![
                 Participant::new(creator, vec![ParticipantRole::Initiator]),
-                Participant::new("did:tenzro:human:bob:1", vec![ParticipantRole::Counterparty]),
+                Participant::new(
+                    "did:tenzro:human:bob:1",
+                    vec![ParticipantRole::Counterparty],
+                ),
             ],
             obligations: vec![],
             approval_gates: vec![],

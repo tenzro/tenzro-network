@@ -151,9 +151,7 @@ impl VerifyConsumeCmd {
         if let Some(t) = &self.witness_type_string {
             params["witness_type_string"] = serde_json::Value::String(t.clone());
         }
-        let v: serde_json::Value = rpc
-            .call("tenzro_permit2VerifyAndConsume", params)
-            .await?;
+        let v: serde_json::Value = rpc.call("tenzro_permit2VerifyAndConsume", params).await?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())
     }

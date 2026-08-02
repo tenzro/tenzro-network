@@ -16,9 +16,9 @@
 
 use std::sync::Arc;
 
-use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, extract::Path, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::web::handlers::WebState;
 
@@ -172,7 +172,10 @@ mod tests {
 
     #[test]
     fn ok_result_contains_context_and_document() {
-        let r = DidResolutionResult::ok(json!({"id": "did:tenzro:human:abc"}), "application/did+ld+json");
+        let r = DidResolutionResult::ok(
+            json!({"id": "did:tenzro:human:abc"}),
+            "application/did+ld+json",
+        );
         assert_eq!(r.context[0], "https://w3id.org/did-resolution/v1");
         assert!(r.did_document.is_some());
         assert_eq!(

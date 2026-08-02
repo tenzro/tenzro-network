@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use tenzro_cortex::{
-    error::{CortexError, Result as CortexResult},
     CortexGossipPublisher,
+    error::{CortexError, Result as CortexResult},
 };
 use tenzro_network::{MessagePayload, NetworkMessage, NetworkService};
 

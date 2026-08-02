@@ -2,9 +2,9 @@
 //!
 //! Register, list, and message AI agents on the Tenzro Network.
 
-use clap::{Parser, Subcommand};
-use anyhow::Result;
 use crate::output;
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
 /// Agent management commands
 #[derive(Debug, Subcommand)]
@@ -132,7 +132,10 @@ impl AgentPruneCmd {
             return Ok(());
         }
 
-        let suspended = result.get("suspended").and_then(|v| v.as_u64()).unwrap_or(0);
+        let suspended = result
+            .get("suspended")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         output::print_success(&format!(
             "Agent reconcile complete: {} agent(s) auto-suspended",
             suspended
@@ -171,13 +174,21 @@ impl AgentRegisterCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let caps = self.capabilities.clone().unwrap_or_else(|| vec!["general".to_string()]);
+        let caps = self
+            .capabilities
+            .clone()
+            .unwrap_or_else(|| vec!["general".to_string()]);
 
-        let result: serde_json::Value = rpc.call("tenzro_registerAgent", serde_json::json!({
-            "name": self.name,
-            "creator": self.creator,
-            "capabilities": caps,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_registerAgent",
+                serde_json::json!({
+                    "name": self.name,
+                    "creator": self.creator,
+                    "capabilities": caps,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -225,12 +236,17 @@ impl AgentListCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let agents: Vec<serde_json::Value> = rpc.call("tenzro_listAgents", serde_json::json!([])).await.unwrap_or_default();
+        let agents: Vec<serde_json::Value> = rpc
+            .call("tenzro_listAgents", serde_json::json!([]))
+            .await
+            .unwrap_or_default();
 
         spinner.finish_and_clear();
 
         if agents.is_empty() {
-            output::print_info("No agents registered. Register one with: tenzro agent register --name <name> --creator <address>");
+            output::print_info(
+                "No agents registered. Register one with: tenzro agent register --name <name> --creator <address>",
+            );
             return Ok(());
         }
 
@@ -253,7 +269,8 @@ impl AgentListCmd {
                     output::print_field("Status", v);
                 }
                 if let Some(caps) = agent.get("capabilities").and_then(|v| v.as_array()) {
-                    let cap_names: Vec<&str> = caps.iter()
+                    let cap_names: Vec<&str> = caps
+                        .iter()
                         .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
                         .collect();
                     output::print_field("Capabilities", &cap_names.join(", "));
@@ -268,10 +285,26 @@ impl AgentListCmd {
             let mut rows = Vec::new();
             for agent in &agents {
                 rows.push(vec![
-                    agent.get("agent_id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                    agent.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
-                    agent.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                    agent.get("creator").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                    agent
+                        .get("agent_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    agent
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                    agent
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    agent
+                        .get("creator")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
                 ]);
             }
             output::print_table(&headers, &rows);
@@ -312,11 +345,16 @@ impl AgentSendCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_sendAgentMessage", serde_json::json!({
-            "from": self.from,
-            "to": self.to,
-            "message": self.message,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_sendAgentMessage",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": self.to,
+                    "message": self.message,
+                }),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -367,11 +405,16 @@ impl AgentSpawnCmd {
 
         let caps = self.capabilities.clone().unwrap_or_default();
 
-        let result: serde_json::Value = rpc.call("tenzro_spawnAgent", serde_json::json!([{
-            "parent_id": self.parent_id,
-            "name": self.name,
-            "capabilities": caps,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_spawnAgent",
+                serde_json::json!([{
+                    "parent_id": self.parent_id,
+                    "name": self.name,
+                    "capabilities": caps,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -421,11 +464,16 @@ impl AgentRunTaskCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_runAgentTask", serde_json::json!([{
-            "agent_id": self.agent_id,
-            "task": self.task,
-            "inference_url": self.inference_url,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_runAgentTask",
+                serde_json::json!([{
+                    "agent_id": self.agent_id,
+                    "task": self.task,
+                    "inference_url": self.inference_url,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -484,13 +532,18 @@ impl AgentCreateSwarmCmd {
         let members: serde_json::Value = serde_json::from_str(&self.members)
             .map_err(|e| anyhow::anyhow!("Invalid --members JSON: {}", e))?;
 
-        let result: serde_json::Value = rpc.call("tenzro_createSwarm", serde_json::json!([{
-            "orchestrator_id": self.orchestrator_id,
-            "members": members,
-            "max_members": self.max_members,
-            "task_timeout_secs": self.task_timeout_secs,
-            "parallel": self.parallel,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_createSwarm",
+                serde_json::json!([{
+                    "orchestrator_id": self.orchestrator_id,
+                    "members": members,
+                    "max_members": self.max_members,
+                    "task_timeout_secs": self.task_timeout_secs,
+                    "parallel": self.parallel,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -530,9 +583,14 @@ impl AgentGetSwarmCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getSwarmStatus", serde_json::json!([{
-            "swarm_id": self.swarm_id,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getSwarmStatus",
+                serde_json::json!([{
+                    "swarm_id": self.swarm_id,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -551,19 +609,29 @@ impl AgentGetSwarmCmd {
         }
 
         if let Some(members) = result.get("members").and_then(|v| v.as_array())
-            && !members.is_empty() {
-                println!();
-                let headers = vec!["Agent ID", "Role", "Status"];
-                let mut rows = Vec::new();
-                for m in members {
-                    rows.push(vec![
-                        m.get("agent_id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                        m.get("role").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                        m.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                    ]);
-                }
-                output::print_table(&headers, &rows);
+            && !members.is_empty()
+        {
+            println!();
+            let headers = vec!["Agent ID", "Role", "Status"];
+            let mut rows = Vec::new();
+            for m in members {
+                rows.push(vec![
+                    m.get("agent_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    m.get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    m.get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                ]);
             }
+            output::print_table(&headers, &rows);
+        }
 
         Ok(())
     }
@@ -591,9 +659,14 @@ impl AgentTerminateSwarmCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_terminateSwarm", serde_json::json!([{
-            "swarm_id": self.swarm_id,
-        }])).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_terminateSwarm",
+                serde_json::json!([{
+                    "swarm_id": self.swarm_id,
+                }]),
+            )
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -649,7 +722,10 @@ impl AgentListTemplatesCmd {
             println!();
             for tpl in templates {
                 let name = tpl.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                let id = tpl.get("template_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let id = tpl
+                    .get("template_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let ver = tpl.get("version").and_then(|v| v.as_str()).unwrap_or("?");
                 let has_spec = tpl.get("execution_spec").is_some_and(|v| !v.is_null());
                 let spec_label = if has_spec { " [executable]" } else { "" };
@@ -684,10 +760,12 @@ impl AgentGetTemplateCmd {
         let spinner = output::create_spinner("Fetching template...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_getAgentTemplate",
-            serde_json::json!({ "template_id": self.id }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getAgentTemplate",
+                serde_json::json!({ "template_id": self.id }),
+            )
+            .await?;
         spinner.finish_and_clear();
 
         if let Some(name) = result.get("name").and_then(|v| v.as_str()) {
@@ -711,9 +789,10 @@ impl AgentGetTemplateCmd {
 
         if has_spec
             && let Some(spec) = result.get("execution_spec")
-                && let Some(steps) = spec.get("steps").and_then(|v| v.as_array()) {
-                    output::print_field("Steps", &steps.len().to_string());
-                }
+            && let Some(steps) = spec.get("steps").and_then(|v| v.as_array())
+        {
+            output::print_field("Steps", &steps.len().to_string());
+        }
 
         Ok(())
     }
@@ -760,10 +839,7 @@ impl AgentSpawnTemplateCmd {
             payload["parent_machine_did"] = serde_json::Value::String(parent.clone());
         }
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_spawnAgentTemplate",
-            payload,
-        ).await?;
+        let result: serde_json::Value = rpc.call("tenzro_spawnAgentTemplate", payload).await?;
         spinner.finish_and_clear();
 
         output::print_success("Agent spawned successfully!");
@@ -813,19 +889,22 @@ impl AgentRunTemplateCmd {
         output::print_header("Run Agent Template");
 
         let mode = if self.dry_run { " (dry-run)" } else { "" };
-        let spinner = output::create_spinner(
-            &format!("Running agent {}{mode}...", &self.agent_id[..8.min(self.agent_id.len())]),
-        );
+        let spinner = output::create_spinner(&format!(
+            "Running agent {}{mode}...",
+            &self.agent_id[..8.min(self.agent_id.len())]
+        ));
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_runAgentTemplate",
-            serde_json::json!({
-                "agent_id": self.agent_id,
-                "max_iterations": self.max_iterations,
-                "dry_run": self.dry_run,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_runAgentTemplate",
+                serde_json::json!({
+                    "agent_id": self.agent_id,
+                    "max_iterations": self.max_iterations,
+                    "dry_run": self.dry_run,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
 
         output::print_success("Execution complete!");
@@ -834,15 +913,22 @@ impl AgentRunTemplateCmd {
         if let Some(v) = result.get("steps_executed").and_then(|v| v.as_u64()) {
             output::print_field("Steps Executed", &v.to_string());
         }
-        if let Some(v) = result.get("steps_skipped_by_delegation").and_then(|v| v.as_u64())
-            && v > 0 {
-                output::print_field("Skipped (delegation)", &v.to_string());
-            }
+        if let Some(v) = result
+            .get("steps_skipped_by_delegation")
+            .and_then(|v| v.as_u64())
+            && v > 0
+        {
+            output::print_field("Skipped (delegation)", &v.to_string());
+        }
         if let Some(v) = result.get("steps_failed").and_then(|v| v.as_u64())
-            && v > 0 {
-                output::print_field("Failed", &v.to_string());
-            }
-        if let Some(v) = result.get("total_value_dispatched").and_then(|v| v.as_u64()) {
+            && v > 0
+        {
+            output::print_field("Failed", &v.to_string());
+        }
+        if let Some(v) = result
+            .get("total_value_dispatched")
+            .and_then(|v| v.as_u64())
+        {
             output::print_field("Value Dispatched", &format!("{v} wei"));
         }
 
@@ -873,15 +959,24 @@ impl AgentDelegateCmd {
         output::print_header("Delegate Task to Agent");
         let spinner = output::create_spinner("Delegating...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_delegateTask", serde_json::json!({
-            "agent_id": self.agent_id,
-            "task": self.task,
-            "budget": self.budget,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_delegateTask",
+                serde_json::json!({
+                    "agent_id": self.agent_id,
+                    "task": self.task,
+                    "budget": self.budget,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Task delegated!");
-        if let Some(v) = result.get("task_id").and_then(|v| v.as_str()) { output::print_field("Task ID", v); }
-        if let Some(v) = result.get("status").and_then(|v| v.as_str()) { output::print_field("Status", v); }
+        if let Some(v) = result.get("task_id").and_then(|v| v.as_str()) {
+            output::print_field("Task ID", v);
+        }
+        if let Some(v) = result.get("status").and_then(|v| v.as_str()) {
+            output::print_field("Status", v);
+        }
         Ok(())
     }
 }
@@ -907,7 +1002,9 @@ impl AgentDiscoverCmd {
         let spinner = output::create_spinner("Discovering...");
         let rpc = RpcClient::new(&self.rpc);
         let mut params = serde_json::json!({ "limit": self.limit });
-        if let Some(ref cap) = self.capability { params["capability"] = serde_json::json!(cap); }
+        if let Some(ref cap) = self.capability {
+            params["capability"] = serde_json::json!(cap);
+        }
         let result: serde_json::Value = rpc.call("tenzro_discoverAgents", params).await?;
         spinner.finish_and_clear();
         if let Some(agents) = result.as_array() {
@@ -918,15 +1015,29 @@ impl AgentDiscoverCmd {
                 let mut rows = Vec::new();
                 for a in agents {
                     rows.push(vec![
-                        a.get("agent_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        a.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        a.get("capabilities").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        a.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        a.get("agent_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        a.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        a.get("capabilities")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        a.get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     ]);
                 }
                 output::print_table(&headers, &rows);
             }
-        } else { output::print_json(&result)?; }
+        } else {
+            output::print_json(&result)?;
+        }
         Ok(())
     }
 }
@@ -951,15 +1062,22 @@ impl AgentFundCmd {
         output::print_header("Fund Agent");
         let spinner = output::create_spinner("Funding agent wallet...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_fundAgent", serde_json::json!({
-            "agent_id": self.agent_id,
-            "amount": self.amount,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_fundAgent",
+                serde_json::json!({
+                    "agent_id": self.agent_id,
+                    "amount": self.amount,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Agent funded!");
         output::print_field("Agent ID", &self.agent_id);
         output::print_field("Amount", &format!("{} TNZO", self.amount));
-        if let Some(v) = result.get("tx_hash").and_then(|v| v.as_str()) { output::print_field("Tx Hash", v); }
+        if let Some(v) = result.get("tx_hash").and_then(|v| v.as_str()) {
+            output::print_field("Tx Hash", v);
+        }
         Ok(())
     }
 }
@@ -984,14 +1102,23 @@ impl AgentSpawnFromTemplateCmd {
         output::print_header("Spawn Agent from Template");
         let spinner = output::create_spinner("Spawning...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_spawnAgentFromTemplate", serde_json::json!({
-            "template_id": self.template_id,
-            "name": self.name,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_spawnAgentFromTemplate",
+                serde_json::json!({
+                    "template_id": self.template_id,
+                    "name": self.name,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Agent spawned from template!");
-        if let Some(v) = result.get("agent_id").and_then(|v| v.as_str()) { output::print_field("Agent ID", v); }
-        if let Some(v) = result.get("wallet_address").and_then(|v| v.as_str()) { output::print_field("Wallet", v); }
+        if let Some(v) = result.get("agent_id").and_then(|v| v.as_str()) {
+            output::print_field("Agent ID", v);
+        }
+        if let Some(v) = result.get("wallet_address").and_then(|v| v.as_str()) {
+            output::print_field("Wallet", v);
+        }
         Ok(())
     }
 }
@@ -1016,14 +1143,23 @@ impl AgentSpawnWithSkillCmd {
         output::print_header("Spawn Agent with Skill");
         let spinner = output::create_spinner("Spawning...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_spawnAgentWithSkill", serde_json::json!({
-            "skill_id": self.skill_id,
-            "name": self.name,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_spawnAgentWithSkill",
+                serde_json::json!({
+                    "skill_id": self.skill_id,
+                    "name": self.name,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Agent spawned with skill!");
-        if let Some(v) = result.get("agent_id").and_then(|v| v.as_str()) { output::print_field("Agent ID", v); }
-        if let Some(v) = result.get("skill_id").and_then(|v| v.as_str()) { output::print_field("Skill", v); }
+        if let Some(v) = result.get("agent_id").and_then(|v| v.as_str()) {
+            output::print_field("Agent ID", v);
+        }
+        if let Some(v) = result.get("skill_id").and_then(|v| v.as_str()) {
+            output::print_field("Skill", v);
+        }
         Ok(())
     }
 }
@@ -1051,15 +1187,24 @@ impl AgentPayForInferenceCmd {
         output::print_header("Agent Pay for Inference");
         let spinner = output::create_spinner("Processing payment...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_agentPayForInference", serde_json::json!({
-            "agent_id": self.agent_id,
-            "model_id": self.model_id,
-            "max_amount": self.max_amount,
-        })).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_agentPayForInference",
+                serde_json::json!({
+                    "agent_id": self.agent_id,
+                    "model_id": self.model_id,
+                    "max_amount": self.max_amount,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
         output::print_success("Payment authorized!");
-        if let Some(v) = result.get("payment_id").and_then(|v| v.as_str()) { output::print_field("Payment ID", v); }
-        if let Some(v) = result.get("amount").and_then(|v| v.as_str()) { output::print_field("Amount", v); }
+        if let Some(v) = result.get("payment_id").and_then(|v| v.as_str()) {
+            output::print_field("Payment ID", v);
+        }
+        if let Some(v) = result.get("amount").and_then(|v| v.as_str()) {
+            output::print_field("Amount", v);
+        }
         Ok(())
     }
 }
@@ -1088,15 +1233,19 @@ async fn fetch_controller_nonce_and_chain_id(
         )
         .await
         .ok()
-        .and_then(|v| v.as_str()
-            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        })
         .unwrap_or(0);
     let chain_id = rpc
         .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
         .await
         .ok()
-        .and_then(|v| v.as_str()
-            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        })
         .unwrap_or(1337);
     (nonce, chain_id)
 }
@@ -1134,8 +1283,7 @@ impl AgentPauseCmd {
 
         let rpc = RpcClient::new(&self.rpc);
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) =
-            fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
+        let (nonce, chain_id) = fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
         spinner.set_message("Signing PauseAgent transaction...");
 
         let tx_type = serde_json::json!({
@@ -1148,22 +1296,25 @@ impl AgentPauseCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.controller,
-                "to": self.controller,
-                "value": 0u64,
-                "gas_limit": DEFAULT_KILLSWITCH_PAUSE_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.controller,
+                    "to": self.controller,
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_KILLSWITCH_PAUSE_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
 
-        let tx_hash = result.get("tx_hash")
+        let tx_hash = result
+            .get("tx_hash")
             .or_else(|| result.get("transaction_hash"))
             .and_then(|v| v.as_str())
             .unwrap_or("<unknown>");
@@ -1227,8 +1378,7 @@ impl AgentQuarantineCmd {
 
         let rpc = RpcClient::new(&self.rpc);
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) =
-            fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
+        let (nonce, chain_id) = fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
         spinner.set_message("Signing QuarantineAgent transaction...");
 
         let tx_type = serde_json::json!({
@@ -1241,22 +1391,25 @@ impl AgentQuarantineCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.controller,
-                "to": self.controller,
-                "value": 0u64,
-                "gas_limit": DEFAULT_KILLSWITCH_QUARANTINE_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.controller,
+                    "to": self.controller,
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_KILLSWITCH_QUARANTINE_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
 
-        let tx_hash = result.get("tx_hash")
+        let tx_hash = result
+            .get("tx_hash")
             .or_else(|| result.get("transaction_hash"))
             .and_then(|v| v.as_str())
             .unwrap_or("<unknown>");
@@ -1310,8 +1463,7 @@ impl AgentTerminateCmd {
 
         let rpc = RpcClient::new(&self.rpc);
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) =
-            fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
+        let (nonce, chain_id) = fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
         spinner.set_message("Signing TerminateAgent transaction...");
 
         let tx_type = serde_json::json!({
@@ -1325,22 +1477,25 @@ impl AgentTerminateCmd {
             }
         });
 
-        let result: serde_json::Value = rpc.call(
-            "tenzro_signAndSendTransaction",
-            serde_json::json!({
-                "from": self.controller,
-                "to": self.controller,
-                "value": 0u64,
-                "gas_limit": DEFAULT_KILLSWITCH_TERMINATE_GAS,
-                "gas_price": 1_000_000_000u64,
-                "nonce": nonce,
-                "chain_id": chain_id,
-                "tx_type": tx_type,
-            }),
-        ).await?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.controller,
+                    "to": self.controller,
+                    "value": 0u64,
+                    "gas_limit": DEFAULT_KILLSWITCH_TERMINATE_GAS,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
         spinner.finish_and_clear();
 
-        let tx_hash = result.get("tx_hash")
+        let tx_hash = result
+            .get("tx_hash")
             .or_else(|| result.get("transaction_hash"))
             .and_then(|v| v.as_str())
             .unwrap_or("<unknown>");

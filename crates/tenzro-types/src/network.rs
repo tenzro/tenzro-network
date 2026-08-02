@@ -124,9 +124,7 @@ impl FromStr for NetworkRole {
             "ai" | "model" | "modelprovider" | "model_provider" | "inference" => {
                 Ok(Self::ModelProvider)
             }
-            "compute" | "computeprovider" | "compute_provider" | "gpu" => {
-                Ok(Self::ComputeProvider)
-            }
+            "compute" | "computeprovider" | "compute_provider" | "gpu" => Ok(Self::ComputeProvider),
             "storage" | "storageprovider" | "storage_provider" => Ok(Self::StorageProvider),
             "cloud" | "cloudprovider" | "cloud_provider" => Ok(Self::CloudProvider),
             "edge" | "ingress" => Ok(Self::Edge),
@@ -673,7 +671,9 @@ mod tests {
 
     #[test]
     fn underscored_aliases_parse_to_canonical_roles() {
-        let set: RoleSet = "model_provider,storage_provider,tee_provider".parse().unwrap();
+        let set: RoleSet = "model_provider,storage_provider,tee_provider"
+            .parse()
+            .unwrap();
         assert!(set.serves_ai());
         assert!(set.serves_storage());
         assert!(set.serves_tee());
