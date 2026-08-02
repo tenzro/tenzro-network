@@ -385,7 +385,7 @@ The workflow runtime is its own state machine. It runs alongside (not inside) th
 ## Where a node keeps things
 
 Everything Tenzro writes on a machine lives under one root: `$TENZRO_HOME`, or
-`~/.tenzro` when unset. Model weights, the HuggingFace cache, and dataset shards
+`~/.tenzro` when unset. Model weights, the HuggingFace cache and dataset shards
 are shared across every Tenzro process on the box — content-addressed and
 read-only once written, so two nodes never hold separate copies of the same
 weights. Chain state is per-instance under `instances/<name>/`, because RocksDB
@@ -425,8 +425,8 @@ Three layers, each answering a different question:
   because accepting it would let a shared node's host mutate their tenants'
   resources.
 
-`submitBlock`, `offerSnapshot`, and `applySnapshotChunk` are not on the
-JSON-RPC surface. They were peer traffic reachable over the user-facing port —
+`submitBlock`, `offerSnapshot` and `applySnapshotChunk` are not on the JSON-RPC
+surface. They were peer traffic reachable over the user-facing port —
 `submitBlock` pushed a caller-supplied block onto the finalized path, which by
 contract has already been through consensus and therefore verifies nothing.
 Blocks arrive over peer-authenticated gossip and block-sync; the inbound half of

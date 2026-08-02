@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-123%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-191%20passed-brightgreen)]()
 
 The official [OpenClaw](https://github.com/anthropics/openclaw) skill for interacting with [Tenzro Network](https://tenzro.com) — a full blockchain and multi-chain toolkit for AI agents.
 
@@ -252,6 +252,22 @@ Tenzro Network (decentralized) + External Chains
 - Website: [tenzro.com](https://tenzro.com)
 - Engineering: [eng@tenzro.com](mailto:eng@tenzro.com)
 - GitHub: [github.com/tenzro](https://github.com/tenzro)
+
+## Owner-proof on resource mutations
+
+Several tools that previously took only an identifier now also require a signed
+DID envelope proving control of the resource. An identifier is not a credential:
+a `jti` travels in every audit row, a `webhook_id` comes back from every list
+call, and a `session_id` is a handle the node hands back.
+
+| Tool | Proof required |
+| --- | --- |
+| `revoke_did` | operator admin token **and** an envelope from the DID (or a machine's controller) |
+| `register_webhook` | `owner_did` plus an envelope over the URL |
+| `authorize_session` / `revoke_session` | envelope from the DID that owns the wallet |
+
+Each envelope is bound to the method name and to that call's parameters, so one
+produced for a given action cannot be replayed as another.
 
 ## License
 

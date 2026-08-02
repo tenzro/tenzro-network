@@ -462,6 +462,22 @@ Command-line options:
 - Engineering: [eng@tenzro.com](mailto:eng@tenzro.com)
 - GitHub: [github.com/tenzro](https://github.com/tenzro)
 
+## Owner-proof on resource mutations
+
+Several tools that previously took only an identifier now also require a signed
+DID envelope proving control of the resource. An identifier is not a credential:
+a `jti` travels in every audit row, a `webhook_id` comes back from every list
+call, and a `session_id` is a handle the node hands back.
+
+| Tool | Proof required |
+| --- | --- |
+| `revoke_did` | operator admin token **and** an envelope from the DID (or a machine's controller) |
+| `register_webhook` | `owner_did` plus an envelope over the URL |
+| `authorize_session` / `revoke_session` | envelope from the DID that owns the wallet |
+
+Each envelope is bound to the method name and to that call's parameters, so one
+produced for a given action cannot be replayed as another.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

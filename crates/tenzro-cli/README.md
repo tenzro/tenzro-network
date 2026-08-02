@@ -55,7 +55,7 @@ tenzro model list
 tenzro chat
 ```
 
-## Commands (103 command modules)
+## Commands (108 command modules)
 
 All commands use real JSON-RPC calls via reqwest. No artificial delays.
 
@@ -84,7 +84,7 @@ tenzro join
 
 ```bash
 # Start a Tenzro Network node (forwards to the tenzro-node binary)
-tenzro node start --roles validator --data-dir ~/.tenzro/data
+tenzro node start --roles validator
 
 # Stop the running node
 tenzro node stop
@@ -1623,25 +1623,67 @@ tenzro --format json <command>
 
 ## Configuration
 
-The CLI stores configuration and wallet data in:
-- Linux: `~/.tenzro/`
-- macOS: `~/.tenzro/`
-- Windows: `%USERPROFILE%\.tenzro\`
+Everything Tenzro writes on a machine lives under one root: `$TENZRO_HOME`, or
+`~/.tenzro` when that is unset. The CLI, the node and the desktop app all
+resolve it the same way, so a model you download with `tenzro model download`
+is the one your node serves.
 
-### Directory Structure
+### Directory structure
 
 ```
-~/.tenzro/
-├── config.toml          # CLI configuration
-├── wallets/             # Wallet keystores
-│   ├── wallet_1.json
-│   └── wallet_2.json
-├── data/                # Node data (if running a node)
-│   ├── db/
-│   └── keystore/
-└── models/              # Downloaded models
-    └── gemma4-9b/
+$TENZRO_HOME                 (default: ~/.tenzro)
+├── models/                  # shared — GGUF weights, ONNX bundles
+├── hf/                      # shared — HuggingFace cache (exported as HF_HOME)
+├── trainer-cache/           # shared — dataset shards, keyed by digest
+├── instances/               # per-instance node state
+│   ├── default/             #   RocksDB, keys, wallets, snapshots, iroh blobs
+│   └── validator/           #   a second node started with --data-dir
+├── networks/<name>/         # named local networks (genesis.toml + data)
+├── config.json              # CLI configuration and tokens
+├── hybrid_key.json          # sealed hybrid keystore (Ed25519 + ML-DSA-65)
+├── passkey/                 # ML-DSA passkey companion seeds
+└── logs/                    # node logs from the service wrappers
 ```
+
+### Shared versus per-instance
+
+Model weights, the HuggingFace cache and dataset shards are **shared** across
+every Tenzro process on the machine — content-addressed and read-only once
+written, so two nodes have no reason to hold separate copies of the same tens
+of gigabytes.
+
+Chain state is **per-instance**, because RocksDB cannot be shared: the second
+process to open the same directory fails on its lock file. A single-node
+machine never has to think about this; the default instance is
+`instances/default/`.
+
+### Running two nodes on one machine
+
+```bash
+tenzro node start --data-dir "$TENZRO_HOME/instances/alpha"
+tenzro node start --data-dir "$TENZRO_HOME/instances/beta"
+```
+
+Both resolve the same `models/` and `hf/`, so weights download once and serve
+from both. Their chain state is separate.
+
+### Running an isolated install
+
+```bash
+TENZRO_HOME=/srv/tenzro-scratch tenzro node start
+```
+
+Everything moves together — models, caches, instance data, CLI config. This is
+the supported way to run a second environment without touching your real state.
+
+### Overrides
+
+| Setting | Effect |
+| --- | --- |
+| `--data-dir <DIR>` | per-instance directory; a leading `~` is expanded |
+| `models_dir` in the node config | shared model store, e.g. weights on a separate NVMe |
+| `HF_HOME` | HuggingFace cache, for a site-wide cache outside Tenzro |
+| `TENZRO_TRAINER_CACHE` | dataset shard cache |
 
 ## Examples
 
