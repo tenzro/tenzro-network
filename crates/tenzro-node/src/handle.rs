@@ -361,7 +361,16 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_and_shutdown_default_config() {
-        let config = NodeConfig::default();
+        // A temp data dir, not `NodeConfig::default()`'s. The default now
+        // resolves to the operator's real instance directory under
+        // `$TENZRO_HOME`, so spawning against it makes this test fight a
+        // running node for the RocksDB lock — and, worse, would have it
+        // mutate live chain state. A unit test gets its own directory.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NodeConfig::default()
+        };
         let handle = spawn_in_background(config).await.expect("spawn");
 
         // Status channel produces an initial snapshot synchronously.

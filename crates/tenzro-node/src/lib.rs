@@ -228,7 +228,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_creation() {
-        let config = NodeConfig::default();
+        // Own directory, for the same reason as `handle.rs`: the default data
+        // dir is a real one now.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NodeConfig::default()
+        };
         let node = TenzroNode::new(config).await;
         assert!(node.is_ok());
     }

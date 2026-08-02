@@ -2658,9 +2658,31 @@ impl EventLoop {
                                 );
                                 continue;
                             }
-                            // Submit for finalization so the execution pipeline runs
-                            // even when this node is not the active consensus proposer
-                            let _ = self.submit_block(block.clone());
+                            // Only the immediate successor may be finalized from
+                            // gossip. A block further ahead means we are behind,
+                            // and finalizing it would advance `current_height` to
+                            // the network tip while every block in between stays
+                            // unfetched — the state transitions they carry are
+                            // simply skipped, and `tenzro_syncing` then reports
+                            // false because the height marker says we have caught
+                            // up. Observed in the field as a node holding blocks
+                            // 1..5504 and 77580.., reporting height 77584, with a
+                            // 72,000-block hole in between.
+                            //
+                            // `handle_network_block` still runs: it is what records
+                            // the peer's height and lets block-sync learn a target
+                            // to backfill toward. Dropping the block from the
+                            // finalization path is what stops the hole.
+                            if block.height().0 == self.current_height + 1 {
+                                let _ = self.submit_block(block.clone());
+                            } else {
+                                debug!(
+                                    received = block.height().0,
+                                    current = self.current_height,
+                                    "Gossiped block is ahead of our tip; leaving it to \
+                                     block-sync rather than finalizing over a gap"
+                                );
+                            }
                             if let Err(e) = self.handle_network_block(block).await {
                                 error!("Failed to handle network block: {}", e);
                             }
@@ -5094,27 +5116,38 @@ impl EventLoop {
             return Ok(());
         }
 
-        // Check for sequential height
+        // A gap means we are behind, not that this block is bad. Refuse it here
+        // and let block-sync fetch the run: importing it would execute one block
+        // against state that is thousands of transitions stale, and would move
+        // `current_height` past everything we skipped so nothing ever fetches
+        // them.
+        //
+        // This used to warn and accept, with a comment that production would
+        // request the missing blocks. Block-sync now exists and does exactly
+        // that — it is what walked this node from height 1 to 5504 — so the
+        // reason to accept anyway ("avoid getting stuck") no longer holds, while
+        // the cost of accepting is a permanent hole in the chain.
         if block_height.0 != expected_height {
-            warn!(
+            debug!(
                 expected = expected_height,
                 received = block_height.0,
-                "Received out-of-order block from network (gap detected)"
+                "Deferring out-of-order network block to block-sync"
             );
-            // Testnet: accept anyway to avoid getting stuck
-            // Production: would request missing blocks via BlockRequest
+            return Ok(());
         }
 
-        // Validate prev_hash continuity (skip for height 1 where prev is genesis)
+        // Continuity. A block whose `prev_hash` is not our tip is on a different
+        // history; importing it would splice two chains together and leave a
+        // state root that matches neither. Refusing keeps this node on one chain
+        // and lets block-sync resolve which.
         if self.current_height > 0 && block.header.prev_hash != self.last_block_hash {
             warn!(
                 height = block_height.0,
                 expected_prev = %self.last_block_hash,
                 actual_prev = %block.header.prev_hash,
-                "Network block prev_hash mismatch — possible fork"
+                "Refusing network block whose prev_hash is not our tip (fork or gap)"
             );
-            // Testnet: accept anyway to maintain sync
-            // Production: fork choice rule would decide
+            return Ok(());
         }
 
         info!(
