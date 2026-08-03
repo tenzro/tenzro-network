@@ -9,8 +9,12 @@ Wire conventions worth pinning down:
   integer (Unix milliseconds).
 * ``Signature`` is ``{"bytes": [...], "public_key": [...]}`` where both fields
   are byte arrays of integers.
-* ``max_price`` and ``price_paid`` are ``u128`` with no string codec attached,
-  so they cross the wire as bare JSON numbers. Python ints serialize as-is.
+* ``max_price`` and ``price_paid`` are ``u128``. They are sent as **decimal
+  strings**: a JSON number above ``u64::MAX`` is parsed as a float by the node
+  and rejected, and every realistic price in wei is above it (1 TNZO is 10^18,
+  ``u64::MAX`` is ~18.4). The node's codec accepts a number or a string and
+  emits a string past ``u64``, so a string is correct at any magnitude.
+  Decoding accepts either, since ``int()`` handles both.
 * ``MediaGenKind`` / ``MediaGenStatus`` / ``MediaGenExpertRole`` carry pinned
   serde labels, so the JSON label and the display label are the same string.
 
@@ -259,7 +263,7 @@ class MediaGenTaskSpec:
             "model_id": self.model_id,
             "kind": self.kind.value,
             "params": self.params.to_json(),
-            "max_price": self.max_price,
+            "max_price": str(self.max_price),
             "created_at": self.created_at,
             "metadata": self.metadata,
         }
@@ -429,7 +433,7 @@ class MediaGenReceipt:
             "output_bytes": self.output_bytes,
             "seed_used": self.seed_used,
             "generation_time_ms": self.generation_time_ms,
-            "price_paid": self.price_paid,
+            "price_paid": str(self.price_paid),
             "completed_at": self.completed_at,
             "worker_signature": self.worker_signature.to_json(),
         }

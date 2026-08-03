@@ -202,8 +202,11 @@ def test_hashes_and_addresses_serialize_as_integer_arrays(spec):
     encoded = spec.to_json()
     assert encoded["requester_address"] == [0] * 32
     assert encoded["kind"] == "text2image"
-    # ``max_price`` is a u128 with no string codec, so it stays a JSON number.
-    assert isinstance(encoded["max_price"], int)
+    # ``max_price`` is a u128 and goes out as a decimal string. A bare JSON
+    # number above u64::MAX is parsed as a float by the node and refused, and
+    # every realistic wei price is above it (1 TNZO = 10^18, u64::MAX ~ 18.4).
+    assert encoded["max_price"] == str(spec.max_price)
+    assert isinstance(encoded["max_price"], str)
     assert isinstance(encoded["created_at"], int)
 
 
