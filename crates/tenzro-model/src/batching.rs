@@ -343,7 +343,9 @@ fn scheduler_loop(
 
     info!(
         "batch engine for {} online: {} slots, ctx={}",
-        model_id, max_slots(), ctx_size
+        model_id,
+        max_slots(),
+        ctx_size
     );
 
     // Slots: None == free.
