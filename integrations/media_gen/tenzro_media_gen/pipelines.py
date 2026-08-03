@@ -111,6 +111,16 @@ class CatalogEntry:
     min_vram_gb: int
     license: str
     expert_pair: ExpertPair | None
+    # A GGUF release publishes only the quantized transformer; every other
+    # component (text encoder, VAE, tokenizer, scheduler) still comes from
+    # `hf_repo`. Both fields are set together or neither is.
+    gguf_repo: str | None = None
+    gguf_file: str | None = None
+    transformer_class: str | None = None
+    # Where the transformer's diffusers config comes from, when that is not
+    # `hf_repo`. Needed when a release ships weights whose geometry no repo in
+    # the entry describes; `None` reads the config from `hf_repo` as before.
+    config_repo: str | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> CatalogEntry:
@@ -136,11 +146,23 @@ class CatalogEntry:
             min_vram_gb=int(data["min_vram_gb"]),
             license=str(data["license"]),
             expert_pair=ExpertPair.from_json(pair) if pair else None,
+            gguf_repo=(str(data["gguf_repo"]) if data.get("gguf_repo") is not None else None),
+            gguf_file=(str(data["gguf_file"]) if data.get("gguf_file") is not None else None),
+            transformer_class=(
+                str(data["transformer_class"])
+                if data.get("transformer_class") is not None
+                else None
+            ),
+            config_repo=(str(data["config_repo"]) if data.get("config_repo") is not None else None),
         )
 
     @property
     def is_split(self) -> bool:
         return self.expert_pair is not None
+
+    @property
+    def is_gguf(self) -> bool:
+        return self.gguf_repo is not None and self.gguf_file is not None
 
     def supports(self, kind: MediaGenKind) -> bool:
         return kind in self.kinds
@@ -357,7 +379,9 @@ def load_pipeline(
     # An unset `cache_dir` used to mean "whatever huggingface_hub defaults to",
     # which is a directory outside the Tenzro root that nothing else reads.
     # Resolve it here instead so every load lands in one place.
-    resolved_cache = str(pathlib.Path(cache_dir).expanduser()) if cache_dir else str(default_cache_dir())
+    resolved_cache = (
+        str(pathlib.Path(cache_dir).expanduser()) if cache_dir else str(default_cache_dir())
+    )
 
     kwargs: dict[str, Any] = {"torch_dtype": torch_dtype, "cache_dir": resolved_cache}
 
@@ -392,6 +416,41 @@ def load_pipeline(
         other = "transformer_2" if role is MediaGenExpertRole.HIGH_NOISE else "transformer"
         kwargs[slot] = expert
         kwargs[other] = None
+
+    if entry.is_gguf:
+        if entry.is_split:
+            raise ValueError(
+                f"model {entry.id!r} declares both a GGUF transformer and a split schedule; "
+                "the two loading paths are mutually exclusive"
+            )
+        # A GGUF release ships the transformer alone, dequantized per matmul
+        # into `torch_dtype`. Everything else — text encoder, VAE, tokenizer,
+        # scheduler — is read from `hf_repo` as usual, so the pipeline is the
+        # upstream one with a smaller transformer swapped in. `config` points
+        # `from_single_file` at the architecture it should build, because the
+        # GGUF carries weights and no diffusers config.
+        from diffusers import GGUFQuantizationConfig
+
+        transformer_class_name = entry.transformer_class or f"{entry.pipeline_class}"
+        transformer_cls = getattr(diffusers, transformer_class_name, None)
+        if transformer_cls is None:
+            raise ValueError(
+                f"diffusers {diffusers.__version__} has no {transformer_class_name!r}; "
+                "the catalog names a transformer class this install cannot build"
+            )
+        gguf_url = f"https://huggingface.co/{entry.gguf_repo}/blob/main/{entry.gguf_file}"
+        kwargs["transformer"] = transformer_cls.from_single_file(
+            gguf_url,
+            quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
+            config=entry.config_repo or entry.hf_repo,
+            subfolder="transformer",
+            torch_dtype=torch_dtype,
+            cache_dir=resolved_cache,
+            **({"token": hf_token} if hf_token else {}),
+        )
+        # The bitsandbytes tiers quantize the transformer that was just built
+        # from GGUF, which would be a second quantization of the same weights.
+        quant_config = None
 
     if quant_config is not None and not entry.is_split:
         # A whole-model load quantizes the transformer through the pipeline's

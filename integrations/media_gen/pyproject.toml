@@ -11,32 +11,34 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Tenzro" }]
 classifiers = [
-    "License :: OSI Approved :: Apache Software License",
-    "Operating System :: POSIX :: Linux",
-    "Operating System :: MacOS :: MacOS X",
-    "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3 :: Only",
 ]
 # The base install carries the wire types, the commitment preimages, and the
 # JSON-RPC client — enough to post jobs, read receipts, and pull outputs from
 # a machine with no GPU stack. Rendering needs the `render` extra.
-dependencies = [
-    "requests>=2.31",
-    "PyNaCl>=1.5",
-]
+dependencies = ["requests>=2.31", "PyNaCl>=1.5"]
 
 [project.optional-dependencies]
 # What a worker needs to actually denoise. `transformers` carries the text
 # encoders the catalog's pipelines load; `imageio-ffmpeg` is what
 # `diffusers.utils.export_to_video` writes mp4 through.
 render = [
-    "torch>=2.4",
-    "diffusers>=0.36",
-    "transformers>=4.45",
-    "accelerate>=1.0",
-    "safetensors>=0.4.3",
-    "Pillow>=10.0",
-    "imageio>=2.34",
-    "imageio-ffmpeg>=0.5",
+  "torch>=2.4",
+  "diffusers>=0.36",
+  # Reader for GGUF-quantized transformers. diffusers' GGUF path imports
+  # this lazily, so without it a GGUF catalog entry fails at load with a
+  # bare "Unable to load weights from checkpoint file" that names the file
+  # rather than the missing dependency.
+  "gguf>=0.10",
+  "transformers>=4.45",
+  "accelerate>=1.0",
+  "safetensors>=0.4.3",
+  "Pillow>=10.0",
+  "imageio>=2.34",
+  "imageio-ffmpeg>=0.5",
 ]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 

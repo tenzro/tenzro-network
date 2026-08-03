@@ -117,22 +117,22 @@ The catalog is the single source of truth for serving behaviour. Each `HfModelEn
 
 A provider can serve inference on whatever accelerator it has. llama.cpp's ggml runtime provides a backend for every major vendor; Tenzro exposes each one as a cargo feature on `tenzro-model` that forwards to the corresponding `GGML_<X>` cmake define at build time. A node compiled with a backend feature detects the device at runtime and reports it through `HardwareInfo` (`compiled_backends` + `active_backend`), logged when the llama backend initialises. The default build (`cluster-serving`) is CPU-only plus the ggml RPC backend for LAN layer-pipeline serving.
 
-| Hardware | Backend | Cargo feature | Build-time requirement |
-|---|---|---|---|
-| NVIDIA (datacenter + consumer) | CUDA | `cuda` | CUDA Toolkit |
-| NVIDIA (older drivers / no VMM) | CUDA | `cuda-no-vmm` | CUDA Toolkit |
-| AMD (Instinct + Radeon) | HIP / ROCm | `rocm` | ROCm + hipcc |
-| Apple Silicon | Metal | auto-linked (macOS ARM64); `metal` to force | Xcode toolchain |
-| Intel Arc / Battlemage / Data Center GPU Max / Xe | SYCL | `sycl` | oneAPI DPC++ (`icx`/`icpx`) |
-| Intel CPU / GPU / NPU | OpenVINO | `openvino` | OpenVINO runtime; device via `GGML_OPENVINO_DEVICE` (`CPU`/`GPU`/`NPU`) |
-| NVIDIA / AMD / Intel Arc / ARM Mali / Adreno | Vulkan | `vulkan` | Vulkan headers + loader + `glslc` |
-| Qualcomm Adreno / ARM Mali | OpenCL | `opencl` | OpenCL 3.0 headers + ICD |
-| Moore Threads MTT S-series | MUSA | `musa` | MUSA toolkit |
-| Huawei Ascend 910 / 310 NPU | CANN | `cann` | Ascend CANN toolkit |
-| Cross-vendor GPU (Dawn) | WebGPU | `webgpu` | Dawn |
-| IBM Z Telum | zDNN | `zdnn` | zDNN library |
-| CPU (BLAS-accelerated) | BLAS | `blas` | OpenBLAS / Intel MKL / Apple Accelerate |
-| CPU (fallback) | — | none | — |
+| Hardware                                          | Backend    | Cargo feature                               | Build-time requirement                                                  |
+| ------------------------------------------------- | ---------- | ------------------------------------------- | ----------------------------------------------------------------------- |
+| NVIDIA (datacenter + consumer)                    | CUDA       | `cuda`                                      | CUDA Toolkit                                                            |
+| NVIDIA (older drivers / no VMM)                   | CUDA       | `cuda-no-vmm`                               | CUDA Toolkit                                                            |
+| AMD (Instinct + Radeon)                           | HIP / ROCm | `rocm`                                      | ROCm + hipcc                                                            |
+| Apple Silicon                                     | Metal      | auto-linked (macOS ARM64); `metal` to force | Xcode toolchain                                                         |
+| Intel Arc / Battlemage / Data Center GPU Max / Xe | SYCL       | `sycl`                                      | oneAPI DPC++ (`icx`/`icpx`)                                             |
+| Intel CPU / GPU / NPU                             | OpenVINO   | `openvino`                                  | OpenVINO runtime; device via `GGML_OPENVINO_DEVICE` (`CPU`/`GPU`/`NPU`) |
+| NVIDIA / AMD / Intel Arc / ARM Mali / Adreno      | Vulkan     | `vulkan`                                    | Vulkan headers + loader + `glslc`                                       |
+| Qualcomm Adreno / ARM Mali                        | OpenCL     | `opencl`                                    | OpenCL 3.0 headers + ICD                                                |
+| Moore Threads MTT S-series                        | MUSA       | `musa`                                      | MUSA toolkit                                                            |
+| Huawei Ascend 910 / 310 NPU                       | CANN       | `cann`                                      | Ascend CANN toolkit                                                     |
+| Cross-vendor GPU (Dawn)                           | WebGPU     | `webgpu`                                    | Dawn                                                                    |
+| IBM Z Telum                                       | zDNN       | `zdnn`                                      | zDNN library                                                            |
+| CPU (BLAS-accelerated)                            | BLAS       | `blas`                                      | OpenBLAS / Intel MKL / Apple Accelerate                                 |
+| CPU (fallback)                                    | —          | none                                        | —                                                                       |
 
 #### NVFP4 is a different runtime, not another quant
 
@@ -171,10 +171,10 @@ SYCL additionally needs the oneAPI DPC++ compiler selected as the C/C++ compiler
 
 **Container images.** Three prebuilt Dockerfile variants cover the widest-reach backends. The base `Dockerfile` is the CPU image.
 
-| Backend | Dockerfile | Run flags |
-|---|---|---|
-| CUDA | `Dockerfile.cuda` | `--gpus all` |
-| ROCm / HIP | `Dockerfile.rocm` | `--device /dev/kfd --device /dev/dri --group-add video` |
+| Backend               | Dockerfile          | Run flags                                                                 |
+| --------------------- | ------------------- | ------------------------------------------------------------------------- |
+| CUDA                  | `Dockerfile.cuda`   | `--gpus all`                                                              |
+| ROCm / HIP            | `Dockerfile.rocm`   | `--device /dev/kfd --device /dev/dri --group-add video`                   |
 | Vulkan (cross-vendor) | `Dockerfile.vulkan` | `--device /dev/dri -v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro` |
 
 Backends without a prebuilt image (SYCL, OpenVINO, OpenCL, MUSA, CANN, WebGPU, zDNN, BLAS) build from the base `Dockerfile` template with the vendor toolchain layered into the builder stage and the matching `--features tenzro-node/<x>` flag.
@@ -263,11 +263,11 @@ Members are discovered from the runtime ggml device API (`list_llama_ggml_backen
 
 ### 3.6 Expert-host execution
 
-The dispatch planner in §3.2 decides *where* each token batch goes; the expert-host execution runtime carries the tensors there and runs the math.
+The dispatch planner in §3.2 decides _where_ each token batch goes; the expert-host execution runtime carries the tensors there and runs the math.
 
 Every node embeds a `MoeExpertRuntime` (`tenzro-model::moe_exec`). An expert holder loads expert FFN weights (`ExpertFfn`, gate/up/down projections with SwiGLU activation) and gating networks (`GatingNetwork`) from safetensors payloads, keyed by `(model_id, layer, expert)`.
 
-The gating network supports both router families in the catalog. Qwen-layout checkpoints use softmax top-k routing. DeepSeek-layout checkpoints (DeepSeek V3/V4, Kimi K2/K3) use sigmoid scoring with a per-expert selection bias: experts are *selected* by `sigmoid(score) + bias` but *weighted* by the raw sigmoid scores, renormalized to sum 1 and scaled by the checkpoint's routed scaling factor. The gate blob is self-describing — the presence of a `router.bias` tensor switches the sigmoid path on, and `routed_scaling_factor` / `shared_experts` ride in the blob's `__metadata__` — so a holder loads either family with the same call. When the checkpoint declares a fused shared-expert FFN, the router appends it as one extra weight-1.0 slot per token at index `num_experts`; the distributed layer treats it as a normal expert for announcement, holding, dispatch, and settlement.
+The gating network supports both router families in the catalog. Qwen-layout checkpoints use softmax top-k routing. DeepSeek-layout checkpoints (DeepSeek V3/V4, Kimi K2/K3) use sigmoid scoring with a per-expert selection bias: experts are _selected_ by `sigmoid(score) + bias` but _weighted_ by the raw sigmoid scores, renormalized to sum 1 and scaled by the checkpoint's routed scaling factor. The gate blob is self-describing — the presence of a `router.bias` tensor switches the sigmoid path on, and `routed_scaling_factor` / `shared_experts` ride in the blob's `__metadata__` — so a holder loads either family with the same call. When the checkpoint declares a fused shared-expert FFN, the router appends it as one extra weight-1.0 slot per token at index `num_experts`; the distributed layer treats it as a normal expert for announcement, holding, dispatch, and settlement.
 
 The runtime holds experts in two tiers under a byte budget, so a holder can advertise more experts than fit in memory:
 
@@ -334,30 +334,30 @@ The extractor understands two checkpoint layouts, selected by the entry's archit
 
 Catalog entries that declare a `moe: Some(MoeShape { ... })` topology:
 
-| Family | Catalog id | num_experts | top-k | shared |
-|---|---|---:|---:|---:|
-| Qwen 3 | `qwen3-30b-a3b`, `qwen3-coder-30b-a3b` | 128 | 8 | 0 |
-| Qwen 3.5 | `qwen3.5-35b-a3b`, `qwen3.5-122b-a10b` | 256 | 8 | 1 |
-| Qwen 3.5 | `qwen3.5-397b-a17b` | 512 | 10 | 1 |
-| Qwen 3.6 | `qwen3.6-35b-a3b`, `qwen3.6-35b-a3b-mtp` | 256 | 8 | 1 |
-| Qwen3-Next | `qwen3-coder-next` | 512 | 10 | 1 |
-| Qwen-AgentWorld | `qwen-agentworld-35b-a3b` | 256 | 8 | 1 |
-| Gemma 4 | `gemma4-26b-a4b`, `gemma4-26b-a4b-qat`, `gemma4-26b-a4b-mtp-draft` | 128 | 4 | 1 |
-| DiffusionGemma | `diffusiongemma-26b-a4b` | 128 | 4 | 1 |
-| Kimi | `kimi-k2-instruct`, `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code` | 384 | 8 | 1 |
-| Kimi K3 | `kimi-k3` | 896 | 16 | 2 |
-| Ornith | `ornith-1.0-35b` | 256 | 8 | 1 |
-| Ornith | `ornith-1.0-397b` | 512 | 10 | 1 |
-| Laguna | `laguna-s-2.1` | 256 | 10 | 1 |
-| MiniMax | `minimax-m2.7` | 256 | 8 | 0 |
-| MiniMax | `minimax-m3` | 128 | 4 | 1 |
-| DeepSeek | `deepseek-v3-0324` | 256 | 8 | 1 |
-| DeepSeek | `deepseek-v4-flash` | 256 | 6 | 1 |
-| DeepSeek | `deepseek-v4-pro` | 384 | 6 | 1 |
-| GLM | `glm-5`, `glm-5.1`, `glm-5.2` | 256 | 8 | 1 |
-| Nemotron Nano | `nemotron-nano-30b-a3b`, `nemotron-3-nano-omni-30b-a3b` | 128 | 6 | 1 |
-| Inkling | `inkling`, `inkling-small` | 256 | 6 | 2 |
-| OpenAI | `gpt-oss-120b` | 128 | 4 | 0 |
+| Family          | Catalog id                                                         | num_experts | top-k | shared |
+| --------------- | ------------------------------------------------------------------ | ----------: | ----: | -----: |
+| Qwen 3          | `qwen3-30b-a3b`, `qwen3-coder-30b-a3b`                             |         128 |     8 |      0 |
+| Qwen 3.5        | `qwen3.5-35b-a3b`, `qwen3.5-122b-a10b`                             |         256 |     8 |      1 |
+| Qwen 3.5        | `qwen3.5-397b-a17b`                                                |         512 |    10 |      1 |
+| Qwen 3.6        | `qwen3.6-35b-a3b`, `qwen3.6-35b-a3b-mtp`                           |         256 |     8 |      1 |
+| Qwen3-Next      | `qwen3-coder-next`                                                 |         512 |    10 |      1 |
+| Qwen-AgentWorld | `qwen-agentworld-35b-a3b`                                          |         256 |     8 |      1 |
+| Gemma 4         | `gemma4-26b-a4b`, `gemma4-26b-a4b-qat`, `gemma4-26b-a4b-mtp-draft` |         128 |     4 |      1 |
+| DiffusionGemma  | `diffusiongemma-26b-a4b`                                           |         128 |     4 |      1 |
+| Kimi            | `kimi-k2-instruct`, `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code`     |         384 |     8 |      1 |
+| Kimi K3         | `kimi-k3`                                                          |         896 |    16 |      2 |
+| Ornith          | `ornith-1.0-35b`                                                   |         256 |     8 |      1 |
+| Ornith          | `ornith-1.0-397b`                                                  |         512 |    10 |      1 |
+| Laguna          | `laguna-s-2.1`                                                     |         256 |    10 |      1 |
+| MiniMax         | `minimax-m2.7`                                                     |         256 |     8 |      0 |
+| MiniMax         | `minimax-m3`                                                       |         128 |     4 |      1 |
+| DeepSeek        | `deepseek-v3-0324`                                                 |         256 |     8 |      1 |
+| DeepSeek        | `deepseek-v4-flash`                                                |         256 |     6 |      1 |
+| DeepSeek        | `deepseek-v4-pro`                                                  |         384 |     6 |      1 |
+| GLM             | `glm-5`, `glm-5.1`, `glm-5.2`                                      |         256 |     8 |      1 |
+| Nemotron Nano   | `nemotron-nano-30b-a3b`, `nemotron-3-nano-omni-30b-a3b`            |         128 |     6 |      1 |
+| Inkling         | `inkling`, `inkling-small`                                         |         256 |     6 |      2 |
+| OpenAI          | `gpt-oss-120b`                                                     |         128 |     4 |      0 |
 
 Per-expert extraction (`tenzro_moePrepareExperts`) additionally needs a safetensors checkpoint source mapped in `moe_safetensors_repo`. Currently mapped: `qwen3-30b-a3b`, `deepseek-v3-0324`, `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k2-instruct`, `kimi-k2.6`, and `kimi-k3`. The mapping is independent of `hf_repo`, so an entry can serve both paths: `kimi-k3` extracts experts from `moonshotai/Kimi-K3` while its whole-model artifact is the `UD-IQ1_S` quant in `unsloth/Kimi-K3-GGUF`. At 594GB for the smallest quant, that whole-model path is a pipeline cluster rather than a single host.
 
@@ -372,20 +372,20 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 - **`CommercialCustom`** (DINOv3, SAM, Gemma) — bespoke commercial-OK licenses; refuse without explicit per-family acceptance
 - **`NonCommercial`** (CC-BY-NC, OpenRAIL-M, etc.) — refused unless explicit opt-in
 
-| Modality | Catalog families | RPC | RPC alias |
-|---|---|---|---|
-| Forecast | TimesFM 2.5 200M, TiRex 35M, Chronos-2 Small | `tenzro_forecast` | |
-| Vision embedding | CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16, DINOv2 | `tenzro_imageEmbed` | `tenzro_visionEmbed` |
-| Text embedding | Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, Snowflake Arctic Embed L v2.0, ModernBERT-embed base/large (8192-context RoPE encoder) | `tenzro_textEmbed` | `tenzro_embed` |
-| Segmentation (point/box) | SAM 2 base/large, EdgeSAM, MobileSAM | `tenzro_segment` | |
-| Segmentation (text-promptable) | SAM 3 / 3.1 | `tenzro_textSegment` | |
-| Detection | RF-DETR n/s/m/b/l/2xl (90-class COCO), D-FINE n/s/m/l/x (80-class) | `tenzro_detect` | |
-| Audio ASR | Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash | `tenzro_transcribe` | |
-| Video | Vision-fallback encoder over uniformly-sampled frames | `tenzro_videoEmbed` | |
+| Modality                       | Catalog families                                                                                                                                           | RPC                  | RPC alias            |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | -------------------- |
+| Forecast                       | TimesFM 2.5 200M, TiRex 35M, Chronos-2 Small                                                                                                               | `tenzro_forecast`    |                      |
+| Vision embedding               | CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16, DINOv2                                                                       | `tenzro_imageEmbed`  | `tenzro_visionEmbed` |
+| Text embedding                 | Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, Snowflake Arctic Embed L v2.0, ModernBERT-embed base/large (8192-context RoPE encoder) | `tenzro_textEmbed`   | `tenzro_embed`       |
+| Segmentation (point/box)       | SAM 2 base/large, EdgeSAM, MobileSAM                                                                                                                       | `tenzro_segment`     |                      |
+| Segmentation (text-promptable) | SAM 3 / 3.1                                                                                                                                                | `tenzro_textSegment` |                      |
+| Detection                      | RF-DETR n/s/m/b/l/2xl (90-class COCO), D-FINE n/s/m/l/x (80-class)                                                                                         | `tenzro_detect`      |                      |
+| Audio ASR                      | Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash                          | `tenzro_transcribe`  |                      |
+| Video                          | Vision-fallback encoder over uniformly-sampled frames                                                                                                      | `tenzro_videoEmbed`  |                      |
 
-Forecast entries carry a `family` that selects the tensor adapter. Most are single-input graphs returning `[B, T]` or `[B, T, Q]` and use the generic path. **Chronos-2 is not**: it takes five tensors (`context`, `group_ids`, a **float** `attention_mask`, and a covariate pair) and returns `quantile_preds` shaped `[B, 13, 672]` — quantiles *before* time. Read through the generic path, a quantile index becomes a timestep and the result is a plausible-looking series of the wrong numbers, so the family gets its own adapter and the loader verifies the graph's inputs before accepting it.
+Forecast entries carry a `family` that selects the tensor adapter. Most are single-input graphs returning `[B, T]` or `[B, T, Q]` and use the generic path. **Chronos-2 is not**: it takes five tensors (`context`, `group_ids`, a **float** `attention_mask`, and a covariate pair) and returns `quantile_preds` shaped `[B, 13, 672]` — quantiles _before_ time. Read through the generic path, a quantile index becomes a timestep and the result is a plausible-looking series of the wrong numbers, so the family gets its own adapter and the loader verifies the graph's inputs before accepting it.
 
-Two Chronos-2 details are easy to get wrong and are checked rather than assumed: the attention mask is float where every other transformer export uses int64, and the covariate tensors cannot be sent empty even with no covariates — the graph reshapes them to `[B, 42, 16]`, so a zero-length tensor fails *inside* the model. They are passed full-width with an all-zero mask. Horizon is fixed at 672 (42 patches × 16) by the export; shorter requests truncate that single pass.
+Two Chronos-2 details are easy to get wrong and are checked rather than assumed: the attention mask is float where every other transformer export uses int64, and the covariate tensors cannot be sent empty even with no covariates — the graph reshapes them to `[B, 42, 16]`, so a zero-length tensor fails _inside_ the model. They are passed full-width with an all-zero mask. Horizon is fixed at 672 (42 patches × 16) by the export; shorter requests truncate that single pass.
 
 Each modality has a dedicated runtime in `tenzro-model` with model-specific preprocessing (mel-spectrogram for ASR, ImageNet / CLIP / SigLIP normalization for vision, BPE tokenization for text-embed). The runtime dispatch hides the per-family ABI differences (SAM 1 vs SAM 2 decoder, RF-DETR vs D-FINE post-processing, Parakeet RNN-T vs Canary NeMo Conformer-AED).
 
@@ -397,12 +397,12 @@ Each modality has a dedicated runtime in `tenzro-model` with model-specific prep
 
 **Tenzro-namespaced endpoints for the modalities no vendor covers.** Forecasting, detection, segmentation and clip embedding have no OpenAI path to be compatible with, so they sit under `/v1/tenzro/…` rather than occupying a vendor name the vendor may later define differently:
 
-| Route | Handler | Body | Response |
-|---|---|---|---|
-| `POST /v1/tenzro/forecasts` | `handle_openai_forecasts` | `model`, `history` (oldest first), `horizon`, optional `quantiles` + `frequency_seconds` | `{ object: "forecast", point, quantiles, quantile_levels, generation_time_ms }` |
-| `POST /v1/tenzro/detections` | `handle_openai_detections` | `model`, `image_base64`, optional `score_threshold` (default `0.25`) | `{ object: "detection", detections, generation_time_ms }` |
-| `POST /v1/tenzro/segmentations` | `handle_openai_segmentations` | `model`, `image_base64`, exactly one of `prompts` (geometric) or `text_prompt` (open-vocabulary), optional `box_prompt` + `score_threshold` | `{ object: "segmentation", masks: [{ score, mask_base64 }], generation_time_ms }` |
-| `POST /v1/tenzro/video/embeddings` | `handle_openai_video_embeddings` | `model`, `video_base64`, optional `normalize` + `frame_stride` | `{ object: "video_embedding", embedding, dim, frames_consumed, generation_time_ms }` |
+| Route                              | Handler                          | Body                                                                                                                                        | Response                                                                             |
+| ---------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `POST /v1/tenzro/forecasts`        | `handle_openai_forecasts`        | `model`, `history` (oldest first), `horizon`, optional `quantiles` + `frequency_seconds`                                                    | `{ object: "forecast", point, quantiles, quantile_levels, generation_time_ms }`      |
+| `POST /v1/tenzro/detections`       | `handle_openai_detections`       | `model`, `image_base64`, optional `score_threshold` (default `0.25`)                                                                        | `{ object: "detection", detections, generation_time_ms }`                            |
+| `POST /v1/tenzro/segmentations`    | `handle_openai_segmentations`    | `model`, `image_base64`, exactly one of `prompts` (geometric) or `text_prompt` (open-vocabulary), optional `box_prompt` + `score_threshold` | `{ object: "segmentation", masks: [{ score, mask_base64 }], generation_time_ms }`    |
+| `POST /v1/tenzro/video/embeddings` | `handle_openai_video_embeddings` | `model`, `video_base64`, optional `normalize` + `frame_stride`                                                                              | `{ object: "video_embedding", embedding, dim, frames_consumed, generation_time_ms }` |
 
 Three details follow from the modalities rather than from the wire shape. `prompts` and `text_prompt` are mutually exclusive because they select different runtimes holding different models under different ids — sending both is refused rather than resolved, since the route cannot pick for the caller. Masks travel base64-encoded: a 1024² mask as a JSON integer array is roughly 3 MB of text for one artifact, and no vendor standard governs the noun. Clip embedding is its own route rather than another `input` on `/v1/embeddings` because a clip returns one vector plus a frame count, and the vendor's `data[]` shape has no field to report how much of the clip was consumed. All four carry a base64 payload or a long series, so they sit on the 64 MiB media ceiling. When the named runtime holds nothing under that id, the error names both the RPC that loads one and the RPC that lists what is loaded. Wire details in [`chat-api.md`](chat-api.md#forecasts).
 
@@ -553,11 +553,11 @@ Tenzro Train does **not** require trainers to run inside a TEE. TEEs are one too
 
 #### Three trust tiers
 
-| Tier | Trainer hardware | Trust comes from | Typical use |
-|---|---|---|---|
-| **Open** | Any GPU (or CPU). No TEE required. | Stake bonding, Byzantine-robust aggregation, redundant fragment assignment, syncer fraud proofs. | Public-data foundation runs; the default tier. |
-| **Verified** | Any GPU; trainer also posts a TEE attestation per round. | All of the above, plus attestation binding {program hash, data shard hash, model hash, DID}. | Provenance-sensitive runs (regulated industries, model-card claims). Higher reward weight. |
-| **Confidential** | TEE'd CPU and/or TEE'd GPU (NVIDIA H100/B200 CC). | Same as Verified, plus the data is sealed to the enclave; the host OS never sees cleartext. | Private datasets (medical, financial, proprietary). |
+| Tier             | Trainer hardware                                         | Trust comes from                                                                                 | Typical use                                                                                |
+| ---------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| **Open**         | Any GPU (or CPU). No TEE required.                       | Stake bonding, Byzantine-robust aggregation, redundant fragment assignment, syncer fraud proofs. | Public-data foundation runs; the default tier.                                             |
+| **Verified**     | Any GPU; trainer also posts a TEE attestation per round. | All of the above, plus attestation binding {program hash, data shard hash, model hash, DID}.     | Provenance-sensitive runs (regulated industries, model-card claims). Higher reward weight. |
+| **Confidential** | TEE'd CPU and/or TEE'd GPU (NVIDIA H100/B200 CC).        | Same as Verified, plus the data is sealed to the enclave; the host OS never sees cleartext.      | Private datasets (medical, financial, proprietary).                                        |
 
 Sponsors pay for what they use: Open is the cheap default, Verified adds an attestation premium, Confidential adds a hardware-scarcity premium. A trainer can opt into a higher tier than the task requires (and earn more); a trainer cannot satisfy a task by claiming a tier they don't operate in.
 
@@ -572,6 +572,7 @@ Sponsors pay for what they use: Open is the cheap default, Verified adds an atte
 **Slash-and-evict on rejected contribution.** A submission that deviates from the task spec the trainer enrolled under — bad signature, wrong quantization, out-of-stage fragment, missing attestation at a tier that requires it, or a malformed / hash-mismatched payload — is not merely dropped: the trainer is evicted from the run for the remainder of the run and its bond is slashed. The same applies post-aggregation to a buffered gradient the syncer had to clip (it exceeded the round's norm budget) or whose cosine agreement with the round aggregate fell below the run's floor. Benign timing or scope races an honest trainer can lose — a straggler submitting for a stale round, or for a fragment outside the current active shard — are dropped but never slashed. Eviction is terminal within a run; there is no down-weighted reputation and no rehabilitation, so an evicted trainer must re-enroll in a future run to participate again.
 
 **Byzantine-robust aggregation.** A trainer might submit a numerically valid but adversarially crafted gradient (e.g., to insert a backdoor). The syncer applies one of:
+
 - **Trimmed mean** — discard the top and bottom α% of gradients per parameter, mean the rest.
 - **Coordinate-wise median** — robust to up to f < M/2 Byzantine learners.
 - **Krum / Multi-Krum** — pick the gradient(s) with the lowest sum-of-distances to nearest neighbors.
@@ -695,18 +696,18 @@ For a model of P parameters partitioned into F fragments with H inner steps per 
 
 Public-internet feasibility:
 
-| Model size | F | Per-fragment xfer (FP16) | At 100 Mbps | At 1 Gbps |
-|---|---|---|---|---|
-| 200M | 12 | 33 MB | 2.6s | 0.3s |
-| 1B | 24 | 83 MB | 6.6s | 0.7s |
-| 7B | 24 | 580 MB | 46s | 4.6s |
-| 70B | 48 | 2.9 GB | 232s | 23s |
+| Model size | F   | Per-fragment xfer (FP16) | At 100 Mbps | At 1 Gbps |
+| ---------- | --- | ------------------------ | ----------- | --------- |
+| 200M       | 12  | 33 MB                    | 2.6s        | 0.3s      |
+| 1B         | 24  | 83 MB                    | 6.6s        | 0.7s      |
+| 7B         | 24  | 580 MB                   | 46s         | 4.6s      |
+| 70B        | 48  | 2.9 GB                   | 232s        | 23s       |
 
 For 200M-1B models (covering all current frontier timeseries foundation models), public-internet trainers are entirely viable at raw f32. For 7B+ language models the protocol carries five communication-efficiency mechanisms, each declared on the `TrainingTaskSpec` and enforced by the syncer:
 
 - **Gradient quantization** (`quantization: GradientQuantization`). Blockwise symmetric compression of the outer-gradient payload: `Int8 { block_size }` stores a 4-byte little-endian f32 scale per block (`scale = max_abs / 127`) followed by one `i8` code per value — 4× smaller than f32; `Int4 { block_size }` uses `scale = max_abs / 7` with codes packed two per byte (low nibble first) — ~8× smaller. `None` is raw little-endian f32. The syncer rejects submissions whose declared quantization differs from the task's, so every trainer and every aggregation round shares one wire format. The Python trainer encodes and decodes the identical format.
 - **Streaming synchronization** (`sync_strategy: SyncStrategy::Streaming { num_shards }`). Instead of synchronizing every fragment every round, fragments are partitioned into contiguous shards and each round synchronizes one shard (`active_shard = round % num_shards`). Per-round transfer drops by `num_shards`× and outer sync overlaps inner compute on the fragments that are not active. The syncer rejects submissions for inactive shards so per-fragment quorum accounting stays scoped. `Full` synchronizes everything every round.
-- **Delayed application** (`delayed_apply: bool`). The aggregate computed at round *r* is applied by trainers at round *r+1*, overlapping the outer synchronization with the next inner-step window instead of stalling on it.
+- **Delayed application** (`delayed_apply: bool`). The aggregate computed at round _r_ is applied by trainers at round _r+1_, overlapping the outer synchronization with the next inner-step window instead of stalling on it.
 - **Adaptive outer learning rate** (`AdaptiveLrConfig` on the outer optimizer). The syncer computes the pairwise cosine agreement of submitted outer gradients (`gradient_agreement`) and scales the Nesterov outer step accordingly (`NesterovSgdState::step_with_agreement`) — high agreement earns a larger step, disagreement shrinks it.
 - **Pipeline-parallel trainer groups** (`pipeline: Option<PipelineConfig { num_stages }>`). Trainers enroll as `(group_id, stage)` pairs; a group of `num_stages` trainers jointly holds one model replica, each stage owning the contiguous fragment slice `stage = fragment × num_stages / fragment_count`. Quorum counts distinct **groups** per fragment, so no single trainer needs to fit the whole model.
 
@@ -725,7 +726,7 @@ Two further acceleration knobs, both automatic with metadata overrides:
 
 One constraint: QLoRA (`lora.quantize: "nf4"`) cannot be combined with FSDP2 sharding — bitsandbytes 4-bit parameters are not DTensor-compatible. Run QLoRA single-process, or drop `quantize` for multi-process LoRA.
 
-**AMD ROCm.** *(Unverified on AMD hardware in this fleet — the reference path is coded and documented but has not been exercised on a physical AMD GPU here.)* PyTorch's HIP build reuses the `torch.cuda` namespace, so `torch.cuda.is_available()` returns True on AMD data-center (MI300X, 192 GB) and RDNA3/3.5/4 GPUs; the adapter discriminates the backend on `torch.version.hip`. Two install steps cannot be expressed as pip constraints and must be run manually on the ROCm host:
+**AMD ROCm.** _(Unverified on AMD hardware in this fleet — the reference path is coded and documented but has not been exercised on a physical AMD GPU here.)_ PyTorch's HIP build reuses the `torch.cuda` namespace, so `torch.cuda.is_available()` returns True on AMD data-center (MI300X, 192 GB) and RDNA3/3.5/4 GPUs; the adapter discriminates the backend on `torch.version.hip`. Two install steps cannot be expressed as pip constraints and must be run manually on the ROCm host:
 
 1. **ROCm torch wheel** — `pip install torch --index-url https://download.pytorch.org/whl/rocm6.3` (match the host's ROCm version).
 2. **Patched bitsandbytes** — stock bitsandbytes ≤ 0.49.2 has a 4-bit NF4 dequant NaN bug on ROCm. Install the ROCm pre-release wheel with `pip` (not `uv`):
@@ -741,9 +742,9 @@ The `tenzro-trainer[amd]` extra pulls the ROCm-safe language stack (transformers
 
 The transfer figures above are analytical; the inner-loop rate is measured. Running the timeseries reference adapter — a 3.19M-parameter patch transformer (`d_model=256`, 4 layers, 4 heads) matching the Phase 1 lead modality — through the real forward/backward/optimizer path on a single-core commodity CPU (no GPU), with 20 warmup steps discarded and 200 steps timed:
 
-| Config | Hardware | Batch | Samples/s | Steps/s |
-|---|---|---|---|---|
-| timeseries reference (3.19M params) | 1× CPU core (n1-highcpu-8, Cascade Lake) | 8 | 177 | 22.2 |
+| Config                              | Hardware                                 | Batch | Samples/s | Steps/s |
+| ----------------------------------- | ---------------------------------------- | ----- | --------- | ------- |
+| timeseries reference (3.19M params) | 1× CPU core (n1-highcpu-8, Cascade Lake) | 8     | 177       | 22.2    |
 
 A "sample" is one `context_patches × patch_size` forecasting window (16 × 32 = 512 points of context). The measurement covers the inner training compute only; model construction and shard load are excluded. Reproduce with:
 
@@ -757,9 +758,9 @@ The harness lives in `tenzro_trainer.benchmark` and drives the same `run_inner_l
 
 The same harness runs a real PEFT LoRA fine-tune of a decoder-only LM. The base is frozen; PEFT injects low-rank adapter matrices at the attention projections; only those matrices carry gradient through the real forward/backward/optimizer path. Because only the adapters are trainable, the per-round outer gradient a trainer transmits is the serialized adapter delta alone — orders of magnitude smaller than a full-model gradient. The measurement below wraps a small Qwen3-family config built locally (no model-weight download, so it reproduces in CI), with 5 warmup steps discarded and 40 steps timed on a single commodity CPU core:
 
-| Config | Hardware | Batch × Seq | Trainable | Delta/round | Samples/s | Steps/s |
-|---|---|---|---|---|---|---|
-| Qwen3-family LoRA (r=16) | 1× CPU core (n1-highcpu-8, Cascade Lake) | 4 × 128 | 196,608 (3.99%) | 790,816 B | 39.7 | 9.92 |
+| Config                   | Hardware                                 | Batch × Seq | Trainable       | Delta/round | Samples/s | Steps/s |
+| ------------------------ | ---------------------------------------- | ----------- | --------------- | ----------- | --------- | ------- |
+| Qwen3-family LoRA (r=16) | 1× CPU core (n1-highcpu-8, Cascade Lake) | 4 × 128     | 196,608 (3.99%) | 790,816 B   | 39.7      | 9.92    |
 
 "Trainable" is the LoRA-adapter parameter count and its share of the base (the frozen base is excluded); "Delta/round" is the serialized safetensors bytes a trainer sends per round — exactly the adapter matrices, never the frozen base. At r=16 the trainer transmits ~0.77 MB per round regardless of base size, which is the point of the LoRA path: the per-round communication is set by the adapter rank, not the model. The measurement covers inner training compute only. Reproduce with:
 
@@ -793,6 +794,7 @@ Tenzro Network takes a configurable commission (default 5%) on the training rewa
 #### 7.6.4 Verifiable Training Receipts
 
 At finalization, the syncer publishes a `TrainingReceipt` on-chain containing:
+
 - Final model parameter hash
 - Sponsor DID, syncer DID, list of contributing trainer DIDs with their per-round contribution counts
 - Reward distribution
@@ -864,6 +866,7 @@ The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verif
 #### 7.7.4 Phased Delivery
 
 **Phase 1: Single modality (timeseries)**
+
 - 200M-parameter TimesFM-style model
 - 4-8 trainers, single-region
 - TEE attestation + simple mean aggregation (no Byzantine defense yet)
@@ -871,23 +874,27 @@ The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verif
 - Goal: prove the protocol on the smallest interesting model
 
 **Phase 2: Byzantine-robust aggregation**
+
 - Add trimmed mean, coordinate median, Krum
 - Add redundant assignment + divergence-triggered slashing
 - Goal: harden against adversarial trainers
 
 **Phase 3: Multi-region + larger models**
+
 - 1B-7B language models
 - Cross-region trainers
 - Quantized gradients (blockwise INT8 / INT4), streaming synchronization, delayed application, adaptive outer LR, pipeline-parallel trainer groups (see §7.5)
 - Goal: scale up
 
 **Phase 4: Multi-modal**
+
 - Vision adapters
 - Multimodal (CLIP-style) adapters
 - Sponsor-defined custom adapters
 - Goal: full modality coverage
 
 **Phase 5: TEE-resident data mode**
+
 - Encrypted-at-rest data flow
 - TEE-resident training with sealed data
 - Goal: enable privacy-preserving training as a product
@@ -939,17 +946,17 @@ permanently-broken trainer cannot pin a subprocess slot in a tight loop.
 
 **Config reference (`[training]`):**
 
-| Key | Default | Meaning |
-|---|---|---|
-| `enabled` | `false` | Master enable for the daemon. |
-| `python_executable` | — | Explicit interpreter path (highest priority). |
-| `venv_path` | — | Virtualenv root; daemon uses `<venv_path>/bin/python`. |
-| `max_concurrent_trainers` | `1` | Cap on concurrent trainer subprocesses. |
-| `poll_interval_secs` | `30` | Seconds between reconcile ticks. |
-| `backoff_base_ms` | `2000` | Base restart backoff. |
-| `backoff_max_ms` | `300000` | Restart backoff ceiling. |
-| `max_restarts` | `8` | Consecutive restarts per run before giving up. |
-| `trainer_extra_args` | `[]` | Extra CLI args appended to every trainer invocation. |
+| Key                       | Default  | Meaning                                                |
+| ------------------------- | -------- | ------------------------------------------------------ |
+| `enabled`                 | `false`  | Master enable for the daemon.                          |
+| `python_executable`       | —        | Explicit interpreter path (highest priority).          |
+| `venv_path`               | —        | Virtualenv root; daemon uses `<venv_path>/bin/python`. |
+| `max_concurrent_trainers` | `1`      | Cap on concurrent trainer subprocesses.                |
+| `poll_interval_secs`      | `30`     | Seconds between reconcile ticks.                       |
+| `backoff_base_ms`         | `2000`   | Base restart backoff.                                  |
+| `backoff_max_ms`          | `300000` | Restart backoff ceiling.                               |
+| `max_restarts`            | `8`      | Consecutive restarts per run before giving up.         |
+| `trainer_extra_args`      | `[]`     | Extra CLI args appended to every trainer invocation.   |
 
 **Status.** The JSON-RPC method `tenzro_getTrainerDaemonStatus` reports whether
 the daemon is running, the derived `trainer_did`, the live trainer count, and
@@ -969,14 +976,14 @@ image; everyone else runs the lean base image.
 
 ### 7.8 Comparison with Existing Approaches
 
-| Approach | Permissionless | Verifiable | Privacy | Multi-modal | Settlement |
-|---|---|---|---|---|---|
-| Centralized DC training (OpenAI, Anthropic) | No | No | No | Yes | Off-chain |
-| Low-communication outer aggregation (single-operator) | No | No | No | Yes (in principle) | N/A |
-| Federated learning (FedAvg, etc.) | Partial | No | Partial | Yes | None |
-| Incentivized subnet training | Yes | Partial (via consensus) | No | Limited | Subnet token |
-| Rented-compute + custom orchestration | Yes | No | No | Yes | Compute token |
-| **Tenzro Train** | **Yes** | **Yes (TEE + fraud proofs + receipts)** | **Yes (TEE-resident mode)** | **Yes** | **TNZO, on-chain** |
+| Approach                                              | Permissionless | Verifiable                              | Privacy                     | Multi-modal        | Settlement         |
+| ----------------------------------------------------- | -------------- | --------------------------------------- | --------------------------- | ------------------ | ------------------ |
+| Centralized DC training (OpenAI, Anthropic)           | No             | No                                      | No                          | Yes                | Off-chain          |
+| Low-communication outer aggregation (single-operator) | No             | No                                      | No                          | Yes (in principle) | N/A                |
+| Federated learning (FedAvg, etc.)                     | Partial        | No                                      | Partial                     | Yes                | None               |
+| Incentivized subnet training                          | Yes            | Partial (via consensus)                 | No                          | Limited            | Subnet token       |
+| Rented-compute + custom orchestration                 | Yes            | No                                      | No                          | Yes                | Compute token      |
+| **Tenzro Train**                                      | **Yes**        | **Yes (TEE + fraud proofs + receipts)** | **Yes (TEE-resident mode)** | **Yes**            | **TNZO, on-chain** |
 
 Tenzro Train's distinctive combination is verifiability + privacy + multi-modal in a single protocol with native on-chain settlement. No existing system covers all four.
 
@@ -1006,45 +1013,45 @@ The result is a network where any participant with compute can earn TNZO by trai
 
 For the initial timeseries run (Phase 1):
 
-| Parameter | Value |
-|---|---|
-| Model | TimesFM-style decoder, 200M params |
-| M (trainers) | 8 |
-| K (quorum) | 6 |
-| F (fragments) | 12 |
-| H (inner steps) | 24 |
-| τ (grace window) | 2 inner-step durations |
-| Inner optimizer | AdamW, lr=3e-4 |
-| Outer optimizer | Nesterov SGD, lr=0.7, momentum=0.9 |
-| Aggregation | Trimmed mean (α=12.5%) |
-| TEE attestation refresh | Per round |
-| State root commitment | Per round |
+| Parameter               | Value                              |
+| ----------------------- | ---------------------------------- |
+| Model                   | TimesFM-style decoder, 200M params |
+| M (trainers)            | 8                                  |
+| K (quorum)              | 6                                  |
+| F (fragments)           | 12                                 |
+| H (inner steps)         | 24                                 |
+| τ (grace window)        | 2 inner-step durations             |
+| Inner optimizer         | AdamW, lr=3e-4                     |
+| Outer optimizer         | Nesterov SGD, lr=0.7, momentum=0.9 |
+| Aggregation             | Trimmed mean (α=12.5%)             |
+| TEE attestation refresh | Per round                          |
+| State root commitment   | Per round                          |
 
 For Phase 3 language scaling:
 
-| Parameter | Value |
-|---|---|
-| Model | Qwen 3.5-style decoder (any catalog-member LM family swappable — Qwen 3 / 3.5 / 3.6, Gemma 3 / 4, Mistral, Phi 3, DeepSeek V3, Granite), 7B params |
-| M (trainers) | 32 |
-| K (quorum) | 24 |
-| F (fragments) | 24 |
-| H (inner steps) | 24 |
-| Gradient compression | `Int8 { block_size: 256 }` blockwise symmetric |
-| Sync strategy | `Streaming { num_shards: 4 }` |
-| Delayed application | enabled |
-| State root commitment | Every 4 rounds |
+| Parameter             | Value                                                                                                                                              |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Model                 | Qwen 3.5-style decoder (any catalog-member LM family swappable — Qwen 3 / 3.5 / 3.6, Gemma 3 / 4, Mistral, Phi 3, DeepSeek V3, Granite), 7B params |
+| M (trainers)          | 32                                                                                                                                                 |
+| K (quorum)            | 24                                                                                                                                                 |
+| F (fragments)         | 24                                                                                                                                                 |
+| H (inner steps)       | 24                                                                                                                                                 |
+| Gradient compression  | `Int8 { block_size: 256 }` blockwise symmetric                                                                                                     |
+| Sync strategy         | `Streaming { num_shards: 4 }`                                                                                                                      |
+| Delayed application   | enabled                                                                                                                                            |
+| State root commitment | Every 4 rounds                                                                                                                                     |
 
 ---
 
 ### 7.B Related work
 
-- Das et al., *TimesFM: A decoder-only foundation model for time-series forecasting*, Google, 2024.
-- Ansari et al., *Chronos: Learning the Language of Time Series*, Amazon, 2024.
-- Woo et al., *Moirai: A Time Series Foundation Model for Universal Forecasting*, Salesforce, 2024.
-- Blanchard et al., *Krum: Machine Learning with Adversaries*, NeurIPS 2017.
-- Yin et al., *Byzantine-Robust Distributed Learning: Towards Optimal Statistical Rates*, ICML 2018.
-- Costan & Devadas, *Intel SGX Explained*, IACR ePrint 2016/086.
-- AMD, *SEV-SNP: Strengthening VM Isolation with Integrity Protection and More*, 2020.
+- Das et al., _TimesFM: A decoder-only foundation model for time-series forecasting_, Google, 2024.
+- Ansari et al., _Chronos: Learning the Language of Time Series_, Amazon, 2024.
+- Woo et al., _Moirai: A Time Series Foundation Model for Universal Forecasting_, Salesforce, 2024.
+- Blanchard et al., _Krum: Machine Learning with Adversaries_, NeurIPS 2017.
+- Yin et al., _Byzantine-Robust Distributed Learning: Towards Optimal Statistical Rates_, ICML 2018.
+- Costan & Devadas, _Intel SGX Explained_, IACR ePrint 2016/086.
+- AMD, _SEV-SNP: Strengthening VM Isolation with Integrity Protection and More_, 2020.
 
 ---
 
@@ -1071,16 +1078,17 @@ The worker never decides what a job is worth, who else is working on it, or whet
 
 Read by workers at enrollment through `tenzro_mediaGen_listCatalog`. Each row names the HuggingFace repo, the `diffusers` pipeline class, the kinds it serves, default and maximum resolutions, default step count and guidance scale, frame count and fps for video, a VRAM floor, and — for split models — the expert pair.
 
-| ID | Repo | Pipeline class | Kinds | Default w×h | Steps | Guidance | Frames / fps | VRAM | Expert pair |
-|---|---|---|---|---|---|---|---|---|---|
-| `qwen-image` | `Qwen/Qwen-Image` | `QwenImagePipeline` | text2image | 1328 × 1328 | 50 | 4.0 | — | 48 GB | — |
-| `qwen-image-flash` | `nvidia/Qwen-Image-Flash` | `QwenImagePipeline` | text2image | 1024 × 1024 | 4 | 1.0 | — | 48 GB | — |
-| `qwen-image-edit` | `Qwen/Qwen-Image-Edit-2511` | `QwenImageEditPlusPipeline` | image2image | 1328 × 1328 | 40 | 4.0 | — | 48 GB | — |
-| `z-image-turbo` | `Tongyi-MAI/Z-Image-Turbo` | `ZImagePipeline` | text2image | 1024 × 1024 | 9 | 0.0 | — | 16 GB | — |
-| `flux2-klein-4b` | `black-forest-labs/FLUX.2-klein-4B` | `Flux2KleinPipeline` | text2image, image2image | 1024 × 1024 | 4 | 1.0 | — | 12 GB | — |
-| `wan2.2-t2v-a14b` | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | `WanPipeline` | text2video | 1280 × 720 | 40 | 4.0 | 81 / 16 | 80 GB | 48 GB each |
-| `wan2.2-i2v-a14b` | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | `WanImageToVideoPipeline` | image2video | 1280 × 720 | 40 | 3.5 | 81 / 16 | 80 GB | 48 GB each |
-| `wan2.2-ti2v-5b` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | `WanPipeline` | text2video, image2video | 1280 × 704 | 50 | 5.0 | 121 / 24 | 24 GB | — |
+| ID                 | Repo                                                    | Pipeline class              | Kinds                   | Default w×h | Steps | Guidance | Frames / fps | VRAM  | Expert pair |
+| ------------------ | ------------------------------------------------------- | --------------------------- | ----------------------- | ----------- | ----- | -------- | ------------ | ----- | ----------- |
+| `qwen-image`       | `Qwen/Qwen-Image`                                       | `QwenImagePipeline`         | text2image              | 1328 × 1328 | 50    | 4.0      | —            | 48 GB | —           |
+| `qwen-image-gguf`  | `Qwen/Qwen-Image-2512` + `unsloth/Qwen-Image-2512-GGUF` | `QwenImagePipeline`         | text2image              | 1328 × 1328 | 50    | 4.0      | —            | 18 GB | —           |
+| `qwen-image-flash` | `nvidia/Qwen-Image-Flash`                               | `QwenImagePipeline`         | text2image              | 1024 × 1024 | 4     | 1.0      | —            | 48 GB | —           |
+| `qwen-image-edit`  | `Qwen/Qwen-Image-Edit-2511`                             | `QwenImageEditPlusPipeline` | image2image             | 1328 × 1328 | 40    | 4.0      | —            | 48 GB | —           |
+| `z-image-turbo`    | `Tongyi-MAI/Z-Image-Turbo`                              | `ZImagePipeline`            | text2image              | 1024 × 1024 | 9     | 0.0      | —            | 16 GB | —           |
+| `flux2-klein-4b`   | `black-forest-labs/FLUX.2-klein-4B`                     | `Flux2KleinPipeline`        | text2image, image2image | 1024 × 1024 | 4     | 1.0      | —            | 12 GB | —           |
+| `wan2.2-t2v-a14b`  | `Wan-AI/Wan2.2-T2V-A14B-Diffusers`                      | `WanPipeline`               | text2video              | 1280 × 720  | 40    | 4.0      | 81 / 16      | 80 GB | 48 GB each  |
+| `wan2.2-i2v-a14b`  | `Wan-AI/Wan2.2-I2V-A14B-Diffusers`                      | `WanImageToVideoPipeline`   | image2video             | 1280 × 720  | 40    | 3.5      | 81 / 16      | 80 GB | 48 GB each  |
+| `wan2.2-ti2v-5b`   | `Wan-AI/Wan2.2-TI2V-5B-Diffusers`                       | `WanPipeline`               | text2video, image2video | 1280 × 704  | 50    | 5.0      | 121 / 24     | 24 GB | —           |
 
 Rows with an image-conditioned kind resolve to a sibling pipeline class where the family provides one — `WanPipeline` becomes `WanImageToVideoPipeline` for an `image2video` job against `wan2.2-ti2v-5b`, while a class that already covers image input keeps it.
 
@@ -1088,13 +1096,30 @@ Rows with an image-conditioned kind resolve to a sibling pipeline class where th
 
 ### 8.4 Precision
 
-The worker loads a transformer at one of six weight formats, coarsest first: `nf4`, `int4`, `int8`, `float16`, `bfloat16`, `float32`. The three floating-point tiers are just `torch_dtype`. The three sub-8-bit tiers quantize through bitsandbytes, with the floating-point `--dtype` remaining the *compute* type — 4-bit weights are dequantized into it per matmul.
+The worker loads a transformer at one of six weight formats, coarsest first: `nf4`, `int4`, `int8`, `float16`, `bfloat16`, `float32`. The three floating-point tiers are just `torch_dtype`. The three sub-8-bit tiers quantize through bitsandbytes, with the floating-point `--dtype` remaining the _compute_ type — 4-bit weights are dequantized into it per matmul.
 
 Verified on this project's target hardware rather than assumed: bitsandbytes 0.50.0 executes both `Linear4bit` and `Linear8bitLt` on a GB10 at compute capability 12.1. Where the kernels are unavailable the load raises rather than falling back, because a caller who asked for 4-bit to make a model fit needs to know it did not.
 
 Quantization is scoped to the **transformer**, not the whole pipeline. The text encoder and VAE are a small share of the weights and are where quality degrades most visibly — a quantized VAE shows up as colour banding in every frame. The transformer is both the bulk of the memory and the part that tolerates it. `nf4` is the default 4-bit type over plain `fp4`, with double quantization on: transformer weights are roughly normally distributed, which is what nf4 is for, and quantizing the quantization constants buys a further ~0.4 bits per weight for no measurable quality cost.
 
 Precision is a **worker runtime choice, not a catalog property**. Unlike the GGUF language tiers — where each quantization is a distinct artifact with its own download — this is one set of safetensors quantized at load time, so `MediaGenModelEntry` carries no precision field and a worker can serve the same catalog row at different precisions on different hardware.
+
+The exception is a **GGUF transformer**, which _is_ a distinct artifact and so does live in the catalog: `gguf_repo`, `gguf_file` and `transformer_class` on `MediaGenModelEntry`. See §8.4.1.
+
+#### 8.4.1 GGUF transformers
+
+A GGUF release publishes the transformer alone. Every other component — text encoder, VAE, tokenizer, scheduler — still comes from `hf_repo`, so the pipeline is the upstream one with a smaller transformer swapped in and sampling behaviour is unchanged. The worker builds it with `from_single_file` under a `GGUFQuantizationConfig` whose `compute_dtype` is the job's `--dtype`, weights dequantizing into that type per matmul exactly as the bitsandbytes tiers do.
+
+`transformer_class` is required alongside the two path fields because a GGUF carries weights and no diffusers config: the loader has to be told which architecture to construct, and is pointed at `hf_repo`'s `transformer` subfolder for the config to build it from.
+
+This is what decides whether a large image model is servable at all next to a node's language and embedding models. `qwen-image` is 57.7 GB at bf16 against 15.0 GB at Q5_K_M, and the VRAM floor falls from 48 GB to 18 GB with it — the difference between a 121 GB box serving one model and serving five.
+
+Two rules the loader enforces:
+
+- **GGUF and split-expert are mutually exclusive.** They are two ways of populating the same `transformer` slot; an entry declaring both is a catalog error, not a merge.
+- **A GGUF entry ignores the bitsandbytes precision tiers.** The weights arrive already quantized, so applying `nf4`/`int4`/`int8` on top would quantize them twice. `--dtype` still selects the compute type.
+
+Only the transformer is quantized, for the same reason as §8.4: the VAE and text encoder are a small share of the weights and the most visible place quality degrades.
 
 Two consequences a caller has to know about. A bitsandbytes-quantized pipeline is placed on its device by the loader and **cannot be moved afterwards** — `LoadedPipeline.is_quantized` exists so callers can ask before they try. And precision is part of the pipeline cache key: the same model at `nf4` and at `bfloat16` are different objects with different VRAM costs and different outputs, so keying on the model alone would hand a caller whichever precision happened to load first.
 
@@ -1114,7 +1139,7 @@ That single handoff is what makes it a distribution primitive. One expert needs 
 t >= boundary_ratio × scheduler.config.num_train_timesteps
 ```
 
-Timesteps descend through the schedule, so that set is always a prefix and one integer index splits it. `boundary_ratio` is a fraction of the scheduler's *training* timestep count — for Wan 2.2 A14B, `0.875` of 1000. A 40-step job and a 100-step job therefore split at the same noise level and at different indices, which is why the protocol records `steps_completed` from the worker rather than assuming a fixed fraction.
+Timesteps descend through the schedule, so that set is always a prefix and one integer index splits it. `boundary_ratio` is a fraction of the scheduler's _training_ timestep count — for Wan 2.2 A14B, `0.875` of 1000. A 40-step job and a 100-step job therefore split at the same noise level and at different indices, which is why the protocol records `steps_completed` from the worker rather than assuming a fixed fraction.
 
 **Loading one half.** Both transformer slots are optional in the `diffusers` Wan pipeline, and every internal read falls back to the other slot when one is unset. A worker holding the high-noise expert loads it into `transformer` and leaves `transformer_2` unset; a low-noise holder does the reverse. The low-noise worker resumes the schedule with `scheduler.set_begin_index(boundary_index)`.
 
@@ -1141,10 +1166,10 @@ The full debit is checked before any of it moves, so a requester who cannot cove
 
 Three SHA-256 preimages under three distinct domain tags:
 
-| Tag | Binds |
-|---|---|
-| `tenzro/media-gen/job-id` | requester DID and address, model ID, kind, every parameter, price ceiling, creation timestamp |
-| `tenzro/media-gen/handoff` | job ID, handing-off worker DID and address, latent hash, latent byte length, `steps_completed`, handoff timestamp |
+| Tag                        | Binds                                                                                                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tenzro/media-gen/job-id`  | requester DID and address, model ID, kind, every parameter, price ceiling, creation timestamp                                                                      |
+| `tenzro/media-gen/handoff` | job ID, handing-off worker DID and address, latent hash, latent byte length, `steps_completed`, handoff timestamp                                                  |
 | `tenzro/media-gen/receipt` | job ID, the executed task spec, worker DID and address, output hash, output MIME, output byte length, seed used, generation time, price paid, completion timestamp |
 
 Distinct tags keep a handoff signature from being replayed as a receipt signature. Encoding rules: integers big-endian at their declared width, `Timestamp` as two's-complement i64 milliseconds, `f32` as the IEEE-754 big-endian bit pattern, variable-length fields prefixed with a big-endian u32 byte count, `Option` as a presence byte then the value. Raw 32-byte hashes embed bare; addresses are length-prefixed. `metadata` is excluded from every preimage — a map has no canonical ordering across encoders, so binding it would make the digest encoder-dependent.
@@ -1173,11 +1198,11 @@ Job status is `pending` | `claimed` | `running` | `completed` | `failed` | `canc
 
 Eighteen JSON-RPC methods under `tenzro_mediaGen_`:
 
-| Group | Methods |
-|---|---|
-| Discovery | `listCatalog`, `quote`, `listWorkers` |
-| Requester | `postJob`, `listJobs`, `getJob`, `cancelJob`, `getReceipt`, `fetchOutput`, `fetchInput` |
-| Worker | `enrollWorker`, `claimJob`, `markRunning`, `failJob`, `publishOutput`, `recordHandoff`, `submitReceipt`, `fetchLatent` |
+| Group     | Methods                                                                                                                |
+| --------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Discovery | `listCatalog`, `quote`, `listWorkers`                                                                                  |
+| Requester | `postJob`, `listJobs`, `getJob`, `cancelJob`, `getReceipt`, `fetchOutput`, `fetchInput`                                |
+| Worker    | `enrollWorker`, `claimJob`, `markRunning`, `failJob`, `publishOutput`, `recordHandoff`, `submitReceipt`, `fetchLatent` |
 
 The same surface is reachable through the CLI (`tenzro media-gen …`), the MCP server, and the A2A `media-gen` skill. Job, worker, and receipt events broadcast on the `tenzro/media-gen` gossip topic.
 
@@ -1188,4 +1213,3 @@ The same surface is reachable through the CLI (`tenzro media-gen …`), the MCP 
 **Video renders.** `POST /v1/videos` (handler: `handle_openai_videos_create`) is a job resource rather than a synchronous call, matching the vendor's video surface — a render that takes minutes has no business holding a connection open for them. The POST admits the job and returns it immediately at `status: "queued"`; the caller polls `GET /v1/videos/{video_id}` and collects the clip from `GET /v1/videos/{video_id}/content`. Both GETs stay ungated even when a payment gate governs generation: they are the back half of a render already priced and charged on the POST, and gating them would bill twice for one artifact. An `input_reference` part selects `Image2Video`, its absence `Text2Video` — again, no field names the kind. `seconds` is converted to a frame count against the pipeline's frame rate, since that is what a diffusion schedule is denominated in; a catalog entry declaring neither an fps nor a default frame count cannot yield a frame budget and the request is refused. The job resource maps queue status onto the vendor vocabulary (`Pending` / `Claimed` → `queued`, `Running` → `in_progress`, `Completed` → `completed`, `Failed` / `Cancelled` → `failed`) with a coarse `progress` that reads the split handoff, and carries the receipt fields under `tenzro` once one exists. Asking for the bytes before completion returns HTTP 409 naming the current status: an SDK client writes any 2xx body straight to a file, and a zero-length clip is harder to diagnose than a status code saying what to wait for. Wire details in [`chat-api.md`](chat-api.md#video-renders).
 
 The Python worker's own CLI (`tenzro-media-gen`) covers both sides: `catalog`, `quote`, `post`, `jobs`, `get`, `cancel`, `receipt`, `fetch` for requesters, and `keygen`, `enroll`, `serve`, `workers` for operators. The requester surface installs without torch. See [`integrations/media_gen/README.md`](../integrations/media_gen/README.md).
-

@@ -2374,6 +2374,43 @@ pub struct MediaGenModelEntry {
     /// dense transformer.
     #[serde(default)]
     pub expert_pair: Option<MediaGenExpertPair>,
+    /// Repo publishing a GGUF-quantized transformer for this model, and the
+    /// file within it. A GGUF release carries the transformer alone, so
+    /// `hf_repo` still supplies the text encoder, VAE, tokenizer and
+    /// scheduler; the worker builds the transformer with
+    /// `from_single_file` and swaps it into the upstream pipeline.
+    ///
+    /// This is what lets a 20B-parameter image model fit where its bf16
+    /// release would not: `qwen-image` is 57.7 GB at bf16 against 15.0 GB at
+    /// Q5_K_M. Both fields are set together or the entry is not a GGUF entry.
+    #[serde(default)]
+    pub gguf_repo: Option<String>,
+    /// File path within [`Self::gguf_repo`].
+    #[serde(default)]
+    pub gguf_file: Option<String>,
+    /// diffusers model class the GGUF weights build into (e.g.
+    /// `QwenImageTransformer2DModel`). Required alongside the GGUF fields
+    /// because a GGUF carries weights and no diffusers config, so the loader
+    /// has to be told which architecture to construct.
+    #[serde(default)]
+    pub transformer_class: Option<String>,
+    /// Repo to read the transformer's diffusers *config* from, when that is
+    /// not `hf_repo`.
+    ///
+    /// Weights and geometry usually travel together, so the default — read the
+    /// config from the same repo the components come from — is right for every
+    /// entry here today. It stops being right whenever a release publishes
+    /// weights whose geometry no repo in the entry describes: diffusers'
+    /// single-file loader resolves an unknown checkpoint to the nearest
+    /// fingerprint it knows and applies *that* generation's config, which is a
+    /// silent shape mismatch rather than a clean failure. `Lightricks/LTX-2.3`
+    /// is the live example — recognised as `ltx2`, configured from the 19B
+    /// `Lightricks/LTX-2`, actually 22B.
+    ///
+    /// Setting this pins the config explicitly instead of inheriting whatever
+    /// the loader guessed. `None` keeps the existing behaviour exactly.
+    #[serde(default)]
+    pub config_repo: Option<String>,
     /// Short description.
     pub description: String,
     /// Whether the Hub requires per-account approval before this can be
@@ -2400,12 +2437,47 @@ pub struct MediaGenModelEntry {
 ///   the whole repo. This excludes repos that tag `library_name: diffusers`
 ///   but ship their own loader (Microsoft Mage-Flow needs the `mage_flow`
 ///   package) and repos that ship bare root-level checkpoints with no pipeline
-///   manifest. Lightricks LTX-2.3 is the latter case and fails a second way:
-///   the repo carries no text encoder, VAE, or scheduler, so even a
-///   single-file loader could not assemble a pipeline from it alone. The
-///   diffusers-format generation of that family ships `audio_vae/` and
-///   `vocoder/` and emits joint audio and video — a shape [`MediaGenKind`]
-///   does not carry.
+///   manifest. `Lightricks/LTX-2.3` is the latter case: root-level
+///   `.safetensors` and nothing else, so `from_pretrained` has no pipeline to
+///   resolve.
+///
+///   **Re-checked 2026-08-03; most of that reasoning was wrong, and the real
+///   blocker is narrower.** Each correction verified rather than inferred:
+///
+///   - diffusers 0.39 ships the whole LTX2 family — `LTX2Pipeline`,
+///     `LTX2ImageToVideoPipeline`, `LTX2VideoTransformer3DModel`,
+///     `AutoencoderKLLTX2Video`, `AutoencoderKLLTX2Audio` — so the
+///     architecture is supported.
+///   - A first-party diffusers-format repo **does** exist. `Lightricks/LTX-2`
+///     carries `model_index.json` and all nine components (`scheduler`, `vae`,
+///     `audio_vae`, `text_encoder`, `tokenizer`, `connectors`, `transformer`,
+///     `vocoder`, `latent_upsampler`); its text encoder is
+///     `Gemma3ForConditionalGeneration`.
+///   - The bare checkpoints in `Lightricks/LTX-2.3` are meant for
+///     `from_single_file`, not `from_pretrained`: diffusers carries an `ltx2`
+///     fingerprint in `CHECKPOINT_KEY_NAMES` and maps it to `ltx2-dev` →
+///     `Lightricks/LTX-2` for component configs. The `from_pretrained`
+///     snippet on that model card **404s on `model_index.json`**, confirmed
+///     against the live Hub.
+///
+///   What blocks an LTX-2.3 entry is therefore a config mismatch, not missing
+///   components: that single-file path resolves configs to `Lightricks/LTX-2`,
+///   the **19B** generation (`num_layers: 48`, `caption_channels: 3840`),
+///   while 2.3 is 22B and its GGUF carries at least one differently-shaped
+///   tensor (`4096 x 3360`). `convert_ltx2_transformer_to_diffusers` is a pure
+///   key-rename that derives no geometry from the checkpoint, so it would
+///   apply 19B config to 22B weights and fail on shapes. [`Self::config_repo`]
+///   exists for exactly this class of override — point it at a repo carrying
+///   the right transformer config and the entry works — but no such repo is
+///   published first-party yet, and pointing it at a third-party conversion is
+///   a supply-chain decision rather than a packaging detail.
+///
+///   `Lightricks/LTX-2` itself is loadable today and is the entry to add when
+///   video generation joins this catalog. It is not
+///   [`LicenseTier::Permissive`] — the LTX Open Weights terms put it in
+///   [`LicenseTier::CommercialCustom`], so it needs an explicit
+///   `--accept-license` and is a deliberate admission decision. The joint
+///   audio+video output shape also still has no [`MediaGenKind`].
 /// - **Serves a [`MediaGenKind`].** Image and video output only; a diffusion
 ///   model that emits text is served by the chat path.
 ///
@@ -2472,6 +2544,48 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             gated: false,
             description: "Qwen-Image 2512 text-to-image MMDiT with strong text rendering"
                 .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
+        // ── Qwen-Image 2512, GGUF transformer (Apache-2.0) ──
+        // Same pipeline as the entry above with the transformer read from
+        // Unsloth's GGUF quantization instead of the bf16 release: 15.0 GB
+        // against 57.7 GB, which is the difference between a node that can
+        // hold this alongside its language and embedding models and one that
+        // cannot. The `min_vram_gb` floor drops with it.
+        //
+        // Only the transformer is quantized. `Qwen/Qwen-Image-2512` still
+        // supplies the Qwen2.5-VL text encoder, the VAE, the tokenizer and the
+        // scheduler, so sampling behaviour is the upstream one — same 50 steps
+        // at true-CFG 4.0, same aspect-ratio table.
+        MediaGenModelEntry {
+            id: "qwen-image-gguf".to_string(),
+            name: "Qwen-Image 2512 (GGUF Q5_K_M)".to_string(),
+            family: "qwen-image".to_string(),
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            pipeline_class: "QwenImagePipeline".to_string(),
+            kinds: vec![Text2Image],
+            default_width: 1328,
+            default_height: 1328,
+            max_resolution: 1664,
+            default_steps: 50,
+            default_guidance_scale: 4.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "20.4B".to_string(),
+            size_bytes: 15_004_000_000,
+            min_vram_gb: 18,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            gated: false,
+            description: "Qwen-Image 2512 text-to-image, Q5_K_M GGUF transformer".to_string(),
+            gguf_repo: Some("unsloth/Qwen-Image-2512-GGUF".to_string()),
+            gguf_file: Some("qwen-image-2512-Q5_K_M.gguf".to_string()),
+            transformer_class: Some("QwenImageTransformer2DModel".to_string()),
+            config_repo: None,
         },
         // ── Qwen-Image-Flash (NVIDIA Open Model License, NVIDIA) ──
         // A distillation of Qwen/Qwen-Image down to a four-step trajectory,
@@ -2508,6 +2622,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             expert_pair: None,
             gated: false,
             description: "Qwen-Image distilled to four steps, guidance disabled".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── Qwen-Image-Edit (Apache-2.0, Alibaba Qwen) ──
         // Same 20B backbone specialised for instruction editing. 40 steps
@@ -2535,6 +2653,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             gated: false,
             description: "Qwen-Image-Edit instruction-driven image editing, multi-reference"
                 .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── Z-Image Turbo (Apache-2.0, Tongyi MAI) ──
         // 6B few-step distillation: 9 steps, guidance disabled.
@@ -2561,6 +2683,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             gated: false,
             description: "Z-Image Turbo few-step text-to-image, 9 steps without guidance"
                 .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── FLUX.2 klein 4B (Apache-2.0, Black Forest Labs) ──
         // The one FLUX.2 checkpoint released under Apache-2.0 and ungated.
@@ -2589,6 +2715,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             gated: false,
             description: "FLUX.2 klein 4B text-to-image and editing, runs on consumer GPUs"
                 .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── FLUX.2 klein base 4B (Apache-2.0, Black Forest Labs) ──
         // The un-distilled sibling of klein-4B: same architecture and licence,
@@ -2623,6 +2753,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             expert_pair: None,
             gated: false,
             description: "FLUX.2 klein base 4B — undistilled text-to-image and editing".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── FLUX.2 dev (custom BFL licence, gated, Black Forest Labs) ──
         // The full 32B flagship. Gated on the Hub, so an operator needs a
@@ -2654,6 +2788,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             expert_pair: None,
             gated: true,
             description: "FLUX.2 dev — 32B flagship text-to-image and editing".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── FLUX.2 klein 9B (custom BFL licence, gated) ──
         // The distilled 9B: the size most single-accelerator operators will
@@ -2681,6 +2819,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             expert_pair: None,
             gated: true,
             description: "FLUX.2 klein 9B — distilled few-step generation and editing".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── FLUX.2 klein base 9B (custom BFL licence, gated) ──
         // Undistilled 9B: normal step count and real guidance, for when the
@@ -2707,6 +2849,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             expert_pair: None,
             gated: true,
             description: "FLUX.2 klein base 9B — undistilled generation and editing".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── FLUX.2 klein 9B KV (custom BFL licence, gated) ──
         // The KV variant of klein-9B. Same weights budget; the difference is
@@ -2733,6 +2879,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             expert_pair: None,
             gated: true,
             description: "FLUX.2 klein 9B KV — few-step generation and editing".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── Wan 2.2 T2V A14B (Apache-2.0, Alibaba Wan) ──
         // Two-expert MoE over the denoising schedule: 27B total, ~14B active
@@ -2765,6 +2915,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             }),
             gated: false,
             description: "Wan 2.2 text-to-video mixture-of-experts, 480P and 720P".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── Wan 2.2 I2V A14B (Apache-2.0, Alibaba Wan) ──
         // Same MoE shape, conditioned on a reference frame. Guidance 3.5.
@@ -2795,6 +2949,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             }),
             gated: false,
             description: "Wan 2.2 image-to-video mixture-of-experts, 480P and 720P".to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── Wan 2.1 FLF2V 14B 720P (Apache-2.0, Alibaba Wan) ──
         // First-last-frame interpolation: given two stills it generates the
@@ -2829,6 +2987,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             gated: false,
             description: "Wan 2.1 first-last-frame interpolation; bridges two stills into motion"
                 .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
         // ── Wan 2.2 TI2V 5B (Apache-2.0, Alibaba Wan) ──
         // The affordable video option: a 16×16×4 VAE lets 5B cover both video
@@ -2857,6 +3019,10 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             gated: false,
             description: "Wan 2.2 hybrid text/image-to-video at 720P 24fps on a single 24 GB GPU"
                 .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
         },
     ]
 }
@@ -6851,6 +7017,11 @@ mod tests {
                 "qwen-image",
                 "qwen-image-edit",
                 "qwen-image-flash",
+                // Same pipeline and components as `qwen-image`, transformer
+                // read from Unsloth's GGUF instead of the bf16 release: still
+                // ungated, still a diffusers-loadable pipeline, 15.0 GB
+                // against 57.7 GB.
+                "qwen-image-gguf",
                 "wan2.1-flf2v-14b",
                 "wan2.2-i2v-a14b",
                 "wan2.2-t2v-a14b",
