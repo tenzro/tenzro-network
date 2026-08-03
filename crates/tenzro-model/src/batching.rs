@@ -65,12 +65,48 @@ use crate::runtime::{ChatMessage, GenerationConfig, InferenceResult, StopReason,
 /// a balance: enough parallelism to saturate a GPU's matmul on decode, small
 /// enough that the per-slot KV cache (`n_ctx` tokens × slots) stays within the
 /// memory a single loaded model already reserves.
-const MAX_SLOTS: usize = 32;
+const MAX_SLOTS_DEFAULT: usize = 32;
+
+/// Sequence slots, overridable with `TENZRO_MAX_SLOTS`.
+///
+/// This is `n_seq_max`, and llama.cpp divides the context across it: the
+/// per-request window is `n_ctx / n_seq_max`, not `n_ctx`. On a card that
+/// cannot afford `32 x` a useful window, the default leaves each slot with a
+/// few hundred tokens and decode fails with `NoKvCacheSlot` before it can
+/// admit even a short prompt. An operator serving a handful of callers buys
+/// back that context by asking for fewer slots.
+fn max_slots() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("TENZRO_MAX_SLOTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(MAX_SLOTS_DEFAULT)
+    })
+}
 
 /// Physical batch capacity for a single `llama_decode`. Prompts are prefilled in
 /// chunks, so this bounds the work per step rather than the prompt length a
 /// request may carry.
-const PHYSICAL_BATCH: usize = 2048;
+const PHYSICAL_BATCH_DEFAULT: usize = 2048;
+
+/// Physical batch, overridable with `TENZRO_PHYSICAL_BATCH`.
+///
+/// Sets `n_batch` and `n_ubatch`, and the compute buffer scales with it: at
+/// the 2048 default a 4B model reserves close to 2 GB of VRAM for scratch
+/// alone, which on a 6 GB card costs more than the weights' worth of headroom.
+/// Lowering it trades prefill throughput for room.
+fn physical_batch() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("TENZRO_PHYSICAL_BATCH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v >= 32)
+            .unwrap_or(PHYSICAL_BATCH_DEFAULT)
+    })
+}
 
 /// Prompt tokens one slot may contribute to a single batch. Bounding the
 /// per-slot share lets several prefills advance together instead of one long
@@ -295,9 +331,9 @@ fn scheduler_loop(
     // cover the interleaved prefill+extend batch.
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(n_ctx))
-        .with_n_seq_max(MAX_SLOTS as u32)
-        .with_n_batch(PHYSICAL_BATCH as u32)
-        .with_n_ubatch(PHYSICAL_BATCH as u32);
+        .with_n_seq_max(max_slots() as u32)
+        .with_n_batch(physical_batch() as u32)
+        .with_n_ubatch(physical_batch() as u32);
 
     let mut ctx = model
         .new_context(backend, ctx_params)
@@ -307,12 +343,12 @@ fn scheduler_loop(
 
     info!(
         "batch engine for {} online: {} slots, ctx={}",
-        model_id, MAX_SLOTS, ctx_size
+        model_id, max_slots(), ctx_size
     );
 
     // Slots: None == free.
-    let mut slots: Vec<Option<Sequence>> = (0..MAX_SLOTS).map(|_| None).collect();
-    let mut batch = LlamaBatch::new(PHYSICAL_BATCH, MAX_SLOTS as i32);
+    let mut slots: Vec<Option<Sequence>> = (0..max_slots()).map(|_| None).collect();
+    let mut batch = LlamaBatch::new(physical_batch(), max_slots() as i32);
 
     loop {
         if shutdown_rx.try_recv().is_ok() {
@@ -343,7 +379,7 @@ fn scheduler_loop(
         // Build the interleaved batch. `logits_slot` maps a batch logits index
         // back to the slot that owns it.
         batch.clear();
-        let mut logits_slot: Vec<(i32, usize)> = Vec::with_capacity(MAX_SLOTS);
+        let mut logits_slot: Vec<(i32, usize)> = Vec::with_capacity(max_slots());
 
         // Extension first: every running sequence contributes exactly one token,
         // so a slot mid-prefill can never hold back the slots already generating.
@@ -373,7 +409,7 @@ fn scheduler_loop(
                 continue;
             };
 
-            let room = PHYSICAL_BATCH
+            let room = physical_batch()
                 .saturating_sub(batch.n_tokens() as usize)
                 .min(PREFILL_CHUNK);
             let start = seq.prefill_cursor;
