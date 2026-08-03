@@ -59,6 +59,12 @@ use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType}
 /// Body ceiling for JSON request bodies.
 const JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
+/// How many faucet transactions may be outstanding before the pending-nonce
+/// counter is treated as abandoned and re-anchored to chain state. Grants are
+/// small and land within a block or two, so a handful covers genuine
+/// concurrency while still catching a counter that has run away.
+const FAUCET_MAX_INFLIGHT_NONCES: u64 = 8;
+
 /// Body ceiling for audio uploads on `/v1/audio/transcriptions`. Sized for a
 /// long-form recording at a common bitrate; the ASR runtimes additionally
 /// enforce their own `max_audio_seconds`.
@@ -8052,12 +8058,17 @@ async fn handle_faucet(
     let nonce = match &wallet_service {
         Some(ws) => {
             use tenzro_wallet::WalletService;
-            let reserved = ws.next_nonce(&faucet_addr);
-            if reserved.0 >= chain_nonce {
-                reserved
-            } else {
-                Nonce::from(chain_nonce)
-            }
+            // Rebase before assigning. Taking the reserved counter whenever it
+            // was at or above chain state made the counter authoritative in
+            // exactly the case where it is wrong: it advances on every request
+            // but chain state only advances on inclusion, so one rejected
+            // grant left it permanently ahead and every later grant was
+            // rejected for a nonce gap — one working faucet request per node
+            // restart. Rebasing bounds how far ahead it may run before it is
+            // treated as abandoned, while still handing concurrent requests in
+            // the same block distinct nonces.
+            ws.rebase_nonce(&faucet_addr, chain_nonce, FAUCET_MAX_INFLIGHT_NONCES);
+            ws.next_nonce(&faucet_addr)
         }
         None => Nonce::from(chain_nonce),
     };

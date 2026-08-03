@@ -83,6 +83,12 @@ pub trait WalletService: Send + Sync {
     /// Get the current pending nonce without incrementing.
     fn peek_nonce(&self, address: &Address) -> Nonce;
 
+    /// Re-anchor the pending nonce counter against the chain's executed nonce,
+    /// allowing `max_inflight` assignments to be outstanding. Callers that can
+    /// read chain state do this before assigning, so one rejected transaction
+    /// cannot wedge the address for the life of the process.
+    fn rebase_nonce(&self, address: &Address, chain_nonce: u64, max_inflight: u64);
+
     // === History ===
 
     /// Get transaction history for an address.

@@ -230,8 +230,9 @@ impl TransactionValidator {
         // `to` may be zero for typed transactions where the recipient is
         // either nonexistent (contract creation, governance ops) or encoded
         // inside the typed payload (release/refund derive recipient from VM
-        // state via `escrow_id`). Plain `Transfer` and `BridgeTransfer` still
-        // require a non-zero recipient.
+        // state via `escrow_id`; the bond variants derive the vault from
+        // `provider_did` / `agent_did` and debit `tx.from`). Plain `Transfer`
+        // and `BridgeTransfer` still require a non-zero recipient.
         if tx.to == Address::zero() {
             match &tx.tx_type {
                 TransactionType::ContractDeploy { .. }
@@ -239,7 +240,13 @@ impl TransactionValidator {
                 | TransactionType::RefundEscrow { .. }
                 | TransactionType::GovernancePropose { .. }
                 | TransactionType::GovernanceVote { .. }
-                | TransactionType::ProviderUnstake { .. } => {
+                | TransactionType::ProviderUnstake { .. }
+                | TransactionType::PostAgentBond { .. }
+                | TransactionType::IncreaseAgentBond { .. }
+                | TransactionType::PostComputeBond { .. }
+                | TransactionType::IncreaseComputeBond { .. }
+                | TransactionType::WithdrawComputeBond { .. }
+                | TransactionType::FinalizeComputeBondWithdrawal { .. } => {
                     // `to` is structurally ignored by the VM for these variants.
                 }
                 _ => {

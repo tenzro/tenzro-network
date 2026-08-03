@@ -1379,9 +1379,17 @@ async fn download_one_file(
     );
     info!("Downloading from: {}", download_url);
 
+    // `timeout()` bounds the *whole* request, response body included, so any
+    // ceiling here is a ceiling on model size: a 22 GB GGUF cannot finish in
+    // 600 s below a sustained 37 MB/s, and the stream is cut mid-body with
+    // "error decoding response body" no matter how healthy the transfer is.
+    // What actually needs bounding is a stalled connection, so bound the
+    // connect and the gap between reads instead and let a slow-but-advancing
+    // download run as long as it keeps advancing.
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(std::time::Duration::from_secs(600))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| ModelError::DownloadError(format!("Failed to create HTTP client: {}", e)))?;
 

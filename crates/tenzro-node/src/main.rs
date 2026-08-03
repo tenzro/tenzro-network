@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 use tracing::{Level, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use tenzro_keystore_unlock::KeystoreUnlocker;
 use tenzro_node::config::{GenesisConfig, NodeConfig};
 use tenzro_node::error::{self, Result};
 use tenzro_node::node::TenzroNode;
@@ -16,6 +17,10 @@ use tenzro_node::{
     spending_policy_bridge, spt_ceiling_bridge, web,
 };
 use tenzro_storage::KvStore;
+
+/// Environment variable holding the wallet-keystore password. Set it to make
+/// wallets persist; leave it unset for an ephemeral node.
+const KEYSTORE_PASSWORD_ENV: &str = "TENZRO_KEYSTORE_PASSWORD";
 
 /// Tenzro Network Node CLI
 #[derive(Parser, Debug)]
@@ -412,6 +417,30 @@ async fn main() -> Result<()> {
 
     // Create and start the node
     let mut node = TenzroNode::new(config.clone()).await?;
+
+    // Wallet keystore. Without an unlocker the wallet service keeps FROST key
+    // shares in memory only: identities and balances survive a restart because
+    // they are chain state, but the key material to spend or sign with them
+    // does not. A provider that cannot sign after a restart cannot hold a
+    // compute bond or serve paid work, and any funds already at its address
+    // are stranded — so an operator running a long-lived node needs this set.
+    // Left unset the node still boots, ephemeral, which is the right default
+    // for a throwaway or test node that should not write key material at all.
+    match tenzro_keystore_unlock::EnvUnlocker::new(KEYSTORE_PASSWORD_ENV).unlock_password() {
+        Ok(_) => {
+            node.set_keystore_unlocker(std::sync::Arc::new(
+                tenzro_keystore_unlock::EnvUnlocker::new(KEYSTORE_PASSWORD_ENV),
+            ));
+        }
+        Err(e) => {
+            tracing::warn!(
+                "{} not usable ({}); wallets will be EPHEMERAL — anything created via \
+                 tenzro_createWallet / participate / onboarding is unsignable after a restart",
+                KEYSTORE_PASSWORD_ENV,
+                e
+            );
+        }
+    }
 
     // State-sync wiring. Three input combinations supported:
     //

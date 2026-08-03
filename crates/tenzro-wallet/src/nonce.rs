@@ -42,6 +42,34 @@ impl NonceManager {
         Nonce(nonce)
     }
 
+    /// Re-anchor the pending counter to the chain's view of this address,
+    /// tolerating up to `max_inflight` assignments that have not been included
+    /// yet.
+    ///
+    /// The pending counter advances on every assignment but chain state only
+    /// advances when a transaction is actually included, so a transaction that
+    /// is signed and then rejected — a nonce gap, an underpriced tx, a dropped
+    /// mempool entry — leaves the counter ahead with nothing that will ever
+    /// close the distance. Every later assignment then reads as a gap and is
+    /// rejected in turn, so a single rejection wedges the address for the life
+    /// of the process.
+    ///
+    /// Both directions are corrected: below chain state means the counter was
+    /// rebuilt empty (a restart) and would replay a spent nonce; further ahead
+    /// than `max_inflight` means the gap can no longer be explained by
+    /// transactions still in flight, so it is treated as abandoned.
+    pub fn rebase_nonce(&self, address: &Address, chain_nonce: u64, max_inflight: u64) {
+        let mut entry = self.pending_nonces.entry(*address).or_insert(chain_nonce);
+        let pending = *entry;
+        if pending < chain_nonce || pending > chain_nonce.saturating_add(max_inflight) {
+            debug!(
+                "Rebasing pending nonce for {} from {} to chain nonce {}",
+                address, pending, chain_nonce
+            );
+            *entry = chain_nonce;
+        }
+    }
+
     /// Peek at the next nonce without incrementing.
     pub fn peek_nonce(&self, address: &Address) -> Nonce {
         let nonce = self.pending_nonces.get(address).map(|v| *v).unwrap_or(0);

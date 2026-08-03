@@ -605,6 +605,10 @@ impl WalletService for TenzroWalletService {
         self.nonces.peek_nonce(address)
     }
 
+    fn rebase_nonce(&self, address: &Address, chain_nonce: u64, max_inflight: u64) {
+        self.nonces.rebase_nonce(address, chain_nonce, max_inflight)
+    }
+
     // === History ===
 
     async fn get_history(&self, address: &Address) -> Result<Vec<TxRecord>> {

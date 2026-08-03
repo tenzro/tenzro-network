@@ -138,6 +138,7 @@ pub enum TransactionType {
     /// Transfer TNZO tokens
     Transfer {
         /// Amount to transfer in the smallest unit
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Deploy a smart contract
@@ -181,6 +182,7 @@ pub enum TransactionType {
     /// Stake tokens for provider operations
     ProviderStake {
         /// Amount to stake
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
         /// Provider type
         provider_type: String,
@@ -188,6 +190,7 @@ pub enum TransactionType {
     /// Unstake tokens
     ProviderUnstake {
         /// Amount to unstake
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Submit a governance proposal
@@ -209,6 +212,7 @@ pub enum TransactionType {
         /// Target address
         target_address: String,
         /// Amount to bridge
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Create a new escrow account, locking funds from the payer
@@ -223,6 +227,7 @@ pub enum TransactionType {
         /// Recipient of funds upon successful release
         payee: Address,
         /// Amount to lock in escrow
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
         /// Asset being escrowed
         asset_id: AssetId,
@@ -337,6 +342,7 @@ pub enum TransactionType {
         /// the receipt is self-describing without an identity lookup.
         controller_did: String,
         /// Amount of TNZO to lock in the bond vault
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Top up an existing Active AgentBond by `amount`.
@@ -347,6 +353,7 @@ pub enum TransactionType {
         /// DID of the agent whose bond is being increased
         agent_did: String,
         /// Additional TNZO to lock
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Initiate the cooldown timer on an Active AgentBond. Funds are
@@ -374,6 +381,7 @@ pub enum TransactionType {
         /// DID of the provider being bonded
         provider_did: String,
         /// Amount of TNZO to lock in the bond vault
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Top up an existing Active compute bond by `amount`.
@@ -383,6 +391,7 @@ pub enum TransactionType {
         /// DID of the provider whose bond is being increased
         provider_did: String,
         /// Additional TNZO to lock
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Initiate the cooldown timer on an Active compute bond. The vault stays
@@ -419,6 +428,7 @@ pub enum TransactionType {
         /// Recipient of the payout
         claimant: Address,
         /// Amount to pay from the pool vault, in TNZO base units
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
     },
     /// Settle an x402 payment on-chain, moving `amount` from `payer` to
@@ -441,6 +451,7 @@ pub enum TransactionType {
         /// is the margin-inclusive total the payer authorized; the VM carves
         /// `amount * margin_bps / (10_000 + margin_bps)` out of it to
         /// `app_wallet` and credits the remainder to `payee`.
+        #[serde(with = "crate::primitives::u128_serde")]
         amount: u128,
         /// x402 payment identifier — the idempotency key.
         payment_id: String,
@@ -481,6 +492,7 @@ pub enum TransactionType {
         withdrawal_address: Address,
         /// Self-stake committed to the candidate. Must be ≥ the registry's
         /// `min_self_stake` (default 10,000 TNZO).
+        #[serde(with = "crate::primitives::u128_serde")]
         self_stake: u128,
         /// Optional ≤256-byte off-chain pointer (moniker / website / contact).
         metadata_uri: String,
