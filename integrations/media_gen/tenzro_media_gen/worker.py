@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -72,6 +73,113 @@ class Claim:
     """
 
     role: MediaGenExpertRole | None
+
+
+#: Fraction of a shared CPU/GPU pool a worker may budget for pipelines.
+#:
+#: Mirrors the `total_ram_gb * 0.7` rule the Rust side already applies in
+#: `tenzro-cli/src/commands/join.rs` when sizing a model memory budget. The
+#: remaining 30% is not slack — it is the node process, the OS, and the
+#: activation working set of whichever pipeline is mid-render.
+SAFE_SHARED_POOL_FRACTION = 0.7
+
+
+def _system_ram_gb() -> float:
+    """Total system RAM in GB (10^9), or 0.0 when it cannot be determined."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+
+
+def _accelerator_pool_gb() -> float:
+    """Accelerator memory in GB (10^9), or 0.0 when there is no CUDA device.
+
+    Deliberately tolerant: a worker must not fail to start because a memory
+    probe raised. An unknown pool degrades to the system-RAM rule below, which
+    is the conservative direction.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0.0
+        return float(torch.cuda.get_device_properties(0).total_memory) / 1e9
+    except Exception:  # noqa: BLE001 - probing must never be fatal
+        return 0.0
+
+
+def shared_memory_pool_gb(vram_gb: float, ram_gb: float) -> float | None:
+    """Python twin of ``tenzro_types::hardware::shared_memory_pool``.
+
+    Returns the effective pool size when the accelerator shares system memory,
+    or ``None`` when it has memory of its own. Kept numerically identical to the
+    Rust rule (the ``vram * 8 >= ram * 7`` comparison) so a node and its
+    media-gen worker cannot disagree about what kind of machine they are on.
+    """
+    if ram_gb <= 0:
+        return None
+    # Shape 1: the tool reports the shared pool, so the figures coincide.
+    if vram_gb > 0 and vram_gb * 8 >= ram_gb * 7:
+        return vram_gb
+    # Shape 2: the tool reports nothing, because there is nothing separate.
+    if vram_gb <= 0:
+        return ram_gb
+    return None
+
+
+def resolve_vram_budget_gb(requested_gb: float) -> float:
+    """Clamp an operator-supplied ``--gpu-vram-gb`` to what the machine has.
+
+    ``--gpu-vram-gb`` is the only thing bounding the pipeline cache: eviction in
+    :meth:`MediaGenWorker._evict_until_fits` runs while
+    ``resident + needed > budget``, so a budget larger than the machine disables
+    the cache bound entirely and every pipeline ever loaded stays resident.
+
+    **On a discrete card that is survivable and on a coherent-memory part it is
+    not.** Overshooting discrete VRAM raises a CUDA OOM, which fails one job and
+    leaves the process alive. On Grace-Blackwell (GB10), Apple Silicon and AMD
+    APUs the GPU pool *is* system memory, so the same overshoot is served by the
+    kernel until the machine runs out and the global OOM killer picks victims
+    across every cgroup — the node, and anything else resident. This is not
+    hypothetical: on 2026-08-03 a worker configured with ``--gpu-vram-gb 100`` on
+    a 121 GB GB10 held a 14 GB image pipeline and a 21 GB video pipeline
+    simultaneously, because 35 never exceeded 100.
+
+    Returns the smaller of the requested budget and the safe ceiling, logging a
+    warning when it clamps. Clamping rather than refusing is deliberate — the
+    catalog's VRAM figures are estimates, and a worker that refused to start on
+    an estimate would be worse than one that ran with a smaller cache.
+    """
+    ram_gb = _system_ram_gb()
+    vram_gb = _accelerator_pool_gb()
+    pool_gb = shared_memory_pool_gb(vram_gb, ram_gb)
+
+    if pool_gb is not None:
+        ceiling = pool_gb * SAFE_SHARED_POOL_FRACTION
+        kind = "shared CPU/GPU pool"
+    elif vram_gb > 0:
+        ceiling = vram_gb
+        kind = "discrete VRAM"
+    else:
+        # Nothing could be probed. Leave the operator's figure alone rather than
+        # inventing a ceiling from a measurement that was never taken.
+        return requested_gb
+
+    if requested_gb > ceiling:
+        log.warning(
+            "--gpu-vram-gb %.1f exceeds this machine's %s (%.1f GB usable of "
+            "%.1f GB); clamping to %.1f GB. An unclamped budget disables the "
+            "pipeline cache bound, and on a shared pool that ends in a global "
+            "OOM rather than a recoverable CUDA OOM.",
+            requested_gb,
+            kind,
+            ceiling,
+            pool_gb if pool_gb is not None else vram_gb,
+            ceiling,
+        )
+        return ceiling
+    return requested_gb
 
 
 @dataclass
@@ -128,20 +236,34 @@ class WorkerConfig:
 class MediaGenWorker:
     """Renders media-gen jobs for one node.
 
-    Pipelines are cached by ``(model_id, kind, role)`` because loading a
-    transformer expert is the single most expensive thing the worker does; a
-    worker that keeps claiming the same half of the same model pays that cost
-    once.
+    Pipelines are cached by ``(model_id, kind, role, precision)`` because
+    loading a transformer expert is the single most expensive thing the worker
+    does; a worker that keeps claiming the same half of the same model pays that
+    cost once. The cache is bounded by ``config.gpu_vram_gb``, which
+    :func:`resolve_vram_budget_gb` clamps to what the machine actually has.
     """
 
     def __init__(self, config: WorkerConfig, client: RpcClient, key: WorkerKey):
         self.config = config
+        # Clamp before anything reads the budget. `capability()` advertises
+        # `gpu_vram_gb` to the node, so clamping here also stops the worker
+        # announcing a capacity the machine cannot honour — a worker that
+        # claims 100 GB gets routed jobs sized for 100 GB.
+        self.config.gpu_vram_gb = resolve_vram_budget_gb(config.gpu_vram_gb)
         self.client = client
         self.key = key
         self._catalog: list[dict[str, Any]] = []
         # OrderedDict, not dict: eviction is LRU and needs move_to_end.
         # Oldest-first iteration order is what `_evict_until_fits` relies on.
-        self._pipelines: OrderedDict[tuple[str, str, str | None], LoadedPipeline] = OrderedDict()
+        #
+        # Key is (model_id, kind, role, precision) — precision joined the key
+        # when the nf4/int4/int8 tiers landed, because keying on the model alone
+        # would hand a caller who asked for bf16 whichever precision happened to
+        # be loaded first. The annotation is spelled out in full so it stays in
+        # step with `_load` rather than drifting behind it again.
+        self._pipelines: OrderedDict[tuple[str, str, str | None, str], LoadedPipeline] = (
+            OrderedDict()
+        )
 
     # ── enrollment and discovery ──────────────────────────────────────
 
