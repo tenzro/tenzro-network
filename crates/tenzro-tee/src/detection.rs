@@ -200,7 +200,17 @@ pub async fn detect_cpu_anchor() -> Option<Arc<dyn TeeProvider>> {
 ///
 /// Probed through NVML (`libnvidia-ml.so.1`). A GPU that is CC-*capable* but
 /// running with CC off cannot produce evidence, so both are required.
-#[cfg(feature = "nvidia-gpu")]
+/// Off-Linux answer. The NVML binding is a `dlopen` of `libnvidia-ml.so.1`, so
+/// [`crate::nvml`] only exists on Linux and there is no way to observe whether
+/// Confidential Computing is switched on. Answering `false` keeps the host from
+/// claiming a trust boundary it cannot produce evidence for — the same
+/// conservative direction the probe takes when NVML is present but fails.
+#[cfg(all(feature = "nvidia-gpu", not(target_os = "linux")))]
+async fn gpu_cc_ready() -> bool {
+    false
+}
+
+#[cfg(all(feature = "nvidia-gpu", target_os = "linux"))]
 async fn gpu_cc_ready() -> bool {
     tokio::task::spawn_blocking(|| {
         let Ok(nvml) = crate::nvml::Nvml::open() else {

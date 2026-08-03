@@ -818,6 +818,29 @@ impl ModelRuntime {
         HW.get_or_init(tenzro_types::HardwareCapabilities::detect)
     }
 
+    /// Operator ceiling on the served context window, from `TENZRO_MAX_CONTEXT`.
+    ///
+    /// The catalog's `context_length` is the model's capability, not a
+    /// statement about the machine serving it. `tenzro_serveModel` passes that
+    /// figure straight through, and the batching engine turns it into one
+    /// context of `n_ctx` tokens — so a 131072-token catalog entry asks for a
+    /// KV cache far larger than a consumer card's whole VRAM, and the load
+    /// fails on device allocation rather than serving a shorter window.
+    ///
+    /// Memory admission (`check_memory_admission`) does not catch this: it
+    /// sizes against the GGUF file, which covers the weights and a fixed
+    /// headroom margin, not a KV cache that scales with the context.
+    ///
+    /// Unset means "trust the catalog", preserving the previous behaviour on
+    /// hosts with the VRAM to back it.
+    fn operator_context_cap() -> Option<u32> {
+        std::env::var("TENZRO_MAX_CONTEXT")
+            .ok()?
+            .trim()
+            .parse::<u32>()
+            .ok()
+    }
+
     /// Number of transformer layers to offload to the GPU for a model of
     /// the given on-disk size.
     ///
@@ -946,6 +969,8 @@ impl ModelRuntime {
                 Some(requested) => trained_ctx.min(requested).min(MAX_CONTEXT_LENGTH),
                 None => trained_ctx.min(DEFAULT_CONTEXT_LENGTH),
             };
+            let effective_ctx = Self::operator_context_cap()
+                .map_or(effective_ctx, |cap| effective_ctx.min(cap.max(1)));
 
             info!(
                 "Model {} loaded: {} params, {} layers, trained_context={}, effective_context={}",

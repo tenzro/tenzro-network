@@ -292,6 +292,20 @@ impl HardwareCapabilities {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            caps.ram_gb = windows_ram_gb();
+
+            // Discrete cards only. Windows has no coherent CPU/GPU part in the
+            // class this probe cares about, so PCIe is the honest answer
+            // whenever a device is found; `resolve_unified_vram` below still
+            // gets its chance to fold an integrated part into the system pool.
+            caps.gpus = detect_nvidia_gpus();
+            if !caps.gpus.is_empty() {
+                caps.interconnect = Interconnect::Pcie;
+            }
+        }
+
         #[cfg(target_os = "macos")]
         {
             use std::process::Command;
@@ -383,9 +397,62 @@ impl HardwareCapabilities {
     }
 }
 
+/// Installed physical memory in GiB, via `GlobalMemoryStatusEx`.
+///
+/// Declared directly rather than pulling in a Windows binding crate: this is
+/// one long-stable kernel32 call, and `tenzro-types` sits under every other
+/// crate in the workspace, so its dependency set is worth keeping small.
+///
+/// Returns 0 when the call fails, which is the same "unknown" the Linux branch
+/// yields when `/proc/meminfo` cannot be read — callers already treat 0 as
+/// undeclared rather than as a machine with no memory.
+#[cfg(target_os = "windows")]
+fn windows_ram_gb() -> u32 {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+
+    let mut status = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page_file: 0,
+        avail_page_file: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended_virtual: 0,
+    };
+
+    // SAFETY: `status` is a live, correctly sized `MEMORYSTATUSEX` with
+    // `length` set to its own size, which is the whole of the call's contract.
+    // The callee only writes within that length and returns non-zero on
+    // success.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return 0;
+    }
+    (status.total_phys / 1_073_741_824) as u32
+}
+
 /// Probe NVIDIA devices via `nvidia-smi`. `memory.total` with `nounits`
 /// is MiB; `compute_cap` is the SM version (`"8.9"`, `"9.0"`).
-#[cfg(target_os = "linux")]
+///
+/// Shared with Windows, where `nvidia-smi.exe` ships in `System32` with the
+/// driver and answers the same query in the same format.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn detect_nvidia_gpus() -> Vec<GpuDevice> {
     let Ok(output) = std::process::Command::new("nvidia-smi")
         .args([
