@@ -636,6 +636,47 @@ async fn main() -> Result<()> {
 
     // Start RPC server
     let node_arc = Arc::new(node);
+
+    // Reload the modality runtimes this node had loaded before it stopped.
+    // `served_models` already covers the chat tier, so a GGUF model reloads on
+    // its first request; the ONNX runtimes kept no record, so a restart dropped
+    // them and every later call answered "Model not found" until an operator
+    // reissued the original load. Runs off-thread because a large ONNX bundle
+    // takes minutes to page in and nothing else in startup depends on it —
+    // requests that arrive first fall back to the same not-loaded error they
+    // would have had anyway.
+    {
+        let restore_node = node_arc.clone();
+        tokio::spawn(async move {
+            tenzro_node::rpc::restore_runtime_loads(&restore_node).await;
+
+            // Warm the chat tier too. Its weights are restored as an
+            // *intention* to serve and loaded on first use, which means the
+            // first caller after every restart pays the whole load — 70s for a
+            // 22 GB GGUF — and callers arriving during it are told to come
+            // back rather than served. On a provider node that is backwards:
+            // the node is idle at boot, which is exactly when the load is
+            // cheapest, and busy later when it is most disruptive.
+            //
+            // Sequential on purpose. Warming several large models at once
+            // competes for the same memory bandwidth and makes all of them
+            // late, and a failure here is not fatal — the lazy path still
+            // works, so a model that cannot be warmed is left for first use.
+            let served: Vec<String> = restore_node
+                .served_models
+                .iter()
+                .map(|e| e.key().clone())
+                .collect();
+            for model_id in served {
+                match restore_node.ensure_local_model_loaded(&model_id).await {
+                    Ok(true) => info!(%model_id, "Pre-warmed served model"),
+                    Ok(false) => {}
+                    Err(e) => warn!(%model_id, error = %e, "Could not pre-warm served model"),
+                }
+            }
+        });
+    }
+
     let mut rpc_server = RpcServer::new(node_arc.clone(), config.rpc_addr.clone());
 
     // Wire HTTP 402 payment gate into RPC server for /v1/chat/completions

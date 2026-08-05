@@ -609,6 +609,28 @@ pub struct AccessScope {
     #[serde(default)]
     pub databases: Vec<String>,
 
+    /// Resident memory this lease may hold, in bytes. `None` — the default —
+    /// means the holder is bounded only by the node's own memory budget, the
+    /// same as any other caller.
+    ///
+    /// A ceiling is what makes "dedicated" mean something on a coherent-memory
+    /// part, where the accelerator pool *is* system RAM: without one, a
+    /// lease's pipelines can crowd out the node's own models and the loser is
+    /// whichever allocation happens to come second.
+    ///
+    /// Bytes rather than GB to match `tenzro_memoryBudget`, which the node's
+    /// admission control already denominates that way — two units for one
+    /// quantity is how a ceiling gets compared against the wrong number. An
+    /// integer also keeps this struct `Eq`, which `f64` would not.
+    pub max_memory_bytes: Option<u64>,
+
+    /// Site ids this lease may publish, re-point or remove.
+    ///
+    /// Empty means none, matching `databases` rather than the API-key
+    /// allow-lists: a lease is a grant of specific things, so widening it by
+    /// default would hand a renter every site the node hosts.
+    pub sites: Vec<String>,
+
     /// Storage deal ids this lease may read and write.
     #[serde(default)]
     pub storage_deals: Vec<String>,
@@ -1485,7 +1507,9 @@ mod tests {
             // Test fixtures share the public pool and pin nothing.
             reserved_slots: 0,
             models: Vec::new(),
-            databases: Vec::new(),
+            max_memory_bytes: None,
+                sites: Vec::new(),
+                databases: Vec::new(),
             storage_deals: Vec::new(),
             agents: Vec::new(),
             channels: Vec::new(),

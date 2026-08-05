@@ -147,7 +147,12 @@ async fn dispatch(node: &Arc<TenzroNode>, method: &str, params: Value, api_key: 
         "POST".to_string(),
         format!("http://{}/", node.config().rpc_addr),
     );
-    if let Some(err) = crate::rpc::gate_api_key(node, &request, Some(api_key))
+    // No admin token: this REST surface is the *tenant* one. Every route here
+    // has already resolved a subject DID from the presented key in order to
+    // adjudicate access, so there is no operator identity to offer and nothing
+    // to gain by accepting one — the operator reaches the same handlers over
+    // JSON-RPC, where their token is honoured.
+    if let Some(err) = crate::rpc::gate_api_key(node, &request, Some(api_key), None)
         && let Some(e) = err.error
     {
         return error_response(StatusCode::FORBIDDEN, "refused", &e.message);

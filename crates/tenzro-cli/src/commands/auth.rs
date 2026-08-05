@@ -29,6 +29,35 @@ pub enum AuthAction {
     Refresh(RefreshArgs),
     /// Mint access + refresh tokens for an existing MPC wallet.
     LinkWallet(LinkWalletArgs),
+    /// Show this machine's DPoP key, creating one on first use.
+    ///
+    /// Prints the RFC 7638 thumbprint (`jkt`) that `--dpop-jkt` wants: bind a
+    /// token to it once, and every later CLI call signs its own proof.
+    DpopKey,
+    /// Sign a one-off DPoP proof for a request.
+    ///
+    /// Ordinary CLI calls mint their own, so this is for driving the node from
+    /// curl or a script — anywhere the proof has to be produced by hand.
+    DpopProof(DpopProofArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct DpopProofArgs {
+    /// HTTP method the proof authorises. Bound into the proof, so it must
+    /// match the request.
+    #[arg(long, default_value = "POST")]
+    pub method: String,
+
+    /// Target URL. Query and fragment are stripped, matching what the node
+    /// compares against.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    pub url: String,
+
+    /// Access token this proof is presented with. Hashed into `ath`, which the
+    /// node requires on access-token requests. Falls back to
+    /// `TENZRO_BEARER_JWT`.
+    #[arg(long)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -76,6 +105,8 @@ impl AuthCommand {
         match &self.action {
             AuthAction::Refresh(args) => execute_refresh(args).await,
             AuthAction::LinkWallet(args) => execute_link_wallet(args).await,
+            AuthAction::DpopKey => execute_dpop_key(),
+            AuthAction::DpopProof(args) => execute_dpop_proof(args),
         }
     }
 }
@@ -228,5 +259,42 @@ async fn execute_link_wallet(args: &LinkWalletArgs) -> Result<()> {
         "Use this access token via `Authorization: Bearer <token>` for privileged RPC calls. \
          When it expires (default 1h), run `tenzro auth refresh` to mint a new one.",
     );
+    Ok(())
+}
+
+/// Show (creating on first use) the DPoP key this machine signs proofs with.
+fn execute_dpop_key() -> Result<()> {
+    let key = crate::dpop::DpopKey::load_or_create()?;
+    output::print_success("DPoP key ready");
+    output::print_field("Path", &crate::dpop::key_path().display().to_string());
+    output::print_field("JWK", &key.jwk());
+    output::print_field("Thumbprint (jkt)", &key.jkt());
+    output::print_info(
+        "Bind a token to it, then every CLI call signs its own proof:\n  \
+         tenzro auth link-wallet --dpop-jkt <jkt>\n  \
+         tenzro auth refresh --dpop-jkt <jkt>",
+    );
+    Ok(())
+}
+
+/// Sign one proof, for driving the node outside this CLI.
+fn execute_dpop_proof(args: &DpopProofArgs) -> Result<()> {
+    let key = crate::dpop::DpopKey::load_or_create()?;
+    let token = args
+        .token
+        .clone()
+        .or_else(|| std::env::var("TENZRO_BEARER_JWT").ok())
+        .filter(|t| !t.is_empty());
+    if token.is_none() {
+        // Not fatal — a /token request legitimately has no access token to
+        // bind to — but on any other call the node will refuse a proof with
+        // no `ath`, and that refusal is confusing after the fact.
+        output::print_info(
+            "No access token given, so the proof carries no `ath`. That is right \
+             for a token request and wrong for anything else.",
+        );
+    }
+    let proof = key.proof(&args.method, &args.url, token.as_deref())?;
+    println!("{proof}");
     Ok(())
 }

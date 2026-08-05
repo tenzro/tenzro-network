@@ -127,16 +127,49 @@ impl MediaGenRuntime {
     /// Enroll a worker. A worker announces the models, resolution, and frame
     /// count it can actually serve; [`MediaGenWorkerCapability::can_serve`]
     /// reads that announcement at claim time.
+    /// Announce a worker's capabilities, replacing any it announced before.
+    ///
+    /// Re-announcement is the normal case, not an error: a worker that
+    /// restarts — after a crash, a reboot, or an operator changing which
+    /// models it holds — comes back and says what it can do now. Refusing the
+    /// second announcement meant a worker could never restart without an
+    /// operator first removing it by hand, and the `serve` path enrolls before
+    /// it renders, so the refusal made restarting a worker impossible rather
+    /// than merely awkward.
+    ///
+    /// The announcement is signature-checked before it reaches here, so a
+    /// re-announcement is the same worker by construction. Taking the newest
+    /// one is also the only correct choice: capabilities change across a
+    /// restart, and keeping the stale set would route jobs to a worker for
+    /// models it no longer holds.
     pub fn enroll_worker(&self, capability: MediaGenWorkerCapability) -> Result<()> {
-        if self.workers.contains_key(&capability.worker_did) {
-            return Err(MediaGenError::WorkerAlreadyEnrolled {
-                worker_did: capability.worker_did.clone(),
-            });
-        }
         self.persist_worker(&capability)?;
         self.workers
             .insert(capability.worker_did.clone(), capability);
         Ok(())
+    }
+
+    /// Withdraw a worker's enrollment.
+    ///
+    /// Enrollment is keyed by `worker_did` and re-announcing under the *same*
+    /// DID replaces the entry, which covers a worker restarting. It does not
+    /// cover a worker changing identity: that announces under a new key and
+    /// leaves the old one enrolled, still advertising models nothing is
+    /// serving. The same reasoning that makes the newest announcement win —
+    /// a stale set routes jobs to a worker for models it no longer holds —
+    /// is why there has to be a way to take one out.
+    ///
+    /// Returns whether an enrollment was actually removed, so a caller can
+    /// tell "withdrawn" from "was never there".
+    pub fn remove_worker(&self, worker_did: &str) -> Result<bool> {
+        let existed = self.workers.remove(worker_did).is_some();
+        if let Some(storage) = &self.storage {
+            let key = format!("worker:{worker_did}");
+            storage
+                .delete(CF_MEDIA_GEN_WORKERS, key.as_bytes())
+                .map_err(|e| MediaGenError::Storage(e.to_string()))?;
+        }
+        Ok(existed)
     }
 
     pub fn get_worker(&self, worker_did: &str) -> Option<MediaGenWorkerCapability> {
@@ -1041,12 +1074,49 @@ mod tests {
     }
 
     #[test]
-    fn enroll_rejects_a_duplicate_worker() {
+    fn re_enrolling_replaces_the_previous_capabilities() {
         let rt = runtime();
-        assert!(matches!(
-            rt.enroll_worker(worker()).unwrap_err(),
-            MediaGenError::WorkerAlreadyEnrolled { .. }
-        ));
+        // A worker that restarts announces itself again. That has to succeed,
+        // or it can never come back without operator intervention.
+        let mut second = worker();
+        second.supported_models = vec!["qwen-image".to_string()];
+        rt.enroll_worker(second).expect("re-enrollment is allowed");
+
+        let held = rt.get_worker(&worker().worker_did).expect("still enrolled");
+        assert_eq!(
+            held.supported_models,
+            vec!["qwen-image".to_string()],
+            "the newest announcement wins; a stale set would route jobs to \
+             models the worker no longer holds"
+        );
+        assert_eq!(rt.list_workers().len(), 1, "re-enrolment must not duplicate");
+    }
+
+    /// A worker that changes identity announces under a new key, so the old
+    /// enrollment has to be withdrawable — otherwise it advertises models
+    /// nothing is serving, for as long as the node lives.
+    #[test]
+    fn a_withdrawn_worker_stops_being_enrolled() {
+        let rt = runtime();
+        let w = worker();
+        rt.enroll_worker(w.clone()).unwrap();
+        assert_eq!(rt.list_workers().len(), 1);
+
+        assert!(
+            rt.remove_worker(&w.worker_did).unwrap(),
+            "removing an enrolled worker reports that it was there"
+        );
+        assert!(rt.list_workers().is_empty());
+        assert!(rt.get_worker(&w.worker_did).is_none());
+
+        assert!(
+            !rt.remove_worker(&w.worker_did).unwrap(),
+            "removing it twice is not an error, but reports nothing was removed"
+        );
+        assert!(
+            !rt.remove_worker("did:tenzro:machine:never-enrolled").unwrap(),
+            "removing an unknown worker reports nothing was removed"
+        );
     }
 
     #[test]

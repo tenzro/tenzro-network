@@ -401,6 +401,6 @@ Fix: Refactor to break the cycle
 
 ## Documentation Links
 
-- Full docs: `/Users/hilarl/AI/tenzronetwork/proto/README.md`
-- Overview: `/Users/hilarl/AI/tenzronetwork/proto/OVERVIEW.md`
-- Proto files: `/Users/hilarl/AI/tenzronetwork/proto/tenzro/v1/`
+- Full docs: `proto/README.md`
+- Overview: `proto/OVERVIEW.md`
+- Proto files: `proto/tenzro/v1/`

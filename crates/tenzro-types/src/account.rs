@@ -18,8 +18,10 @@ pub struct Account {
     /// Current nonce (transaction count)
     pub nonce: Nonce,
     /// Account balance in the smallest unit of TNZO (18 decimals, u128 for full precision)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub balance: u128,
     /// Staked amount for provider operations
+    #[serde(with = "crate::primitives::u128_serde")]
     pub staked: u128,
     /// Account state data
     pub state: AccountState,

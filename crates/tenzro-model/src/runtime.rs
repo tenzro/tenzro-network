@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Global singleton for the llama.cpp backend — can only be initialized once per process.
 static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
@@ -253,12 +253,32 @@ impl Default for GenerationConfig {
 /// so a request that does not ask for them samples exactly as it did before
 /// those knobs existed.
 fn build_sampler_chain(config: &GenerationConfig) -> LlamaSampler {
-    let mut stages = vec![LlamaSampler::penalties(
+    build_sampler_chain_with_grammar(config, None)
+}
+
+/// [`build_sampler_chain`] with an optional grammar stage in front.
+///
+/// The grammar goes first so it masks the tokens that would spell a malformed
+/// tool call before any truncation or temperature stage sees the
+/// distribution — constraining after a truncation stage has already discarded
+/// candidates can leave nothing legal to draw from.
+///
+/// `None` reproduces [`build_sampler_chain`] exactly, which is what every
+/// non-tool path passes.
+fn build_sampler_chain_with_grammar(
+    config: &GenerationConfig,
+    grammar: Option<LlamaSampler>,
+) -> LlamaSampler {
+    let mut stages = Vec::new();
+    if let Some(g) = grammar {
+        stages.push(g);
+    }
+    stages.push(LlamaSampler::penalties(
         config.repeat_last_n as i32,
         config.repeat_penalty,
         config.frequency_penalty,
         config.presence_penalty,
-    )];
+    ));
     if let Some(k) = config.top_k {
         stages.push(LlamaSampler::top_k(k as i32));
     }
@@ -1540,30 +1560,49 @@ impl ModelRuntime {
             .new_context(&loaded.backend, ctx_params)
             .map_err(|e| ModelError::Other(format!("Failed to create context: {}", e)))?;
 
-        let mut batch = LlamaBatch::new(std::cmp::max(total, 512), 1);
-        for (i, token) in prompt_tokens.iter().enumerate() {
-            let wants_logits = i >= prompt_len - 1;
-            batch
-                .add(*token, i as i32, &[0], wants_logits)
-                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
-        }
-        for (j, step) in commitment.steps[..steps - 1].iter().enumerate() {
-            let pos = (prompt_len + j) as i32;
-            batch
-                .add(LlamaToken(step.token_id as i32), pos, &[0], true)
-                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
-        }
-
-        ctx.decode(&mut batch)
-            .map_err(|e| ModelError::Other(format!("Verification prefill failed: {}", e)))?;
+        // The sequence to replay is the prompt followed by every committed
+        // output token but the last.
+        let mut seq: Vec<LlamaToken> = Vec::with_capacity(total);
+        seq.extend_from_slice(&prompt_tokens);
+        seq.extend(
+            commitment.steps[..steps - 1]
+                .iter()
+                .map(|step| LlamaToken(step.token_id as i32)),
+        );
 
         let k = commitment.k as usize;
-        let recomputed: Vec<Vec<crate::toploc::TopKEntry>> = (0..steps)
-            .map(|j| {
-                let pos = (prompt_len - 1 + j) as i32;
-                crate::toploc::top_k_from_logits(ctx.get_logits_ith(pos), k)
-            })
-            .collect();
+        let first_logits_pos = prompt_len - 1;
+
+        // Chunked for the same reason as `prefill_in_batches` — a committed
+        // sequence longer than `n_batch` would abort the process rather than
+        // fail the verification. The rows are read back inside the loop
+        // instead of after it because `output_ids` is refilled by every
+        // decode, so a row is only addressable until the next one runs.
+        let n_batch = (ctx.n_batch() as usize).max(1);
+        let mut batch = LlamaBatch::new(n_batch.min(seq.len()), 1);
+        let mut recomputed: Vec<Vec<crate::toploc::TopKEntry>> = Vec::with_capacity(steps);
+
+        let mut start = 0usize;
+        while start < seq.len() {
+            let end = (start + n_batch).min(seq.len());
+            batch.clear();
+            for (offset, token) in seq[start..end].iter().enumerate() {
+                let pos = start + offset;
+                batch
+                    .add(*token, pos as i32, &[0], pos >= first_logits_pos)
+                    .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
+            }
+            ctx.decode(&mut batch)
+                .map_err(|e| ModelError::Other(format!("Verification prefill failed: {}", e)))?;
+
+            for pos in start.max(first_logits_pos)..end {
+                recomputed.push(crate::toploc::top_k_from_logits(
+                    ctx.get_logits_ith((pos - start) as i32),
+                    k,
+                ));
+            }
+            start = end;
+        }
 
         Ok(crate::toploc::verify_commitment(commitment, &recomputed))
     }
@@ -1739,14 +1778,34 @@ impl ModelRuntime {
         };
 
         let _guard = self.acquire_inflight(model_id)?;
-        let mut messages = messages.to_vec();
+        let messages = messages.to_vec();
         let tools = tools.to_vec();
         let config = config.clone();
 
-        inject_tools_preamble(&mut messages, &tools);
+        // Two ways to tell a model about tools, preferred in this order:
+        //
+        // 1. The model's own chat template, which renders them in the format
+        //    it was tuned on and hands back a GBNF grammar compiled from their
+        //    schemas. Sampling constrained to that grammar cannot spell a
+        //    malformed call — see `crate::tool_grammar`.
+        // 2. Failing that, a system preamble of our own wording, parsed back
+        //    out of free text on a best-effort basis.
+        //
+        // Only the serial path takes route 1 so far: the batching engine
+        // renders its own prompts and owns one long-lived context and sampler,
+        // so a per-request grammar does not thread through it without changing
+        // how that engine is built. The preamble it already used is unchanged,
+        // so nothing regresses by not having been converted yet.
+        let preamble_messages = || {
+            let mut m = messages.clone();
+            inject_tools_preamble(&mut m, &tools);
+            m
+        };
 
         let inner = if let Some(engine) = external {
-            engine.chat(&messages, &config).await?
+            // A remote engine is given the tool schemas over its own wire
+            // format; the preamble is all this side controls.
+            engine.chat(&preamble_messages(), &config).await?
         } else {
             match entry
                 .as_ref()
@@ -1754,15 +1813,51 @@ impl ModelRuntime {
                 .as_ref()
             {
                 LoadedEntry::Batched(engine) => {
-                    Self::run_batched(engine, BatchPrompt::Chat(messages), &config, None).await?
+                    Self::run_batched(
+                        engine,
+                        BatchPrompt::Chat(preamble_messages()),
+                        &config,
+                        None,
+                    )
+                    .await?
                 }
                 LoadedEntry::Serial(model_mutex) => {
                     let model_mutex = model_mutex.clone();
                     let config = config.clone();
+                    let messages = messages.clone();
+                    let tools = tools.clone();
                     tokio::task::spawn_blocking(move || {
                         let loaded = model_mutex.blocking_lock();
-                        let prompt = render_chat_prompt(&loaded.model, &messages)?;
-                        Self::generate_sync(&loaded, &prompt, &config)
+                        match crate::tool_grammar::native_tool_prompt(
+                            &loaded.model,
+                            &messages,
+                            &tools,
+                        ) {
+                            Some((prompt, grammar)) => {
+                                // Stop sequences the template asks for are
+                                // additive to the caller's own.
+                                let config = match grammar.as_ref() {
+                                    Some(g) if !g.additional_stops.is_empty() => {
+                                        let mut c = config.clone();
+                                        c.stop.extend(g.additional_stops.iter().cloned());
+                                        c
+                                    }
+                                    _ => config,
+                                };
+                                Self::generate_sync_with_grammar(
+                                    &loaded,
+                                    &prompt,
+                                    &config,
+                                    grammar.as_ref(),
+                                )
+                            }
+                            None => {
+                                let mut messages = messages;
+                                inject_tools_preamble(&mut messages, &tools);
+                                let prompt = render_chat_prompt(&loaded.model, &messages)?;
+                                Self::generate_sync(&loaded, &prompt, &config)
+                            }
+                        }
                     })
                     .await
                     .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??
@@ -1864,6 +1959,8 @@ impl ModelRuntime {
                         &prompt,
                         &config,
                         Some(&token_tx),
+                        // Plain chat streaming carries no tools.
+                        None,
                     )
                 });
                 handle
@@ -2045,6 +2142,8 @@ impl ModelRuntime {
                         &prompt,
                         &config,
                         Some(&token_tx),
+                        // Plain chat streaming carries no tools.
+                        None,
                     )
                 });
                 handle
@@ -2052,6 +2151,54 @@ impl ModelRuntime {
                     .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
             }
         }
+    }
+
+    /// Prefill `tokens` into `ctx`, submitting at most `n_batch` of them per
+    /// `llama_decode` call, and return the batch row the first sample reads
+    /// its logits from.
+    ///
+    /// `n_batch` is llama.cpp's *logical* batch cap — "logical maximum batch
+    /// size that can be submitted to llama_decode" (`llama.h`) — and going
+    /// over it is not a recoverable error. `llama_context::decode` opens with
+    /// `GGML_ASSERT(n_tokens_all <= cparams.n_batch)`, and a failed
+    /// `GGML_ASSERT` calls `abort()`: a prompt one token past the cap does not
+    /// fail the request, it takes the whole node process down, mid-response,
+    /// for every other tenant it was serving. The cap defaults to 2048
+    /// independently of `n_ctx`, so a 128k-context model still aborts on the
+    /// 2049th prompt token unless the prompt is split. Splitting into
+    /// `n_ubatch`-sized micro-batches happens inside llama.cpp and needs
+    /// nothing from us; this loop is only about the logical cap, and mirrors
+    /// upstream's own prefill loops (`tools/perplexity`, `examples/passkey`,
+    /// `tools/server`) and `batching.rs`.
+    ///
+    /// Only the final token requests logits, so the returned row is an index
+    /// into the *last* decode call's batch rather than a position in the
+    /// prompt: `output_ids` is refilled per decode and translates a batch
+    /// index, not a sequence position. Returning it keeps that distinction
+    /// with the loop that knows the chunk boundaries instead of leaving each
+    /// caller to re-derive it.
+    fn prefill_in_batches(ctx: &mut LlamaContext, tokens: &[LlamaToken]) -> Result<i32> {
+        let n_batch = (ctx.n_batch() as usize).max(1);
+        let last = tokens.len() - 1;
+        let mut batch = LlamaBatch::new(n_batch.min(tokens.len()), 1);
+
+        let mut start = 0usize;
+        while start < tokens.len() {
+            let end = (start + n_batch).min(tokens.len());
+            batch.clear();
+            for (offset, token) in tokens[start..end].iter().enumerate() {
+                let pos = start + offset;
+                batch
+                    .add(*token, pos as i32, &[0], pos == last)
+                    .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
+            }
+            ctx.decode(&mut batch)
+                .map_err(|e| ModelError::Other(format!("Prompt decode failed: {}", e)))?;
+            start = end;
+        }
+
+        // Row of the last token within the final chunk.
+        Ok((tokens.len() - 1 - (start - batch.n_tokens() as usize)) as i32)
     }
 
     /// Synchronous text generation using llama.cpp.
@@ -2064,7 +2211,20 @@ impl ModelRuntime {
         prompt: &str,
         config: &GenerationConfig,
     ) -> Result<InferenceResult> {
-        Self::generate_sync_streaming(loaded, None, prompt, config, None)
+        Self::generate_sync_streaming(loaded, None, prompt, config, None, None)
+    }
+
+    /// [`Self::generate_sync`] with sampling constrained to a tool grammar.
+    ///
+    /// Used by the tool-aware path when the model's own template supplied one;
+    /// everything else calls [`Self::generate_sync`] and is unaffected.
+    fn generate_sync_with_grammar(
+        loaded: &LoadedModel,
+        prompt: &str,
+        config: &GenerationConfig,
+        grammar: Option<&crate::tool_grammar::ToolGrammar>,
+    ) -> Result<InferenceResult> {
+        Self::generate_sync_streaming(loaded, None, prompt, config, None, grammar)
     }
 
     /// Core synchronous generation loop, optionally streaming each
@@ -2076,6 +2236,7 @@ impl ModelRuntime {
         prompt: &str,
         config: &GenerationConfig,
         token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
+        tool_grammar: Option<&crate::tool_grammar::ToolGrammar>,
     ) -> Result<InferenceResult> {
         // MTP / speculative-decoding seam. When the caller passes
         // `draft_n: Some(n)`:
@@ -2089,7 +2250,16 @@ impl ModelRuntime {
         // `mtp-speculative-decoding` (DINOZYAVIER/llama-cpp-rs PR
         // #1027). When upstream merges, drop the [patch.crates-io]
         // block at the workspace root and this seam stays unchanged.
-        if let Some(n) = config.draft_n {
+        // A tool grammar outranks speculative decoding. The drafter proposes
+        // tokens the target then accepts or rejects, and the acceptance test
+        // does not consult the grammar — a draft could carry the sequence past
+        // a point the grammar forbids, which is the one guarantee this path
+        // exists to provide. Declining the drafter costs throughput on a turn
+        // that is about to call a tool; letting it through would cost the
+        // constraint.
+        if tool_grammar.is_some() && config.draft_n.is_some() {
+            debug!("tool grammar present — running this turn without the MTP drafter");
+        } else if let Some(n) = config.draft_n {
             let Some(drafter) = drafter else {
                 return Err(ModelError::MtpUnavailable {
                     reason: format!(
@@ -2134,24 +2304,12 @@ impl ModelRuntime {
             .new_context(&loaded.backend, ctx_params)
             .map_err(|e| ModelError::Other(format!("Failed to create context: {}", e)))?;
 
-        // Create batch sized to fit the entire prompt
-        let batch_size = std::cmp::max(tokens_list.len(), 512);
-        let mut batch = LlamaBatch::new(batch_size, 1);
-        let last_index = (tokens_list.len() - 1) as i32;
-        for (i, token) in tokens_list.iter().enumerate() {
-            let is_last = i as i32 == last_index;
-            batch
-                .add(*token, i as i32, &[0], is_last)
-                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
-        }
+        // Prefill the prompt, in `n_batch`-sized decode calls.
+        let n_past = tokens_list.len() as i32;
+        let first_logits = Self::prefill_in_batches(&mut ctx, &tokens_list)?;
 
-        // Decode prompt (prefill)
-        let n_past = batch.n_tokens();
-        ctx.decode(&mut batch)
-            .map_err(|e| ModelError::Other(format!("Prompt decode failed: {}", e)))?;
-
-        // The prefill batch asked for logits on its last token only, so that
-        // row is where the first sample reads from.
+        // The prefill asked for logits on its last token only, so that row is
+        // where the first sample reads from.
         Self::decode_loop(
             loaded,
             &mut ctx,
@@ -2159,8 +2317,9 @@ impl ModelRuntime {
             input_tokens,
             config,
             token_tx,
-            Some(n_past - 1),
+            Some(first_logits),
             start,
+            tool_grammar,
         )
     }
 
@@ -2192,6 +2351,7 @@ impl ModelRuntime {
         token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
         first_logits: Option<i32>,
         start: Instant,
+        tool_grammar: Option<&crate::tool_grammar::ToolGrammar>,
     ) -> Result<InferenceResult> {
         let n_ctx_val = ctx.n_ctx() as i32;
         let total_needed = n_past + config.max_tokens as i32;
@@ -2202,7 +2362,10 @@ impl ModelRuntime {
             );
         }
 
-        let mut sampler = build_sampler_chain(config);
+        let mut sampler = build_sampler_chain_with_grammar(
+            config,
+            tool_grammar.and_then(|g| g.sampler(&loaded.model)),
+        );
 
         let mut n_cur = n_past;
         let mut output_tokens: u32 = 0;
@@ -2446,6 +2609,8 @@ impl ModelRuntime {
             None,
             None,
             start,
+            // The multimodal prefill path does not carry a tool grammar.
+            None,
         )
     }
 
@@ -2547,25 +2712,21 @@ impl ModelRuntime {
                 reason: format!("MtpSpeculative begin failed: {}", e),
             })?;
 
-        // Prefill the target context with the prompt.
-        let batch_size = std::cmp::max(tokens_list.len(), 512);
-        let mut batch = LlamaBatch::new(batch_size, 1);
-        let last_index = (tokens_list.len() - 1) as i32;
-        for (i, token) in tokens_list.iter().enumerate() {
-            let is_last = i as i32 == last_index;
-            batch
-                .add(*token, i as i32, &[0], is_last)
-                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
-        }
-        spec.target_context_mut()
-            .decode(&mut batch)
-            .map_err(|e| ModelError::Other(format!("Prompt decode failed: {}", e)))?;
+        // Prefill the target context with the prompt, in `n_batch`-sized
+        // decode calls.
+        let prompt_logits_row = Self::prefill_in_batches(spec.target_context_mut(), &tokens_list)?;
+
+        // Reused by every speculative step below, which carries at most
+        // `draft_n` candidates — or one token when the drafter declines. The
+        // prompt no longer sizes this batch: it is prefilled separately, in
+        // `n_batch`-sized calls.
+        let mut batch = LlamaBatch::new((draft_n as usize).max(1), 1);
 
         // Same chain as the single-token path. The drafter only PROPOSES
         // tokens; the target's sampler decides which are kept.
         let mut sampler = build_sampler_chain(config);
 
-        let mut n_cur = batch.n_tokens();
+        let mut n_cur = tokens_list.len() as i32;
         let mut output_tokens: u32 = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut stream = StopStream::new(config.stop.clone());
@@ -2574,7 +2735,7 @@ impl ModelRuntime {
 
         // Seed `id_last` by sampling one token from the target. The
         // drafter conditions its draft on this token.
-        let mut id_last = sampler.sample(spec.target_context_mut(), batch.n_tokens() - 1);
+        let mut id_last = sampler.sample(spec.target_context_mut(), prompt_logits_row);
         sampler.accept(id_last);
 
         // Emit the seed token.
@@ -2880,10 +3041,22 @@ pub(crate) fn render_chatml_prompt(messages: &[ChatMessage]) -> String {
 /// Mistral, Gemma) have seen tool prompts in training and adapt to it.
 fn render_tools_preamble(tools: &[ToolDefinition]) -> String {
     let mut out = String::new();
+    // The instruction is written as a worked example rather than as a
+    // `<tool_call>...</tool_call>` schematic on purpose. Models copy what they
+    // are shown between the tags, ellipsis included: given the schematic form,
+    // Qwen 3.6 emits `<tool_call>...\n{"name": ...}\n</tool_call>` — correct
+    // JSON preceded by a literal `...`, which fails to parse and silently
+    // costs the caller the entire tool call. Showing one concrete call leaves
+    // nothing to copy but the shape.
     out.push_str(
-        "You have access to the following tools. To call a tool, emit a \
-         JSON object inside <tool_call>...</tool_call> tags with \
-         {\"name\": ..., \"input\": {...}}. Only call a tool when needed.\n\n\
+        "You have access to the following tools. To call a tool, write a \
+         single JSON object between a <tool_call> tag and a </tool_call> \
+         tag, like this:\n\n\
+         <tool_call>\n\
+         {\"name\": \"example_tool\", \"input\": {\"first_argument\": \"a value\"}}\n\
+         </tool_call>\n\n\
+         Put nothing but that JSON object between the tags. Only call a tool \
+         when needed.\n\n\
          <tools>\n",
     );
     for t in tools {
@@ -2947,9 +3120,59 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
         let end = after_open + rel_end;
         let close_end = end + "</tool_call>".len();
 
+        // Parse from the first `{` rather than from the start of the body.
+        // Models routinely put a few stray characters after the opening tag —
+        // a copied `...` placeholder, a stray `json` fence, a newline and a
+        // word — and dropping the call over that loses the whole turn even
+        // though the JSON that follows is exactly right. The object still has
+        // to parse, so this widens what is tolerated, not what is accepted.
         let body = text[after_open..end].trim();
-        if let Some(call) = parse_tool_call_json(body) {
+        let json = body.find('{').map(|i| &body[i..]).unwrap_or(body);
+        if let Some(call) = parse_tool_call_json(json)
+            .or_else(|| repair_key_separators(json).and_then(|r| parse_tool_call_json(&r)))
+            .or_else(|| parse_xml_tool_call_body(body))
+            .or_else(|| parse_tool_call_lenient(body))
+        {
             calls.push(call);
+        }
+        text.replace_range(start..close_end, "");
+    }
+
+    // ── Anthropic-shaped: <tool_use id="…" name="…">{json}</tool_use> ─
+    //
+    // Not a format any local model is trained on — it is the shape an agent's
+    // own system prompt and prior turns put in front of the model, and models
+    // imitate their context. `qwen3.6-35b-a3b-mtp` reaches for it mid-session
+    // once earlier assistant turns carrying tool calls are in the history,
+    // even when the template taught it `<function=…>`. Unread, the turn looks
+    // to the caller like the model declining to act.
+    //
+    // The tool name is an attribute rather than a JSON field here, so the
+    // whole body is the argument object.
+    while let Some(start) = text.find("<tool_use ") {
+        let Some(rel_gt) = text[start..].find('>') else {
+            break;
+        };
+        let open_end = start + rel_gt + 1;
+        let Some(rel_end) = text[open_end..].find("</tool_use>") else {
+            break;
+        };
+        let end = open_end + rel_end;
+        let close_end = end + "</tool_use>".len();
+
+        let attrs = &text[start..open_end];
+        if let Some(name) = xml_attr(attrs, "name") {
+            let body = text[open_end..end].trim();
+            let json = body.find('{').map(|i| &body[i..]).unwrap_or(body);
+            let input = find_balanced_close(json, 0, '{', '}')
+                .and_then(|close| serde_json::from_str(&json[..=close]).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            calls.push(ToolCall {
+                id: xml_attr(attrs, "id")
+                    .unwrap_or_else(|| format!("toolu_{}", uuid::Uuid::new_v4().simple())),
+                name,
+                input,
+            });
         }
         text.replace_range(start..close_end, "");
     }
@@ -3019,6 +3242,287 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
 /// Parse a single tool-call JSON object. Accepts both
 /// `{"name":..., "input":...}` (our canonical form, also Qwen) and
 /// `{"name":..., "arguments":...}` (Mistral/OpenAI-style).
+/// Value of a double-quoted XML attribute in an opening tag, e.g. `name` in
+/// `<tool_use id="x" name="bash">`.
+///
+/// Deliberately minimal: these tags come from a model imitating its own
+/// context, not from an XML document, so there are no namespaces, entities or
+/// single-quoted forms to honour — and treating the input as XML would invite
+/// a parser where a `find` will do.
+fn xml_attr(tag: &str, attr: &str) -> Option<String> {
+    let pat = format!("{attr}=\"");
+    let start = tag.find(&pat)? + pat.len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    let value = &rest[..end];
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Recover a tool call from a `<tool_call>` body that is not valid JSON, by
+/// anchoring on the field names instead of the punctuation between them.
+///
+/// This is the last of four attempts, and it exists because the first three
+/// were each written for one observed corruption and the model kept producing
+/// a new one. From `qwen3.6-35b-a3b-mtp`, on three prompts differing only in
+/// how many tools were offered and how long the system prompt was:
+///
+/// ```text
+/// {"name">"read_file", "input": {"path": "src/parser.rs"}}   // `>` for `:`
+/// {"name": "read_file",\n{"input": {"path": "src/parser.rs"}}  // stray `{`
+/// {"name">"read_file"</name><arg_key>path</arg_key>…          // XML bleed
+/// ```
+///
+/// Every one names the function and its arguments unambiguously and differs
+/// only in the punctuation joining them, so keying on `"name"` and `"input"`
+/// and reading the balanced object that follows recovers all three and does
+/// not need editing for the fourth. The argument object still has to parse as
+/// JSON — models corrupt the joins between fields far more readily than the
+/// values inside them — so this widens which wrappers are tolerated, not what
+/// counts as a valid call.
+///
+/// Only ever applied inside a `<tool_call>` span, which this model emits when
+/// it is calling a tool and not otherwise, so the looser matching cannot
+/// promote ordinary prose into a call.
+fn parse_tool_call_lenient(body: &str) -> Option<ToolCall> {
+    /// Byte offset just past `"field"`, searched outside of nothing in
+    /// particular — the body is already known not to be valid JSON.
+    fn field_end(hay: &str, field: &str) -> Option<usize> {
+        let pat = format!("\"{}\"", field);
+        hay.find(&pat).map(|i| i + pat.len())
+    }
+
+    /// Skip whitespace and any separator the model might have used.
+    fn skip_separator(hay: &str, mut i: usize) -> usize {
+        for (off, c) in hay[i..].char_indices() {
+            if c.is_whitespace() || c == ':' || c == '>' || c == '=' || c == ',' {
+                continue;
+            }
+            return i + off;
+        }
+        i = hay.len();
+        i
+    }
+
+    let name_at = skip_separator(body, field_end(body, "name")?);
+    let rest = &body[name_at..];
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let mut name = String::new();
+    let mut escaped = false;
+    for c in rest[1..].chars() {
+        if escaped {
+            name.push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            break;
+        } else {
+            name.push(c);
+        }
+    }
+    if name.is_empty() {
+        return None;
+    }
+
+    let input = ["input", "arguments", "parameters"]
+        .iter()
+        .find_map(|field| {
+            let at = skip_separator(body, field_end(body, field)?);
+            let open = body[at..].find('{')? + at;
+            let close = find_balanced_close(body, open, '{', '}')?;
+            serde_json::from_str::<serde_json::Value>(&body[open..=close]).ok()
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some(ToolCall {
+        id: format!("toolu_{}", uuid::Uuid::new_v4().simple()),
+        name,
+        input,
+    })
+}
+
+/// Repair `"key">value` back to `"key":value` in a tool-call body.
+///
+/// Models trained to emit XML tool calls leak the habit into JSON when a
+/// preamble asks for JSON instead. Qwen 3.6 writes
+///
+/// ```text
+/// {"name">"read_file", "input": {"path": "src/parser.rs"}}
+/// ```
+///
+/// — one wrong character, `>` where the key separator belongs, and everything
+/// else exactly right. Left alone it costs the whole call and stalls the
+/// agent, which is a poor trade for a defect this small.
+///
+/// The substitution is made only where a colon is the sole legal character:
+/// directly after a string that opened in key position (first member of an
+/// object, or just past a comma), never inside a string. That keeps a value
+/// like `{"html": "<a href=\"x\">"}` untouched. Returns `None` when there was
+/// nothing to repair, so the caller can tell a repair from a no-op, and the
+/// result still has to parse — this widens what is recovered, not what is
+/// accepted.
+fn repair_key_separators(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut repaired = false;
+
+    // Last structural character seen outside a string; a key may start only
+    // after `{` or `,`.
+    let mut prev_structural = '\0';
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((_, c)) = chars.next() {
+        if c != '"' {
+            if !c.is_whitespace() {
+                prev_structural = c;
+            }
+            out.push(c);
+            continue;
+        }
+
+        // Copy the string literal verbatim, honouring escapes.
+        let in_key_position = prev_structural == '{' || prev_structural == ',';
+        out.push('"');
+        let mut escaped = false;
+        for (_, sc) in chars.by_ref() {
+            out.push(sc);
+            if escaped {
+                escaped = false;
+            } else if sc == '\\' {
+                escaped = true;
+            } else if sc == '"' {
+                break;
+            }
+        }
+
+        if !in_key_position {
+            prev_structural = '"';
+            continue;
+        }
+
+        // Whitespace, then the separator.
+        while let Some((_, w)) = chars.peek() {
+            if w.is_whitespace() {
+                out.push(*w);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        match chars.peek() {
+            Some((_, '>')) => {
+                out.push(':');
+                chars.next();
+                repaired = true;
+                prev_structural = ':';
+            }
+            _ => prev_structural = '"',
+        }
+    }
+
+    repaired.then_some(out)
+}
+
+/// Parse the XML argument dialect that some instruct models emit inside a
+/// `<tool_call>` span instead of a JSON object.
+///
+/// Qwen 3.6 and the GLM-4.5/4.6 family are trained to write arguments as
+/// `<arg_key>k</arg_key><arg_value>v</arg_value>` pairs, and Qwen 3 Coder as
+/// `<parameter=k>v</parameter>`. Told in a system preamble to emit JSON
+/// instead, they blend the two — the observed output for the tools preamble is
+///
+/// ```text
+/// <tool_call>
+/// {"name">"read_file"</name>
+/// <arg_key>path</arg_key><arg_value>"src/parser.rs"</arg_value>
+/// </tool_call>
+/// ```
+///
+/// which is neither valid JSON nor clean XML, but names the function and every
+/// argument unambiguously. Upstream llama.cpp treats these as first-class
+/// dialects rather than errors (`common/chat-auto-parser.h` enumerates
+/// `<arg_key>` and `<param=` among its name/argument delimiters), and so do we:
+/// the alternative is discarding a call the model got right in substance and
+/// stalling the agent loop.
+///
+/// Returns `None` unless both a name and at least one delimiter were found, so
+/// prose that merely mentions the tags cannot masquerade as a call.
+fn parse_xml_tool_call_body(body: &str) -> Option<ToolCall> {
+    /// Text between the first `open` and the following `close`, plus the
+    /// offset just past `close`.
+    fn between<'a>(hay: &'a str, from: usize, open: &str, close: &str) -> Option<(&'a str, usize)> {
+        let s = hay[from..].find(open)? + from + open.len();
+        let e = hay[s..].find(close)? + s;
+        Some((&hay[s..e], e + close.len()))
+    }
+
+    let mut input = serde_json::Map::new();
+
+    // `<arg_key>k</arg_key> <arg_value>v</arg_value>` pairs.
+    let mut cursor = 0usize;
+    while let Some((key, after_key)) = between(body, cursor, "<arg_key>", "</arg_key>") {
+        let Some((value, after_value)) = between(body, after_key, "<arg_value>", "</arg_value>")
+        else {
+            break;
+        };
+        input.insert(key.trim().to_string(), xml_arg_value(value));
+        cursor = after_value;
+    }
+
+    // `<parameter=k>v</parameter>` pairs.
+    let mut cursor = 0usize;
+    while let Some((key, after_key)) = between(body, cursor, "<parameter=", ">") {
+        let Some((value, after_value)) = between(body, after_key, "", "</parameter>") else {
+            break;
+        };
+        input.insert(key.trim().to_string(), xml_arg_value(value));
+        cursor = after_value;
+    }
+
+    // The name sits ahead of the first argument delimiter. Prefer the last
+    // quoted string there — in `{"name">"read_file"</name>` that is the value
+    // rather than the `"name"` label — and fall back to the last bare word,
+    // which is the shape GLM's own `<tool_call>fn_name` header uses.
+    let head_end = ["<arg_key>", "<parameter=", "<arg_value>"]
+        .iter()
+        .filter_map(|d| body.find(d))
+        .min()
+        .unwrap_or(body.len());
+    let head = &body[..head_end];
+
+    let quoted: Vec<&str> = head.split('"').skip(1).step_by(2).collect();
+    let name = quoted
+        .iter()
+        .rev()
+        .find(|s| !s.trim().is_empty() && *s != &"name")
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '-'))
+                .find(|w| !w.is_empty() && *w != "name")
+                .map(|w| w.to_string())
+        })?;
+
+    if input.is_empty() && head_end == body.len() {
+        return None;
+    }
+
+    Some(ToolCall {
+        id: format!("toolu_{}", uuid::Uuid::new_v4().simple()),
+        name,
+        input: serde_json::Value::Object(input),
+    })
+}
+
+/// Coerce one XML-carried argument value. JSON first, so `3`, `true` and
+/// `{"a":1}` keep their types and a quoted `"src/parser.rs"` loses its quotes;
+/// anything else is the literal text.
+fn xml_arg_value(raw: &str) -> serde_json::Value {
+    let t = raw.trim();
+    serde_json::from_str::<serde_json::Value>(t)
+        .unwrap_or_else(|_| serde_json::Value::String(t.to_string()))
+}
+
 fn parse_tool_call_json(body: &str) -> Option<ToolCall> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     parse_tool_call_value(&v)
@@ -3130,7 +3634,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_qwen_tool_call() {
+    fn extract_json_body_in_tool_call_tags() {
         let raw = "Sure thing.\n<tool_call>\n{\"name\": \"get_weather\", \"input\": {\"city\": \"Tokyo\"}}\n</tool_call>\nAnything else?";
         let (text, calls) = extract_tool_calls(raw);
         assert_eq!(calls.len(), 1);
@@ -3141,8 +3645,220 @@ mod tests {
         assert!(text.contains("Anything else"));
     }
 
+    /// Junk between the opening tag and the JSON.
+    ///
+    /// Any model shown a `<tool_call>...</tool_call>` schematic may copy the
+    /// ellipsis in ahead of an otherwise perfect call — first seen on a Qwen
+    /// 3.6 build, but it is a property of the instruction, not of that model.
+    /// The preamble no longer invites it; the tolerance stays because a stray
+    /// token before the body must not cost the whole call.
     #[test]
-    fn extract_multiple_qwen_tool_calls() {
+    fn extract_tool_call_with_junk_before_the_json() {
+        let raw = "<tool_call>...\n{\"name\": \"get_weather\", \"input\": {\"city\": \"Tokyo\"}}\n</tool_call>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].input["city"], "Tokyo");
+        assert!(!text.contains("<tool_call>"));
+    }
+
+    /// The preamble is what the model imitates, so it must not contain a
+    /// `<tool_call>` span whose body is anything but a valid JSON object.
+    #[test]
+    fn tools_preamble_shows_only_parseable_tool_call_bodies() {
+        let preamble = render_tools_preamble(&[ToolDefinition {
+            name: "get_weather".to_string(),
+            description: Some("Get current weather".to_string()),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]);
+
+        let (_text, calls) = extract_tool_calls(&preamble);
+        assert_eq!(
+            calls.len(),
+            1,
+            "the worked example in the preamble must itself parse as a tool call"
+        );
+        assert_eq!(calls[0].name, "example_tool");
+    }
+
+    /// The `<arg_key>`/`<arg_value>` argument dialect, blended into JSON.
+    ///
+    /// Trained into the GLM-4.5/4.6 family and reachable from any model
+    /// carrying those tokens. This sample came from a Qwen 3.6 build told to
+    /// emit JSON instead, which produced a hybrid of the two: neither valid
+    /// JSON nor clean XML, but unambiguous as a call.
+    #[test]
+    fn extract_arg_key_value_dialect() {
+        let raw = "<think>\n\n</think>\n\n<tool_call>\n{\"name\">\"read_file\"</name>\n\
+                   <arg_key>path</arg_key><arg_value>\"src/parser.rs\"</arg_value>\n</tool_call>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].input["path"], "src/parser.rs");
+        assert!(!text.contains("<tool_call>"));
+        assert!(!text.contains("arg_key"));
+    }
+
+    #[test]
+    fn extract_xml_tool_call_typed_and_multi_arg() {
+        let raw = "<tool_call>edit_file\n\
+                   <arg_key>path</arg_key><arg_value>src/lib.rs</arg_value>\n\
+                   <arg_key>count</arg_key><arg_value>3</arg_value>\n\
+                   <arg_key>dry</arg_key><arg_value>true</arg_value>\n</tool_call>";
+        let (_text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "edit_file");
+        // Unquoted text stays a string; JSON scalars keep their type.
+        assert_eq!(calls[0].input["path"], "src/lib.rs");
+        assert_eq!(calls[0].input["count"], 3);
+        assert_eq!(calls[0].input["dry"], true);
+    }
+
+    #[test]
+    fn extract_function_parameter_dialect() {
+        let raw = "<tool_call>\n<function=read_file>\n<parameter=path>src/parser.rs</parameter>\n</function>\n</tool_call>";
+        let (_text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].input["path"], "src/parser.rs");
+    }
+
+    /// Prose that merely mentions the tags is not a call — the XML fallback
+    /// must not manufacture one out of a bare `<tool_call>` span.
+    #[test]
+    fn xml_fallback_does_not_invent_calls_from_prose() {
+        let raw = "<tool_call>I was going to call a tool but changed my mind.</tool_call>";
+        let (_text, calls) = extract_tool_calls(raw);
+        assert!(calls.is_empty(), "got {:?}", calls);
+    }
+
+    /// One wrong character: `>` where the key separator belongs.
+    ///
+    /// The failure mode of a model that carries XML tool tokens being asked
+    /// for JSON — the tag habit leaks into the separator. Sampled from a Qwen
+    /// 3.6 build; nothing about the repair is specific to it.
+    #[test]
+    fn extract_tool_call_with_angle_bracket_key_separator() {
+        let raw = "<think>\n\n</think>\n\n<tool_call>\n\
+                   {\"name\">\"read_file\", \"input\": {\"path\": \"src/parser.rs\"}}\n</tool_call>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].input["path"], "src/parser.rs");
+        assert!(!text.contains("<tool_call>"));
+    }
+
+    /// The repair must not reach inside string values — a `">` that is part of
+    /// markup being passed as an argument has to survive intact.
+    #[test]
+    fn key_separator_repair_leaves_string_values_alone() {
+        let body = "{\"name\">\"write\", \"input\": {\"html\": \"<a href=\\\"x\\\">link</a>\"}}";
+        let repaired = repair_key_separators(body).expect("the name separator needs repair");
+        let call = parse_tool_call_json(&repaired).expect("repaired body must parse");
+        assert_eq!(call.name, "write");
+        assert_eq!(call.input["html"], "<a href=\"x\">link</a>");
+    }
+
+    #[test]
+    fn key_separator_repair_is_none_when_nothing_is_broken() {
+        assert!(repair_key_separators("{\"name\": \"ok\", \"input\": {}}").is_none());
+    }
+
+    /// A stray `{` opens a second object where the first should have
+    /// continued.
+    ///
+    /// Longer tool arrays and longer system prompts make this likelier in any
+    /// model; this sample is from a 9-tool, 1.5 KB-system prompt on a Qwen 3.6
+    /// build.
+    #[test]
+    fn extract_tool_call_with_stray_brace_before_input() {
+        let raw = "<think>\n\n</think>\n\n<tool_call>\n\
+                   {\"name\": \"read_file\",\n{\"input\": {\"path\": \"src/parser.rs\"}}\n</tool_call>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].input["path"], "src/parser.rs");
+        assert!(!text.contains("<tool_call>"));
+    }
+
+    /// A call naming a function but carrying no argument object is still a
+    /// call — some tools take none — and must come back with empty input
+    /// rather than being dropped.
+    #[test]
+    fn lenient_parse_allows_argumentless_call() {
+        let (_text, calls) =
+            extract_tool_calls("<tool_call>\n{\"name\" \"list_dir\"\n</tool_call>");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_dir");
+        assert_eq!(calls[0].input, serde_json::json!({}));
+    }
+
+    /// Without a `"name"` field there is nothing to dispatch, so the lenient
+    /// pass must decline rather than invent one.
+    #[test]
+    fn lenient_parse_declines_without_a_name_field() {
+        assert!(parse_tool_call_lenient("{\"input\": {\"path\": \"x\"}}").is_none());
+        assert!(parse_tool_call_lenient("just some prose").is_none());
+    }
+
+    /// The `<tool_use name="…">` tag of the Anthropic wire format.
+    ///
+    /// No local model is trained on this — it is the shape an agent's own
+    /// system prompt and prior assistant turns are written in, and models
+    /// imitate their context. It is therefore reachable from *any* model
+    /// driven by an agent that formats history this way, which is why it is
+    /// parsed rather than treated as one model's quirk. Sampled several turns
+    /// into an agent session on a Qwen 3.6 build.
+    #[test]
+    fn extract_tool_use_tag_dialect() {
+        let raw = "Now verifying the fix by running the test:\
+                   <tool_use id=\"toolu_5e14f83b\" name=\"bash\">\
+                   {\"command\":\"cargo test 2>&1\"}\n</tool_use>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].input["command"], "cargo test 2>&1");
+        // The id the model supplied is kept: the caller correlates its result
+        // by it, and minting a fresh one would break that pairing.
+        assert_eq!(calls[0].id, "toolu_5e14f83b");
+        assert!(!text.contains("<tool_use"));
+        assert!(text.contains("Now verifying"));
+    }
+
+    /// The same tag with the trailing brace dropped. Because the tool name is
+    /// an attribute rather than a JSON field, the call stays dispatchable even
+    /// when the argument object does not parse.
+    #[test]
+    fn tool_use_tag_survives_a_truncated_body() {
+        let raw = "<tool_use id=\"toolu_48f06e31\" name=\"bash\">\
+                   {\"command\":\"cargo test\"</command></tool_use>";
+        let (_text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].input, serde_json::json!({}));
+    }
+
+    /// A tag with no `name` names no tool, so there is nothing to dispatch.
+    /// The markers still come out of the text.
+    #[test]
+    fn tool_use_tag_without_a_name_is_not_a_call() {
+        let (text, calls) = extract_tool_calls("<tool_use id=\"x\">{}</tool_use>");
+        assert!(calls.is_empty(), "got {:?}", calls);
+        assert!(!text.contains("<tool_use"));
+    }
+
+    #[test]
+    fn xml_attr_reads_only_the_named_attribute() {
+        let tag = "<tool_use id=\"toolu_1\" name=\"read_file\">";
+        assert_eq!(xml_attr(tag, "id").as_deref(), Some("toolu_1"));
+        assert_eq!(xml_attr(tag, "name").as_deref(), Some("read_file"));
+        assert_eq!(xml_attr(tag, "missing"), None);
+        // An empty value is no value.
+        assert_eq!(xml_attr("<tool_use name=\"\">", "name"), None);
+    }
+
+    #[test]
+    fn extract_multiple_tool_call_tags() {
         let raw = "ok <tool_call>{\"name\":\"a\",\"input\":{}}</tool_call> mid <tool_call>{\"name\":\"b\",\"input\":{\"x\":1}}</tool_call> end";
         let (_text, calls) = extract_tool_calls(raw);
         assert_eq!(calls.len(), 2);
@@ -3172,7 +3888,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_mistral_tool_calls_array() {
+    fn extract_bracketed_tool_calls_array() {
         let raw = "[TOOL_CALLS] [{\"name\":\"add\",\"arguments\":{\"a\":1,\"b\":2}}, {\"name\":\"mul\",\"arguments\":{\"x\":3}}]";
         let (_text, calls) = extract_tool_calls(raw);
         assert_eq!(calls.len(), 2);

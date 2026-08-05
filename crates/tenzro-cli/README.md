@@ -6,6 +6,11 @@ The official command-line interface for operating Tenzro Network nodes, managing
 
 - **Network Onboarding**: One-click participation via `join` command
 - **Node Management**: Monitor node status
+- **Live Status**: `tenzro status` — memory, accelerators, loaded models and traffic in one readout, with `--watch` for a continuous refresh and `--json` for scripting
+- **Node Visibility**: `tenzro visibility` — advertise or withhold individual capabilities (ai, storage, database, hosting, rpc, tee, compute) without unloading them; consensus stays advertised so a validator can still vote
+- **File Storage**: `tenzro files` — multi-tenant, erasure-coded file storage scoped to a storage API key's subject, with upload/list/get/download/delete and usage accounting
+- **Rented Hardware Shell**: `tenzro shell` — passkey-authenticated interactive sessions on hardware you rented, plus the operator-side `lease open/revoke/list` that scopes GPUs, cores, memory, egress and session lifetime
+- **Raw RPC Access**: `tenzro rpc` — discover every method the node serves along with how each is gated, and call any of them by name
 - **Wallet Operations**: Create FROST-Ed25519 threshold wallets, check balances, send transactions (real reqwest RPC client)
 - **Model Management**: List, download, serve AI models (local + remote RPC)
 - **Multi-Modal Inference**: Forecasting, image/text/video embedding, point-and-box and text-promptable segmentation, object detection, and audio transcription — each a subcommand group with `catalog` / `list` / `load` / `unload` / `run`
@@ -115,6 +120,53 @@ tenzro node mempool-stats
 # token-bucket state.
 tenzro node mempool-lane --address 0xabc...
 ```
+
+### Live Status
+
+```bash
+# One frame of the node's resource and traffic readout: memory, accelerators,
+# loaded models, and request throughput.
+tenzro status
+
+# Refresh continuously until interrupted. The floor is 500 ms — each frame is
+# four RPCs, and polling faster than that measures the node's response to being
+# polled rather than its actual load.
+tenzro status --watch 2000
+
+# One JSON object instead of the formatted readout, for scripting.
+tenzro status --json
+```
+
+A panel that fails is reported as `null` rather than aborting the frame: a node
+that is not serving models still has traffic and memory worth looking at, and an
+operator diagnosing a half-up node is precisely who needs the half that works.
+The readout also calls out whether a Hugging Face token is present — without one,
+half the frontier image catalog fails at download time with a 401 and nothing
+otherwise connects that to a missing credential.
+
+### Node Visibility
+
+What this node advertises to the network, independent of what it can actually do.
+Hiding a capability stops it being announced; it does not unload or disable it.
+
+```bash
+# Each capability and whether it is currently advertised.
+tenzro visibility show
+
+# Stop advertising one capability:
+#   ai | storage | database | hosting | rpc | tee | compute
+tenzro visibility hide storage --admin-token $TENZRO_ADMIN_TOKEN
+
+# Stop advertising everything that can be hidden. Consensus stays advertised —
+# a validator its peers cannot reach cannot vote.
+tenzro visibility hide --all
+
+# Resume advertising.
+tenzro visibility publish storage
+tenzro visibility publish --all
+```
+
+`--admin-token` falls back to `TENZRO_ADMIN_TOKEN`.
 
 ### Local Discovery
 
@@ -253,6 +305,77 @@ tenzro database authorize --id <id> --caller-did <did>
 tenzro database drop --id <id> --caller-did <did>
 ```
 
+### File Storage
+
+Multi-tenant file storage, erasure-coded across providers. Every subcommand is
+scoped by a storage API key — its subject owns the files, and `--api-key` falls
+back to `TENZRO_API_KEY`. `--rpc` defaults to `http://127.0.0.1:8545`.
+
+```bash
+# Store a local file. --purpose is one of:
+#   assistants | batch | fine_tune | vision | user_data
+tenzro files upload ./corpus.jsonl --purpose fine_tune
+
+# List the files owned by your key's subject, newest first.
+tenzro files list --purpose fine_tune --limit 20
+
+# One file's record.
+tenzro files get file-<uuid>
+
+# Download it back. --out defaults to the stored filename in the current
+# directory.
+tenzro files download file-<uuid> --out ./restored.jsonl
+
+# Unlink a file. This removes the record, not the erasure-coded shards —
+# the command prints a note saying so.
+tenzro files delete file-<uuid>
+
+# What you are storing and what it bills against.
+tenzro files usage
+```
+
+### Rented Hardware Shell
+
+Interactive access to hardware you rented, and the operator side that issues it.
+
+Renter — sign in and open a session. Authentication is a passkey against the
+wallet smart account named by `--account`; `--service-key` is what the operator
+issued you and falls back to `TENZRO_SERVICE_KEY`. `--web-url` is derived from
+`--rpc` when omitted.
+
+```bash
+tenzro shell login --service-key <key> --account 0xabc...
+```
+
+Operator — leases are what make a service key mean anything:
+
+```bash
+# Issue a service key and open a lease for it. Only the key's digest is
+# stored, so keep your copy. At least one --wallet is required: a lease naming
+# no wallet is a key with nothing behind it, and the node refuses to create it.
+tenzro shell lease open \
+  --service-key <key> \
+  --wallet 0xabc... [--wallet 0xdef...] \
+  --renter-did did:tenzro:... \
+  [--rental-id <id>] \
+  [--gpu 0 --gpu 1] \
+  [--cores 4] [--memory-mib 16384] \
+  [--allow-egress] \
+  [--max-session-secs 3600] [--term-hours 24]
+
+# End a lease. This kills every outstanding session grant against it.
+tenzro shell lease revoke --lease-id <id>
+
+# Every lease on this node.
+tenzro shell lease list
+```
+
+Scope defaults are deliberate. Omitting `--gpu` gives a CPU-only lease — "all
+GPUs" is not a scope anyone chose, so it is not the default. `--allow-egress` is
+off by default: a rented shell is for compute, and the operator's local networks
+stay unreachable either way. `--max-session-secs` is a per-session wall-clock
+ceiling capped at 12 hours. `--admin-token` falls back to `TENZRO_ADMIN_TOKEN`.
+
 ### Wallet Operations
 
 ```bash
@@ -305,7 +428,7 @@ tenzro wallet send <to-address> <amount> --self-custody
 ### Model Management
 
 The `tenzro` CLI is the full node surface: it downloads weights and serves
-models so your node becomes a provider. If you only want to *use* a model —
+models so your node becomes a provider. If you only want to _use_ a model —
 send a prompt to a provider that already serves it, with no node and no weights
 — reach for the simpler Tenzro Labs client instead:
 
@@ -885,7 +1008,7 @@ mismatched amount, counterparty, or action type parks again.
 
 `--deny-reason` on a denial is carried verbatim back to the requester. A
 retry against a denied approval returns `-32001` with the controller's
-reason in the message, so the agent can act on *why* it was refused rather
+reason in the message, so the agent can act on _why_ it was refused rather
 than only that it was:
 
 ```bash
@@ -1125,11 +1248,11 @@ have to name a network, since there is no key to infer one from.
 Each key carries a tier bounding its request budget over a sliding
 60-second window:
 
-| Tier | Requests/min | Writes |
-|---|---|---|
-| `free` | 60 | refused |
-| `standard` | 600 | allowed |
-| `priority` | 6,000 | allowed |
+| Tier       | Requests/min | Writes  |
+| ---------- | ------------ | ------- |
+| `free`     | 60           | refused |
+| `standard` | 600          | allowed |
+| `priority` | 6,000        | allowed |
 
 Exceeding the budget returns `-32005` with `retry_after_ms`,
 `requests_per_minute`, and `tier`.
@@ -1328,7 +1451,7 @@ tenzro marketplace register <template>
 
 ### Skill Management
 
-A skill is either an *endpoint* the node calls on your behalf or a *bundle* —
+A skill is either an _endpoint_ the node calls on your behalf or a _bundle_ —
 a content-addressed WASI 0.2 component the node fetches and runs inside its
 own sandbox, under a fuel and deadline budget, with no ambient filesystem or
 network. Publishing is permissionless: you set the price in TNZO base units
@@ -1611,6 +1734,31 @@ tenzro info
 tenzro version --detailed
 ```
 
+### Raw RPC Access
+
+Discover and call any JSON-RPC method the node serves, including ones with no
+dedicated subcommand. Useful for a method added since your CLI build.
+
+```bash
+# Every method this node serves, with how each one is gated.
+tenzro rpc methods
+
+# Narrow it down.
+tenzro rpc methods --namespace eth
+tenzro rpc methods --contains serve
+
+# List the namespaces rather than the methods.
+tenzro rpc methods --namespaces
+
+# Call anything by name. --params takes a JSON object, default {}.
+tenzro rpc call tenzro_previewServe --params '{"model_id":"qwen3-8b"}'
+```
+
+`tenzro rpc methods` reports each method's gate, so it doubles as the reference
+for which credential a call needs: `--api-key` for scope-gated methods (falls
+back to `TENZRO_API_KEY`) and `--admin-token` for admin-gated ones (falls back to
+`TENZRO_ADMIN_TOKEN`).
+
 ## Global Options
 
 ```bash
@@ -1678,12 +1826,12 @@ the supported way to run a second environment without touching your real state.
 
 ### Overrides
 
-| Setting | Effect |
-| --- | --- |
-| `--data-dir <DIR>` | per-instance directory; a leading `~` is expanded |
-| `models_dir` in the node config | shared model store, e.g. weights on a separate NVMe |
-| `HF_HOME` | HuggingFace cache, for a site-wide cache outside Tenzro |
-| `TENZRO_TRAINER_CACHE` | dataset shard cache |
+| Setting                         | Effect                                                  |
+| ------------------------------- | ------------------------------------------------------- |
+| `--data-dir <DIR>`              | per-instance directory; a leading `~` is expanded       |
+| `models_dir` in the node config | shared model store, e.g. weights on a separate NVMe     |
+| `HF_HOME`                       | HuggingFace cache, for a site-wide cache outside Tenzro |
+| `TENZRO_TRAINER_CACHE`          | dataset shard cache                                     |
 
 ## Examples
 

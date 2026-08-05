@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 
 struct TestNode {
     base_url: String,
+    node: Arc<TenzroNode>,
     shutdown: broadcast::Sender<()>,
     handle: tokio::task::JoinHandle<tenzro_node::Result<()>>,
     _tmp: tempfile::TempDir,
@@ -51,6 +52,7 @@ impl TestNode {
 
         Self {
             base_url: format!("http://{addr}"),
+            node,
             shutdown,
             handle,
             _tmp: tmp,
@@ -59,15 +61,84 @@ impl TestNode {
     }
 
     async fn rpc(&self, method: &str, params: Value) -> Value {
-        self.client
+        self.request(method, params, None).await
+    }
+
+    /// The same call, presenting an API key. Site RPCs do not *require* one —
+    /// the envelope is what authenticates them — but a key that is presented
+    /// still attenuates what the call may reach.
+    async fn rpc_with_key(&self, method: &str, params: Value, key: &str) -> Value {
+        self.request(method, params, Some(key)).await
+    }
+
+    async fn request(&self, method: &str, params: Value, key: Option<&str>) -> Value {
+        let mut req = self
+            .client
             .post(&self.base_url)
-            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
-            .send()
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}));
+        if let Some(key) = key {
+            req = req.header("X-Tenzro-Api-Key", key);
+        }
+        req.send()
             .await
             .expect("HTTP request")
             .json::<Value>()
             .await
             .expect("JSON parse")
+    }
+
+    /// Publish a real site owned by `owner`, returning its `site_id`.
+    async fn publish(&self, owner: &Owner, name: &str) -> String {
+        let hash = "c".repeat(64);
+        self.node
+            .site_registry()
+            .blob_cache()
+            .insert(&hash, bytes::Bytes::from_static(b"<!doctype html>"));
+        let env = owner.envelope("tenzro_sitePublish", name.as_bytes());
+        let resp = self
+            .rpc(
+                "tenzro_sitePublish",
+                json!({
+                    "name": name,
+                    "owner_did": owner.did,
+                    "did_envelope": env,
+                    "routes": [
+                        {"path": "/index.html", "blob_hash": hash,
+                         "content_type": "text/html", "size": 15},
+                    ],
+                }),
+            )
+            .await;
+        resp["result"]["site_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("publish failed: {resp}"))
+            .to_string()
+    }
+
+    /// A key narrowed to exactly the sites named.
+    fn key_for_sites(&self, subject: &str, sites: Vec<String>) -> String {
+        use tenzro_node::api_key::{AgentDelegation, ApiKeyScope, KeyClass};
+        self.node
+            .api_key_manager()
+            .expect("api key manager")
+            .issue_with_delegation(
+                Some(subject.to_string()),
+                "narrowed",
+                // Site RPCs carry no scope of their own; issuance just requires
+                // at least one, and which is irrelevant to the allow-list.
+                vec![ApiKeyScope::Storage],
+                KeyClass::Subject,
+                None,
+                None,
+                None,
+                None,
+                AgentDelegation {
+                    allowed_sites: sites,
+                    ..Default::default()
+                },
+            )
+            .expect("issue")
+            .key
     }
 
     async fn shutdown(self) {
@@ -353,6 +424,138 @@ async fn reads_do_not_require_an_envelope() {
     assert!(
         resp.get("result").is_some(),
         "listing sites must not require an envelope: {resp}"
+    );
+    n.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// The other axis: which of an owner's own sites a credential may reach
+// ---------------------------------------------------------------------------
+//
+// The envelope proves *who* is calling. `allowed_sites` narrows *what* one
+// credential of theirs may touch — an owner with two sites can hand out a key
+// that reaches only one. Both checks run; neither substitutes for the other,
+// so these tests sign correctly throughout and vary only the key.
+
+/// A narrowed key reaches the site it names and is refused on the one it does
+/// not — including through the alias surface, where the site is reached by
+/// hostname rather than by id.
+#[tokio::test]
+async fn a_narrowed_key_reaches_only_the_site_it_names() {
+    let n = TestNode::boot().await;
+    let owner = Owner::new(20);
+    let mine = n.publish(&owner, "narrow-mine").await;
+    let other = n.publish(&owner, "narrow-other").await;
+    let key = n.key_for_sites(&owner.did, vec![mine.clone()]);
+
+    let resp = n
+        .rpc_with_key("tenzro_siteGet", json!({ "site_id": mine }), &key)
+        .await;
+    assert!(
+        resp.get("result").is_some(),
+        "the key was refused on the site it names: {resp}"
+    );
+
+    let resp = n
+        .rpc_with_key("tenzro_siteGet", json!({ "site_id": other }), &key)
+        .await;
+    assert!(
+        error_message(&resp).contains("not authorized for site"),
+        "the key reached a site outside its allow-list: {resp}"
+    );
+
+    // Aliases name a hostname, not a site. Resolving it first is what keeps
+    // the allow-list from being sidestepped by pointing at the target
+    // indirectly.
+    let env = owner.envelope("tenzro_siteSetAlias", format!("a.example:{other}").as_bytes());
+    let resp = n
+        .rpc_with_key(
+            "tenzro_siteSetAlias",
+            json!({ "hostname": "a.example", "site_id": other,
+                    "owner_did": owner.did, "did_envelope": env }),
+            &key,
+        )
+        .await;
+    assert!(
+        error_message(&resp).contains("not authorized for site"),
+        "a narrowed key re-pointed a hostname at a site it may not touch: {resp}"
+    );
+    n.shutdown().await;
+}
+
+/// A listing must not name what a `get` would refuse. Otherwise the allow-list
+/// hides the contents of a site while still disclosing that it exists.
+#[tokio::test]
+async fn a_listing_names_nothing_the_key_cannot_open() {
+    let n = TestNode::boot().await;
+    let owner = Owner::new(21);
+    let mine = n.publish(&owner, "listing-mine").await;
+    let other = n.publish(&owner, "listing-other").await;
+    let key = n.key_for_sites(&owner.did, vec![mine.clone()]);
+
+    let resp = n.rpc_with_key("tenzro_listSites", json!({}), &key).await;
+    let listed: Vec<String> = resp["result"]["sites"]
+        .as_array()
+        .expect("sites array")
+        .iter()
+        .filter_map(|s| s["site_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(listed.contains(&mine), "the key's own site was hidden: {resp}");
+    assert!(
+        !listed.contains(&other),
+        "the listing disclosed a site the key cannot open: {resp}"
+    );
+
+    // The same call without a key is unnarrowed, so this is a property of the
+    // credential and not of the listing having quietly stopped working.
+    let resp = n.rpc("tenzro_listSites", json!({})).await;
+    let all: Vec<String> = resp["result"]["sites"]
+        .as_array()
+        .expect("sites array")
+        .iter()
+        .filter_map(|s| s["site_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        all.contains(&mine) && all.contains(&other),
+        "an unnarrowed caller should still see both: {resp}"
+    );
+    n.shutdown().await;
+}
+
+/// Narrowing must also stop a key creating its way out of the allow-list. A
+/// key that could publish a *new* site would simply own one the list does not
+/// name.
+#[tokio::test]
+async fn a_narrowed_key_cannot_publish_a_new_site() {
+    let n = TestNode::boot().await;
+    let owner = Owner::new(22);
+    let mine = n.publish(&owner, "escape-mine").await;
+    let key = n.key_for_sites(&owner.did, vec![mine]);
+
+    let hash = "c".repeat(64);
+    n.node
+        .site_registry()
+        .blob_cache()
+        .insert(&hash, bytes::Bytes::from_static(b"<!doctype html>"));
+    let env = owner.envelope("tenzro_sitePublish", b"escape-new");
+    let resp = n
+        .rpc_with_key(
+            "tenzro_sitePublish",
+            json!({
+                "name": "escape-new",
+                "owner_did": owner.did,
+                "did_envelope": env,
+                "routes": [
+                    {"path": "/index.html", "blob_hash": hash,
+                     "content_type": "text/html", "size": 15},
+                ],
+            }),
+            &key,
+        )
+        .await;
+    assert!(
+        error_message(&resp).contains("not authorized for site"),
+        "a narrowed key published a site outside its allow-list: {resp}"
     );
     n.shutdown().await;
 }

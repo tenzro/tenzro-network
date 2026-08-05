@@ -391,6 +391,7 @@ pub struct SettlementAuthorization {
     /// Payer's DID — resolved to a wallet address at execution time
     pub payer_did: String,
     /// TNZO amount, fixed and quoted at charge time (never fiat-denominated)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub amount_tnzo: u128,
     /// Developer's payment-provider reference (idempotency key per app)
     pub external_ref: String,

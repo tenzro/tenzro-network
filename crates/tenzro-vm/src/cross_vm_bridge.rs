@@ -312,24 +312,28 @@ fn byte_to_vm_type(byte: u8) -> Option<TokenVmType> {
     }
 }
 
-/// Converts a 20-byte EVM address to a 32-byte Tenzro Address
+/// Converts a 20-byte EVM address to a 32-byte Tenzro Address, **left-aligned**.
+///
+/// Same key the token ledger is written under — see the note on the sibling
+/// helper in `evm::tnzo_bridge`. This used to right-align, so a cross-VM TNZO
+/// transfer debited a key the payer's balance was never recorded at.
 fn evm_addr_to_tenzro(evm_addr: &[u8; 20]) -> Address {
     let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(evm_addr);
+    bytes[..20].copy_from_slice(evm_addr);
     Address::new(bytes)
 }
 
-/// Converts arbitrary bytes to a Tenzro Address (padding or truncating to 32 bytes)
+/// Converts arbitrary bytes to a Tenzro Address (padding or truncating to 32 bytes).
+///
+/// Left-aligned for every width. A 32-byte SVM pubkey occupies the whole
+/// address; anything shorter — an EVM destination, a truncated identifier —
+/// leads and the tail is zero, which is the one widening the token ledger
+/// keys on. Short inputs used to be right-aligned instead, which put the
+/// destination of a cross-VM transfer at an address its owner could not read.
 fn bytes_to_tenzro_address(bytes: &[u8]) -> Address {
     let mut addr = [0u8; 32];
     let copy_len = bytes.len().min(32);
-    if bytes.len() <= 20 {
-        // EVM-style: right-align in 32 bytes
-        addr[32 - copy_len..32].copy_from_slice(&bytes[..copy_len]);
-    } else {
-        // SVM-style: left-align (already 32 bytes)
-        addr[..copy_len].copy_from_slice(&bytes[..copy_len]);
-    }
+    addr[..copy_len].copy_from_slice(&bytes[..copy_len]);
     Address::new(addr)
 }
 
@@ -416,11 +420,25 @@ mod tests {
         assert_eq!(byte_to_vm_type(5), None);
     }
 
+    /// An EVM caller must land on the key the token ledger writes — 20
+    /// significant bytes leading, zero tail — or a cross-VM TNZO transfer
+    /// moves value to an address nothing else can read.
     #[test]
     fn test_evm_addr_to_tenzro() {
         let evm = [0xAB; 20];
         let addr = evm_addr_to_tenzro(&evm);
-        assert_eq!(addr.as_bytes()[12..32], [0xAB; 20]);
-        assert_eq!(addr.as_bytes()[0..12], [0u8; 12]);
+        assert_eq!(addr.as_bytes()[0..20], [0xAB; 20]);
+        assert_eq!(addr.as_bytes()[20..32], [0u8; 12]);
+    }
+
+    /// A 20-byte destination widens the same way the caller does; a 32-byte
+    /// SVM pubkey fills the address and is untouched.
+    #[test]
+    fn bytes_to_tenzro_address_is_left_aligned_at_every_width() {
+        let short = bytes_to_tenzro_address(&[0xCD; 20]);
+        assert_eq!(short, evm_addr_to_tenzro(&[0xCD; 20]));
+
+        let svm = bytes_to_tenzro_address(&[0xEF; 32]);
+        assert_eq!(svm.as_bytes(), &[0xEF; 32]);
     }
 }

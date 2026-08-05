@@ -189,7 +189,7 @@ pub(crate) async fn forward(
     {
         return Err(e);
     }
-    if let Some(err) = crate::rpc::gate_api_key(node, &request, api_key)
+    if let Some(err) = crate::rpc::gate_api_key(node, &request, api_key, admin_token)
         && let Some(e) = err.error
     {
         return Err(e);

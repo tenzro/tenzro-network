@@ -272,13 +272,16 @@ pub struct ControllerActivitySummary {
     pub controller_did: String,
     pub receipt_count: u64,
     /// Total settled value across the window, in TNZO smallest unit.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub total_value_wei: u128,
     /// Distinct DIDs that acted under the controller during the window.
     pub agents_acted_under: Vec<String>,
     pub kill_switch_events: u32,
     pub kyc_tier_at_oldest: u8,
     pub kyc_tier_at_newest: u8,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub bond_min: u128,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub bond_max: u128,
     /// Inclusive lower bound of the window (unix seconds). `None` if
     /// open-ended at the oldest end.

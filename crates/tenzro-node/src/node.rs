@@ -1791,6 +1791,7 @@ fn resolve_announce_payee(
 fn resolve_operator_identity(
     identity_registry: Option<&Arc<IdentityRegistry>>,
     announce_signer: Option<&Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>>,
+    configured: Option<&str>,
 ) -> Option<(String, Address)> {
     use tenzro_identity::{IdentityData, IdentityStatus};
 
@@ -1799,6 +1800,18 @@ fn resolve_operator_identity(
     let usable = |identity: &tenzro_identity::TenzroIdentity| {
         identity.status == IdentityStatus::Active && identity.wallet_address != Address::default()
     };
+
+    // Named by the operator — no inference to do. Honoured ahead of the
+    // wallet match so that naming an identity is decisive rather than advisory.
+    if let Some(did) = configured.map(str::trim).filter(|d| !d.is_empty()) {
+        match all.iter().find(|(d, id)| d.as_str() == did && usable(id)) {
+            Some((d, id)) => return Some((d.clone(), id.wallet_address)),
+            None => warn!(
+                "config names operator_did={did}, but this node's registry has no active \
+                 identity by that DID with a wallet — falling back to inference"
+            ),
+        }
+    }
 
     if let Some(wallet) = resolve_announce_payee(announce_signer)
         && let Some((did, _)) = all
@@ -1810,13 +1823,32 @@ fn resolve_operator_identity(
     }
 
     // Lower rank wins; ties break on the DID string.
+    //
+    // Machines outrank humans because a node *is* a machine. TDIP models a
+    // node as `did:tenzro:machine:<controller>:<uuid>` when a human operator
+    // delegates it, or `did:tenzro:machine:<uuid>` when it acts on its own;
+    // a `did:tenzro:human:` identity denotes the person operating it, not the
+    // hardware. Ranking humans first — as this did — meant a node whose
+    // operator had registered themselves published its DID document under
+    // *their* identity, and attributed every file, database and site it holds
+    // to a person rather than to the machine.
+    //
+    // A delegated machine outranks an autonomous one: if a controller exists
+    // there is an accountable human behind the node, which is the more
+    // informative of the two identities to present.
+    //
+    // This is still inference — see `NodeConfig::operator_did` for naming it
+    // outright, which is what a node with several enrolled machines needs.
     let rank = |data: &IdentityData| match data {
-        IdentityData::Human { .. } | IdentityData::Institution { .. } => 0u8,
+        IdentityData::Machine {
+            controller_did: Some(_),
+            ..
+        } => 0u8,
         IdentityData::Machine {
             controller_did: None,
             ..
         } => 1,
-        IdentityData::Machine { .. } => 2,
+        IdentityData::Human { .. } | IdentityData::Institution { .. } => 2,
     };
 
     all.iter()
@@ -1834,8 +1866,9 @@ fn resolve_operator_identity(
 fn resolve_operator_payee(
     identity_registry: Option<&Arc<IdentityRegistry>>,
     announce_signer: Option<&Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>>,
+    configured: Option<&str>,
 ) -> Option<Address> {
-    match resolve_operator_identity(identity_registry, announce_signer) {
+    match resolve_operator_identity(identity_registry, announce_signer, configured) {
         Some((_, wallet)) => Some(wallet),
         None => resolve_announce_payee(announce_signer),
     }
@@ -8241,6 +8274,7 @@ impl TenzroNode {
             // restart.
             let identity_registry = self.identity_registry.clone();
             let announce_signer = self.announce_signer.clone();
+            let configured_operator_did = self.config.operator_did.clone();
             tokio::spawn(async move {
                 let mut rx = match network.subscribe("tenzro/sla").await {
                     Ok(rx) => rx,
@@ -8266,6 +8300,7 @@ impl TenzroNode {
                     let payee = resolve_operator_payee(
                         identity_registry.as_ref(),
                         announce_signer.as_ref(),
+                        configured_operator_did.as_deref(),
                     );
                     match (bonds.get(&probe.provider_did), payee) {
                         (Some(bond), Some(payee)) if bond.provider_address == payee => {}
@@ -13036,6 +13071,7 @@ impl TenzroNode {
         resolve_operator_payee(
             self.identity_registry.as_ref(),
             self.announce_signer.as_ref(),
+            self.config.operator_did.as_deref(),
         )
     }
 
@@ -13048,6 +13084,7 @@ impl TenzroNode {
         resolve_operator_identity(
             self.identity_registry.as_ref(),
             self.announce_signer.as_ref(),
+            self.config.operator_did.as_deref(),
         )
         .map(|(did, _)| did)
     }
@@ -14853,9 +14890,7 @@ impl TenzroNode {
         // for its own layout is the whole of the lookup — the three
         // hand-rolled `$HOME/.tenzro/models` probes that used to live here
         // existed only because the two disagreed about where models lived.
-        self.hf_downloader
-            .as_ref()?
-            .resolve_local_gguf(model_id)
+        self.hf_downloader.as_ref()?.resolve_local_gguf(model_id)
     }
 
     /// Load the speculative-decoding drafter declared by a catalog entry for a
@@ -15213,10 +15248,45 @@ impl TenzroNode {
     /// Register a served model with the load tracker, sizing max-concurrency
     /// against detected hardware. Shared by the serve path and the lazy loader
     /// so the concurrency budget is computed identically everywhere.
-    fn register_load_tracker(&self, model_id: &str, entry: &tenzro_model::HfModelEntry) {
-        let max_concurrent = {
-            let hw = self.hardware_profile.read();
-            if let Some(ref profile) = *hw {
+    async fn register_load_tracker(&self, model_id: &str, entry: &tenzro_model::HfModelEntry) {
+        // The hardware profile is populated lazily by the first probe, so it is
+        // routinely absent here: a model reloaded at boot, or lazily loaded on
+        // first use, registers before anything has measured the machine.
+        //
+        // Assuming a 4 GB, GPU-less host in that window is not a conservative
+        // default, it is a wrong one that never gets revisited — the estimate
+        // is cached as the model's permanent concurrency cap. On this class of
+        // box it resolves to a single slot for a model the machine can serve
+        // dozens of, and every concurrent request after the first is refused
+        // with "node at capacity: 1 of 1" while the node reports 40 free.
+        //
+        // Measure instead, and cache the reading the same way
+        // `validate_role_capability` does, so the first caller to need a
+        // profile pays for it once and every later one reads it.
+        let profile = {
+            let measured = self.hardware_profile.read().clone();
+            match measured {
+                Some(hw) => Some(hw),
+                None => match detect_hardware(&self.config.data_dir).await {
+                    Ok(hw) => {
+                        *self.hardware_profile.write() = Some(hw.clone());
+                        Some(hw)
+                    }
+                    Err(e) => {
+                        warn!(
+                            model_id = %model_id,
+                            error = %e,
+                            "Hardware probe failed while sizing concurrency; \
+                             falling back to a single slot for this model",
+                        );
+                        None
+                    }
+                },
+            }
+        };
+
+        let max_concurrent = match profile {
+            Some(profile) => {
                 let gpu_vram = profile
                     .gpus
                     .first()
@@ -15229,10 +15299,16 @@ impl TenzroNode {
                     gpu_vram,
                     has_gpu,
                 )
-            } else {
-                tenzro_model::estimate_max_concurrent(entry.min_ram_gb, 4.0, 0.0, false)
             }
+            // Only reached when the probe itself failed, which is a real fault
+            // rather than a timing window: serve one at a time until it works.
+            None => 1,
         };
+        info!(
+            model_id = %model_id,
+            max_concurrent,
+            "Registered per-model concurrency cap",
+        );
         self.load_tracker.register_model(model_id, max_concurrent);
     }
 
@@ -15271,7 +15347,7 @@ impl TenzroNode {
             .load_model_with_context(model_id, &path, Some(entry.context_length))
             .await
             .map_err(|e| e.to_string())?;
-        self.register_load_tracker(model_id, &entry);
+        self.register_load_tracker(model_id, &entry).await;
         let _ = self.autoload_drafter(model_id, &entry).await;
         info!(model_id = %model_id, "Lazily loaded served model on first use");
         Ok(true)
@@ -15365,7 +15441,7 @@ impl TenzroNode {
                     // node's boot RAM does not scale with the number of held
                     // models. A holder that never serves keeps them on disk.
                     if self.model_runtime.is_some() {
-                        self.register_load_tracker(model_id, &entry);
+                        self.register_load_tracker(model_id, &entry).await;
                         reloaded += 1;
                         info!(
                             model_id = %model_id,

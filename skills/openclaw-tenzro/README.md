@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-191%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-191%20passed-brightgreen)](<>)
 
 The official [OpenClaw](https://github.com/anthropics/openclaw) skill for interacting with [Tenzro Network](https://tenzro.com) — a full blockchain and multi-chain toolkit for AI agents.
 
@@ -91,6 +91,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.xyz/mcp
 **AI Models & Inference:** `list_models`, `chat`, `inference_request`, `route_intent`, `chat_by_intent`, `record_route_outcome`, `route_difficulty_stats`, `serve_model`, `stop_model`, `download_model`, `get_model_hash`, `list_model_hashes`, `record_model_hash`, `list_model_endpoints`, `get_provenance`. Intent routing replaces naming a model with stating a use case plus a budget, a quality floor and a cost-quality knob: `route_intent` returns the selection and its reasoning without dispatching, `chat_by_intent` selects and runs in one call with dispatch pinned to the offer that was scored, so the price quoted is the price settled and the provider share goes to the address that offer named. Selection also accounts for how hard the prompt is — the decision carries the difficulty cluster it landed in and the chosen model's observed error rate there. `record_route_outcome` reports an escalation back so those rates reflect what happened; `route_difficulty_stats` reads the cluster map as an operator diagnostic. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_cluster` to split even when it fits one host, `force_single` to pin it to one host, or `visibility="private"` to keep it local/LAN-only instead of gossiping it to the network. Model weights are content-addressed: `download_model` is peer-first over iroh blobs (BLAKE3-verified on transfer), falling back to HuggingFace, and the weights are checked against the canonical hash record before load; `get_model_hash` reads that record (BLAKE3 root + SHA-256 + per-file manifest hash) by `model_id`, `list_model_hashes` returns every recorded hash, and `record_model_hash` writes a first-recorder-wins record. `list_model_endpoints` returns each service's `iroh_endpoint_id` (the serving node's iroh `EndpointId`, empty for local-only); cross-node inference routes to it over the `tenzro/infer` ALPN. `get_provenance` resolves the cached synthetic-content manifest (EU AI Act Art. 50(2)) for generated output by its `content_hash`.
 
 **Multi-Modal Inference (17 wrappers across 7 modalities):**
+
 - **Forecast** — `list_forecast_catalog`, `list_forecast_models`, `load_forecast_model`, `forecast` (TimesFM 2.5)
 - **Vision** — `list_vision_catalog`, `vision_embed`, `vision_similarity` (CLIP, SigLIP2, DINOv3)
 - **Text Embedding** — `list_text_embedding_catalog`, `text_embed` (Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic)
@@ -125,7 +126,11 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.xyz/mcp
 
 **ERC-8004 Trustless Agents (cross-VM trio):** `register_8004_agent`, `lookup_8004_agent`, `submit_8004_feedback`, `request_8004_validation`, `submit_8004_validation`. Each `register_8004_agent` call fans out from one TDIP write to canonical EVM proxies (deployed at genesis), the QuantuLabs Anchor program on SVM, and the Tenzro-authored Canton package on DAML. `agentId` shape is per-backend: `uint256` on EVM, 32-byte Pubkey on SVM, 8-byte LE u64 on DAML.
 
-**Network & Node:** `node_status`, `node_info`, `get_block_number`, `get_block`, `peer_count`, `syncing`
+**Network & Node:** `node_status`, `node_info`, `get_block_number`, `get_block`, `peer_count`, `syncing`, `node_did_document`, `service_key_status` — `node_did_document` resolves the node's DID Document, which carries every way of reaching it: the five identifiers (TDIP DID, Ed25519 public key, iroh `EndpointId`, libp2p `PeerId`, Pkarr record) plus its JSON-RPC / MCP / A2A / web service URLs, so a caller holding any one of them can get the rest. It is also served at `/.well-known/did.json` for generic DID resolvers. `service_key_status` reports whether the operator requires a service key to reach the node — one gate covering JSON-RPC, MCP, A2A and the web API at once, never covering consensus or P2P and never gating `/health` or `/ready`.
+
+**Universal RPC Gateway:** `list_rpc_methods`, `call_rpc`, `supports` — the escape hatch for anything without a named wrapper above. `list_rpc_methods` enumerates every method the node serves, each entry carrying how it is gated (`admin` vs `open`) and which API-key scope it needs, so you can tell "I need a differently-scoped key" from "I need the operator's token" without provoking the error first; narrow with `namespace` or `contains`, since unfiltered it is ~900 rows. `call_rpc` invokes one by name. `supports` asks the node whether it serves a method rather than checking a list in this file, so it stays correct against a node newer than this skill. Authorization is unchanged — a gateway call passes the same gates as a direct request and reaches exactly what your credentials already allow.
+
+**Tenant Object Storage:** `upload_file`, `list_files`, `get_file`, `download_file`, `delete_file`, `file_storage_usage` — multi-tenant file storage. Uploads are erasure-coded (4 data + 2 parity shards, surviving two simultaneous provider losses) across independent providers, with a streaming storage deal funding the shards; a `null` `deal_id` means the upload succeeded but nothing is paying for it. `purpose` is one of `assistants` / `batch` / `fine_tune` / `vision` / `user_data`. Every file is owned by the subject on the presenting API key and there is no cross-tenant read — a lookup for another tenant's file id reports identically to one that does not exist. Deletion unlinks the reference and stops the deal; it does **not** erase shards, which expire only once the deal stops paying for them, so it must not be treated as redaction.
 
 **Decentralized Storage:** `storage_store_object`, `storage_open_deal`, `storage_charge_epoch`, `storage_get_deal`, `storage_set_pricing`, `storage_status` — content-addressed objects on the data plane, byte-epoch deal billing gated by proof-of-retrievability.
 
@@ -239,13 +244,13 @@ Tenzro Network (decentralized) + External Chains
 
 ## Related
 
-| Resource | URL |
-|----------|-----|
-| Tenzro Network | [tenzro.com](https://tenzro.com) |
-| MCP Server | [github.com/tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) |
-| A2A Server | [github.com/tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) |
-| JSON-RPC | `https://rpc.tenzro.xyz` |
-| Web API | `https://api.tenzro.xyz` |
+| Resource       | URL                                                                                |
+| -------------- | ---------------------------------------------------------------------------------- |
+| Tenzro Network | [tenzro.com](https://tenzro.com)                                                   |
+| MCP Server     | [github.com/tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) |
+| A2A Server     | [github.com/tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) |
+| JSON-RPC       | `https://rpc.tenzro.xyz`                                                           |
+| Web API        | `https://api.tenzro.xyz`                                                           |
 
 ## Contact
 
@@ -260,11 +265,11 @@ DID envelope proving control of the resource. An identifier is not a credential:
 a `jti` travels in every audit row, a `webhook_id` comes back from every list
 call, and a `session_id` is a handle the node hands back.
 
-| Tool | Proof required |
-| --- | --- |
-| `revoke_did` | operator admin token **and** an envelope from the DID (or a machine's controller) |
-| `register_webhook` | `owner_did` plus an envelope over the URL |
-| `authorize_session` / `revoke_session` | envelope from the DID that owns the wallet |
+| Tool                                   | Proof required                                                                    |
+| -------------------------------------- | --------------------------------------------------------------------------------- |
+| `revoke_did`                           | operator admin token **and** an envelope from the DID (or a machine's controller) |
+| `register_webhook`                     | `owner_did` plus an envelope over the URL                                         |
+| `authorize_session` / `revoke_session` | envelope from the DID that owns the wallet                                        |
 
 Each envelope is bound to the method name and to that call's parameters, so one
 produced for a given action cannot be replayed as another.

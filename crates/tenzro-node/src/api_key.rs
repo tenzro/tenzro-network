@@ -470,6 +470,43 @@ pub struct AgentDelegation {
     /// `*` family. Empty = no model restriction.
     pub allowed_models: Vec<String>,
 
+    /// `database_id`s the key may reach. Gated at every database RPC that
+    /// names one — create, get, query, usage, partitions, rescale,
+    /// connection issuance, read authorisation and drop — and used to filter
+    /// the listings, so a listing never names a database a `get` would
+    /// refuse. Empty = no database restriction.
+    ///
+    /// Distinct from the database's own [`AccessPolicy`], which says who
+    /// *owns* it: that is a property of the resource, this is an attenuation
+    /// of one credential. A subject owning three databases can hold a key
+    /// that reaches only one of them.
+    ///
+    /// Empty means unrestricted, matching every other allow-list here — the
+    /// attenuation is opt-in, so a key that names nothing is a key that has
+    /// not been narrowed.
+    pub allowed_databases: Vec<String>,
+
+    /// `site_id`s the key may publish, re-point or remove. Gated at every
+    /// site RPC that names one — directly by `site_id`, or indirectly
+    /// through the hostname of an alias or custom domain, which is resolved
+    /// to its target site before the check. Also filters the listings.
+    /// Empty = no site restriction.
+    ///
+    /// Site mutations are additionally authorised by a signed DID envelope
+    /// proving control of the owner DID; this narrows *which* of an owner's
+    /// sites a given key may act on, and does not replace that proof.
+    ///
+    /// Deliberately **not** backed by a scope in [`ApiKeyScope`], unlike
+    /// `allowed_databases`. The signed envelope — not an operator-issued key
+    /// — is what authenticates a site mutation, so requiring a scoped key
+    /// would make publishing permissioned on someone else's node and break
+    /// the self-service path the envelope exists to provide. This list
+    /// therefore attenuates a key that *is* presented; it does not compel
+    /// one. Adding a `Site` scope would gate the envelope tests in
+    /// `tests/site_envelope_integration.rs`, which is the signal that the
+    /// change is wrong rather than that the tests need updating.
+    pub allowed_sites: Vec<String>,
+
     /// Per-resource TNZO ceiling override. Maps resource_id to the
     /// per-invocation max in atto-TNZO. Caller refused if the
     /// resource's posted `price_per_call` exceeds the cap for that
@@ -626,6 +663,12 @@ pub struct ApiKeyRecord {
     #[serde(default)]
     pub allowed_models: Vec<String>,
 
+    /// `database_id`s the key may reach. Empty = unrestricted.
+    pub allowed_databases: Vec<String>,
+
+    /// `site_id`s the key may act on. Empty = unrestricted.
+    pub allowed_sites: Vec<String>,
+
     /// Per-resource TNZO ceiling override. Maps resource_id to the
     /// per-invocation max in atto-TNZO. Caller refused if the
     /// resource's posted `price_per_call` exceeds the cap for that
@@ -779,6 +822,18 @@ impl ApiKeyRecord {
         self.max_per_resource_tnzo.get(resource_id).copied()
     }
 
+    /// Returns true if this key may reach the given database.
+    /// Returns true if the key has no `allowed_databases` restriction.
+    pub fn allows_database(&self, database_id: &str) -> bool {
+        self.allowed_databases.is_empty() || self.allowed_databases.iter().any(|d| d == database_id)
+    }
+
+    /// Returns true if this key may act on the given site.
+    /// Returns true if the key has no `allowed_sites` restriction.
+    pub fn allows_site(&self, site_id: &str) -> bool {
+        self.allowed_sites.is_empty() || self.allowed_sites.iter().any(|s| s == site_id)
+    }
+
     /// Bundles all per-resource-class checks for a given resource into
     /// a single result. Returns `Ok(())` when the key is allowed to
     /// invoke the resource AND the resource's price fits under the
@@ -786,7 +841,8 @@ impl ApiKeyRecord {
     /// reason describing which check failed.
     ///
     /// `class` is one of `"tool"`, `"skill"`, `"knowledge"`,
-    /// `"workflow_template"`, `"agent_template"`, `"model"`. Caller
+    /// `"workflow_template"`, `"agent_template"`, `"model"`,
+    /// `"database"`, `"site"`. Caller
     /// of this method must use the matching string — RPC handlers
     /// have a single source of truth so we don't drift names.
     pub fn check_resource_authorization(
@@ -802,6 +858,8 @@ impl ApiKeyRecord {
             "workflow_template" => self.allows_workflow_template(resource_id),
             "agent_template" => self.allows_agent_template(resource_id),
             "model" => self.allows_model(resource_id),
+            "database" => self.allows_database(resource_id),
+            "site" => self.allows_site(resource_id),
             _ => return Err(format!("unknown resource class: {}", class)),
         };
         if !allowed {
@@ -1040,6 +1098,8 @@ impl ApiKeyManager {
             allowed_workflow_templates: delegation.allowed_workflow_templates,
             allowed_agent_templates: delegation.allowed_agent_templates,
             allowed_models: delegation.allowed_models,
+            allowed_databases: delegation.allowed_databases,
+            allowed_sites: delegation.allowed_sites,
             max_per_resource_tnzo: delegation.max_per_resource_tnzo,
             canton_networks: delegation.canton_networks,
             tier: delegation.tier,
@@ -1330,6 +1390,28 @@ mod tests {
         Arc::new(MemoryStore::new())
     }
 
+    /// A real issued record, for tests that care about one allow-list and
+    /// nothing else. Issued through the manager rather than built from a
+    /// partial literal, so it always carries whatever fields the record
+    /// actually has.
+    fn blank_record() -> ApiKeyRecord {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        mgr.issue(
+            Some("did:tenzro:machine:fixture".to_string()),
+            "fixture",
+            // Issuance requires at least one scope; which one is irrelevant to
+            // the allow-list logic under test.
+            vec![ApiKeyScope::Database],
+            KeyClass::Subject,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .record
+    }
+
     #[test]
     fn issue_and_lookup_roundtrip() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
@@ -1350,6 +1432,77 @@ mod tests {
         assert!(found.has_scope(ApiKeyScope::Canton));
         assert_eq!(found.key_id, issued.record.key_id);
         assert_eq!(found.class, KeyClass::Subject);
+    }
+
+    /// A key that names no databases or sites reaches all of them — the same
+    /// rule every other allow-list on this record follows. Narrowing is opt-in.
+    #[test]
+    fn empty_database_and_site_lists_are_unrestricted() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        let issued = mgr
+            .issue(
+                Some("did:tenzro:machine:abc".to_string()),
+                "unrestricted",
+                vec![ApiKeyScope::Database],
+                KeyClass::Subject,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let rec = mgr.lookup(&issued.key).unwrap();
+        assert!(rec.allows_database("anything"));
+        assert!(rec.allows_site("anything"));
+    }
+
+    #[test]
+    fn a_named_list_admits_only_what_it_names() {
+        let mut rec = ApiKeyRecord {
+            allowed_databases: vec!["vectors".into()],
+            allowed_sites: vec!["site-a".into()],
+            ..blank_record()
+        };
+        assert!(rec.allows_database("vectors"));
+        assert!(!rec.allows_database("other"));
+        assert!(rec.allows_site("site-a"));
+        assert!(!rec.allows_site("site-b"));
+
+        // Restricting one class leaves the other alone.
+        rec.allowed_sites.clear();
+        assert!(rec.allows_site("site-b"));
+        assert!(!rec.allows_database("other"));
+    }
+
+    /// The dispatcher is the single source of truth RPC handlers key off, so
+    /// the new classes have to be reachable through it by name.
+    #[test]
+    fn resource_dispatcher_routes_the_new_classes() {
+        let rec = ApiKeyRecord {
+            allowed_databases: vec!["vectors".into()],
+            allowed_sites: vec!["site-a".into()],
+            ..blank_record()
+        };
+        assert!(
+            rec.check_resource_authorization("database", "vectors", 0)
+                .is_ok()
+        );
+        assert!(
+            rec.check_resource_authorization("database", "other", 0)
+                .is_err()
+        );
+        assert!(
+            rec.check_resource_authorization("site", "site-a", 0)
+                .is_ok()
+        );
+        assert!(
+            rec.check_resource_authorization("site", "site-b", 0)
+                .is_err()
+        );
+        assert!(
+            rec.check_resource_authorization("nonsense", "x", 0)
+                .is_err()
+        );
     }
 
     #[test]

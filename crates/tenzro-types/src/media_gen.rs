@@ -310,6 +310,7 @@ pub struct MediaGenTaskSpec {
     /// Diffusion sampling parameters.
     pub params: MediaGenParams,
     /// Maximum price the requester will pay, in attoTNZO.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub max_price: u128,
     /// Posting timestamp.
     pub created_at: Timestamp,
@@ -473,6 +474,7 @@ pub struct MediaGenReceipt {
     /// Wall-clock generation time in milliseconds.
     pub generation_time_ms: u64,
     /// Price actually charged, in attoTNZO (<= `task_spec.max_price`).
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price_paid: u128,
     /// Completion timestamp.
     pub completed_at: Timestamp,

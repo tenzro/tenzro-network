@@ -30,7 +30,15 @@ DEFAULT_URL = "http://127.0.0.1:8545"
 
 
 def _client(args: argparse.Namespace) -> RpcClient:
-    return RpcClient(url=args.url, timeout_secs=args.timeout)
+    # The memory-budget calls mutate the node's ledger, so they sit behind the
+    # operator's admin token like every other ledger mutation. Taken from the
+    # environment rather than a flag: it is a secret, and a flag puts it in
+    # `ps` output for every user on the box.
+    return RpcClient(
+        url=args.url,
+        timeout_secs=args.timeout,
+        admin_token=os.environ.get("TENZRO_ADMIN_TOKEN") or None,
+    )
 
 
 def _params_from(args: argparse.Namespace, input_image_hash: bytes | None) -> MediaGenParams:

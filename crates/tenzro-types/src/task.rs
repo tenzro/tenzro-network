@@ -204,6 +204,7 @@ pub struct TaskInfo {
     pub assignee: Option<Address>,
 
     /// Maximum price the poster is willing to pay (in TNZO micro-units)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub max_price: u128,
 
     /// Actual price quoted/agreed (set when task is assigned)
@@ -315,6 +316,7 @@ pub struct TaskQuote {
     pub provider: Address,
 
     /// Quoted price in TNZO micro-units
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price: u128,
 
     /// Estimated time to complete (seconds)

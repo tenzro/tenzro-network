@@ -1,7 +1,7 @@
 Tenzro Network Protocol Buffers - Directory Structure
 ======================================================
 
-/Users/hilarl/AI/tenzronetwork/proto/
+proto/
 │
 ├── Configuration Files
 │   ├── buf.yaml                    # Buf linting and breaking change detection config
@@ -265,7 +265,7 @@ NEXT STEPS
 ===================================
 
 1. Generate code:
-   cd /Users/hilarl/AI/tenzronetwork/proto
+   cd proto
    make generate
 
 2. Integrate with Rust crates:

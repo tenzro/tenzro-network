@@ -160,6 +160,7 @@ pub struct SkillDefinition {
     pub output_schema: serde_json::Value,
 
     /// Price per invocation in TNZO atto-tokens (1 TNZO = 10^18 atto)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price_per_call: u128,
 
     /// Discoverability tags (e.g., ["search", "web", "retrieval"])
@@ -380,6 +381,7 @@ pub struct SkillInvocationResult {
     pub settlement_tx: Option<String>,
 
     /// Amount paid in atto-TNZO
+    #[serde(with = "crate::primitives::u128_serde")]
     pub amount_paid: u128,
 
     /// Unix timestamp when the invocation completed

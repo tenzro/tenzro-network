@@ -274,6 +274,7 @@ pub struct RuntimeSupport {
     /// one. `0` (the default) means the node hosts for free — the most
     /// competitive bid. Ignored on nodes that advertise no `hosting_runtimes`.
     #[serde(default)]
+    #[serde(with = "crate::primitives::u128_serde")]
     pub hosting_price_per_hour: u128,
 }
 

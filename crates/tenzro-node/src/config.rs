@@ -1641,6 +1641,26 @@ pub struct NodeConfig {
     #[serde(default)]
     pub service_keys: Vec<String>,
 
+    /// This node's own TDIP identity, named explicitly.
+    ///
+    /// A node is a *machine*. Under TDIP that is either
+    /// `did:tenzro:machine:<controller>:<uuid>` — a machine a human operator
+    /// delegates, which is the usual shape — or `did:tenzro:machine:<uuid>`
+    /// for one that acts autonomously. Everything the node owns (files,
+    /// databases, sites, receipts) is attributed to it, so getting it wrong
+    /// misattributes all of them.
+    ///
+    /// Set it. Left unset the node *infers* one from its registry, and
+    /// inference is only ever a guess: a registry holds the operator's own
+    /// human identity, every agent the node has spawned, and every machine it
+    /// has enrolled, with nothing in the data marking which one is the node
+    /// itself. The inference is documented at `resolve_operator_identity` and
+    /// deliberately prefers machines over humans, but a node that has enrolled
+    /// several machines can still be handed the wrong one — naming it here is
+    /// how that stops being a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_did: Option<String>,
+
     /// RPC server listen address
     pub rpc_addr: String,
 
@@ -2111,6 +2131,7 @@ impl NodeConfig {
             // which is functionally a centralized chain on the access axis.
             // Override with `--rpc-addr 127.0.0.1:8545` for a private node.
             service_keys: Vec::new(),
+            operator_did: None,
             rpc_addr: "0.0.0.0:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
@@ -2164,6 +2185,7 @@ impl NodeConfig {
             rental: RentalConfig::default(),
             log_level: "info".to_string(),
             service_keys: Vec::new(),
+            operator_did: None,
             rpc_addr: "127.0.0.1:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
@@ -2217,6 +2239,7 @@ impl NodeConfig {
             rental: RentalConfig::default(),
             log_level: "info".to_string(),
             service_keys: Vec::new(),
+            operator_did: None,
             rpc_addr: "127.0.0.1:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
@@ -2270,6 +2293,7 @@ impl NodeConfig {
             rental: RentalConfig::default(),
             log_level: "info".to_string(),
             service_keys: Vec::new(),
+            operator_did: None,
             rpc_addr: "127.0.0.1:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),

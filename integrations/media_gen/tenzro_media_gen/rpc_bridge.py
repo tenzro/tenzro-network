@@ -83,6 +83,11 @@ class RpcClient:
 
     url: str = "http://127.0.0.1:8545"
     timeout_secs: float = 300.0
+    #: Operator admin token, for the ledger-mutating memory-budget calls.
+    #: Read from ``TENZRO_ADMIN_TOKEN`` by the worker. Absent, the budget calls
+    #: are refused by the node and the worker falls back to its local cache
+    #: bound — see :meth:`memory_admit`.
+    admin_token: str | None = None
     _next_id: int = field(default=1, repr=False)
 
     def _call(self, method: str, params: Any | None = None) -> Any:
@@ -94,7 +99,8 @@ class RpcClient:
         self._next_id += 1
         if params is not None:
             payload["params"] = params
-        resp = requests.post(self.url, json=payload, timeout=self.timeout_secs)
+        headers = {"X-Tenzro-Admin-Token": self.admin_token} if self.admin_token else None
+        resp = requests.post(self.url, json=payload, headers=headers, timeout=self.timeout_secs)
         resp.raise_for_status()
         body = resp.json()
         if body.get("error") is not None:
@@ -105,6 +111,43 @@ class RpcClient:
                 data=err.get("data"),
             )
         return body.get("result")
+
+    # ── memory budget ─────────────────────────────────────────────────
+
+    def memory_admit(
+        self,
+        key: str,
+        tier: str,
+        num_bytes: int,
+        apply_headroom: bool = True,
+    ) -> dict[str, Any]:
+        """Claim ``num_bytes`` of the node's pool for this worker.
+
+        The worker holds pipelines in its own address space, so the node's
+        ledger cannot observe them. Without this call the on-demand tier reads
+        zero committed while the worker holds tens of gigabytes — a budget
+        blind to the largest consumer on the box, which is how a node with a
+        configured ceiling still gets OOM-killed.
+
+        Raises :class:`RpcError` when the tier cannot accommodate the request;
+        the caller evicts and retries.
+        """
+        return dict(
+            self._call(
+                "tenzro_memoryAdmit",
+                {
+                    "key": key,
+                    "tier": tier,
+                    "bytes": int(num_bytes),
+                    "apply_headroom": apply_headroom,
+                },
+            )
+            or {}
+        )
+
+    def memory_release(self, key: str) -> dict[str, Any]:
+        """Drop this worker's claim on ``key``. Idempotent."""
+        return dict(self._call("tenzro_memoryRelease", {"key": key}) or {})
 
     # ── catalog and pricing ───────────────────────────────────────────
 

@@ -54,6 +54,7 @@ pub struct SagaStep {
     pub escrow_id: Option<String>,
     /// Amount locked in the per-step escrow (0 if none).
     #[serde(default)]
+    #[serde(with = "crate::primitives::u128_serde")]
     pub escrow_amount: u128,
     /// Opaque execution-proof reference recorded at `Execute`.
     #[serde(default)]

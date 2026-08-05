@@ -245,6 +245,7 @@ pub struct ValidatorSignature {
     /// Signature bytes
     pub signature: Vec<u8>,
     /// Validator's voting power
+    #[serde(with = "crate::primitives::u128_serde")]
     pub voting_power: u128,
     /// Signature timestamp
     pub signed_at: Timestamp,

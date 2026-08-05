@@ -59,6 +59,12 @@ from .types import (
 
 log = logging.getLogger("tenzro.media_gen.worker")
 
+# JSON-RPC code the node returns when a receipt is well-formed and accepted but
+# the payer cannot cover the payout. Distinct from a rejected receipt: the job
+# is already complete and its output published, so this is an unpaid render,
+# not a failed one.
+SETTLEMENT_ERROR_CODE = -32023
+
 
 def now_millis() -> int:
     return int(time.time() * 1000)
@@ -264,6 +270,9 @@ class MediaGenWorker:
         self._pipelines: OrderedDict[tuple[str, str, str | None, str], LoadedPipeline] = (
             OrderedDict()
         )
+        # One warning per process, not one per job, when the worker has no
+        # token to write the ledger with.
+        self._warned_no_admin_token = False
 
     # ── enrollment and discovery ──────────────────────────────────────
 
@@ -422,6 +431,7 @@ class MediaGenWorker:
             return cached
 
         self._evict_until_fits(entry)
+        self._admit_with_node(cache_key, entry)
         loaded = load_pipeline(
             entry,
             kind,
@@ -433,6 +443,70 @@ class MediaGenWorker:
         )
         self._pipelines[cache_key] = loaded
         return loaded
+
+    @staticmethod
+    def _commitment_key(cache_key: tuple[Any, ...]) -> str:
+        """Ledger key for one cached pipeline.
+
+        Carries the whole cache key, not just the model id: the same model at
+        two precisions is two resident objects with two costs, and collapsing
+        them onto one ledger entry would under-count the pool by exactly the
+        amount that makes the difference.
+        """
+        return "media-gen:" + ":".join(str(part) for part in cache_key)
+
+    def _admit_with_node(self, cache_key: tuple[Any, ...], entry: CatalogEntry) -> None:
+        """Record this pipeline against the node's pool before loading it.
+
+        The local LRU in :meth:`_evict_until_fits` bounds this worker against
+        its own budget. It cannot see the language model the node is serving
+        in another process, so on its own it will happily load a pipeline into
+        memory the node has already promised elsewhere. The node's ledger is
+        the only place both are visible, so admission has to happen there.
+
+        Eviction and retry live here rather than in the node: the node knows
+        the pool is full, but only the worker knows which pipeline it is
+        willing to give up.
+        """
+        if not self.client.admin_token:
+            # Fail open, loudly. A worker without the operator's token cannot
+            # write to the ledger, and refusing every job would be a worse
+            # failure than the unaccounted load this replaces.
+            if not self._warned_no_admin_token:
+                log.warning(
+                    "TENZRO_ADMIN_TOKEN unset: pipeline memory will not be recorded "
+                    "against the node's budget, so the node cannot account for this "
+                    "worker's %.1f GB when admitting its own models",
+                    self._entry_vram_gb(entry),
+                )
+                self._warned_no_admin_token = True
+            return
+
+        key = self._commitment_key(cache_key)
+        needed_bytes = int(self._entry_vram_gb(entry) * 1e9)
+
+        while True:
+            try:
+                # `min_vram_gb` is the author's floor for *running* the model,
+                # so it already covers activations; applying the node's load
+                # headroom on top would double-count it.
+                self.client.memory_admit(key, "on-demand", needed_bytes, apply_headroom=False)
+                return
+            except RpcError as exc:
+                if not self._pipelines:
+                    raise RuntimeError(
+                        f"node refused {self._entry_vram_gb(entry):.1f} GB for "
+                        f"{entry.id} and this worker holds nothing to evict: {exc}"
+                    ) from exc
+                victim_key, victim = self._pipelines.popitem(last=False)
+                self._release(victim)
+                self.client.memory_release(self._commitment_key(victim_key))
+                log.info(
+                    "evicted pipeline %s after the node refused %s: %s",
+                    victim_key[0],
+                    entry.id,
+                    exc,
+                )
 
     def _entry_vram_gb(self, entry: CatalogEntry) -> float:
         """What holding this pipeline costs, in GB.
@@ -463,7 +537,8 @@ class MediaGenWorker:
         still attempts the load, because the catalog's VRAM figures are
         estimates and refusing on an estimate would make a worker decline jobs
         it could actually have rendered. The real ceiling is enforced by the
-        node's memory budget on the Rust side.
+        node's memory budget on the Rust side, which `_admit_with_node` calls
+        immediately after this returns.
         """
         budget = float(self.config.gpu_vram_gb)
         needed = self._entry_vram_gb(entry)
@@ -472,6 +547,11 @@ class MediaGenWorker:
             victim_key, victim = next(iter(self._pipelines.items()))
             del self._pipelines[victim_key]
             self._release(victim)
+            # Give the bytes back on the node's ledger too, or the pool leaks
+            # a commitment for every eviction and the tier fills with claims
+            # nothing holds.
+            if self.client.admin_token:
+                self.client.memory_release(self._commitment_key(victim_key))
             log.info(
                 "evicted pipeline %s to make room for %s (%.1f GB needed, %.1f GB budget)",
                 victim_key[0],
@@ -494,8 +574,11 @@ class MediaGenWorker:
             if hasattr(pipe, "to"):
                 try:
                     pipe.to("cpu")
-                except Exception:  # noqa: BLE001 - best effort, never fatal
-                    pass
+                except Exception:
+                    # Not fatal — the pipeline is being discarded either way —
+                    # but it means the VRAM is not coming back on this path,
+                    # so the next OOM wants this line in the journal.
+                    log.debug("could not move %s off the GPU", type(pipe).__name__, exc_info=True)
             del pipe
             del loaded
             gc.collect()
@@ -579,7 +662,24 @@ class MediaGenWorker:
             worker_signature=Signature.empty(),
         )
         receipt.worker_signature = sign_receipt(receipt, self.key)
-        sealed = self.client.submit_receipt(receipt)
+        try:
+            sealed = self.client.submit_receipt(receipt)
+        except RpcError as exc:
+            if exc.code != SETTLEMENT_ERROR_CODE:
+                raise
+            # The render is done and the output is published, so the job is
+            # already terminal on the node — reporting this as a job failure
+            # asks for `completed -> failed`, which the state machine rightly
+            # refuses, and buries the real cause under that refusal. The node
+            # has already recorded the unpaid settlement; the operator's
+            # remedy is funding the payer, not re-running the render.
+            log.error(
+                "job %s: rendered and published, but unpaid — %s. The output "
+                "stands; settle by funding the requester.",
+                job.job_id,
+                exc.message,
+            )
+            return
         log.info(
             "job %s: completed, %d bytes of %s",
             job.job_id,

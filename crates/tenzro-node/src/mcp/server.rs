@@ -4893,7 +4893,12 @@ async fn rpc_dispatch(
     {
         return Err(ErrorData::internal_error(e.message, None));
     }
-    if let Some(err) = crate::rpc::gate_api_key(node, &request, h.x_tenzro_api_key.as_deref())
+    if let Some(err) = crate::rpc::gate_api_key(
+        node,
+        &request,
+        h.x_tenzro_api_key.as_deref(),
+        h.x_tenzro_admin_token.as_deref(),
+    )
         && let Some(e) = err.error
     {
         return Err(ErrorData::internal_error(e.message, None));

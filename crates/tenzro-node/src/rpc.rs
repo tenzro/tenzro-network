@@ -238,7 +238,6 @@ impl RpcServer {
         // Open routes (always accessible without payment)
         let node_state = self.node.clone();
         let open_routes = Router::new()
-            .route("/", post(handle_rpc_post))
             .route("/health", get(handle_rpc_get))
             // OpenAI-compatible model listing (free)
             .route("/v1/models", get(handle_openai_list_models))
@@ -280,6 +279,21 @@ impl RpcServer {
         // body, and a larger per-route limit cannot take effect underneath a
         // smaller outer one. Routes whose JSON carries a base64 image or clip
         // sit in their own tier between the two.
+        //
+        // The JSON-RPC root is one of those routes, which is easy to miss
+        // because its name says JSON. `tenzro_mediaGen_publishOutput` is how a
+        // media-gen worker returns a finished render, and `fetchInput` /
+        // `fetchLatent` / `fetchOutput` carry bytes the same way — all base64
+        // inside a JSON-RPC envelope, all dispatched here. Under
+        // `JSON_BODY_LIMIT` a worker rendered the image successfully and then
+        // failed to publish it with a 413, which surfaced only as a failed job
+        // with the render cost already spent. A 121-frame clip is an order of
+        // magnitude worse.
+        let rpc_root = Router::new()
+            .route("/", post(handle_rpc_post))
+            .with_state(node_state.clone())
+            .layer(axum::extract::DefaultBodyLimit::disable())
+            .layer(RequestBodyLimitLayer::new(MEDIA_BODY_LIMIT));
         let app = if let Some(gate) = self.payment_gate {
             info!("RPC payment gate enabled for {}", PAID_ROUTES.join(", "));
             let gate_layer = axum::middleware::from_fn_with_state(
@@ -306,6 +320,7 @@ impl RpcServer {
             open_routes
                 .with_state(node_state)
                 .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
+                .merge(rpc_root)
                 .merge(paid_json)
                 .merge(paid_media)
                 .merge(paid_audio)
@@ -323,6 +338,7 @@ impl RpcServer {
                 .merge(paid_json_routes())
                 .with_state(node_state)
                 .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
+                .merge(rpc_root)
                 .merge(media)
                 .merge(audio)
         };
@@ -438,6 +454,19 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
+    /// Context for a request the node raises against itself — startup
+    /// restoration, not a caller. There are no headers to carry because there
+    /// was no HTTP request; the admin gate runs in the HTTP layer above
+    /// `dispatch_request`, so an internal replay is deliberately ungated.
+    pub(crate) fn internal() -> Self {
+        Self {
+            authorization: None,
+            dpop: None,
+            http_method: "POST".to_string(),
+            http_uri: String::new(),
+        }
+    }
+
     /// Extract the auth context from incoming HTTP headers. Returns
     /// `None` for both fields if neither header is present — this is
     /// not an error; many RPCs don't require auth.
@@ -538,7 +567,9 @@ async fn handle_rpc_post(
                         responses.push(serde_json::to_value(err).unwrap());
                         continue;
                     }
-                    if let Some(err) = gate_api_key(&node, &request, api_key.as_deref()) {
+                    if let Some(err) =
+                        gate_api_key(&node, &request, api_key.as_deref(), admin_token.as_deref())
+                    {
                         responses.push(serde_json::to_value(err).unwrap());
                         continue;
                     }
@@ -588,7 +619,9 @@ async fn handle_rpc_post(
             if let Some(err) = gate_admin_token(&node, &request, admin_token.as_deref()) {
                 return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
             }
-            if let Some(err) = gate_api_key(&node, &request, api_key.as_deref()) {
+            if let Some(err) =
+                gate_api_key(&node, &request, api_key.as_deref(), admin_token.as_deref())
+            {
                 return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
             }
             if let Some(err) = gate_chainlink_rate_limit(&node, &request, api_key.as_deref()) {
@@ -639,6 +672,7 @@ pub(crate) fn gate_api_key(
     node: &Arc<TenzroNode>,
     request: &JsonRpcRequest,
     api_key: Option<&str>,
+    admin_token: Option<&str>,
 ) -> Option<JsonRpcResponse> {
     // Admin-token-gated methods skip the API-key scope gate even when
     // their name matches the canton scope predicate. `gate_admin_token`
@@ -646,6 +680,29 @@ pub(crate) fn gate_api_key(
     // the operator admin token is strictly stronger than any tenant
     // API key (cross-tenant read).
     if requires_admin_token(&request.method) {
+        return None;
+    }
+
+    // The operator's own admin token satisfies any tenant scope on their own
+    // node.
+    //
+    // These scopes exist to separate *network tenants* from each other: a key
+    // carries the databases, files and sites its holder may reach, and the
+    // gate is what stops one tenant enumerating another's. The node's operator
+    // is not one of those tenants. Without this, running `tenzro_listDatabases`
+    // against your own node fails with "missing X-Tenzro-Api-Key" and the
+    // operator has to mint themselves a tenant key to use the machine they
+    // already administer — while holding the credential that can revoke every
+    // key on it.
+    //
+    // Same reasoning the admission gate already applies, where an admin token
+    // is accepted as a service key "so an operator is not locked out of their
+    // own gated node". The token is verified against this node's configured
+    // one in constant time; an absent or wrong token falls through to the
+    // ordinary tenant path below, so nothing is loosened for the network.
+    if let (Some(presented), Some(expected)) = (admin_token, node.admin_token())
+        && crate::api_key::verify_admin_token(presented, expected)
+    {
         return None;
     }
     let mgr = node.api_key_manager()?;
@@ -1053,7 +1110,12 @@ async fn dispatch_embedded_single(
     if let Some(err) = gate_admin_token(node, &request, auth.admin_token.as_deref()) {
         return serde_json::to_value(err).unwrap_or(Value::Null);
     }
-    if let Some(err) = gate_api_key(node, &request, auth.api_key.as_deref()) {
+    if let Some(err) = gate_api_key(
+        node,
+        &request,
+        auth.api_key.as_deref(),
+        auth.admin_token.as_deref(),
+    ) {
         return serde_json::to_value(err).unwrap_or(Value::Null);
     }
     if let Some(err) = gate_chainlink_rate_limit(node, &request, auth.api_key.as_deref()) {
@@ -1377,6 +1439,149 @@ fn resolve_canton_network(
     Ok(Some(net))
 }
 
+/// CF_MODELS key prefix for a persisted modality-runtime load.
+const RUNTIME_LOAD_PREFIX: &str = "runtime_load:";
+
+/// Load methods whose effect should survive a restart, paired with the unload
+/// method that cancels it. Every ONNX modality runtime is here; the chat tier
+/// is absent because `served_models` already persists it.
+const RUNTIME_LOAD_METHODS: &[(&str, &str)] = &[
+    ("tenzro_loadForecastModel", "tenzro_unloadForecastModel"),
+    (
+        "tenzro_loadTextEmbeddingModel",
+        "tenzro_unloadTextEmbeddingModel",
+    ),
+    ("tenzro_loadVisionModel", "tenzro_unloadVisionModel"),
+    (
+        "tenzro_loadSegmentationModel",
+        "tenzro_unloadSegmentationModel",
+    ),
+    (
+        "tenzro_loadTextSegmentationModel",
+        "tenzro_unloadTextSegmentationModel",
+    ),
+    ("tenzro_loadDetectionModel", "tenzro_unloadDetectionModel"),
+    ("tenzro_loadAudioModel", "tenzro_unloadAudioModel"),
+    ("tenzro_loadVideoModel", "tenzro_unloadVideoModel"),
+];
+
+/// `true` when this method loads or unloads a modality runtime, i.e. when its
+/// params are worth capturing for persistence.
+fn is_runtime_load_method(method: &str) -> bool {
+    RUNTIME_LOAD_METHODS
+        .iter()
+        .any(|(load, unload)| *load == method || *unload == method)
+}
+
+/// Persist a successful modality-runtime load, or erase one on unload.
+///
+/// The stored value is the caller's own params, so a restore is a replay of the
+/// exact request that worked rather than a reconstruction that can drift from
+/// it. Storage failures are logged and swallowed: losing persistence must not
+/// fail a load that has already happened.
+async fn record_runtime_load(node: &Arc<TenzroNode>, method: &str, params: Option<&Value>) {
+    let Some(storage) = node.storage() else {
+        return;
+    };
+    let is_load = RUNTIME_LOAD_METHODS.iter().any(|(load, _)| *load == method);
+    let unload_of = RUNTIME_LOAD_METHODS
+        .iter()
+        .find(|(_, unload)| *unload == method)
+        .map(|(load, _)| *load);
+    if !is_load && unload_of.is_none() {
+        return;
+    }
+
+    let Some(params) = params else { return };
+    let params = params
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or(params)
+        .clone();
+    let Some(model_id) = params.get("model_id").and_then(|v| v.as_str()) else {
+        return;
+    };
+
+    if let Some(load_method) = unload_of {
+        let key = format!("{RUNTIME_LOAD_PREFIX}{load_method}:{model_id}");
+        if let Err(e) = storage.delete(CF_MODELS, key.as_bytes()) {
+            warn!(%model_id, error = %e, "Failed to clear persisted runtime load");
+        }
+        return;
+    }
+
+    let key = format!("{RUNTIME_LOAD_PREFIX}{method}:{model_id}");
+    let record = serde_json::json!({ "method": method, "params": params });
+    match serde_json::to_vec(&record) {
+        Ok(bytes) => {
+            if let Err(e) = storage.put(CF_MODELS, key.as_bytes(), &bytes) {
+                warn!(%model_id, error = %e, "Failed to persist runtime load");
+            }
+        }
+        Err(e) => warn!(%model_id, error = %e, "Failed to encode runtime load"),
+    }
+}
+
+/// Replay every persisted modality-runtime load.
+///
+/// Called once at startup, after the runtimes exist. Each entry is dispatched
+/// as the request that originally created it, so this path cannot diverge from
+/// the handler it is restoring. A record whose artifact has since been deleted
+/// fails its own load and is left in place: the operator removed the file, not
+/// the intent, and a later boot should retry rather than quietly forget.
+pub async fn restore_runtime_loads(node: &Arc<TenzroNode>) {
+    let Some(storage) = node.storage() else {
+        return;
+    };
+    let keys = match storage.get_keys_with_prefix(CF_MODELS, RUNTIME_LOAD_PREFIX.as_bytes()) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "Failed to list persisted runtime loads");
+            return;
+        }
+    };
+
+    let (mut restored, mut failed) = (0usize, 0usize);
+    for key in &keys {
+        let Ok(Some(bytes)) = storage.get(CF_MODELS, key) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let (Some(method), Some(params)) = (
+            record.get("method").and_then(|v| v.as_str()),
+            record.get("params").cloned(),
+        ) else {
+            continue;
+        };
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params: Some(params),
+            id: Value::from(0),
+        };
+        // Restoration is the node acting on its own recorded state, not a
+        // caller acting on the node, so it runs with the operator's authority
+        // rather than re-deriving one from an absent request.
+        let response = dispatch_request(node, request, &AuthContext::internal(), None).await;
+        match response.error {
+            None => restored += 1,
+            Some(e) => {
+                failed += 1;
+                warn!(%method, error = %e.message, "Failed to restore runtime load");
+            }
+        }
+    }
+    if restored > 0 || failed > 0 {
+        info!(
+            restored,
+            failed, "Restored persisted modality-runtime loads"
+        );
+    }
+}
+
 pub(crate) async fn handle_request(
     node: &Arc<TenzroNode>,
     request: JsonRpcRequest,
@@ -1485,6 +1690,15 @@ async fn dispatch_request(
     }
 
     request.params = normalize_params(request.params);
+    // Captured before dispatch: several arms take `request.params` by value, so
+    // it is gone by the time the result is known. Only cloned for the methods
+    // that persist, so an ordinary request does not pay for it.
+    let runtime_load_params = if is_runtime_load_method(&request.method) {
+        request.params.clone()
+    } else {
+        None
+    };
+
     let result = match request.method.as_str() {
         // Chain methods
         "tenzro_blockNumber" => handle_block_number(node).await,
@@ -1899,34 +2113,36 @@ async fn dispatch_request(
         // Static site hosting — publish/inspect/remove site manifests whose
         // routes point at iroh blobs (upload content via
         // `tenzro_iroh_publishBlob` first). Served at `GET /sites/{site_id}`.
-        "tenzro_sitePublish" => handle_site_publish(node, request.params).await,
-        "tenzro_siteGet" => handle_site_get(node, request.params).await,
-        "tenzro_listSites" => handle_list_sites(node, request.params).await,
-        "tenzro_siteRemove" => handle_site_remove(node, request.params).await,
+        "tenzro_sitePublish" => handle_site_publish(node, request.params, api_key).await,
+        "tenzro_siteGet" => handle_site_get(node, request.params, api_key).await,
+        "tenzro_listSites" => handle_list_sites(node, request.params, api_key).await,
+        "tenzro_siteRemove" => handle_site_remove(node, request.params, api_key).await,
         // Site alias (hostname → site_id) naming layer. Set/remove are
         // DID-owner-authenticated; get/list are open reads.
-        "tenzro_siteSetAlias" => handle_site_set_alias(node, request.params).await,
-        "tenzro_siteGetAlias" => handle_site_get_alias(node, request.params).await,
-        "tenzro_listSiteAliases" => handle_list_site_aliases(node, request.params).await,
-        "tenzro_siteRemoveAlias" => handle_site_remove_alias(node, request.params).await,
+        "tenzro_siteSetAlias" => handle_site_set_alias(node, request.params, api_key).await,
+        "tenzro_siteGetAlias" => handle_site_get_alias(node, request.params, api_key).await,
+        "tenzro_listSiteAliases" => handle_list_site_aliases(node, request.params, api_key).await,
+        "tenzro_siteRemoveAlias" => handle_site_remove_alias(node, request.params, api_key).await,
         // Custom-domain (bring-your-own hostname) layer. Claim returns the
         // ownership TXT record the caller must publish; verify checks DNS and
         // flips the domain to verified so a certificate is issued and the
         // hostname serves. Claim/verify/remove are DID-owner-authenticated;
         // get/list are open reads.
-        "tenzro_siteClaimDomain" => handle_site_claim_domain(node, request.params).await,
-        "tenzro_siteVerifyDomain" => handle_site_verify_domain(node, request.params).await,
-        "tenzro_siteGetDomain" => handle_site_get_domain(node, request.params).await,
-        "tenzro_listSiteDomains" => handle_list_site_domains(node, request.params).await,
-        "tenzro_siteRemoveDomain" => handle_site_remove_domain(node, request.params).await,
+        "tenzro_siteClaimDomain" => handle_site_claim_domain(node, request.params, api_key).await,
+        "tenzro_siteVerifyDomain" => handle_site_verify_domain(node, request.params, api_key).await,
+        "tenzro_siteGetDomain" => handle_site_get_domain(node, request.params, api_key).await,
+        "tenzro_listSiteDomains" => handle_list_site_domains(node, request.params, api_key).await,
+        "tenzro_siteRemoveDomain" => handle_site_remove_domain(node, request.params, api_key).await,
         // Dynamic-ingress placement (site_id → serving-node EndpointIds). The
         // edge forwards a request to a placed serving node over `tenzro/http`;
         // an empty placement serves locally. Set/remove are site-owner-
         // authenticated; get/list are open reads.
-        "tenzro_siteSetPlacement" => handle_site_set_placement(node, request.params).await,
-        "tenzro_siteGetPlacement" => handle_site_get_placement(node, request.params).await,
-        "tenzro_listSitePlacements" => handle_list_site_placements(node, request.params).await,
-        "tenzro_siteRemovePlacement" => handle_site_remove_placement(node, request.params).await,
+        "tenzro_siteSetPlacement" => handle_site_set_placement(node, request.params, api_key).await,
+        "tenzro_siteGetPlacement" => handle_site_get_placement(node, request.params, api_key).await,
+        "tenzro_listSitePlacements" => handle_list_site_placements(node, request.params, api_key).await,
+        "tenzro_siteRemovePlacement" => {
+            handle_site_remove_placement(node, request.params, api_key).await
+        }
 
         // Function hosting — deploy/inspect/remove `wasi:http` component
         // deployments served over the same `tenzro/http` ingress path as static
@@ -2025,6 +2241,8 @@ async fn dispatch_request(
         "tenzro_previewServe" => handle_preview_serve(node, request.params).await,
         "tenzro_trafficStats" => handle_traffic_stats(node, request.params).await,
         "tenzro_memoryBudget" => handle_memory_budget(node, request.params).await,
+        "tenzro_memoryAdmit" => handle_memory_admit(node, request.params).await,
+        "tenzro_memoryRelease" => handle_memory_release(node, request.params).await,
         "tenzro_modelLifecycle" => handle_model_lifecycle(node, request.params).await,
         "tenzro_pinModel" => handle_pin_model(node, request.params).await,
         "tenzro_unpinModel" => handle_unpin_model(node, request.params).await,
@@ -2375,12 +2593,12 @@ async fn dispatch_request(
         "tenzro_clusterPreview" => handle_cluster_preview(node, request.params).await,
         "tenzro_clusterMembers" => handle_cluster_members(node).await,
         "tenzro_listDatabaseEngines" => handle_list_database_engines().await,
-        "tenzro_createDatabase" => handle_create_database(node, request.params).await,
-        "tenzro_getDatabase" => handle_get_database(node, request.params).await,
-        "tenzro_listDatabases" => handle_list_databases(node).await,
-        "tenzro_getDatabasePartition" => handle_get_database_partition(node, request.params).await,
+        "tenzro_createDatabase" => handle_create_database(node, request.params, api_key).await,
+        "tenzro_getDatabase" => handle_get_database(node, request.params, api_key).await,
+        "tenzro_listDatabases" => handle_list_databases(node, api_key).await,
+        "tenzro_getDatabasePartition" => handle_get_database_partition(node, request.params, api_key).await,
         "tenzro_listDatabasePartitions" => {
-            handle_list_database_partitions(node, request.params).await
+            handle_list_database_partitions(node, request.params, api_key).await
         }
         "tenzro_dropDatabase" => handle_drop_database(node, request.params, api_key).await,
         "tenzro_authorizeDatabaseRead" => {
@@ -2529,6 +2747,9 @@ async fn dispatch_request(
             handle_media_gen_enroll_worker(node, request.params).await
         }
         "tenzro_mediaGen_listWorkers" => handle_media_gen_list_workers(node).await,
+        "tenzro_mediaGen_removeWorker" => {
+            handle_media_gen_remove_worker(node, request.params).await
+        }
         "tenzro_mediaGen_claimJob" => handle_media_gen_claim_job(node, request.params).await,
         "tenzro_mediaGen_markRunning" => handle_media_gen_mark_running(node, request.params).await,
         "tenzro_mediaGen_failJob" => handle_media_gen_fail_job(node, request.params).await,
@@ -3584,6 +3805,17 @@ async fn dispatch_request(
             data: None,
         }),
     };
+
+    // A modality runtime that was loaded should still be loaded after a
+    // restart. `served_models` already restores the chat tier, so a GGUF model
+    // reloads lazily on its first request; the ONNX runtimes had no equivalent,
+    // so every restart silently dropped them and the next call returned "Model
+    // not found" until an operator re-issued the original load by hand. Record
+    // the load here rather than in eight handlers, and drop the record on
+    // unload so a deliberate unload is not undone by the next boot.
+    if result.is_ok() {
+        record_runtime_load(node, &request.method, runtime_load_params.as_ref()).await;
+    }
 
     match result {
         Ok(value) => JsonRpcResponse {
@@ -9607,6 +9839,7 @@ fn record_site_envelope_nonce(
 async fn handle_site_publish(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -9629,6 +9862,10 @@ async fn handle_site_publish(
             message: "Missing owner_did".to_string(),
             data: None,
         })?;
+    // Ahead of the envelope check: `require_did_owner` consumes the envelope's
+    // nonce, so refusing after it would burn a single-use signature on a call
+    // that was never going to be allowed.
+    enforce_site_scope(node, api_key, &crate::sites::compute_site_id(owner_did, name))?;
     require_did_owner(
         node,
         &params,
@@ -9764,6 +10001,7 @@ async fn handle_site_publish(
 async fn handle_site_get(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let site_id = params
         .as_ref()
@@ -9774,6 +10012,7 @@ async fn handle_site_get(
             message: "Missing site_id".to_string(),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, site_id)?;
     let manifest = node
         .site_registry()
         .get_site(site_id)
@@ -9788,6 +10027,7 @@ async fn handle_site_get(
 async fn handle_list_sites(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let owner = params
         .as_ref()
@@ -9797,6 +10037,7 @@ async fn handle_list_sites(
         .site_registry()
         .list_sites(owner)
         .iter()
+        .filter(|m| key_allows_site(node, api_key, &m.site_id))
         .map(site_manifest_to_json)
         .collect();
     Ok(serde_json::json!({ "sites": sites, "count": sites.len() }))
@@ -9805,6 +10046,7 @@ async fn handle_list_sites(
 async fn handle_site_remove(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -9819,6 +10061,7 @@ async fn handle_site_remove(
             message: "Missing site_id".to_string(),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, site_id)?;
     let owner_did = params
         .get("owner_did")
         .and_then(|v| v.as_str())
@@ -10591,6 +10834,7 @@ fn placement_record_to_json(r: &crate::ingress::PlacementRecord) -> Value {
 async fn handle_site_set_placement(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -10605,6 +10849,7 @@ async fn handle_site_set_placement(
             message: "Missing site_id".to_string(),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, site_id)?;
 
     // The manifest's owner is the authority over where the site is served.
     let manifest = node
@@ -10670,6 +10915,7 @@ async fn handle_site_set_placement(
 async fn handle_site_get_placement(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let site_id = params
         .as_ref()
@@ -10680,6 +10926,7 @@ async fn handle_site_get_placement(
             message: "Missing site_id".to_string(),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, site_id)?;
     match node.ingress_table().get_placement(site_id) {
         Some(record) => Ok(placement_record_to_json(&record)),
         None => Ok(serde_json::json!({
@@ -10693,11 +10940,13 @@ async fn handle_site_get_placement(
 async fn handle_list_site_placements(
     node: &Arc<TenzroNode>,
     _params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let placements: Vec<Value> = node
         .ingress_table()
         .list_placements()
         .iter()
+        .filter(|r| key_allows_site(node, api_key, &r.site_id))
         .map(placement_record_to_json)
         .collect();
     Ok(serde_json::json!({ "placements": placements, "count": placements.len() }))
@@ -10706,6 +10955,7 @@ async fn handle_list_site_placements(
 async fn handle_site_remove_placement(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -10720,6 +10970,7 @@ async fn handle_site_remove_placement(
             message: "Missing site_id".to_string(),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, site_id)?;
     let manifest = node
         .site_registry()
         .get_site(site_id)
@@ -10786,6 +11037,7 @@ fn site_alias_to_json(a: &crate::sites::SiteAlias) -> Value {
 async fn handle_site_set_alias(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -10816,6 +11068,7 @@ async fn handle_site_set_alias(
             message: "Missing owner_did".to_string(),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, site_id)?;
     require_did_owner(
         node,
         &params,
@@ -10834,6 +11087,7 @@ async fn handle_site_set_alias(
 async fn handle_site_get_alias(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let hostname = params
         .as_ref()
@@ -10852,12 +11106,14 @@ async fn handle_site_get_alias(
             message: format!("alias not found: {hostname}"),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, &alias.site_id)?;
     Ok(site_alias_to_json(&alias))
 }
 
 async fn handle_list_site_aliases(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let owner = params
         .as_ref()
@@ -10867,6 +11123,7 @@ async fn handle_list_site_aliases(
         .site_registry()
         .list_aliases(owner)
         .iter()
+        .filter(|a| key_allows_site(node, api_key, &a.site_id))
         .map(site_alias_to_json)
         .collect();
     Ok(serde_json::json!({ "aliases": aliases, "count": aliases.len() }))
@@ -10875,6 +11132,7 @@ async fn handle_list_site_aliases(
 async fn handle_site_remove_alias(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -10897,6 +11155,9 @@ async fn handle_site_remove_alias(
             message: "Missing owner_did".to_string(),
             data: None,
         })?;
+    if let Some(existing) = node.site_registry().get_alias(hostname) {
+        enforce_site_scope(node, api_key, &existing.site_id)?;
+    }
     require_did_owner(
         node,
         &params,
@@ -10940,6 +11201,7 @@ fn site_domain_to_json(node: &Arc<TenzroNode>, d: &crate::sites::CustomDomain) -
 async fn handle_site_claim_domain(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -10970,6 +11232,7 @@ async fn handle_site_claim_domain(
             message: "Missing owner_did".to_string(),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, site_id)?;
     require_did_owner(
         node,
         &params,
@@ -10988,6 +11251,7 @@ async fn handle_site_claim_domain(
 async fn handle_site_verify_domain(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -11010,6 +11274,9 @@ async fn handle_site_verify_domain(
             message: "Missing owner_did".to_string(),
             data: None,
         })?;
+    if let Some(existing) = node.site_registry().get_domain(hostname) {
+        enforce_site_scope(node, api_key, &existing.site_id)?;
+    }
     require_did_owner(
         node,
         &params,
@@ -11046,6 +11313,7 @@ async fn handle_site_verify_domain(
 async fn handle_site_get_domain(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let hostname = params
         .as_ref()
@@ -11064,12 +11332,14 @@ async fn handle_site_get_domain(
             message: format!("domain not found: {hostname}"),
             data: None,
         })?;
+    enforce_site_scope(node, api_key, &domain.site_id)?;
     Ok(site_domain_to_json(node, &domain))
 }
 
 async fn handle_list_site_domains(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let owner = params
         .as_ref()
@@ -11079,6 +11349,7 @@ async fn handle_list_site_domains(
         .site_registry()
         .list_domains(owner)
         .iter()
+        .filter(|d| key_allows_site(node, api_key, &d.site_id))
         .map(|d| site_domain_to_json(node, d))
         .collect();
     Ok(serde_json::json!({ "domains": domains, "count": domains.len() }))
@@ -11087,6 +11358,7 @@ async fn handle_list_site_domains(
 async fn handle_site_remove_domain(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -11109,6 +11381,9 @@ async fn handle_site_remove_domain(
             message: "Missing owner_did".to_string(),
             data: None,
         })?;
+    if let Some(existing) = node.site_registry().get_domain(hostname) {
+        enforce_site_scope(node, api_key, &existing.site_id)?;
+    }
     require_did_owner(
         node,
         &params,
@@ -23901,6 +24176,7 @@ async fn handle_list_database_engines() -> std::result::Result<Value, JsonRpcErr
 async fn handle_create_database(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -23916,6 +24192,7 @@ async fn handle_create_database(
             data: None,
         })?
         .to_string();
+    enforce_database_scope(node, api_key, &database_id)?;
     let engine_id = params
         .get("engine_id")
         .and_then(|v| v.as_str())
@@ -24153,6 +24430,7 @@ async fn broadcast_database_descriptor(
 async fn handle_get_database(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let database_id = params
         .as_ref()
@@ -24163,6 +24441,7 @@ async fn handle_get_database(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let registry = database_registry_or_err(node)?;
     let desc = registry
         .get_database(database_id)
@@ -24171,11 +24450,15 @@ async fn handle_get_database(
 }
 
 /// `tenzro_listDatabases` — every database this node serves.
-async fn handle_list_databases(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_databases(
+    node: &Arc<TenzroNode>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
     let registry = database_registry_or_err(node)?;
     let dbs: Vec<Value> = registry
         .list_databases()
         .iter()
+        .filter(|d| key_allows_database(node, api_key, &d.database_id))
         .map(database_descriptor_json)
         .collect();
     Ok(serde_json::json!({ "databases": dbs, "count": dbs.len() }))
@@ -24185,6 +24468,7 @@ async fn handle_list_databases(node: &Arc<TenzroNode>) -> std::result::Result<Va
 async fn handle_get_database_partition(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -24199,6 +24483,7 @@ async fn handle_get_database_partition(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let partition_index = params
         .get("partition_index")
         .and_then(|v| v.as_u64())
@@ -24218,6 +24503,7 @@ async fn handle_get_database_partition(
 async fn handle_list_database_partitions(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let database_id = params
         .as_ref()
@@ -24228,6 +24514,7 @@ async fn handle_list_database_partitions(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let registry = database_registry_or_err(node)?;
     let partitions: Vec<Value> = registry
         .list_partitions(database_id)
@@ -24263,6 +24550,7 @@ async fn handle_drop_database(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let caller_did = params
         .get("caller_did")
         .and_then(|v| v.as_str())
@@ -24454,6 +24742,7 @@ async fn handle_authorize_database_read(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let caller_did = params
         .get("caller_did")
         .and_then(|v| v.as_str())
@@ -24525,6 +24814,7 @@ async fn handle_database_query(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let caller_did = params
         .get("caller_did")
         .and_then(|v| v.as_str())
@@ -25049,6 +25339,7 @@ async fn handle_rescale_database(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let caller_did = params
         .get("caller_did")
         .and_then(|v| v.as_str())
@@ -25193,6 +25484,7 @@ async fn handle_issue_database_connection(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let caller_did = params
         .get("caller_did")
         .and_then(|v| v.as_str())
@@ -25346,6 +25638,7 @@ async fn handle_database_usage(
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
         })?;
+    enforce_database_scope(node, api_key, database_id)?;
     let caller_did = params
         .get("caller_did")
         .and_then(|v| v.as_str())
@@ -30116,6 +30409,136 @@ async fn handle_memory_budget(
     })
 }
 
+/// `tenzro_memoryAdmit` — claim pool memory on behalf of an out-of-process
+/// runtime.
+///
+/// In-process runtimes call [`MemoryBudget::admit`] directly. The Python
+/// media-gen worker cannot: it holds tens of gigabytes of diffusion pipeline
+/// in a separate address space, and without this method the ledger records
+/// nothing for it. A budget that cannot see the largest consumer on the box
+/// is not a budget, which is exactly how a node with a configured ceiling
+/// still gets OOM-killed.
+///
+/// `bytes` is the participant's own estimate of resident size. Headroom is
+/// applied here rather than by the caller so every participant is scaled by
+/// the same factor as the in-process paths; pass `apply_headroom: false` when
+/// the figure is already a measured resident set rather than a file length.
+///
+/// Admission is idempotent per key: re-admitting a key that already holds a
+/// commitment releases the old claim first, so a worker that reloads a
+/// pipeline does not double-count it.
+async fn handle_memory_admit(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "missing params".to_string(),
+        data: None,
+    })?;
+
+    let key = params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "key is required".to_string(),
+            data: None,
+        })?;
+
+    let tier: tenzro_model::memory_budget::Tier = params
+        .get("tier")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("tier must be \"resident\" or \"on-demand\": {e}"),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "tier is required".to_string(),
+            data: None,
+        })?;
+
+    let bytes = params
+        .get("bytes")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "bytes is required".to_string(),
+            data: None,
+        })?;
+
+    let apply_headroom = params
+        .get("apply_headroom")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let required = if apply_headroom {
+        tenzro_model::memory_budget::MemoryBudget::with_headroom(bytes)
+    } else {
+        bytes
+    };
+
+    let budget = tenzro_model::memory_budget::global();
+    // Re-admitting the same key is a reload, not a second pipeline. Drop the
+    // stale claim so the ledger reflects one copy of the weights.
+    budget.release(key);
+
+    match budget.admit(key, tier, required) {
+        Ok(()) => Ok(serde_json::json!({
+            "admitted": true,
+            "key": key,
+            "tier": tier,
+            "committed_bytes": required,
+            "tier_available_bytes": budget.available_in(tier),
+        })),
+        Err(denied) => Err(JsonRpcError {
+            code: -32005,
+            message: denied.to_string(),
+            data: Some(serde_json::json!({
+                "key": denied.key,
+                "tier": denied.tier,
+                "requested_bytes": denied.requested_bytes,
+                "tier_available_bytes": denied.tier_available_bytes,
+                "tier_ceiling_bytes": denied.tier_ceiling_bytes,
+            })),
+        }),
+    }
+}
+
+/// `tenzro_memoryRelease` — drop an out-of-process commitment.
+///
+/// The counterpart to [`handle_memory_admit`]. A worker calls this when it
+/// evicts a pipeline. Releasing a key that holds no commitment is not an
+/// error — an evictor that runs twice should not fail the second time.
+async fn handle_memory_release(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let key = params
+        .as_ref()
+        .and_then(|p| p.get("key"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "key is required".to_string(),
+            data: None,
+        })?;
+
+    match tenzro_model::memory_budget::global().release(key) {
+        Some(commitment) => Ok(serde_json::json!({
+            "released": true,
+            "key": commitment.key,
+            "tier": commitment.tier,
+            "bytes": commitment.bytes,
+        })),
+        None => Ok(serde_json::json!({ "released": false, "key": key })),
+    }
+}
+
 /// `tenzro_modelLifecycle` — which models are warm, and the state of any that
 /// are not.
 ///
@@ -30484,15 +30907,24 @@ pub(crate) async fn handle_chat_by_intent(
     // The requester is who the inference router prices and rate-limits
     // against. `payer_address` when the caller declared one, else the address
     // the call bills to — the same wallet either way for a well-formed request.
-    let requester = intent
-        .payer_address
-        .or_else(|| {
-            params
-                .get("caller_address")
-                .and_then(|v| v.as_str())
-                .and_then(|s| tenzro_types::primitives::Address::from_hex(s).ok())
-        })
-        .unwrap_or_default();
+    //
+    // Absent means anonymous, which is a legitimate way to call this. Present
+    // but unreadable is not: it used to fall through to the zero address, so a
+    // caller who named themselves was silently priced and rate-limited as
+    // anonymous, pooled with every other malformed caller.
+    let requester = match intent.payer_address {
+        Some(payer) => payer,
+        None => match params.get("caller_address").and_then(|v| v.as_str()) {
+            Some(s) => {
+                tenzro_types::primitives::Address::from_hex(s).map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid caller_address: {}", e),
+                    data: None,
+                })?
+            }
+            None => tenzro_types::primitives::Address::default(),
+        },
+    };
 
     let (model_id, provider, decision) = {
         let meta = node.meta_router().ok_or_else(|| JsonRpcError {
@@ -32309,10 +32741,18 @@ async fn handle_chat_simple(
         for entry in node.network_models_snapshot() {
             let reg = &entry.registration;
             if reg.model_id == model_query {
-                if let Some(pin) = pinned_provider
-                    && tenzro_types::primitives::Address::from_hex(&reg.provider)
-                        .is_ok_and(|a| a != pin)
-                {
+                // Read the payee once, and skip the announcement outright if it
+                // cannot be read: there would be nobody to pay for the
+                // inference. This also closes a pin bypass — `is_ok_and`
+                // returned false on a parse failure, so an unreadable
+                // announcement satisfied a pin naming a different operator and
+                // then carried the zero address into the payee slot below.
+                let Ok(provider_address) =
+                    tenzro_types::primitives::Address::from_hex(&reg.provider)
+                else {
+                    continue;
+                };
+                if pinned_provider.is_some_and(|pin| provider_address != pin) {
                     continue;
                 }
                 // Self-dial guard: never treat our own announcement as a
@@ -32333,8 +32773,7 @@ async fn handle_chat_simple(
                     instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
                     model_id: reg.model_id.clone(),
                     model_name: reg.name.clone(),
-                    provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
-                        .unwrap_or_default(),
+                    provider_address,
                     provider_name: reg.provider.clone(),
                     location: tenzro_types::model::ModelLocation::Network,
                     api_endpoint: reg.rpc_endpoint.clone(),
@@ -32897,10 +33336,16 @@ async fn handle_chat_rich(
         for entry in node.network_models_snapshot() {
             let reg = &entry.registration;
             if reg.model_id == model_query {
-                if let Some(pin) = pinned_provider
-                    && tenzro_types::primitives::Address::from_hex(&reg.provider)
-                        .is_ok_and(|a| a != pin)
-                {
+                // Read the payee once and skip on failure — same reasoning as
+                // the sibling resolver: no readable payee means nothing to
+                // settle against, and a parse failure used to slip past the pin
+                // check and land the zero address in the payee slot.
+                let Ok(provider_address) =
+                    tenzro_types::primitives::Address::from_hex(&reg.provider)
+                else {
+                    continue;
+                };
+                if pinned_provider.is_some_and(|pin| provider_address != pin) {
                     continue;
                 }
                 // Self-dial guard: skip our own announcement.
@@ -32919,8 +33364,7 @@ async fn handle_chat_rich(
                     instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
                     model_id: reg.model_id.clone(),
                     model_name: reg.name.clone(),
-                    provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
-                        .unwrap_or_default(),
+                    provider_address,
                     provider_name: reg.provider.clone(),
                     location: tenzro_types::model::ModelLocation::Network,
                     api_endpoint: reg.rpc_endpoint.clone(),
@@ -36001,6 +36445,12 @@ fn parse_media_size(
 }
 
 /// Reads the hex address a media-generation job's price is charged against.
+///
+/// [`Address::from_hex`] widens a 20-byte address left-aligned, which is the
+/// key the token ledger is written under, so the address this returns is the
+/// one `settle_media_gen_job`'s balance check reads. The EIP-55 check it
+/// performs is what catches a mistyped or wrongly derived address before a job
+/// is queued against an account that does not exist.
 fn parse_requester_address(
     address: &str,
 ) -> std::result::Result<tenzro_types::primitives::Address, Response> {
@@ -37036,7 +37486,11 @@ async fn handle_openai_videos_create(
                     "invalid_seconds",
                 );
             }
-            (seconds * f64::from(fps)).round().max(1.0) as u32
+            // Snapped onto the pipeline's frame grid: an off-grid count is
+            // rounded down by the VAE at decode time but billed at the count
+            // asked for, so leaving it unsnapped charges for footage the job
+            // never returns.
+            entry.snap_num_frames((seconds * f64::from(fps)).round().max(1.0) as u32)
         }
         Ok(None) => match entry.default_num_frames {
             Some(v) => v,
@@ -37252,7 +37706,14 @@ fn resolve_failover_target(
         if reg.model_id.as_str() != model_query || reg.rpc_endpoint.is_empty() {
             continue;
         }
-        let addr = tenzro_types::primitives::Address::from_hex(&reg.provider).unwrap_or_default();
+        // An announcement whose payee cannot be read is not routable — there
+        // would be no one to pay for the inference. Defaulting instead put the
+        // zero address in the payee slot and, because every unreadable provider
+        // collapsed onto that one address, made `exclude` and the preference
+        // filter below treat unrelated providers as the same peer.
+        let Ok(addr) = tenzro_types::primitives::Address::from_hex(&reg.provider) else {
+            continue;
+        };
         if &addr == exclude {
             continue;
         }
@@ -37332,7 +37793,11 @@ fn resolve_chat_offer(
         if is_self {
             continue;
         }
-        let addr = tenzro_types::primitives::Address::from_hex(&reg.provider).unwrap_or_default();
+        // Unreadable payee — skip rather than route work to an announcement
+        // nobody can be paid for. See the sibling resolver above.
+        let Ok(addr) = tenzro_types::primitives::Address::from_hex(&reg.provider) else {
+            continue;
+        };
         if prefs.is_some_and(|p| !p.admits(&addr, &reg.provider)) {
             continue;
         }
@@ -39034,12 +39499,19 @@ pub async fn handle_chat_stream_rich(
                 if is_self {
                     continue;
                 }
+                // No readable payee, nothing to settle against — skip rather
+                // than stream from an endpoint whose provider address defaults
+                // to zero.
+                let Ok(provider_address) =
+                    tenzro_types::primitives::Address::from_hex(&reg.provider)
+                else {
+                    continue;
+                };
                 service = Some(tenzro_types::model::ModelServiceInstance {
                     instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
                     model_id: reg.model_id.clone(),
                     model_name: reg.name.clone(),
-                    provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
-                        .unwrap_or_default(),
+                    provider_address,
                     provider_name: reg.provider.clone(),
                     location: tenzro_types::model::ModelLocation::Network,
                     api_endpoint: reg.rpc_endpoint.clone(),
@@ -39565,12 +40037,18 @@ async fn handle_list_model_endpoints(
         if local_model_ids.contains(&reg.model_id) {
             continue;
         }
+        // Don't list a service whose payee cannot be read: the address in this
+        // field is what a caller settles against, and defaulting advertised the
+        // zero address as the payee for a real endpoint.
+        let Ok(provider_address) = tenzro_types::primitives::Address::from_hex(&reg.provider)
+        else {
+            continue;
+        };
         services.push(tenzro_types::model::ModelServiceInstance {
             instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
             model_id: reg.model_id.clone(),
             model_name: reg.name.clone(),
-            provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
-                .unwrap_or_default(),
+            provider_address,
             provider_name: reg.provider.clone(),
             location: tenzro_types::model::ModelLocation::Network,
             api_endpoint: reg.rpc_endpoint.clone(),
@@ -42381,6 +42859,8 @@ async fn handle_create_api_key(
             allowed_workflow_templates: str_array("allowed_workflow_templates"),
             allowed_agent_templates: str_array("allowed_agent_templates"),
             allowed_models: str_array("allowed_models"),
+            allowed_databases: str_array("allowed_databases"),
+            allowed_sites: str_array("allowed_sites"),
             max_per_resource_tnzo,
             canton_networks: canton_networks.clone(),
             tier,
@@ -42587,8 +43067,10 @@ async fn handle_create_api_key(
         })
     });
     // Echo the delegation fields back so clients can verify what was
-    // applied. The `agent_delegation` object is `null` when no
-    // delegation parameters were supplied (legacy unrestricted key).
+    // applied. The `agent_delegation` object is `null` only when the key
+    // is unrestricted — every allow-list below must be represented in
+    // `any_delegation`, or a key narrowed by that list alone would report
+    // itself as unrestricted while the RPC layer enforces the narrowing.
     let rec = &issued.record;
     let any_delegation = !rec.can_act_as_parties.is_empty()
         || !rec.can_read_as_parties.is_empty()
@@ -42604,6 +43086,8 @@ async fn handle_create_api_key(
         || !rec.allowed_workflow_templates.is_empty()
         || !rec.allowed_agent_templates.is_empty()
         || !rec.allowed_models.is_empty()
+        || !rec.allowed_databases.is_empty()
+        || !rec.allowed_sites.is_empty()
         || !rec.max_per_resource_tnzo.is_empty();
     let agent_delegation = if !any_delegation {
         Value::Null
@@ -42628,6 +43112,8 @@ async fn handle_create_api_key(
             "allowed_workflow_templates": rec.allowed_workflow_templates,
             "allowed_agent_templates": rec.allowed_agent_templates,
             "allowed_models": rec.allowed_models,
+            "allowed_databases": rec.allowed_databases,
+            "allowed_sites": rec.allowed_sites,
             "max_per_resource_tnzo": Value::Object(max_per_resource_obj),
         })
     };
@@ -43841,6 +44327,81 @@ fn liquid_staking_pool(
             message: "Liquid staking pool not initialized".to_string(),
             data: None,
         })
+}
+
+/// Refuse when the presented API key is attenuated to a set of databases that
+/// does not include this one.
+///
+/// Separate from the database's own `AccessPolicy`, which decides who *owns*
+/// it. This narrows one credential: a subject owning several databases can
+/// hold a key that reaches only one. A key with an empty `allowed_databases`
+/// is unrestricted, matching every other allow-list on the record.
+///
+/// Callers presenting no key are unaffected — admission was already decided
+/// upstream by `gate_api_key`, and the operator reaching their own node holds
+/// an admin token rather than a tenant key.
+fn enforce_database_scope(
+    node: &Arc<TenzroNode>,
+    api_key: Option<&str>,
+    database_id: &str,
+) -> std::result::Result<(), JsonRpcError> {
+    let (Some(mgr), Some(presented)) = (node.api_key_manager(), api_key) else {
+        return Ok(());
+    };
+    let Some(record) = mgr.lookup(presented) else {
+        return Ok(());
+    };
+    if record.allows_database(database_id) {
+        return Ok(());
+    }
+    Err(JsonRpcError {
+        code: -32004,
+        message: format!(
+            "Unauthorized: API key not authorized for database `{}`. Allowed: {:?}",
+            database_id, record.allowed_databases
+        ),
+        data: None,
+    })
+}
+
+/// The non-erroring form of [`enforce_database_scope`], for listings.
+///
+/// A listing that returned every database on the node would hand a narrowed key
+/// the names of resources it cannot open — enumeration the allow-list is meant
+/// to prevent. Filtering here keeps a listing consistent with what a `get` on
+/// each row would answer.
+fn key_allows_database(node: &Arc<TenzroNode>, api_key: Option<&str>, database_id: &str) -> bool {
+    enforce_database_scope(node, api_key, database_id).is_ok()
+}
+
+/// The site equivalent of [`key_allows_database`].
+fn key_allows_site(node: &Arc<TenzroNode>, api_key: Option<&str>, site_id: &str) -> bool {
+    enforce_site_scope(node, api_key, site_id).is_ok()
+}
+
+/// The site equivalent of [`enforce_database_scope`].
+fn enforce_site_scope(
+    node: &Arc<TenzroNode>,
+    api_key: Option<&str>,
+    site_id: &str,
+) -> std::result::Result<(), JsonRpcError> {
+    let (Some(mgr), Some(presented)) = (node.api_key_manager(), api_key) else {
+        return Ok(());
+    };
+    let Some(record) = mgr.lookup(presented) else {
+        return Ok(());
+    };
+    if record.allows_site(site_id) {
+        return Ok(());
+    }
+    Err(JsonRpcError {
+        code: -32004,
+        message: format!(
+            "Unauthorized: API key not authorized for site `{}`. Allowed: {:?}",
+            site_id, record.allowed_sites
+        ),
+        data: None,
+    })
 }
 
 fn primary_wallet_address(node: &Arc<TenzroNode>) -> std::result::Result<Address, JsonRpcError> {
@@ -67300,7 +67861,6 @@ fn media_gen_err(e: tenzro_media_gen::MediaGenError) -> JsonRpcError {
         ME::JobNotFound(_)
         | ME::JobAlreadyExists { .. }
         | ME::WorkerNotEnrolled(_)
-        | ME::WorkerAlreadyEnrolled { .. }
         | ME::WorkerCannotServe { .. }
         | ME::IllegalTransition { .. }
         | ME::NotJobHolder { .. }
@@ -67619,6 +68179,43 @@ async fn handle_media_gen_enroll_worker(
 }
 
 /// `tenzro_mediaGen_listWorkers`: workers enrolled on this node.
+/// `tenzro_mediaGen_removeWorker` — withdraw a worker's enrollment.
+///
+/// Enrollment is keyed by DID and re-announcing under the same DID replaces the
+/// entry, so a worker restarting needs nothing here. A worker that changes
+/// *identity* is the case this exists for: it announces under a new key and the
+/// old enrollment stays, advertising models nothing is serving.
+///
+/// Operator-gated, because withdrawing someone else's worker would be a way to
+/// take their capacity off the board.
+async fn handle_media_gen_remove_worker(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_param_object(params);
+    let worker_did = params
+        .get("worker_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("worker_did"))?;
+
+    let removed = node
+        .media_gen_runtime
+        .remove_worker(worker_did)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("remove worker: {e}"),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "worker_did": worker_did,
+        // False means it was not enrolled — not an error, but the caller
+        // usually wants to know they aimed at nothing.
+        "removed": removed,
+        "remaining": node.media_gen_runtime.list_workers().len(),
+    }))
+}
+
 async fn handle_media_gen_list_workers(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -69289,5 +69886,50 @@ mod tee_custody_gate_tests {
         assert!(requires_admin_token("tenzro_revokeDid"));
         assert!(requires_admin_token("tenzro_revokeIdentity"));
         assert!(requires_admin_token("tenzro_forgetIdentity"));
+    }
+}
+
+#[cfg(test)]
+mod requester_address_tests {
+    use super::{parse_address, parse_requester_address};
+
+    /// A media-generation job's payer must resolve to the same 32-byte key the
+    /// token ledger is written under, or the balance check in
+    /// `settle_media_gen_job` reads 0 and every settlement fails as
+    /// "insufficient balance" regardless of funding.
+    ///
+    /// `Address::from_hex` and `parse_address` reach the same 32-byte key by
+    /// different routes — one validates an EIP-55 checksum first, the other
+    /// accepts any length up to 32 — so this pins that they agree rather than
+    /// trusting two independent widenings to stay in step.
+    #[test]
+    fn a_20_byte_payer_lands_on_the_token_ledgers_key() {
+        // EIP-55 checksummed form of a real 20-byte account.
+        let checksummed = "0x3d0291C0fC59EdA83f2D9f5f00A09e12f3f6a067";
+        let ledger_key = parse_address(checksummed).expect("ledger parse");
+        let payer = parse_requester_address(checksummed).expect("payer parse");
+        assert_eq!(
+            payer, ledger_key,
+            "payer address must key the same ledger entry the faucet credits"
+        );
+        // Left-aligned: the 20 significant bytes lead, the tail is zero.
+        assert_eq!(&payer.as_bytes()[..4], &[0x3d, 0x02, 0x91, 0xc0]);
+        assert_eq!(&payer.as_bytes()[20..], &[0u8; 12]);
+    }
+
+    /// A full 32-byte address has no alignment to choose and must pass through
+    /// byte-for-byte.
+    #[test]
+    fn a_32_byte_payer_is_unchanged() {
+        let full = "c846770be60288c0a768cd7fb817bb4c10583276c70658e248549f61edbe6f39";
+        let payer = parse_requester_address(full).expect("payer parse");
+        assert_eq!(payer, parse_address(full).expect("ledger parse"));
+    }
+
+    /// The checksum guard is what catches a wrongly derived address before a
+    /// job is queued against an account that does not exist.
+    #[test]
+    fn a_bad_checksum_is_still_refused() {
+        assert!(parse_requester_address("0x3d0291c0FC59EdA83f2D9f5f00A09e12f3f6a067").is_err());
     }
 }

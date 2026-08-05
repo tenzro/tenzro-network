@@ -98,7 +98,22 @@ pub async fn admit_inference(
     deadline: Option<Duration>,
     queue_ahead: u32,
 ) -> Decision {
-    let budget = deadline.unwrap_or_else(|| class.default_deadline());
+    // Two different budgets, because they answer two different questions.
+    //
+    // The QoS deadline is a *serving* SLO: how long an interactive caller is
+    // willing to wait for a model that is up. A cold load is not serving, and
+    // 30s of it never covered a 22 GB GGUF, so every first request after a
+    // restart was refused with "retry in about 70000 ms" — a dead end that
+    // told the caller to come back without accepting any work.
+    //
+    // The warm budget is how long a caller will wait for the load itself.
+    // Waiting through it and then answering is strictly better than refusing:
+    // the caller asked for an answer, not for a schedule. Operator-tunable
+    // because it depends on the largest model a node holds, and set to zero
+    // by a caller that genuinely wants the old fail-fast behaviour.
+    let serving_budget = deadline.unwrap_or_else(|| class.default_deadline());
+    let warm_budget = warm_wait_budget().max(serving_budget);
+    let budget = warm_budget;
     let started = Instant::now();
 
     loop {
@@ -117,7 +132,7 @@ pub async fn admit_inference(
                 // Only now take a concurrency slot. Taking it before the wait
                 // would have a hundred queued callers occupying the capacity
                 // needed to serve them.
-                let remaining = budget.saturating_sub(started.elapsed());
+                let remaining = serving_budget.saturating_sub(started.elapsed());
                 let traffic_guard =
                     match node
                         .traffic()
@@ -188,6 +203,20 @@ pub async fn admit_inference(
             return Decision::Warming(warming_status);
         }
     }
+}
+
+/// How long a caller waits for a model to finish loading before being told to
+/// come back, from `TENZRO_WARM_WAIT_SECS`.
+///
+/// Defaults to five minutes: enough for the largest GGUF in the catalog to
+/// page in on a cold cache, so a restart costs the first caller latency rather
+/// than an error. Set it to `0` to restore fail-fast admission.
+fn warm_wait_budget() -> Duration {
+    std::env::var("TENZRO_WARM_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(300))
 }
 
 /// How often the wait loop re-checks whether a warming model is ready.

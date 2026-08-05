@@ -126,6 +126,7 @@ pub struct WorkflowTemplate {
     /// creator_wallet with the same 5% commission split as tools.
     /// Free templates (price_per_instantiate == 0) may omit
     /// creator_wallet.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price_per_instantiate: u128,
     pub status: WorkflowTemplateStatus,
     pub created_at: u64,

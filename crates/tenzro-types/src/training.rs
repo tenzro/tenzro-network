@@ -554,6 +554,7 @@ pub struct TrainingTaskSpec {
     /// up to this delay; their submissions count if they land within τ.
     pub grace_window_ms: u64,
     /// Total reward pool escrowed by sponsor (TNZO, in attoTNZO).
+    #[serde(with = "crate::primitives::u128_serde")]
     pub reward_pool: u128,
     /// Reference to the dataset. Format depends on tier:
     /// - Open / Verified (public): `tenzro://blob/<hash>` (native
@@ -814,6 +815,7 @@ pub struct TrainingReceipt {
     /// Per-trainer reward in attoTNZO.
     pub trainer_rewards: HashMap<String, u128>,
     /// Network commission (treasury cut) in attoTNZO.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub network_commission: u128,
     /// Per-round state roots. Order matches `0..=last_completed_round`.
     pub round_state_roots: Vec<Hash>,

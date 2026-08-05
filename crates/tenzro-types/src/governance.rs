@@ -18,6 +18,7 @@ pub struct GovernanceVote {
     /// Vote type
     pub vote_type: VoteType,
     /// Voting power used
+    #[serde(with = "crate::primitives::u128_serde")]
     pub voting_power: u128,
     /// Vote timestamp
     pub voted_at: Timestamp,
@@ -87,6 +88,7 @@ pub struct VotingDelegation {
     /// Delegate address
     pub delegate: Address,
     /// Amount of voting power delegated
+    #[serde(with = "crate::primitives::u128_serde")]
     pub voting_power: u128,
     /// Delegation start time
     pub delegated_at: Timestamp,
@@ -148,6 +150,7 @@ pub struct QuorumRequirements {
     /// Minimum approval (basis points)
     pub minimum_approval_bps: u32,
     /// Absolute minimum votes required
+    #[serde(with = "crate::primitives::u128_serde")]
     pub minimum_votes: u128,
 }
 
@@ -189,8 +192,10 @@ pub struct VoterInfo {
     /// Voter address
     pub address: Address,
     /// Direct voting power
+    #[serde(with = "crate::primitives::u128_serde")]
     pub direct_voting_power: u128,
     /// Delegated voting power received
+    #[serde(with = "crate::primitives::u128_serde")]
     pub delegated_voting_power: u128,
     /// Total proposals voted on
     pub total_votes_cast: u64,

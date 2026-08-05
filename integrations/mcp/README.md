@@ -10,7 +10,9 @@ The official [Model Context Protocol](https://modelcontextprotocol.io) server fo
 
 The Tenzro MCP server is an installable Python package that exposes 360 blockchain and multi-modal AI tools to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
 
-The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **535 tools** (Tenzro Ledger + multi-modal AI + distributed MoE serving + ERC-8004 calldata encoders + AgentBond/insurance + agent memory + app hosting) and is the authoritative tool inventory; this Python distributable exposes a subset over stdio + Streamable HTTP.
+The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **535 tools** (Tenzro Ledger + multi-modal AI + distributed MoE serving + ERC-8004 calldata encoders + AgentBond/insurance + agent memory + app hosting + multi-tenant file storage) and is the authoritative tool inventory; this Python distributable exposes a subset over stdio + Streamable HTTP.
+
+The Rust server also carries an RPC gateway pair — `list_rpc_methods` enumerates the JSON-RPC methods the node serves with how each is gated (admin token vs API-key scope), and `call_rpc` invokes anything you find there. The named tools cover the surfaces worth a dedicated schema; the node serves roughly 900 methods in total, so the gateway is how an agent reaches capability added since its tool list was built. Filter with `namespace` or `contains` — the unfiltered directory is ~900 entries. Authorization is unchanged: a gateway call passes the same gates as any other, so it reaches exactly what the presented credentials already allow.
 
 **Testnet endpoint:** `https://mcp.tenzro.xyz/mcp`
 **Local:** `http://localhost:3001/mcp`
@@ -92,15 +94,18 @@ Add to your project's `.mcp.json`:
 ### Cursor / Windsurf / Other MCP Clients
 
 **Option A: Connect to live testnet**
+
 - **Name:** tenzro
 - **Transport:** Streamable HTTP
 - **URL:** `https://mcp.tenzro.xyz/mcp`
 
 **Option B: Run locally**
+
 - **Name:** tenzro
 - **Command:** `tenzro-mcp-server`
 
 Or with Streamable HTTP transport:
+
 - **URL:** `http://localhost:3001/mcp`
 - Start the server first: `tenzro-mcp-server --transport http --port 3001`
 
@@ -338,6 +343,7 @@ priced by the provider in TNZO or offered free, and needs no operator
 approval.
 
 Reads:
+
 - `canton_list_domains` — List Canton synchronization domains the node is configured against
 - `canton_list_contracts` — Active-contracts query with `template_ids` filter (Canton 3.5+ requires a non-empty filter; the node attaches the resolved FQ party id automatically)
 - `canton_list_parties` — `GET /v2/parties/known`
@@ -351,6 +357,7 @@ Reads:
 - `canton_get_transaction` — `GET /v2/updates/transaction-tree-by-id/{hex}?requestingParties=...`
 
 Writes:
+
 - `canton_submit_command` — DAML `create` / `exercise` via the JSON Ledger API submit-and-wait path. When the presenting API key carries a bound `canton_user_id`, the node forwards `actAs` as that user's `primaryParty`, scoping the submission to the tenant. Canton's AuthService enforces per-user CanActAs rights server-side.
 - `canton_allocate_party` — `POST /v2/parties` — returns the fully-qualified party id `<hint>::<participant-hash>`
 - `canton_grant_user_rights` — `POST /v2/users/{userId}/rights` — grant CanActAs / CanReadAs on a party to a tenant's user (CIP-26). Required before a newly-allocated party can be acted on.
@@ -358,6 +365,7 @@ Writes:
 - `canton_upload_dar` — DAR upload via `POST /v2/packages` with a single `Content-Type: application/octet-stream` header (Canton 3.5+ rejects duplicates). Legacy `/admin/packages/upload-dar` is NOT used — that's gRPC-only and not exposed on the Tenzro-operated DevNet.
 
 Per-tenant analytics:
+
 - `canton_get_my_analytics` — Subject self-read: per-tenant call counters for the API key configured on this client. Returns `{key_id, canton_user_id, calls_total, errors_total, calls_by_method, errors_by_method, first_seen_at, last_called_at}`.
 - `canton_list_api_key_analytics` — Operator admin-read: every tenant's counters (admin-token-gated). Optional `key_id` filter.
 
@@ -622,15 +630,15 @@ An engine-agnostic protocol layer over persistent state. A node either holds a t
 
 In addition to the main Tenzro MCP server, the node runs specialized servers for direct blockchain interaction:
 
-| Server | Port | Endpoint | Description |
-|--------|------|----------|-------------|
-| **Tenzro** | 3001 | `/mcp` | 535 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + distributed MoE serving + AgentBond/insurance + agent memory + app hosting |
-| **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
-| **Ethereum** | 3004 | `/mcp` | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
-| **Canton** | 3005 | `/mcp` | 23 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |
-| **LayerZero** | 3006 | `/mcp` | 21 tools — V2 messaging, OFT, Stargate V2, Value Transfer API |
-| **Chainlink** | 3007 | `/mcp` | 21 tools — CCIP, data feeds, Data Streams, VRF v2.5, PoR, automation, Functions |
-| **Li.Fi** | 3008 | `/mcp` | 9 tools — cross-chain aggregation, quotes, routes, status |
+| Server        | Port | Endpoint | Description                                                                                                                                                                                                                                                                                             |
+| ------------- | ---- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Tenzro**    | 3001 | `/mcp`   | 535 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + distributed MoE serving + AgentBond/insurance + agent memory + app hosting                                                                                                       |
+| **Solana**    | 3003 | `/mcp`   | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking                                                                                                                                                                                                                                       |
+| **Ethereum**  | 3004 | `/mcp`   | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004                                                                                                                                                                                                                                                  |
+| **Canton**    | 3005 | `/mcp`   | 23 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |
+| **LayerZero** | 3006 | `/mcp`   | 21 tools — V2 messaging, OFT, Stargate V2, Value Transfer API                                                                                                                                                                                                                                           |
+| **Chainlink** | 3007 | `/mcp`   | 21 tools — CCIP, data feeds, Data Streams, VRF v2.5, PoR, automation, Functions                                                                                                                                                                                                                         |
+| **Li.Fi**     | 3008 | `/mcp`   | 9 tools — cross-chain aggregation, quotes, routes, status                                                                                                                                                                                                                                               |
 
 ## Programmatic Usage
 
@@ -641,7 +649,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const transport = new StreamableHTTPClientTransport(
-  new URL("https://mcp.tenzro.xyz/mcp")
+  new URL("https://mcp.tenzro.xyz/mcp"),
 );
 const client = new Client({ name: "my-app", version: "1.0.0" }, {});
 await client.connect(transport);
@@ -741,21 +749,21 @@ curl -s -X POST http://localhost:3001/mcp \
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TENZRO_RPC_URL` | `https://rpc.tenzro.xyz` | Tenzro JSON-RPC endpoint |
-| `TENZRO_API_URL` | `https://api.tenzro.xyz` | Tenzro Web API endpoint |
-| `TENZRO_BEARER_JWT` | unset | OAuth 2.1 access token forwarded as `Authorization: Bearer` |
-| `TENZRO_DPOP_PROOF` | unset | DPoP proof forwarded as the `DPoP` header, binding the token to a key |
-| `TENZRO_API_KEY` | unset | Operator-issued `tnz_...` key forwarded as `X-Tenzro-Api-Key` |
-| `TENZRO_CANTON_NETWORK` | unset | Canton network selector forwarded as `X-Canton-Network` |
+| Variable                | Default                  | Description                                                           |
+| ----------------------- | ------------------------ | --------------------------------------------------------------------- |
+| `TENZRO_RPC_URL`        | `https://rpc.tenzro.xyz` | Tenzro JSON-RPC endpoint                                              |
+| `TENZRO_API_URL`        | `https://api.tenzro.xyz` | Tenzro Web API endpoint                                               |
+| `TENZRO_BEARER_JWT`     | unset                    | OAuth 2.1 access token forwarded as `Authorization: Bearer`           |
+| `TENZRO_DPOP_PROOF`     | unset                    | DPoP proof forwarded as the `DPoP` header, binding the token to a key |
+| `TENZRO_API_KEY`        | unset                    | Operator-issued `tnz_...` key forwarded as `X-Tenzro-Api-Key`         |
+| `TENZRO_CANTON_NETWORK` | unset                    | Canton network selector forwarded as `X-Canton-Network`               |
 
 Command-line options:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--transport` | `stdio` | Transport type (`stdio` or `http`) |
-| `--port` | `3001` | HTTP server port (when using `http` transport) |
+| Flag          | Default | Description                                    |
+| ------------- | ------- | ---------------------------------------------- |
+| `--transport` | `stdio` | Transport type (`stdio` or `http`)             |
+| `--port`      | `3001`  | HTTP server port (when using `http` transport) |
 
 ## Protocol Details
 
@@ -766,11 +774,11 @@ Command-line options:
 
 ## Related
 
-| Resource | URL |
-|----------|-----|
-| Tenzro Network | [tenzro.com](https://tenzro.com) |
-| A2A Server | [github.com/tenzro/tenzro-network](https://github.com/tenzro/tenzro-network) |
-| MCP Specification | [modelcontextprotocol.io](https://modelcontextprotocol.io) |
+| Resource          | URL                                                                          |
+| ----------------- | ---------------------------------------------------------------------------- |
+| Tenzro Network    | [tenzro.com](https://tenzro.com)                                             |
+| A2A Server        | [github.com/tenzro/tenzro-network](https://github.com/tenzro/tenzro-network) |
+| MCP Specification | [modelcontextprotocol.io](https://modelcontextprotocol.io)                   |
 
 ## Contact
 
@@ -785,11 +793,11 @@ DID envelope proving control of the resource. An identifier is not a credential:
 a `jti` travels in every audit row, a `webhook_id` comes back from every list
 call, and a `session_id` is a handle the node hands back.
 
-| Tool | Proof required |
-| --- | --- |
-| `revoke_did` | operator admin token **and** an envelope from the DID (or a machine's controller) |
-| `register_webhook` | `owner_did` plus an envelope over the URL |
-| `authorize_session` / `revoke_session` | envelope from the DID that owns the wallet |
+| Tool                                   | Proof required                                                                    |
+| -------------------------------------- | --------------------------------------------------------------------------------- |
+| `revoke_did`                           | operator admin token **and** an envelope from the DID (or a machine's controller) |
+| `register_webhook`                     | `owner_did` plus an envelope over the URL                                         |
+| `authorize_session` / `revoke_session` | envelope from the DID that owns the wallet                                        |
 
 Each envelope is bound to the method name and to that call's parameters, so one
 produced for a given action cannot be replayed as another.

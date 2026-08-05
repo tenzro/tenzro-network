@@ -674,33 +674,69 @@ async fn test_rpc_participate() {
 // Error Handling Tests
 // ---------------------------------------------------------------------------
 
-/// A request body larger than 2 MB should be rejected.
+/// The JSON-RPC root is bounded, but at the media ceiling rather than the
+/// JSON one.
+///
+/// The route's name says JSON, and it once carried the 2 MB `JSON_BODY_LIMIT`
+/// this test used to assert. It cannot: `tenzro_mediaGen_publishOutput` is how
+/// a media-gen worker returns a finished render, and `fetchInput` /
+/// `fetchLatent` / `fetchOutput` move bytes the same way — all base64 inside a
+/// JSON-RPC envelope, all dispatched here. Under 2 MB a worker rendered an
+/// image successfully and then failed to publish it with a 413, the render
+/// cost already spent. So the root sits at `MEDIA_BODY_LIMIT` (64 MB), and
+/// both halves of that are worth pinning: a render-sized body gets through,
+/// and an unbounded one still does not.
+///
+/// The two constants are private to `rpc.rs`; the figures are repeated here
+/// deliberately, so that moving either ceiling trips this test rather than
+/// silently changing what the endpoint accepts.
 #[tokio::test]
 async fn test_rpc_body_size_limit() {
+    const MEDIA_BODY_LIMIT: usize = 64 * 1024 * 1024;
+    const JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
     let (base_url, shutdown_tx, handle, _tmp, _node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
-    // Create a payload slightly over 2 MB
-    let big_data = "x".repeat(2 * 1024 * 1024 + 1024);
-    let body = json!({
+    // Over the old JSON ceiling, under the media one: this is the shape a
+    // worker publishing a render sends, and it must not be refused.
+    let render_sized = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "eth_blockNumber",
-        "params": [big_data]
+        "params": ["x".repeat(JSON_BODY_LIMIT + 1024)],
     });
-
     let resp = client
         .post(&base_url)
-        .json(&body)
+        .json(&render_sized)
+        .send()
+        .await
+        .expect("HTTP request");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a body over the JSON ceiling but under the media one must be accepted \
+         on the JSON-RPC root — this is the media-gen publish path",
+    );
+
+    // Past the media ceiling the request is refused.
+    let oversized = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_blockNumber",
+        "params": ["x".repeat(MEDIA_BODY_LIMIT + 1024)],
+    });
+    let resp = client
+        .post(&base_url)
+        .json(&oversized)
         .send()
         .await
         .expect("HTTP request");
 
-    // The server should reject with 413 Payload Too Large (or 400)
     let status = resp.status().as_u16();
     assert!(
         status == 413 || status == 400 || status == 422,
-        "oversized body should be rejected, got status: {}",
+        "a body past the media ceiling should be rejected, got status: {}",
         status,
     );
 

@@ -124,6 +124,7 @@ pub struct Authorization {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_scope_ref: Option<String>,
     /// Absolute ceiling on total notional this intent may spend (smallest unit).
+    #[serde(with = "crate::primitives::u128_serde")]
     pub max_total_notional: u128,
 }
 
@@ -248,6 +249,7 @@ pub struct CapitalQuote {
     /// Human/opaque description of the execution plan.
     pub plan: String,
     /// Quoted all-in price (smallest unit) to fulfil the objective.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price: u128,
     /// Estimated time to completion, seconds.
     pub eta_secs: u64,
@@ -303,6 +305,7 @@ pub enum LegStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VenueQuote {
     pub venue: String,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub unit_price: u128,
 }
 
@@ -325,7 +328,9 @@ pub struct CapitalLeg {
     pub venue: String,
     pub asset_id: String,
     pub side: Side,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub quantity: u128,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub unit_price: u128,
     /// ERC-7683 order / settlement reference for this leg, once settled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,6 +368,7 @@ pub struct CapitalIntentRecord {
     pub escrow_id: Option<String>,
     /// Notional filled so far (smallest unit).
     #[serde(default)]
+    #[serde(with = "crate::primitives::u128_serde")]
     pub filled_notional: u128,
     /// Final receipt hash (hex) once settled.
     #[serde(default, skip_serializing_if = "Option::is_none")]

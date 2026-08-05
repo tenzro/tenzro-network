@@ -153,7 +153,7 @@ Start here:
 
 ```bash
 # Navigate to proto directory
-cd /Users/hilarl/AI/tenzronetwork/proto
+cd proto
 
 # Generate all code
 make generate

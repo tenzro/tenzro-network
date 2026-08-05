@@ -197,6 +197,7 @@ pub struct AgentTemplate {
     /// across all invocations — this is the amount that landed in
     /// `creator_wallet`, i.e. the net-of-commission creator share.
     #[serde(default)]
+    #[serde(with = "crate::primitives::u128_serde")]
     pub total_revenue: u128,
 
     /// Version string (semver, e.g., "1.0.0")

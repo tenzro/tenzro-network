@@ -17,6 +17,7 @@ pub struct TokenConfig {
     /// Number of decimals
     pub decimals: u8,
     /// Total supply (in smallest unit) - using u128 to prevent overflow
+    #[serde(with = "crate::primitives::u128_serde")]
     pub total_supply: u128,
     /// Initial distribution
     pub initial_distribution: InitialDistribution,
@@ -41,16 +42,22 @@ impl Default for TokenConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialDistribution {
     /// Treasury allocation
+    #[serde(with = "crate::primitives::u128_serde")]
     pub treasury: u128,
     /// Team allocation
+    #[serde(with = "crate::primitives::u128_serde")]
     pub team: u128,
     /// Investors allocation
+    #[serde(with = "crate::primitives::u128_serde")]
     pub investors: u128,
     /// Community allocation
+    #[serde(with = "crate::primitives::u128_serde")]
     pub community: u128,
     /// Provider incentives
+    #[serde(with = "crate::primitives::u128_serde")]
     pub provider_incentives: u128,
     /// Liquidity pool
+    #[serde(with = "crate::primitives::u128_serde")]
     pub liquidity: u128,
 }
 
@@ -80,6 +87,7 @@ pub struct TokenEconomics {
     /// Burn rate for fees (basis points)
     pub burn_rate_bps: u32,
     /// Minimum stake amount (in smallest unit)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub min_stake: u128,
 }
 
@@ -101,14 +109,19 @@ pub struct Treasury {
     /// Treasury address
     pub address: Address,
     /// Current balance (in smallest unit)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub balance: u128,
     /// Total allocated to grants
+    #[serde(with = "crate::primitives::u128_serde")]
     pub allocated_grants: u128,
     /// Total spent on development
+    #[serde(with = "crate::primitives::u128_serde")]
     pub spent_development: u128,
     /// Total spent on marketing
+    #[serde(with = "crate::primitives::u128_serde")]
     pub spent_marketing: u128,
     /// Reserved for future use
+    #[serde(with = "crate::primitives::u128_serde")]
     pub reserved: u128,
     /// Treasury parameters
     pub parameters: TreasuryParameters,
@@ -140,8 +153,10 @@ impl Treasury {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TreasuryParameters {
     /// Maximum grant amount per proposal
+    #[serde(with = "crate::primitives::u128_serde")]
     pub max_grant_amount: u128,
     /// Minimum proposal threshold
+    #[serde(with = "crate::primitives::u128_serde")]
     pub min_proposal_threshold: u128,
     /// Grant approval quorum (basis points)
     pub grant_approval_quorum: u32,
@@ -167,6 +182,7 @@ pub struct StakingPool {
     /// Pool type
     pub pool_type: PoolType,
     /// Total staked amount (in smallest unit)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub total_staked: u128,
     /// Number of stakers
     pub staker_count: u64,
@@ -258,12 +274,14 @@ pub struct ProviderStake {
     /// Provider type
     pub provider_type: ProviderType,
     /// Staked amount (in smallest unit)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub staked_amount: u128,
     /// Stake timestamp
     pub staked_at: Timestamp,
     /// Lock period end (if any)
     pub lock_until: Option<Timestamp>,
     /// Rewards earned (in smallest unit)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub rewards_earned: u128,
     /// Stake status
     pub status: StakeStatus,
@@ -565,10 +583,13 @@ pub struct GovernanceProposal {
     /// Current status
     pub status: ProposalStatus,
     /// Votes in favor
+    #[serde(with = "crate::primitives::u128_serde")]
     pub votes_for: u128,
     /// Votes against
+    #[serde(with = "crate::primitives::u128_serde")]
     pub votes_against: u128,
     /// Total voting power
+    #[serde(with = "crate::primitives::u128_serde")]
     pub total_voting_power: u128,
     /// Execution data (if applicable)
     pub execution_data: Option<Vec<u8>>,

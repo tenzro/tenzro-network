@@ -54,20 +54,56 @@ def entry(model_id: str, vram_gb: int) -> CatalogEntry:
     )
 
 
-def worker(vram_gb: float) -> MediaGenWorker:
+@dataclass
+class FakeClient:
+    """Stands in for the node RPC bridge and records ledger releases.
+
+    Eviction gives the node back the memory commitment it took, so a worker
+    without a client is not a configuration these tests should model — every
+    real worker has one.
+    """
+
+    admin_token: str | None = "test-token"
+    released: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        self.released = []
+
+    def memory_release(self, key: str) -> None:
+        assert self.released is not None
+        self.released.append(key)
+
+
+def worker(vram_gb: float, client: FakeClient | None = None) -> MediaGenWorker:
     config = WorkerConfig(
         worker_did="did:tenzro:machine:test",
         worker_address=b"\x00" * 20,
         gpu_vram_gb=vram_gb,
     )
-    return MediaGenWorker(config, client=None, key=None)  # type: ignore[arg-type]
+    return MediaGenWorker(config, client=client or FakeClient(), key=None)  # type: ignore[arg-type]
+
+
+def key_for(w: MediaGenWorker, e: CatalogEntry) -> tuple[str, str, str | None, str]:
+    """The cache key `MediaGenWorker._pipeline` would build for this entry.
+
+    Mirrored rather than hand-written as a short tuple: `_commitment_key`
+    joins every part into the ledger string, so a test key of the wrong arity
+    would exercise a ledger entry production never writes.
+    """
+    return (
+        e.id,
+        MediaGenKind.TEXT2IMAGE.value,
+        None,
+        w.config.precision or w.config.dtype,
+    )
 
 
 def install(w: MediaGenWorker, e: CatalogEntry) -> FakePipe:
     """Put a pipeline in the cache without loading anything real."""
     pipe = FakePipe()
-    key = (e.id, MediaGenKind.TEXT2IMAGE.value, None)
-    w._pipelines[key] = LoadedPipeline(pipe=pipe, entry=e, kind=MediaGenKind.TEXT2IMAGE, role=None)
+    w._pipelines[key_for(w, e)] = LoadedPipeline(
+        pipe=pipe, entry=e, kind=MediaGenKind.TEXT2IMAGE, role=None
+    )
     return pipe
 
 
@@ -100,7 +136,7 @@ def test_eviction_is_least_recently_used_not_first_inserted() -> None:
     install(w, b)
 
     # Touch `a`, making `b` the least recently used.
-    w._pipelines.move_to_end(("a", MediaGenKind.TEXT2IMAGE.value, None))
+    w._pipelines.move_to_end(key_for(w, a))
 
     w._evict_until_fits(entry("c", 16))
     remaining = {k[0] for k in w._pipelines}
@@ -115,6 +151,28 @@ def test_eviction_actually_releases_the_pipeline() -> None:
     pipe = install(w, entry("big", 16))
     w._evict_until_fits(entry("bigger", 18))
     assert pipe.released_to == "cpu", "the pipeline must be moved off the GPU"
+
+
+def test_eviction_gives_the_commitment_back_to_the_node() -> None:
+    # Freeing local VRAM without releasing the node-side commitment leaks one
+    # claim per eviction, and the memory tier fills with claims nothing holds.
+    client = FakeClient()
+    w = worker(vram_gb=20, client=client)
+    install(w, entry("big", 16))
+    w._evict_until_fits(entry("bigger", 18))
+    assert client.released == [w._commitment_key(key_for(w, entry("big", 16)))]
+
+
+def test_eviction_without_an_admin_token_skips_the_ledger_release() -> None:
+    # `memory_release` is admin-gated. A worker with no token still has to be
+    # able to evict locally rather than fail the render it was making room for.
+    client = FakeClient(admin_token=None)
+    w = worker(vram_gb=20, client=client)
+    pipe = install(w, entry("big", 16))
+    w._evict_until_fits(entry("bigger", 18))
+    assert w._pipelines == {}
+    assert pipe.released_to == "cpu"
+    assert client.released == []
 
 
 def test_a_pipeline_larger_than_the_whole_budget_still_attempts_to_load() -> None:
@@ -143,7 +201,7 @@ def test_release_never_raises_even_on_a_hostile_pipeline() -> None:
 
     w = worker(vram_gb=10)
     e = entry("hostile", 8)
-    w._pipelines[(e.id, MediaGenKind.TEXT2IMAGE.value, None)] = LoadedPipeline(
+    w._pipelines[key_for(w, e)] = LoadedPipeline(
         pipe=Hostile(), entry=e, kind=MediaGenKind.TEXT2IMAGE, role=None
     )
     w._evict_until_fits(entry("next", 8))

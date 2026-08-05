@@ -53,3 +53,9 @@ metal = ["tenzro-model/metal"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The node's own DPoP verifier, so the client's proofs are checked against the
+# code that will actually receive them rather than against a fixture.
+tenzro-auth = { workspace = true }
+tempfile = { workspace = true }

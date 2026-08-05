@@ -143,10 +143,13 @@ impl BlockHeader {
 /// floor, 1000 Gwei ceiling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeeMarketParams {
+    #[serde(with = "crate::primitives::u128_serde")]
     pub initial_base_fee: u128,
     pub target_gas_per_block: u64,
     pub base_fee_change_denominator: u64,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub min_base_fee: u128,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub max_base_fee: u128,
 }
 
@@ -284,6 +287,7 @@ pub struct ValidatorSignature {
     /// The signature bytes
     pub signature: Vec<u8>,
     /// The voting power of the validator
+    #[serde(with = "crate::primitives::u128_serde")]
     pub voting_power: u128,
 }
 

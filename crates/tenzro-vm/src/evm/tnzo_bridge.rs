@@ -635,10 +635,14 @@ fn is_authorized_bridge_caller(caller: &[u8; 20], token: &TnzoToken) -> bool {
         return true;
     }
 
-    // Treasury is always authorized
+    // Treasury is always authorized. Narrow the 32-byte treasury address back
+    // to its 20 significant leading bytes — the inverse of the left-aligned
+    // widening in `evm_addr_to_tenzro`. Reading the trailing 12 bytes instead
+    // (EVM's right-aligned word) took the zero pad, so the real treasury never
+    // matched itself and a caller at 0x00…00 matched in its place.
     if let Some(treasury) = token.treasury_address_ref() {
         let mut treasury_20 = [0u8; 20];
-        treasury_20.copy_from_slice(&treasury.as_bytes()[12..32]);
+        treasury_20.copy_from_slice(&treasury.as_bytes()[..20]);
         if caller == &treasury_20 {
             return true;
         }
@@ -667,10 +671,22 @@ fn decode_dynamic_bytes(calldata: &[u8], offset_slot: usize) -> Option<Vec<u8>> 
 // Helpers
 // -----------------------------------------------------------------------
 
-/// Converts a 20-byte EVM address to a 32-byte Tenzro Address
+/// Converts a 20-byte EVM address to a 32-byte Tenzro Address, **left-aligned**.
+///
+/// The whole point of the wTNZO pointer model is that an EVM caller and the
+/// native TNZO layer address the same balance, so this must produce the key the
+/// token ledger is written under: 20 significant bytes then 12 zero bytes, as
+/// built by `tenzro_token`'s RocksDB backend and reproduced for raw EVM
+/// addresses by `tenzro_vm::state_adapter::tnzo_balance_key`.
+///
+/// This used to right-align (EVM's `0x00 × 12 || addr20` word). Every
+/// `balanceOf` / `transfer` / `mint` / `burn` through this precompile then read
+/// and wrote a key nothing else in the system touches — so wTNZO balances were
+/// always 0 no matter how funded the native account was, and any transfer that
+/// did move value moved it somewhere unreachable.
 fn evm_addr_to_tenzro(evm_addr: &[u8; 20]) -> Address {
     let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(evm_addr);
+    bytes[..20].copy_from_slice(evm_addr);
     Address::new(bytes)
 }
 

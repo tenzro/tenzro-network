@@ -190,10 +190,32 @@ impl RpcClient {
         {
             req = req.header("Authorization", format!("DPoP {}", bearer));
         }
+        // A DPoP proof is per-request: it commits to this method and URL,
+        // carries a `jti` the node caches against replay, and is valid for
+        // ±60s. So it is minted here rather than exported — an env var can
+        // only ever carry one that works once.
+        //
+        // `TENZRO_DPOP_PROOF` still wins when set, for debugging and for
+        // callers holding their key somewhere this process cannot reach.
         if let Ok(dpop) = std::env::var("TENZRO_DPOP_PROOF")
             && !dpop.is_empty()
         {
             req = req.header("DPoP", dpop);
+        } else if crate::dpop::DpopKey::exists() {
+            // Only when a bearer token is present: the proof binds to it via
+            // `ath`, and an unbound proof authorises nothing on its own.
+            match std::env::var("TENZRO_BEARER_JWT") {
+                Ok(token) if !token.is_empty() => match crate::dpop::DpopKey::load()
+                    .and_then(|k| k.proof("POST", &self.rpc_url, Some(&token)))
+                {
+                    Ok(proof) => req = req.header("DPoP", proof),
+                    // A key that will not load or sign is worth saying so
+                    // about: the request would otherwise fail at the node
+                    // with a bare "missing DPoP proof".
+                    Err(e) => eprintln!("warning: could not mint a DPoP proof: {e}"),
+                },
+                _ => {}
+            }
         }
         if let Some(ref api_key) = self.api_key_override {
             req = req.header("X-Tenzro-Api-Key", api_key);

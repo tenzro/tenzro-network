@@ -16,9 +16,6 @@ pub enum MediaGenError {
     #[error("Worker not enrolled: {0}")]
     WorkerNotEnrolled(String),
 
-    #[error("Worker {worker_did} is already enrolled")]
-    WorkerAlreadyEnrolled { worker_did: String },
-
     #[error("Worker {worker_did} cannot serve job {job_id}")]
     WorkerCannotServe { worker_did: String, job_id: String },
 

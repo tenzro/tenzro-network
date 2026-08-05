@@ -2411,6 +2411,34 @@ pub struct MediaGenModelEntry {
     /// the loader guessed. `None` keeps the existing behaviour exactly.
     #[serde(default)]
     pub config_repo: Option<String>,
+    /// Whether this is a step-distilled release, whose sampler must follow the
+    /// sigma trajectory the distillation was trained against.
+    ///
+    /// A distilled checkpoint is not simply "the same model at fewer steps".
+    /// It is trained to jump along one specific path through noise, and
+    /// `FlowMatchEulerDiscreteScheduler` left to derive its own dynamically
+    /// shifted sigmas takes a different path — composition still lands,
+    /// because that is decided early, but fine structure never resolves. The
+    /// symptom is a render that is recognisably the prompt and yet visibly
+    /// unfinished, which reads as a weak model rather than a wrong schedule.
+    ///
+    /// diffusers publishes the trained trajectories as `DISTILLED_SIGMA_VALUES`
+    /// and `STAGE_2_DISTILLED_SIGMA_VALUES`, so the entry records only *that*
+    /// the checkpoint is distilled and the worker passes the matching values.
+    #[serde(default)]
+    pub distilled: bool,
+    /// Subfolder of [`Self::config_repo`]'s converted snapshot holding the
+    /// latent upsampler that stage 2 refines through. `None` renders in one
+    /// stage.
+    ///
+    /// LTX-2 is designed as a two-stage model: stage 1 lays down composition
+    /// and motion at the base resolution, then the latents are upsampled 2×
+    /// and a short second pass synthesizes the detail. Decoding stage 1
+    /// directly — which is what a single-stage render does — skips the pass
+    /// that produces fine structure, and no amount of stage-1 tuning
+    /// substitutes for it.
+    #[serde(default)]
+    pub latent_upsampler: Option<String>,
     /// Short description.
     pub description: String,
     /// Whether the Hub requires per-account approval before this can be
@@ -2460,24 +2488,54 @@ pub struct MediaGenModelEntry {
 ///     snippet on that model card **404s on `model_index.json`**, confirmed
 ///     against the live Hub.
 ///
-///   What blocks an LTX-2.3 entry is therefore a config mismatch, not missing
-///   components: that single-file path resolves configs to `Lightricks/LTX-2`,
-///   the **19B** generation (`num_layers: 48`, `caption_channels: 3840`),
-///   while 2.3 is 22B and its GGUF carries at least one differently-shaped
-///   tensor (`4096 x 3360`). `convert_ltx2_transformer_to_diffusers` is a pure
-///   key-rename that derives no geometry from the checkpoint, so it would
-///   apply 19B config to 22B weights and fail on shapes. [`Self::config_repo`]
-///   exists for exactly this class of override — point it at a repo carrying
-///   the right transformer config and the entry works — but no such repo is
-///   published first-party yet, and pointing it at a third-party conversion is
-///   a supply-chain decision rather than a packaging detail.
+///   What blocked an LTX-2.3 entry was therefore a config mismatch, not
+///   missing components: that single-file path resolves configs to
+///   `Lightricks/LTX-2`, the **19B** generation (`num_layers: 48`,
+///   `caption_channels: 3840`), while 2.3 is 22B.
+///   `convert_ltx2_transformer_to_diffusers` is a pure key-rename that derives
+///   no geometry from the checkpoint, so it applied 19B config to 22B weights
+///   and failed on shapes.
 ///
-///   `Lightricks/LTX-2` itself is loadable today and is the entry to add when
-///   video generation joins this catalog. It is not
-///   [`LicenseTier::Permissive`] — the LTX Open Weights terms put it in
-///   [`LicenseTier::CommercialCustom`], so it needs an explicit
-///   `--accept-license` and is a deliberate admission decision. The joint
-///   audio+video output shape also still has no [`MediaGenKind`].
+///   **Resolved 2026-08-04, and `ltx-2.3-22b-distilled-gguf` is now an
+///   entry.** The geometry was recovered by fitting each component against its
+///   published weights until the parameter count matched exactly, and the
+///   result is three authored configs plus three rename tables:
+///
+///   - **transformer** — `use_prompt_embeddings: false`; leaving it `true`
+///     builds LTX-2.0's `caption_projection` and strands 8 tensors. 4186/4186
+///     parameters, none left on meta. 12 `prompt_adaln_single.*` keys need
+///     renaming to `prompt_adaln.*`, which the shipped converter misses
+///     because its handler matches the `adaln_single` substring but only
+///     rewrites two other prefixes.
+///   - **connectors** — `per_modality_projections: true` is the literal
+///     2.0-vs-2.3 switch; head counts must make `inner_dim` match the
+///     projected widths (video 32×128, audio 16×128) or the zero-layer
+///     `norm_out` fails.
+///   - **video VAE** — 170/170. The decoder carries one more upsample stage
+///     than the shipped rename table covers, so flat `up_blocks.7`/`.8` map to
+///     `up_blocks.3.upsamplers.0`/`up_blocks.3`.
+///   - **audio VAE** — geometry is *identical* to 2.0; only the latent
+///     statistics keys moved, which the shipped converter already handles.
+///   - **vocoder** — 2.3 is BigVGAN-shaped with a bandwidth-extension
+///     generator, so the class is `LTX2VocoderWithBWE` rather than 2.0's
+///     `LTX2Vocoder`. Its default config is already correct; 1227/1227
+///     parameters fit under a six-entry rename.
+///
+///   Weights come from `unsloth/LTX-2.3-GGUF` (transformer, both VAEs,
+///   connectors, vocoder) and `Lightricks/LTX-2` (tokenizer, scheduler); the
+///   text encoder is the ungated `unsloth/gemma-3-12b-it-qat-bnb-4bit`, whose
+///   3840-wide hidden states across 49 layers are what the connectors project.
+///   Because those pieces span two repos in a pre-0.39 key layout, the worker
+///   applies the renames once offline into a local snapshot and points
+///   [`Self::config_repo`] at it — a conversion the operator performs and can
+///   re-derive, rather than a third-party conversion pulled from the Hub.
+///
+///   It is not [`LicenseTier::Permissive`] — the LTX Open Weights terms put it
+///   in [`LicenseTier::CommercialCustom`], so it needs an explicit
+///   `--accept-license ltx-open-weights`. Only `Text2Video` is declared:
+///   the image-conditioned sibling is unverified here, and the joint
+///   audio+video output shape still has no [`MediaGenKind`], so the audio
+///   branch renders but is not offered as a product.
 /// - **Serves a [`MediaGenKind`].** Image and video output only; a diffusion
 ///   model that emits text is served by the chat path.
 ///
@@ -2538,6 +2596,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "20.4B".to_string(),
             size_bytes: 57_704_595_735,
             min_vram_gb: 48,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -2577,6 +2637,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "20.4B".to_string(),
             size_bytes: 15_004_000_000,
             min_vram_gb: 18,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -2617,6 +2679,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "20.4B".to_string(),
             size_bytes: 57_708_362_811,
             min_vram_gb: 48,
+            distilled: false,
+            latent_upsampler: None,
             license: "NVIDIA Open Model License".to_string(),
             license_tier: LicenseTier::CommercialCustom,
             expert_pair: None,
@@ -2647,6 +2711,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "20.4B".to_string(),
             size_bytes: 57_720_463_453,
             min_vram_gb: 48,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -2677,6 +2743,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "6.2B".to_string(),
             size_bytes: 32_899_667_397,
             min_vram_gb: 16,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -2709,6 +2777,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "3.9B".to_string(),
             size_bytes: 23_740_007_447,
             min_vram_gb: 12,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -2748,6 +2818,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "3.9B".to_string(),
             size_bytes: 23_740_007_506,
             min_vram_gb: 12,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -2783,6 +2855,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "32B".to_string(),
             size_bytes: 177_640_374_395,
             min_vram_gb: 80,
+            distilled: false,
+            latent_upsampler: None,
             license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
             license_tier: LicenseTier::CommercialCustom,
             expert_pair: None,
@@ -2814,6 +2888,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "9B".to_string(),
             size_bytes: 52_888_736_795,
             min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
             license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
             license_tier: LicenseTier::CommercialCustom,
             expert_pair: None,
@@ -2844,6 +2920,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "9B".to_string(),
             size_bytes: 52_888_736_752,
             min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
             license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
             license_tier: LicenseTier::CommercialCustom,
             expert_pair: None,
@@ -2874,6 +2952,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "9B".to_string(),
             size_bytes: 52_886_252_700,
             min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
             license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
             license_tier: LicenseTier::CommercialCustom,
             expert_pair: None,
@@ -2905,6 +2985,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "14.3B".to_string(),
             size_bytes: 126_200_628_126,
             min_vram_gb: 80,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: Some(MediaGenExpertPair {
@@ -2939,6 +3021,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "14.3B".to_string(),
             size_bytes: 126_204_155_463,
             min_vram_gb: 80,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: Some(MediaGenExpertPair {
@@ -2981,6 +3065,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "14B".to_string(),
             size_bytes: 90_110_903_694,
             min_vram_gb: 60,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -3013,6 +3099,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             parameters: "5.0B".to_string(),
             size_bytes: 34_203_021_834,
             min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
             license: "Apache-2.0".to_string(),
             license_tier: LicenseTier::Permissive,
             expert_pair: None,
@@ -3024,7 +3112,181 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             transformer_class: None,
             config_repo: None,
         },
+        // ── LTX-2.3 (LTX Open Weights, Lightricks) ──
+        // 22B audio-video DiT, distilled to an 8-sigma schedule, served from
+        // Unsloth's Q5_K_M GGUF. `config_repo` names a locally converted
+        // snapshot rather than a Hub repo: 2.3's components are split across
+        // `Lightricks/LTX-2` (tokenizer, scheduler) and `unsloth/LTX-2.3-GGUF`
+        // (transformer, VAEs, connectors, vocoder), and three sets of keys sit
+        // in a layout the installed diffusers converters predate. The worker
+        // builds that snapshot once, offline, then loads it with plain
+        // `from_pretrained`.
+        //
+        // Text-to-video only for now. `LTX2ImageToVideoPipeline` exists in
+        // diffusers 0.39 and the components are the same, but the
+        // image-conditioned path is unverified here, and declaring a kind the
+        // worker has never run is how a job gets accepted and then fails.
+        MediaGenModelEntry {
+            id: "ltx-2.3-22b-distilled-gguf".to_string(),
+            name: "LTX-2.3 22B Distilled (GGUF Q5_K_M)".to_string(),
+            family: "ltx2".to_string(),
+            hf_repo: "Lightricks/LTX-2.3".to_string(),
+            pipeline_class: "LTX2Pipeline".to_string(),
+            kinds: vec![Text2Video],
+            default_width: 768,
+            default_height: 512,
+            max_resolution: 1280,
+            default_steps: 8,
+            // The distilled schedule is not classifier-free-guided; the
+            // reference sigmas were tuned against an unguided sampler and a
+            // scale above 1.0 fights the distillation.
+            default_guidance_scale: 1.0,
+            default_num_frames: Some(121),
+            default_fps: Some(24),
+            parameters: "22B".to_string(),
+            size_bytes: 30_215_060_095,
+            min_vram_gb: 36,
+            distilled: true,
+            latent_upsampler: Some("latent_upsampler".to_string()),
+            license: "LTX Open Weights".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "LTX-2.3 22B distilled text-to-video, 8-step schedule, \
+                          synchronized audio branch"
+                .to_string(),
+            gguf_repo: Some("unsloth/LTX-2.3-GGUF".to_string()),
+            gguf_file: Some("ltx-2.3-22b-distilled-1.1-UD-Q5_K_M.gguf".to_string()),
+            transformer_class: Some("LTX2VideoTransformer3DModel".to_string()),
+            config_repo: Some("~/.tenzro/models/ltx-2.3/diffusers".to_string()),
+        },
+        // MiniMax H3 (Hailuo 3.0), the open-weight H3-Base module.
+        //
+        // Registered so the catalog records that it exists and on what terms;
+        // **no run has been verified**, and three facts decide whether any
+        // given operator can serve it at all.
+        //
+        // *Not yet constructible.* `MiniMaxH3ModularPipeline` is a Modular
+        // Diffusers class and is absent from diffusers 0.39, which is what this
+        // worker pins; Modular Diffusers still announces itself as
+        // experimental and subject to breaking changes. Until the class ships
+        // in a pinned release the worker cannot build this entry at all, and
+        // because modular pipelines are invoked through blocks rather than a
+        // single `pipe(**kwargs)` call, it will also need a `FamilyAdapter`
+        // — see `docs/MEDIA_GEN_FAMILIES.md`. The entry is therefore
+        // discoverable, priced and licence-gated, but not servable.
+        //
+        // *Territory.* The H3 Community License grants rights "worldwide,
+        // excluding the European Union, the United Kingdom, the Republic of
+        // Korea and the United States of America", and §IV.4 extends that to
+        // the model's *Outputs*, not just its weights. That makes it unlike
+        // every other [`LicenseTier::CommercialCustom`] entry here, whose terms
+        // turn on revenue or attribution: acknowledging this one is a claim
+        // about **where the operator is**. For a node serving a decentralized
+        // network it is sharper still, because §III permits distribution to
+        // third parties only within the Applicable Territory, and a node
+        // cannot in general establish where its consumers are. Registering the
+        // entry does not resolve that; `--accept-license minimax-h3-community`
+        // is where the operator takes the position.
+        //
+        // *Footprint.* 144 GB at bf16 for the text-to-video path — transformer
+        // 66.3, Qwen3-VL-32B text encoder 66.7, video VAE 10.4, audio VAE 0.6 —
+        // so `min_vram_gb` refuses on anything smaller, including a 121 GB
+        // GB10. Third-party GGUFs exist but quantize the FL2VA
+        // (first-and-last-frame) task bundle rather than the base
+        // text-to-video transformer, so they do not serve this entry's kind.
+        //
+        // Only `Text2Video` is declared. The repo advertises image-, video-,
+        // audio- and reference-conditioned variants, but those live in the
+        // separate `FL2VA/` and `Ref2VA/` task partitions, and the discipline
+        // that applies to every entry here applies doubly to an unrun one: a
+        // worker advertising a kind it has never served gets jobs accepted and
+        // then fails them.
+        //
+        // 2K output is **not** reachable from these weights. H3-Base renders at
+        // a 768-pixel short edge; the 2K path runs through H3-Regenerate-2K,
+        // which MiniMax kept proprietary. `max_resolution` therefore describes
+        // the open module, not the hosted product.
+        MediaGenModelEntry {
+            id: "minimax-h3".to_string(),
+            name: "MiniMax H3 (Hailuo 3.0) H3-Base".to_string(),
+            family: "minimax-h3".to_string(),
+            hf_repo: "MiniMaxAI/MiniMax-H3".to_string(),
+            pipeline_class: "MiniMaxH3ModularPipeline".to_string(),
+            kinds: vec![Text2Video],
+            // The reference request takes `short_edge` + `aspect_ratio` rather
+            // than a pixel pair; 768 short edge at 16:9 is this, rounded to a
+            // multiple of 16.
+            default_width: 1360,
+            default_height: 768,
+            max_resolution: 1360,
+            // Provisional: the reference deployment is an SGLang service that
+            // owns its own schedule and exposes neither a step count nor a
+            // guidance scale, so these are placeholders and must be verified
+            // against a real run before this entry is served or priced.
+            default_steps: 50,
+            default_guidance_scale: 1.0,
+            // 10s at 24fps, the duration the official t2va script requests.
+            // The model card states a 4-15s range.
+            default_num_frames: Some(240),
+            default_fps: Some(24),
+            parameters: "H3-Base + Qwen3-VL-32B text encoder".to_string(),
+            size_bytes: 144_000_000_000,
+            min_vram_gb: 144,
+            distilled: false,
+            latent_upsampler: None,
+            license: "MiniMax H3 Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "MiniMax H3 omni-modal text-to-video with native \
+                          stereo audio, 768p short edge, 4-15s. Licence \
+                          excludes the EU, UK, South Korea and the USA, \
+                          including outputs"
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
     ]
+}
+
+impl MediaGenModelEntry {
+    /// Frame counts this pipeline can actually produce, as the stride of the
+    /// `stride·k + 1` grid its video VAE decodes onto.
+    ///
+    /// A latent video frame covers `stride` pixel frames plus a single
+    /// unpaired first frame, so a request off the grid is silently rounded
+    /// *down* by the pipeline: asking LTX-2.3 for 48 frames (2s at 24fps)
+    /// yields `(48-1)/8 + 1 = 6` latents, which decode back to 41. Billing is
+    /// quoted from the requested count, so leaving the request off-grid
+    /// charges for 48 frames and delivers 41. [`Self::snap_num_frames`] is
+    /// applied at admission so the quote and the output agree.
+    ///
+    /// Image-only entries return 1: every count is representable.
+    pub fn temporal_stride(&self) -> u32 {
+        match self.family.as_str() {
+            "ltx2" => 8,
+            // Wan 2.1 and 2.2 share a 4× temporal VAE.
+            "wan2.1" | "wan2.2" => 4,
+            _ => 1,
+        }
+    }
+
+    /// The requested frame count rounded up onto [`Self::temporal_stride`].
+    ///
+    /// Rounds up rather than down so a caller never silently receives less
+    /// footage than they asked for and were quoted.
+    pub fn snap_num_frames(&self, requested: u32) -> u32 {
+        let stride = self.temporal_stride();
+        if stride <= 1 || requested <= 1 {
+            return requested.max(1);
+        }
+        // Smallest `stride·k + 1` that is >= requested.
+        let k = (requested - 1).div_ceil(stride);
+        k * stride + 1
+    }
 }
 
 /// Look up a generative-media pipeline by its internal ID.
@@ -6186,6 +6448,20 @@ pub fn custom_license_id(license: &str) -> Option<String> {
         Some("dinov3".to_string())
     } else if l.contains("gemma") {
         Some("gemma".to_string())
+    } else if l.contains("ltx") {
+        // Lightricks' LTX Open Weights terms: freely redistributable, with
+        // revenue-scale conditions on commercial use that the operator has to
+        // acknowledge rather than the loader infer.
+        Some("ltx-open-weights".to_string())
+    } else if l.contains("minimax") {
+        // MiniMax's H3 Community License. Unlike every other custom licence in
+        // this table, its restriction is **territorial**: the grant covers
+        // "worldwide, excluding the European Union, the United Kingdom, the
+        // Republic of Korea and the United States of America", and §IV.4
+        // extends that exclusion to the model's *outputs*, not only its
+        // weights. Acknowledging it is therefore a statement about where the
+        // operator is, which no loader can infer.
+        Some("minimax-h3-community".to_string())
     } else if l.contains("nvidia open model") {
         Some("nvidia-open-model".to_string())
     } else if l.contains("nxai") {
@@ -7014,6 +7290,23 @@ mod tests {
                 "flux2-klein-9b-kv",
                 "flux2-klein-base-4b",
                 "flux2-klein-base-9b",
+                // Ungated on the Hub. Not loadable by `from_pretrained`
+                // straight from either publishing repo — its components are
+                // split across two and keyed for a diffusers older than the
+                // installed one — so the worker converts them once into a
+                // local snapshot named by `config_repo`.
+                "ltx-2.3-22b-distilled-gguf",
+                // The one entry here that is listed *without* being servable.
+                // `MiniMaxH3ModularPipeline` is absent from the pinned
+                // diffusers 0.39, so the worker cannot build it at all; it is
+                // carried so the catalog records that the model exists and on
+                // what terms, which for this one is a claim about where the
+                // operator is — the H3 Community License excludes the EU, UK,
+                // Korea and the US, and extends that to Outputs. Two guards
+                // keep it from being enrolled by accident: a 144 GB
+                // `min_vram_gb` floor and `--accept-license
+                // minimax-h3-community`. See the entry's own comment.
+                "minimax-h3",
                 "qwen-image",
                 "qwen-image-edit",
                 "qwen-image-flash",
@@ -7029,7 +7322,8 @@ mod tests {
                 "z-image-turbo",
             ],
             "media-gen membership changed — every entry must be ungated on \
-             HuggingFace and loadable by diffusers"
+             HuggingFace, and loadable by diffusers unless it is listed here \
+             as a documented not-yet-constructible exception"
         );
         for e in &catalog {
             // Nothing gated survives membership, so no entry is
@@ -7090,6 +7384,38 @@ mod tests {
                 "{}: holding one expert must cost less than holding both",
                 e.id
             );
+        }
+    }
+
+    #[test]
+    fn test_media_gen_frame_grid_snaps_up_and_defaults_are_on_grid() {
+        let ltx = get_media_gen_model_by_id("ltx-2.3-22b-distilled-gguf").expect("ltx entry");
+        assert_eq!(ltx.temporal_stride(), 8);
+        // 2s at 24fps is the case that shipped 41 frames against a 48-frame
+        // bill before this snapped.
+        assert_eq!(ltx.snap_num_frames(48), 49);
+        assert_eq!(ltx.snap_num_frames(49), 49, "already on grid, unchanged");
+        assert_eq!(ltx.snap_num_frames(50), 57);
+        assert_eq!(ltx.snap_num_frames(1), 1);
+
+        // An image entry has no temporal grid, so every count passes through.
+        let img = get_media_gen_model_by_id("qwen-image-gguf").expect("image entry");
+        assert_eq!(img.temporal_stride(), 1);
+        assert_eq!(img.snap_num_frames(48), 48);
+
+        // A default the catalog hands out must itself be representable, or the
+        // no-`seconds` path reintroduces exactly the mismatch snapping fixes.
+        for e in get_media_gen_catalog() {
+            if let Some(frames) = e.default_num_frames {
+                assert_eq!(
+                    e.snap_num_frames(frames),
+                    frames,
+                    "{}: default_num_frames {} is off its {}-frame grid",
+                    e.id,
+                    frames,
+                    e.temporal_stride()
+                );
+            }
         }
     }
 

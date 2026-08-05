@@ -120,7 +120,29 @@ class CatalogEntry:
     # Where the transformer's diffusers config comes from, when that is not
     # `hf_repo`. Needed when a release ships weights whose geometry no repo in
     # the entry describes; `None` reads the config from `hf_repo` as before.
+    #
+    # A `~`-prefixed local directory holding a `model_index.json` is read as a
+    # whole converted snapshot rather than a config-only override, and the
+    # pipeline is built from it instead of `hf_repo`. That is what LTX-2.3
+    # needs: its components are published across two repos in a key layout the
+    # installed diffusers converters predate, so they are renamed once offline
+    # and `hf_repo` stays the upstream id for provenance.
     config_repo: str | None = None
+    # Step-distilled release: sample on the trajectory the distillation was
+    # trained against rather than letting the scheduler derive its own. The
+    # values are resolved per family by its `FamilyAdapter`, never shared
+    # across families.
+    distilled: bool = False
+    # Subfolder of the converted snapshot holding the latent upsampler stage 2
+    # refines through. `None` renders in one stage.
+    latent_upsampler: str | None = None
+
+    def local_snapshot(self) -> pathlib.Path | None:
+        """The converted snapshot to build from, if `config_repo` names one."""
+        if self.config_repo is None:
+            return None
+        path = pathlib.Path(self.config_repo).expanduser()
+        return path if (path / "model_index.json").is_file() else None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> CatalogEntry:
@@ -154,6 +176,10 @@ class CatalogEntry:
                 else None
             ),
             config_repo=(str(data["config_repo"]) if data.get("config_repo") is not None else None),
+            distilled=bool(data.get("distilled", False)),
+            latent_upsampler=(
+                str(data["latent_upsampler"]) if data.get("latent_upsampler") is not None else None
+            ),
         )
 
     @property
@@ -323,6 +349,204 @@ def _token_from_cli_login() -> str | None:
     return None
 
 
+class FamilyAdapter:
+    """Per-family hooks the generic render path calls through.
+
+    Everything in here is something the render path cannot infer from the
+    catalog: a checkpoint converter that needs patching, the sigma trajectory a
+    distilled release was trained on, how a family's refiner is constructed.
+    Those are properties of a model family, not of generative media, so they
+    live behind this seam rather than as branches in the render path.
+
+    The distinction matters for extensibility. A render path written as
+    ``if family == "ltx2"`` is not generic code — it is LTX-specific code with
+    a hole for everything else, and every new family widens the hole. Here,
+    adding a family means registering an adapter: the render path does not
+    change, and a family that needs none of these hooks registers nothing.
+
+    Every method is optional. The default implementations say "this family does
+    not do that", and the render path is responsible for turning a catalog
+    claim it cannot honour into a clear error rather than silence.
+    """
+
+    #: Catalog ``family`` string this adapter serves.
+    family: str = ""
+
+    def patch_converter(self, entry: CatalogEntry) -> None:
+        """Fix up diffusers' single-file converter before a checkpoint loads."""
+        return
+
+    def sigma_schedules(self, entry: CatalogEntry) -> tuple[list[float], list[float]]:
+        """The (stage-1, stage-2) sigma trajectories for a distilled release.
+
+        Step distillation is a general technique but the trajectory belongs to
+        the specific training run, so this is never shared across families —
+        handing one family's curve to another produces a plausible render that
+        is not the one the checkpoint was trained to produce.
+        """
+        raise NotImplementedError(
+            f"{entry.id} is marked distilled but family {entry.family!r} publishes "
+            "no sigma schedule; add one to its adapter rather than borrowing "
+            "another family's"
+        )
+
+    def refine(
+        self,
+        loaded: LoadedPipeline,
+        params: MediaGenParams,
+        stage1_kwargs: dict[str, Any],
+        generator: Any,
+    ) -> Any:
+        """Run a multi-stage render and return pixel frames."""
+        raise NotImplementedError(
+            f"{loaded.entry.id} declares latent_upsampler but family "
+            f"{loaded.entry.family!r} has no refiner wired in its adapter"
+        )
+
+
+_FAMILY_ADAPTERS: dict[str, FamilyAdapter] = {}
+
+
+def register_family_adapter(adapter: FamilyAdapter) -> None:
+    """Register `adapter` as the handler for its family."""
+    _FAMILY_ADAPTERS[adapter.family] = adapter
+
+
+def family_adapter(family: str) -> FamilyAdapter:
+    """The adapter for `family`, or a no-op adapter if it needs no hooks.
+
+    Returning a base instance rather than `None` keeps the render path free of
+    null checks: a family with nothing special registered simply declines every
+    hook, and the render path's own guards decide whether declining is an error.
+    """
+    return _FAMILY_ADAPTERS.get(family, _DEFAULT_ADAPTER)
+
+
+_DEFAULT_ADAPTER = FamilyAdapter()
+
+
+class Ltx2Adapter(FamilyAdapter):
+    """LTX-2 (Lightricks). Two-stage, step-distilled, single-file transformer.
+
+    Everything LTX-specific in this worker lives here. The render path calls
+    the base-class hooks and never names this family.
+    """
+
+    family = "ltx2"
+
+    def patch_converter(self, entry: CatalogEntry) -> None:
+        """Teach diffusers' LTX-2.0-era transformer converter the 2.3 key layout.
+
+        2.3 renamed the prompt modulation block. The shipped converter's
+        special handler matches on the ``adaln_single`` substring but only
+        rewrites the ``adaln_single.`` / ``audio_adaln_single.`` prefixes, so 12
+        ``prompt_adaln_single.*`` keys fall through unrenamed and the load fails
+        on missing tensors.
+
+        The entry in ``SINGLE_FILE_LOADABLE_CLASSES`` is replaced rather than
+        the ``single_file_utils`` module attribute: that mapping captures the
+        function by reference at import, so rebinding the attribute has no
+        effect.
+        """
+        from diffusers.loaders import single_file_utils as sfu
+        from diffusers.loaders.single_file_model import SINGLE_FILE_LOADABLE_CLASSES
+
+        slot = SINGLE_FILE_LOADABLE_CLASSES["LTX2VideoTransformer3DModel"]
+        if getattr(slot["checkpoint_mapping_fn"], "_ltx23", False):
+            return
+        base = sfu.convert_ltx2_transformer_to_diffusers
+
+        def convert_ltx2_3(checkpoint, **kw):
+            converted = base(checkpoint, **kw)
+            return {
+                k.replace("prompt_adaln_single.", "prompt_adaln."): v for k, v in converted.items()
+            }
+
+        convert_ltx2_3._ltx23 = True
+        slot["checkpoint_mapping_fn"] = convert_ltx2_3
+
+    def sigma_schedules(self, entry: CatalogEntry) -> tuple[list[float], list[float]]:
+        """The trajectories the LTX-2 distillation was trained against.
+
+        Published by diffusers rather than restated here, so they cannot drift
+        from the installed pipeline.
+        """
+        from diffusers.pipelines.ltx2.utils import (
+            DISTILLED_SIGMA_VALUES,
+            STAGE_2_DISTILLED_SIGMA_VALUES,
+        )
+
+        return list(DISTILLED_SIGMA_VALUES), list(STAGE_2_DISTILLED_SIGMA_VALUES)
+
+    def refine(
+        self,
+        loaded: LoadedPipeline,
+        params: MediaGenParams,
+        stage1_kwargs: dict[str, Any],
+        generator: Any,
+    ) -> Any:
+        """Stage 1 → 2x latent upsample → short stage-2 pass. Returns frames.
+
+        Stage 1 lays down composition and motion at the base resolution and
+        stops at latents. Those are upsampled and handed back to the *same*
+        transformer for a second pass that synthesizes detail at the higher
+        resolution. Decoding stage 1 directly is a different product — the
+        draft — and extra stage-1 steps do not substitute, because the detail is
+        not under-sampled, it is absent at that resolution.
+        """
+        from diffusers.pipelines.ltx2 import LTX2LatentUpsamplePipeline
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+
+        entry = loaded.entry
+        snapshot = entry.local_snapshot()
+        if snapshot is None:
+            raise ValueError(
+                f"{entry.id} declares latent_upsampler but has no converted "
+                "snapshot to load it from"
+            )
+        _, stage2_sigmas = self.sigma_schedules(entry)
+
+        # Stage 1 stops at latents. `return_dict=False` because the video and
+        # audio latents come back as a plain tuple in this mode.
+        stage1 = dict(stage1_kwargs)
+        stage1["output_type"] = "latent"
+        stage1["return_dict"] = False
+        video_latent, audio_latent = loaded.pipe(**stage1)
+
+        upsampler = LTX2LatentUpsamplerModel.from_pretrained(
+            str(snapshot / entry.latent_upsampler),
+            torch_dtype=loaded.pipe.dtype,
+        ).to(loaded.pipe._execution_device)
+        upsample_pipe = LTX2LatentUpsamplePipeline(vae=loaded.pipe.vae, latent_upsampler=upsampler)
+        upscaled = upsample_pipe(latents=video_latent, output_type="latent", return_dict=False)[0]
+
+        # Stage 2 re-enters the same pipeline with the upsampled latents. The
+        # renoise level is the first stage-2 sigma: the pass has to add noise
+        # back before it can denoise detail in, and starting anywhere else
+        # either scrubs stage 1's structure or leaves nothing to resolve.
+        stage2: dict[str, Any] = {
+            "latents": upscaled,
+            "audio_latents": audio_latent,
+            "prompt": params.prompt,
+            "num_inference_steps": len(stage2_sigmas),
+            "noise_scale": stage2_sigmas[0],
+            "sigmas": stage2_sigmas,
+            "generator": generator,
+            "output_type": "np",
+            "return_dict": False,
+        }
+        stage2[guidance_kwarg_for(entry.pipeline_class_for(loaded.kind))] = params.guidance_scale
+        if params.negative_prompt is not None:
+            stage2["negative_prompt"] = params.negative_prompt
+
+        video, _audio = loaded.pipe(**stage2)
+        del upsample_pipe, upsampler
+        return video[0]
+
+
+register_family_adapter(Ltx2Adapter())
+
+
 def load_pipeline(
     entry: CatalogEntry,
     kind: MediaGenKind,
@@ -438,11 +662,20 @@ def load_pipeline(
                 f"diffusers {diffusers.__version__} has no {transformer_class_name!r}; "
                 "the catalog names a transformer class this install cannot build"
             )
-        gguf_url = f"https://huggingface.co/{entry.gguf_repo}/blob/main/{entry.gguf_file}"
+        family_adapter(entry.family).patch_converter(entry)
+        snapshot = entry.local_snapshot()
+        local_gguf = (snapshot.parent / entry.gguf_file) if snapshot is not None else None
+        # A converted snapshot sits beside the GGUF it was built against, so
+        # prefer that file over re-fetching 17 GB the operator already holds.
+        source = (
+            str(local_gguf)
+            if local_gguf is not None and local_gguf.is_file()
+            else f"https://huggingface.co/{entry.gguf_repo}/blob/main/{entry.gguf_file}"
+        )
         kwargs["transformer"] = transformer_cls.from_single_file(
-            gguf_url,
+            source,
             quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
-            config=entry.config_repo or entry.hf_repo,
+            config=str(snapshot) if snapshot is not None else (entry.config_repo or entry.hf_repo),
             subfolder="transformer",
             torch_dtype=torch_dtype,
             cache_dir=resolved_cache,
@@ -462,7 +695,12 @@ def load_pipeline(
             quant_mapping={"transformer": quant_config}
         )
 
-    pipe = pipeline_cls.from_pretrained(entry.hf_repo, **kwargs)
+    # A converted snapshot already holds every component in diffusers layout,
+    # so it is the source; `hf_repo` stays the upstream id for provenance.
+    snapshot = entry.local_snapshot()
+    pipe = pipeline_cls.from_pretrained(
+        str(snapshot) if snapshot is not None else entry.hf_repo, **kwargs
+    )
     # A bitsandbytes-quantized module is already placed on its device by the
     # loader and cannot be moved afterwards; calling `.to()` on it raises.
     if quant_config is None:
@@ -589,6 +827,10 @@ def denoise_whole(
         guidance_kwarg: params.guidance_scale,
         "generator": generator,
     }
+    if loaded.entry.distilled:
+        stage1, _ = family_adapter(loaded.entry.family).sigma_schedules(loaded.entry)
+        kwargs["sigmas"] = stage1
+        kwargs["num_inference_steps"] = len(stage1)
     if params.negative_prompt is not None:
         kwargs["negative_prompt"] = params.negative_prompt
     if loaded.kind.is_video:
@@ -597,6 +839,21 @@ def denoise_whole(
         if input_image is None:
             raise ValueError(f"{loaded.kind.value} needs a conditioning image")
         kwargs["image"] = _load_image(input_image)
+
+    if loaded.entry.latent_upsampler is not None and loaded.kind.is_video:
+        frames = family_adapter(loaded.entry.family).refine(loaded, params, kwargs, generator)
+        fps = params.fps or loaded.entry.default_fps or 16
+        media = _encode_video_bytes(frames, fps)
+        mime = "video/mp4"
+        return DenoiseResult(
+            latents=None,
+            media=media,
+            mime=mime,
+            seed_used=seed,
+            steps_completed=params.steps,
+            total_steps=params.steps,
+            boundary_index=None,
+        )
 
     out = loaded.pipe(**kwargs)
 

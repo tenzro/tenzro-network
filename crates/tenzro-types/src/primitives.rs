@@ -131,9 +131,10 @@ impl Address {
 
     /// Creates an address from a hex string.
     ///
-    /// For 20-byte Ethereum addresses (40 hex chars), validates EIP-55 checksum.
-    /// For 32-byte Tenzro addresses (64 hex chars), validates hex format.
-    /// Use this as the default entry point for hex address parsing.
+    /// For 20-byte Ethereum addresses (40 hex chars), validates EIP-55 checksum
+    /// and widens left-aligned. For 32-byte Tenzro addresses (64 hex chars),
+    /// validates hex format. Use this as the default entry point for hex
+    /// address parsing.
     pub fn from_hex(s: &str) -> Result<Self, crate::error::TenzroError> {
         Self::from_hex_checksummed(s)
     }
@@ -142,6 +143,23 @@ impl Address {
     ///
     /// For Ethereum-style addresses (20 bytes), this validates the EIP-55 mixed-case
     /// checksum. The hex string should be 40 characters (or 42 with 0x prefix).
+    ///
+    /// A 20-byte address is widened into the 32-byte [`Address`] **left-aligned**
+    /// — the 20 significant bytes lead and the trailing 12 are zero. That is the
+    /// one widening this workspace uses: the token ledger's `balance:` key is
+    /// built that way by `tenzro_token`'s RocksDB backend and reproduced by
+    /// `tenzro_vm::state_adapter::tnzo_balance_key` for raw EVM addresses, the
+    /// node's `parse_address` produces it, and every 20-byte
+    /// `tenzro_crypto::Address` in the wallet, consensus, agent and network
+    /// crates is widened with `addr_bytes[..20].copy_from_slice(..)`.
+    ///
+    /// This function used to right-align instead (EVM's `0x00 × 12 || addr20`
+    /// word), which meant a caller who passed a 40-hex address got a key no
+    /// other part of the system ever writes: balances read 0, credits landed
+    /// somewhere unreachable, and nothing errored. Right-aligned EVM *words*
+    /// are still built where ABI encoding genuinely needs one, but they are
+    /// produced from raw 20-byte arrays at the encoding site, never by parsing
+    /// an address here.
     pub fn from_hex_checksummed(s: &str) -> Result<Self, crate::error::TenzroError> {
         let s = s.strip_prefix("0x").unwrap_or(s);
 
@@ -177,9 +195,9 @@ impl Address {
                 }
             }
 
-            // Pad to 32 bytes for our Address type
+            // Widen to 32 bytes left-aligned, matching the ledger key.
             let mut addr = [0u8; 32];
-            addr[12..].copy_from_slice(&bytes);
+            addr[..20].copy_from_slice(&bytes);
             Ok(Self(addr))
         } else if s.len() == 64 {
             // 32-byte address (full Tenzro address)
@@ -848,5 +866,51 @@ mod u128_serde_tests {
     fn rejects_negative_number() {
         let json = r#"{"v":-1}"#;
         assert!(serde_json::from_str::<Wrap>(json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod address_widening_tests {
+    use super::Address;
+
+    /// The whole system keys a 20-byte address into the 32-byte [`Address`]
+    /// left-aligned: `tenzro_token`'s `balance:` key, the node's
+    /// `parse_address`, `tenzro_vm::state_adapter::tnzo_balance_key`, and every
+    /// `addr_bytes[..20].copy_from_slice(..)` in the wallet, consensus, agent
+    /// and network crates. `from_hex` widened the other way — EVM's
+    /// right-aligned word — so any caller passing a 40-hex address addressed an
+    /// account nothing else in the system writes to, silently.
+    #[test]
+    fn a_20_byte_address_is_widened_left_aligned() {
+        // EIP-55 checksummed form of a real 20-byte account.
+        let addr = Address::from_hex("0x3d0291C0fC59EdA83f2D9f5f00A09e12f3f6a067").unwrap();
+        assert_eq!(&addr.as_bytes()[..4], &[0x3d, 0x02, 0x91, 0xc0]);
+        assert_eq!(&addr.as_bytes()[17..20], &[0xf6, 0xa0, 0x67]);
+        assert_eq!(&addr.as_bytes()[20..], &[0u8; 12], "tail must be the pad");
+    }
+
+    /// A 20-byte address must reach the same key whether it arrives 40-hex or
+    /// already widened to 64-hex, or a client that widens before sending and
+    /// one that does not would address different accounts.
+    #[test]
+    fn the_40_and_64_hex_forms_of_one_address_agree() {
+        let short = Address::from_hex("0x3d0291C0fC59EdA83f2D9f5f00A09e12f3f6a067").unwrap();
+        let long = Address::from_hex(&hex::encode(short.as_bytes())).unwrap();
+        assert_eq!(short, long);
+    }
+
+    /// A full 32-byte address has no alignment to choose.
+    #[test]
+    fn a_32_byte_address_passes_through() {
+        let hex_str = "c846770be60288c0a768cd7fb817bb4c10583276c70658e248549f61edbe6f39";
+        let addr = Address::from_hex(hex_str).unwrap();
+        assert_eq!(hex::encode(addr.as_bytes()), hex_str);
+    }
+
+    /// The EIP-55 guard is what catches a mistyped or wrongly derived address
+    /// before it is used as an account key, and must survive the widening fix.
+    #[test]
+    fn a_bad_checksum_is_refused() {
+        assert!(Address::from_hex("0x3d0291c0FC59EdA83f2D9f5f00A09e12f3f6a067").is_err());
     }
 }

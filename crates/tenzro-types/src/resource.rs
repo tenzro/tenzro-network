@@ -84,6 +84,7 @@ pub struct ResourceDescriptor {
     pub creator_wallet: Option<Address>,
 
     /// Per-invocation cost in atto-TNZO. `0` = free.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price_per_call: u128,
 
     /// `true` when the resource is `Active` in the source registry.

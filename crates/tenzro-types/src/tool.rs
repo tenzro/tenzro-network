@@ -237,6 +237,7 @@ pub struct ToolDefinition {
     /// Set to `0` for a free tool. The split is identical to the agent
     /// template marketplace: `MARKETPLACE_COMMISSION_BPS` (5%) to the
     /// treasury, remainder to `creator_wallet`.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price_per_call: u128,
 
     /// Current status of the tool
@@ -422,6 +423,7 @@ pub struct ToolInvocationResult {
     pub settlement_tx: Option<String>,
 
     /// Amount paid by the invoker in atto-TNZO. `0` for free tools.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub amount_paid: u128,
 
     /// Unix timestamp when the invocation completed

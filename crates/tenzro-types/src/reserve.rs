@@ -43,6 +43,7 @@ pub struct ReserveAttestation {
     /// Tokenized-asset id (hex token id, matching the `TokenRegistry`).
     pub asset_id: String,
     /// Attested reserve units backing the asset (smallest unit).
+    #[serde(with = "crate::primitives::u128_serde")]
     pub reserves: u128,
     /// Provenance of the reserve figure.
     pub source: ReserveSource,

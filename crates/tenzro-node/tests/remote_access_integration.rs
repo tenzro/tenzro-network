@@ -88,6 +88,8 @@ fn shell_scope() -> AccessScope {
         confinement: ConfinementKind::KataVm,
         reserved_slots: 0,
         models: Vec::new(),
+        max_memory_bytes: None,
+        sites: Vec::new(),
         databases: Vec::new(),
         storage_deals: Vec::new(),
         agents: Vec::new(),

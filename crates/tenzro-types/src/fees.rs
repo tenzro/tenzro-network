@@ -106,36 +106,43 @@ pub struct ServiceFeeSchedule {
     /// Human identity registration fee (in smallest TNZO unit)
     ///
     /// Default: 10 TNZO (10 * 10^18)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub human_identity_registration: u128,
 
     /// Machine identity registration fee
     ///
     /// Default: 5 TNZO (5 * 10^18)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub machine_identity_registration: u128,
 
     /// Agent identity registration fee
     ///
     /// Default: 5 TNZO (5 * 10^18)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub agent_registration: u128,
 
     /// Credential issuance fee
     ///
     /// Default: 2 TNZO (2 * 10^18)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub credential_issuance: u128,
 
     /// Identity verification fee
     ///
     /// Default: 1 TNZO (1 * 10^18)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub identity_verification: u128,
 
     /// Model registration fee
     ///
     /// Default: 50 TNZO (50 * 10^18)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub model_registration: u128,
 
     /// Bridge transfer base fee
     ///
     /// Default: 1 TNZO (1 * 10^18)
+    #[serde(with = "crate::primitives::u128_serde")]
     pub bridge_transfer_base: u128,
 }
 

@@ -450,6 +450,8 @@ mod tests {
                 // Test fixtures share the public pool and pin nothing.
                 reserved_slots: 0,
                 models: Vec::new(),
+                max_memory_bytes: None,
+                sites: Vec::new(),
                 databases: Vec::new(),
                 storage_deals: Vec::new(),
                 agents: Vec::new(),

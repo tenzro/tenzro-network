@@ -127,6 +127,7 @@ pub struct KnowledgeRecord {
 
     /// TNZO atto-token cost per invocation. The protocol takes 5% as
     /// network commission; the remaining 95% goes to `creator_wallet`.
+    #[serde(with = "crate::primitives::u128_serde")]
     pub price_per_call: u128,
 
     /// Resource status.
@@ -262,6 +263,7 @@ pub struct KnowledgeInvocationResult {
     pub invocation_id: String,
     pub output: serde_json::Value,
     pub settlement_tx: Option<String>,
+    #[serde(with = "crate::primitives::u128_serde")]
     pub amount_paid: u128,
     pub completed_at: u64,
 }

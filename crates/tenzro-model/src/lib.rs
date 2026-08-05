@@ -156,6 +156,7 @@ pub mod serve_advisor;
 pub mod sla;
 pub mod text_embedding_runtime;
 pub mod text_segmentation_runtime;
+pub(crate) mod tool_grammar;
 pub mod toploc;
 pub mod traffic;
 pub mod ts_runtime;

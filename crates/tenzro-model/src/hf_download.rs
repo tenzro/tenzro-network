@@ -1339,6 +1339,42 @@ fn explain_hf_status(status: reqwest::StatusCode, repo: &str, had_token: bool) -
     }
 }
 
+/// Whether the Hub reports this repository as gated, asked before any bytes move.
+///
+/// # Why a preflight and not just the 401
+///
+/// Without this, a tokenless node discovers a gated repo only when the file GET
+/// is refused — after the request is in flight, and for a sharded model after
+/// some shards have already landed on disk. Asking the metadata API first turns
+/// that into a refusal at the boundary, before a partial download exists.
+///
+/// `gated` is `false` for open repos and `"auto"` / `"manual"` for the two
+/// approval flows. Returns `None` when the Hub cannot be asked — an outage must
+/// not become a download ban, and the file GET still enforces the real decision.
+async fn repo_is_gated(client: &reqwest::Client, repo: &str) -> Option<bool> {
+    let url = format!("https://huggingface.co/api/models/{repo}");
+    let body: serde_json::Value = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    parse_gated_field(body.get("gated")?)
+}
+
+/// The `gated` field's three shapes, split out so the decision is testable
+/// without reaching the network.
+fn parse_gated_field(v: &serde_json::Value) -> Option<bool> {
+    match v {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::String(s) => Some(s != "false"),
+        _ => None,
+    }
+}
+
 async fn download_one_file(
     progress_label: &str,
     hf_repo: &str,
@@ -1397,6 +1433,18 @@ async fn download_one_file(
     // when configured, absent otherwise — an ungated download works either way,
     // so there is no reason to require one.
     let token = hf_token();
+
+    // A gated repo without a token can only end one way, so end it here rather
+    // than mid-transfer. Only asked when tokenless: a configured operator pays
+    // no extra round trip, and an unreachable Hub does not block the attempt.
+    if token.is_none() && repo_is_gated(&client, hf_repo).await == Some(true) {
+        return Err(ModelError::DownloadError(explain_hf_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            hf_repo,
+            false,
+        )));
+    }
+
     let mut request = client.get(&download_url);
     if let Some(t) = &token {
         request = request.bearer_auth(t);
@@ -1687,6 +1735,21 @@ mod hf_token_tests {
             !msg.contains("HF_TOKEN"),
             "a 404 is not a credentials problem: {msg}"
         );
+    }
+
+    #[test]
+    fn both_hub_gating_flows_read_as_gated() {
+        // The Hub says `false` for open repos but names the approval flow
+        // ("auto" / "manual") for gated ones — a bare truthiness check on the
+        // string would read every repo as gated.
+        use serde_json::json;
+        assert_eq!(parse_gated_field(&json!(false)), Some(false));
+        assert_eq!(parse_gated_field(&json!("false")), Some(false));
+        assert_eq!(parse_gated_field(&json!("auto")), Some(true));
+        assert_eq!(parse_gated_field(&json!("manual")), Some(true));
+        // Anything unrecognised is "don't know", which leaves the decision to
+        // the file request rather than inventing a refusal.
+        assert_eq!(parse_gated_field(&json!(null)), None);
     }
 
     #[test]
