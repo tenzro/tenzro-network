@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tenzro-a2a-server"
-version = "0.1.0"
+version = "0.1.1"
 description = "A2A server for Tenzro Network — 75 agent skills for AI-to-AI collaboration"
 readme = "README.md"
 license = {file = "LICENSE"}
