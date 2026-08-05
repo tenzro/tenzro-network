@@ -27,7 +27,7 @@ import json
 import os
 import pathlib
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .types import MediaGenExpertRole, MediaGenKind, MediaGenParams
@@ -401,6 +401,25 @@ class FamilyAdapter:
             "another family's"
         )
 
+    def configure(self, pipe: Any, entry: CatalogEntry) -> None:
+        """Adjust a freshly built pipeline before it renders.
+
+        For a family whose published defaults differ from what
+        ``from_pretrained`` leaves in place — a scheduler swap, a flow shift.
+        Doing it here rather than in the loader keeps the loader from growing a
+        branch per family, and a family needing nothing simply declines.
+        """
+        return
+
+    def shape_prompt(self, prompt: str, entry: CatalogEntry) -> str:
+        """Convert a plain-text prompt into whatever this family expects.
+
+        Default is identity. A family that was trained on structured prompts
+        overrides it, so callers keep sending plain text and the difference
+        stays a property of the model rather than of the API.
+        """
+        return prompt
+
     def refine(
         self,
         loaded: LoadedPipeline,
@@ -635,6 +654,46 @@ class Ltx2Adapter(FamilyAdapter):
 
 register_family_adapter(Ltx2Adapter())
 
+class Cosmos3Adapter(FamilyAdapter):
+    """NVIDIA Cosmos3. A diffusers pipeline with two published deviations.
+
+    It ships inside diffusers, so there is no backend to add — but
+    ``from_pretrained`` alone does not reproduce the reference invocation.
+    """
+
+    family = "cosmos3"
+
+    def configure(self, pipe: Any, entry: CatalogEntry) -> None:
+        # The published usage replaces the scheduler after loading. Without the
+        # flow shift the sampler walks a different trajectory than the one the
+        # model was trained against — it still renders, which is what makes
+        # skipping this quietly wrong rather than loudly broken.
+        try:
+            from diffusers.schedulers.scheduling_unipc_multistep import (
+                UniPCMultistepScheduler,
+            )
+
+            pipe.scheduler = UniPCMultistepScheduler.from_config(
+                pipe.scheduler.config, flow_shift=3.0, use_karras_sigmas=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s: could not install the UniPC scheduler: %s", entry.id, exc)
+
+    def shape_prompt(self, prompt: str, entry: CatalogEntry) -> str:
+        # Cosmos3 was trained on JSON-upsampled prompts, not prose. A bare
+        # string is accepted by the pipeline and produces markedly worse
+        # output, so wrap it rather than passing it through.
+        import json
+
+        text = prompt.strip()
+        if text.startswith("{") or text.startswith("["):
+            return text  # caller already sent structured JSON
+        return json.dumps({"prompt": text})
+
+
+register_family_adapter(Cosmos3Adapter())
+
+
 
 class Trellis2Adapter(BackendAdapter):
     """Microsoft TRELLIS.2 — single image in, GLB mesh with PBR materials out.
@@ -734,6 +793,87 @@ class Trellis2Adapter(BackendAdapter):
 
 
 register_backend_adapter(Trellis2Adapter())
+
+
+class Hunyuan3dAdapter(BackendAdapter):
+    """Tencent Hunyuan3D 2.1 — image in, textured mesh out, in two stages.
+
+    Shape and paint are separate pipelines with separate VRAM footprints
+    (~10 GB and ~21 GB), and the published usage reaches them by putting the
+    repo's own ``hy3dshape`` / ``hy3dpaint`` directories on ``sys.path`` rather
+    than by importing an installed distribution. So availability is checked on
+    the module that actually imports, not on a package name that does not
+    exist on PyPI.
+    """
+
+    backend = "hunyuan3d"
+    required_package = "hy3dshape"
+
+    def load(self, entry: CatalogEntry, kind: MediaGenKind, role, **opts) -> LoadedPipeline:
+        if role is not None:
+            raise ValueError(f"{entry.id} is not a split model")
+        from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+
+        source = str(entry.local_snapshot() or entry.hf_repo)
+        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(source)
+        return LoadedPipeline(pipe=pipe, entry=entry, kind=kind, role=None)
+
+    def render(self, loaded: LoadedPipeline, params: MediaGenParams, input_image: bytes | None):
+        if not input_image:
+            raise ValueError(
+                f"{loaded.entry.id} serves image23d and needs a conditioning image; "
+                "none was published for this job"
+            )
+        import io
+        import tempfile
+
+        from PIL import Image
+
+        seed = _resolve_seed(params.seed)
+        image = Image.open(io.BytesIO(input_image)).convert("RGB")
+        mesh = loaded.pipe(image=image)[0]
+
+        # Texturing is a second model with its own weights and its own VRAM
+        # peak. Attempted, but not fatal: a mesh without PBR textures is still
+        # the asset that was asked for, whereas failing the whole job because
+        # the paint stage would not fit throws away the shape work already done.
+        try:
+            from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
+
+            with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as raw:
+                mesh.export(raw.name)
+                painter = Hunyuan3DPaintPipeline(
+                    Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
+                )
+                with tempfile.NamedTemporaryFile(suffix=".png") as img_fh:
+                    image.save(img_fh.name)
+                    mesh = painter(raw.name, image_path=img_fh.name)
+        except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+            log.warning(
+                "%s: texture stage unavailable (%s); returning untextured geometry",
+                loaded.entry.id,
+                exc,
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".glb") as fh:
+            if isinstance(mesh, (str, pathlib.Path)):
+                payload = pathlib.Path(mesh).read_bytes()
+            else:
+                mesh.export(fh.name)
+                payload = pathlib.Path(fh.name).read_bytes()
+
+        return DenoiseResult(
+            latents=None,
+            media=payload,
+            mime="model/gltf-binary",
+            seed_used=seed,
+            steps_completed=params.steps,
+            total_steps=params.steps,
+            boundary_index=None,
+        )
+
+
+register_backend_adapter(Hunyuan3dAdapter())
 
 
 def load_pipeline(
@@ -910,6 +1050,10 @@ def load_pipeline(
     # loader and cannot be moved afterwards; calling `.to()` on it raises.
     if quant_config is None:
         pipe.to(device)
+    # Family hooks that apply after the pipeline exists — a scheduler swap,
+    # a flow shift. A family registering none declines and nothing happens.
+    family_adapter(entry.family).configure(pipe, entry)
+
     return LoadedPipeline(pipe=pipe, entry=entry, kind=kind, role=role, precision=precision)
 
 
@@ -956,6 +1100,7 @@ def _encode_prompts(
     pipe: Any,
     params: MediaGenParams,
     device: Any,
+    entry: CatalogEntry | None = None,
 ) -> tuple[Any, Any | None]:
     """Text-encode the prompt pair.
 
@@ -964,6 +1109,13 @@ def _encode_prompts(
     bound into the job id, and shipping embeds would put a second
     schema-versioned tensor on the wire for no gain.
     """
+    # A family trained on structured prompts gets its shape here, so callers
+    # keep sending plain text and the difference stays a property of the model.
+    if entry is not None:
+        shaped = family_adapter(entry.family).shape_prompt(params.prompt, entry)
+        if shaped != params.prompt:
+            params = replace(params, prompt=shaped)
+
     do_cfg = params.guidance_scale > 1.0
     prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
         prompt=params.prompt,
@@ -1129,7 +1281,7 @@ def denoise_split(
     split_at = boundary_index(pipe, params.steps, pair.boundary_ratio)
     timesteps = pipe.scheduler.timesteps
 
-    prompt_embeds, negative_prompt_embeds = _encode_prompts(pipe, params, device)
+    prompt_embeds, negative_prompt_embeds = _encode_prompts(pipe, params, device, loaded.entry)
     do_cfg = negative_prompt_embeds is not None
 
     num_frames = params.num_frames or loaded.entry.default_num_frames

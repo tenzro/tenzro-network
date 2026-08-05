@@ -2318,9 +2318,13 @@ pub struct MediaGenExpertPair {
 ///
 /// The worker began as a `diffusers` host because every model it served was a
 /// `diffusers` pipeline. That stopped being true: `Trellis2ImageTo3DPipeline`
-/// comes from Microsoft's own `trellis2` package, and Cosmos3 ships a
-/// `Cosmos3OmniPipeline` whose omni surface is not a `diffusers` pipeline in
-/// the usual sense either.
+/// comes from Microsoft's own `trellis2` package, and Hunyuan3D's shape and
+/// paint stages import from the repo's own `hy3dshape` / `hy3dpaint` trees.
+///
+/// Not everything new needs one. NVIDIA's `Cosmos3OmniPipeline` ships *inside*
+/// `diffusers`, so it is a `Diffusers` entry with a family adapter for its
+/// scheduler and prompt format — a backend variant for it would have been a
+/// second mechanism doing nothing.
 ///
 /// Forcing those through a `diffusers` shim, or forcing `diffusers` models
 /// through a new abstraction, both trade a working path for a uniform one. So
@@ -2335,10 +2339,8 @@ pub enum MediaGenBackend {
     Diffusers,
     /// Microsoft's `trellis2` package (`Trellis2ImageTo3DPipeline`).
     Trellis2,
-    /// Tencent's `hy3dgen` stack for the Hunyuan3D family.
+    /// Tencent's Hunyuan3D stack (`hy3dshape` + `hy3dpaint`).
     Hunyuan3d,
-    /// NVIDIA Cosmos omni pipeline (`Cosmos3OmniPipeline`).
-    Cosmos3Omni,
 }
 
 impl MediaGenBackend {
@@ -2348,7 +2350,6 @@ impl MediaGenBackend {
             Self::Diffusers => "diffusers",
             Self::Trellis2 => "trellis2",
             Self::Hunyuan3d => "hunyuan3d",
-            Self::Cosmos3Omni => "cosmos3_omni",
         }
     }
 
@@ -2360,8 +2361,10 @@ impl MediaGenBackend {
         match self {
             Self::Diffusers => "diffusers",
             Self::Trellis2 => "trellis2",
-            Self::Hunyuan3d => "hy3dgen",
-            Self::Cosmos3Omni => "cosmos3",
+            // The published usage adds the repo's own directories to
+            // `sys.path`; `hy3dshape` is the module that actually imports, and
+            // there is no `hy3dgen` distribution to check for.
+            Self::Hunyuan3d => "hy3dshape",
         }
     }
 }
@@ -3349,6 +3352,44 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             transformer_class: None,
             config_repo: None,
         },
+        MediaGenModelEntry {
+            id: "cosmos3-edge".to_string(),
+            name: "NVIDIA Cosmos3 Edge".to_string(),
+            family: "cosmos3".to_string(),
+            hf_repo: "nvidia/Cosmos3-Edge".to_string(),
+            // Ships inside diffusers. No backend variant needed — its quirks
+            // (UniPC with flow_shift, JSON-structured prompts) are family
+            // hooks, not a different library.
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "Cosmos3OmniPipeline".to_string(),
+            kinds: vec![Image2Video],
+            default_width: 832,
+            default_height: 480,
+            max_resolution: 1280,
+            default_steps: 50,
+            default_guidance_scale: 5.0,
+            default_num_frames: Some(121),
+            default_fps: Some(24),
+            parameters: "4B".to_string(),
+            size_bytes: 17_200_000_000,
+            min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
+            license: "OpenMDW-1.1".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            gated: false,
+            description: "NVIDIA Cosmos3 Edge world foundation model, 4B, \
+                          image-to-video at 480p/121 frames. Ungated, \
+                          commercial use permitted. Takes JSON-structured \
+                          prompts rather than plain text"
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
         // ---- 3D asset generation -------------------------------------------
         //
         // These produce a GLB mesh, not frames, and neither loads through
@@ -3357,6 +3398,41 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
         // claiming, content-addressed output, signed receipts, settlement — is
         // identical; only the loader and the artifact differ, which is exactly
         // what `backend` and `kinds` exist to carry.
+        MediaGenModelEntry {
+            id: "hunyuan3d-2.1".to_string(),
+            name: "Hunyuan3D 2.1".to_string(),
+            family: "hunyuan3d".to_string(),
+            hf_repo: "tencent/Hunyuan3D-2.1".to_string(),
+            backend: MediaGenBackend::Hunyuan3d,
+            default_voxel_resolution: Some(512),
+            pipeline_class: "Hunyuan3DDiTFlowMatchingPipeline".to_string(),
+            kinds: vec![Image23d],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 1024,
+            default_steps: 30,
+            default_guidance_scale: 5.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "3.3B".to_string(),
+            size_bytes: 13_400_000_000,
+            min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
+            license: "TENCENT HUNYUAN NON-COMMERCIAL".to_string(),
+            license_tier: LicenseTier::NonCommercial,
+            expert_pair: None,
+            gated: false,
+            description: "Tencent Hunyuan3D 2.1 image-to-3D with PBR texture \
+                          synthesis. Ungated on the Hub but non-commercial: \
+                          enrollment refuses it until the operator sets \
+                          --accept-non-commercial. Loads through `hy3dgen`"
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
         MediaGenModelEntry {
             id: "trellis2-4b".to_string(),
             name: "TRELLIS.2 4B".to_string(),
@@ -5037,6 +5113,41 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
     // Omni takes audio, video, text, images and documents in and emits
     // text. The vision path needs the separate `mmproj` sibling, which is
     // why it is declared here rather than left for the loader to guess.
+    // NVIDIA Cosmos-Reason2 — a video-reasoning VLM, post-trained on
+    // Qwen3-VL-8B-Instruct, so it serves on the ordinary llama.cpp vision path
+    // rather than needing anything of its own. Text out, video/image in.
+    //
+    // NVIDIA's own repo is **gated** on the Hub: fetching it needs the
+    // operator's `HF_TOKEN`. The community GGUF conversion carries both the
+    // weights and the projector and is ungated, which is what makes the model
+    // reachable from a fresh node at all — see `hf_token()` for the gated path
+    // when an operator prefers the first-party weights.
+    catalog.push(HfModelEntry {
+        id: "cosmos-reason2-8b".into(),
+        name: "NVIDIA Cosmos-Reason2 8B (video reasoning VLM)".into(),
+        family: "cosmos-reason".into(),
+        hf_repo: "mradermacher/Cosmos-Reason2-8B-GGUF".into(),
+        hf_filename: "Cosmos-Reason2-8B.Q4_K_M.gguf".into(),
+        parameters: "8B".into(),
+        architecture: ModelArchitecture::Qwen3Vl,
+        context_length: 262144,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 5_027_785_920,
+        min_ram_gb: 8,
+        license: "NVIDIA Open Model License".into(),
+        description: "NVIDIA Cosmos-Reason2 8B — video reasoning VLM for Physical AI, post-trained on Qwen3-VL-8B-Instruct. Takes video or images plus text and answers in text, with spatial-temporal understanding and object detection. 256K context. Needs the mmproj projector for the vision path; NVIDIA's own repo is gated and requires HF_TOKEN, this GGUF conversion is not.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec { filename: "Cosmos-Reason2-8B.mmproj-f16.gguf".into() }),
+        reasoning: ReasoningPolicy { supports_thinking: true, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
     catalog.push(HfModelEntry {
         id: "nemotron-3-nano-omni-30b-a3b".into(),
         name: "Nemotron 3 Nano Omni 30B-A3B (MoE, multimodal)".into(),
@@ -7432,12 +7543,14 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cosmos3-edge",
                 "flux2-dev",
                 "flux2-klein-4b",
                 "flux2-klein-9b",
                 "flux2-klein-9b-kv",
                 "flux2-klein-base-4b",
                 "flux2-klein-base-9b",
+                "hunyuan3d-2.1",
                 // Ungated on the Hub. Not loadable by `from_pretrained`
                 // straight from either publishing repo — its components are
                 // split across two and keyed for a diffusers older than the
@@ -7475,10 +7588,19 @@ mod tests {
              as a documented not-yet-constructible exception"
         );
         for e in &catalog {
-            // Nothing gated survives membership, so no entry is
-            // NonCommercial. A custom commercial license is admissible —
-            // enrollment refuses the model unless the operator accepted it by
-            // id — so every such entry must yield an id to accept.
+            // Membership is about *gating on HuggingFace* — whether a fresh
+            // node can fetch the weights without an account. Licence tier is a
+            // separate axis, enforced at enrollment by
+            // `TenzroNode::check_model_license`.
+            //
+            // This used to reject every NonCommercial entry outright, on the
+            // reasoning that "nothing gated survives membership, so no entry is
+            // NonCommercial". That inference is false: Hunyuan3D 2.1 is
+            // ungated on the Hub and carries a non-commercial community
+            // licence, so the two properties are simply independent. The rule
+            // that matters is that a restrictive tier must be *acceptable* —
+            // there has to be a way for an operator to opt in — otherwise the
+            // entry is unservable by anyone and should not be listed.
             match e.license_tier {
                 LicenseTier::Permissive | LicenseTier::Attribution => {}
                 LicenseTier::CommercialCustom => assert!(
@@ -7488,10 +7610,16 @@ mod tests {
                     e.id,
                     e.license
                 ),
-                LicenseTier::NonCommercial => panic!(
-                    "{} is NonCommercial (license={}); such a model is gated \
-                     on HuggingFace and fails membership",
-                    e.id, e.license
+                // Admissible, and opted into with `--accept-non-commercial`.
+                // The flag is global rather than per-id, so unlike
+                // CommercialCustom there is no acceptance id to map — the
+                // requirement is only that the tier is labelled honestly, so
+                // an operator is told what they are agreeing to.
+                LicenseTier::NonCommercial => assert!(
+                    !e.license.is_empty(),
+                    "{} is NonCommercial but names no licence, so an operator \
+                     accepting it would not know what they accepted",
+                    e.id
                 ),
             }
             assert!(!e.kinds.is_empty(), "{} serves no MediaGenKind", e.id);
