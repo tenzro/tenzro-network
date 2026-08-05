@@ -53,13 +53,35 @@ own receipt is acceptable.
   `diffusers` pipeline class, the kinds it serves, default and maximum
   resolutions, default step count and guidance scale, frame count and fps for
   video, VRAM floor, and — for split models — the expert pair.
+- **Backends:** a row carries a `backend`, defaulting to `diffusers`. That
+  default is what keeps every pixel pipeline unchanged — the render path for
+  them is byte-for-byte what it was. A row naming another backend is loaded and
+  rendered by its own adapter instead: `trellis2` (TRELLIS.2 image-to-3D) ships
+  as Microsoft's own package with its own pipeline class and returns a mesh,
+  not frames or latents, so there is no `diffusers` hook that expresses it.
+  Wrapping it in a `diffusers`-shaped shim would mean inventing a latent space,
+  a scheduler and a frame decoder the model does not have; rewriting the
+  `diffusers` path behind a new common abstraction would change seventeen
+  working pipelines to accommodate one that is not like them. Adding a backend
+  means implementing `load` and `render` on a `BackendAdapter` — nothing
+  existing moves.
+- **3D output:** `image23d` / `text23d` jobs produce a GLB mesh with PBR
+  materials (`model/gltf-binary`), published to the content-addressed store
+  like any other artifact. They are priced on the voxel grid rather than
+  `width`/`height`, which for a 3D job describe the _conditioning image_. The
+  worker builds the mesh to the grid the job was quoted on — delivering a
+  coarser one than was paid for is a silent overcharge.
+- **Enrollment refuses what it cannot load:** a worker checks each model's
+  backend imports before advertising it, and declines with the package to
+  install. A worker that enrolls for a backend it cannot import looks healthy,
+  wins the job, and fails at render — the requester waited for nothing.
 - **Split experts:** a row with an `expert_pair` names the two transformer
   components and the `boundary_ratio` that divides the schedule. Wan 2.2 A14B
   is the case in the catalog today: `transformer` renders the high-noise
   prefix, `transformer_2` the low-noise remainder, with the boundary at
   `0.875`. One expert needs 48 GB where the whole model needs 80, which is the
   point — two commodity cards render what one could not.
-- **Distributed rendering:** the boundary is a *noise level*, not a step index.
+- **Distributed rendering:** the boundary is a _noise level_, not a step index.
   A step belongs to the high-noise expert while
   `t >= boundary_ratio × scheduler.config.num_train_timesteps`; timesteps
   descend, so that set is always a prefix and one integer splits the schedule.
@@ -160,7 +182,7 @@ fetches that latent, resumes the scheduler at the boundary index, decodes, and
 signs the receipt. The intermediate latent is the only thing that crosses
 between them.
 
-A worker holding *both* experts claims each half separately and runs the same
+A worker holding _both_ experts claims each half separately and runs the same
 two passes locally. The protocol makes no exception for it, which keeps the
 signed step counts and the payment split identical either way.
 
@@ -174,14 +196,14 @@ tenzro-media-gen fetch "$JOB" --latent -o latent.safetensors
 
 ## Module layout
 
-| Module | Purpose |
-|---|---|
-| `tenzro_media_gen.types` | Python mirrors of `tenzro_types::media_gen` — params, task spec, job, handoff, receipt, worker capability — serializing to the same JSON the Rust queue expects, with the same admission checks. |
-| `tenzro_media_gen.commitments` | The three SHA-256 preimages (job id, handoff, receipt) under their domain tags, plus `WorkerKey` and Ed25519 sign/verify over them via PyNaCl. Byte-identical to `crates/tenzro-media-gen/src/commitments.rs`. |
-| `tenzro_media_gen.rpc_bridge` | JSON-RPC 2.0 client over `requests` covering all 18 `tenzro_mediaGen_*` methods. |
-| `tenzro_media_gen.pipelines` | Catalog-row parsing, `diffusers` pipeline construction (including loading a single expert into its natural slot with the other left unset), `boundary_index` arithmetic, and the whole / high-noise / low-noise denoising loops. Heavy imports stay function-local so the base install works without torch. |
-| `tenzro_media_gen.worker` | The lifecycle: enroll, poll, claim, `markRunning`, render, `publishOutput`, then `recordHandoff` or `submitReceipt`. Bounded waits on a split partner; explicit `failJob` rather than silent abandonment. |
-| `tenzro_media_gen.cli` | `tenzro-media-gen catalog \| quote \| post \| jobs \| get \| cancel \| receipt \| fetch \| workers \| keygen \| enroll \| serve` |
+| Module                         | Purpose                                                                                                                                                                                                                                                                                                     |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tenzro_media_gen.types`       | Python mirrors of `tenzro_types::media_gen` — params, task spec, job, handoff, receipt, worker capability — serializing to the same JSON the Rust queue expects, with the same admission checks.                                                                                                            |
+| `tenzro_media_gen.commitments` | The three SHA-256 preimages (job id, handoff, receipt) under their domain tags, plus `WorkerKey` and Ed25519 sign/verify over them via PyNaCl. Byte-identical to `crates/tenzro-media-gen/src/commitments.rs`.                                                                                              |
+| `tenzro_media_gen.rpc_bridge`  | JSON-RPC 2.0 client over `requests` covering all 18 `tenzro_mediaGen_*` methods.                                                                                                                                                                                                                            |
+| `tenzro_media_gen.pipelines`   | Catalog-row parsing, `diffusers` pipeline construction (including loading a single expert into its natural slot with the other left unset), `boundary_index` arithmetic, and the whole / high-noise / low-noise denoising loops. Heavy imports stay function-local so the base install works without torch. |
+| `tenzro_media_gen.worker`      | The lifecycle: enroll, poll, claim, `markRunning`, render, `publishOutput`, then `recordHandoff` or `submitReceipt`. Bounded waits on a split partner; explicit `failJob` rather than silent abandonment.                                                                                                   |
+| `tenzro_media_gen.cli`         | `tenzro-media-gen catalog \| quote \| post \| jobs \| get \| cancel \| receipt \| fetch \| workers \| keygen \| enroll \| serve`                                                                                                                                                                            |
 
 Global flags: `--url` (node JSON-RPC endpoint, default `http://127.0.0.1:8545`),
 `--timeout` (seconds per call, default 300 — raise it when publishing large

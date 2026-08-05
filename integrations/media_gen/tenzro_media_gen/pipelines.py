@@ -132,6 +132,11 @@ class CatalogEntry:
     # trained against rather than letting the scheduler derive its own. The
     # values are resolved per family by its `FamilyAdapter`, never shared
     # across families.
+    #: Which inference library loads and runs this entry. Defaults to
+    #: ``diffusers`` so every pipeline that predates 3D support is unchanged.
+    backend: str = "diffusers"
+    #: Voxel grid resolution for 3D entries; ``None`` for pixel pipelines.
+    default_voxel_resolution: int | None = None
     distilled: bool = False
     # Subfolder of the converted snapshot holding the latent upsampler stage 2
     # refines through. `None` renders in one stage.
@@ -176,6 +181,12 @@ class CatalogEntry:
                 else None
             ),
             config_repo=(str(data["config_repo"]) if data.get("config_repo") is not None else None),
+            backend=str(data.get("backend", "diffusers")),
+            default_voxel_resolution=(
+                int(data["default_voxel_resolution"])
+                if data.get("default_voxel_resolution") is not None
+                else None
+            ),
             distilled=bool(data.get("distilled", False)),
             latent_upsampler=(
                 str(data["latent_upsampler"]) if data.get("latent_upsampler") is not None else None
@@ -404,6 +415,84 @@ class FamilyAdapter:
         )
 
 
+class BackendAdapter:
+    """Per-backend loading and rendering, one level above :class:`FamilyAdapter`.
+
+    ``FamilyAdapter`` covers what differs *within* diffusers — a converter to
+    patch, a sigma trajectory, a refiner. This covers what is not diffusers at
+    all. TRELLIS.2 ships its own ``trellis2`` package with its own pipeline
+    class and returns a mesh rather than frames; there is no diffusers hook
+    that expresses that.
+
+    Two ways to get this wrong, both rejected:
+
+    * Wrap the new library in a diffusers-shaped shim. The shim has to invent
+      a latent space, a scheduler and a frame decoder that the model does not
+      have, and every one of those inventions is a place to be subtly wrong.
+    * Rewrite the diffusers path behind a new common abstraction. That changes
+      seventeen working pipelines to accommodate one that is not like them.
+
+    So the backend is declared per catalog entry and defaults to ``diffusers``.
+    Nothing existing moves, and a new backend implements only ``load`` and
+    ``render``.
+    """
+
+    #: Catalog ``backend`` string this adapter serves.
+    backend: str = ""
+    #: Python distribution that must import before this backend can serve.
+    required_package: str = ""
+
+    def available(self) -> bool:
+        """Whether this worker can actually load this backend.
+
+        Checked at *enrolment*, so a worker advertises only what it can serve.
+        A worker that enrols for a backend it cannot import looks healthy,
+        claims a job, and fails at render time — the job is dead and the
+        requester waited for nothing.
+        """
+        import importlib.util
+
+        return importlib.util.find_spec(self.required_package) is not None
+
+    def load(self, entry: CatalogEntry, kind: MediaGenKind, role, **opts) -> LoadedPipeline:
+        raise NotImplementedError(
+            f"backend {self.backend!r} declares no loader"
+        )
+
+    def render(self, loaded: LoadedPipeline, params: MediaGenParams, input_image: bytes | None):
+        raise NotImplementedError(
+            f"backend {self.backend!r} declares no render path"
+        )
+
+
+_BACKEND_ADAPTERS: dict[str, BackendAdapter] = {}
+
+
+def register_backend_adapter(adapter: BackendAdapter) -> None:
+    """Register `adapter` as the handler for its backend."""
+    _BACKEND_ADAPTERS[adapter.backend] = adapter
+
+
+def backend_adapter(backend: str) -> BackendAdapter | None:
+    """The adapter for `backend`, or ``None`` for the diffusers default.
+
+    ``None`` rather than a no-op instance: the diffusers path is not an adapter
+    and never was, so returning something adapter-shaped for it would imply a
+    symmetry that does not exist and invite someone to "finish" it.
+    """
+    return _BACKEND_ADAPTERS.get(backend)
+
+
+def backend_is_available(backend: str) -> bool:
+    """Whether this worker can serve `backend`."""
+    if backend in ("", "diffusers"):
+        import importlib.util
+
+        return importlib.util.find_spec("diffusers") is not None
+    adapter = backend_adapter(backend)
+    return adapter is not None and adapter.available()
+
+
 _FAMILY_ADAPTERS: dict[str, FamilyAdapter] = {}
 
 
@@ -547,6 +636,106 @@ class Ltx2Adapter(FamilyAdapter):
 register_family_adapter(Ltx2Adapter())
 
 
+class Trellis2Adapter(BackendAdapter):
+    """Microsoft TRELLIS.2 — single image in, GLB mesh with PBR materials out.
+
+    Not a diffusers pipeline: it ships as ``trellis2`` with its own
+    ``Trellis2ImageTo3DPipeline``, and its result is a mesh object, not frames
+    or latents. The GLB is built by ``o_voxel.postprocess.to_glb`` from the
+    mesh's vertices, faces and attribute volume — so both packages have to be
+    importable before this worker may advertise the model.
+    """
+
+    backend = "trellis2"
+    required_package = "trellis2"
+
+    def available(self) -> bool:
+        # Two packages, not one. `o_voxel` is what turns the mesh into a GLB,
+        # so a worker with `trellis2` alone can run the model and then fail at
+        # the last step with the render already paid for.
+        import importlib.util
+
+        return all(
+            importlib.util.find_spec(pkg) is not None for pkg in ("trellis2", "o_voxel")
+        )
+
+    def load(self, entry: CatalogEntry, kind: MediaGenKind, role, **opts) -> LoadedPipeline:
+        if role is not None:
+            raise ValueError(
+                f"{entry.id} is not a split model; TRELLIS.2 has no expert pair to serve half of"
+            )
+        from trellis2.pipelines import Trellis2ImageTo3DPipeline
+
+        source = str(entry.local_snapshot() or entry.hf_repo)
+        pipe = Trellis2ImageTo3DPipeline.from_pretrained(source)
+        device = opts.get("device", "cuda")
+        if device == "cuda":
+            pipe.cuda()
+        return LoadedPipeline(pipe=pipe, entry=entry, kind=kind, role=None)
+
+    def render(self, loaded: LoadedPipeline, params: MediaGenParams, input_image: bytes | None):
+        if not input_image:
+            raise ValueError(
+                f"{loaded.entry.id} serves image23d and needs a conditioning image; "
+                "none was published for this job"
+            )
+        import io
+        import tempfile
+
+        import o_voxel
+        from PIL import Image
+
+        seed = _resolve_seed(params.seed)
+        image = Image.open(io.BytesIO(input_image)).convert("RGB")
+        mesh = loaded.pipe.run(image, seed=seed)[0]
+
+        # `voxel_resolution` is the grid the job was priced on, so the mesh it
+        # returns has to be built to match — quoting one size and delivering
+        # another is a silent overcharge. TRELLIS exposes the size through the
+        # decimation target rather than as a grid argument, so the face budget
+        # is derived from the same number: r² faces for an r³ grid, matching
+        # how the price is computed on the grid face.
+        grid = params.voxel_resolution or loaded.entry.default_voxel_resolution or 512
+        mesh.simplify(grid * grid)
+
+        glb = o_voxel.postprocess.to_glb(
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            attr_volume=mesh.attrs,
+            coords=mesh.coords,
+            attr_layout=mesh.layout,
+            voxel_size=mesh.voxel_size,
+            aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+            decimation_target=grid * grid,
+            texture_size=2048,
+            remesh=True,
+            remesh_band=1,
+            remesh_project=0,
+            verbose=False,
+        )
+
+        # `export` writes a file rather than returning bytes, and the receipt
+        # commits to the bytes. Round-trip through a temp file rather than
+        # reaching into the exporter's internals.
+        with tempfile.NamedTemporaryFile(suffix=".glb") as fh:
+            glb.export(fh.name, extension_webp=True)
+            fh.seek(0)
+            payload = pathlib.Path(fh.name).read_bytes()
+
+        return DenoiseResult(
+            latents=None,
+            media=payload,
+            mime="model/gltf-binary",
+            seed_used=seed,
+            steps_completed=params.steps,
+            total_steps=params.steps,
+            boundary_index=None,
+        )
+
+
+register_backend_adapter(Trellis2Adapter())
+
+
 def load_pipeline(
     entry: CatalogEntry,
     kind: MediaGenKind,
@@ -571,6 +760,22 @@ def load_pipeline(
     Defaults to ``dtype``, so an existing caller gets exactly what it did
     before.
     """
+    # A non-diffusers entry is loaded by its own backend. Dispatching here
+    # rather than in the worker keeps the call sites unchanged: everything
+    # still asks for a pipeline for an entry and a kind, and the entry decides
+    # which library answers.
+    adapter = backend_adapter(entry.backend)
+    if adapter is not None:
+        return adapter.load(
+            entry,
+            kind,
+            role,
+            device=device,
+            dtype=dtype,
+            precision=precision,
+            cache_dir=cache_dir,
+        )
+
     import diffusers
     import torch
 
@@ -810,6 +1015,10 @@ def denoise_whole(
     input_image: bytes | None = None,
 ) -> DenoiseResult:
     """Render a non-split job with the stock pipeline call."""
+    adapter = backend_adapter(loaded.entry.backend)
+    if adapter is not None:
+        return adapter.render(loaded, params, input_image)
+
     import torch
 
     if loaded.entry.is_split:

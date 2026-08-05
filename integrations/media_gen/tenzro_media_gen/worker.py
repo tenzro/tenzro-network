@@ -41,6 +41,8 @@ from .pipelines import (
     denoise_whole,
     encode_latents,
     find_entry,
+    backend_adapter,
+    backend_is_available,
     load_pipeline,
 )
 from .rpc_bridge import RpcClient, RpcError
@@ -285,9 +287,24 @@ class MediaGenWorker:
         """
         self._catalog = self.client.list_catalog()
         known = {entry.get("id") for entry in self._catalog}
+        by_id = {entry.get("id"): entry for entry in self._catalog}
         for model_id in self.config.served_models + [m for m, _ in self.config.expert_holdings]:
             if model_id not in known:
                 raise ValueError(f"model {model_id!r} is not in the node's catalog")
+            # Refuse at enrolment, not at claim time. A worker that advertises
+            # a backend it cannot import looks healthy, wins the job, and then
+            # fails during render — the requester waited for nothing and the
+            # job has to be re-posted. Checking here means the model is simply
+            # never offered by this worker.
+            backend = str(by_id[model_id].get("backend", "diffusers"))
+            if not backend_is_available(backend):
+                adapter = backend_adapter(backend)
+                pkg = adapter.required_package if adapter is not None else backend
+                raise ValueError(
+                    f"model {model_id!r} needs the {backend!r} backend, which this worker "
+                    f"cannot load: install {pkg!r} (and its peers) or drop the model from "
+                    "--model"
+                )
         self.client.enroll_worker(self.config.capability())
         log.info(
             "enrolled %s: %d whole model(s), %d expert holding(s)",
