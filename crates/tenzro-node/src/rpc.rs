@@ -554,10 +554,12 @@ async fn handle_rpc_post(
     // per method rather than by the blanket middleware, so inference on a
     // model published to the network still gets through — see
     // `gate_service_key`.
-    let service_key = headers
-        .get(crate::admission::SERVICE_KEY_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    // Both headers, via the same helper the blanket middleware uses. The
+    // operator's admin token is accepted as a service key so whoever gated the
+    // node is not locked out of it; reading only `x-tenzro-service-key` here
+    // would reintroduce exactly that lockout on the one surface that no longer
+    // goes through the middleware.
+    let service_key = crate::admission::presented_key(&headers).map(|s| s.to_string());
 
     // Optional BYO-issuer Canton JWT. Tenants normally never send
     // this — the node mints their Canton JWT server-side from the
@@ -1017,6 +1019,45 @@ pub(crate) const PUBLIC_INFERENCE_METHODS: &[&str] = &[
     "tenzro_transcribe",
     "tenzro_videoEmbed",
 ];
+
+/// Record a loaded multi-modal model's visibility.
+///
+/// The multi-modal runtimes (forecast, vision, text-embedding, segmentation,
+/// detection, audio, video) load through their own `load_*` RPCs rather than
+/// `serve_model`, so they never acquired a [`ModelVisibility`] at all. That
+/// left them unpublishable: `served_models` is what provider announcements
+/// read and what the gated-node carve-out consults, so a forecast or embedding
+/// model could be loaded and serving locally while being invisible to both.
+///
+/// Same map as `serve_model` writes, so announcement and admission keep giving
+/// one answer rather than two.
+///
+/// # Default is `Private`
+///
+/// Loading a model is not publishing it. `serve_model` defaults to `Network`
+/// because serving is the act of offering; `load_*` only puts weights in
+/// memory, and defaulting it to `Network` would silently start announcing
+/// every model an operator warmed up. An operator publishes by passing
+/// `visibility` explicitly.
+fn record_multimodal_visibility(
+    node: &Arc<TenzroNode>,
+    params: &Value,
+    model_id: &str,
+) -> std::result::Result<(), JsonRpcError> {
+    let visibility = match params.get("visibility").and_then(|v| v.as_str()) {
+        Some(s) => ModelVisibility::parse(s).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Unknown visibility '{}'. Expected 'network', 'gated' or 'private'",
+                s
+            ),
+            data: None,
+        })?,
+        None => ModelVisibility::Private,
+    };
+    node.served_models.insert(model_id.to_string(), visibility);
+    Ok(())
+}
 
 /// The model a public-inference request targets, if this is one.
 ///
@@ -3064,6 +3105,7 @@ async fn dispatch_request(
         // all, not what a caller may do once admitted.
         "tenzro_addServiceKey" => handle_add_service_key(node, request.params).await,
         "tenzro_revokeServiceKey" => handle_revoke_service_key(node, request.params).await,
+        "tenzro_forgetServiceKey" => handle_forget_service_key(node, request.params).await,
         "tenzro_serviceKeyStatus" => handle_service_key_status(node).await,
 
         // API key management — subject (X-Tenzro-Api-Key authenticated)
@@ -26210,7 +26252,7 @@ async fn handle_serve_model(
             Some(s) => ModelVisibility::parse(s).ok_or_else(|| JsonRpcError {
                 code: -32602,
                 message: format!(
-                    "Unknown visibility '{}'. Expected 'network' or 'private'",
+                    "Unknown visibility '{}'. Expected 'network', 'gated' or 'private'",
                     s
                 ),
                 data: None,
@@ -26605,7 +26647,7 @@ async fn handle_serve_model(
         Some(s) => ModelVisibility::parse(s).ok_or_else(|| JsonRpcError {
             code: -32602,
             message: format!(
-                "Unknown visibility '{}'. Expected 'network' or 'private'",
+                "Unknown visibility '{}'. Expected 'network', 'gated' or 'private'",
                 s
             ),
             data: None,
@@ -28123,6 +28165,7 @@ async fn handle_load_forecast_model(
         )
         .map_err(forecast_err)?;
 
+    record_multimodal_visibility(node, &p, model_id)?;
     Ok(serde_json::json!({
         "model_id": model_id,
         "loaded": true,
@@ -28332,6 +28375,7 @@ async fn handle_load_vision_model(
         )
         .map_err(forecast_err)?;
 
+    record_multimodal_visibility(node, &p, &model_id)?;
     Ok(serde_json::json!({
         "model_id": model_id,
         "loaded": true,
@@ -28598,6 +28642,7 @@ async fn handle_load_text_embedding_model(
         )
         .map_err(forecast_err)?;
 
+    record_multimodal_visibility(node, &p, &model_id)?;
     Ok(serde_json::json!({
         "model_id": model_id, "loaded": true,
         "embedding_dim": embedding_dim, "max_sequence_length": max_sequence_length,
@@ -29189,6 +29234,7 @@ async fn handle_load_segmentation_model(
             input_size,
         )
         .map_err(forecast_err)?;
+    record_multimodal_visibility(node, &p, &model_id)?;
     Ok(serde_json::json!({ "model_id": model_id, "loaded": true, "input_size": input_size }))
 }
 
@@ -29388,6 +29434,7 @@ async fn handle_load_text_segmentation_model(
         )
         .map_err(forecast_err)?;
 
+    record_multimodal_visibility(node, &p, &model_id)?;
     Ok(serde_json::json!({
         "model_id": model_id,
         "bundle_dir": bundle_dir.display().to_string(),
@@ -29587,6 +29634,7 @@ async fn handle_load_detection_model(
     node.detection_runtime
         .load_onnx(model_id.clone(), path, family, input_size, num_classes)
         .map_err(forecast_err)?;
+    record_multimodal_visibility(node, &p, &model_id)?;
     Ok(
         serde_json::json!({ "model_id": model_id, "loaded": true, "input_size": input_size, "num_classes": num_classes }),
     )
@@ -29909,6 +29957,7 @@ async fn handle_load_audio_model(
         }
     }
 
+    record_multimodal_visibility(node, &p, &model_id)?;
     Ok(serde_json::json!({
         "model_id": model_id,
         "loaded": true,
@@ -30072,6 +30121,7 @@ async fn handle_load_video_model(
     node.video_runtime
         .register_vision_fallback(model_id, encoder, num_frames);
 
+    record_multimodal_visibility(node, &p, model_id)?;
     Ok(serde_json::json!({
         "model_id": model_id,
         "vision_model_id": vision_model_id,
@@ -43774,6 +43824,57 @@ async fn handle_revoke_service_key(
         })?;
 
     Ok(serde_json::json!({ "revoked": digest }))
+}
+
+/// `tenzro_forgetServiceKey` — stop a key holding the gate open.
+///
+/// The explicit counterpart to `tenzro_revokeServiceKey`. Revoking says a key
+/// must never work again and deliberately keeps the gate on, because the usual
+/// reason to revoke is a leak and turning a leak into an open node would be a
+/// worse failure. Forgetting is how an operator actually un-gates: remove the
+/// acceptances, and when the last one goes the node is permissionless again.
+///
+/// Reports whether the gate is still enabled afterwards, so an operator can
+/// tell "I removed one of several" from "my node is now open" without a second
+/// call.
+async fn handle_forget_service_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(Value::Null);
+    let digest = params
+        .get("key_digest")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing required parameter: key_digest (the hex digest \
+                      returned by tenzro_addServiceKey, not the key itself)"
+                .to_string(),
+            data: None,
+        })?;
+
+    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "key_digest must be a 64-character SHA-256 hex digest".to_string(),
+            data: None,
+        });
+    }
+
+    let gate = node.admission_gate();
+    gate.forget_key(digest).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: e,
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "forgotten": digest,
+        "gate_enabled": gate.is_enabled(),
+        "accepted_keys": gate.accepted_len(),
+    }))
 }
 
 /// `tenzro_serviceKeyStatus` — whether the gate is on, and how many keys it

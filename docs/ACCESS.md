@@ -101,6 +101,41 @@ budget returns `-32005` with `retry_after_ms`.
 A key's holder can read its own entitlements (`listMine`), so a tenant can
 answer "what may I do here" without asking the operator.
 
+### Direct node access vs. operator-operated external networks
+
+The distinction that matters: **one tier is direct access to the node itself;
+the other is access to external networks the operator operates.** They are
+different systems and should never be reasoned about as one.
+
+An API key does both jobs, and only the first is affected by anything described
+here.
+
+1. **Scopes on this node's own resources** — what the holder may call.
+2. **Authorization for upstream networks the operator brokers** — Canton
+   synchronizers and equivalents that the operator runs, pays for, or holds
+   credentials to.
+
+The second is a pre-existing system and is unchanged. A key carries
+`canton_networks` (the set it may reach; a key naming none reaches no ledger)
+and an optional `canton_user_id` binding it to a party, plus a tier bounding
+its budget over a sliding 60-second window — `free` at 60 requests/min with
+writes refused, `standard` at 600, `priority` at 6,000. A key authorizing more
+than one network and given no pin returns `-32004` naming the authorized set;
+over budget returns `-32005` with `retry_after_ms`.
+
+This is the operator brokering access to something _upstream of the node_. It
+is not the node's service-key gate, and it is not model visibility. Three
+different questions:
+
+|                               | Gates what                               | Set by               |
+| ----------------------------- | ---------------------------------------- | -------------------- |
+| Service key                   | this machine's raw resources             | operator, per rental |
+| Model visibility              | who may call a given model               | operator, per model  |
+| API-key network authorization | which upstream networks a tenant reaches | operator, per key    |
+
+Publishing a model at `network` visibility does not grant anyone Canton access,
+and holding a Canton-authorized API key does not make a private model callable.
+
 ## Payment — on demand, no relationship
 
 x402 / TNZO settlement. The caller pays per call. There is no key to issue and

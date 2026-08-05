@@ -62,6 +62,14 @@ const ENV_SERVICE_KEYS: &str = "TENZRO_SERVICE_KEYS";
 pub struct NodeAdmissionGate {
     policy: RwLock<AdmissionPolicy>,
     storage: Option<Arc<dyn KvStore>>,
+    /// Digest of the operator's admin token, when they set one.
+    ///
+    /// Held so [`Self::add_key`] can fold it in at the moment a runtime call
+    /// first switches the gate on. `load` does this already, but a node whose
+    /// gate is enabled by `tenzro_addServiceKey` rather than by config never
+    /// passed through that branch — and locked its operator out unless they
+    /// happened to keep the key they had just minted.
+    admin_digest: Option<ServiceKeyHash>,
 }
 
 impl NodeAdmissionGate {
@@ -71,6 +79,7 @@ impl NodeAdmissionGate {
         Self {
             policy: RwLock::new(AdmissionPolicy::open()),
             storage: None,
+            admin_digest: None,
         }
     }
 
@@ -154,6 +163,9 @@ impl NodeAdmissionGate {
         Self {
             policy: RwLock::new(policy),
             storage,
+            admin_digest: admin_token
+                .filter(|t| !t.is_empty())
+                .map(ServiceKeyHash::from_plaintext),
         }
     }
 
@@ -191,7 +203,18 @@ impl NodeAdmissionGate {
         let hash = ServiceKeyHash::from_plaintext(plaintext);
         let hex = hash.as_hex().to_string();
         self.persist(ACCEPTED_PREFIX, &hex)?;
-        self.policy.write().accept_key(hash);
+
+        let mut policy = self.policy.write();
+        let was_enabled = policy.is_enabled();
+        policy.accept_key(hash);
+
+        // Turning the gate on at runtime must not lock out the operator doing
+        // the turning. `load` folds the admin token in for a gate enabled by
+        // config; this is the same courtesy for one enabled by RPC, and it is
+        // the difference between "gated" and "gated with no way back in".
+        if !was_enabled && let Some(admin) = self.admin_digest.as_ref() {
+            policy.accept_key(admin.clone());
+        }
         Ok(hex)
     }
 
@@ -210,6 +233,29 @@ impl NodeAdmissionGate {
         self.policy.write().accept_grant(grant);
     }
 
+    /// Forget a key's acceptance, without recording a revocation.
+    ///
+    /// The deliberate counterpart to [`Self::revoke_key`]. Revocation says
+    /// "this key must never work again" and keeps the gate on; forgetting says
+    /// "this key is no longer one of the ones holding the gate open". Removing
+    /// the last one returns the node to permissionless — which is why it is a
+    /// separate call an operator makes on purpose rather than a side effect of
+    /// revoking a leaked key.
+    ///
+    /// The persisted row goes too, so the next start does not resurrect it.
+    pub fn forget_key(&self, hex_digest: &str) -> Result<(), String> {
+        let hash = ServiceKeyHash::from_hex(hex_digest);
+        if let Some(store) = self.storage.as_ref() {
+            let mut key = ACCEPTED_PREFIX.to_vec();
+            key.extend_from_slice(hash.as_hex().as_bytes());
+            store
+                .delete(CF_METADATA, &key)
+                .map_err(|e| format!("admission gate: could not forget key: {e}"))?;
+        }
+        self.policy.write().forget_key(&hash);
+        Ok(())
+    }
+
     /// Revoke a key by its digest.
     ///
     /// Revocation is recorded rather than the acceptance being deleted, so a
@@ -218,6 +264,20 @@ impl NodeAdmissionGate {
     pub fn revoke_key(&self, hex_digest: &str) -> Result<(), String> {
         let hash = ServiceKeyHash::from_hex(hex_digest);
         self.persist(REVOKED_PREFIX, hash.as_hex())?;
+
+        // The acceptance is deliberately left in place.
+        //
+        // `is_enabled()` is "any accepted key", so dropping it would mean
+        // revoking the last key silently returns the node to permissionless —
+        // and the commonest reason to revoke a key is that it leaked. Turning
+        // a leak into an open node is a worse failure than the one it would
+        // fix. The gate stays on; the key stays refused, because revocation is
+        // checked before acceptance.
+        //
+        // Reachability for the operator is handled the other way round: the
+        // admin token is admitted whenever the gate is enabled, including when
+        // a runtime `add_key` is what enabled it. Un-gating stays an explicit
+        // act rather than a side effect of revocation.
         self.policy.write().revoke_key(hash);
         Ok(())
     }
@@ -263,7 +323,7 @@ const ADMIN_TOKEN_HEADER: &str = "x-tenzro-admin-token";
 ///
 /// Falls back to the admin token header so an operator's existing tooling
 /// reaches a gated node without also learning a second header.
-fn presented_key(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn presented_key(headers: &HeaderMap) -> Option<&str> {
     [SERVICE_KEY_HEADER, ADMIN_TOKEN_HEADER]
         .into_iter()
         .find_map(|name| {

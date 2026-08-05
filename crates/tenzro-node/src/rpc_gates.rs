@@ -94,6 +94,7 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_exportConfig",
     "tenzro_forgetIdentity",
     "tenzro_forgetMcpSecret",
+    "tenzro_forgetServiceKey",
     "tenzro_freezeAddress",
     "tenzro_getAccessLease",
     "tenzro_gossipStats",

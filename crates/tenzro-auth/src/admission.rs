@@ -301,6 +301,16 @@ impl AdmissionPolicy {
         self.revoked.insert(key);
     }
 
+    /// Drop a key's acceptance without recording a revocation.
+    ///
+    /// Pairs with [`Self::revoke_key`]: revocation says "this key must never
+    /// work again", acceptance is what keeps the gate switched on. Revoking
+    /// without also forgetting leaves a gate that is enabled by a key which
+    /// can no longer open it — a node nobody can reach and nobody can un-gate.
+    pub fn forget_key(&mut self, key: &ServiceKeyHash) {
+        self.accepted.retain(|g| &g.hash != key);
+    }
+
     /// Turn the gate off entirely, returning to permissionless.
     pub fn disable(&mut self) {
         self.accepted.clear();
