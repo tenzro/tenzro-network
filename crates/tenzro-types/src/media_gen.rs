@@ -90,6 +90,18 @@ pub enum MediaGenKind {
     /// Reference image + text prompt -> video clip.
     #[serde(rename = "image2video")]
     Image2Video,
+    /// Reference image -> 3D asset (mesh with PBR materials).
+    ///
+    /// The output is a GLB, not frames. Kept a distinct kind rather than
+    /// folded into `Image2Image` because almost nothing downstream is shared:
+    /// the work scales with voxel resolution rather than pixels, the artifact
+    /// is a mesh a viewer loads rather than something to decode, and a worker
+    /// that can render video is not thereby able to produce geometry.
+    #[serde(rename = "image23d")]
+    Image23d,
+    /// Text prompt -> 3D asset (mesh with PBR materials).
+    #[serde(rename = "text23d")]
+    Text23d,
 }
 
 impl fmt::Display for MediaGenKind {
@@ -99,6 +111,8 @@ impl fmt::Display for MediaGenKind {
             Self::Image2Image => write!(f, "image2image"),
             Self::Text2Video => write!(f, "text2video"),
             Self::Image2Video => write!(f, "image2video"),
+            Self::Image23d => write!(f, "image23d"),
+            Self::Text23d => write!(f, "text23d"),
         }
     }
 }
@@ -112,18 +126,43 @@ impl MediaGenKind {
             "image2image" | "image-to-image" | "i2i" => Some(Self::Image2Image),
             "text2video" | "text-to-video" | "t2v" => Some(Self::Text2Video),
             "image2video" | "image-to-video" | "i2v" => Some(Self::Image2Video),
+            "image23d" | "image-to-3d" | "i23d" => Some(Self::Image23d),
+            "text23d" | "text-to-3d" | "t23d" => Some(Self::Text23d),
             _ => None,
         }
     }
 
     /// Whether this kind requires an `input_image_hash` in [`MediaGenParams`].
     pub fn requires_input_image(&self) -> bool {
-        matches!(self, Self::Image2Image | Self::Image2Video)
+        matches!(self, Self::Image2Image | Self::Image2Video | Self::Image23d)
     }
 
     /// Whether this kind produces a video (multi-frame) output.
     pub fn is_video(&self) -> bool {
         matches!(self, Self::Text2Video | Self::Image2Video)
+    }
+
+    /// Whether this kind produces geometry rather than pixels.
+    ///
+    /// The seam every kind-dependent branch should ask, so a third output
+    /// class later is one arm here rather than a hunt for `== Image23d`
+    /// comparisons scattered across the worker and the pricing table.
+    pub fn is_3d(&self) -> bool {
+        matches!(self, Self::Image23d | Self::Text23d)
+    }
+
+    /// The artifact's file extension, for the content-addressed store.
+    ///
+    /// 3D kinds return a GLB — a mesh with PBR materials — which nothing
+    /// downstream should try to decode as frames.
+    pub fn output_extension(&self) -> &'static str {
+        if self.is_3d() {
+            "glb"
+        } else if self.is_video() {
+            "mp4"
+        } else {
+            "png"
+        }
     }
 }
 
@@ -225,6 +264,22 @@ pub struct MediaGenParams {
     pub steps: u32,
     /// Classifier-free guidance scale.
     pub guidance_scale: f32,
+    /// Voxel grid resolution for 3D kinds, e.g. `1536` for a 1536³ grid.
+    ///
+    /// Optional and ignored by every pixel kind, so an image or video job is
+    /// unchanged by its existence. Present because a 3D job's cost and quality
+    /// scale with this rather than with `width`/`height`, which for
+    /// [`MediaGenKind::Image23d`] describe the *conditioning image* and say
+    /// nothing about the asset produced.
+    ///
+    /// `default` but deliberately **not** `skip_serializing_if`: these params
+    /// cross the gossip wire as bincode, which is positional and not
+    /// self-describing. Skipping the field on write would leave the decoder
+    /// reading a value that was never written — it fails as a truncated
+    /// payload, not as a missing field. `default` still covers the JSON
+    /// surfaces, where an older client simply omits it.
+    #[serde(default)]
+    pub voxel_resolution: Option<u32>,
     /// Optional deterministic seed. When `None` the worker picks one and
     /// reports it back in the receipt.
     pub seed: Option<u64>,
@@ -619,6 +674,7 @@ mod tests {
             fps: if kind.is_video() { Some(16) } else { None },
             steps: 30,
             guidance_scale: 4.5,
+            voxel_resolution: None,
             seed: None,
             input_image_hash: if kind.requires_input_image() {
                 Some(Hash::new([7u8; 32]))

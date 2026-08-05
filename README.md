@@ -313,6 +313,16 @@ Three factors gate a session, each answering a different question. A **service k
 
 The lease is also the scope: which accelerators, how many cores, how much memory, whether outbound egress is permitted (off by default — a rented shell is for compute, and the operator's local networks stay unreachable either way), the per-session wall-clock ceiling (capped at 12 hours), and the lease term. Omitting the accelerator list yields a CPU-only lease, because "all GPUs" is not a scope anyone chose. Revoking a lease kills every outstanding session grant against it. CLI `tenzro shell login` and `tenzro shell lease {open, revoke, list}`.
 
+### 3D asset generation
+
+Image-to-3D sits in the same job queue as image and video rather than beside it. The surrounding machinery — posting, claiming, content-addressed output, signed receipts, pixel-step settlement — is identical; only the loader and the artifact differ, and those are exactly what the catalog entry carries.
+
+- **Kinds.** `MediaGenKind` gains `image23d` and `text23d`. The output is a GLB mesh with PBR materials, not frames, so nothing downstream tries to decode it as video.
+- **Pluggable backend, nothing forced.** A media-gen entry declares its `backend`, defaulted to `diffusers`. That default is what keeps every existing pipeline byte-for-byte unchanged. `trellis2-4b` loads through Microsoft's own `trellis2` package, which is not a `diffusers` pipeline at all — pushing it through a shim, or pushing `diffusers` models through a new abstraction, would trade a working path for a uniform one. A worker missing a backend's package refuses enrolment for that entry rather than accepting the job and failing at claim time.
+- **Priced on what it produces.** A 3D job is quoted on the voxel grid, not the conditioning image: `width`/`height` describe the _input photo_, so pricing on them would charge for the input and ignore the asset — two jobs from one photo at 512³ and 1536³ would cost the same while differing 27× in work. Charged on the grid face (`r²`), since generation cost tracks the sparse occupied surface rather than the empty interior, and against the same `per_pixel_step` rate so both settle through one path.
+
+`tenzro model serve` and every pixel pipeline are untouched by any of this.
+
 ### Node capability surface
 
 Two facilities cover the gap between what a node can do and what a caller can find.

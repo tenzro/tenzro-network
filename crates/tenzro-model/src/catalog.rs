@@ -2312,6 +2312,60 @@ pub struct MediaGenExpertPair {
     pub min_vram_gb_per_expert: u32,
 }
 
+/// Which inference library a media-gen entry is loaded and run through.
+///
+/// # Why this is per-entry rather than one house style
+///
+/// The worker began as a `diffusers` host because every model it served was a
+/// `diffusers` pipeline. That stopped being true: `Trellis2ImageTo3DPipeline`
+/// comes from Microsoft's own `trellis2` package, and Cosmos3 ships a
+/// `Cosmos3OmniPipeline` whose omni surface is not a `diffusers` pipeline in
+/// the usual sense either.
+///
+/// Forcing those through a `diffusers` shim, or forcing `diffusers` models
+/// through a new abstraction, both trade a working path for a uniform one. So
+/// the backend is a property of the entry, defaulted to
+/// [`Diffusers`](Self::Diffusers) — every existing entry keeps its exact
+/// behaviour without being touched, and a new family declares what it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaGenBackend {
+    /// HuggingFace `diffusers`. The default and the common case.
+    #[default]
+    Diffusers,
+    /// Microsoft's `trellis2` package (`Trellis2ImageTo3DPipeline`).
+    Trellis2,
+    /// Tencent's `hy3dgen` stack for the Hunyuan3D family.
+    Hunyuan3d,
+    /// NVIDIA Cosmos omni pipeline (`Cosmos3OmniPipeline`).
+    Cosmos3Omni,
+}
+
+impl MediaGenBackend {
+    /// Stable wire/label form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Diffusers => "diffusers",
+            Self::Trellis2 => "trellis2",
+            Self::Hunyuan3d => "hunyuan3d",
+            Self::Cosmos3Omni => "cosmos3_omni",
+        }
+    }
+
+    /// The Python distribution a worker must have installed to serve it.
+    ///
+    /// Reported so a worker can refuse enrolment for a backend it cannot load,
+    /// rather than accepting the job and failing at claim time.
+    pub fn required_package(&self) -> &'static str {
+        match self {
+            Self::Diffusers => "diffusers",
+            Self::Trellis2 => "trellis2",
+            Self::Hunyuan3d => "hy3dgen",
+            Self::Cosmos3Omni => "cosmos3",
+        }
+    }
+}
+
 /// A generative-media pipeline in the curated media-gen catalog.
 ///
 /// Unlike the ONNX entries above, a media-gen pipeline is a multi-folder
@@ -2321,6 +2375,7 @@ pub struct MediaGenExpertPair {
 /// [`pipeline_class`](MediaGenModelEntry::pipeline_class) declared in its
 /// `model_index.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+
 pub struct MediaGenModelEntry {
     /// Internal model ID, used as `model_id` on a `MediaGenTaskSpec`.
     pub id: String,
@@ -2330,6 +2385,17 @@ pub struct MediaGenModelEntry {
     pub family: String,
     /// HuggingFace repository ID. Loaded as a whole pipeline directory.
     pub hf_repo: String,
+    /// Which inference library loads and runs this entry.
+    ///
+    /// Defaulted, so every pipeline that predates 3D support keeps working
+    /// unchanged and a worker that only has `diffusers` installed is unaffected
+    /// by the existence of entries it cannot serve.
+    #[serde(default)]
+    pub backend: MediaGenBackend,
+    /// Voxel grid resolution the vendor's reference invocation uses, for 3D
+    /// entries. `None` for pixel pipelines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_voxel_resolution: Option<u32>,
     /// Diffusers pipeline class named by the repo's `model_index.json`.
     ///
     /// A repo that serves more than one [`MediaGenKind`] may need a sibling
@@ -2563,7 +2629,7 @@ pub struct MediaGenModelEntry {
 /// non-Apache FLUX.2 line was gated, which was wrong for `dev-NVFP4` and
 /// `klein-9b-kv-fp8`.
 pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
-    use tenzro_types::MediaGenKind::{Image2Image, Image2Video, Text2Image, Text2Video};
+    use tenzro_types::MediaGenKind::{Image2Image, Image2Video, Image23d, Text2Image, Text2Video};
 
     vec![
         // ── Qwen-Image (Apache-2.0, Alibaba Qwen) ──
@@ -2584,6 +2650,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             // version bump, so the repo moves and the id stays stable rather
             // than the catalog carrying both.
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "QwenImagePipeline".to_string(),
             kinds: vec![Text2Image],
             default_width: 1328,
@@ -2625,6 +2693,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Qwen-Image 2512 (GGUF Q5_K_M)".to_string(),
             family: "qwen-image".to_string(),
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "QwenImagePipeline".to_string(),
             kinds: vec![Text2Image],
             default_width: 1328,
@@ -2667,6 +2737,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Qwen-Image-Flash".to_string(),
             family: "qwen-image".to_string(),
             hf_repo: "nvidia/Qwen-Image-Flash".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "QwenImagePipeline".to_string(),
             kinds: vec![Text2Image],
             default_width: 1024,
@@ -2699,6 +2771,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Qwen-Image-Edit 2511".to_string(),
             family: "qwen-image".to_string(),
             hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "QwenImageEditPlusPipeline".to_string(),
             kinds: vec![Image2Image],
             default_width: 1328,
@@ -2731,6 +2805,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Z-Image Turbo".to_string(),
             family: "z-image".to_string(),
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "ZImagePipeline".to_string(),
             kinds: vec![Text2Image],
             default_width: 1024,
@@ -2765,6 +2841,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "FLUX.2 klein 4B".to_string(),
             family: "flux2".to_string(),
             hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "Flux2KleinPipeline".to_string(),
             kinds: vec![Text2Image, Image2Image],
             default_width: 1024,
@@ -2804,6 +2882,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "FLUX.2 klein base 4B".to_string(),
             family: "flux2".to_string(),
             hf_repo: "black-forest-labs/FLUX.2-klein-base-4B".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "Flux2KleinPipeline".to_string(),
             kinds: vec![Text2Image, Image2Image],
             default_width: 1024,
@@ -2843,6 +2923,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "FLUX.2 dev".to_string(),
             family: "flux2".to_string(),
             hf_repo: "black-forest-labs/FLUX.2-dev".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "Flux2Pipeline".to_string(),
             kinds: vec![Text2Image, Image2Image],
             default_width: 1024,
@@ -2876,6 +2958,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "FLUX.2 klein 9B".to_string(),
             family: "flux2".to_string(),
             hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "Flux2KleinPipeline".to_string(),
             kinds: vec![Text2Image, Image2Image],
             default_width: 1024,
@@ -2908,6 +2992,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "FLUX.2 klein base 9B".to_string(),
             family: "flux2".to_string(),
             hf_repo: "black-forest-labs/FLUX.2-klein-base-9B".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "Flux2KleinPipeline".to_string(),
             kinds: vec![Text2Image, Image2Image],
             default_width: 1024,
@@ -2940,6 +3026,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "FLUX.2 klein 9B KV".to_string(),
             family: "flux2".to_string(),
             hf_repo: "black-forest-labs/FLUX.2-klein-9b-kv".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "Flux2KleinPipeline".to_string(),
             kinds: vec![Text2Image, Image2Image],
             default_width: 1024,
@@ -2973,6 +3061,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Wan 2.2 T2V A14B".to_string(),
             family: "wan2.2".to_string(),
             hf_repo: "Wan-AI/Wan2.2-T2V-A14B-Diffusers".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "WanPipeline".to_string(),
             kinds: vec![Text2Video],
             default_width: 1280,
@@ -3009,6 +3099,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Wan 2.2 I2V A14B".to_string(),
             family: "wan2.2".to_string(),
             hf_repo: "Wan-AI/Wan2.2-I2V-A14B-Diffusers".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "WanImageToVideoPipeline".to_string(),
             kinds: vec![Image2Video],
             default_width: 1280,
@@ -3053,6 +3145,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Wan 2.1 FLF2V 14B 720P".to_string(),
             family: "wan2.1".to_string(),
             hf_repo: "Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "WanImageToVideoPipeline".to_string(),
             kinds: vec![Image2Video],
             default_width: 1280,
@@ -3087,6 +3181,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "Wan 2.2 TI2V 5B".to_string(),
             family: "wan2.2".to_string(),
             hf_repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "WanPipeline".to_string(),
             kinds: vec![Text2Video, Image2Video],
             default_width: 1280,
@@ -3131,6 +3227,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "LTX-2.3 22B Distilled (GGUF Q5_K_M)".to_string(),
             family: "ltx2".to_string(),
             hf_repo: "Lightricks/LTX-2.3".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "LTX2Pipeline".to_string(),
             kinds: vec![Text2Video],
             default_width: 768,
@@ -3212,6 +3310,8 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             name: "MiniMax H3 (Hailuo 3.0) H3-Base".to_string(),
             family: "minimax-h3".to_string(),
             hf_repo: "MiniMaxAI/MiniMax-H3".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
             pipeline_class: "MiniMaxH3ModularPipeline".to_string(),
             kinds: vec![Text2Video],
             // The reference request takes `short_edge` + `aspect_ratio` rather
@@ -3243,6 +3343,54 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
                           stereo audio, 768p short edge, 4-15s. Licence \
                           excludes the EU, UK, South Korea and the USA, \
                           including outputs"
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
+        // ---- 3D asset generation -------------------------------------------
+        //
+        // These produce a GLB mesh, not frames, and neither loads through
+        // `diffusers`. They sit in the same catalog and the same job queue as
+        // the pixel pipelines because the surrounding machinery — posting,
+        // claiming, content-addressed output, signed receipts, settlement — is
+        // identical; only the loader and the artifact differ, which is exactly
+        // what `backend` and `kinds` exist to carry.
+        MediaGenModelEntry {
+            id: "trellis2-4b".to_string(),
+            name: "TRELLIS.2 4B".to_string(),
+            family: "trellis2".to_string(),
+            hf_repo: "microsoft/TRELLIS.2-4B".to_string(),
+            backend: MediaGenBackend::Trellis2,
+            default_voxel_resolution: Some(1024),
+            // Not a `diffusers` class. Named for the worker's dispatch and to
+            // keep the field's meaning uniform: the entry-point class its own
+            // library exposes.
+            pipeline_class: "Trellis2ImageTo3DPipeline".to_string(),
+            kinds: vec![Image23d],
+            // The conditioning image, not the asset. A 3D job's size is
+            // `default_voxel_resolution`.
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 1536,
+            default_steps: 25,
+            default_guidance_scale: 7.5,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "4B".to_string(),
+            size_bytes: 16_800_000_000,
+            min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
+            license: "MIT".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            gated: false,
+            description: "Microsoft TRELLIS.2 image-to-3D. Produces a GLB mesh \
+                          with PBR materials including transparency, at up to \
+                          1536³. Loads through the `trellis2` package, not \
+                          diffusers"
                 .to_string(),
             gguf_repo: None,
             gguf_file: None,
@@ -7315,6 +7463,7 @@ mod tests {
                 // ungated, still a diffusers-loadable pipeline, 15.0 GB
                 // against 57.7 GB.
                 "qwen-image-gguf",
+                "trellis2-4b",
                 "wan2.1-flf2v-14b",
                 "wan2.2-i2v-a14b",
                 "wan2.2-t2v-a14b",

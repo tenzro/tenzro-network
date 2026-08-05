@@ -36987,6 +36987,9 @@ async fn handle_openai_images_generations(
         guidance_scale: request
             .guidance_scale
             .unwrap_or(entry.default_guidance_scale),
+        // Pixel kinds only: the OpenAI-compatible image surface has no
+        // 3D job shape, so there is no voxel grid to describe.
+        voxel_resolution: None,
         seed: request.seed,
         input_image_hash: None,
         metadata: std::collections::HashMap::new(),
@@ -37438,6 +37441,8 @@ async fn handle_openai_images_edits(
         fps: None,
         steps,
         guidance_scale,
+        // Pixel kind: no voxel grid to describe.
+        voxel_resolution: None,
         seed,
         input_image_hash: Some(input_image_hash),
         metadata,
@@ -37751,6 +37756,8 @@ async fn handle_openai_videos_create(
         fps: Some(fps),
         steps,
         guidance_scale,
+        // Pixel kind: no voxel grid to describe.
+        voxel_resolution: None,
         seed,
         input_image_hash,
         metadata: std::collections::HashMap::new(),

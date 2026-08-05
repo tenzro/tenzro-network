@@ -173,6 +173,7 @@ mod tests {
             fps: None,
             steps: 30,
             guidance_scale: 4.5,
+            voxel_resolution: None,
             seed: Some(11),
             input_image_hash: None,
             metadata: HashMap::new(),

@@ -65,6 +65,14 @@ impl MediaGenPricing {
 /// stray frame count is still one frame of work, and must not be priced as if
 /// it were a clip.
 pub fn pixel_steps(kind: MediaGenKind, params: &MediaGenParams) -> u128 {
+    // A 3D job has no pixels to charge for. `width`/`height` describe the
+    // *conditioning image*, so pricing on them would charge for the input and
+    // ignore the thing actually produced — two jobs from the same photo at
+    // 512³ and 1536³ would cost the same while differing 27× in work.
+    if kind.is_3d() {
+        return voxel_steps(params);
+    }
+
     let frames = if kind.is_video() {
         u128::from(params.num_frames.unwrap_or(1).max(1))
     } else {
@@ -74,6 +82,22 @@ pub fn pixel_steps(kind: MediaGenKind, params: &MediaGenParams) -> u128 {
         .saturating_mul(u128::from(params.height))
         .saturating_mul(u128::from(params.steps))
         .saturating_mul(frames)
+}
+
+/// Work units for a 3D job, in the same unit as [`pixel_steps`].
+///
+/// One occupied voxel of one step, so a 3D job and a pixel job are quoted
+/// against the same `per_pixel_step` rate and settle through the same path —
+/// a second rate would be a second thing to govern and to keep in step.
+///
+/// Charged on the **grid face** (`r²`) rather than the full cube. Generation
+/// cost tracks the sparse occupied surface, not the empty interior; `r³` at
+/// 1536 would be 3.6 billion units against a 1024×1024 image's 1.0 million and
+/// price a mesh out of existence.
+pub fn voxel_steps(params: &MediaGenParams) -> u128 {
+    let r = u128::from(params.voxel_resolution.unwrap_or(512).max(1));
+    r.saturating_mul(r)
+        .saturating_mul(u128::from(params.steps.max(1)))
 }
 
 /// Divide a job's worker payout across its assignments by the `share_bps` the
@@ -134,6 +158,7 @@ mod tests {
             fps: None,
             steps: 30,
             guidance_scale: 4.5,
+            voxel_resolution: None,
             seed: None,
             input_image_hash: None,
             metadata: HashMap::new(),
@@ -269,5 +294,75 @@ mod tests {
                 ..
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod three_d_pricing_tests {
+    use super::*;
+    use tenzro_types::{MediaGenKind, MediaGenParams};
+
+    fn params(width: u32, height: u32, steps: u32, voxels: Option<u32>) -> MediaGenParams {
+        MediaGenParams {
+            prompt: "a bronze teapot".to_string(),
+            negative_prompt: None,
+            width,
+            height,
+            num_frames: None,
+            fps: None,
+            steps,
+            guidance_scale: 7.5,
+            voxel_resolution: voxels,
+            seed: None,
+            input_image_hash: None,
+            metadata: Default::default(),
+        }
+    }
+
+    /// A 3D job is priced on the asset it produces, not the photo it was
+    /// conditioned on. Two jobs from the same image at different grids must
+    /// not cost the same.
+    #[test]
+    fn a_3d_job_is_priced_on_the_grid_not_the_conditioning_image() {
+        let small = pixel_steps(MediaGenKind::Image23d, &params(1024, 1024, 25, Some(512)));
+        let large = pixel_steps(MediaGenKind::Image23d, &params(1024, 1024, 25, Some(1536)));
+        assert!(
+            large > small,
+            "a finer grid must cost more: {small} vs {large}"
+        );
+        assert_eq!(large / small, 9, "cost scales on the grid face, r²");
+    }
+
+    /// Changing the conditioning image's size must not move a 3D price.
+    #[test]
+    fn conditioning_image_size_does_not_move_a_3d_price() {
+        let a = pixel_steps(MediaGenKind::Image23d, &params(512, 512, 25, Some(1024)));
+        let b = pixel_steps(MediaGenKind::Image23d, &params(2048, 2048, 25, Some(1024)));
+        assert_eq!(a, b);
+    }
+
+    /// The pixel path must be untouched by the existence of 3D — an image job
+    /// prices exactly as it did before.
+    #[test]
+    fn the_pixel_path_is_unchanged() {
+        let p = params(1024, 1024, 30, None);
+        assert_eq!(
+            pixel_steps(MediaGenKind::Text2Image, &p),
+            1024u128 * 1024 * 30
+        );
+        let mut v = params(1280, 720, 40, None);
+        v.num_frames = Some(81);
+        assert_eq!(
+            pixel_steps(MediaGenKind::Text2Video, &v),
+            1280u128 * 720 * 40 * 81
+        );
+    }
+
+    /// A 3D job with no grid stated still prices, on a documented default,
+    /// rather than collapsing to zero and being served for free.
+    #[test]
+    fn a_3d_job_without_a_grid_is_not_free() {
+        let n = pixel_steps(MediaGenKind::Image23d, &params(1024, 1024, 25, None));
+        assert_eq!(n, 512u128 * 512 * 25);
     }
 }

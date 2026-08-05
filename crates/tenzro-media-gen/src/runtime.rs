@@ -916,6 +916,7 @@ mod tests {
             fps: if kind.is_video() { Some(16) } else { None },
             steps: 30,
             guidance_scale: 4.5,
+            voxel_resolution: None,
             seed: Some(42),
             input_image_hash: if kind.requires_input_image() {
                 Some(Hash::new([7u8; 32]))
