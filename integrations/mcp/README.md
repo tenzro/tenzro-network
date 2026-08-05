@@ -12,6 +12,14 @@ The Tenzro MCP server is an installable Python package that exposes 360 blockcha
 
 The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **535 tools** (Tenzro Ledger + multi-modal AI + distributed MoE serving + ERC-8004 calldata encoders + AgentBond/insurance + agent memory + app hosting + multi-tenant file storage) and is the authoritative tool inventory; this Python distributable exposes a subset over stdio + Streamable HTTP.
 
+**Access on a gated node.** A node operator may require a service key across the
+node's service surfaces. Model _serving_ does not answer to that gate — a model
+published at `network` visibility is reachable by payment alone — but that
+carve-out currently applies to the **JSON-RPC** surface only, which is what
+provider announcements advertise. MCP stays fully gated: reaching this server on
+a gated node needs the service key in `X-Tenzro-Service-Key`, whatever a model's
+visibility is. See [`docs/ACCESS.md`](https://github.com/tenzro/tenzro-network/blob/main/docs/ACCESS.md).
+
 The Rust server also carries an RPC gateway pair — `list_rpc_methods` enumerates the JSON-RPC methods the node serves with how each is gated (admin token vs API-key scope), and `call_rpc` invokes anything you find there. The named tools cover the surfaces worth a dedicated schema; the node serves roughly 900 methods in total, so the gateway is how an agent reaches capability added since its tool list was built. Filter with `namespace` or `contains` — the unfiltered directory is ~900 entries. Authorization is unchanged: a gateway call passes the same gates as any other, so it reaches exactly what the presented credentials already allow.
 
 **Testnet endpoint:** `https://mcp.tenzro.xyz/mcp`

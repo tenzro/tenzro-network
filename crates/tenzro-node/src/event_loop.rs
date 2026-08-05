@@ -468,8 +468,16 @@ pub struct EventLoop {
     provider_pricing: Option<Arc<parking_lot::RwLock<crate::node::ProviderPricing>>>,
     /// Shared reference to the node's provider schedule for heartbeat announcements
     provider_schedule: Option<Arc<parking_lot::RwLock<crate::node::ProviderSchedule>>>,
-    /// RPC address for constructing rpc_endpoint in announcements
-    rpc_addr: String,
+    /// The RPC endpoint this node advertises in announcements.
+    ///
+    /// Already resolved by the caller: `external_rpc_addr` when the
+    /// operator set one, otherwise `http://<rpc_addr>`. Stored resolved
+    /// rather than as a bind address because a node behind NAT, a proxy
+    /// or a relay does not advertise what it binds — and gossiping a
+    /// loopback bind address sends every peer a URL that resolves to
+    /// *itself*, which dials successfully against the wrong machine
+    /// instead of failing as an empty endpoint would.
+    advertised_rpc_endpoint: String,
     /// Shared reference to model_services for cleanup of expired network endpoints
     model_services: Option<Arc<DashMap<String, tenzro_types::model::ModelServiceInstance>>>,
     /// Agent runtime for agent heartbeat announcements
@@ -784,7 +792,7 @@ impl EventLoop {
             node_visibility: None,
             provider_pricing: None,
             provider_schedule: None,
-            rpc_addr: String::new(),
+            advertised_rpc_endpoint: String::new(),
             model_services: None,
             agent_runtime: None,
             swarm_manager: None,
@@ -918,13 +926,13 @@ impl EventLoop {
         served_models: Arc<DashMap<String, tenzro_types::model::ModelVisibility>>,
         provider_pricing: Arc<parking_lot::RwLock<crate::node::ProviderPricing>>,
         provider_schedule: Arc<parking_lot::RwLock<crate::node::ProviderSchedule>>,
-        rpc_addr: String,
+        advertised_rpc_endpoint: String,
     ) -> Self {
         self.network_models = Some(network_models);
         self.served_models = Some(served_models);
         self.provider_pricing = Some(provider_pricing);
         self.provider_schedule = Some(provider_schedule);
-        self.rpc_addr = rpc_addr;
+        self.advertised_rpc_endpoint = advertised_rpc_endpoint;
         self
     }
 
@@ -1891,7 +1899,7 @@ impl EventLoop {
                         let signer = signer.clone();
                         let pricing = self.provider_pricing.as_ref().map(|p| p.read().clone());
                         let schedule = self.provider_schedule.as_ref().map(|s| s.read().clone());
-                        let rpc_addr = self.rpc_addr.clone();
+                        let rpc_endpoint = self.advertised_rpc_endpoint.clone();
 
                         for entry in served.iter() {
                             // Private models are never announced — no heartbeat,
@@ -1939,7 +1947,7 @@ impl EventLoop {
                                 ttl_secs: 120,
                                 timestamp: chrono::Utc::now().timestamp_millis(),
                                 withdrawn: false,
-                                rpc_endpoint: format!("http://{}", rpc_addr),
+                                rpc_endpoint: rpc_endpoint.clone(),
                                 iroh_endpoint_id: self
                                     .iroh_resolver
                                     .as_ref()
@@ -2005,7 +2013,7 @@ impl EventLoop {
                             }
                         };
                         let agents = ar.list_agents(None);
-                        let rpc_addr = self.rpc_addr.clone();
+                        let rpc_endpoint = self.advertised_rpc_endpoint.clone();
                         for a in agents.iter() {
                             let cap_names: Vec<String> = a.capabilities.iter().map(|c| {
                                 match c {
@@ -2027,7 +2035,7 @@ impl EventLoop {
                                 capabilities: cap_names,
                                 status: a.status.as_str().to_string(),
                                 origin_peer_id: local_peer_id.clone(),
-                                rpc_endpoint: format!("http://{}", rpc_addr),
+                                rpc_endpoint: rpc_endpoint.clone(),
                                 timestamp: chrono::Utc::now().timestamp_millis(),
                                 ttl_secs: 180,
                                 pubkey: Vec::new(),

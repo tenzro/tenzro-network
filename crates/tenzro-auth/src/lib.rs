@@ -146,7 +146,7 @@ pub use aap::{
     is_valid_action_name, rar_to_aap_action,
 };
 pub use admission::{
-    Admission, AdmissionPolicy, NEVER_GATED_PATHS, ServiceKeyHash, ServiceSurface, admit,
+    Admission, AdmissionPolicy, NEVER_GATED_PATHS, ServiceKeyGrant, ServiceKeyHash, ServiceSurface, admit,
     is_never_gated,
 };
 pub use claims::{AuthClaims, Cnf};

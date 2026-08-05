@@ -60,21 +60,40 @@ impl AcceptancePolicy {
     }
 }
 
-/// Visibility of a model on the network.
+/// Visibility of a model on the network, and with it the access policy for
+/// calling that model.
 ///
-/// Governs whether the model is announced over gossip and listed to peers:
+/// This is a property of the *model*, not of the node. An operator who gates
+/// their node's operator surfaces behind a service key has said something
+/// about who may administer the node; they have not said anything about what
+/// they are willing to serve. Conflating the two means a gated node cannot
+/// offer a model to the network at all, which is a posture nobody chose.
 ///
 /// - `Network`: announced on `tenzro/models`, included in provider
-///   announcements and heartbeats, discoverable by any peer.
+///   announcements and heartbeats, discoverable by any peer. **Any caller may
+///   invoke it by paying**; no service key and no prior relationship is
+///   required. Publishing at this tier is the operator's explicit decision to
+///   serve the network, and it overrides the node's service-key gate for this
+///   model's inference path alone.
+/// - `Gated`: not announced, but servable off-node to callers the operator has
+///   a relationship with — an API key carrying a pre-agreed policy (scope,
+///   tier, price), or payment where that policy permits it. This is the tier
+///   for "I serve this, but on my terms."
 /// - `Private`: never announced, never heartbeated, excluded from provider
-///   served-model lists. Served only to callers of this node. Weights for
-///   private models are distributed as encrypted shards to named recipients
-///   via a signed sealed-model manifest.
+///   served-model lists, and never servable off-node. Callers of this node
+///   only. Weights for private models are distributed as encrypted shards to
+///   named recipients via a signed sealed-model manifest.
+///
+/// Wire compatibility: `network` and `private` are unchanged, so existing
+/// records and announcements parse as before. `gated` is new — a peer running
+/// an older build refuses to parse it rather than silently reading it as
+/// something more open, which is the correct direction to fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelVisibility {
     #[default]
     Network,
+    Gated,
     Private,
 }
 
@@ -83,6 +102,7 @@ impl ModelVisibility {
     pub fn as_str(&self) -> &'static str {
         match self {
             ModelVisibility::Network => "network",
+            ModelVisibility::Gated => "gated",
             ModelVisibility::Private => "private",
         }
     }
@@ -91,13 +111,50 @@ impl ModelVisibility {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "network" => Some(ModelVisibility::Network),
+            "gated" => Some(ModelVisibility::Gated),
             "private" => Some(ModelVisibility::Private),
             _ => None,
         }
     }
 
     /// Whether the model may be announced/listed to peers.
+    ///
+    /// Only [`Network`](Self::Network). `Gated` is deliberately servable but
+    /// not discoverable: the operator's counterparties already know it is
+    /// there, and announcing it would advertise capacity to callers who
+    /// cannot use it.
     pub fn is_network(&self) -> bool {
+        matches!(self, ModelVisibility::Network)
+    }
+
+    /// Whether the model may be served to a caller off this node at all.
+    ///
+    /// The inverse of "local only". Both public tiers are offered; `Private`
+    /// is not. Use this rather than `!is_private()` at call sites that decide
+    /// whether to serve, so a tier added later has to be classified here
+    /// instead of silently inheriting whichever branch it falls into.
+    pub fn is_offered(&self) -> bool {
+        matches!(self, ModelVisibility::Network | ModelVisibility::Gated)
+    }
+
+    /// Whether reaching this model requires a credential carrying a
+    /// pre-agreed policy, as opposed to payment alone.
+    ///
+    /// `Network` is payment-only by definition — requiring a key there would
+    /// make it undiscoverable in practice, since a peer that just found the
+    /// offer over gossip has no way to obtain one.
+    pub fn requires_credential(&self) -> bool {
+        matches!(self, ModelVisibility::Gated)
+    }
+
+    /// Whether publishing at this tier overrides the node's service-key gate
+    /// for this model's inference path.
+    ///
+    /// True only for [`Network`](Self::Network). The operator published it to
+    /// the whole network; a service key they never issued to that caller
+    /// cannot also be a precondition. The override is scoped to inference on
+    /// this model — every other method on every surface stays gated.
+    pub fn overrides_node_gate(&self) -> bool {
         matches!(self, ModelVisibility::Network)
     }
 }

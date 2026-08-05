@@ -10,6 +10,14 @@ Connect AI agents to Tenzro Network using Google's [Agent-to-Agent (A2A)](https:
 
 The Tenzro A2A server is an installable Python package that lets any A2A-compatible agent interact with the blockchain — query balances, send transactions, manage identities, spawn sub-agents, trade on marketplaces, deploy contracts, and more. Install with `pip install tenzro-a2a-server` and run locally, or connect directly to the live testnet endpoint.
 
+**Access on a gated node.** A node operator may require a service key across the
+node's service surfaces. Model _serving_ does not answer to that gate — a model
+published at `network` visibility is reachable by payment alone — but that
+carve-out currently applies to the **JSON-RPC** surface only, which is what
+provider announcements advertise. A2A stays fully gated: reaching this server on
+a gated node needs the service key in `X-Tenzro-Service-Key`, whatever a model's
+visibility is. See [`docs/ACCESS.md`](https://github.com/tenzro/tenzro-network/blob/main/docs/ACCESS.md).
+
 **Live testnet:** `https://a2a.tenzro.xyz`
 **Local:** `http://localhost:3002`
 

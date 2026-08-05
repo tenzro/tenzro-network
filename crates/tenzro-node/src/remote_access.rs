@@ -897,6 +897,20 @@ pub struct LeaseRegistry {
     traffic: Option<Arc<tenzro_model::traffic::TrafficManager>>,
     /// Model lifecycle, for pinning a lease's models warm for its term.
     lifecycle: Option<Arc<tenzro_model::lifecycle::ModelLifecycle>>,
+    /// The node's admission policy, so a lease's service key is a *node*
+    /// credential rather than one this registry alone recognises.
+    ///
+    /// There used to be two unrelated registries of "service keys": this one,
+    /// scoped and expiring, and a flat digest set in the admission gate with
+    /// no scope, expiry or subject. An operator holding a key could not tell
+    /// which they had. Registering here makes the lease the single source: the
+    /// grant carries the lease's term, so access stops when the rental does
+    /// without anyone remembering to revoke it.
+    ///
+    /// Optional and behind a lock for the same reason as `confinement` — the
+    /// registry is constructed before the node's gate exists, and is testable
+    /// without one.
+    admission: RwLock<Option<Arc<crate::admission::NodeAdmissionGate>>>,
     /// What has been committed to leases, so nothing is sold twice.
     ledger: Option<Arc<parking_lot::Mutex<ResourceLedger>>>,
 }
@@ -928,6 +942,43 @@ impl LeaseRegistry {
         self
     }
 
+    /// Attach the node's admission gate.
+    ///
+    /// Every lease already in the book is registered as it is attached, so a
+    /// node that rehydrated leases from storage before its gate existed still
+    /// ends up with one registry rather than two views of the same keys.
+    pub fn set_admission_gate(&self, gate: Arc<crate::admission::NodeAdmissionGate>) {
+        for lease in self.leases.read().values() {
+            if lease.status == LeaseStatus::Active {
+                Self::register_grant(&gate, lease);
+            }
+        }
+        *self.admission.write() = Some(gate);
+    }
+
+    /// Surfaces a rental key admits on.
+    ///
+    /// The model surfaces, not the web API. A renter bought compute and the
+    /// models pinned for their term, and reaches them over JSON-RPC, MCP or
+    /// A2A. The web API is the operator's own verification and status plane;
+    /// renting a GPU does not buy it.
+    const RENTAL_SURFACES: [tenzro_auth::ServiceSurface; 3] = [
+        tenzro_auth::ServiceSurface::JsonRpc,
+        tenzro_auth::ServiceSurface::Mcp,
+        tenzro_auth::ServiceSurface::A2a,
+    ];
+
+    /// Register one lease's key with the node gate, bounded by its term.
+    fn register_grant(gate: &Arc<crate::admission::NodeAdmissionGate>, lease: &AccessLease) {
+        gate.accept_grant(
+            tenzro_auth::ServiceKeyGrant::unrestricted(tenzro_auth::ServiceKeyHash::from_hex(
+                lease.service_key_hash.clone(),
+            ))
+            .on_surfaces(Self::RENTAL_SURFACES)
+            .for_lease(lease.lease_id.clone(), lease.expires_at_ms),
+        );
+    }
+
     /// A registry with no persistence and no confinement — refuses everything.
     pub fn new(serves_tee: bool) -> Self {
         Self {
@@ -940,6 +991,7 @@ impl LeaseRegistry {
             traffic: None,
             lifecycle: None,
             ledger: None,
+            admission: RwLock::new(None),
         }
     }
 
@@ -955,6 +1007,7 @@ impl LeaseRegistry {
             traffic: None,
             lifecycle: None,
             ledger: None,
+            admission: RwLock::new(None),
         };
 
         match storage.scan_prefix(CF_SETTLEMENTS, LEASE_PREFIX) {
@@ -1092,6 +1145,13 @@ impl LeaseRegistry {
             }
         }
 
+        // Make the key a node credential, scoped to the model surfaces and
+        // bounded by the lease's own term. Registered after persistence so a
+        // key is never admitted for a lease that failed to store.
+        if let Some(gate) = self.admission.read().as_ref() {
+            Self::register_grant(gate, &lease);
+        }
+
         self.by_service_key
             .write()
             .insert(lease.service_key_hash.clone(), lease.lease_id.clone());
@@ -1157,6 +1217,20 @@ impl LeaseRegistry {
         // One action, not two. An outstanding grant is a credential against
         // this lease, and leaving it live would mean revocation had a window.
         self.grants.write().retain(|_, g| g.lease_id != lease_id);
+
+        // The same reasoning reaches the node gate: a revoked lease whose key
+        // still admitted on the service surfaces would be a revocation that
+        // only closed the shell. Recorded as a revocation rather than a
+        // removal so a config reload cannot re-admit the digest.
+        if let Some(gate) = self.admission.read().as_ref()
+            && let Err(e) = gate.revoke_key(&snapshot.service_key_hash)
+        {
+            warn!(
+                lease = %lease_id,
+                error = %e,
+                "lease revoked but its service key could not be revoked on the node gate"
+            );
+        }
 
         // Return the guaranteed capacity. Requests already running against it
         // keep going — a revocation must not kill work mid-generation — and
@@ -1508,8 +1582,8 @@ mod tests {
             reserved_slots: 0,
             models: Vec::new(),
             max_memory_bytes: None,
-                sites: Vec::new(),
-                databases: Vec::new(),
+            sites: Vec::new(),
+            databases: Vec::new(),
             storage_deals: Vec::new(),
             agents: Vec::new(),
             channels: Vec::new(),

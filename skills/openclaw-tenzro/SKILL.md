@@ -2239,7 +2239,7 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `get_model_hash` — Get a model's content-addressed hash record (BLAKE3 root + SHA-256 + per-file manifest hash) by `model_id`
 - `list_model_hashes` — List every recorded model hash
 - `record_model_hash` — Record a model's content-addressed hash (first-recorder-wins)
-- `serve_model` — Start serving a model for inference (auto-clusters when it exceeds one host; `force_cluster` / `force_single` override placement, `visibility="private"` keeps it local/LAN-only)
+- `serve_model` — Start serving a model for inference (auto-clusters when it exceeds one host; `force_cluster` / `force_single` override placement, `visibility` sets who may call it — `"network"` (default) announces it and lets any caller pay per call with no key even on a gated node, `"gated"` serves only API-key holders under a pre-agreed policy and is not announced, `"private"` keeps it local/LAN-only)
 - `stop_model` — Stop serving a model
 - `delete_model` — Delete a downloaded model
 - `discover_models` — Discover AI models available on the network

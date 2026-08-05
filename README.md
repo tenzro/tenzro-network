@@ -318,6 +318,7 @@ The lease is also the scope: which accelerators, how many cores, how much memory
 Two facilities cover the gap between what a node can do and what a caller can find.
 
 - **Universal RPC gateway.** The node serves roughly 900 JSON-RPC methods and gains more each release, so any hand-maintained client list is perpetually behind — and the developer discovers the gap exactly when they need the method. `tenzro_listRpcMethods` returns the directory from the node itself, each entry carrying its gate class (admin token vs open) and the API-key scope it needs, so a caller can distinguish "I need a differently-scoped key" from "I need the operator's token" without provoking the error first; filter by namespace or substring, since unfiltered it is ~900 rows. Anything found can then be invoked by name. Authorization is unchanged: a gateway call passes the same admin-token gate, API-key scope gate, and default-deny classification as a direct request, reaching exactly what the presented credentials already allow. Exposed on the CLI (`tenzro rpc {methods, call}`), both SDKs, MCP, and A2A.
+- **Model visibility — three tiers.** Who may call a model is a property of the model. `network` (the default) announces it on `tenzro/models` and makes it reachable by **any caller who pays** — no service key and no prior relationship, even on a node whose service-key gate is on. `gated` serves it to callers holding an API key whose policy the operator pre-agreed, and deliberately does _not_ announce it: the counterparties already know it is there, and gossiping it would advertise capacity to callers who cannot use it. `private` never leaves the box. CLI `tenzro model serve [--gated | --private]`. The published-model carve-out is narrow — an inference-method allowlist against a model currently served at `network`; a gated, private, or unknown model, or any other method, still needs the key.
 - **Capability visibility.** What a node advertises is separable from what it can do. An operator can stop announcing individual capabilities — `ai`, `storage`, `database`, `hosting`, `rpc`, `tee`, `compute` — without unloading or disabling them, and resume later. Consensus is deliberately not hideable: a validator its peers cannot reach cannot vote. CLI `tenzro visibility {show, hide, publish}`.
 
 ### Multi-modal inference
@@ -452,8 +453,16 @@ sits on the mounted volume rather than the ephemeral layer.
 Three layers, each answering a different question:
 
 - **Admission** (`admission.rs`) — an optional operator-set service key gates
-  all four service surfaces at once. It has no consensus or gossip variant, so
-  a gated node structurally cannot stop validating.
+  the service surfaces. It has no consensus or gossip variant, so a gated node
+  structurally cannot stop validating. A service key is a **rental credential**
+  for this machine's raw resources — a confined shell, storage, memory, compute
+  — carrying a `ServiceKeyGrant` with the surfaces it admits on and the term it
+  expires at, bound to the `AccessLease` it was minted for. It is not a
+  statement about what the node serves: **model serving answers to the model's
+  own visibility, not to this gate.** A model published at `network` visibility
+  is reachable by payment alone, on a gated node, because a peer that found the
+  offer over gossip has no way to obtain a key. See
+  [`docs/ACCESS.md`](docs/ACCESS.md).
 - **Classification** (`rpc_gates.rs`) — every dispatched method is named in
   exactly one of `ADMIN_METHODS` (109) or `OPEN_METHODS` (823); a method in
   neither is refused before its handler runs. Tests read the dispatcher's own

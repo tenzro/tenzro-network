@@ -144,6 +144,40 @@ The readout also calls out whether a Hugging Face token is present — without o
 half the frontier image catalog fails at download time with a 401 and nothing
 otherwise connects that to a missing credential.
 
+### Model Visibility and Access
+
+Who may call a model is a property of the **model**, not of the node. A service
+key rents this machine's raw resources; it does not decide what you serve. So a
+gated node can still publish models to the network.
+
+```bash
+# Network (default) — announced on tenzro/models and reachable by ANY caller
+# who pays. No service key, no prior relationship, even if this node's
+# service-key gate is on: a peer that found the offer over gossip has no way
+# to obtain a key, so requiring one would make the offer a lie.
+tenzro model serve --model-id timesfm-2.5-200m
+
+# Gated — servable to callers holding an API key whose policy you pre-agreed,
+# and NOT announced. Your counterparties already know it is there; gossiping
+# it would advertise capacity to callers who cannot use it.
+tenzro model serve --model-id partner-model --gated
+
+# Private — never announced, never served off-node.
+tenzro model serve --model-id house-model --private
+```
+
+`--gated` and `--private` are mutually exclusive; omitting both publishes.
+
+The carve-out for published models is narrow by design: it covers inference
+calls on a model currently served at `network` visibility, and nothing else. A
+`gated` or `private` model, an unknown model, or any non-inference method still
+requires the service key. Every other path on the RPC listener (`/v1/*`, media,
+audio) stays fully gated.
+
+The operator is the admin of their node and makes every gating decision on it —
+issuing service keys and API keys, opening leases, and setting each model's
+visibility. See [`docs/ACCESS.md`](../../docs/ACCESS.md) for the full model.
+
 ### Node Visibility
 
 What this node advertises to the network, independent of what it can actually do.

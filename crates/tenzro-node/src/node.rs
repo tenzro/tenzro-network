@@ -4381,6 +4381,13 @@ impl TenzroNode {
                 );
             }
         }
+        // One service-key registry, not two. Every lease — including those
+        // just rehydrated from storage — becomes a node credential scoped to
+        // the model surfaces and bounded by the lease's own term, so a rental
+        // that lapses stops admitting without the operator remembering to
+        // revoke it.
+        leases.set_admission_gate(self.admission_gate.clone());
+
         self.lease_registry = Some(leases);
 
         // Initialize the snapshot ABCI store on top of the live KV store.
@@ -11275,7 +11282,15 @@ impl TenzroNode {
             self.served_models.clone(),
             self.provider_pricing.clone(),
             self.provider_schedule.clone(),
-            self.config.rpc_addr.clone(),
+            // What peers should dial, not what this node binds. Model offers
+            // and agent announcements carry this verbatim, so a node bound to
+            // loopback behind a proxy or relay must advertise the reachable
+            // address instead — otherwise every peer receives a URL pointing
+            // at itself.
+            self.config
+                .external_rpc_addr
+                .clone()
+                .unwrap_or_else(|| format!("http://{}", self.config.rpc_addr)),
         );
 
         // The advertisement policy. Shared rather than copied, so an operator

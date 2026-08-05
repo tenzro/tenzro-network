@@ -583,8 +583,22 @@ pub struct ModelServeCmd {
     /// Serve privately: register the model locally without gossiping it to the
     /// network. It stays reachable over a direct or LAN connection. Omit to
     /// announce the model so any peer can route inference to it.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "gated")]
     private: bool,
+
+    /// Serve to callers holding an API key whose policy you pre-agreed, and to
+    /// nobody else.
+    ///
+    /// The middle tier. The model is *not* announced — your counterparties
+    /// already know it is there, and gossiping it would advertise capacity to
+    /// callers who cannot use it. Unlike the default, it is not reachable by
+    /// payment alone.
+    ///
+    /// Use the default (neither flag) to publish to the network: any caller
+    /// may then invoke it by paying, with no key and no prior relationship,
+    /// even on a node whose service-key gate is on.
+    #[arg(long, conflicts_with = "private")]
+    gated: bool,
 
     /// Front an external OpenAI-compatible serving engine instead of loading
     /// weights in-process: vllm, sglang, llama-server, or external (any
@@ -642,7 +656,13 @@ impl ModelServeCmd {
             "model_id": self.model_id,
             "user_forced": self.cluster,
             "force_single": self.force_single,
-            "visibility": if self.private { "private" } else { "network" },
+            "visibility": if self.private {
+                "private"
+            } else if self.gated {
+                "gated"
+            } else {
+                "network"
+            },
         });
         if let Some(ref engine) = self.engine {
             req["engine"] = serde_json::json!(engine);

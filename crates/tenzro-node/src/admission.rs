@@ -34,6 +34,18 @@ use tenzro_auth::{Admission, AdmissionPolicy, ServiceKeyHash, ServiceSurface, ad
 use tenzro_storage::{CF_METADATA, KvStore};
 use tracing::{info, warn};
 
+/// Wall-clock now, in Unix milliseconds.
+///
+/// A service-key grant may carry an expiry, so admission is time-dependent.
+/// Read here rather than inside [`tenzro_auth::admit`] so that function stays
+/// pure and its tests can pin a clock instead of sleeping.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// RocksDB key prefix for accepted service-key digests.
 const ACCEPTED_PREFIX: &[u8] = b"admission_key:";
 /// RocksDB key prefix for revoked service-key digests.
@@ -162,7 +174,13 @@ impl NodeAdmissionGate {
         path: &str,
         presented_key: Option<&str>,
     ) -> Admission {
-        admit(&self.policy.read(), surface, path, presented_key)
+        admit(
+            &self.policy.read(),
+            surface,
+            path,
+            presented_key,
+            now_unix_ms(),
+        )
     }
 
     /// Accept a new key at runtime, persisting it so it survives a restart.
@@ -175,6 +193,21 @@ impl NodeAdmissionGate {
         self.persist(ACCEPTED_PREFIX, &hex)?;
         self.policy.write().accept_key(hash);
         Ok(hex)
+    }
+
+    /// Accept a key with an explicit grant — scoped surfaces and a term.
+    ///
+    /// Used by the lease registry, which mints keys for rentals. Deliberately
+    /// **not** persisted into the admission column family: the lease record is
+    /// already durable and is the source of truth, and writing a second copy
+    /// here would let a key outlive the lease that justified it — the exact
+    /// failure the grant's term exists to prevent. Leases are re-registered
+    /// from storage when the gate is attached.
+    ///
+    /// The operator issues these; see `remote_access::LeaseRegistry`, whose
+    /// open/revoke RPCs are admin-token gated.
+    pub fn accept_grant(&self, grant: tenzro_auth::ServiceKeyGrant) {
+        self.policy.write().accept_grant(grant);
     }
 
     /// Revoke a key by its digest.

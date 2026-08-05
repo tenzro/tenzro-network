@@ -11,6 +11,7 @@
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tenzro_node::{NodeConfig, RpcServer, TenzroNode};
+use tenzro_types::ModelVisibility;
 use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
@@ -736,5 +737,154 @@ async fn a_malformed_proof_request_does_not_take_the_node_down() {
         alive.get("result").is_some(),
         "the node must survive a malformed proof request, got: {alive}"
     );
+    n.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Model visibility vs. the node's service-key gate
+// ---------------------------------------------------------------------------
+//
+// A service key rents raw machine resources. It says nothing about what the
+// operator is willing to serve. These tests pin the separation: a gated node
+// still serves a model it published to the network, and gates everything else.
+//
+// Each asserts on the gate's answer (401 vs. not-401), not on the inference
+// result — the models are not loaded, so a call that gets past the gate fails
+// in the handler. That is the correct assertion: it isolates admission from
+// serving.
+
+/// The whole point. An operator gated their machine; they also published a
+/// model to the network. A peer that found that offer over gossip has no way
+/// to obtain a service key, so requiring one would make the offer a lie.
+#[tokio::test]
+async fn a_network_model_is_reachable_on_a_gated_node_without_a_key() {
+    let n = TestNode::boot().await;
+    n.node.admission_gate().add_key("operator-only").unwrap();
+    n.node
+        .served_models
+        .insert("timesfm-2.5-200m".to_string(), ModelVisibility::Network);
+
+    let resp = n
+        .client
+        .post(&n.base_url)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tenzro_forecast",
+            "params": {"model_id": "timesfm-2.5-200m", "series": [1.0, 2.0, 3.0]}
+        }))
+        .send()
+        .await
+        .expect("HTTP request");
+
+    assert_ne!(
+        resp.status(),
+        401,
+        "a model published to the network must not require a service key"
+    );
+    n.shutdown().await;
+}
+
+/// A private model is not offered off-node at all, so the gate still stands.
+#[tokio::test]
+async fn a_private_model_stays_refused_on_a_gated_node() {
+    let n = TestNode::boot().await;
+    n.node.admission_gate().add_key("operator-only").unwrap();
+    n.node
+        .served_models
+        .insert("house-model".to_string(), ModelVisibility::Private);
+
+    let resp = n
+        .client
+        .post(&n.base_url)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tenzro_forecast",
+            "params": {"model_id": "house-model", "series": [1.0]}
+        }))
+        .send()
+        .await
+        .expect("HTTP request");
+
+    assert_eq!(resp.status(), 401, "a private model must stay behind the gate");
+    n.shutdown().await;
+}
+
+/// `Gated` is servable, but to callers holding a credential whose policy the
+/// operator pre-agreed — not to the open network. It must not inherit the
+/// payment-only carve-out that `Network` gets.
+#[tokio::test]
+async fn a_gated_visibility_model_is_not_open_to_the_network() {
+    let n = TestNode::boot().await;
+    n.node.admission_gate().add_key("operator-only").unwrap();
+    n.node
+        .served_models
+        .insert("partner-model".to_string(), ModelVisibility::Gated);
+
+    let resp = n
+        .client
+        .post(&n.base_url)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tenzro_forecast",
+            "params": {"model_id": "partner-model", "series": [1.0]}
+        }))
+        .send()
+        .await
+        .expect("HTTP request");
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "gated visibility is not a public carve-out"
+    );
+    n.shutdown().await;
+}
+
+/// The carve-out is inference on that model, not a general hole. Naming a
+/// network-visible model on an unrelated method must not widen it.
+#[tokio::test]
+async fn the_public_carveout_does_not_widen_to_other_methods() {
+    let n = TestNode::boot().await;
+    n.node.admission_gate().add_key("operator-only").unwrap();
+    n.node
+        .served_models
+        .insert("timesfm-2.5-200m".to_string(), ModelVisibility::Network);
+
+    // An unrelated method, carrying the published model's id in its params.
+    let resp = n
+        .client
+        .post(&n.base_url)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber",
+            "params": {"model_id": "timesfm-2.5-200m"}
+        }))
+        .send()
+        .await
+        .expect("HTTP request");
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "only the inference allowlist is carved out"
+    );
+    n.shutdown().await;
+}
+
+/// An unknown model id on an allowlisted method falls through to the refusal
+/// rather than being treated as public.
+#[tokio::test]
+async fn an_unknown_model_is_not_treated_as_public() {
+    let n = TestNode::boot().await;
+    n.node.admission_gate().add_key("operator-only").unwrap();
+
+    let resp = n
+        .client
+        .post(&n.base_url)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tenzro_forecast",
+            "params": {"model_id": "never-published", "series": [1.0]}
+        }))
+        .send()
+        .await
+        .expect("HTTP request");
+
+    assert_eq!(resp.status(), 401, "unknown models are not public by default");
     n.shutdown().await;
 }

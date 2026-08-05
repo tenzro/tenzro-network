@@ -349,15 +349,29 @@ impl RpcServer {
             // cannot attach the service-key header to a preflight, and a
             // gated preflight would break every browser client of an
             // otherwise correctly-keyed node.
+            // The JSON-RPC root defers to `gate_service_key`, which runs after
+            // the body is parsed and can therefore see the method and the
+            // model. It has to: a model published at `Network` visibility is
+            // reachable by payment alone, and this layer — which runs before
+            // the body exists — cannot tell that call apart from any other.
+            //
+            // Every other path on this listener (`/v1/*`, media, audio) keeps
+            // the blanket gate, because none of them is the announced
+            // inference endpoint and each would otherwise become reachable
+            // with no key at all.
             .layer(axum::middleware::from_fn_with_state(
                 self.node.admission_gate().clone(),
-                |state, req, next| {
+                |state, req: axum::extract::Request, next: axum::middleware::Next| async move {
+                    if req.uri().path() == "/" {
+                        return next.run(req).await;
+                    }
                     crate::admission::gate_request(
                         tenzro_auth::ServiceSurface::JsonRpc,
                         state,
                         req,
                         next,
                     )
+                    .await
                 },
             ))
             .layer(cors)
@@ -536,6 +550,15 @@ async fn handle_rpc_post(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // The node's own service key, if the operator gated this machine. Checked
+    // per method rather than by the blanket middleware, so inference on a
+    // model published to the network still gets through — see
+    // `gate_service_key`.
+    let service_key = headers
+        .get(crate::admission::SERVICE_KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // Optional BYO-issuer Canton JWT. Tenants normally never send
     // this — the node mints their Canton JWT server-side from the
     // OAuth credentials stored on their API key record (the tnz_ key
@@ -563,6 +586,24 @@ async fn handle_rpc_post(
             match serde_json::from_value::<JsonRpcRequest>(item.clone()) {
                 Ok(request) => {
                     debug!("RPC batch request: {}", request.method);
+                    if let Some(reason) =
+                        service_key_refusal(&node, &request, service_key.as_deref())
+                    {
+                        responses.push(
+                            serde_json::to_value(JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: request.id.clone(),
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32001,
+                                    message: reason.to_string(),
+                                    data: None,
+                                }),
+                            })
+                            .unwrap(),
+                        );
+                        continue;
+                    }
                     if let Some(err) = gate_admin_token(&node, &request, admin_token.as_deref()) {
                         responses.push(serde_json::to_value(err).unwrap());
                         continue;
@@ -616,6 +657,12 @@ async fn handle_rpc_post(
     match serde_json::from_value::<JsonRpcRequest>(payload) {
         Ok(request) => {
             debug!("RPC request: {}", request.method);
+            if let Some(reason) = service_key_refusal(&node, &request, service_key.as_deref()) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(service_key_denied_body(reason)),
+                );
+            }
             if let Some(err) = gate_admin_token(&node, &request, admin_token.as_deref()) {
                 return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
             }
@@ -947,6 +994,110 @@ fn requires_admin_token(method: &str) -> bool {
 /// of caller input. Comparison uses [`crate::api_key::verify_admin_token`]
 /// (constant-time, length-prefix short-circuit), so neither the secret
 /// nor its length leaks through the response timing.
+/// The inference calls a caller who found an offer over gossip actually makes.
+///
+/// Deliberately an allowlist rather than "anything that touches a model": a
+/// method added later is unreachable on a gated node until someone puts it
+/// here, which is the same default-deny posture `rpc_gates.rs` enforces for
+/// the admin/open split. The read-only catalog and load/unload methods are
+/// absent on purpose — discovery happens through the gossiped offer, and
+/// loading a model is an operator action, not a caller's.
+pub(crate) const PUBLIC_INFERENCE_METHODS: &[&str] = &[
+    "tenzro_chat",
+    "tenzro_inferenceRequest",
+    "tenzro_forecast",
+    "tenzro_textEmbed",
+    "tenzro_embed",
+    "tenzro_imageEmbed",
+    "tenzro_visionEmbed",
+    "tenzro_imageTextSimilarity",
+    "tenzro_segment",
+    "tenzro_textSegment",
+    "tenzro_detect",
+    "tenzro_transcribe",
+    "tenzro_videoEmbed",
+];
+
+/// The model a public-inference request targets, if this is one.
+///
+/// Returns `None` for any other method, so the caller cannot widen the
+/// carve-out by naming a model on an unrelated call.
+fn public_inference_target(request: &JsonRpcRequest) -> Option<String> {
+    if !PUBLIC_INFERENCE_METHODS.contains(&request.method.as_str()) {
+        return None;
+    }
+    let params = request.params.as_ref()?;
+    params
+        .get("model_id")
+        .or_else(|| params.get("model"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Node-level service-key admission for JSON-RPC, method-aware.
+///
+/// The blanket middleware cannot do this: it runs before the body is parsed,
+/// so it knows neither the method nor the model. It therefore refused every
+/// call on a gated node — including inference on a model the operator had
+/// deliberately published to the whole network, which no one chose and which
+/// made "gate my machine" and "serve the network" mutually exclusive.
+///
+/// A service key rents raw machine resources. It is not a statement about what
+/// the node serves. So a model whose visibility is `Network` is reachable by
+/// **payment alone** — a peer that found the offer over gossip has no way to
+/// obtain a key, and requiring one would make the offer a lie.
+///
+/// Fails closed in every other direction: the carve-out covers only
+/// [`PUBLIC_INFERENCE_METHODS`], only when the named model is currently served
+/// at `Network` visibility. A `Gated` or `Private` model, an unknown model, an
+/// unlisted method, or a missing model parameter all fall through to the
+/// refusal.
+/// Returns the denial reason when the node's service-key gate refuses this
+/// call, or `None` when it is admitted.
+///
+/// Deliberately returns the reason rather than a built response: the refusal
+/// shape differs by call site. A single request answers `401` with the same
+/// `{error, header, surface}` body the blanket middleware has always sent, so
+/// existing clients see no change. A batch cannot — one HTTP status covers
+/// every item — so there the refusal is a per-item JSON-RPC error.
+pub(crate) fn service_key_refusal(
+    node: &Arc<TenzroNode>,
+    request: &JsonRpcRequest,
+    presented: Option<&str>,
+) -> Option<&'static str> {
+    let gate = node.admission_gate();
+    if !gate.is_enabled() {
+        return None;
+    }
+    match gate.admit(tenzro_auth::ServiceSurface::JsonRpc, "/", presented) {
+        tenzro_auth::Admission::Allow => return None,
+        tenzro_auth::Admission::Deny(reason) => {
+            // Refused as an operator surface. The one thing that still gets
+            // through is inference on a model published to the network.
+            if let Some(model_id) = public_inference_target(request)
+                && node
+                    .served_models
+                    .get(&model_id)
+                    .map(|v| v.value().overrides_node_gate())
+                    .unwrap_or(false)
+            {
+                return None;
+            }
+            Some(reason)
+        }
+    }
+}
+
+/// The `401` body the blanket middleware sends, rebuilt here so a refusal from
+/// the method-aware gate is byte-identical to one from the layer.
+pub(crate) fn service_key_denied_body(reason: &str) -> Value {
+    serde_json::json!({
+        "error": reason,
+        "header": crate::admission::SERVICE_KEY_HEADER,
+        "surface": tenzro_auth::ServiceSurface::JsonRpc.as_str(),
+    })
+}
+
 pub(crate) fn gate_admin_token(
     node: &Arc<TenzroNode>,
     request: &JsonRpcRequest,
@@ -2139,7 +2290,9 @@ async fn dispatch_request(
         // authenticated; get/list are open reads.
         "tenzro_siteSetPlacement" => handle_site_set_placement(node, request.params, api_key).await,
         "tenzro_siteGetPlacement" => handle_site_get_placement(node, request.params, api_key).await,
-        "tenzro_listSitePlacements" => handle_list_site_placements(node, request.params, api_key).await,
+        "tenzro_listSitePlacements" => {
+            handle_list_site_placements(node, request.params, api_key).await
+        }
         "tenzro_siteRemovePlacement" => {
             handle_site_remove_placement(node, request.params, api_key).await
         }
@@ -2596,7 +2749,9 @@ async fn dispatch_request(
         "tenzro_createDatabase" => handle_create_database(node, request.params, api_key).await,
         "tenzro_getDatabase" => handle_get_database(node, request.params, api_key).await,
         "tenzro_listDatabases" => handle_list_databases(node, api_key).await,
-        "tenzro_getDatabasePartition" => handle_get_database_partition(node, request.params, api_key).await,
+        "tenzro_getDatabasePartition" => {
+            handle_get_database_partition(node, request.params, api_key).await
+        }
         "tenzro_listDatabasePartitions" => {
             handle_list_database_partitions(node, request.params, api_key).await
         }
@@ -9865,7 +10020,11 @@ async fn handle_site_publish(
     // Ahead of the envelope check: `require_did_owner` consumes the envelope's
     // nonce, so refusing after it would burn a single-use signature on a call
     // that was never going to be allowed.
-    enforce_site_scope(node, api_key, &crate::sites::compute_site_id(owner_did, name))?;
+    enforce_site_scope(
+        node,
+        api_key,
+        &crate::sites::compute_site_id(owner_did, name),
+    )?;
     require_did_owner(
         node,
         &params,
