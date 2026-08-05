@@ -440,6 +440,33 @@ tzlabs chat qwen3-4b "explain content addressing in one line"
 
 The rest of this section is for running the model yourself.
 
+None of these models are Tenzro's own — they are third-party checkpoints the
+node supports. Serving is model-agnostic: llama.cpp reads the architecture from
+the GGUF's own metadata, and a model with no catalog entry serves on documented
+defaults. A catalog entry exists to carry the per-model configuration that
+actually varies — a multimodal projector, a paired drafter, a MoE shape, sampling
+defaults, a replacement chat template — each of them optional, so a model
+declares only what applies to it.
+
+Listing a model does not mean it has been verified end to end. The registry is
+broader than what has been exercised on real hardware. As models are tested and
+issues surface they get fixed, and where a model needs something the generic path
+does not give it, that becomes a new optional slot added as needed to run that
+model — left unset for every model that does not need it. If one misbehaves,
+report it.
+
+**Gated models need your own HuggingFace token.** The catalog is curated to
+ungated repositories so a fresh node works with no account, but many strong
+checkpoints require per-account approval to fetch. Accept the model's terms on
+HuggingFace, then give the node your token by any of `HF_TOKEN`,
+`HUGGING_FACE_HUB_TOKEN`, or the file `huggingface-cli login` already wrote —
+all three are read, so logging in the ordinary way is enough. It is your
+credential for your account: sent only to huggingface.co, never persisted by the
+node, and redacted from logs. Without one a gated fetch fails with 401/403 and
+the error names the repository and the terms page to accept. `tenzro status`
+reports whether a token is present, since otherwise this surfaces only as an
+unexplained download failure.
+
 ```bash
 # List all available models
 tenzro model list
