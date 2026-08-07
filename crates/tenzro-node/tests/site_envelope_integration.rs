@@ -467,7 +467,10 @@ async fn a_narrowed_key_reaches_only_the_site_it_names() {
     // Aliases name a hostname, not a site. Resolving it first is what keeps
     // the allow-list from being sidestepped by pointing at the target
     // indirectly.
-    let env = owner.envelope("tenzro_siteSetAlias", format!("a.example:{other}").as_bytes());
+    let env = owner.envelope(
+        "tenzro_siteSetAlias",
+        format!("a.example:{other}").as_bytes(),
+    );
     let resp = n
         .rpc_with_key(
             "tenzro_siteSetAlias",
@@ -500,7 +503,10 @@ async fn a_listing_names_nothing_the_key_cannot_open() {
         .iter()
         .filter_map(|s| s["site_id"].as_str().map(str::to_string))
         .collect();
-    assert!(listed.contains(&mine), "the key's own site was hidden: {resp}");
+    assert!(
+        listed.contains(&mine),
+        "the key's own site was hidden: {resp}"
+    );
     assert!(
         !listed.contains(&other),
         "the listing disclosed a site the key cannot open: {resp}"

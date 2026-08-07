@@ -1153,6 +1153,67 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "device-binding",
+                "name": "Device Binding and Machine Ownership",
+                "description": (
+                    "The devices bound to an identity, and what each proved "
+                    "about the hardware holding its key. A Tenzro identity "
+                    "links devices the way a platform account does, but the "
+                    "link is not a platform account: no Apple, Google or "
+                    "Microsoft sign-in is an identity authority here. A device "
+                    "counts as hardware-bound only when its credential cannot "
+                    "be replicated off it AND a WebAuthn attestation verified "
+                    "against a pinned vendor root says the key lives in a TEE "
+                    "or secure element — a synced passkey proves control of a "
+                    "cloud account rather than possession of a device. Also "
+                    "answers whether a wallet may be created (it cannot sit "
+                    "behind a single device) and moves machine ownership, "
+                    "which requires the authority that anchors the machine: "
+                    "its controller, or proof of its hardware root."
+                ),
+                "tags": [
+                    "identity", "devices", "passkey", "webauthn",
+                    "attestation", "wallet", "ownership", "sessions",
+                ],
+                "examples": [
+                    "Which devices can authenticate as this identity?",
+                    "Is this passkey hardware-bound or synced to a cloud account?",
+                    "Can this identity create a wallet yet, and if not why?",
+                    "Transfer this machine to another owner",
+                ],
+            },
+            {
+                "id": "economics",
+                "name": "Network Economics",
+                "description": (
+                    "How a payment on this node divides, and what it costs "
+                    "before you pay it. Returns the live EconomicPolicy — the "
+                    "validating split (operator / treasury), the delegated "
+                    "split (operator / rpc-provider / treasury), the "
+                    "marketplace commission, the network's default settlement "
+                    "asset, and the micro-settlement floor beneath which a "
+                    "charge settles through a payment channel rather than its "
+                    "own transaction. Also reports, per capability, which "
+                    "economic mode this node is in: a private capability "
+                    "keeps the whole payment because nobody discovered it and "
+                    "no validator was engaged; a public validating one shares "
+                    "with the treasury; a public one that does not validate "
+                    "also pays the RPC provider validating on its behalf. "
+                    "Every rate is governance-set, never a constant, so read "
+                    "this rather than assuming a rate from documentation."
+                ),
+                "tags": [
+                    "economics", "pricing", "revenue-split", "settlement",
+                    "governance", "tokenomics",
+                ],
+                "examples": [
+                    "What does this node charge, and how does the payment divide?",
+                    "Is this node private, validating, or delegated?",
+                    "What is the micro-settlement floor?",
+                    "Which asset does the network settle in by default?",
+                ],
+            },
+            {
                 "id": "adaptive-burn",
                 "name": "Adaptive Burn-Rate Governance Dial",
                 "description": (

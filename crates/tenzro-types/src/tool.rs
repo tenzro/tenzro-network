@@ -235,8 +235,9 @@ pub struct ToolDefinition {
 
     /// Price per invocation in TNZO atto-tokens (1 TNZO = 10^18 atto).
     /// Set to `0` for a free tool. The split is identical to the agent
-    /// template marketplace: `MARKETPLACE_COMMISSION_BPS` (5%) to the
-    /// treasury, remainder to `creator_wallet`.
+    /// template marketplace: the governance-set
+    /// `EconomicPolicy::marketplace_commission_bps` to the treasury, remainder
+    /// to `creator_wallet`.
     #[serde(with = "crate::primitives::u128_serde")]
     pub price_per_call: u128,
 

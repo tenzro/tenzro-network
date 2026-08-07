@@ -303,10 +303,12 @@ fn print_job_summary(job: &serde_json::Value) {
             s.get("price_paid").and_then(|v| v.as_str()).unwrap_or("0"),
         );
         output::print_field(
-            "Commission",
-            s.get("commission_wei")
-                .and_then(|v| v.as_str())
-                .unwrap_or("0"),
+            "Network share",
+            s.get("network_wei").and_then(|v| v.as_str()).unwrap_or("0"),
+        );
+        output::print_field(
+            "Economic mode",
+            s.get("mode").and_then(|v| v.as_str()).unwrap_or("unknown"),
         );
         for p in s
             .get("payouts")

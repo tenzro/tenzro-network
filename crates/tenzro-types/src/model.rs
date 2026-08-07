@@ -1260,7 +1260,72 @@ impl BillableUnits {
 /// be derived from width and height. Families disagree on how: a fixed-grid ViT
 /// encoder produces one token per patch, a tiling vision-language model charges
 /// per tile plus a thumbnail pass, and a pooled embedding encoder charges the
-/// same regardless of input size. The descriptor lives on
+/// same regardless of input size. The descriptor lives on/// Meters one call across every billable dimension it reported, in the rate
+/// card's own smallest unit.
+///
+/// **The single implementation of the metering rule.** Two engines used to
+/// carry their own copy — one in `u64` for the advertised rate card, one in
+/// `u128` for wei — and a modality that started reporting a new unit would have
+/// begun billing on one path and not the other. Both now delegate here, so a
+/// change to what counts as billable work reaches every charging path at once.
+///
+/// Arithmetic is `u128` throughout: token prices are `u128`, and a
+/// high-resolution video's `width × height × steps × frames` exceeds `u64`.
+///
+/// # Frames are not charged twice
+///
+/// Frames are metered only when the call reported no `pixel_steps`. A
+/// generation's frame count is already a factor of its pixel-steps, so charging
+/// both would bill the same work twice. Frames stand alone only for a call that
+/// *consumed* them, as when a video encoder samples a clip.
+///
+/// # Modality-agnostic by construction
+///
+/// Text tokens are one dimension among ten. Vision, audio, video, timeseries,
+/// embeddings, segmentation, detection and generative media all meter through
+/// this same function — a language model is one shape of billable work, not the
+/// privileged one.
+pub fn meter_units_wei(
+    units: &BillableUnits,
+    input_price: u128,
+    output_price: u128,
+    rates: &ModalityRates,
+) -> u128 {
+    let charge =
+        |quantity: u64, rate: u64| -> u128 { (quantity as u128).saturating_mul(rate as u128) };
+
+    let pixel_step_cost = units
+        .pixel_steps
+        .saturating_mul(rates.price_per_pixel_step as u128);
+
+    let frame_cost = if units.pixel_steps == 0 {
+        charge(units.frames as u64, rates.price_per_frame)
+    } else {
+        0
+    };
+
+    [
+        (units.input_tokens as u128).saturating_mul(input_price),
+        (units.output_tokens as u128).saturating_mul(output_price),
+        charge(
+            units.cached_read_tokens as u64,
+            rates.price_per_cached_read_token,
+        ),
+        charge(
+            units.cached_write_tokens as u64,
+            rates.price_per_cached_write_token,
+        ),
+        charge(units.reasoning_loops as u64, rates.price_per_reasoning_loop),
+        charge(units.image_tokens as u64, rates.price_per_image_token),
+        charge(units.audio_seconds(), rates.price_per_audio_second),
+        charge(units.video_seconds(), rates.price_per_video_second),
+        pixel_step_cost,
+        frame_cost,
+    ]
+    .into_iter()
+    .fold(0u128, |acc, cost| acc.saturating_add(cost))
+}
+
 /// [`ModelParameters`] so each catalog entry declares its own rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageTokenization {

@@ -27,6 +27,7 @@ pub mod platform_root;
 pub mod registry;
 pub mod sealed_agent_keypair;
 pub mod sealed_secp256k1;
+pub mod tpm_seal;
 pub mod traits;
 
 #[cfg(feature = "intel-tdx")]

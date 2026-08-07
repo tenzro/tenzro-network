@@ -39,9 +39,15 @@ pub struct NodeSettlementPreferences {
 }
 
 impl NodeSettlementPreferences {
-    /// Load every recorded preference from storage.
-    pub fn load(storage: Arc<dyn KvStore>) -> Self {
-        let mut prefs = SettlementPreferences::new();
+    /// Load every recorded preference from storage, over the network's
+    /// governance-set default.
+    ///
+    /// `default_asset` comes from
+    /// [`tenzro_types::economics::EconomicPolicy::default_conversion`]: a payee
+    /// who has said nothing gets what the network takes by default, and
+    /// changing that is a governance decision rather than a release.
+    pub fn load(storage: Arc<dyn KvStore>, default_asset: SettlementAsset) -> Self {
+        let mut prefs = SettlementPreferences::with_default(default_asset);
         match storage.scan_prefix(CF_SETTLEMENTS, PREFIX) {
             Ok(rows) => {
                 for (key, value) in rows {
@@ -111,13 +117,20 @@ mod tests {
         Arc::new(MemoryStore::new())
     }
 
-    /// A provider earning USDC generally wants spendable USDC. Converting
-    /// without being asked hands them an FX position they did not choose.
+    /// A payee who has said nothing gets what the network takes by default,
+    /// and that default is governance's — passed in here rather than assumed,
+    /// so a node whose governance set the other answer honours it.
     #[test]
-    fn an_unrecorded_payee_keeps_what_arrived() {
-        let prefs = NodeSettlementPreferences::load(store());
+    fn an_unrecorded_payee_gets_the_network_default() {
+        let prefs = NodeSettlementPreferences::load(store(), SettlementAsset::Tnzo);
         assert_eq!(
             prefs.get("did:tenzro:machine:never-configured"),
+            SettlementAsset::Tnzo
+        );
+
+        let keep = NodeSettlementPreferences::load(store(), SettlementAsset::KeepInbound);
+        assert_eq!(
+            keep.get("did:tenzro:machine:never-configured"),
             SettlementAsset::KeepInbound
         );
     }
@@ -126,7 +139,7 @@ mod tests {
     fn a_recorded_preference_survives_a_restart() {
         let store = store();
         {
-            let prefs = NodeSettlementPreferences::load(store.clone());
+            let prefs = NodeSettlementPreferences::load(store.clone(), SettlementAsset::Tnzo);
             prefs
                 .set("did:tenzro:machine:a", SettlementAsset::Tnzo)
                 .unwrap();
@@ -135,7 +148,7 @@ mod tests {
                 .unwrap();
         }
 
-        let restarted = NodeSettlementPreferences::load(store);
+        let restarted = NodeSettlementPreferences::load(store, SettlementAsset::Tnzo);
         assert_eq!(restarted.get("did:tenzro:machine:a"), SettlementAsset::Tnzo);
         assert_eq!(
             restarted.get("did:tenzro:machine:b"),
@@ -145,7 +158,7 @@ mod tests {
 
     #[test]
     fn a_preference_can_be_changed_back() {
-        let prefs = NodeSettlementPreferences::load(store());
+        let prefs = NodeSettlementPreferences::load(store(), SettlementAsset::Tnzo);
         prefs
             .set("did:tenzro:machine:a", SettlementAsset::Tnzo)
             .unwrap();
@@ -169,16 +182,16 @@ mod tests {
         key.extend_from_slice(b"did:tenzro:machine:corrupt");
         store.put(CF_SETTLEMENTS, &key, b"garbage").unwrap();
 
-        let prefs = NodeSettlementPreferences::load(store);
+        let prefs = NodeSettlementPreferences::load(store, SettlementAsset::Tnzo);
         assert_eq!(
             prefs.get("did:tenzro:machine:corrupt"),
-            SettlementAsset::KeepInbound
+            SettlementAsset::Tnzo
         );
     }
 
     #[test]
     fn the_resolver_surfaces_every_recorded_payee() {
-        let prefs = NodeSettlementPreferences::load(store());
+        let prefs = NodeSettlementPreferences::load(store(), SettlementAsset::Tnzo);
         prefs
             .set("did:tenzro:machine:a", SettlementAsset::Tnzo)
             .unwrap();
@@ -186,7 +199,7 @@ mod tests {
         assert_eq!(snapshot.get("did:tenzro:machine:a"), SettlementAsset::Tnzo);
         assert_eq!(
             snapshot.get("did:tenzro:machine:unknown"),
-            SettlementAsset::KeepInbound
+            SettlementAsset::Tnzo
         );
     }
 }

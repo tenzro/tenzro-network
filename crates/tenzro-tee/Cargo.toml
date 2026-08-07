@@ -56,6 +56,8 @@ ed25519-dalek = { workspace = true }
 hkdf = "0.12"
 sha3 = { workspace = true }
 zeroize = { workspace = true }
+# Context files for the TPM sealing tools (tpm_seal.rs).
+tempfile = "3"
 
 [features]
 default = ["all-tees"]

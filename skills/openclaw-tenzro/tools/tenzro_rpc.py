@@ -188,6 +188,9 @@ Usage:
     python tenzro_rpc.py get_insurance_pool_balance
 
     # Adaptive Burn governance dial (Spec 8)
+    python tenzro_rpc.py list_bound_devices
+    python tenzro_rpc.py wallet_readiness
+    python tenzro_rpc.py get_economic_policy
     python tenzro_rpc.py get_burn_rate_config
     python tenzro_rpc.py get_supply_metrics
     python tenzro_rpc.py get_burn_rate_recommendation
@@ -5762,7 +5765,7 @@ def settle_authorized(app_id: str, chain_id: int, payer_did: str,
                       expiry: int, key_id: str, signature: str) -> dict:
     """Execute a developer-signed settlement authorization.
 
-    Moves TNZO from the app wallet to the payer, minus the network commission.
+    Moves TNZO from the app wallet to the payer, minus the settlement-authorization commission (50 bps).
     Idempotent per (app_id, external_ref). ``signature`` (hex Ed25519 over the
     authorization signing hash) must be from one of the app's registered keys.
     """
@@ -7574,6 +7577,125 @@ def get_insurance_claim(claim_id: str) -> dict:
 def get_insurance_pool_balance() -> dict:
     """Read the current insurance pool vault balance."""
     return _rpc("tenzro_getInsurancePoolBalance", {})
+
+
+# ── Devices and machine ownership ─────────────────────────────────
+
+
+def bind_device(identity_did: str, label: str, attestation_object_b64: str) -> dict:
+    """Bind a device to an identity from a WebAuthn registration.
+
+    `attestation_object_b64` is the base64 attestation object from
+    `navigator.credentials.create()`. The node parses and grades it against
+    the vendor roots it pins — nothing the client asserts about its own
+    hardware is taken on trust, and **no platform account is an identity
+    authority**.
+
+    A device is refused when its credential can sync to a cloud account (which
+    would prove control of an account rather than possession of a device) or
+    when no verified attestation says its key lives in a TEE or secure element.
+    """
+    return _rpc(
+        "tenzro_bindDevice",
+        {
+            "identity_did": identity_did,
+            "label": label,
+            "attestation_object_b64": attestation_object_b64,
+        },
+    )
+
+
+def list_bound_devices(identity_did: str) -> dict:
+    """List the devices that can authenticate as an identity.
+
+    Each entry reports what it proved: attestation format, key protection tier,
+    whether the chain reached a pinned vendor root, the backup flags, and
+    whether its signature counter is a usable clone signal (it is not, for a
+    synced credential). Also reports whether a wallet may be created yet.
+    """
+    return _rpc("tenzro_listBoundDevices", {"identity_did": identity_did})
+
+
+def revoke_bound_device(identity_did: str, credential_id: str) -> dict:
+    """Unbind a device and end every session it authorised, in one action.
+
+    Both happen together by design: removing the device without ending its
+    sessions would leave a lost phone's access live, which is the exact
+    situation the user is trying to fix.
+    """
+    return _rpc(
+        "tenzro_revokeBoundDevice",
+        {"identity_did": identity_did, "credential_id": credential_id},
+    )
+
+
+def wallet_readiness(identity_did: str, this_device_credential_id: str | None = None) -> dict:
+    """Whether a wallet may be created for this identity, and if not, why.
+
+    A wallet held behind a single device is lost with that device. The machine
+    the user is on is the first; a genuinely separate hardware-bound device — a
+    phone, another machine — must be bound before there is anything to lose.
+    Returns a `remedy` code alongside the reason.
+    """
+    return _rpc(
+        "tenzro_walletReadiness",
+        {
+            "identity_did": identity_did,
+            "this_device_credential_id": this_device_credential_id,
+        },
+    )
+
+
+def transfer_machine_ownership(
+    machine_did: str,
+    new_owner_did: str,
+    authority: str,
+    controller_did: str | None = None,
+    hardware_root_hex: str | None = None,
+) -> dict:
+    """Move a machine to another identity.
+
+    The authority required is whatever anchors the machine. Pass
+    `authority="controller"` with `controller_did` for a machine a human or
+    institution delegated; pass `authority="hardware_root"` with
+    `hardware_root_hex` for a machine nobody delegated. The two are **not**
+    interchangeable: holding the hardware cannot take a machine that has an
+    accountable party — that is a compromise, not an acquisition.
+    """
+    return _rpc(
+        "tenzro_transferMachineOwnership",
+        {
+            "machine_did": machine_did,
+            "new_owner_did": new_owner_did,
+            "authority": authority,
+            "controller_did": controller_did,
+            "hardware_root_hex": hardware_root_hex,
+        },
+    )
+
+
+# ── Economics ─────────────────────────────────────────────────────
+
+
+def get_economic_policy() -> dict:
+    """Read the economic policy this node applies to every settlement.
+
+    Returns the live `EconomicPolicy` — the validating split (operator /
+    treasury), the delegated split (operator / rpc-provider / treasury), the
+    marketplace commission, the network's default settlement asset, and the
+    micro-settlement floor beneath which a charge settles through a payment
+    channel rather than its own transaction.
+
+    Also reports, per capability, which economic mode this node is in. A
+    **private** capability keeps the whole payment — nobody discovered it and
+    no validator was engaged on the caller's behalf. A **public validating**
+    one shares with the treasury. A **public delegated** one also pays the RPC
+    provider validating on its behalf.
+
+    Read this before paying rather than inferring the split from a receipt
+    afterwards. Every rate is governance-set, never a constant.
+    """
+    return _rpc("tenzro_getEconomicPolicy", {})
 
 
 # ── Adaptive Burn (Spec 8) ────────────────────────────────────────
@@ -10247,6 +10369,24 @@ COMMANDS = {
     "get_insurance_claim": lambda args: get_insurance_claim(args[0]),
     "get_insurance_pool_balance": lambda args: get_insurance_pool_balance(),
     # ── Adaptive Burn (Spec 8) ──
+    "bind_device": lambda args: bind_device(
+        args["identity_did"], args["label"], args["attestation_object_b64"]
+    ),
+    "list_bound_devices": lambda args: list_bound_devices(args["identity_did"]),
+    "revoke_bound_device": lambda args: revoke_bound_device(
+        args["identity_did"], args["credential_id"]
+    ),
+    "wallet_readiness": lambda args: wallet_readiness(
+        args["identity_did"], args.get("this_device_credential_id")
+    ),
+    "transfer_machine_ownership": lambda args: transfer_machine_ownership(
+        args["machine_did"],
+        args["new_owner_did"],
+        args["authority"],
+        args.get("controller_did"),
+        args.get("hardware_root_hex"),
+    ),
+    "get_economic_policy": lambda args: get_economic_policy(),
     "get_burn_rate_config": lambda args: get_burn_rate_config(),
     "get_supply_metrics": lambda args: get_supply_metrics(),
     "get_burn_rate_recommendation": lambda args: get_burn_rate_recommendation(),

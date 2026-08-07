@@ -1,14 +1,49 @@
-# Access model — service keys, API keys, and payment
+# Access model — subscribers, renters, and users
 
-Tenzro has three ways a caller earns access. They answer different questions,
-and keeping them separate is what lets a node be private about its machine
-while still serving models to the network.
+Tenzro has three ways a caller reaches a node. The distinction is **economic
+before it is technical** — each pays differently, so each has to be nameable at
+settlement time — and keeping them separate is what lets a node be private about
+its machine while still serving models to the network.
 
-| Credential      | Question it answers                          | Bought / issued how                                | Scope lives on                                                              |
-| --------------- | -------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- |
-| **Service key** | _May you use this machine's raw resources?_  | Rented — a period, up to a capacity                | `ServiceKeyGrant` (reachability) + `AccessLease` / `AccessScope` (capacity) |
-| **API key**     | _May you use this resource, on these terms?_ | Issued by the operator against a pre-agreed policy | `ApiKeyRecord.scopes`, class, tier ceiling                                  |
-| **Payment**     | _Have you paid for this call?_               | On demand, per call, no prior relationship         | The model's own price and the settlement path                               |
+| Tier               | Credential      | Pays                            | What they get                                                    | Scope lives on                                                              |
+| ------------------ | --------------- | ------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| **User**           | none — payment  | per request, on demand          | whatever the node serves publicly                                | The model's own price and the settlement path                               |
+| **Subscriber**     | API key         | a subscription the operator sets | scoped access to resources the node **serves**                   | `ApiKeyRecord.scopes`, class, tier ceiling                                  |
+| **Renter**         | service key     | locked or prepaid up front      | the **raw capacity itself** — compute, storage, memory, security | `ServiceKeyGrant` (reachability) + `AccessLease` / `AccessScope` (capacity) |
+
+Types: `crates/tenzro-types/src/access_tier.rs`
+(`AccessTier`, `CredentialKind`, `PayerKind`, `RentableResource`,
+`RentalFunding`).
+
+**A user** is anyone on the network paying to use resources on it, with no prior
+relationship — a human, an agent, or a machine. Each holds its own identity and
+its own wallet, so each pays for itself rather than borrowing another's
+credential.
+
+**A subscriber** buys access to resources the node *serves*: inference on a
+model, queries against a database, objects in storage — answers produced with
+the hardware, under a scope the operator wrote.
+
+**A renter** buys the capacity itself, having locked funds in escrow or prepaid
+for a term. The node hands over confined use of the hardware rather than answers
+from it. That is why the credentials differ rather than being one credential
+with a flag: an API key names scopes on services, a service key names a lease
+over a machine and is bounded by that lease's term.
+
+Only a user is charged at serve time — the other two settled up front. **Metering
+runs for all three regardless**: an operator who cannot see what a prepaid tenant
+consumed cannot price the next term.
+
+## Private is about discovery, not access
+
+A **private node** is connected to the network but does not advertise itself.
+The network can still reach it — through the API keys and service keys its
+operator issues — but nobody browsing discovery finds it. Because no discovery
+was consumed and no validator was engaged on the caller's behalf, a private
+node keeps the whole payment; see [ECONOMICS.md](ECONOMICS.md).
+
+Privacy reduces the set of people who know you exist. It does not authenticate
+the ones who do.
 
 The rule that ties them together:
 
@@ -36,7 +71,7 @@ Two consequences worth stating plainly:
   setting. The remedy would otherwise be editing config and restarting — at
   the exact moment they are trying to revoke a leaked key.
 
-## Service keys — renting the machine
+## Renters — service keys over the machine
 
 A service key is a **rental credential**. It buys access to raw resources —
 a confined shell, storage, memory, compute — for a period, up to a capacity.
@@ -87,7 +122,7 @@ keeps working exactly as before; narrowing is opt-in.
   preventing one.
 - **Model serving.** See below.
 
-## API keys — using a resource on agreed terms
+## Subscribers — API keys over the node's services
 
 An `ApiKeyRecord` carries granted `scopes`, a `KeyClass`, an optional subject
 DID, a tier ceiling with a rolling rate budget, and any Canton bindings. This
@@ -136,7 +171,7 @@ different questions:
 Publishing a model at `network` visibility does not grant anyone Canton access,
 and holding a Canton-authorized API key does not make a private model callable.
 
-## Payment — on demand, no relationship
+## Users — payment on demand, no relationship
 
 x402 / TNZO settlement. The caller pays per call. There is no key to issue and
 nothing to agree in advance, which is the only thing that works for a peer that
@@ -226,6 +261,44 @@ be; it dials successfully against the wrong machine.
 Both model offers and agent announcements now resolve through
 `external_rpc_addr` when set, matching what model-service registrations
 already did.
+
+
+## RPC providers sell their own tenants a fourth thing
+
+An RPC provider brokers access to **external networks** — Canton, and other
+chains beyond Tenzro — using upstream credentials they hold. They sell scoped
+access to that on their own terms and bill for it themselves, the way every
+other chain's RPC operators do. Modelled as
+`tenzro_types::access_tier::RpcServiceGrant`.
+
+That revenue is theirs and **never enters a node's revenue split**. It must not
+be confused with the RPC-provider leg described in
+[ECONOMICS.md](ECONOMICS.md), which pays for *validation performed on a serving
+node's behalf* and appears only when a node advertises without validating.
+Charging in both places for the same relationship would be charging twice for
+two different things and calling it one.
+
+A grant that names no network is refused at issuance rather than stored: the
+natural reading of an empty list at a call site is "unrestricted", and that
+reading would hand a tenant every upstream credential the provider holds.
+
+
+## Devices are what authenticate, and sessions name them
+
+Every tier above is reached by an identity, and an identity authenticates
+through the **devices bound to it** — a phone, a laptop, a machine. A binding
+counts only when the credential cannot sync off the device *and* an attestation
+verified to a pinned vendor root says its key lives in hardware. No platform
+account is an identity authority.
+
+An authenticated session names the bound device that authorised it, not only the
+identity, so unbinding a device ends exactly the access it granted. A wallet
+cannot be created behind a single device: the machine is the first, and a
+genuinely separate one must be bound before there is anything to lose.
+
+Full model, including why a phone has no serial number to read and why the
+signature counter is only meaningful for device-bound credentials:
+[TDIP.md](TDIP.md).
 
 ## Wire compatibility
 

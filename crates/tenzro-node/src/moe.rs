@@ -1770,8 +1770,19 @@ async fn settle_moe_forward(
     let Some(payer) = node.self_provider_address() else {
         return;
     };
-    let commission_bps =
-        tenzro_types::fees::NetworkCommissionRates::default().inference_commission_bps as u64;
+    // The network's share of an expert's gross, read from the live economic
+    // policy rather than a constant, so a governance change reaches this path
+    // at the same moment it reaches every other one. An expert holder is the
+    // operator here — they did the work — so what the network takes is whatever
+    // the split does not give the operator.
+    let policy = node.economic_policy();
+    let mode = tenzro_types::economics::NodeEconomicMode::resolve(
+        node.advertises(tenzro_types::node_visibility::Capability::Ai),
+        node.runtime_roles.read().is_validator(),
+    );
+    let commission_bps = (tenzro_types::economics::BPS_DENOMINATOR
+        - policy.share_bps(mode, tenzro_types::economics::PayeeRole::Operator))
+        as u64;
     for (holder, (tokens, commitments)) in settled_basis {
         let pricing = manager
             .get_provider(&holder)

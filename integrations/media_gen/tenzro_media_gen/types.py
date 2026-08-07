@@ -505,19 +505,25 @@ class MediaGenPayout:
 class MediaGenSettlement:
     """What the requester paid for a job and where it went.
 
-    The network commission is carved out of `price_paid` rather than added on
-    top, so `commission_wei` plus every payout sums back to `price_paid`.
+    The network's share is carved out of `price_paid` rather than added on top,
+    so `network_wei` plus every payout sums back to `price_paid`. How large that
+    share is follows the serving node's economic mode, reported as `mode`: a
+    private node keeps the whole price, a public validating node pays the
+    treasury leg, and a public node that does not validate also pays the RPC
+    provider validating on its behalf.
     """
 
     price_paid: int
-    commission_wei: int
+    network_wei: int
+    mode: str
     payouts: list[MediaGenPayout]
 
     @classmethod
     def from_json(cls, obj: dict[str, Any]) -> MediaGenSettlement:
         return cls(
             price_paid=int(obj["price_paid"]),
-            commission_wei=int(obj["commission_wei"]),
+            network_wei=int(obj["network_wei"]),
+            mode=str(obj.get("mode", "unknown")),
             payouts=[MediaGenPayout.from_json(p) for p in (obj.get("payouts") or [])],
         )
 

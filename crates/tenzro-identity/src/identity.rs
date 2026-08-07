@@ -126,6 +126,312 @@ pub struct ServiceEndpoint {
 }
 
 /// Identity-specific data that differs between human and machine identities
+/// What holds a machine identity to the world.
+///
+/// A machine cannot be the sole authority for its own identity. Something has
+/// to be able to answer for it — a person who delegated it, or hardware that
+/// can prove which machine it is. A machine that answers only to itself is a
+/// self-issued claim: nothing distinguishes it from ten thousand identical
+/// claims minted by the same script, and there is nobody to hold to account
+/// when it misbehaves.
+///
+/// So every machine identity carries one of these, and there is no third
+/// option. This is the type that makes the rule impossible to bypass by
+/// forgetting a check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MachineAnchor {
+    /// A human delegated this machine, and remains accountable for it.
+    ///
+    /// The ordinary case. The controller's own identity is the accountability
+    /// surface: revoking it cascades, and its delegation scope bounds what the
+    /// machine may do.
+    Delegated {
+        /// The controlling human's DID.
+        controller_did: String,
+    },
+    /// An institution delegated this machine.
+    ///
+    /// Accountability runs to a legal entity anchored by an LEI rather than to
+    /// a natural person. An institution carries `controlled_machines` for
+    /// exactly this purpose, so refusing it would have left that field
+    /// unfillable.
+    InstitutionDelegated {
+        /// The controlling institution's DID.
+        controller_did: String,
+    },
+    /// No human delegated it; a hardware root of trust stands in their place.
+    ///
+    /// The TPM (or equivalent secure element) takes the human's seat: it can
+    /// prove *this machine* is speaking, so the identity is anchored in silicon
+    /// that cannot be cloned by copying a keyfile. The machine still does not
+    /// hold sole authority — the anchor is a fact about the hardware, not a
+    /// claim the software can make about itself.
+    ///
+    /// A readable serial is **not** sufficient here. Anything running on the
+    /// machine can read a fused serial, and anything anywhere can claim one;
+    /// only an attestable root proves possession.
+    HardwareRooted {
+        /// The 32-byte machine root the anchor was derived from, hex-encoded.
+        hardware_root_hex: String,
+        /// Which identifier sources contributed, as
+        /// [`tenzro_types::machine_id::IdentifierSource`] wire labels. At least
+        /// one must grade as attestable.
+        sources: Vec<String>,
+    },
+}
+
+impl MachineAnchor {
+    /// The DID accountable for this machine, when a party is.
+    ///
+    /// `None` for a hardware-rooted machine: the hardware answers for it, and
+    /// there is no other identity to cascade a revocation through.
+    pub fn controller_did(&self) -> Option<&str> {
+        match self {
+            MachineAnchor::Delegated { controller_did }
+            | MachineAnchor::InstitutionDelegated { controller_did } => Some(controller_did),
+            MachineAnchor::HardwareRooted { .. } => None,
+        }
+    }
+
+    /// Whether a party — rather than hardware — answers for this machine.
+    pub fn is_delegated(&self) -> bool {
+        self.controller_did().is_some()
+    }
+
+    /// Whether this anchor is coherent enough to register.
+    ///
+    /// A hardware anchor must name at least one *attestable* source. A machine
+    /// that could only read a fused serial has not proven anything: it has read
+    /// a number that any observer could also read and any impostor could also
+    /// claim.
+    pub fn is_valid(&self) -> bool {
+        match self {
+            MachineAnchor::Delegated { controller_did }
+            | MachineAnchor::InstitutionDelegated { controller_did } => !controller_did.is_empty(),
+            MachineAnchor::HardwareRooted {
+                hardware_root_hex,
+                sources,
+            } => {
+                hardware_root_hex.len() == 64
+                    && hardware_root_hex.chars().all(|c| c.is_ascii_hexdigit())
+                    && sources.iter().any(|label| {
+                        tenzro_types::machine_id::IdentifierSource::parse(label)
+                            .is_some_and(|src| src.grade().is_attestable())
+                    })
+            }
+        }
+    }
+
+    /// Why this anchor was refused, for an error a caller can act on.
+    pub fn rejection_reason(&self) -> Option<&'static str> {
+        if self.is_valid() {
+            return None;
+        }
+        Some(match self {
+            MachineAnchor::Delegated { .. } | MachineAnchor::InstitutionDelegated { .. } => {
+                "a delegated machine must name the DID accountable for it"
+            }
+            MachineAnchor::HardwareRooted { .. } => {
+                "a machine with no human controller must be anchored by a hardware root of trust \
+                 that can prove possession — a TPM, secure enclave or secure element. A readable \
+                 serial is not enough: anything on the machine can read one, and anything anywhere \
+                 can claim one"
+            }
+        })
+    }
+}
+
+/// Who authorised a change of machine ownership.
+///
+/// The authority required is whatever *anchors* the machine — the same fact
+/// that made the identity admissible in the first place. There is no third
+/// party who can move a machine, and the two authorities are not
+/// interchangeable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case")]
+pub enum TransferAuthority {
+    /// The delegating party authorised it.
+    ///
+    /// For a machine a human or institution controls, ownership is theirs to
+    /// give: they are the accountable party, and possession of the hardware
+    /// does not override that. Someone who gains root on a delegated machine
+    /// has compromised a machine, not acquired it.
+    Controller {
+        /// DID of the controller signing the transfer.
+        controller_did: String,
+    },
+    /// Whoever holds the machine's hardware root authorised it.
+    ///
+    /// For a machine no one delegated, the TPM *is* the accountable party, so
+    /// demonstrating control of it is the ownership fact. That is the honest
+    /// model for selling or decommissioning a box: the buyer ends up holding
+    /// the silicon, and nothing else could distinguish them from the seller.
+    HardwareRoot {
+        /// The 32-byte machine root proven, hex-encoded. Must equal the root
+        /// the machine is anchored on — a different TPM is a different machine.
+        hardware_root_hex: String,
+    },
+}
+
+/// Why an ownership transfer was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferError {
+    /// The authority presented is not the one anchoring this machine.
+    WrongAuthority,
+    /// A controller-authorised transfer named a controller that does not
+    /// control this machine.
+    NotTheController {
+        /// The DID that actually controls it.
+        expected: String,
+    },
+    /// A hardware-authorised transfer proved a root this machine is not
+    /// anchored on.
+    WrongHardwareRoot,
+    /// The new owner is empty, or is already the owner.
+    InvalidNewOwner,
+    /// The transfer's validity window has passed.
+    Expired,
+}
+
+impl std::fmt::Display for TransferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongAuthority => write!(
+                f,
+                "the authority presented does not anchor this machine. A machine a human \
+                 delegated moves only on that controller's authority — holding the hardware does \
+                 not override an accountable party. A machine nobody delegated moves only on \
+                 proof of its hardware root"
+            ),
+            Self::NotTheController { expected } => write!(
+                f,
+                "this machine is controlled by {expected}, and only that identity can transfer it"
+            ),
+            Self::WrongHardwareRoot => write!(
+                f,
+                "the hardware root proven is not the one this machine is anchored on — a \
+                 different root of trust is a different machine"
+            ),
+            Self::InvalidNewOwner => write!(
+                f,
+                "the new owner must be a real identity, and a different one from the current owner"
+            ),
+            Self::Expired => write!(
+                f,
+                "this transfer's validity window has passed; issue a fresh one rather than \
+                 replaying an old authorisation"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TransferError {}
+
+/// A request to move administrative ownership of a machine to another identity.
+///
+/// # Why ownership moves at all
+///
+/// Machines are sold, redeployed, and handed between teams. Without a transfer
+/// the only ways to re-own one are to leave it under an identity that no longer
+/// operates it — so the accountable party is wrong — or to re-register it,
+/// which mints a second identity for one physical machine and breaks every
+/// receipt that named the first.
+///
+/// # Ownership moves in one step
+///
+/// The old owner is replaced, not added to. A machine has exactly one
+/// administering identity at a time; a window with two would mean two parties
+/// could each issue credentials on it, and a window with none would mean an
+/// unowned machine still holding keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipTransfer {
+    /// The machine being transferred.
+    pub machine_did: String,
+    /// The identity taking ownership.
+    pub new_owner_did: String,
+    /// Who authorised it.
+    pub authority: TransferAuthority,
+    /// When the authorisation stops being valid, in milliseconds since the Unix
+    /// epoch. Bounded so a signed transfer cannot be replayed later — against a
+    /// machine that has since changed hands, or been decommissioned.
+    pub expires_at_ms: u64,
+}
+
+impl OwnershipTransfer {
+    /// Check this transfer against the machine's current anchor.
+    ///
+    /// Returns the anchor the machine should hold afterwards. A delegated
+    /// machine's controller changes; a hardware-rooted machine keeps its root
+    /// — the silicon did not move, only the identity administering it — and
+    /// becomes delegated to the new owner, because it now has an accountable
+    /// party where before it had only hardware.
+    ///
+    /// # Errors
+    ///
+    /// [`TransferError`] naming the single unmet requirement.
+    pub fn authorize(
+        &self,
+        current: &MachineAnchor,
+        now_ms: u64,
+    ) -> Result<MachineAnchor, TransferError> {
+        if now_ms >= self.expires_at_ms {
+            return Err(TransferError::Expired);
+        }
+        if self.new_owner_did.trim().is_empty() {
+            return Err(TransferError::InvalidNewOwner);
+        }
+        if current.controller_did() == Some(self.new_owner_did.as_str()) {
+            return Err(TransferError::InvalidNewOwner);
+        }
+
+        match (&self.authority, current) {
+            // A delegated machine moves on its controller's authority alone.
+            (
+                TransferAuthority::Controller { controller_did },
+                MachineAnchor::Delegated {
+                    controller_did: actual,
+                }
+                | MachineAnchor::InstitutionDelegated {
+                    controller_did: actual,
+                },
+            ) => {
+                if controller_did != actual {
+                    return Err(TransferError::NotTheController {
+                        expected: actual.clone(),
+                    });
+                }
+                Ok(MachineAnchor::Delegated {
+                    controller_did: self.new_owner_did.clone(),
+                })
+            }
+
+            // A machine nobody delegated moves on proof of its hardware root.
+            (
+                TransferAuthority::HardwareRoot { hardware_root_hex },
+                MachineAnchor::HardwareRooted {
+                    hardware_root_hex: actual,
+                    sources,
+                },
+            ) => {
+                if hardware_root_hex != actual {
+                    return Err(TransferError::WrongHardwareRoot);
+                }
+                // The root is retained: this is the same machine, and it must
+                // still be able to prove that after changing hands. What
+                // changes is that it now has an accountable party.
+                let _ = sources;
+                Ok(MachineAnchor::Delegated {
+                    controller_did: self.new_owner_did.clone(),
+                })
+            }
+
+            // Anything else is an authority that does not anchor this machine.
+            _ => Err(TransferError::WrongAuthority),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum IdentityData {
@@ -144,7 +450,13 @@ pub enum IdentityData {
         capabilities: Vec<String>,
         /// Delegation scope from controller
         delegation_scope: DelegationScope,
-        /// Controller (human) DID, if any
+        /// Controller DID, when a party rather than hardware answers for this
+        /// machine. `None` means the machine is hardware-anchored — never that
+        /// it answers to nobody.
+        ///
+        /// Which of the two it is was decided at registration by
+        /// [`MachineAnchor`], and a machine that could satisfy neither was
+        /// refused before this record existed.
         controller_did: Option<String>,
         /// Reputation score (0-1000)
         reputation: u32,
@@ -481,6 +793,240 @@ pub struct RevocationEntry {
     pub reason: String,
     /// DID of the entity that performed the revocation
     pub revoked_by: String,
+}
+
+#[cfg(test)]
+mod ownership_transfer_tests {
+    use super::*;
+
+    const ROOT: &str = "ab";
+    fn root_hex() -> String {
+        ROOT.repeat(32)
+    }
+
+    fn delegated(controller: &str) -> MachineAnchor {
+        MachineAnchor::Delegated {
+            controller_did: controller.to_string(),
+        }
+    }
+
+    fn hardware() -> MachineAnchor {
+        MachineAnchor::HardwareRooted {
+            hardware_root_hex: root_hex(),
+            sources: vec!["tpm:ek".to_string()],
+        }
+    }
+
+    fn transfer(to: &str, authority: TransferAuthority) -> OwnershipTransfer {
+        OwnershipTransfer {
+            machine_did: "did:tenzro:machine:box".to_string(),
+            new_owner_did: to.to_string(),
+            authority,
+            expires_at_ms: 10_000,
+        }
+    }
+
+    /// The ordinary case: the accountable party hands the machine on.
+    #[test]
+    fn a_controller_transfers_the_machine_it_controls() {
+        let t = transfer(
+            "did:tenzro:human:bob",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:human:alice".into(),
+            },
+        );
+        let next = t
+            .authorize(&delegated("did:tenzro:human:alice"), 1_000)
+            .expect("the controller may transfer");
+        assert_eq!(next.controller_did(), Some("did:tenzro:human:bob"));
+    }
+
+    /// Someone who gains root on a delegated machine has compromised a machine,
+    /// not acquired it. Possession must not override an accountable party.
+    #[test]
+    fn holding_the_hardware_cannot_take_a_delegated_machine() {
+        let t = transfer(
+            "did:tenzro:human:thief",
+            TransferAuthority::HardwareRoot {
+                hardware_root_hex: root_hex(),
+            },
+        );
+        let err = t
+            .authorize(&delegated("did:tenzro:human:alice"), 1_000)
+            .expect_err("possession must not override delegation");
+        assert_eq!(err, TransferError::WrongAuthority);
+        assert!(err.to_string().contains("does not override"), "{err}");
+    }
+
+    /// A machine nobody delegated moves on proof of its hardware root — the
+    /// honest model for selling a box.
+    #[test]
+    fn the_hardware_holder_transfers_a_machine_nobody_delegated() {
+        let t = transfer(
+            "did:tenzro:human:buyer",
+            TransferAuthority::HardwareRoot {
+                hardware_root_hex: root_hex(),
+            },
+        );
+        let next = t.authorize(&hardware(), 1_000).expect("the TPM holder may");
+        // It now has an accountable party where before it had only hardware.
+        assert_eq!(next.controller_did(), Some("did:tenzro:human:buyer"));
+        assert!(next.is_delegated());
+    }
+
+    /// A different root of trust is a different machine.
+    #[test]
+    fn a_transfer_proving_the_wrong_root_is_refused() {
+        let t = transfer(
+            "did:tenzro:human:buyer",
+            TransferAuthority::HardwareRoot {
+                hardware_root_hex: "cd".repeat(32),
+            },
+        );
+        assert_eq!(
+            t.authorize(&hardware(), 1_000),
+            Err(TransferError::WrongHardwareRoot)
+        );
+    }
+
+    /// A controller who does not control this machine cannot move it.
+    #[test]
+    fn a_stranger_claiming_to_be_the_controller_is_refused() {
+        let t = transfer(
+            "did:tenzro:human:bob",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:human:mallory".into(),
+            },
+        );
+        let err = t
+            .authorize(&delegated("did:tenzro:human:alice"), 1_000)
+            .expect_err("only the real controller may transfer");
+        assert_eq!(
+            err,
+            TransferError::NotTheController {
+                expected: "did:tenzro:human:alice".into()
+            }
+        );
+    }
+
+    /// A controller signature cannot move a machine that has no controller —
+    /// there is nothing for it to have authorised.
+    #[test]
+    fn a_controller_cannot_move_a_machine_that_has_none() {
+        let t = transfer(
+            "did:tenzro:human:bob",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:human:alice".into(),
+            },
+        );
+        assert_eq!(
+            t.authorize(&hardware(), 1_000),
+            Err(TransferError::WrongAuthority)
+        );
+    }
+
+    /// Replaying an old authorisation against a machine that has since changed
+    /// hands is the reason the window exists.
+    #[test]
+    fn an_expired_authorisation_is_refused() {
+        let t = transfer(
+            "did:tenzro:human:bob",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:human:alice".into(),
+            },
+        );
+        assert_eq!(
+            t.authorize(&delegated("did:tenzro:human:alice"), 10_000),
+            Err(TransferError::Expired),
+            "expiry is exclusive"
+        );
+        t.authorize(&delegated("did:tenzro:human:alice"), 9_999)
+            .expect("still inside the window");
+    }
+
+    #[test]
+    fn a_transfer_to_the_current_owner_or_to_nobody_is_refused() {
+        let to_self = transfer(
+            "did:tenzro:human:alice",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:human:alice".into(),
+            },
+        );
+        assert_eq!(
+            to_self.authorize(&delegated("did:tenzro:human:alice"), 1_000),
+            Err(TransferError::InvalidNewOwner)
+        );
+
+        let to_nobody = transfer(
+            "   ",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:human:alice".into(),
+            },
+        );
+        assert_eq!(
+            to_nobody.authorize(&delegated("did:tenzro:human:alice"), 1_000),
+            Err(TransferError::InvalidNewOwner)
+        );
+    }
+
+    /// An institution's machine moves on the institution's authority, the same
+    /// way a person's does.
+    #[test]
+    fn an_institution_transfers_its_own_machine() {
+        let anchor = MachineAnchor::InstitutionDelegated {
+            controller_did: "did:tenzro:institution:acme".into(),
+        };
+        let t = transfer(
+            "did:tenzro:human:bob",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:institution:acme".into(),
+            },
+        );
+        let next = t.authorize(&anchor, 1_000).expect("the institution may");
+        assert_eq!(next.controller_did(), Some("did:tenzro:human:bob"));
+    }
+
+    /// Ownership replaces, never accumulates: a machine has exactly one
+    /// administering identity at a time.
+    #[test]
+    fn ownership_replaces_rather_than_accumulating() {
+        let mut anchor = delegated("did:tenzro:human:alice");
+        for owner in ["did:tenzro:human:bob", "did:tenzro:human:carol"] {
+            let previous = anchor.controller_did().expect("a controller").to_string();
+            let t = transfer(
+                owner,
+                TransferAuthority::Controller {
+                    controller_did: previous.clone(),
+                },
+            );
+            anchor = t.authorize(&anchor, 1_000).expect("each hop authorises");
+            assert_eq!(anchor.controller_did(), Some(owner));
+        }
+        // And the party who held it two hops ago can no longer move it.
+        let stale = transfer(
+            "did:tenzro:human:mallory",
+            TransferAuthority::Controller {
+                controller_did: "did:tenzro:human:alice".into(),
+            },
+        );
+        assert!(stale.authorize(&anchor, 1_000).is_err());
+    }
+
+    /// Whatever the transfer produces must still be a valid anchor, or the
+    /// machine would end up in a state registration would have refused.
+    #[test]
+    fn the_resulting_anchor_is_always_valid() {
+        let from_hardware = transfer(
+            "did:tenzro:human:buyer",
+            TransferAuthority::HardwareRoot {
+                hardware_root_hex: root_hex(),
+            },
+        )
+        .authorize(&hardware(), 1_000)
+        .expect("authorised");
+        assert!(from_hardware.is_valid());
+        assert!(from_hardware.rejection_reason().is_none());
+    }
 }
 
 #[cfg(test)]

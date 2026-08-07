@@ -40,7 +40,7 @@ The compact string form is accepted by `tenzro_registerAgentTemplate`, the CLI `
 
 ### Network commission
 
-`MARKETPLACE_COMMISSION_BPS = 500` (5%). Defined in `tenzro_types::marketplace` and shared across all three Tenzro marketplaces (agent templates, skills, tools). On every paid `tenzro_runAgentTemplate`:
+The governance-set `EconomicPolicy::marketplace_commission_bps`, shared across all three Tenzro marketplaces (agent templates, skills, tools) and read live rather than compiled in. On every paid `tenzro_runAgentTemplate`:
 
 ```
 fee_paid          = pricing.price_for(tokens_estimate, max_iterations)

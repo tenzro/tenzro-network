@@ -16,6 +16,9 @@ pub enum GovernanceCommand {
     /// Vote on a proposal (alias)
     #[command(name = "vote-on")]
     VoteOn(GovernanceVoteCmd),
+    /// Show the economic policy this node is applying
+    #[command(name = "economic-policy")]
+    EconomicPolicy(EconomicPolicyCmd),
 }
 
 impl GovernanceCommand {
@@ -25,7 +28,107 @@ impl GovernanceCommand {
             Self::Propose(cmd) => cmd.execute().await,
             Self::Vote(cmd) => cmd.execute().await,
             Self::VoteOn(cmd) => cmd.execute().await,
+            Self::EconomicPolicy(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Show the live economic policy — the rates this node applies to every
+/// settlement, and how a payment divides under each of its capabilities.
+#[derive(Debug, Parser)]
+pub struct EconomicPolicyCmd {
+    /// Emit the raw JSON the node returned.
+    #[arg(long)]
+    json: bool,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl EconomicPolicyCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getEconomicPolicy", serde_json::json!([]))
+            .await?;
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("Economic Policy");
+        let policy = &result["policy"];
+        println!();
+        output::print_field(
+            "Validating split",
+            &format!(
+                "operator {} bps / treasury {} bps",
+                policy["validating"]["operator_bps"], policy["validating"]["treasury_bps"]
+            ),
+        );
+        output::print_field(
+            "Delegated split",
+            &format!(
+                "operator {} bps / rpc provider {} bps / treasury {} bps",
+                policy["delegated"]["operator_bps"],
+                policy["delegated"]["rpc_provider_bps"],
+                policy["delegated"]["treasury_bps"]
+            ),
+        );
+        output::print_field(
+            "Marketplace commission",
+            &format!("{} bps", policy["marketplace_commission_bps"]),
+        );
+        output::print_field(
+            "Default settlement",
+            policy["default_conversion"].as_str().unwrap_or("unknown"),
+        );
+        output::print_field(
+            "Micro-settlement floor",
+            &policy["micro_settlement_floor"].to_string(),
+        );
+        output::print_field(
+            "Validating",
+            if result["validating"].as_bool().unwrap_or(false) {
+                "yes"
+            } else {
+                "no"
+            },
+        );
+        match result["rpc_provider_payee"].as_str() {
+            Some(addr) => output::print_field("RPC provider payee", addr),
+            None => output::print_field("RPC provider payee", "unset"),
+        }
+
+        println!();
+        output::print_header("Per capability");
+        if let Some(modes) = result["modes"].as_array() {
+            for entry in modes {
+                let capability = entry["capability"].as_str().unwrap_or("?");
+                let mode = entry["mode"].as_str().unwrap_or("?");
+                let shares: Vec<String> = entry["shares"]
+                    .as_array()
+                    .map(|v| {
+                        v.iter()
+                            .map(|s| {
+                                format!("{} {}bps", s["role"].as_str().unwrap_or("?"), s["bps"])
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                output::print_field(capability, &format!("{mode} — {}", shares.join(", ")));
+            }
+        }
+
+        println!();
+        output::print_warning(
+            "A private capability keeps the whole payment. Rates are governance-set: propose a \
+             change with `tenzro governance propose --type economic_policy`.",
+        );
+        Ok(())
     }
 }
 
@@ -204,6 +307,15 @@ pub struct GovernanceProposeCmd {
     #[arg(long, default_value = "10000")]
     deposit: String,
 
+    /// The complete economic policy, as JSON. Required for
+    /// `--type economic_policy` and ignored otherwise.
+    ///
+    /// The whole policy travels together because a partial change would not sum
+    /// to a whole payment. Start from `tenzro governance economic-policy --json`
+    /// and edit the `policy` object.
+    #[arg(long)]
+    policy_json: Option<String>,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -251,6 +363,25 @@ impl GovernanceProposeCmd {
             return Ok(());
         }
 
+        let mut params = serde_json::json!({
+            "title": self.title,
+            "description": self.description,
+            "proposal_type": self.r#type,
+            "duration_days": self.duration_days,
+            "deposit": self.deposit
+        });
+        if self.r#type == "economic_policy" {
+            let raw = self.policy_json.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--policy-json is required for --type economic_policy. Start from \
+                     `tenzro governance economic-policy --json` and edit the `policy` object."
+                )
+            })?;
+            let policy: serde_json::Value = serde_json::from_str(raw)
+                .map_err(|e| anyhow::anyhow!("--policy-json is not valid JSON: {e}"))?;
+            params["policy"] = policy;
+        }
+
         let spinner = output::create_spinner("Creating proposal transaction...");
 
         use crate::rpc::RpcClient;
@@ -259,16 +390,7 @@ impl GovernanceProposeCmd {
         spinner.set_message("Locking deposit...");
 
         let result: serde_json::Value = rpc
-            .call(
-                "tenzro_createProposal",
-                serde_json::json!([{
-                    "title": self.title,
-                    "description": self.description,
-                    "proposal_type": self.r#type,
-                    "duration_days": self.duration_days,
-                    "deposit": self.deposit
-                }]),
-            )
+            .call("tenzro_createProposal", serde_json::json!([params]))
             .await?;
 
         spinner.set_message("Broadcasting proposal...");

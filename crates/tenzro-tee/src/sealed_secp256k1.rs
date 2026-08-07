@@ -72,17 +72,19 @@ pub struct SealedSecp256k1Key {
 impl SealedSecp256k1Key {
     /// Derives a key from the platform's stable hardware root.
     ///
-    /// The root is [`crate::platform_root::platform_root_ikm`]: the
-    /// SEV-SNP PSP-derived key bound to `MEASUREMENT | IMAGE_ID |
-    /// GUEST_SVN` where available, otherwise the TDX MRTD. Both reproduce
-    /// for a given measured image, so the same node recovers the same
-    /// signer — and therefore the same sender address — after a restart.
+    /// The root is [`crate::platform_root::platform_root_ikm`]: the SEV-SNP
+    /// PSP-derived key bound to `MEASUREMENT | IMAGE_ID | GUEST_SVN` where
+    /// available, otherwise the TDX MRTD, otherwise a TPM-sealed per-machine
+    /// secret. All three reproduce across restarts, so the same node recovers
+    /// the same signer — and therefore the same sender address. The first two
+    /// are additionally bound to the measured image; the TPM is bound to the
+    /// machine.
     ///
     /// `label` is the HKDF salt and the only thing separating one purpose
     /// from another (e.g. `b"tenzro/bridge/evm-signer"` vs
     /// `b"tenzro/mpc/keyshare"`). Reuse a label and you reuse a key.
     ///
-    /// Returns `TeeError::NotAvailable` when neither SNP nor TDX is
+    /// Returns `TeeError::NotAvailable` when none of SNP, TDX or a TPM is
     /// reachable — nothing is fabricated off hardware.
     pub async fn derive_auto(label: &[u8]) -> Result<Self> {
         let ikm = crate::platform_root::platform_root_ikm().await?;
@@ -220,23 +222,18 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_auto_off_hardware_returns_not_available() {
-        // On dev machines without /dev/sev-guest or /dev/tdx_guest,
-        // derive_auto must NOT silently fabricate a key. No-simulation
-        // policy on testnet.
+    fn test_derive_auto_requires_a_real_hardware_root() {
+        // The no-simulation policy: `derive_auto` must never fabricate a key.
+        // It may only succeed where a real platform root exists — SEV-SNP, TDX,
+        // or a TPM, the third root that commodity hardware actually has.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(SealedSecp256k1Key::derive_auto(b"test"));
-        // Either NotAvailable (typical dev/CI) or Ok(_) when this very
-        // test runs inside a SEV/TDX VM.
         match result {
             Err(TeeError::NotAvailable(_)) => {}
             Ok(_) => {
-                let on_sev = std::path::Path::new("/dev/sev-guest").exists();
-                let on_tdx = std::path::Path::new("/dev/tdx_guest").exists()
-                    || std::path::Path::new("/sys/kernel/config/tsm/report").exists();
                 assert!(
-                    on_sev || on_tdx,
-                    "derive_auto returned Ok off TEE hardware — must not happen"
+                    crate::platform_root::platform_root_available(),
+                    "derive_auto returned Ok with no hardware root — must not happen"
                 );
             }
             Err(other) => panic!("unexpected error: {:?}", other),

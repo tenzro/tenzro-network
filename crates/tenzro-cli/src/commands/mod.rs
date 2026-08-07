@@ -32,6 +32,7 @@ pub mod custody;
 pub mod da;
 pub mod database;
 pub mod debridge;
+pub mod device;
 pub mod discover;
 pub mod dispute;
 pub mod eip7702;

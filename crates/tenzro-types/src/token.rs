@@ -649,6 +649,19 @@ pub enum ProposalType {
     TreasuryGrant { recipient: Address, amount: u128 },
     /// Protocol upgrade proposal
     ProtocolUpgrade { version: String, code_hash: Vec<u8> },
+    /// Sets the live [`crate::economics::EconomicPolicy`] — every rate the
+    /// network charges, in one proposal.
+    ///
+    /// Carries the whole policy rather than a field at a time so a proposal is
+    /// self-describing and cannot leave the schedules half-applied: a change
+    /// that moved the operator's share without moving anyone else's would not
+    /// sum to a whole payment, and would be refused at execution anyway.
+    /// Validation runs before it is stored, so a rejected proposal leaves the
+    /// previous policy live.
+    EconomicPolicyUpdate {
+        /// The complete policy to apply.
+        policy: crate::economics::EconomicPolicy,
+    },
     /// Adaptive-burn dial update (Spec 8). Sets the live `BurnRateConfig`
     /// applied by the EIP-1559 fee market and Spec 6 local-fee router.
     /// `paymaster_burn_bps` is invariant-locked to 10_000 (100%) — proposals

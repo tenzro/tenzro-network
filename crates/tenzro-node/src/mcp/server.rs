@@ -19,6 +19,12 @@ use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType, SettlementR
 // ─── Tool parameter structs ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct IdentityDidParams {
+    /// The identity whose devices to inspect, e.g. `did:tenzro:human:…`.
+    pub identity_did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetBalanceParams {
     #[schemars(description = "Hex-encoded account address (with or without 0x prefix)")]
     pub address: String,
@@ -1083,7 +1089,7 @@ pub struct RunAgentTemplateParams {
     )]
     pub dry_run: Option<bool>,
     #[schemars(
-        description = "Hex-encoded payer wallet address. REQUIRED for paid templates — will be charged the network commission (to treasury) and creator payout."
+        description = "Hex-encoded payer wallet address. REQUIRED for paid templates — will be charged the marketplace commission (to treasury) and creator payout."
     )]
     pub payer_wallet: Option<String>,
     #[schemars(
@@ -2482,9 +2488,7 @@ pub struct SubscribeEventsParams {
 pub struct RegisterWebhookParams {
     #[schemars(description = "HTTPS URL to receive webhook POST notifications")]
     pub url: String,
-    #[schemars(
-        description = "DID that owns this webhook. Only this DID can list or delete it."
-    )]
+    #[schemars(description = "DID that owns this webhook. Only this DID can list or delete it.")]
     pub owner_did: String,
     #[schemars(
         description = "Hex DID envelope proving control of owner_did, bound to method tenzro_registerWebhook with the url as the params hash. Without it the owner field would be a claim rather than a fact."
@@ -4898,8 +4902,7 @@ async fn rpc_dispatch(
         &request,
         h.x_tenzro_api_key.as_deref(),
         h.x_tenzro_admin_token.as_deref(),
-    )
-        && let Some(e) = err.error
+    ) && let Some(e) = err.error
     {
         return Err(ErrorData::internal_error(e.message, None));
     }
@@ -10682,7 +10685,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "Run (invoke) a spawned agent template. For paid templates, the `payer_wallet` is charged: the network commission (5%) goes to the treasury and the remainder is paid to the template's `creator_wallet`. `tokens_estimate` is used for per-token pricing. Set `dry_run=true` to simulate without charging fees or dispatching real transactions. Successful non-dry-run invocations are metered (invocation_count + total_revenue) and persisted."
+        description = "Run (invoke) a spawned agent template. For paid templates, the `payer_wallet` is charged: the marketplace commission (5%) goes to the treasury and the remainder is paid to the template's `creator_wallet`. `tokens_estimate` is used for per-token pricing. Set `dry_run=true` to simulate without charging fees or dispatching real transactions. Successful non-dry-run invocations are metered (invocation_count + total_revenue) and persisted."
     )]
     async fn run_agent_template(
         &self,
@@ -10691,7 +10694,6 @@ impl TenzroMcpServer {
         use crate::commission_policy::{CommissionError, settle_invocation_fee};
         use tenzro_storage::{CF_AGENT_TEMPLATES, CF_AGENTS, KvStore};
         use tenzro_types::agent_template::AgentTemplate;
-        use tenzro_types::marketplace::MARKETPLACE_COMMISSION_BPS;
 
         let max_iterations = params.max_iterations.unwrap_or(1) as usize;
         let dry_run = params.dry_run.unwrap_or(false);
@@ -10777,6 +10779,7 @@ impl TenzroMcpServer {
             let receipt = settle_invocation_fee(
                 &template,
                 fee,
+                self.node.economic_policy().marketplace_commission_bps as u16,
                 params.payer_wallet.as_deref(),
                 self.node.token().map(|t| &**t),
                 app.as_ref(),
@@ -10855,7 +10858,7 @@ impl TenzroMcpServer {
             "steps_failed": report.steps_failed,
             "total_value_dispatched": report.total_value_dispatched.to_string(),
             "fee_paid": fee.to_string(),
-            "commission_bps": MARKETPLACE_COMMISSION_BPS,
+            "commission_bps": self.node.economic_policy().marketplace_commission_bps,
             "network_commission": commission.to_string(),
             "creator_share": creator_share.to_string(),
             "payer_wallet": payer_hex,
@@ -13026,6 +13029,53 @@ impl TenzroMcpServer {
     }
 
     // ---- Spec 7: adaptive burn-rate governance dial -------------------
+
+    #[tool(
+        description = "List the devices bound to an identity and what each proved about its hardware — attestation format, key protection tier, whether the chain reached a pinned vendor root, and the backup flags. A device counts as hardware-bound only when its credential cannot sync off it AND a verified attestation says the key is in a TEE or secure element. Also reports whether a wallet may be created and, if not, why."
+    )]
+    async fn list_bound_devices(
+        &self,
+        Parameters(params): Parameters<IdentityDidParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_listBoundDevices",
+            serde_json::json!({ "identity_did": params.identity_did }),
+        )
+        .await?;
+        json_result(v)
+    }
+
+    #[tool(
+        description = "Whether an identity may create a wallet yet, and what to do if not. A wallet cannot sit behind a single device: the machine you are on is the first, and a genuinely separate hardware-bound device — a phone, another machine — must be bound before there is anything to lose. Returns a remedy code alongside the reason."
+    )]
+    async fn wallet_readiness(
+        &self,
+        Parameters(params): Parameters<IdentityDidParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_walletReadiness",
+            serde_json::json!({ "identity_did": params.identity_did }),
+        )
+        .await?;
+        json_result(v)
+    }
+
+    #[tool(
+        description = "Show this node's economic policy — how a settled payment divides, the marketplace commission, the network's default settlement asset, and the micro-settlement floor. Also reports, per capability, which economic mode the node is in: a private capability keeps the whole payment, a public validating one shares with the treasury, and a public one that does not validate also pays the RPC provider validating on its behalf. Read this before paying rather than inferring the split from a receipt. Every rate is governance-set."
+    )]
+    async fn get_economic_policy(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getEconomicPolicy",
+            serde_json::json!({}),
+        )
+        .await?;
+        json_result(v)
+    }
 
     #[tool(
         description = "Show the current adaptive burn-rate config — base/local/paymaster burn bps with their treasury complements. Paymaster is locked at 100% burn. The dial moves only via on-chain governance proposals (see adaptive_burn_get_recommendation)."
@@ -17612,7 +17662,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "Execute a developer-signed settlement authorization. The developer already charged the end user in fiat on their own payment-provider account; this moves TNZO from the app wallet to the payer, minus the network commission. Idempotent per (app_id, external_ref): a replay returns the recorded outcome with duplicate=true. The signature must be from one of the app's registered signing keys."
+        description = "Execute a developer-signed settlement authorization. The developer already charged the end user in fiat on their own payment-provider account; this moves TNZO from the app wallet to the payer, minus the settlement-authorization commission. Idempotent per (app_id, external_ref): a replay returns the recorded outcome with duplicate=true. The signature must be from one of the app's registered signing keys."
     )]
     async fn settle_authorized(
         &self,

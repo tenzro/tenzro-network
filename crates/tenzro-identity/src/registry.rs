@@ -1130,19 +1130,67 @@ impl IdentityRegistry {
         &self,
         public_key: Vec<u8>,
         capabilities: Vec<String>,
+        anchor: crate::identity::MachineAnchor,
     ) -> Result<TenzroIdentity> {
         let result = self
-            .register_autonomous_machine_with_fee(public_key, capabilities)
+            .register_autonomous_machine_with_fee(public_key, capabilities, anchor)
             .await?;
         Ok(result.identity)
     }
 
-    /// Registers an autonomous machine identity with fee information
+    /// Registers a machine identity that no human delegated, anchored instead
+    /// by a hardware root of trust.
+    ///
+    /// # The rule this enforces
+    ///
+    /// A machine identity must be answerable to something other than itself.
+    /// Either a human (or institution) delegated it and remains accountable, or
+    /// hardware that can *prove which machine it is* stands in their place. A
+    /// machine that answers only to itself is a self-issued claim, and nothing
+    /// distinguishes one from ten thousand minted by the same script.
+    ///
+    /// This path is the second case, so the anchor must be
+    /// [`MachineAnchor::HardwareRooted`] naming at least one attestable source.
+    /// A delegated anchor belongs on [`Self::register_machine_with_fee`], which
+    /// checks the controller exists and is active.
+    ///
+    /// [`MachineAnchor::HardwareRooted`]: crate::identity::MachineAnchor::HardwareRooted
+    ///
+    /// # Errors
+    ///
+    /// Refuses an anchor that is not hardware-rooted, and one that is but names
+    /// no source able to prove possession — a readable serial is not proof, and
+    /// accepting one would make the rule cosmetic.
     pub async fn register_autonomous_machine_with_fee(
         &self,
         public_key: Vec<u8>,
         capabilities: Vec<String>,
+        anchor: crate::identity::MachineAnchor,
     ) -> Result<RegistrationResult> {
+        use crate::identity::MachineAnchor;
+
+        if anchor.is_delegated() {
+            return Err(IdentityError::PermissionDenied(
+                "a delegated machine must be registered through register_machine_with_fee, so its \
+                 controller is checked to exist and be active"
+                    .to_string(),
+            ));
+        }
+        if let Some(reason) = anchor.rejection_reason() {
+            return Err(IdentityError::PermissionDenied(reason.to_string()));
+        }
+        let MachineAnchor::HardwareRooted {
+            hardware_root_hex,
+            sources,
+        } = &anchor
+        else {
+            return Err(IdentityError::PermissionDenied(
+                "a machine with no delegating party must be anchored by hardware".to_string(),
+            ));
+        };
+        let hardware_root_hex = hardware_root_hex.clone();
+        let sources = sources.join(",");
+
         let did = TenzroDid::new_autonomous_machine();
         let did_string = did.to_string();
 
@@ -1175,7 +1223,14 @@ impl IdentityRegistry {
             services: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            metadata: HashMap::new(),
+            // The anchor is recorded, not merely checked: a verifier resolving
+            // this DID later has to be able to see *why* a machine with no
+            // controller was admitted, without trusting that the check ran.
+            metadata: HashMap::from([
+                ("machine_anchor".to_string(), "hardware_rooted".to_string()),
+                ("hardware_root".to_string(), hardware_root_hex),
+                ("hardware_root_sources".to_string(), sources),
+            ]),
             username: None,
         };
 
@@ -2371,6 +2426,106 @@ impl IdentityRegistry {
         }
     }
 
+    /// Record a machine's new controlling identity after an authorised
+    /// [`crate::identity::OwnershipTransfer`].
+    ///
+    /// Deliberately *not* a general setter: it is called only after
+    /// `OwnershipTransfer::authorize` has checked the transfer against the
+    /// machine's current anchor. Exposing it as an unguarded "set the
+    /// controller" would let a caller skip the authority check that makes
+    /// ownership mean anything.
+    ///
+    /// The old controller's `controlled_machines` entry is dropped and the new
+    /// one gains it in the same call, so ownership replaces rather than
+    /// accumulating — a machine listed under two owners would let both issue
+    /// credentials on it.
+    pub fn set_machine_controller(&self, machine_did: &str, new_controller: &str) -> Result<()> {
+        if new_controller.trim().is_empty() {
+            return Err(IdentityError::PermissionDenied(
+                "a machine must be transferred to a real identity".to_string(),
+            ));
+        }
+
+        let previous = {
+            let mut identity = self
+                .identities
+                .get_mut(machine_did)
+                .ok_or_else(|| IdentityError::NotFound(machine_did.to_string()))?;
+            match &mut identity.identity_data {
+                IdentityData::Machine { controller_did, .. } => {
+                    let previous = controller_did.clone();
+                    *controller_did = Some(new_controller.to_string());
+                    identity.updated_at = Utc::now();
+                    self.persist_identity(machine_did, &identity);
+                    previous
+                }
+                _ => {
+                    return Err(IdentityError::PermissionDenied(
+                        "only a machine identity has a controller to transfer".to_string(),
+                    ));
+                }
+            }
+        };
+
+        // Detach from the previous owner, if there was one.
+        if let Some(prev) = previous.as_deref()
+            && prev != new_controller
+            && let Some(mut old) = self.identities.get_mut(prev)
+        {
+            let changed = match &mut old.identity_data {
+                IdentityData::Human {
+                    controlled_machines,
+                    ..
+                }
+                | IdentityData::Institution {
+                    controlled_machines,
+                    ..
+                } => {
+                    let before = controlled_machines.len();
+                    controlled_machines.retain(|m| m != machine_did);
+                    before != controlled_machines.len()
+                }
+                _ => false,
+            };
+            if changed {
+                old.updated_at = Utc::now();
+                self.persist_identity(prev, &old);
+            }
+        }
+
+        // Attach to the new owner.
+        if let Some(mut owner) = self.identities.get_mut(new_controller) {
+            let changed = match &mut owner.identity_data {
+                IdentityData::Human {
+                    controlled_machines,
+                    ..
+                }
+                | IdentityData::Institution {
+                    controlled_machines,
+                    ..
+                } => {
+                    if controlled_machines.iter().any(|m| m == machine_did) {
+                        false
+                    } else {
+                        controlled_machines.push(machine_did.to_string());
+                        true
+                    }
+                }
+                _ => false,
+            };
+            if changed {
+                owner.updated_at = Utc::now();
+                self.persist_identity(new_controller, &owner);
+            }
+        }
+
+        info!(
+            "Machine {} ownership transferred from {:?} to {}",
+            machine_did, previous, new_controller
+        );
+        Ok(())
+    }
+
     /// Gets all machines controlled by a human identity
     pub fn get_controlled_machines(&self, human_did: &str) -> Result<Vec<TenzroIdentity>> {
         let identity = self
@@ -2796,11 +2951,114 @@ mod tests {
         assert_eq!(machines[0].did_string(), machine.did_string());
     }
 
+    /// The rule: a machine identity must be answerable to something other
+    /// than itself. With no delegating party, only hardware that can *prove*
+    /// which machine it is will do.
+    #[tokio::test]
+    async fn a_machine_with_no_controller_needs_an_attestable_anchor() {
+        use crate::identity::MachineAnchor;
+        let registry = IdentityRegistry::new();
+
+        // A readable serial is not proof. Anything on the machine can read one,
+        // and anything anywhere can claim one — so accepting it would make the
+        // rule cosmetic.
+        let readable_only = MachineAnchor::HardwareRooted {
+            hardware_root_hex: "cd".repeat(32),
+            sources: vec!["intel:ppin".to_string(), "smbios:platform".to_string()],
+        };
+        let err = registry
+            .register_autonomous_machine(
+                test_pubkey(21),
+                vec!["monitoring".to_string()],
+                readable_only,
+            )
+            .await
+            .expect_err("a readable serial must not anchor an identity");
+        assert!(
+            format!("{err}").contains("prove possession"),
+            "the refusal should say why: {err}"
+        );
+
+        // A malformed root is refused too — a 32-byte root is the claim being
+        // made, and a truncated one is not that claim.
+        let malformed = MachineAnchor::HardwareRooted {
+            hardware_root_hex: "ab".to_string(),
+            sources: vec!["tpm:ek".to_string()],
+        };
+        assert!(
+            registry
+                .register_autonomous_machine(
+                    test_pubkey(22),
+                    vec!["monitoring".to_string()],
+                    malformed,
+                )
+                .await
+                .is_err()
+        );
+
+        // A TPM does anchor it: the hardware takes the human's seat.
+        let attestable = MachineAnchor::HardwareRooted {
+            hardware_root_hex: "ab".repeat(32),
+            sources: vec!["tpm:ek".to_string()],
+        };
+        let machine = registry
+            .register_autonomous_machine(
+                test_pubkey(23),
+                vec!["monitoring".to_string()],
+                attestable,
+            )
+            .await
+            .expect("a hardware-rooted machine may register");
+        // And the evidence is recorded, so a verifier resolving this DID later
+        // can see why a machine with no controller was admitted.
+        assert_eq!(
+            machine.metadata.get("machine_anchor").map(String::as_str),
+            Some("hardware_rooted")
+        );
+        assert_eq!(
+            machine
+                .metadata
+                .get("hardware_root_sources")
+                .map(String::as_str),
+            Some("tpm:ek")
+        );
+    }
+
+    /// A delegated machine belongs on the path that checks its controller
+    /// exists and is active. Letting it through here would mint a machine
+    /// naming a controller nobody verified.
+    #[tokio::test]
+    async fn a_delegated_anchor_is_refused_on_the_autonomous_path() {
+        use crate::identity::MachineAnchor;
+        let registry = IdentityRegistry::new();
+        let err = registry
+            .register_autonomous_machine(
+                test_pubkey(24),
+                vec!["monitoring".to_string()],
+                MachineAnchor::Delegated {
+                    controller_did: "did:tenzro:human:alice".to_string(),
+                },
+            )
+            .await
+            .expect_err("a delegated anchor must not take the autonomous path");
+        assert!(
+            format!("{err}").contains("register_machine_with_fee"),
+            "{err}"
+        );
+    }
+
     #[tokio::test]
     async fn test_register_autonomous_machine() {
         let registry = IdentityRegistry::new();
         let machine = registry
-            .register_autonomous_machine(test_pubkey(1), vec!["monitoring".to_string()])
+            .register_autonomous_machine(
+                test_pubkey(1),
+                vec!["monitoring".to_string()],
+                crate::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: "ab".repeat(32),
+                    sources: vec!["tpm:ek".to_string()],
+                },
+            )
             .await
             .unwrap();
 
@@ -3849,7 +4107,14 @@ mod tests {
     async fn principal_chain_for_autonomous_machine() {
         let registry = IdentityRegistry::new();
         let bot = registry
-            .register_autonomous_machine(test_pubkey(1), vec!["monitoring".to_string()])
+            .register_autonomous_machine(
+                test_pubkey(1),
+                vec!["monitoring".to_string()],
+                crate::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: "ab".repeat(32),
+                    sources: vec!["tpm:ek".to_string()],
+                },
+            )
             .await
             .unwrap();
 
@@ -4013,7 +4278,14 @@ mod tests {
         let registry =
             IdentityRegistry::new().with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
         let bot = registry
-            .register_autonomous_machine(test_pubkey(7), vec!["monitoring".to_string()])
+            .register_autonomous_machine(
+                test_pubkey(7),
+                vec!["monitoring".to_string()],
+                crate::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: "ab".repeat(32),
+                    sources: vec!["tpm:ek".to_string()],
+                },
+            )
             .await
             .unwrap();
 

@@ -27,10 +27,10 @@ use commands::{
     TeeCommand, TextSegmentCommand, TokenCommand, ToolCommand, TrainCommand, TranscribeCommand,
     TreasuryCommand, ValidatorCommand, VrfCommand, WalletCommand, WorkflowCommand, WormholeCommand,
     X402Command, ZkCommand, attested_clock::AttestedClockCommand, bridge_fee::BridgeFeeCommand,
-    database::DatabaseCommand, files::FilesCommand, function::FunctionCommand,
-    ivms101::Ivms101Command, lease::LeaseCommand, machine::MachineCommand, rpc_cmd::RpcCommand,
-    site::SiteCommand, status_bar::StatusCmd, urwa::UrwaCommand, visibility::VisibilityCommand,
-    wormhole_ntt::WormholeNttCommand,
+    database::DatabaseCommand, device::DeviceCommand, files::FilesCommand,
+    function::FunctionCommand, ivms101::Ivms101Command, lease::LeaseCommand,
+    machine::MachineCommand, rpc_cmd::RpcCommand, site::SiteCommand, status_bar::StatusCmd,
+    urwa::UrwaCommand, visibility::VisibilityCommand, wormhole_ntt::WormholeNttCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -498,6 +498,10 @@ enum Command {
     #[command(subcommand)]
     Database(DatabaseCommand),
 
+    /// Devices bound to an identity, and machine ownership
+    #[command(subcommand)]
+    Device(DeviceCommand),
+
     /// Tenant object storage: upload, list, download, and delete files
     #[command(subcommand)]
     Files(FilesCommand),
@@ -764,6 +768,7 @@ async fn main() -> Result<()> {
         Command::Discover(cmd) => cmd.execute().await?,
         Command::Cluster(cmd) => cmd.execute().await?,
         Command::Database(cmd) => cmd.execute().await?,
+        Command::Device(cmd) => cmd.execute().await?,
         Command::Files(cmd) => cmd.execute().await?,
         Command::Status(cmd) => cmd.execute().await?,
         Command::Rpc(cmd) => cmd.execute().await?,
@@ -868,7 +873,11 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     let _ = std::fs::create_dir_all(&models_dir);
 
     // Initialize chat history directory
-    let history_dir = tenzro_types::paths::chat_history_dir();
+    // Chat transcripts belong to the identity that held the conversation, not
+    // to the machine it happened on. Two people sharing a box do not share a
+    // history, and one person on two boxes expects theirs to follow them.
+    let history_dir =
+        tenzro_types::paths::identity_chat_history_dir(&tenzro_cli::keystore::active_did());
     let _ = std::fs::create_dir_all(&history_dir);
 
     let runtime = Arc::new(ModelRuntime::new());

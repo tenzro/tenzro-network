@@ -1,491 +1,637 @@
-//! Revenue split for settled inference and TEE payments.
+//! Dividing one settled payment among the parties that earned it.
 //!
-//! One payment funds the party that did the work and the network that made it
-//! findable and settleable. [`crate::settlement_asset`] decides *what asset*
-//! settles; this module decides *who receives it*.
+//! [`crate::settlement_asset`] decides *what asset* settles; this module decides
+//! *who receives it*, and in what proportion. The proportions themselves are
+//! [`tenzro_types::economics::EconomicPolicy`] — governance's, not this
+//! module's.
 //!
-//! # The network share has an interim custodian
+//! # The mode decides the payees, and participation decides the mode
 //!
-//! There are three slots, but only two economic parties. The **serving
-//! operator** earns the majority for running the model or the enclave. The
-//! remainder is the **network share**, and it is split between a custodian and
-//! the treasury only because, during testnet, the decentralized governance /
-//! DAO / treasury that should receive it is not yet operational.
+//! There is no configuration here that lets an operator choose to be paid more.
+//! [`tenzro_types::economics::NodeEconomicMode`] is derived from whether the
+//! node advertises the capability that served the request and whether it
+//! validates:
 //!
-//! The custodian slot is therefore a temporary stand-in, not a permanent
-//! payee. When governance is live, [`SplitConfig::governed`] folds the
-//! custodian's share into the treasury and the slot goes to zero — a config
-//! change, not a code change, which is the whole reason it is a configured
-//! address rather than a constant.
+//! - **Private** — connected but not advertised, reached through the operator's
+//!   own API keys and service keys. Nobody discovered the node and no validator
+//!   was engaged for the caller, so the operator keeps the payment.
+//! - **Public, validating** — operator and treasury.
+//! - **Public, not validating** — operator, the RPC provider validating on this
+//!   node's behalf, and treasury.
 //!
-//! # RPC providers are not paid from this split
+//! # This is the only place a service payment is divided
 //!
-//! An RPC provider monetises the way every other chain's RPC operator does:
-//! they bill their own tenants for API access, quotas, and SLA tiers, on terms
-//! they set. That revenue never touches this split, and conflating the two
-//! would mean a provider was paid twice for one request — once by their tenant
-//! and once out of the serving operator's earnings.
+//! Previously a payment could be divided here *and* have a network fee taken
+//! again inside the settlement engine, so a receipt reported an operator share
+//! the operator never received. [`split_revenue`] now produces the complete
+//! division, every leg is paid from it, and nothing downstream takes a second
+//! cut. [`RevenueSplit::total`] equalling the input is the invariant that keeps
+//! it that way, and it is asserted rather than assumed.
 //!
-//! # The treasury address is configured, never hardcoded
+//! # An RPC provider's own tenants are billed elsewhere
 //!
-//! A hardcoded address would have to be found and changed in a release the day
-//! governance takes the treasury over — with every node that had not upgraded
-//! still paying the old one. Carrying it as configuration makes that handover
-//! a config change with no code motion, which is the point.
-//!
-//! # The operator's share is constrained to be the majority
-//!
-//! Enforced by [`SplitConfig::validate`], not merely documented. The party
-//! doing the work has to be the party earning most of the payment, or the
-//! incentive that makes anyone serve a model at all is gone. A config that
-//! inverts it is rejected at construction rather than discovered in a receipt.
+//! The RPC-provider leg pays for *validation performed on this node's behalf*,
+//! and appears only in the delegated mode. It is not payment for brokering
+//! external networks — that is the provider's own business with their own
+//! tenants, under
+//! [`tenzro_types::access_tier::RpcServiceGrant`], and it never touches this
+//! split. Charging both here and there would be charging twice for two
+//! different things and calling it one.
 
 use serde::{Deserialize, Serialize};
+use tenzro_types::economics::{BPS_DENOMINATOR, EconomicPolicy, NodeEconomicMode, PayeeRole};
 
 use crate::error::{PaymentError, Result};
 
-/// Basis points in a whole. Shares must sum to exactly this.
-pub const BPS_DENOMINATOR: u32 = 10_000;
-
-/// How one payment divides, in basis points.
-///
-/// Shares must sum to exactly [`BPS_DENOMINATOR`]. Not "approximately" and not
-/// "at most": a split that sums low silently strands value with no owner, and
-/// one that sums high pays out more than came in. Both are caught by
-/// [`Self::validate`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SplitConfig {
-    /// Share to the operator that served the request.
-    pub operator_bps: u32,
-    /// Share to the interim custodian of the network's cut.
-    ///
-    /// A testnet stand-in for the treasury, which is not yet operational. Set
-    /// to zero by [`Self::governed`] once governance can receive it directly.
-    pub custodian_bps: u32,
-    /// Share to the network treasury.
-    pub treasury_bps: u32,
-}
-
-impl Default for SplitConfig {
-    /// Testnet default: 80% operator, 10% interim custodian, 10% treasury.
-    ///
-    /// The operator majority is the load-bearing part; the 10/10 tail is a
-    /// starting point for governance to tune, and the custodian half of it
-    /// disappears at the governance handover — see [`SplitConfig::governed`].
-    fn default() -> Self {
-        Self {
-            operator_bps: 8_000,
-            custodian_bps: 1_000,
-            treasury_bps: 1_000,
-        }
-    }
-}
-
-impl SplitConfig {
-    /// The split once governance can receive the network's cut directly.
-    ///
-    /// Folds the interim custodian's share into the treasury and zeroes the
-    /// custodian slot. The operator's share is unchanged — the handover moves
-    /// who holds the network's cut, not how much of the payment it is.
-    ///
-    /// This is the one line that has to change at the handover, and it is a
-    /// config selection rather than a code edit, which is why the custodian
-    /// was a configured address from the start.
-    pub fn governed(&self) -> Self {
-        Self {
-            operator_bps: self.operator_bps,
-            custodian_bps: 0,
-            treasury_bps: self.treasury_bps + self.custodian_bps,
-        }
-    }
-
-    /// Whether the network's cut still passes through an interim custodian.
-    ///
-    /// Surfaced so a receipt, a dashboard, or an operator can tell a testnet
-    /// split from a governed one without inferring it from the numbers.
-    pub fn has_interim_custodian(&self) -> bool {
-        self.custodian_bps > 0
-    }
-
-    /// Check the split is payable and incentive-sound.
-    ///
-    /// # Errors
-    ///
-    /// - shares do not sum to exactly [`BPS_DENOMINATOR`]
-    /// - the operator does not hold a strict majority
-    pub fn validate(&self) -> Result<()> {
-        let total = self
-            .operator_bps
-            .checked_add(self.custodian_bps)
-            .and_then(|s| s.checked_add(self.treasury_bps))
-            .ok_or_else(|| {
-                PaymentError::ConfigError("revenue split shares overflow".to_string())
-            })?;
-
-        if total != BPS_DENOMINATOR {
-            return Err(PaymentError::ConfigError(format!(
-                "revenue split must sum to {BPS_DENOMINATOR} bps, got {total} \
-                 (operator {} + rpc {} + treasury {})",
-                self.operator_bps, self.custodian_bps, self.treasury_bps
-            )));
-        }
-
-        // Strictly more than half, so an exact 50/50 is rejected too: at half,
-        // the operator is not being paid to serve, they are splitting with
-        // parties that did not do the work.
-        if self.operator_bps * 2 <= BPS_DENOMINATOR {
-            return Err(PaymentError::ConfigError(format!(
-                "the serving operator must take the majority: operator {} bps is not more than \
-                 half of {BPS_DENOMINATOR}. The party doing the work has to earn most of the \
-                 payment or there is no reason to serve",
-                self.operator_bps
-            )));
-        }
-
-        Ok(())
-    }
-}
-
-/// Where each share is paid.
+/// Where each role's share is paid.
 ///
 /// Addresses are opaque strings so the same split works whether the payout is a
-/// TNZO account, an EVM address, or a Solana pubkey — the settlement asset is
-/// [`crate::settlement_asset`]'s decision, and this type should not constrain
-/// it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// TNZO account, an EVM address or a Solana pubkey — the settlement asset is
+/// [`crate::settlement_asset`]'s decision and this type must not constrain it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitPayees {
     /// The operator that served the request.
     pub operator: String,
-    /// The interim custodian of the network's cut.
+    /// The RPC provider validating on this node's behalf.
     ///
-    /// During testnet this is the node operator standing in for a treasury
-    /// that does not yet exist. It is not the RPC provider's fee — RPC
-    /// providers bill their own tenants separately, the way every other
-    /// chain's RPC operators do.
-    pub custodian: String,
+    /// Required in [`NodeEconomicMode::PublicDelegated`] and meaningless in the
+    /// other two. A delegated split with no RPC provider named is refused
+    /// rather than quietly redirected — paying that leg to the treasury because
+    /// the provider could not be resolved would be paying the wrong party and
+    /// reporting it as if nothing were wrong.
+    pub rpc_provider: Option<String>,
     /// The network treasury.
     ///
-    /// Supplied by configuration. See the module docs for why this is not a
-    /// constant.
+    /// Supplied by the caller from the derived treasury account. Keyless, so
+    /// value that arrives there moves only through the treasury's authorised
+    /// withdrawal path.
     pub treasury: String,
 }
 
-/// One party's cut of a payment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SplitShare {
-    /// Who is paid.
-    pub payee: String,
-    /// How much, in the settled asset's smallest unit.
-    pub amount: u128,
-    /// The share in basis points, carried so a receipt can be audited without
-    /// re-deriving it from the config that was live at the time.
-    pub bps: u32,
-}
+impl SplitPayees {
+    /// Payees for a node that keeps the whole payment.
+    pub fn private(operator: impl Into<String>) -> Self {
+        Self {
+            operator: operator.into(),
+            rpc_provider: None,
+            treasury: String::new(),
+        }
+    }
 
-/// The full division of one payment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RevenueSplit {
-    /// The serving operator's share — always the largest.
-    pub operator: SplitShare,
-    /// The interim custodian's share of the network cut. Zero once governance
-    /// is live.
-    pub custodian: SplitShare,
-    /// The treasury's share.
-    pub treasury: SplitShare,
-}
+    /// Payees for a node that validates for itself.
+    pub fn validating(operator: impl Into<String>, treasury: impl Into<String>) -> Self {
+        Self {
+            operator: operator.into(),
+            rpc_provider: None,
+            treasury: treasury.into(),
+        }
+    }
 
-impl RevenueSplit {
-    /// Total paid out. Always equals the input amount — see [`split_revenue`].
-    pub fn total(&self) -> u128 {
-        self.operator.amount + self.custodian.amount + self.treasury.amount
+    /// Payees for a node whose validation is performed by an RPC provider.
+    pub fn delegated(
+        operator: impl Into<String>,
+        rpc_provider: impl Into<String>,
+        treasury: impl Into<String>,
+    ) -> Self {
+        Self {
+            operator: operator.into(),
+            rpc_provider: Some(rpc_provider.into()),
+            treasury: treasury.into(),
+        }
+    }
+
+    /// The address for `role`, if this set names one.
+    fn address_for(&self, role: PayeeRole) -> Option<&str> {
+        match role {
+            PayeeRole::Operator => Some(self.operator.as_str()),
+            PayeeRole::RpcProvider => self.rpc_provider.as_deref(),
+            PayeeRole::Treasury => Some(self.treasury.as_str()),
+        }
     }
 }
 
-/// Divide `amount` three ways.
+/// One party's cut of a payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitShare {
+    /// Which role is being paid.
+    pub role: PayeeRole,
+    /// Who is paid.
+    pub payee: String,
+    /// How much, in the settled asset's smallest unit.
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub amount: u128,
+    /// The share in basis points, carried so a receipt can be audited without
+    /// re-deriving it from a policy that may since have changed.
+    pub bps: u32,
+}
+
+/// The complete division of one payment.
+///
+/// Complete is the load-bearing word: every party that will be paid appears
+/// here, and nothing downstream takes a further cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevenueSplit {
+    /// The mode that produced this division, recorded so a receipt explains
+    /// itself.
+    pub mode: NodeEconomicMode,
+    /// Each party's cut, in settlement order — the operator first, so a failure
+    /// on a downstream leg cannot leave the party that did the work unpaid.
+    pub shares: Vec<SplitShare>,
+}
+
+impl RevenueSplit {
+    /// Total paid out. Always equals the amount that was split — see
+    /// [`split_revenue`].
+    pub fn total(&self) -> u128 {
+        self.shares.iter().map(|s| s.amount).sum()
+    }
+
+    /// The share paid to `role`, if this mode pays it.
+    pub fn share(&self, role: PayeeRole) -> Option<&SplitShare> {
+        self.shares.iter().find(|s| s.role == role)
+    }
+
+    /// The amount paid to `role`, or zero if this mode does not pay it.
+    pub fn amount_for(&self, role: PayeeRole) -> u128 {
+        self.share(role).map_or(0, |s| s.amount)
+    }
+
+    /// The operator's share, which every mode pays.
+    ///
+    /// Infallible because [`split_revenue`] always emits it: there is no mode in
+    /// which the party that served the request is not paid.
+    pub fn operator(&self) -> &SplitShare {
+        self.share(PayeeRole::Operator)
+            .expect("every mode pays the operator")
+    }
+}
+
+/// Divide `amount` according to `mode` and `policy`.
 ///
 /// # Conservation
 ///
-/// The three shares sum to exactly `amount`, always. Integer division discards
-/// a remainder of up to two smallest-units, and rather than let that vanish it
-/// is given to the operator — the majority party, and the one whose share is
-/// least distorted by it.
+/// The shares sum to exactly `amount`, always. Integer division discards a
+/// remainder of up to one smallest-unit per non-operator leg; rather than let
+/// that vanish it is given to the operator — the majority party, whose share is
+/// least distorted by it, and the one already receiving the residual.
 ///
-/// This matters more than the rounding: value that neither arrives nor is
-/// accounted for is the kind of leak that shows up as an unreconcilable
-/// balance months later, on a path that runs on every settled inference.
+/// This matters more than the rounding. Value that neither arrives nor is
+/// accounted for is the kind of leak that surfaces months later as a balance
+/// nobody can reconcile, on a path that runs on every settled request.
 ///
 /// # Errors
 ///
-/// Propagates [`SplitConfig::validate`].
+/// - `policy` fails [`EconomicPolicy::validate`]
+/// - `mode` is [`NodeEconomicMode::PublicDelegated`] and `payees` names no RPC
+///   provider
+/// - a mode that pays the treasury is given an empty treasury address
 pub fn split_revenue(
     amount: u128,
-    config: &SplitConfig,
+    mode: NodeEconomicMode,
+    policy: &EconomicPolicy,
     payees: &SplitPayees,
 ) -> Result<RevenueSplit> {
-    config.validate()?;
+    policy
+        .validate()
+        .map_err(|e| PaymentError::ConfigError(e.to_string()))?;
 
-    let denominator = u128::from(BPS_DENOMINATOR);
-    let custodian_amount = amount * u128::from(config.custodian_bps) / denominator;
-    let treasury_amount = amount * u128::from(config.treasury_bps) / denominator;
+    if mode.requires_rpc_provider() && payees.rpc_provider.is_none() {
+        return Err(PaymentError::ConfigError(
+            "a node whose validation is performed by an RPC provider must name that provider \
+             before it can settle: paying their leg to anyone else would pay the wrong party and \
+             report it as if nothing were wrong"
+                .to_string(),
+        ));
+    }
+
+    let mut shares = Vec::with_capacity(mode.payees().len());
+    let mut tail_total: u128 = 0;
+
+    // Every leg but the operator's is computed directly; the operator takes the
+    // residual, which is what makes conservation exact by construction rather
+    // than by a rounding rule that has to be got right.
+    for role in mode.payees().iter().copied() {
+        if role == PayeeRole::Operator {
+            continue;
+        }
+        let bps = policy.share_bps(mode, role);
+        let payee = payees.address_for(role).ok_or_else(|| {
+            PaymentError::ConfigError(format!(
+                "the {mode} split pays {role} but no {role} address was supplied"
+            ))
+        })?;
+        if payee.is_empty() {
+            return Err(PaymentError::ConfigError(format!(
+                "the {mode} split pays {role} but the {role} address is empty; settling would \
+                 send that share nowhere"
+            )));
+        }
+        let share_amount = apply_bps(amount, bps);
+        tail_total = tail_total
+            .checked_add(share_amount)
+            .ok_or_else(|| PaymentError::ConfigError("revenue split shares overflow".into()))?;
+        shares.push(SplitShare {
+            role,
+            payee: payee.to_string(),
+            amount: share_amount,
+            bps,
+        });
+    }
 
     // Whatever is left, including the rounding dust. Subtraction rather than a
-    // third multiply is what makes conservation exact by construction.
-    let operator_amount = amount - custodian_amount - treasury_amount;
-
-    Ok(RevenueSplit {
-        operator: SplitShare {
+    // further multiply is what makes the total exact.
+    let operator_amount = amount.checked_sub(tail_total).ok_or_else(|| {
+        PaymentError::ConfigError(
+            "revenue split tail exceeded the amount being split; the policy is not payable".into(),
+        )
+    })?;
+    shares.insert(
+        0,
+        SplitShare {
+            role: PayeeRole::Operator,
             payee: payees.operator.clone(),
             amount: operator_amount,
-            bps: config.operator_bps,
+            bps: policy.share_bps(mode, PayeeRole::Operator),
         },
-        custodian: SplitShare {
-            payee: payees.custodian.clone(),
-            amount: custodian_amount,
-            bps: config.custodian_bps,
-        },
-        treasury: SplitShare {
-            payee: payees.treasury.clone(),
-            amount: treasury_amount,
-            bps: config.treasury_bps,
-        },
-    })
+    );
+
+    Ok(RevenueSplit { mode, shares })
+}
+
+/// `amount * bps / 10_000`, decomposed so it cannot overflow for any `u128`.
+///
+/// The naive `amount * bps` overflows above `u128::MAX / 10_000`. Quotient and
+/// remainder are handled separately, matching the convention
+/// `tenzro_types::fees::split_settlement_authorization` already uses.
+fn apply_bps(amount: u128, bps: u32) -> u128 {
+    let bps = u128::from(bps);
+    let denominator = u128::from(BPS_DENOMINATOR);
+    (amount / denominator) * bps + (amount % denominator) * bps / denominator
 }
 
 #[cfg(test)]
 mod tests {
-
-    /// The handover: governance goes live, the custodian slot disappears, and
-    /// the operator's share is untouched. The network's cut moved custodian,
-    /// it did not change size.
-    #[test]
-    fn governance_handover_folds_the_custodian_share_into_the_treasury() {
-        let testnet = SplitConfig::default();
-        assert!(testnet.has_interim_custodian());
-
-        let governed = testnet.governed();
-        assert!(!governed.has_interim_custodian());
-        assert_eq!(governed.operator_bps, testnet.operator_bps);
-        assert_eq!(
-            governed.treasury_bps,
-            testnet.treasury_bps + testnet.custodian_bps
-        );
-        assert_eq!(
-            governed.operator_bps + governed.custodian_bps + governed.treasury_bps,
-            BPS_DENOMINATOR
-        );
-        governed.validate().unwrap();
-    }
-
-    /// The amount reaching each economic party is the same before and after
-    /// the handover — only who holds the network's cut changes.
-    #[test]
-    fn the_handover_does_not_change_what_the_operator_earns() {
-        let payees = SplitPayees {
-            operator: "op".to_string(),
-            custodian: "custodian".to_string(),
-            treasury: "treasury".to_string(),
-        };
-        let before = split_revenue(1_000_000, &SplitConfig::default(), &payees).unwrap();
-        let after = split_revenue(1_000_000, &SplitConfig::default().governed(), &payees).unwrap();
-
-        assert_eq!(before.operator.amount, after.operator.amount);
-        assert_eq!(after.custodian.amount, 0);
-        assert_eq!(
-            after.treasury.amount,
-            before.treasury.amount + before.custodian.amount
-        );
-        assert_eq!(before.total(), after.total());
-    }
-
-    /// Governance is still governance: it cannot take the majority.
-    #[test]
-    fn a_governed_split_still_leaves_the_operator_the_majority() {
-        let greedy = SplitConfig {
-            operator_bps: 4_000,
-            custodian_bps: 3_000,
-            treasury_bps: 3_000,
-        };
-        assert!(greedy.governed().validate().is_err());
-    }
     use super::*;
+    use tenzro_types::economics::{DelegatedSchedule, ValidatingSchedule};
 
-    fn payees() -> SplitPayees {
-        SplitPayees {
-            operator: "did:tenzro:machine:operator".into(),
-            custodian: "did:tenzro:machine:rpc".into(),
-            treasury: "did:tenzro:human:treasury".into(),
-        }
+    fn treasury() -> String {
+        "did:tenzro:system:treasury".to_string()
     }
 
-    // ---- config validation ------------------------------------------------
+    // ---- private ----------------------------------------------------------
 
+    /// Nobody discovered the node and no validator was engaged for the caller,
+    /// so there is no network share to take.
     #[test]
-    fn the_default_split_is_valid_and_operator_majority() {
-        let cfg = SplitConfig::default();
-        cfg.validate().unwrap();
-        assert!(cfg.operator_bps * 2 > BPS_DENOMINATOR);
-    }
+    fn a_private_node_keeps_the_whole_payment() {
+        let split = split_revenue(
+            1_000_000,
+            NodeEconomicMode::Private,
+            &EconomicPolicy::default(),
+            &SplitPayees::private("operator"),
+        )
+        .unwrap();
 
-    #[test]
-    fn shares_must_sum_to_exactly_ten_thousand() {
-        // Sums low — value would be stranded with no owner.
-        let low = SplitConfig {
-            operator_bps: 8_000,
-            custodian_bps: 1_000,
-            treasury_bps: 500,
-        };
-        assert!(low.validate().is_err());
-
-        // Sums high — would pay out more than came in.
-        let high = SplitConfig {
-            operator_bps: 8_000,
-            custodian_bps: 1_500,
-            treasury_bps: 1_000,
-        };
-        assert!(high.validate().is_err());
-    }
-
-    /// The incentive constraint, enforced rather than documented.
-    #[test]
-    fn the_operator_must_hold_a_strict_majority() {
-        let minority = SplitConfig {
-            operator_bps: 4_000,
-            custodian_bps: 3_000,
-            treasury_bps: 3_000,
-        };
-        let err = minority
-            .validate()
-            .expect_err("an operator minority must be refused");
-        assert!(
-            format!("{err}").contains("must take the majority"),
-            "got {err}"
-        );
-
-        // Exactly half is not a majority either.
-        let half = SplitConfig {
-            operator_bps: 5_000,
-            custodian_bps: 2_500,
-            treasury_bps: 2_500,
-        };
-        assert!(half.validate().is_err(), "50% is not a majority");
-
-        // One bp over half is.
-        let just_over = SplitConfig {
-            operator_bps: 5_001,
-            custodian_bps: 2_500,
-            treasury_bps: 2_499,
-        };
-        just_over.validate().unwrap();
-    }
-
-    // ---- splitting ---------------------------------------------------------
-
-    #[test]
-    fn splits_a_clean_amount_by_the_configured_shares() {
-        let split = split_revenue(1_000_000, &SplitConfig::default(), &payees()).unwrap();
-        assert_eq!(split.operator.amount, 800_000);
-        assert_eq!(split.custodian.amount, 100_000);
-        assert_eq!(split.treasury.amount, 100_000);
+        assert_eq!(split.shares.len(), 1);
+        assert_eq!(split.operator().amount, 1_000_000);
+        assert_eq!(split.operator().bps, BPS_DENOMINATOR);
+        assert_eq!(split.amount_for(PayeeRole::Treasury), 0);
         assert_eq!(split.total(), 1_000_000);
     }
 
-    /// Conservation is the property that matters: on a path that runs on every
-    /// settled inference, a lost smallest-unit becomes an unreconcilable
-    /// balance later.
+    /// A private node needs no treasury address, so an empty one must not be
+    /// treated as a misconfiguration.
     #[test]
-    fn every_amount_is_conserved_exactly() {
-        let cfg = SplitConfig::default();
-        let p = payees();
-        for amount in [
-            0,
-            1,
-            2,
-            3,
-            7,
-            99,
-            101,
-            9_999,
-            10_001,
-            123_456_789,
-            u64::MAX as u128,
-        ] {
-            let split = split_revenue(amount, &cfg, &p).unwrap();
-            assert_eq!(
-                split.total(),
-                amount,
-                "amount {amount} was not conserved: {split:?}"
-            );
+    fn a_private_split_does_not_require_a_treasury() {
+        let payees = SplitPayees::private("operator");
+        assert!(payees.treasury.is_empty());
+        assert!(
+            split_revenue(
+                1,
+                NodeEconomicMode::Private,
+                &EconomicPolicy::default(),
+                &payees
+            )
+            .is_ok()
+        );
+    }
+
+    // ---- public, validating -----------------------------------------------
+
+    #[test]
+    fn a_validating_node_splits_two_ways() {
+        let split = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicValidating,
+            &EconomicPolicy::default(),
+            &SplitPayees::validating("operator", treasury()),
+        )
+        .unwrap();
+
+        assert_eq!(split.shares.len(), 2);
+        assert_eq!(split.amount_for(PayeeRole::Operator), 900_000);
+        assert_eq!(split.amount_for(PayeeRole::Treasury), 100_000);
+        assert_eq!(split.amount_for(PayeeRole::RpcProvider), 0);
+        assert_eq!(split.total(), 1_000_000);
+    }
+
+    // ---- public, delegated ------------------------------------------------
+
+    #[test]
+    fn a_delegated_node_splits_three_ways() {
+        let split = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicDelegated,
+            &EconomicPolicy::default(),
+            &SplitPayees::delegated("operator", "rpc", treasury()),
+        )
+        .unwrap();
+
+        assert_eq!(split.shares.len(), 3);
+        assert_eq!(split.amount_for(PayeeRole::Operator), 800_000);
+        assert_eq!(split.amount_for(PayeeRole::RpcProvider), 100_000);
+        assert_eq!(split.amount_for(PayeeRole::Treasury), 100_000);
+        assert_eq!(split.total(), 1_000_000);
+    }
+
+    /// Paying that leg to the treasury because the provider could not be
+    /// resolved would pay the wrong party and report it as if nothing were
+    /// wrong.
+    #[test]
+    fn a_delegated_split_without_an_rpc_provider_is_refused() {
+        let err = split_revenue(
+            1_000,
+            NodeEconomicMode::PublicDelegated,
+            &EconomicPolicy::default(),
+            &SplitPayees::validating("operator", treasury()),
+        )
+        .expect_err("must refuse");
+        assert!(
+            format!("{err}").contains("must name that provider"),
+            "{err}"
+        );
+    }
+
+    /// The difference between the two public schedules is exactly the RPC
+    /// provider's leg: the operator is buying validation it does not perform.
+    #[test]
+    fn delegating_validation_costs_the_operator_exactly_the_rpc_leg() {
+        let policy = EconomicPolicy::default();
+        let validating = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicValidating,
+            &policy,
+            &SplitPayees::validating("operator", treasury()),
+        )
+        .unwrap();
+        let delegated = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicDelegated,
+            &policy,
+            &SplitPayees::delegated("operator", "rpc", treasury()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            validating.amount_for(PayeeRole::Operator) - delegated.amount_for(PayeeRole::Operator),
+            delegated.amount_for(PayeeRole::RpcProvider)
+        );
+        // The treasury's cut is the same either way — what it does for the
+        // payment does not change.
+        assert_eq!(
+            validating.amount_for(PayeeRole::Treasury),
+            delegated.amount_for(PayeeRole::Treasury)
+        );
+    }
+
+    // ---- conservation -----------------------------------------------------
+
+    /// The property that matters. On a path that runs on every settled request,
+    /// a lost smallest-unit becomes an unreconcilable balance later.
+    #[test]
+    fn every_amount_is_conserved_exactly_in_every_mode() {
+        let policy = EconomicPolicy::default();
+        let cases = [
+            (NodeEconomicMode::Private, SplitPayees::private("op")),
+            (
+                NodeEconomicMode::PublicValidating,
+                SplitPayees::validating("op", treasury()),
+            ),
+            (
+                NodeEconomicMode::PublicDelegated,
+                SplitPayees::delegated("op", "rpc", treasury()),
+            ),
+        ];
+        for (mode, payees) in cases {
+            for amount in [
+                0,
+                1,
+                2,
+                3,
+                7,
+                99,
+                101,
+                9_999,
+                10_001,
+                123_456_789,
+                u64::MAX as u128,
+                u128::MAX,
+            ] {
+                let split = split_revenue(amount, mode, &policy, &payees).unwrap();
+                assert_eq!(
+                    split.total(),
+                    amount,
+                    "{mode} did not conserve {amount}: {split:?}"
+                );
+            }
         }
+    }
+
+    /// The naive `amount * bps` overflows above `u128::MAX / 10_000`. The
+    /// decomposition is what lets the largest representable payment settle.
+    #[test]
+    fn the_largest_representable_amount_does_not_overflow() {
+        let split = split_revenue(
+            u128::MAX,
+            NodeEconomicMode::PublicDelegated,
+            &EconomicPolicy::default(),
+            &SplitPayees::delegated("op", "rpc", treasury()),
+        )
+        .unwrap();
+        assert_eq!(split.total(), u128::MAX);
+        // And the shares are still roughly the configured proportions.
+        assert!(split.amount_for(PayeeRole::Operator) > u128::MAX / 2);
     }
 
     /// Rounding dust goes to the operator — the majority party, whose share is
     /// least distorted by it.
     #[test]
     fn rounding_dust_goes_to_the_operator() {
-        // 7 units at 80/10/10: rpc and treasury each floor to 0, so the
-        // operator takes all 7 rather than 4 vanishing.
-        let split = split_revenue(7, &SplitConfig::default(), &payees()).unwrap();
-        assert_eq!(split.custodian.amount, 0);
-        assert_eq!(split.treasury.amount, 0);
-        assert_eq!(split.operator.amount, 7);
+        // 7 units at 80/10/10: both tail legs floor to 0, so the operator takes
+        // all 7 rather than value vanishing.
+        let split = split_revenue(
+            7,
+            NodeEconomicMode::PublicDelegated,
+            &EconomicPolicy::default(),
+            &SplitPayees::delegated("op", "rpc", treasury()),
+        )
+        .unwrap();
+        assert_eq!(split.amount_for(PayeeRole::RpcProvider), 0);
+        assert_eq!(split.amount_for(PayeeRole::Treasury), 0);
+        assert_eq!(split.amount_for(PayeeRole::Operator), 7);
         assert_eq!(split.total(), 7);
     }
 
     #[test]
     fn a_zero_payment_splits_to_zeroes() {
-        let split = split_revenue(0, &SplitConfig::default(), &payees()).unwrap();
+        let split = split_revenue(
+            0,
+            NodeEconomicMode::PublicValidating,
+            &EconomicPolicy::default(),
+            &SplitPayees::validating("op", treasury()),
+        )
+        .unwrap();
         assert_eq!(split.total(), 0);
-        assert_eq!(split.operator.amount, 0);
+        assert!(split.shares.iter().all(|s| s.amount == 0));
+    }
+
+    // ---- ordering and audit -----------------------------------------------
+
+    /// The operator is paid first so a failure on a downstream leg cannot leave
+    /// the party that did the work unpaid.
+    #[test]
+    fn the_operator_leg_comes_first() {
+        let split = split_revenue(
+            1_000,
+            NodeEconomicMode::PublicDelegated,
+            &EconomicPolicy::default(),
+            &SplitPayees::delegated("op", "rpc", treasury()),
+        )
+        .unwrap();
+        assert_eq!(split.shares[0].role, PayeeRole::Operator);
     }
 
     #[test]
-    fn shares_carry_their_bps_for_audit() {
-        let cfg = SplitConfig::default();
-        let split = split_revenue(1_000_000, &cfg, &payees()).unwrap();
-        assert_eq!(split.operator.bps, cfg.operator_bps);
-        assert_eq!(split.custodian.bps, cfg.custodian_bps);
-        assert_eq!(split.treasury.bps, cfg.treasury_bps);
+    fn shares_carry_their_role_payee_and_bps_for_audit() {
+        let policy = EconomicPolicy::default();
+        let split = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicDelegated,
+            &policy,
+            &SplitPayees::delegated("op", "rpc", treasury()),
+        )
+        .unwrap();
+
+        let rpc = split.share(PayeeRole::RpcProvider).unwrap();
+        assert_eq!(rpc.payee, "rpc");
+        assert_eq!(rpc.bps, policy.delegated.rpc_provider_bps);
+        assert_eq!(split.share(PayeeRole::Treasury).unwrap().payee, treasury());
+        assert_eq!(split.mode, NodeEconomicMode::PublicDelegated);
     }
 
-    #[test]
-    fn payees_are_carried_through_to_their_shares() {
-        let p = payees();
-        let split = split_revenue(1_000, &SplitConfig::default(), &p).unwrap();
-        assert_eq!(split.operator.payee, p.operator);
-        assert_eq!(split.custodian.payee, p.custodian);
-        assert_eq!(split.treasury.payee, p.treasury);
-    }
-
-    /// The treasury is whatever configuration says, so handing it to a DAO is a
-    /// config change with no code motion.
+    /// The treasury is whatever the caller supplies, so handing it from Labs
+    /// administration to a permissionless treasury is a configuration change
+    /// with no code motion.
     #[test]
     fn the_treasury_payee_is_not_fixed_by_the_code() {
-        let labs = SplitPayees {
-            treasury: "did:tenzro:human:tenzro-labs".into(),
-            ..payees()
-        };
-        let dao = SplitPayees {
-            treasury: "did:tenzro:machine:network-dao".into(),
-            ..payees()
-        };
-        let cfg = SplitConfig::default();
+        let policy = EconomicPolicy::default();
+        let labs = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicValidating,
+            &policy,
+            &SplitPayees::validating("op", "did:tenzro:human:tenzro-labs"),
+        )
+        .unwrap();
+        let permissionless = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicValidating,
+            &policy,
+            &SplitPayees::validating("op", "did:tenzro:system:treasury"),
+        )
+        .unwrap();
 
-        let a = split_revenue(1_000_000, &cfg, &labs).unwrap();
-        let b = split_revenue(1_000_000, &cfg, &dao).unwrap();
-
-        assert_eq!(a.treasury.payee, "did:tenzro:human:tenzro-labs");
-        assert_eq!(b.treasury.payee, "did:tenzro:machine:network-dao");
+        assert_eq!(
+            labs.share(PayeeRole::Treasury).unwrap().payee,
+            "did:tenzro:human:tenzro-labs"
+        );
         // Only the recipient moves; the economics are identical.
-        assert_eq!(a.treasury.amount, b.treasury.amount);
+        assert_eq!(
+            labs.amount_for(PayeeRole::Treasury),
+            permissionless.amount_for(PayeeRole::Treasury)
+        );
     }
 
+    // ---- refusals ---------------------------------------------------------
+
     #[test]
-    fn an_invalid_config_refuses_to_split() {
-        let bad = SplitConfig {
+    fn an_invalid_policy_refuses_to_split() {
+        let mut policy = EconomicPolicy::default();
+        policy.validating = ValidatingSchedule {
             operator_bps: 1_000,
-            custodian_bps: 1_000,
             treasury_bps: 1_000,
         };
-        assert!(split_revenue(1_000, &bad, &payees()).is_err());
+        assert!(
+            split_revenue(
+                1_000,
+                NodeEconomicMode::PublicValidating,
+                &policy,
+                &SplitPayees::validating("op", treasury())
+            )
+            .is_err()
+        );
+    }
+
+    /// Settling would send that share nowhere, so it is refused at the split
+    /// rather than discovered in a receipt.
+    #[test]
+    fn a_public_split_with_no_treasury_address_is_refused() {
+        let err = split_revenue(
+            1_000,
+            NodeEconomicMode::PublicValidating,
+            &EconomicPolicy::default(),
+            &SplitPayees::validating("op", ""),
+        )
+        .expect_err("must refuse");
+        assert!(
+            format!("{err}").contains("treasury address is empty"),
+            "{err}"
+        );
+    }
+
+    /// Governance can move the proportions, and the split follows without a
+    /// code change — but it still cannot invert the incentive.
+    #[test]
+    fn a_governance_set_policy_is_honoured_within_the_invariant() {
+        let mut policy = EconomicPolicy::default();
+        policy.delegated = DelegatedSchedule {
+            operator_bps: 7_000,
+            rpc_provider_bps: 2_000,
+            treasury_bps: 1_000,
+        };
+        let split = split_revenue(
+            1_000_000,
+            NodeEconomicMode::PublicDelegated,
+            &policy,
+            &SplitPayees::delegated("op", "rpc", treasury()),
+        )
+        .unwrap();
+        assert_eq!(split.amount_for(PayeeRole::RpcProvider), 200_000);
+        assert_eq!(split.amount_for(PayeeRole::Operator), 700_000);
+
+        // An operator minority is still refused, however governance sets it.
+        policy.delegated = DelegatedSchedule {
+            operator_bps: 4_000,
+            rpc_provider_bps: 3_000,
+            treasury_bps: 3_000,
+        };
+        assert!(
+            split_revenue(
+                1_000,
+                NodeEconomicMode::PublicDelegated,
+                &policy,
+                &SplitPayees::delegated("op", "rpc", treasury())
+            )
+            .is_err()
+        );
     }
 }

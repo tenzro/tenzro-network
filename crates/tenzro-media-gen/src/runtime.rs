@@ -1090,7 +1090,11 @@ mod tests {
             "the newest announcement wins; a stale set would route jobs to \
              models the worker no longer holds"
         );
-        assert_eq!(rt.list_workers().len(), 1, "re-enrolment must not duplicate");
+        assert_eq!(
+            rt.list_workers().len(),
+            1,
+            "re-enrolment must not duplicate"
+        );
     }
 
     /// A worker that changes identity announces under a new key, so the old
@@ -1115,7 +1119,8 @@ mod tests {
             "removing it twice is not an error, but reports nothing was removed"
         );
         assert!(
-            !rt.remove_worker("did:tenzro:machine:never-enrolled").unwrap(),
+            !rt.remove_worker("did:tenzro:machine:never-enrolled")
+                .unwrap(),
             "removing an unknown worker reports nothing was removed"
         );
     }

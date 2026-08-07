@@ -11,6 +11,8 @@ name = "tenzro-node"
 path = "src/main.rs"
 
 [dependencies]
+# Advisory flock for the single-instance guard (single_instance.rs).
+libc = { workspace = true }
 tenzro-types = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-tee = { workspace = true }

@@ -47,9 +47,37 @@ pub struct X402PaymentServer {
     /// carries an offer commitment is keyed by `(commitment, payer_did)`; a
     /// replay returns the prior receipt instead of charging twice.
     idempotency: Option<Arc<crate::x402::offer::IdempotencyLedger>>,
+    /// The scheme this server pins on the challenges it issues.
+    ///
+    /// Configuration rather than a literal, because the choice is an economic
+    /// one the operator makes, not a property of the protocol. A resource whose
+    /// price is known up front issues `exact`-family challenges; a **metered**
+    /// resource — inference, media generation, anything billed by consumption —
+    /// issues [`crate::x402::UPTO_SCHEME`], where `amount` is the ceiling the
+    /// buyer authorizes and the seller settles the actual usage beneath it.
+    ///
+    /// Both paths run through this one constructor and the backend registry
+    /// that already implements them; the scheme decides which backend verifies.
+    scheme: String,
 }
 
 impl X402PaymentServer {
+    /// Pins the scheme this server issues challenges under.
+    ///
+    /// Set [`crate::x402::UPTO_SCHEME`] on a node serving **metered** resources
+    /// — inference, media generation, anything priced by consumption. Under it
+    /// the challenge `amount` is the ceiling the buyer authorizes rather than a
+    /// fixed price, and the seller settles the metered actual beneath it. That
+    /// is what makes per-token billing expressible over HTTP 402: the buyer
+    /// cannot know the token count in advance, so it signs a maximum.
+    ///
+    /// Leaving it unset keeps the fixed-price default, which is correct for a
+    /// resource whose price is known before the work runs.
+    pub fn with_scheme(mut self, scheme: impl Into<String>) -> Self {
+        self.scheme = scheme.into();
+        self
+    }
+
     /// Creates a new x402 payment server with the default scheme registry
     /// ([`SchemeRegistry::with_defaults`]).
     pub fn new(recipient: impl Into<String>, supported_chains: Vec<String>) -> Self {
@@ -62,6 +90,7 @@ impl X402PaymentServer {
             scheme_registry: SchemeRegistry::with_defaults(),
             offer_signer: None,
             idempotency: None,
+            scheme: crate::x402::DEFAULT_SCHEME.to_string(),
         }
     }
 
@@ -193,7 +222,7 @@ impl PaymentProtocol for X402PaymentServer {
             .first()
             .cloned()
             .unwrap_or_else(|| "tenzro".to_string());
-        let scheme = crate::x402::DEFAULT_SCHEME.to_string();
+        let scheme = self.scheme.clone();
         let network = format!("eip155:{}", 1337);
 
         let mut extra = HashMap::new();

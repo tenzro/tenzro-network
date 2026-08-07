@@ -75,9 +75,21 @@ impl LocalHybridSigner {
     }
 }
 
-/// Path to the CLI's sealed hybrid key: `~/.tenzro/hybrid_key.json`.
+/// Path to the sealed hybrid key belonging to the CLI's active identity.
+///
+/// Identity-scoped rather than machine-scoped: a key is something an identity
+/// holds, and filing it at machine level meant two identities on one box shared
+/// one keyfile — so the second to seal a key silently overwrote the first.
 pub fn hybrid_key_path() -> PathBuf {
-    tenzro_types::paths::hybrid_key_path()
+    tenzro_types::paths::identity_hybrid_key_path(&active_did())
+}
+
+/// The identity this CLI invocation acts as, from the persisted config.
+pub fn active_did() -> String {
+    crate::config::load_config()
+        .did
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "anonymous".to_string())
 }
 
 /// `true` iff a local self-custody hybrid key exists on disk.

@@ -23,7 +23,7 @@ use crate::primitives::Address;
 /// Domain tag for the derived network treasury address.
 const TREASURY_DOMAIN: &[u8] = b"tenzro/treasury";
 
-/// The account network commissions accumulate at.
+/// The account network revenue accumulates at.
 ///
 /// Derived rather than configured: `SHA-256("tenzro/treasury")`. Every replica
 /// computes the same 32 bytes, so a commission credited on one node lands at
@@ -70,9 +70,16 @@ pub fn apply_developer_margin(network_cost: u128, margin_bps: u32) -> Option<u12
 ///
 /// When a developer-signed [`crate::SettlementAuthorization`] moves TNZO from
 /// an app wallet to a payer, this fraction of the authorized amount routes to
-/// the network treasury instead — the same 0.5% rate as the settlement
-/// engine's network fee. The payer receives `amount_tnzo` minus this
+/// the network treasury instead. The payer receives `amount_tnzo` minus this
 /// commission; the app wallet is debited exactly `amount_tnzo`.
+///
+/// This is its own rate and **not** part of the `EconomicPolicy` settlement
+/// split — an app paying out to its own user is not a service payment being
+/// divided between operator, treasury and validator, so the split does not
+/// apply and neither charge stacks on the other. It is also not the settlement
+/// engine's former `network_fee_bps`, which is now 0; a comment here once
+/// claimed parity with that rate, which stopped being true when the double
+/// charge it described was removed.
 pub const SETTLEMENT_AUTHORIZATION_COMMISSION_BPS: u32 = 50;
 
 /// Splits an authorized settlement amount into (payer_net, commission).
@@ -215,132 +222,6 @@ impl ServiceFeeSchedule {
     }
 }
 
-/// Network commission rates for provider payments (in basis points, 100 = 1%)
-///
-/// These commissions are taken as a percentage of payments to AI inference providers,
-/// TEE enclave providers, key management services, and model hosting providers.
-/// The commission flows to the network treasury for protocol development and governance.
-///
-/// # Examples
-///
-/// ```
-/// use tenzro_types::NetworkCommissionRates;
-///
-/// let rates = NetworkCommissionRates::default();
-/// assert_eq!(rates.inference_commission_bps, 500); // 5%
-///
-/// // Calculate commission on a 100 TNZO payment
-/// let payment = 100_000_000_000_000_000_000u128; // 100 TNZO
-/// let commission = rates.calculate_inference_commission(payment).unwrap();
-/// assert_eq!(commission, 5_000_000_000_000_000_000u128); // 5 TNZO
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkCommissionRates {
-    /// Commission on AI inference payments (basis points)
-    ///
-    /// Default: 500 bps (5%)
-    pub inference_commission_bps: u32,
-
-    /// Commission on TEE enclave usage payments (basis points)
-    ///
-    /// Default: 500 bps (5%)
-    pub tee_commission_bps: u32,
-
-    /// Commission on key management/custody payments (basis points)
-    ///
-    /// Default: 500 bps (5%)
-    pub custody_commission_bps: u32,
-
-    /// Commission on model hosting payments (basis points)
-    ///
-    /// Default: 500 bps (5%)
-    pub model_hosting_commission_bps: u32,
-}
-
-impl Default for NetworkCommissionRates {
-    fn default() -> Self {
-        Self {
-            inference_commission_bps: 500,     // 5%
-            tee_commission_bps: 500,           // 5%
-            custody_commission_bps: 500,       // 5%
-            model_hosting_commission_bps: 500, // 5%
-        }
-    }
-}
-
-impl NetworkCommissionRates {
-    /// Creates a new commission rate structure with custom values
-    pub fn new(
-        inference_commission_bps: u32,
-        tee_commission_bps: u32,
-        custody_commission_bps: u32,
-        model_hosting_commission_bps: u32,
-    ) -> Self {
-        Self {
-            inference_commission_bps,
-            tee_commission_bps,
-            custody_commission_bps,
-            model_hosting_commission_bps,
-        }
-    }
-
-    /// Calculates the commission amount for an inference payment
-    ///
-    /// Returns None if the calculation would overflow.
-    pub fn calculate_inference_commission(&self, payment_amount: u128) -> Option<u128> {
-        self.calculate_commission(payment_amount, self.inference_commission_bps)
-    }
-
-    /// Calculates the commission amount for a TEE enclave payment
-    ///
-    /// Returns None if the calculation would overflow.
-    pub fn calculate_tee_commission(&self, payment_amount: u128) -> Option<u128> {
-        self.calculate_commission(payment_amount, self.tee_commission_bps)
-    }
-
-    /// Calculates the commission amount for a key custody payment
-    ///
-    /// Returns None if the calculation would overflow.
-    pub fn calculate_custody_commission(&self, payment_amount: u128) -> Option<u128> {
-        self.calculate_commission(payment_amount, self.custody_commission_bps)
-    }
-
-    /// Calculates the commission amount for a model hosting payment
-    ///
-    /// Returns None if the calculation would overflow.
-    pub fn calculate_model_hosting_commission(&self, payment_amount: u128) -> Option<u128> {
-        self.calculate_commission(payment_amount, self.model_hosting_commission_bps)
-    }
-
-    /// Helper function to calculate commission from basis points
-    ///
-    /// Returns None if the calculation would overflow.
-    fn calculate_commission(&self, amount: u128, bps: u32) -> Option<u128> {
-        // Commission = amount * bps / 10000
-        amount.checked_mul(bps as u128)?.checked_div(10000)
-    }
-
-    /// Validates that all commission rates are within reasonable bounds (0-10000 bps = 0-100%)
-    pub fn validate(&self) -> Result<(), &'static str> {
-        const MAX_BPS: u32 = 10000; // 100%
-
-        if self.inference_commission_bps > MAX_BPS {
-            return Err("Inference commission exceeds 100%");
-        }
-        if self.tee_commission_bps > MAX_BPS {
-            return Err("TEE commission exceeds 100%");
-        }
-        if self.custody_commission_bps > MAX_BPS {
-            return Err("Custody commission exceeds 100%");
-        }
-        if self.model_hosting_commission_bps > MAX_BPS {
-            return Err("Model hosting commission exceeds 100%");
-        }
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,47 +249,6 @@ mod tests {
         let total = fees.calculate_total_collected(1, 1, 1, 1, 1, 1, 1).unwrap();
         let expected = 10 + 5 + 5 + 2 + 1 + 50 + 1; // 74 TNZO
         assert_eq!(total, expected * ONE_TNZO);
-    }
-
-    #[test]
-    fn test_network_commission_rates_defaults() {
-        let rates = NetworkCommissionRates::default();
-
-        assert_eq!(rates.inference_commission_bps, 500);
-        assert_eq!(rates.tee_commission_bps, 500);
-        assert_eq!(rates.custody_commission_bps, 500);
-        assert_eq!(rates.model_hosting_commission_bps, 500);
-    }
-
-    #[test]
-    fn test_commission_calculation() {
-        let rates = NetworkCommissionRates::default();
-        const ONE_HUNDRED_TNZO: u128 = 100_000_000_000_000_000_000; // 100 * 10^18
-
-        // 5% of 100 TNZO = 5 TNZO
-        let commission = rates
-            .calculate_inference_commission(ONE_HUNDRED_TNZO)
-            .unwrap();
-        assert_eq!(commission, 5_000_000_000_000_000_000);
-    }
-
-    #[test]
-    fn test_commission_validation() {
-        let valid_rates = NetworkCommissionRates::default();
-        assert!(valid_rates.validate().is_ok());
-
-        let invalid_rates = NetworkCommissionRates::new(15000, 500, 500, 500);
-        assert!(invalid_rates.validate().is_err());
-    }
-
-    #[test]
-    fn test_commission_overflow_protection() {
-        let rates = NetworkCommissionRates::default();
-
-        // Max u128 should not panic, but may return None
-        let result = rates.calculate_inference_commission(u128::MAX);
-        // We expect None due to overflow in checked_mul
-        assert!(result.is_none());
     }
 
     #[test]

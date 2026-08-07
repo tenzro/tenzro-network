@@ -2,7 +2,7 @@
 //!
 //! Single source of truth for paid-invocation fee splits across all
 //! three Tenzro marketplaces (agent templates, skills, tools): the
-//! network commission goes to the treasury, the remainder goes to the
+//! marketplace commission goes to the treasury, the remainder goes to the
 //! creator's `creator_wallet`. Used by the JSON-RPC handlers
 //! (`tenzro_runAgentTemplate`, `tenzro_useSkill`, `tenzro_useTool`)
 //! and the MCP `run_agent_template` tool — before this module they
@@ -33,7 +33,7 @@ use crate::app_registry::AppRecord;
 use tenzro_token::TnzoToken;
 use tenzro_types::agent_template::AgentTemplate;
 use tenzro_types::fees::apply_developer_margin;
-use tenzro_types::marketplace::{MARKETPLACE_COMMISSION_BPS, split_marketplace_fee};
+use tenzro_types::marketplace::split_marketplace_fee;
 use tenzro_types::primitives::Address;
 
 /// Outcome of a successful commission settlement on a paid template
@@ -97,7 +97,9 @@ pub enum CommissionError {
 }
 
 /// Marketplace-agnostic settlement primitive. Splits `fee` using
-/// [`MARKETPLACE_COMMISSION_BPS`] and moves the two halves on the live
+/// `commission_bps` — read from the live economic policy by the caller, so a
+/// governance change reaches the marketplace at the same moment it reaches
+/// every other charging path — and moves the two halves on the live
 /// TNZO ledger. Used by all three marketplace surfaces (agent
 /// templates, skills, tools) via thin wrappers.
 ///
@@ -124,6 +126,7 @@ pub enum CommissionError {
 pub fn settle_paid_invocation<F>(
     creator_wallet: Option<Address>,
     fee: u128,
+    commission_bps: u16,
     payer_wallet: Option<&str>,
     token: Option<&TnzoToken>,
     app: Option<&AppRecord>,
@@ -165,12 +168,12 @@ where
         None => (0u128, 0u32, None, None),
     };
 
-    let (commission, creator_share) = split_marketplace_fee(fee, MARKETPLACE_COMMISSION_BPS);
+    let (commission, creator_share) = split_marketplace_fee(fee, commission_bps);
 
     if commission > 0 {
         token
             .transfer(&payer, &treasury, commission)
-            .map_err(|e| CommissionError::TransferFailed(format!("network commission: {e}")))?;
+            .map_err(|e| CommissionError::TransferFailed(format!("marketplace commission: {e}")))?;
     }
     if creator_share > 0 {
         token
@@ -204,6 +207,7 @@ where
 pub fn settle_invocation_fee<F>(
     template: &AgentTemplate,
     fee: u128,
+    commission_bps: u16,
     payer_wallet: Option<&str>,
     token: Option<&TnzoToken>,
     app: Option<&AppRecord>,
@@ -218,6 +222,7 @@ where
     settle_paid_invocation(
         template.creator_wallet,
         fee,
+        commission_bps,
         payer_wallet,
         token,
         app,
@@ -260,7 +265,7 @@ mod tests {
         );
         // Pricing is Free by default per AgentTemplate::new.
         let receipt =
-            settle_invocation_fee(&tmpl, 100, Some("payer"), None, None, ok_parse).unwrap();
+            settle_invocation_fee(&tmpl, 100, 500, Some("payer"), None, None, ok_parse).unwrap();
         assert!(receipt.is_none(), "free template should not settle");
     }
 
@@ -268,27 +273,29 @@ mod tests {
     fn zero_fee_returns_none() {
         let tmpl = paid_template(Some(Address::default()));
         // fee=0 short-circuits even on a paid template (e.g. dry_run).
-        let receipt = settle_invocation_fee(&tmpl, 0, Some("payer"), None, None, ok_parse).unwrap();
+        let receipt =
+            settle_invocation_fee(&tmpl, 0, 500, Some("payer"), None, None, ok_parse).unwrap();
         assert!(receipt.is_none());
     }
 
     #[test]
     fn paid_without_creator_wallet_rejects() {
         let tmpl = paid_template(None);
-        let err =
-            settle_invocation_fee(&tmpl, 1_000, Some("payer"), None, None, ok_parse).unwrap_err();
+        let err = settle_invocation_fee(&tmpl, 1_000, 500, Some("payer"), None, None, ok_parse)
+            .unwrap_err();
         assert!(matches!(err, CommissionError::MissingCreatorWallet));
     }
 
     #[test]
     fn paid_without_payer_rejects() {
         let tmpl = paid_template(Some(Address::default()));
-        let err = settle_invocation_fee(&tmpl, 1_000, None, None, None, ok_parse).unwrap_err();
+        let err = settle_invocation_fee(&tmpl, 1_000, 500, None, None, None, ok_parse).unwrap_err();
         assert!(matches!(err, CommissionError::MissingPayerWallet));
     }
 
     /// Invariant: every successful paid-template settlement produces exactly two
-    /// ledger movements — one to the treasury (5% commission) and one to the
+    /// ledger movements — one to the treasury (the governance-set marketplace
+    /// commission) and one to the
     /// creator wallet (95% creator share) — and the sum equals the fee paid by
     /// the payer. This is the contract both call sites (RPC + MCP) depend on.
     #[test]
@@ -314,16 +321,17 @@ mod tests {
         // Parse callback returns the matching test address verbatim.
         let parse = |_: &str| Ok(payer);
 
-        let receipt = settle_invocation_fee(&tmpl, fee, Some("payer"), Some(&token), None, parse)
-            .expect("settlement must succeed")
-            .expect("paid template must produce a receipt");
+        let receipt =
+            settle_invocation_fee(&tmpl, fee, 500, Some("payer"), Some(&token), None, parse)
+                .expect("settlement must succeed")
+                .expect("paid template must produce a receipt");
 
         // Math invariant: commission + creator_share == fee, with 5% / 95% split.
         assert_eq!(receipt.commission + receipt.creator_share, fee);
         assert_eq!(
             receipt.commission, 500,
             "5% of 10_000 commission, with current bps = {}",
-            MARKETPLACE_COMMISSION_BPS
+            500
         );
         assert_eq!(receipt.creator_share, 9_500);
 
@@ -367,8 +375,9 @@ mod tests {
         let tmpl = paid_template(Some(creator));
         let parse = |_: &str| Ok(payer);
 
-        let err = settle_invocation_fee(&tmpl, 10_000, Some("payer"), Some(&token), None, parse)
-            .unwrap_err();
+        let err =
+            settle_invocation_fee(&tmpl, 10_000, 500, Some("payer"), Some(&token), None, parse)
+                .unwrap_err();
         assert!(matches!(err, CommissionError::TransferFailed(_)));
 
         // Creator never received anything — no half-settlement leaked through.
@@ -412,10 +421,17 @@ mod tests {
         let app = app_record(1_000, app_wallet);
         let parse = |_: &str| Ok(payer);
 
-        let receipt =
-            settle_invocation_fee(&tmpl, fee, Some("payer"), Some(&token), Some(&app), parse)
-                .expect("settlement must succeed")
-                .expect("paid template must produce a receipt");
+        let receipt = settle_invocation_fee(
+            &tmpl,
+            fee,
+            500,
+            Some("payer"),
+            Some(&token),
+            Some(&app),
+            parse,
+        )
+        .expect("settlement must succeed")
+        .expect("paid template must produce a receipt");
 
         assert_eq!(receipt.margin_bps, 1_000);
         assert_eq!(receipt.margin_amount, 1_000);
@@ -453,6 +469,7 @@ mod tests {
         let receipt = settle_invocation_fee(
             &tmpl,
             10_000,
+            500,
             Some("payer"),
             Some(&token),
             Some(&app),
@@ -490,6 +507,7 @@ mod tests {
         let err = settle_invocation_fee(
             &tmpl,
             10_000,
+            500,
             Some("payer"),
             Some(&token),
             Some(&app),

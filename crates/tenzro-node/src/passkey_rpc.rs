@@ -670,7 +670,9 @@ pub struct InstalledValidatorSummary {
 // Helpers
 // =============================================================================
 
-fn parse_params<T: for<'de> Deserialize<'de>>(params: Option<Value>) -> Result<T, JsonRpcError> {
+pub(crate) fn parse_params<T: for<'de> Deserialize<'de>>(
+    params: Option<Value>,
+) -> Result<T, JsonRpcError> {
     let p = params.ok_or_else(|| JsonRpcError {
         code: -32602,
         message: "Missing params".to_string(),

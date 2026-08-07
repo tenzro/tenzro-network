@@ -21,7 +21,7 @@ Payment settlement engine for the Tenzro Network, handling escrow, micropayments
 - **Escrow Manager**: Conditional escrow with proof-gated release
 - **Micropayment Channels**: Off-chain payment channels for low-latency per-token billing with dispute resolution
 - **Batch Processing**: Atomic multi-settlement operations with all-or-nothing guarantees
-- **Fee Collection**: Automatic network fee routing (default 0.5% commission on AI/TEE payments)
+- **Fee Collection**: Network fee routing. The engine's own `network_fee_bps` is **0** — a settled service payment is divided exactly once by the revenue split (`tenzro-payments::revenue_split`), and nothing downstream takes a further cut. See `docs/ECONOMICS.md`.
 - **Settlement Modes**:
   - `Immediate` - Direct on-chain settlement
   - `Escrow` - Conditional settlement with proof-based release

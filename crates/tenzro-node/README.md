@@ -186,6 +186,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 - **Settlement**: settle, getSettlement
 - **Agents**: registerAgent (provisioner mode → server-held FROST-Ed25519 + ML-DSA-65 hybrid wallet, returns `classical_public_key` + `pq_verifying_key_len`; BYOK mode → caller supplies `public_key` (32B Ed25519) + `pq_public_key` (1952B ML-DSA-65), `byok: true`), sendAgentMessage (optional hybrid `signature` (64B Ed25519) + `pq_signature` (3309B ML-DSA-65) — both or neither; mixed-mode rejected)
 - **Identity**: registerIdentity, importIdentity, resolveDidDocument, resolveIdentity, participate, forgetIdentity (GDPR Article 17 right-to-erasure — DID must already be `Revoked`)
+- **Device binding**: bindDevice, listBoundDevices, walletReadiness, revokeBoundDevice, transferMachineOwnership — the devices that can authenticate as an identity, what each one's attestation proved about the hardware holding its key, and the authority under which a machine changes hands. `bindDevice` / `revokeBoundDevice` / `transferMachineOwnership` are admin-token gated; `listBoundDevices` / `walletReadiness` are open. Params are a **bare object**, not a one-element array
 - **Network**: nodeInfo, peerCount, syncing, hardwareProfile, role
 - **Governance**: listProposals, vote, getVotingPower
 - **Payments**: createPaymentChallenge, payMpp, payX402, listPaymentSessions, paymentGatewayInfo, listX402Schemes (pluggable scheme registry: `tenzro-hybrid`, `exact-eip3009`, `permit2`, `erc7710`). An operator that sets `[payments.x402_facilitator]` facilitates the EIP-3009 and Permit2 schemes itself: the node runs the exact/EVM verification checks against its own `evm_rpc_url` and broadcasts the buyer's signed `transferWithAuthorization` through a relayer key, so the buyer pays no gas and the settlement path depends on no third-party facilitator. Without that block those two schemes resolve through the remote verifier
@@ -225,7 +226,7 @@ The agent marketplace supports both free (community) and paid (creator-tied) tem
 - **Creator identity binding (optional):** at registration, a creator may bind a template to any TDIP identity class — human (`did:tenzro:human:{uuid}`), delegated agent (`did:tenzro:machine:{controller}:{uuid}`), or autonomous agent (`did:tenzro:machine:{uuid}`) — via `creator_did`. The binding is immutable post-registration.
 - **Creator payout wallet (mandatory for paid pricing):** any non-`Free` `pricing` requires `creator_wallet`. Registration fails if the wallet is missing. `tenzro_runAgentTemplate` routes the creator share to this address.
 - **Pricing models** (`AgentPricingModel`): `Free`, `PerExecution { price }`, `PerToken { price_per_token }`, `Subscription { monthly_rate }`, `RevenueShare { creator_share_bps }`. Compact string form accepted by the RPC: `"free"`, `"per_execution:<u128>"`, `"per_token:<u128>"`, `"subscription:<u128>"`, `"revenue_share:<bps>"`.
-- **Network commission:** `MARKETPLACE_COMMISSION_BPS = 500` (5%). On every paid invocation of `tenzro_runAgentTemplate`, `tenzro_useSkill`, and `tenzro_useTool`:
+- **Marketplace commission:** the governance-set `EconomicPolicy::marketplace_commission_bps`, read live from the node (`tenzro_getEconomicPolicy`) rather than a constant. On every paid invocation of `tenzro_runAgentTemplate`, `tenzro_useSkill`, and `tenzro_useTool`:
   - `payer_wallet` is debited the full `fee_paid`
   - `commission = fee_paid * 500 / 10_000` is credited to the network treasury
   - `creator_share = fee_paid - commission` is credited to `creator_wallet`
@@ -444,3 +445,63 @@ For production deployment:
 ## License
 
 Licensed under Apache License 2.0.
+
+## `single_instance` — one node per data directory
+
+An advisory `flock` on the canonicalised data directory, taken in `main.rs`
+*before* RocksDB opens, and held for the process lifetime. Two nodes sharing a
+data directory is not a degraded configuration but a corrupt one; RocksDB does
+catch it, but deep inside storage initialisation and with an error naming a path
+rather than a process.
+
+The refusal names the holding PID and its command line and offers the three ways
+out (`graceful-exit`, `kill`, or `--data-dir` for a separate instance). Listen
+addresses are probed in the same pass, so every port conflict is reported at once
+rather than one restart at a time.
+
+The lock lives on a file descriptor, so the kernel releases it however the
+process dies — a crash never leaves a stale claim, which is the failure that
+trains operators to delete lockfiles reflexively.
+
+## `device_rpc` — devices bound to an identity
+
+A Tenzro identity links devices the way a platform account does, except the link
+is not a platform account. **No Apple, Google or Microsoft sign-in is an identity
+authority here**: what the node trusts is a WebAuthn attestation it verifies
+against a vendor root the operator pinned, so "hardware-bound" is a fact the
+device proved rather than a claim the same software making every other claim made
+about itself.
+
+A device is hardware-bound only when **both** hold: the credential cannot be
+replicated off the device, and the attestation says its key lives in a TEE or
+secure element. Backup-eligibility is disqualifying rather than informational — a
+credential that *may* sync proves control of a cloud account, not possession of a
+device. Where the chain cannot be verified the grade is degraded
+(`chain_verified: false`) instead of the parse failing, so an operator who has
+pinned no roots gets an honest answer rather than a silent pass.
+
+The roots are `webauthn_trusted_roots` in the node config — base64 DER, one per
+entry. An entry that does not decode is dropped rather than trusted, so a typo
+narrows what the node accepts instead of widening it.
+
+**A wallet cannot sit behind one device.** The machine the user is on is the
+first; a genuinely separate hardware-bound device must exist before there is
+anything to lose. `walletReadiness` names the blocker and its remedy so a UI can
+say "scan the pairing QR with your phone" rather than offer a button that fails.
+
+**Revoking a device unbinds it and ends every session it authorised, in one
+action.** Doing only the first would leave a lost phone's access live, which is
+the exact situation the user is trying to fix — which is why every session names
+the bound device that authorised it, not only the identity.
+
+**Machine ownership moves on whatever anchors the machine**, and the two
+authorities are not interchangeable: `controller` for a machine some party
+delegated, `hardware_root` for a machine nobody did. Holding the hardware cannot
+take a machine that has an accountable party — that is a compromise, not an
+acquisition. The authorisation is TTL-bounded (5 minutes by default) so it cannot
+be replayed against a machine that has since changed hands.
+
+Attestation parsing and chain verification live in
+`tenzro-auth::webauthn_attestation`; the types and the grading rules live in
+`tenzro-types::device_binding`. Records persist under `bound_device:` and
+`device_session:` in `CF_IDENTITIES`.

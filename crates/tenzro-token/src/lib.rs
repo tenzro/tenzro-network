@@ -44,6 +44,7 @@ pub mod bond;
 pub mod burn_quota;
 pub mod compute_bond;
 pub mod cross_vm;
+pub mod economic_policy;
 pub mod erc3643;
 pub mod erc7802;
 pub mod error;
@@ -94,6 +95,7 @@ pub use cross_vm::{
     TokenDefinition, TokenId, TokenMetadata, TokenPermissions, TokenType, TokenVmType, VmAddresses,
     native_to_spl, spl_to_native, truncation_dust,
 };
+pub use economic_policy::{ECONOMIC_POLICY_KEY, EconomicPolicyManager};
 pub use erc3643::{
     CLAIM_TOPIC_ACCREDITED_INVESTOR, CLAIM_TOPIC_COUNTRY, CLAIM_TOPIC_KYC,
     CLAIM_TOPIC_QUALIFIED_PURCHASER, ComplianceCheckResult, ComplianceRegistry, ComplianceRules,

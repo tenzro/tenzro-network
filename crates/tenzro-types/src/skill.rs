@@ -275,7 +275,7 @@ impl SkillDefinition {
     /// Validate registration invariants. Any paid skill must declare a
     /// `creator_wallet` to receive the creator share of each invocation;
     /// otherwise the creator share would have no destination and the
-    /// network commission would have nothing to split against. Free
+    /// marketplace commission would have nothing to split against. Free
     /// skills (`price_per_call == 0`) may omit `creator_wallet`.
     pub fn validate_for_registration(&self) -> Result<(), String> {
         if self.is_paid() && self.creator_wallet.is_none() {

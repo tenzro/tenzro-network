@@ -415,6 +415,11 @@ pub struct TenzroProposalExecutor {
     /// the forwarder always drains in real time.
     seed_agent_broadcast:
         Option<tokio::sync::mpsc::UnboundedSender<tenzro_token::SeedAgentGossipMessage>>,
+    /// The live economic policy. Governance proposals of type
+    /// `EconomicPolicyUpdate` dispatch here, and every settlement reads the
+    /// result — so a passed proposal changes what the next payment costs
+    /// without a release.
+    economic_policy: Arc<tenzro_token::EconomicPolicyManager>,
 }
 
 impl TenzroProposalExecutor {
@@ -422,6 +427,7 @@ impl TenzroProposalExecutor {
         burn_rate: Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>,
         treasury: Arc<NetworkTreasury>,
         treasury_caller: Address,
+        economic_policy: Arc<tenzro_token::EconomicPolicyManager>,
     ) -> Self {
         Self {
             burn_rate,
@@ -429,6 +435,7 @@ impl TenzroProposalExecutor {
             treasury_caller,
             seed_agents: None,
             seed_agent_broadcast: None,
+            economic_policy,
         }
     }
 
@@ -466,6 +473,20 @@ impl tenzro_token::governance::ProposalExecutor for TenzroProposalExecutor {
         use tenzro_types::token::ProposalType;
 
         match &proposal.proposal_type {
+            ProposalType::EconomicPolicyUpdate { policy } => {
+                // Validated inside `apply`, so an incoherent policy is refused
+                // here and the previous one stays live rather than the network
+                // adopting a split that does not sum to a whole payment.
+                self.economic_policy.apply(*policy)?;
+                info!(
+                    operator_validating_bps = policy.validating.operator_bps,
+                    operator_delegated_bps = policy.delegated.operator_bps,
+                    rpc_provider_bps = policy.delegated.rpc_provider_bps,
+                    treasury_validating_bps = policy.validating.treasury_bps,
+                    "Governance applied a new economic policy"
+                );
+                Ok(())
+            }
             ProposalType::AdaptiveBurnConfigUpdate {
                 base_fee_burn_bps,
                 local_fee_burn_bps,
@@ -1588,38 +1609,15 @@ impl ProviderPricing {
     /// charging both would bill the same work twice; frames stand alone only for
     /// a call that *consumed* them, as when a video encoder samples a clip.
     pub fn meter(&self, units: &tenzro_types::model::BillableUnits) -> u128 {
-        let rates = &self.modality_rates;
-        let charge =
-            |quantity: u64, rate: u64| -> u128 { (quantity as u128).saturating_mul(rate as u128) };
-
-        let frames = if units.pixel_steps == 0 {
-            charge(units.frames as u64, rates.price_per_frame)
-        } else {
-            0
-        };
-
-        [
-            (units.input_tokens as u128).saturating_mul(self.input_price_per_token_wei),
-            (units.output_tokens as u128).saturating_mul(self.output_price_per_token_wei),
-            charge(
-                units.cached_read_tokens as u64,
-                rates.price_per_cached_read_token,
-            ),
-            charge(
-                units.cached_write_tokens as u64,
-                rates.price_per_cached_write_token,
-            ),
-            charge(units.reasoning_loops as u64, rates.price_per_reasoning_loop),
-            charge(units.image_tokens as u64, rates.price_per_image_token),
-            charge(units.audio_seconds(), rates.price_per_audio_second),
-            charge(units.video_seconds(), rates.price_per_video_second),
-            units
-                .pixel_steps
-                .saturating_mul(rates.price_per_pixel_step as u128),
-            frames,
-        ]
-        .into_iter()
-        .fold(0u128, |acc, term| acc.saturating_add(term))
+        // Delegates to the one implementation of the metering rule, so this
+        // path and the advertised rate card can never disagree about what
+        // counts as billable work.
+        tenzro_types::model::meter_units_wei(
+            units,
+            self.input_price_per_token_wei,
+            self.output_price_per_token_wei,
+            &self.modality_rates,
+        )
     }
 }
 
@@ -2864,6 +2862,14 @@ pub struct TenzroNode {
     pub user_resources: Arc<DashMap<String, UserResource>>,
     pub transaction_history: Arc<RwLock<Vec<TransactionHistoryEntry>>>,
     pub runtime_roles: Arc<RwLock<RoleSet>>,
+    /// The live economic policy — every rate the network charges, in one
+    /// governance-settable block.
+    ///
+    /// Always present, so no settlement path has to decide what to do when it
+    /// is absent. Before storage is wired it holds the defaults; once storage
+    /// is available it is swapped for a persisted manager that hydrates
+    /// whatever governance last applied.
+    pub economic_policy: Arc<tenzro_token::EconomicPolicyManager>,
     /// Storage-provider runtime. `Some` only when this node's roles include
     /// `StorageProvider` — owns the object store, the per-epoch billing meter
     /// (PoR-gated), and the byte-epoch pricing policy. Spawned during startup
@@ -3250,6 +3256,7 @@ impl TenzroNode {
             node_visibility: Arc::new(RwLock::new(
                 tenzro_types::node_visibility::NodeVisibility::default(),
             )),
+            economic_policy: Arc::new(tenzro_token::EconomicPolicyManager::new()),
             account_records: Arc::new(crate::account_record::AccountRecordStore::new()),
             compute_runtime: None,
             prepaid_ledger: None,
@@ -4850,6 +4857,21 @@ impl TenzroNode {
         };
         self.burn_rate_manager = Some(burn_rate_manager.clone());
 
+        // Swap the default economic policy for one backed by storage, so a
+        // restart resumes whatever governance last applied rather than silently
+        // reverting every rate to its default.
+        if let Some(storage) = &self.storage {
+            self.economic_policy = Arc::new(tenzro_token::EconomicPolicyManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ));
+            info!(
+                "Economic policy hydrated: operator {} bps validating / {} bps delegated, RPC provider {} bps",
+                self.economic_policy.current().validating.operator_bps,
+                self.economic_policy.current().delegated.operator_bps,
+                self.economic_policy.current().delegated.rpc_provider_bps,
+            );
+        }
+
         // Wire the adaptive-burn dial into the VM gas oracle so the EIP-1559
         // fee market splits per-block gross revenue between burn and treasury
         // according to `BurnRateConfig.base_fee_burn_bps` and hot-state
@@ -4991,8 +5013,12 @@ impl TenzroNode {
             self.burn_rate_manager.as_ref(),
             self.treasury.as_ref(),
         ) {
-            let mut executor =
-                TenzroProposalExecutor::new(burn_rate.clone(), treasury.clone(), treasury_addr);
+            let mut executor = TenzroProposalExecutor::new(
+                burn_rate.clone(),
+                treasury.clone(),
+                treasury_addr,
+                self.economic_policy.clone(),
+            );
             // SeedAgent gossip channel — shared by the governance executor
             // (charter / earmark / status mutations) and the provisioning
             // daemon (monthly refill broadcasts + automatic pause-on-sunset).
@@ -5881,7 +5907,12 @@ impl TenzroNode {
         info!("Initializing settlement engine...");
 
         let treasury_addr = tenzro_types::network_treasury_address();
-        let config = SettlementConfig::new(treasury_addr);
+        // The revenue split is the only division of a service payment, so the
+        // engine takes nothing further. It used to charge its own network fee
+        // on top of the operator's already-split share, which meant the basis
+        // points reported on a receipt described a division that had not
+        // happened and the operator quietly absorbed a second deduction.
+        let config = SettlementConfig::new(treasury_addr).with_network_fee_bps(0);
         let treasury = self.treasury.clone().unwrap();
 
         // SettlementEngine — when storage is available, persist receipts and
@@ -10051,6 +10082,21 @@ impl TenzroNode {
         .with_default_asset("USDC")
         .with_challenge_store(challenge_store.clone());
 
+        // A node serving models bills by consumption, and a buyer cannot know
+        // the token count — or the audio seconds, or the pixel-steps — before
+        // the work runs. So it issues `upto` challenges: the amount is the
+        // ceiling the buyer authorizes, and the metered actual settles beneath
+        // it. A node serving only fixed-price resources keeps the exact-amount
+        // default, because there the price *is* known up front.
+        if self.config.roles.serves_ai() {
+            x402_builder = x402_builder.with_scheme(tenzro_payments::x402::UPTO_SCHEME);
+            info!(
+                "x402 challenges issued under the `{}` scheme — metered resources authorize a \
+                 ceiling and settle the actual",
+                tenzro_payments::x402::UPTO_SCHEME
+            );
+        }
+
         if let Some(registry) = &self_hosted_registry {
             x402_builder = x402_builder.with_scheme_registry(registry.clone());
         }
@@ -10459,6 +10505,9 @@ impl TenzroNode {
                 let prefs = Arc::new(
                     crate::settlement_preferences_bridge::NodeSettlementPreferences::load(
                         store.clone() as Arc<dyn tenzro_storage::KvStore>,
+                        tenzro_payments::settlement_asset::SettlementAsset::from_policy(
+                            self.economic_policy.current().default_conversion,
+                        ),
                     ),
                 );
                 self.settlement_preferences = Some(prefs.clone());
@@ -13060,6 +13109,46 @@ impl TenzroNode {
     /// Returns the identity registry (TDIP) if initialized
     pub fn identity_registry(&self) -> Option<&Arc<IdentityRegistry>> {
         self.identity_registry.as_ref()
+    }
+    /// Vendor attestation roots this node pins, decoded to DER.
+    ///
+    /// An entry that is not valid base64 is dropped rather than failing the
+    /// call: one malformed root in a list must not make every other root
+    /// unusable, and a dropped root simply means fewer chains verify — which
+    /// fails closed.
+    pub fn webauthn_trusted_roots(&self) -> Vec<Vec<u8>> {
+        use base64::Engine;
+        self.config
+            .webauthn_trusted_roots
+            .iter()
+            .filter_map(|b| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b.trim())
+                    .ok()
+            })
+            .collect()
+    }
+
+    /// The live economic policy — the rates every settlement on this node
+    /// applies.
+    pub fn economic_policy(&self) -> tenzro_types::economics::EconomicPolicy {
+        self.economic_policy.current()
+    }
+
+    /// The RPC provider that validates on this node's behalf, and is therefore
+    /// owed a share of what this node earns.
+    ///
+    /// Only consulted in [`tenzro_types::economics::NodeEconomicMode::PublicDelegated`]
+    /// — a node that validates for itself owes no such leg. Returns `None` when
+    /// the operator has not named one, which is refused at settlement rather
+    /// than defaulted: paying that share to the treasury because nobody was
+    /// configured would pay the wrong party without saying so.
+    pub fn rpc_provider_payee(&self) -> Option<Address> {
+        self.config
+            .economics
+            .rpc_provider_payee
+            .as_deref()
+            .and_then(|s| Address::from_hex(s).ok())
     }
 
     /// The wallet this node is paid at.

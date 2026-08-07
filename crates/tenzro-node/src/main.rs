@@ -412,6 +412,57 @@ async fn main() -> Result<()> {
         );
     }
 
+    // One node per data directory, refused here rather than discovered later.
+    //
+    // Held for the whole process lifetime: the lock lives on the descriptor, so
+    // binding it to a variable that outlives startup is what keeps it. The
+    // kernel releases it however this process exits, including a SIGKILL, so a
+    // crash never leaves a stale claim that blocks the next start.
+    //
+    // Taken *before* `TenzroNode::new`, which opens RocksDB. Two nodes over one
+    // data directory would open the same database, keystore and snapshot tree;
+    // RocksDB's own lock does catch that, but only deep inside storage
+    // initialisation and with an error that names a path rather than a process.
+    let _instance_lock = match tenzro_node::single_instance::acquire(&config.data_dir) {
+        Ok(lock) => {
+            info!(
+                data_dir = %lock.data_dir().display(),
+                "Single-instance lock acquired"
+            );
+            lock
+        }
+        Err(e) => {
+            // Printed as well as logged: this is the one failure an operator
+            // has to read and act on, and a structured log line buries the
+            // instructions.
+            eprintln!("\n{e}\n");
+            return Err(error::NodeError::Other(
+                "refusing to start a second node over the same data directory".to_string(),
+            ));
+        }
+    };
+
+    // Every address this node intends to bind, checked together so an operator
+    // moving listeners is told about all of them at once instead of restarting
+    // to discover the next conflict.
+    if let Err(e) = tenzro_node::single_instance::check_ports(&[
+        ("json-rpc", &config.rpc_addr),
+        ("web api", &config.web_addr),
+        ("mcp", &config.mcp_addr),
+        ("a2a", &config.a2a_addr),
+        ("solana mcp", &config.solana_mcp_addr),
+        ("ethereum mcp", &config.ethereum_mcp_addr),
+        ("canton mcp", &config.canton_mcp_addr),
+        ("layerzero mcp", &config.layerzero_mcp_addr),
+        ("chainlink mcp", &config.chainlink_mcp_addr),
+        ("lifi mcp", &config.lifi_mcp_addr),
+    ]) {
+        eprintln!("\n{e}\n");
+        return Err(error::NodeError::Other(
+            "one or more listen addresses are already in use".to_string(),
+        ));
+    }
+
     // Create shutdown broadcast channel — all subsystems subscribe to this
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 

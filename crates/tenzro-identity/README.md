@@ -135,3 +135,28 @@ All features confirmed (85 passing tests):
 ## License
 
 Apache-2.0.
+
+## Machine anchors and ownership
+
+`MachineAnchor` is what holds a machine identity to the world: a delegating
+party (human or institution), or a hardware root of trust standing in their
+place. There is no third option — a machine that answers only to itself is a
+self-issued claim, indistinguishable from ten thousand minted by the same
+script. A hardware anchor must name at least one **attestable** source; a
+readable serial is not proof.
+
+`OwnershipTransfer` moves administrative ownership, and the authority required
+is whatever anchors the machine: a delegated machine moves on its controller's
+authority, a hardware-rooted machine on proof of its root. The two are not
+interchangeable, so holding the hardware cannot take a machine that has an
+accountable party. Ownership replaces rather than accumulates, and
+authorisations expire.
+
+`IdentityRegistry::set_machine_controller` records the result — detaching the
+machine from the old owner and attaching it to the new one in the same step, so
+no window exists in which both or neither claims it.
+
+Reachable as `tenzro_transferMachineOwnership` (admin-token gated, authorisation
+TTL-bounded against replay) and `tenzro device transfer` on the CLI.
+
+Full model: `docs/TDIP.md`.

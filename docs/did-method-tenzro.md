@@ -46,7 +46,7 @@ did:tenzro:machine:6ba7b810-9dad-11d1-80b4-00c04fd430c8
   Enhanced / Full) are expressed as Verifiable Credentials.
 - **machine:{parent}:{uuid}**: Machine identity controlled by `{parent}` with
   delegation scope (spending limits, allowed operations, allowed protocols).
-- **machine:{uuid}**: Autonomous machine with no controller.
+- **machine:{uuid}**: Machine with no human controller. Admitted **only** when anchored by an attestable hardware root of trust — see "Machine identities must be answerable" below. Derived from that root rather than randomly, so the DID is reproducible from the machine.
 
 ---
 
@@ -183,3 +183,80 @@ methods table in `methods.md`:
 
 **Next step for repository owner**: Fork `https://github.com/w3c/did-extensions`,
 add the table entry above to `methods.md`, and open a PR referencing this specification URL.
+
+## Machine identities must be answerable
+
+A machine identity must be answerable to something other than itself. Either a
+human (or institution) delegated it and remains accountable, or a **hardware
+root of trust that can prove which machine it is** stands in their place. There
+is no third option, and a machine that satisfies neither is refused before a
+record exists.
+
+A machine that answers only to itself is a self-issued claim: nothing
+distinguishes it from ten thousand identical claims minted by the same script,
+and there is nobody to hold to account when it misbehaves.
+
+Agents are delegated the same way — from a human, or from the machine that owns
+them.
+
+### A readable serial is not proof
+
+The anchor is graded (`tenzro_types::machine_id::IdentifierGrade`):
+
+- **Attestable** — a per-unit *secret* that can prove possession without
+  disclosing it: a TPM 2.0 endorsement key, a Chinese TCM/TPCM, an Apple Secure
+  Enclave, AMD SEV-SNP's chip-unique VCEK, Intel SGX/TDX platform provisioning,
+  Qualcomm QFPROM/StrongBox, a Microchip ATECC608 signed serial, an NXP SE050,
+  an ESP32's DS/ECDSA peripheral, a Raspberry Pi device unique secret.
+- **Fused** — per-unit, readable, not a secret: Intel and AMD PPIN, Apple ECID,
+  Allwinner SID, Rockchip OTP, a Raspberry Pi `/proc/cpuinfo` serial, SMBIOS
+  UUID.
+- **Model** — identifies a design, not a unit: Arm `MIDR_EL1`, x86 CPUID
+  family/model/stepping. Modelled explicitly because both are routinely
+  mistaken for serials.
+
+**Only an attestable source can anchor a machine no human delegated.** A fused
+serial is readable by anything running on the machine and claimable by anything
+anywhere; accepting one would make the rule cosmetic. Duplicate serials on
+cloned boards are a documented field failure.
+
+### Identity does not root in the GPU
+
+An accelerator is the most-swapped component in a machine — cards move between
+chassis, are resold, are replaced on failure, and partition (MIG, SR-IOV) so one
+device presents several identifiers. Rooting identity in one would mean the
+identity follows the card rather than the machine, and a node that loses a GPU
+would lose the ability to prove it is itself. **GPU serials and UUIDs are not
+identity sources**, and a test asserts none can reach the fingerprint.
+
+Only the SHA-256 digest of an identifier is ever published, never the value: a
+fused serial is a stable cross-service correlator, and publishing one would let
+anyone track the same machine across every network it joins.
+
+### Transferring a machine to a new owner
+
+Machines are sold, redeployed and handed between teams. Ownership moves by an
+`OwnershipTransfer`, and **the authority required is whatever anchors the
+machine** — the same fact that made its identity admissible:
+
+- A machine a human or institution **delegated** moves on that controller's
+  authority alone. Holding the hardware does not override an accountable party:
+  someone who gains root on a delegated machine has compromised a machine, not
+  acquired it.
+- A machine **nobody delegated** moves on proof of its hardware root. For an
+  autonomous machine the TPM *is* the accountable party, so demonstrating
+  control of it is the ownership fact — which is the honest model for selling a
+  box, since the buyer ends up holding the silicon and nothing else could
+  distinguish them from the seller.
+
+The two are not interchangeable, and presenting the wrong one is refused.
+
+A hardware-rooted machine that changes hands **keeps its root** — the silicon
+did not move — and becomes delegated to the new owner, because it now has an
+accountable party where before it had only hardware.
+
+Ownership **replaces rather than accumulates**: a machine has exactly one
+administering identity at a time. A window with two would let both issue
+credentials on it; a window with none would leave an unowned machine still
+holding keys. Authorisations carry an expiry so a signed transfer cannot be
+replayed later against a machine that has since changed hands.

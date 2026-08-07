@@ -1579,6 +1579,28 @@ impl RentalConfig {
     }
 }
 
+/// Economic settings an operator declares for this node.
+///
+/// The *rates* are not here — those are governance's, held in
+/// [`tenzro_types::economics::EconomicPolicy`] and applied network-wide. What
+/// an operator declares locally is only who they are paying alongside
+/// themselves, which is a fact about their own arrangement rather than a price.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EconomicsConfig {
+    /// The RPC provider validating on this node's behalf, as a hex address.
+    ///
+    /// Required only when this node advertises a capability *and does not run
+    /// the validator role* — someone is validating for its users, and that
+    /// party is owed a share. A node that validates for itself leaves this
+    /// unset.
+    ///
+    /// Settlement refuses rather than defaulting when it is missing, because
+    /// the alternative — quietly paying that share to the treasury — pays the
+    /// wrong party and reports nothing wrong.
+    #[serde(default)]
+    pub rpc_provider_payee: Option<String>,
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1714,6 +1736,23 @@ pub struct NodeConfig {
     /// keep the corresponding builtins unregistered on this node.
     #[serde(default)]
     pub builtins: BuiltinsConfig,
+
+    /// Economic settings for this node. Rates are governance's; this is only
+    /// who the operator pays alongside themselves.
+    #[serde(default)]
+    pub economics: EconomicsConfig,
+
+    /// Vendor attestation roots this node pins, as base64 DER certificates.
+    ///
+    /// A device binding is graded hardware-bound only when its attestation
+    /// chain reaches one of these — the FIDO Metadata Service entry for the
+    /// credential's AAGUID, or the platform vendor's root. **Empty is a safe
+    /// default, not a permissive one**: with no roots configured, devices still
+    /// bind and still authenticate, but none grades as hardware-bound, so the
+    /// wallet gate refuses and says why rather than silently accepting a
+    /// software key.
+    #[serde(default)]
+    pub webauthn_trusted_roots: Vec<String>,
 
     /// HTTP 402 payment gate configuration for the Web API
     #[serde(default)]
@@ -2148,6 +2187,8 @@ impl NodeConfig {
             canton: CantonConfig::default(),
             mcp_plugin_host: McpPluginHostConfig::default(),
             builtins: BuiltinsConfig::default(),
+            economics: EconomicsConfig::default(),
+            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -2202,6 +2243,8 @@ impl NodeConfig {
             canton: CantonConfig::default(),
             mcp_plugin_host: McpPluginHostConfig::default(),
             builtins: BuiltinsConfig::default(),
+            economics: EconomicsConfig::default(),
+            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -2256,6 +2299,8 @@ impl NodeConfig {
             canton: CantonConfig::default(),
             mcp_plugin_host: McpPluginHostConfig::default(),
             builtins: BuiltinsConfig::default(),
+            economics: EconomicsConfig::default(),
+            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -2310,6 +2355,8 @@ impl NodeConfig {
             canton: CantonConfig::from_env(),
             mcp_plugin_host: McpPluginHostConfig::default(),
             builtins: BuiltinsConfig::default(),
+            economics: EconomicsConfig::default(),
+            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),

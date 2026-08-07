@@ -803,7 +803,11 @@ async fn a_private_model_stays_refused_on_a_gated_node() {
         .await
         .expect("HTTP request");
 
-    assert_eq!(resp.status(), 401, "a private model must stay behind the gate");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a private model must stay behind the gate"
+    );
     n.shutdown().await;
 }
 
@@ -885,7 +889,11 @@ async fn an_unknown_model_is_not_treated_as_public() {
         .await
         .expect("HTTP request");
 
-    assert_eq!(resp.status(), 401, "unknown models are not public by default");
+    assert_eq!(
+        resp.status(),
+        401,
+        "unknown models are not public by default"
+    );
     n.shutdown().await;
 }
 
@@ -956,7 +964,10 @@ async fn revoking_one_of_two_keys_leaves_the_gate_on() {
     n.node.admission_gate().add_key("key-two").unwrap();
 
     n.node.admission_gate().revoke_key(&first).unwrap();
-    assert!(n.node.admission_gate().is_enabled(), "second key holds it on");
+    assert!(
+        n.node.admission_gate().is_enabled(),
+        "second key holds it on"
+    );
 
     assert_eq!(
         n.rpc_with_key("eth_blockNumber", json!({}), "key-one")

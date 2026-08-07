@@ -223,7 +223,14 @@ mod tests {
 
         // Register an autonomous agent
         let agent_did = registry
-            .register_autonomous_machine(vec![1; 32], vec!["inference".to_string()])
+            .register_autonomous_machine(
+                vec![1; 32],
+                vec!["inference".to_string()],
+                tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: "ab".repeat(32),
+                    sources: vec!["tpm:ek".to_string()],
+                },
+            )
             .await
             .unwrap()
             .did_string();
@@ -245,7 +252,14 @@ mod tests {
 
         // Register an autonomous agent (no controller)
         let agent_did = registry
-            .register_autonomous_machine(vec![2; 32], vec!["inference".to_string()])
+            .register_autonomous_machine(
+                vec![2; 32],
+                vec!["inference".to_string()],
+                tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: "ab".repeat(32),
+                    sources: vec!["tpm:ek".to_string()],
+                },
+            )
             .await
             .unwrap()
             .did_string();

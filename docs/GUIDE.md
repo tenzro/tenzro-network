@@ -891,7 +891,6 @@ Email security findings to `security@tenzro.com`. Do not file public issues for 
 - **Docs**: https://tenzro.com/docs
 - **Issues**: https://github.com/tenzro/tenzro-network/issues
 - **Specification**: [`SPECIFICATION.md`](SPECIFICATION.md)
-- **Foundation**: [`FOUNDATION.md`](FOUNDATION.md)
 
 When filing a build-failure issue, attach:
 

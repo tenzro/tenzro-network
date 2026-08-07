@@ -131,20 +131,24 @@ impl std::fmt::Display for Caip19 {
 }
 
 /// What a payee wants to hold once a payment settles.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Which of these applies when a payee has expressed no preference is
+/// **governance's decision**, carried on
+/// [`tenzro_types::economics::EconomicPolicy::default_conversion`], not a
+/// constant here. The network takes TNZO by default — it is the unit the ledger
+/// accounts in, and a treasury holding forty stablecoins is a treasury nobody
+/// can value — but that default is a parameter, and this enum must not
+/// second-guess it with a `Default` impl of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettlementAsset {
-    /// Keep the stablecoin exactly as it arrived. **The default.**
+    /// Keep the asset exactly as it arrived.
     ///
-    /// A provider earning USDC generally wants spendable USDC — their costs are
-    /// denominated in dollars, and converting to TNZO would hand them an FX
-    /// position they did not ask for.
-    #[default]
+    /// Chosen by operators whose costs are denominated in dollars and who would
+    /// rather hold the stablecoin they were paid than take conversion risk on
+    /// every microtransaction.
     KeepInbound,
     /// Swap the inbound asset to TNZO before crediting the payee.
-    ///
-    /// Opt-in. Chosen by payees who want network-token exposure, or who are
-    /// staking their earnings.
     Tnzo,
 }
 
@@ -154,6 +158,17 @@ impl SettlementAsset {
         match self {
             SettlementAsset::KeepInbound => "keep_inbound",
             SettlementAsset::Tnzo => "tnzo",
+        }
+    }
+
+    /// The asset implied by a governance-set conversion policy.
+    ///
+    /// The single translation between the network-wide parameter and this
+    /// per-payee choice, so the two vocabularies cannot drift apart.
+    pub fn from_policy(policy: tenzro_types::economics::ConversionPolicy) -> Self {
+        match policy {
+            tenzro_types::economics::ConversionPolicy::ConvertToTnzo => SettlementAsset::Tnzo,
+            tenzro_types::economics::ConversionPolicy::KeepInbound => SettlementAsset::KeepInbound,
         }
     }
 }
@@ -184,20 +199,52 @@ pub enum SettlementRoute {
     },
 }
 
-/// Per-payee settlement preferences.
+/// Per-payee settlement preferences, over a governance-set default.
 ///
-/// Keyed by payee DID. A payee with no recorded preference gets
-/// [`SettlementAsset::KeepInbound`], which is the conservative answer: it
-/// credits exactly what was paid and involves no route.
-#[derive(Debug, Clone, Default)]
+/// Keyed by payee DID. A payee with no recorded preference gets `default_asset`
+/// — which the node sets from
+/// [`tenzro_types::economics::EconomicPolicy::default_conversion`], so changing
+/// what the network takes by default is a governance decision rather than a
+/// release.
+#[derive(Debug, Clone)]
 pub struct SettlementPreferences {
     by_payee: HashMap<String, SettlementAsset>,
+    default_asset: SettlementAsset,
+}
+
+impl Default for SettlementPreferences {
+    /// TNZO, matching [`tenzro_types::economics::EconomicPolicy::default`].
+    ///
+    /// A caller that constructs preferences without consulting the live policy
+    /// gets the same answer the live policy ships with, so a forgotten wiring
+    /// step degrades to the network's intent rather than silently inverting it.
+    fn default() -> Self {
+        Self {
+            by_payee: HashMap::new(),
+            default_asset: SettlementAsset::from_policy(
+                tenzro_types::economics::EconomicPolicy::default().default_conversion,
+            ),
+        }
+    }
 }
 
 impl SettlementPreferences {
     /// Empty set — every payee gets the default.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Empty set over an explicit default, taken from the live economic policy.
+    pub fn with_default(default_asset: SettlementAsset) -> Self {
+        Self {
+            by_payee: HashMap::new(),
+            default_asset,
+        }
+    }
+
+    /// The asset a payee gets when they have expressed no preference.
+    pub fn default_asset(&self) -> SettlementAsset {
+        self.default_asset
     }
 
     /// Record a payee's preference.
@@ -210,7 +257,7 @@ impl SettlementPreferences {
         self.by_payee
             .get(payee_did)
             .copied()
-            .unwrap_or(SettlementAsset::KeepInbound)
+            .unwrap_or(self.default_asset)
     }
 
     /// Drop a payee's preference, returning them to the default.
@@ -387,33 +434,44 @@ mod tests {
 
     // ---- preferences -----------------------------------------------------
 
-    /// The default matters: a provider earning USDC wants spendable USDC.
+    /// The network takes TNZO unless a payee says otherwise — and the default
+    /// comes from the governance policy, not from a constant in this module.
     #[test]
-    fn an_unrecorded_payee_keeps_the_inbound_asset() {
+    fn an_unrecorded_payee_gets_the_governance_default() {
         let prefs = SettlementPreferences::new();
+        assert_eq!(prefs.get("did:tenzro:human:nobody"), SettlementAsset::Tnzo);
         assert_eq!(
-            prefs.get("did:tenzro:human:nobody"),
-            SettlementAsset::KeepInbound
+            SettlementAsset::from_policy(
+                tenzro_types::economics::EconomicPolicy::default().default_conversion
+            ),
+            SettlementAsset::Tnzo
         );
-        assert_eq!(SettlementAsset::default(), SettlementAsset::KeepInbound);
     }
 
+    /// An operator who would rather hold the stablecoin they were paid than
+    /// take conversion risk on every microtransaction can say so, and a node
+    /// whose governance set a different network default honours that too.
     #[test]
-    fn preferences_are_per_payee() {
-        let mut prefs = SettlementPreferences::new();
-        prefs.set("did:a", SettlementAsset::Tnzo);
-        assert_eq!(prefs.get("did:a"), SettlementAsset::Tnzo);
-        assert_eq!(prefs.get("did:b"), SettlementAsset::KeepInbound);
+    fn a_payee_overrides_the_default_and_the_default_itself_is_settable() {
+        let mut prefs = SettlementPreferences::with_default(SettlementAsset::Tnzo);
+        prefs.set("did:a", SettlementAsset::KeepInbound);
+        assert_eq!(prefs.get("did:a"), SettlementAsset::KeepInbound);
+        assert_eq!(prefs.get("did:b"), SettlementAsset::Tnzo);
 
         prefs.clear("did:a");
-        assert_eq!(prefs.get("did:a"), SettlementAsset::KeepInbound);
+        assert_eq!(prefs.get("did:a"), SettlementAsset::Tnzo);
+
+        // Governance flips the network default; unrecorded payees follow.
+        let other = SettlementPreferences::with_default(SettlementAsset::KeepInbound);
+        assert_eq!(other.get("did:b"), SettlementAsset::KeepInbound);
+        assert_eq!(other.default_asset(), SettlementAsset::KeepInbound);
     }
 
     // ---- routing ---------------------------------------------------------
 
     #[test]
     fn default_preference_routes_direct_with_no_quoter() {
-        let prefs = SettlementPreferences::new();
+        let prefs = SettlementPreferences::with_default(SettlementAsset::KeepInbound);
         let route = route_settlement("did:a", &usdc_base(), 1_000_000, &prefs, None).unwrap();
         assert_eq!(
             route,
@@ -481,7 +539,9 @@ mod tests {
     /// chain-agnostic by construction, which is the point of keying on CAIP-19.
     #[test]
     fn evm_and_svm_inbound_route_the_same_way() {
-        let prefs = SettlementPreferences::new();
+        // Pinned to keep-inbound so the assertion is about chain namespace
+        // handling, not about which asset the network defaults to.
+        let prefs = SettlementPreferences::with_default(SettlementAsset::KeepInbound);
         for asset in [usdc_base(), usdc_solana()] {
             let route = route_settlement("did:a", &asset, 500, &prefs, None).unwrap();
             assert_eq!(

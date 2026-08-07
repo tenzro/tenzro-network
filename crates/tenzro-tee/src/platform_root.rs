@@ -19,6 +19,7 @@
 //! |---|---|---|
 //! | AMD SEV-SNP | `SNP_GET_DERIVED_KEY` bound to `MEASUREMENT \| IMAGE_ID \| GUEST_SVN` | yes |
 //! | Intel TDX | MRTD (initial TD measurement, 48-byte SHA-384) | yes |
+//! | TPM 2.0 | a random secret sealed to the storage hierarchy | yes |
 //! | AWS Nitro / NVIDIA GPU CC | no key-derivation interface | — |
 //!
 //! SEV-SNP is the strongest of the three: the PSP runs the KDF, so the root is
@@ -27,6 +28,15 @@
 //! itself is the input keying material — readable inside the TD, which bounds
 //! the guarantee to "no other tenant and no compromised host can recover this",
 //! not "not even the TD owner can".
+//!
+//! A **TPM** is the third root, and on commodity hardware it is the only one.
+//! It has no measured-image binding — a TPM seals to the platform, not to what
+//! the platform is running — so it is the weakest of the three against a host
+//! that swaps the image. It is nonetheless the one that matters most in
+//! practice, because it is what an ordinary machine has, and because the
+//! identity rule already requires an attestable root before a machine may speak
+//! for itself. Without a TPM root, every such machine would fall back to a
+//! keyfile that anything able to read it can copy.
 //!
 //! Nitro and NVIDIA GPU CC have no derivation interface at all. Callers that
 //! need to work there fall back to the vendor measurement carried in an
@@ -46,11 +56,11 @@ const HKDF_INFO: &[u8] = b"tenzro/platform-root/derived-key";
 /// Read the platform's stable root keying material.
 ///
 /// Returns the SEV-SNP PSP-derived key (64 bytes) when `/dev/sev-guest` is
-/// present, otherwise the TDX MRTD (48 bytes) when a TDX report interface is
-/// present. Both are reproducible for a given measured image.
+/// present, the TDX MRTD (48 bytes) when a TDX report interface is present, and
+/// otherwise a TPM-sealed per-machine secret. All three are reproducible across
+/// restarts; the first two are additionally bound to the measured image.
 ///
-/// Returns [`TeeError::NotAvailable`] on every other platform, including dev
-/// machines. Nothing is fabricated when the hardware is absent — per the
+/// Returns [`TeeError::NotAvailable`] on a host with none of the three. Nothing is fabricated when the hardware is absent — per the
 /// no-simulation policy, a caller that cannot get a real root must fail rather
 /// than seal against a placeholder.
 pub async fn platform_root_ikm() -> Result<Zeroizing<Vec<u8>>> {
@@ -82,9 +92,53 @@ pub async fn platform_root_ikm() -> Result<Zeroizing<Vec<u8>>> {
             return Ok(Zeroizing::new(mr_td.to_vec()));
         }
     }
+    // A TPM is the third root, and on commodity hardware it is the only one.
+    //
+    // The identity rule already says a machine with no human controller must
+    // hold an attestable root of trust; this is the other half of that
+    // sentence, so the machines allowed to speak for themselves are exactly the
+    // machines able to seal the key they speak with. Without it, every
+    // TPM-anchored autonomous machine would fall back to a keyfile — a key
+    // anything that can read the file can copy, with no human to notice.
+    if crate::tpm_seal::tpm_available() {
+        return tpm_platform_root();
+    }
+
     Err(TeeError::not_available(
-        "no SEV-SNP or TDX platform root available for key derivation",
+        "no SEV-SNP, TDX or TPM platform root available for key derivation",
     ))
+}
+
+/// Directory holding this machine's TPM-sealed platform root.
+///
+/// Machine-level, not identity-level: this is a fact about the box, and every
+/// identity the box hosts derives from it.
+fn tpm_root_dir() -> std::path::PathBuf {
+    tenzro_types::paths::tenzro_home().join("tpm-root")
+}
+
+/// A stable per-machine secret that only this TPM can recover.
+///
+/// Generated once from the OS CSPRNG and immediately sealed; thereafter
+/// unsealed. The bytes never exist on disk in the clear, so copying the disk
+/// yields a blob no other TPM will open — which is what makes the derived key
+/// machine-bound rather than merely machine-*resident*.
+fn tpm_platform_root() -> Result<Zeroizing<Vec<u8>>> {
+    let dir = tpm_root_dir();
+    if crate::tpm_seal::is_sealed(&dir) {
+        return crate::tpm_seal::unseal(&dir);
+    }
+
+    use rand::RngCore;
+    let mut secret = Zeroizing::new(vec![0u8; 32]);
+    rand::thread_rng().fill_bytes(&mut secret);
+    crate::tpm_seal::seal(&dir, &secret)?;
+
+    // Read it back rather than returning what was just generated, so the very
+    // first call exercises the same path every later one takes. A seal that
+    // silently did not persist would otherwise surface only after a reboot,
+    // by which point the key derived from it is already in use.
+    crate::tpm_seal::unseal(&dir)
 }
 
 /// Whether [`platform_root_ikm`] can return a root on this host.
@@ -107,7 +161,7 @@ pub fn platform_root_available() -> bool {
             return true;
         }
     }
-    false
+    crate::tpm_seal::tpm_available()
 }
 
 /// Derive a 32-byte purpose-specific key from the platform root.
@@ -130,22 +184,27 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn root_is_absent_off_hardware() {
-        // The no-simulation policy in one assertion: off SEV/TDX there is no
-        // root, and no placeholder is invented to stand in for one.
+    async fn a_root_exists_only_where_hardware_provides_one() {
+        // The no-simulation policy in one assertion: a root comes from SEV-SNP,
+        // TDX or a TPM, and where none of the three is present no placeholder
+        // is invented to stand in for one.
         let available = platform_root_available();
         match platform_root_ikm().await {
-            Ok(_) => assert!(available, "a root was produced without SEV or TDX present"),
+            Ok(_) => assert!(
+                available,
+                "a root was produced with no SEV-SNP, TDX or TPM present"
+            ),
             Err(TeeError::NotAvailable(_)) => {}
-            Err(e) => assert!(available, "unexpected error off TEE hardware: {:?}", e),
+            Err(e) => assert!(available, "unexpected error with no hardware root: {:?}", e),
         }
     }
 
     #[tokio::test]
     async fn derived_key_follows_the_root() {
-        // Off hardware every call fails and there is nothing to compare; on
-        // hardware the same label must reproduce and two labels must diverge.
-        // One test covers both so it stays meaningful inside a real CVM.
+        // With no hardware root every call fails and there is nothing to
+        // compare; with one, the same label must reproduce and two labels must
+        // diverge. One test covers both so it stays meaningful on a TPM host
+        // and inside a real CVM alike.
         if !platform_root_available() {
             assert!(derive_platform_key(b"tenzro/test/alpha").await.is_err());
             return;

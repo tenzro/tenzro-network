@@ -52,9 +52,7 @@ pub use identity_binding::{
     EscrowResolver, EscrowSnapshot, IdentityPaymentBinder, LifecyclePosture,
     LifecycleStateResolver, SpendingPolicyResolver, SpendingPolicySnapshot,
 };
-pub use revenue_split::{
-    BPS_DENOMINATOR, RevenueSplit, SplitConfig, SplitPayees, SplitShare, split_revenue,
-};
+pub use revenue_split::{RevenueSplit, SplitPayees, SplitShare, split_revenue};
 pub use settlement_asset::{
     Caip19, SettlementAsset, SettlementPreferences, SettlementRoute, SwapQuoter, route_settlement,
 };

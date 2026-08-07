@@ -743,6 +743,24 @@ TDIP identities can have registrations on multiple chains:
 | `tenzro_exportIdentityCar` / `tenzro_importIdentityCar` | CARv1 portable identity bundle: DID + credentials + encrypted keystore |
 | `tenzro_importIdentity` | Import an identity from an existing keypair |
 | `tenzro_verifyDidEnvelope` | Verify a DID-signed envelope (also served at `POST /verify/did-envelope`) |
+| `tenzro_bindDevice` | Bind a device from a WebAuthn registration; grades what the attestation actually proved (admin-token gated) |
+| `tenzro_listBoundDevices` | The devices that can authenticate as an identity, and each one's grade |
+| `tenzro_walletReadiness` | Whether a wallet may be created for this identity yet, and if not, the blocker and its remedy |
+| `tenzro_revokeBoundDevice` | Unbind a device and end every session it authorised, in one action (admin-token gated) |
+| `tenzro_transferMachineOwnership` | Move a machine to another identity under `controller` or `hardware_root` authority (admin-token gated) |
+
+The five device methods take their params as a **bare object**, not a
+one-element array — the handler deserializes the params value directly, so a
+wrapped array is rejected rather than silently misread.
+
+Reachable from every surface: CLI `tenzro device {list,wallet-readiness,revoke,transfer}`,
+Rust SDK `client.device()`, TypeScript SDK `client.device()`, MCP tools
+`list_bound_devices` / `wallet_readiness`, and the A2A `device-binding` skill.
+
+The roots an operator pins for attestation verification are
+`webauthn_trusted_roots` in `NodeConfig` — base64 DER, one per entry. An entry
+that does not decode is dropped rather than trusted, so a typo narrows what the
+node will accept instead of widening it.
 
 ---
 
@@ -839,3 +857,209 @@ is_value_allowed(1500)             → false
 Copyright 2026 Tenzro Network Contributors. Licensed under MIT OR Apache-2.0.
 
 This specification is open for adoption and implementation. Implementors may freely build TDIP-compliant systems.
+
+## Machine identities must be answerable
+
+A machine identity must be answerable to something other than itself. Either a
+human (or institution) delegated it and remains accountable, or a **hardware
+root of trust that can prove which machine it is** stands in their place. There
+is no third option, and a machine that satisfies neither is refused before a
+record exists.
+
+A machine that answers only to itself is a self-issued claim: nothing
+distinguishes it from ten thousand identical claims minted by the same script,
+and there is nobody to hold to account when it misbehaves.
+
+Agents are delegated the same way — from a human, or from the machine that owns
+them.
+
+### A readable serial is not proof
+
+The anchor is graded (`tenzro_types::machine_id::IdentifierGrade`):
+
+- **Attestable** — a per-unit *secret* that can prove possession without
+  disclosing it: a TPM 2.0 endorsement key, a Chinese TCM/TPCM, an Apple Secure
+  Enclave, AMD SEV-SNP's chip-unique VCEK, Intel SGX/TDX platform provisioning,
+  Qualcomm QFPROM/StrongBox, a Microchip ATECC608 signed serial, an NXP SE050,
+  an ESP32's DS/ECDSA peripheral, a Raspberry Pi device unique secret.
+- **Fused** — per-unit, readable, not a secret: Intel and AMD PPIN, Apple ECID,
+  Allwinner SID, Rockchip OTP, a Raspberry Pi `/proc/cpuinfo` serial, SMBIOS
+  UUID.
+- **Model** — identifies a design, not a unit: Arm `MIDR_EL1`, x86 CPUID
+  family/model/stepping. Modelled explicitly because both are routinely
+  mistaken for serials.
+
+**Only an attestable source can anchor a machine no human delegated.** A fused
+serial is readable by anything running on the machine and claimable by anything
+anywhere; accepting one would make the rule cosmetic. Duplicate serials on
+cloned boards are a documented field failure.
+
+### Identity does not root in the GPU
+
+An accelerator is the most-swapped component in a machine — cards move between
+chassis, are resold, are replaced on failure, and partition (MIG, SR-IOV) so one
+device presents several identifiers. Rooting identity in one would mean the
+identity follows the card rather than the machine, and a node that loses a GPU
+would lose the ability to prove it is itself. **GPU serials and UUIDs are not
+identity sources**, and a test asserts none can reach the fingerprint.
+
+Only the SHA-256 digest of an identifier is ever published, never the value: a
+fused serial is a stable cross-service correlator, and publishing one would let
+anyone track the same machine across every network it joins.
+
+### Transferring a machine to a new owner
+
+Machines are sold, redeployed and handed between teams. Ownership moves by an
+`OwnershipTransfer`, and **the authority required is whatever anchors the
+machine** — the same fact that made its identity admissible:
+
+- A machine a human or institution **delegated** moves on that controller's
+  authority alone. Holding the hardware does not override an accountable party:
+  someone who gains root on a delegated machine has compromised a machine, not
+  acquired it.
+- A machine **nobody delegated** moves on proof of its hardware root. For an
+  autonomous machine the TPM *is* the accountable party, so demonstrating
+  control of it is the ownership fact — which is the honest model for selling a
+  box, since the buyer ends up holding the silicon and nothing else could
+  distinguish them from the seller.
+
+The two are not interchangeable, and presenting the wrong one is refused.
+
+A hardware-rooted machine that changes hands **keeps its root** — the silicon
+did not move — and becomes delegated to the new owner, because it now has an
+accountable party where before it had only hardware.
+
+Ownership **replaces rather than accumulates**: a machine has exactly one
+administering identity at a time. A window with two would let both issue
+credentials on it; a window with none would leave an unowned machine still
+holding keys. Authorisations carry an expiry so a signed transfer cannot be
+replayed later against a machine that has since changed hands.
+
+## Devices bound to an identity
+
+A Tenzro identity links devices the way an Apple ID does — a phone, a laptop, a
+machine — and each bound device can authenticate as that identity. Unlike an
+Apple ID, **the link is not a platform account**. Nothing here trusts Apple,
+Google or Microsoft as an identity provider. What is trusted is a WebAuthn
+attestation: a signature, from a key the vendor put in hardware, over a
+challenge we chose, verifiable against a root we pin — through the FIDO
+Metadata Service by AAGUID, or the platform's own root. The platform is a
+conduit, not an authority.
+
+Types: `tenzro_types::device_binding`
+(`BoundDevice`, `BindingPolicy`, `AttestationEvidence`, `KeyProtection`,
+`AttestationFormat`, `Aaguid`, `DeviceSession`).
+
+### A synced passkey is not a hardware-bound one
+
+WebAuthn's backup-eligibility bit says whether a credential *may* sync. `BE=1`
+means the platform's password manager may replicate it to every device the
+user's cloud account touches — at which point the credential proves control of
+an **account**, not possession of a **device**.
+
+But `BE=0` alone is not proof of hardware either: it is a claim made by the same
+software making every other claim. A software authenticator can report `BE=0`
+truthfully and still keep the private key in a file. So binding requires both:
+
+1. `BE=0` — the credential cannot be replicated off the device.
+2. An attestation, verified to a pinned vendor root, saying the key lives in a
+   TEE or secure element.
+
+`BE=0` together with `BS=1` is refused outright: a credential that cannot be
+backed up cannot report itself as backed up, and an authenticator that
+misreports its own state is not one to bind an identity to.
+
+The signature counter is a clone signal **only** for device-bound credentials.
+Synced passkeys hold it at zero permanently, so counter-based clone detection
+built without that check locks out exactly the users whose credentials are
+hardest to clone.
+
+### Phones do not expose serial numbers, and should not
+
+For a machine, `tenzro_types::machine_id` reads chipset and processor
+identifiers. For a phone there is deliberately no equivalent: Apple and Google
+both removed per-unit identifiers from application reach so that apps could not
+fingerprint users across installs.
+
+That is not a gap. **For a phone the device identity *is* the attested
+credential key** — a keypair the secure element generated and will not export,
+whose attestation says which hardware holds it. It identifies the device better
+than a serial would, because a serial can be read and repeated by anything that
+has seen it once, while possession of the key can only be demonstrated by the
+device that holds it.
+
+The AAGUID names the authenticator's *make and model* and is therefore
+model-grade: every Pixel of a given generation reports the same one. It is what
+policy is written against ("StrongBox-class only"); it is never identity. An
+all-zero AAGUID means **unknown**, not suspicious — several platform providers
+report it for privacy, and alarming on it would reject them.
+
+## A wallet needs a second device
+
+A wallet held behind a single device is lost with that device. The first device
+is the machine the user is already on — it was captured when they started — so
+the requirement in practice is: **bind a phone (or another machine) before there
+is anything to lose**. The user scans the pairing QR code and authenticates with
+their passkey; WebAuthn's hybrid transport carries the ceremony.
+
+The second device must be genuinely *separate*, not merely a second credential:
+two passkeys on one laptop are two ways into one box, and a laptop that dies
+takes both. Only hardware-bound devices count, because a syncable credential
+would make the second factor an account rather than a device.
+
+An identity may bind many devices, and each of them authenticates.
+
+## Sessions
+
+An authenticated session is distinct from the short-lived browser *ceremony*
+session that mints it. **Every session names the bound device that authorised
+it**, not only the identity — a session recording only "alice is signed in"
+could not be revoked when Alice loses the phone that created it without signing
+her out everywhere, including from the laptop still in her hands.
+
+Unbinding a device therefore ends exactly the sessions it granted. Expiry and
+revocation are independent: a revoked session inside its window and an expired
+session never revoked are both unusable.
+
+Sessions are stored per identity, under `identity_sessions_dir(did)` — see
+"Where identity state lives" below.
+
+## Where identity state lives
+
+State about *who* is filed under the identity, not the machine hosting it:
+
+| Path | Holds |
+|---|---|
+| `identities/<did>/sessions/` | live sessions |
+| `identities/<did>/devices/` | bound devices |
+| `identities/<did>/chat-history/` | conversation transcripts |
+| `identities/<did>/passkey/` | passkey companion material |
+| `identities/<did>/hybrid_key.json` | that identity's sealed hybrid key |
+
+A machine hosts identities; it does not own them. Chat history and passkey
+material filed at machine level answer "what happened on this box", which is
+never the question asked of them. Filing them under the identity also makes
+exporting or revoking an identity a directory operation.
+
+The directory name is the DID with path-unsafe characters replaced, plus a short
+digest of the original. The digest is what makes it injective: `:` must collapse
+for the filesystem's sake, so without it `a:b` and `a_b` would name one
+directory and two identities would share their sessions and their keys.
+
+## A machine that holds its own key seals it
+
+An autonomous machine answers for itself, and what makes that claim mean
+anything is that the key it answers with cannot be copied off the machine. A key
+in a file is copyable by anything that can read the file — a backup, a stolen
+disk, a container escape, a misapplied `chmod` — and copying it makes you the
+machine, with no human to notice.
+
+So a machine that stores its own key **seals it to its hardware root**. The blob
+on disk is ciphertext under the TPM's storage hierarchy: only that TPM can open
+it. A host that cannot seal is refused rather than degrading to a plaintext
+keyfile.
+
+This is the same rule as the anchor rule, seen from the other side: the machines
+allowed to speak for themselves are exactly the machines able to seal the key
+they speak with. A machine with no attestable root was never allowed to be
+autonomous, so it never reaches this path.

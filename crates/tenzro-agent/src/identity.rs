@@ -344,6 +344,14 @@ pub struct AgentIdentityManager {
     /// legacy local-only behaviour for backwards compatibility with tests and
     /// lightweight callers.
     identity_registry: Option<Arc<IdentityRegistry>>,
+    /// The hardware anchor this host can offer for agent identities it mints.
+    ///
+    /// An agent is delegated by its owner — a human, or the machine hosting it.
+    /// When neither is nameable, the host's own hardware root of trust stands
+    /// in their place, exactly as it does for a machine with no controller. A
+    /// manager with no anchor and no owner cannot mint an identity at all:
+    /// there would be nothing answerable for it.
+    machine_anchor: Option<tenzro_identity::identity::MachineAnchor>,
     /// Default gas policy for blockchain-bound registrations (HIGH #105).
     ///
     /// Only consulted when `identity_registry` is `Some`. Defaults to
@@ -364,6 +372,7 @@ impl AgentIdentityManager {
             wallet_provisioner: Arc::new(wallet_provisioner),
             storage_path: None,
             identity_registry: None,
+            machine_anchor: None,
             gas_policy: GasPolicy::AcceptAny,
         })
     }
@@ -385,6 +394,7 @@ impl AgentIdentityManager {
             wallet_provisioner: Arc::new(wallet_provisioner),
             storage_path: Some(storage_path),
             identity_registry: None,
+            machine_anchor: None,
             gas_policy: GasPolicy::AcceptAny,
         })
     }
@@ -405,6 +415,18 @@ impl AgentIdentityManager {
     /// use `register_agent_with_gas_policy` for per-call control.
     pub fn with_identity_registry(mut self, registry: Arc<IdentityRegistry>) -> Self {
         self.identity_registry = Some(registry);
+        self
+    }
+
+    /// Supplies the hardware root of trust that answers for agents this host
+    /// mints.
+    ///
+    /// Required alongside [`Self::with_identity_registry`] on a host that mints
+    /// agent identities without an owner DID to delegate from. Without it,
+    /// registration is refused rather than producing an identity that answers
+    /// to nobody.
+    pub fn with_machine_anchor(mut self, anchor: tenzro_identity::identity::MachineAnchor) -> Self {
+        self.machine_anchor = Some(anchor);
         self
     }
 
@@ -567,8 +589,20 @@ impl AgentIdentityManager {
             // they have a creator Address but not a controlling DID. Use the
             // fee-aware variant so we get the registration fee back for the
             // caller to collect at the transaction layer.
+            // An agent must be answerable to something. Absent an owner DID,
+            // the host's hardware root of trust is what answers for it — and a
+            // host that cannot offer one is refused rather than minting an
+            // identity nobody can be held to.
+            let anchor = self.machine_anchor.clone().ok_or_else(|| {
+                AgentError::BlockchainBindingFailed(format!(
+                    "cannot mint a TDIP identity for agent {agent_id}: this host offers no \
+                     hardware root of trust, and no owner DID was supplied to delegate from. An \
+                     agent identity must be answerable to a human, to the machine that owns it, \
+                     or to hardware that can prove which machine it is."
+                ))
+            })?;
             let registration = registry
-                .register_autonomous_machine_with_fee(public_key, cap_strings)
+                .register_autonomous_machine_with_fee(public_key, cap_strings, anchor)
                 .await
                 .map_err(|e| {
                     AgentError::BlockchainBindingFailed(format!(
@@ -1161,7 +1195,11 @@ mod tests {
         let registry = Arc::new(IdentityRegistry::new());
         let manager = AgentIdentityManager::new()
             .unwrap()
-            .with_identity_registry(registry.clone());
+            .with_identity_registry(registry.clone())
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                hardware_root_hex: "ab".repeat(32),
+                sources: vec!["tpm:ek".to_string()],
+            });
 
         let creator = Address::from([8u8; 32]);
         let agent = manager
@@ -1204,6 +1242,10 @@ mod tests {
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry)
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                hardware_root_hex: "ab".repeat(32),
+                sources: vec!["tpm:ek".to_string()],
+            })
             .with_gas_policy(GasPolicy::PayUpTo(1));
 
         let creator = Address::from([9u8; 32]);
@@ -1246,6 +1288,10 @@ mod tests {
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry)
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                hardware_root_hex: "ab".repeat(32),
+                sources: vec!["tpm:ek".to_string()],
+            })
             .with_gas_policy(GasPolicy::PayUpTo(big_budget));
 
         let creator = Address::from([10u8; 32]);
@@ -1273,7 +1319,11 @@ mod tests {
         let registry = Arc::new(IdentityRegistry::new());
         let manager = AgentIdentityManager::new()
             .unwrap()
-            .with_identity_registry(registry);
+            .with_identity_registry(registry)
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                hardware_root_hex: "ab".repeat(32),
+                sources: vec!["tpm:ek".to_string()],
+            });
         // No `with_gas_policy` → defaults to AcceptAny.
 
         let creator = Address::from([11u8; 32]);

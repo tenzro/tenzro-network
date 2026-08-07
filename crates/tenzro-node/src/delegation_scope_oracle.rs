@@ -224,7 +224,14 @@ mod tests {
         // requires exactly 32 bytes).
         let pk = vec![0x42u8; 32];
         let result = registry
-            .register_autonomous_machine(pk, vec!["test".to_string()])
+            .register_autonomous_machine(
+                pk,
+                vec!["test".to_string()],
+                tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: "ab".repeat(32),
+                    sources: vec!["tpm:ek".to_string()],
+                },
+            )
             .await
             .expect("register autonomous machine");
         let did = result.did.to_string();

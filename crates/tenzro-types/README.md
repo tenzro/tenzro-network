@@ -98,7 +98,11 @@ Foundation crate providing shared types for the Tenzro Network.
 
 ### Configuration & Fees
 - `NetworkConfig`, `NodeConfig` - Network configuration
-- `ServiceFeeSchedule`, `NetworkCommissionRates` - Fee structures
+- `ServiceFeeSchedule` - Flat ledger service fees
+- `EconomicPolicy`, `NodeEconomicMode`, `PayeeRole` - The governance-set revenue split (see `docs/ECONOMICS.md`)
+- `AccessTier`, `PayerKind`, `RentableResource` - Subscriber / renter / user tiers
+- `InteractionProvenance` - Who, what, when, how, how much for every metered interaction
+- `MachineIdentity`, `IdentifierGrade` - Graded machine-identity sources
 
 ### TEE Types
 - `TeeVendor`, `AttestationReport`, `AttestationResult`
@@ -152,3 +156,23 @@ let tx = Transaction {
 ## License
 
 Apache-2.0.
+
+## Identity, devices and machines
+
+- `device_binding` — devices bound to an identity. `BoundDevice`,
+  `BindingPolicy`, `AttestationEvidence`, `KeyProtection`, `AttestationFormat`,
+  `Aaguid`, plus `DeviceSession` and the wallet second-device gate
+  (`wallet_readiness`). A device counts as hardware-bound only when the
+  credential cannot sync **and** an attestation verified to a pinned vendor root
+  says the key lives in hardware — no platform account is an identity authority.
+- `machine_id` — graded machine-identity sources. `IdentifierGrade` separates
+  `Model` (Arm `MIDR_EL1`, x86 CPUID — a design, not a unit), `Fused` (Intel/AMD
+  PPIN, Apple ECID, SMBIOS — per-unit but readable) and `Attestable` (TPM EK,
+  TCM/TPCM, Secure Enclave, SEV-SNP VCEK, ATECC608, SE050, ESP32 DS). Only
+  `Attestable` can anchor a machine no human delegated. Accelerator identifiers
+  are excluded by design.
+- `paths` — one root, and a third scope beside shared and per-instance:
+  per-identity (`identity_dir`, `identity_sessions_dir`,
+  `identity_devices_dir`). State about *who* is filed under the identity, not
+  the machine hosting it.
+- `economics` / `provenance` / `access_tier` — see `docs/ECONOMICS.md`.

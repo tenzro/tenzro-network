@@ -426,7 +426,7 @@ impl AppListCmd {
 /// The developer backend has already charged the end user in fiat on its own
 /// payment-provider account; this command signs (or forwards) the TNZO
 /// settlement authorization that moves TNZO from the app wallet to the payer,
-/// minus the network commission. The signing key must be one of the app's
+/// minus the settlement-authorization commission. The signing key must be one of the app's
 /// registered settlement keys.
 #[derive(Debug, Parser)]
 pub struct AppSettleAuthorizedCmd {

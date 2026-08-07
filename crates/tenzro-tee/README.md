@@ -170,3 +170,21 @@ Unit tests and doc tests cover:
 ## License
 
 Apache-2.0.
+
+## `tpm_seal` — sealing a machine's own key to its TPM
+
+A machine that stores its own key seals it rather than writing a keyfile: the
+blob on disk is ciphertext under the TPM's storage hierarchy, so copying the
+disk yields something no other TPM will open. A host that cannot seal is refused
+rather than degrading to plaintext — the value of the autonomous claim rests on
+the key being unextractable.
+
+Driven through `tpm2-tools`, the same way this workspace already talks to
+`nvidia-smi` and `rocm-smi`; the secret reaches the TPM over the tool's stdin and
+never touches disk in the clear.
+
+A TPM is also the **third platform root** (`platform_root`), after SEV-SNP and
+TDX, and on commodity hardware the only one. It has no measured-image binding —
+it seals to the platform, not to what the platform is running — but it is what
+an ordinary machine has, and the identity rule already requires an attestable
+root before a machine may speak for itself.

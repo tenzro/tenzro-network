@@ -24,7 +24,7 @@ pub enum MarketplaceCommand {
     /// Update an existing agent template
     Update(UpdateTemplateCmd),
     /// Run (invoke) a spawned agent template through its full execution spec
-    /// (charges the payer wallet for paid templates: network commission -> treasury, remainder -> creator)
+    /// (charges the payer wallet for paid templates: marketplace commission -> treasury, remainder -> creator)
     Run(RunTemplateCmd),
 }
 
@@ -481,7 +481,7 @@ impl UpdateTemplateCmd {
 /// Invoke (run) a spawned agent template through its full execution spec.
 ///
 /// For paid templates the payer wallet is charged:
-///   - `MARKETPLACE_COMMISSION_BPS` (5%) flows to the network treasury
+///   - the governance-set marketplace commission flows to the network treasury
 ///   - the remainder is paid to the template's `creator_wallet`
 ///
 /// Successful non-dry-run invocations are metered (invocation_count +

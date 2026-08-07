@@ -751,6 +751,42 @@ tenzro identity add-credential <did> <credential>
 tenzro identity add-service <did> <service>
 ```
 
+### Device Binding and Machine Ownership
+
+A Tenzro identity links devices the way a platform account does, except the link
+is not a platform account. What the node trusts is a WebAuthn attestation it
+verifies against a vendor root it pins — no Apple, Google or Microsoft sign-in is
+an identity authority here. A device counts as hardware-bound only when its
+credential cannot sync **and** the attestation says the key is in a TEE or secure
+element.
+
+```bash
+# What can authenticate as this identity, and what each device proved
+tenzro device list <did>
+tenzro device list <did> --json
+
+# May a wallet be created yet? If not, what is the remedy?
+# A wallet cannot sit behind one device; --this-device is what lets the
+# check notice that every bound device is the same machine.
+tenzro device wallet-readiness <did> [--this-device <credential-id>]
+
+# Lost phone: unbind it and end every session it authorised, in one action
+tenzro device revoke <did> <credential-id>
+
+# Hand a machine to another identity. The two authorities are not
+# interchangeable: holding the hardware cannot take a machine that has an
+# accountable party.
+tenzro device transfer <machine-did> <new-owner-did> \
+  --authority controller --controller-did <did>
+tenzro device transfer <machine-did> <new-owner-did> \
+  --authority hardware_root --hardware-root-hex <64-hex>
+```
+
+Binding a device (`tenzro_bindDevice`) happens through the browser ceremony
+rather than the CLI — the attestation object comes from
+`navigator.credentials.create()`. `bind`, `revoke` and `transfer` are
+admin-token gated; `list` and `wallet-readiness` are open.
+
 ### Payment Operations
 
 ```bash

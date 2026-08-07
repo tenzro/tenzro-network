@@ -623,7 +623,7 @@ Failure semantics: identity registration comes first. If it fails, no funds move
 
 Every paid resource invocation goes through the same commission split:
 
-- **5%** to network treasury (network commission, on every paid invocation)
+- **5%** to network treasury (the governance-set marketplace commission, on every paid invocation)
 - **95%** to operator's `creator_wallet`
 
 The operator's upstream costs (payment-processor fees, model-provider plans, premium data-feed subscriptions, etc.) are off-protocol — the operator converts TNZO revenue to fiat to pay them. The protocol charges only for network use.

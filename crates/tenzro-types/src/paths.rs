@@ -43,10 +43,23 @@
 //!   trainer dataset shards ([`trainer_cache_dir`]). Two nodes on one box
 //!   should not download the same 40 GB of weights twice, and they do not have
 //!   to, because none of this is instance state.
-//! - **Per-instance** — RocksDB, keys, wallets, snapshots, agent memory. These
-//!   go under [`instance_data_dir`], which namespaces by instance name, because
+//! - **Per-instance** — RocksDB, node keys, snapshots, agent memory. These go
+//!   under [`instance_data_dir`], which namespaces by instance name, because
 //!   two nodes genuinely cannot share a RocksDB directory: the second one to
-//!   start fails on the lock file.
+//!   start is refused by the single-instance lock.
+//! - **Per-identity** — everything tied to *who* rather than to *which machine*:
+//!   bound devices, sessions, chat transcripts, passkey material. These go under
+//!   [`identity_dir`], namespaced by DID.
+//!
+//! # Why identity state is not machine state
+//!
+//! A machine hosts identities; it does not own them. One box may run a human's
+//! identity and several agents it controls, and the same human may appear on
+//! another machine tomorrow. Chat history and passkey material filed at machine
+//! level answer "what happened on this box", which is never the question asked
+//! of them — the question is always "what did *this identity* do". Filing them
+//! under the identity also means revoking or exporting an identity is a
+//! directory operation rather than a grep.
 //!
 //! [`default_data_dir`] is `instance_data_dir("default")`, so a single-node
 //! machine never has to think about the distinction.
@@ -240,19 +253,82 @@ pub fn cli_config_path() -> PathBuf {
     tenzro_home().join("config.json")
 }
 
-/// CLI chat session transcripts.
-pub fn chat_history_dir() -> PathBuf {
-    tenzro_home().join("chat-history")
+/// Root under which every identity's own state lives.
+pub fn identities_root() -> PathBuf {
+    tenzro_home().join("identities")
 }
 
-/// Sealed hybrid (Ed25519 + ML-DSA-65) keystore used by the CLI.
-pub fn hybrid_key_path() -> PathBuf {
-    tenzro_home().join("hybrid_key.json")
+/// Everything belonging to one identity — human, machine or agent.
+///
+/// Namespaced by DID rather than by machine, because this is state about *who*,
+/// not about *which box*. An agent that moves between hosts takes its directory
+/// with it; a machine that hosts three agents keeps them apart without
+/// convention.
+///
+/// The directory name is the DID with path-unsafe characters replaced, plus a
+/// short digest of the original. The digest is what makes it injective: `:`
+/// collapses to `_` for the filesystem's sake, so `a:b` and `a_b` would
+/// otherwise name one directory and two identities would share their sessions
+/// and their keys.
+pub fn identity_dir(did: &str) -> PathBuf {
+    identities_root().join(identity_component(did))
 }
 
-/// Directory holding ML-DSA passkey companion seeds.
-pub fn passkey_dir() -> PathBuf {
-    tenzro_home().join("passkey")
+/// Live sessions for one identity.
+///
+/// Under the identity rather than the machine so that revoking an identity, or
+/// signing it out everywhere, is one directory — and so a session cannot be
+/// silently reused by a different identity on the same host.
+pub fn identity_sessions_dir(did: &str) -> PathBuf {
+    identity_dir(did).join("sessions")
+}
+
+/// Devices bound to one identity — the phones and machines that can
+/// authenticate as it.
+pub fn identity_devices_dir(did: &str) -> PathBuf {
+    identity_dir(did).join("devices")
+}
+
+/// Chat transcripts belonging to one identity.
+///
+/// Identity-scoped rather than machine-scoped: two people using one machine do
+/// not share a conversation history, and one person using two machines expects
+/// the transcript to follow the identity.
+pub fn identity_chat_history_dir(did: &str) -> PathBuf {
+    identity_dir(did).join("chat-history")
+}
+
+/// ML-DSA passkey companion seeds for one identity.
+pub fn identity_passkey_dir(did: &str) -> PathBuf {
+    identity_dir(did).join("passkey")
+}
+
+/// Sealed hybrid (Ed25519 + ML-DSA-65) keystore for one identity.
+pub fn identity_hybrid_key_path(did: &str) -> PathBuf {
+    identity_dir(did).join("hybrid_key.json")
+}
+
+/// Filesystem-safe, injective directory name for a DID.
+///
+/// Readable prefix so an operator can see whose directory this is, plus eight
+/// hex of `SHA-256(did)` so two DIDs that sanitise to the same string still get
+/// two directories. Truncating the readable part keeps the name usable on
+/// filesystems with a 255-byte component limit.
+fn identity_component(did: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(did.as_bytes());
+    let short = hex_prefix(&digest[..4]);
+    let mut readable = sanitize_component(did);
+    readable.truncate(96);
+    format!("{readable}-{short}")
+}
+
+/// Lowercase hex of `bytes`, without pulling in a hex dependency for four
+/// bytes — `tenzro-types` sits under every other crate, so its dependency set
+/// is worth keeping small.
+fn hex_prefix(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// MAC key protecting locally-cached wallet state.
@@ -328,6 +404,122 @@ pub fn child_env() -> Vec<(String, String)> {
             trainer_cache_dir().display().to_string(),
         ),
     ]
+}
+
+#[cfg(test)]
+mod identity_path_tests {
+    use super::*;
+
+    // These assert on `identity_component`, the pure function, rather than on
+    // `identity_dir`. Sibling tests in this module mutate `TENZRO_HOME`
+    // process-wide, so any test that calls an env-reading path builder twice
+    // and compares the results is racing them — it can observe two different
+    // roots and fail for a reason unrelated to what it is checking. Injectivity
+    // and determinism are properties of the name derivation, so testing it
+    // directly is both race-free and a more precise statement.
+
+    /// The property the digest suffix exists for. `:` has to collapse for the
+    /// filesystem's sake, so without it these two DIDs would name one directory
+    /// — and two identities would share their sessions and their keys.
+    #[test]
+    fn dids_that_sanitise_alike_still_get_separate_components() {
+        let a = identity_component("did:tenzro:human:a:b");
+        let b = identity_component("did:tenzro:human:a_b");
+        assert_ne!(a, b, "distinct DIDs must never share a directory name");
+    }
+
+    #[test]
+    fn one_did_always_resolves_to_one_component() {
+        let did = "did:tenzro:machine:64225154-c233-4ac5-bd79-435035d733b6";
+        assert_eq!(identity_component(did), identity_component(did));
+    }
+
+    /// Readable prefix so an operator can see whose directory this is without
+    /// decoding a hash.
+    #[test]
+    fn the_directory_name_names_the_identity() {
+        let name = identity_component("did:tenzro:human:alice");
+        assert!(name.starts_with("did_tenzro_human_alice-"), "{name}");
+    }
+
+    /// A pathological DID must not produce a component the filesystem refuses.
+    #[test]
+    fn an_absurdly_long_did_still_yields_a_usable_component() {
+        let did = format!("did:tenzro:human:{}", "x".repeat(4_000));
+        let name = identity_component(&did);
+        assert!(name.len() <= 255, "component was {} bytes", name.len());
+    }
+
+    /// Identity state hangs off the identity, never off an instance — that is
+    /// the whole distinction between "who" and "which machine".
+    #[test]
+    fn identity_state_is_not_under_any_instance() {
+        // Asserted on path *components* rather than an absolute prefix.
+        // Sibling tests in this module mutate `TENZRO_HOME` process-wide, so a
+        // prefix comparison races them and fails for a reason that has nothing
+        // to do with the invariant. The structural claim — identity state lives
+        // under `identities/`, never under `instances/` — is what actually
+        // matters, and it holds wherever the root happens to be.
+        let did = "did:tenzro:human:alice";
+        for path in [
+            identity_dir(did),
+            identity_sessions_dir(did),
+            identity_devices_dir(did),
+            identity_chat_history_dir(did),
+            identity_passkey_dir(did),
+            identity_hybrid_key_path(did),
+        ] {
+            let components: Vec<String> = path
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                components.iter().any(|c| c == "identities"),
+                "{} is not under identities/",
+                path.display()
+            );
+            assert!(
+                !components.iter().any(|c| c == "instances"),
+                "{} was filed under an instance",
+                path.display()
+            );
+        }
+    }
+
+    /// Each kind of identity state has exactly one home, so nothing is written
+    /// to two places and read from one.
+    /// Compared by trailing component rather than by whole path, so a sibling
+    /// test flipping `TENZRO_HOME` between these calls cannot make two
+    /// genuinely distinct homes look distinct for the wrong reason.
+    #[test]
+    fn each_kind_of_identity_state_has_one_distinct_home() {
+        let did = "did:tenzro:agent:bob";
+        let leaves: Vec<String> = [
+            identity_sessions_dir(did),
+            identity_devices_dir(did),
+            identity_chat_history_dir(did),
+            identity_passkey_dir(did),
+            identity_hybrid_key_path(did),
+        ]
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .expect("a trailing component")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+        let unique: std::collections::BTreeSet<&String> = leaves.iter().collect();
+        assert_eq!(unique.len(), leaves.len(), "two kinds shared a path");
+    }
+
+    #[test]
+    fn two_identities_on_one_machine_do_not_share_state() {
+        assert_ne!(
+            identity_component("did:tenzro:human:alice"),
+            identity_component("did:tenzro:agent:bob")
+        );
+    }
 }
 
 #[cfg(test)]

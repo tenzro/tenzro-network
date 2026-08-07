@@ -66,7 +66,7 @@ pub struct ComponentManifest {
     #[serde(default)]
     pub description: Option<String>,
 
-    /// Optional creator DID (for the paid-marketplace 5% commission flow).
+    /// Optional creator DID (for the paid-marketplace commission flow).
     #[serde(default)]
     pub creator_did: Option<String>,
 }

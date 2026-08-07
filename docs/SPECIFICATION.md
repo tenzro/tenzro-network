@@ -131,12 +131,12 @@ For the full protocol-layer view, see [`WHITEPAPER.md`](WHITEPAPER.md).
 
 1. **Ledger Transaction Fees (Gas):** All on-chain transactions pay gas fees in TNZO to validators, securing the economic substrate. Uses EIP-1559 dynamic fee market.
 
-2. **Network Commission Fees:** The Tenzro Network collects a 0.5% commission on AI provider inference payments and TEE provider service fees. This commission is distributed: 40% to treasury, 30% burned, 30% to stakers.
+2. **Network Commission Fees:** A settled service payment is divided once, by the serving node's economic mode — a private node keeps it, a public validating node pays 10% to the treasury, and a public node that does not validate pays 10% to the treasury and 10% to the RPC provider validating on its behalf. Every rate is governance-set. See [ECONOMICS.md](ECONOMICS.md) for the full model.
 
 Providers/validators/nodes can earn from multiple sources:
 - **Validators:** Block rewards + transaction fees (gas) for securing the Ledger
-- **Model Providers:** Per-inference fees (minus 0.5% Network commission) for providing intelligence
-- **TEE Providers:** Service fees (minus 0.5% Network commission) for providing security
+- **Model Providers:** Per-inference fees (minus the network's share under the node's economic mode) for providing intelligence
+- **TEE Providers:** Service fees (minus the network's share under the node's economic mode) for providing security
 - Nodes can serve multiple roles simultaneously (e.g., a validator can also be a Model Provider and/or TEE Provider)
 
 ### 2.2 System Architecture
@@ -215,9 +215,9 @@ Participants in the Tenzro Network operate nodes in one of several roles. Nodes 
 
 - **RPC Provider.** A Tier 3 validator role. Serves public JSON-RPC + REST verification API. Sanctioned to mint scoped tenant API keys (`tenzro_createApiKey`), broker access to operator-held upstream credentials (Canton participants, AI provider keys, data feed subscriptions), and route cross-chain mint/burn flows. Requires ≥ 100,000 TNZO bonded (implies the Tier 2 minimum). Tenzro Labs operates the first RPC Provider at `rpc.tenzro.xyz`.
 
-- **Model Provider.** Serves AI models for inference requests. Bonds **1,000 TNZO**; admission is permissionless above the bond, with no allowlist and no approval step. Earns a 1.1× reward multiplier per TOKENOMICS §9 and per-inference fees (paid in TNZO) settled through micropayment channels. The Network takes a 0.5% commission on provider earnings, which flows to the treasury. Model providers provide **intelligence** to the Network.
+- **Model Provider.** Serves AI models for inference requests. Bonds **1,000 TNZO**; admission is permissionless above the bond, with no allowlist and no approval step. Earns a 1.1× reward multiplier per TOKENOMICS §9 and per-inference fees (paid in TNZO) settled through micropayment channels. The network's share of provider earnings follows the node's economic mode and flows to the treasury (see [ECONOMICS.md](ECONOMICS.md)). Model providers provide **intelligence** to the Network.
 
-- **TEE Provider.** Operates hardware TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU TEEs, Intel Tiber) for confidential computation, key management, custody services, and attestation. Bonds **10,000 TNZO** — the second-largest rung on the ladder, reflecting that a false attestation compromises every party relying on it. Earns a 1.2× reward multiplier per TOKENOMICS §9 and fees for TEE services (paid in TNZO). The Network takes a 0.5% commission on provider earnings, which flows to the treasury. TEE providers provide **security** to the Network.
+- **TEE Provider.** Operates hardware TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU TEEs, Intel Tiber) for confidential computation, key management, custody services, and attestation. Bonds **10,000 TNZO** — the second-largest rung on the ladder, reflecting that a false attestation compromises every party relying on it. Earns a 1.2× reward multiplier per TOKENOMICS §9 and fees for TEE services (paid in TNZO). The network's share of provider earnings follows the node's economic mode and flows to the treasury (see [ECONOMICS.md](ECONOMICS.md)). TEE providers provide **security** to the Network.
 
 - **Storage Provider.** Stores and serves blockchain state, model weights, and historical data. Bonds **100 TNZO per terabyte pledged**, floored at 100 TNZO, so the bond tracks the capacity it collateralizes. Earns storage fees.
 
@@ -227,7 +227,7 @@ Participants in the Tenzro Network operate nodes in one of several roles. Nodes 
 
 - **Training Provider.** Participates in Tenzro Train distributed training runs as a trainer. Bonds **1,000 TNZO**, slashable for withholding training results. Witness committee membership is separate and restricted to Tier 2 staked validators.
 
-- **Media Worker.** Renders Tenzro Media Gen diffusion jobs — image and video generation. **Open entry, no stake required.** Earns per-job fees (paid in TNZO) against the price ceiling the requester posted; the Network takes a 0.5% commission on worker earnings, which flows to the treasury. A worker enrolls the whole models it can hold and, separately, the individual experts of a split model — one half of a timestep-boundary expert pair fits accelerators that cannot hold the full model (§20a.4).
+- **Media Worker.** Renders Tenzro Media Gen diffusion jobs — image and video generation. **Open entry, no stake required.** Earns per-job fees (paid in TNZO) against the price ceiling the requester posted; the network's share of worker earnings follows the node's economic mode and flows to the treasury. A worker enrolls the whole models it can hold and, separately, the individual experts of a split model — one half of a timestep-boundary expert pair fits accelerators that cannot hold the full model (§20a.4).
 
 - **Light Client.** Verifies block headers and proofs without storing full state. Suitable for end-user devices.
 
@@ -819,7 +819,7 @@ Tenzro operates two distinct fee collection mechanisms:
 - Provides economic security for Tenzro Ledger
 
 **2. Network Commission Fees**
-- 0.5% commission (50 basis points) on AI provider inference payments and TEE provider service fees
+- The network's share of AI provider inference payments and TEE provider service fees, set by the node's economic mode
 - Collected when users pay providers for intelligence (models) or security (TEE enclaves)
 - Distributed as follows:
 
@@ -829,7 +829,7 @@ Tenzro operates two distinct fee collection mechanisms:
 | Burn | 30% | Deflationary pressure, reducing circulating supply |
 | Stakers | 30% | Rewards for validators and service providers |
 
-The network commission distribution parameters are governed by on-chain proposals and can be adjusted through governance votes.
+The settlement split and the marketplace commission are one governance-set `EconomicPolicy` block, adjusted through on-chain proposals.
 
 ### 8.3 Staking
 
@@ -917,7 +917,7 @@ The Network Treasury is a multi-asset vault that accumulates Network commission 
 - **Multi-signature withdrawal.** Treasury withdrawals require M-of-N approval from authorized withdrawers (configurable, e.g., 2-of-3).
 - **Duplicate approval prevention.** Each withdrawer can approve a withdrawal only once.
 - **Backing ratio.** The treasury publishes a `backing_ratio = treasury_value / tnzo_supply`, providing transparency into the network's economic health.
-- **Fee sources.** The treasury receives 40% of the 0.5% Network commission on AI provider inference payments and TEE provider service fees. Ledger transaction fees (gas) flow directly to validators and do not pass through the treasury.
+- **Fee sources.** The treasury receives its leg of the revenue split on AI provider inference payments and TEE provider service fees. Ledger transaction fees (gas) flow directly to validators and do not pass through the treasury.
 
 ---
 
@@ -933,7 +933,7 @@ For simple one-shot payments:
 
 1. Consumer submits a `SettlementRequest` specifying payer, payee, amount, asset, and service proof.
 2. The `SettlementEngine` verifies the consumer has sufficient balance.
-3. For provider payments (AI inference or TEE services), a 0.5% Network commission is deducted and routed to the treasury. For direct peer-to-peer transfers, no commission is charged (only standard Ledger gas fees apply).
+3. For provider payments (AI inference or TEE services), the network's share under the node's economic mode is deducted and routed to the treasury. For direct peer-to-peer transfers, no commission is charged (only standard Ledger gas fees apply).
 4. The net amount is credited to the payee.
 5. A `SettlementReceipt` is generated with a unique receipt ID, status, and fee breakdown.
 
@@ -2651,7 +2651,7 @@ Tenzro Train is split across two layers, each owning what it does best:
 - libp2p gossip topics: `tenzro/training` (trainer → syncer outer gradients) and `tenzro/training/syncer` (syncer → trainers post-step weights)
 - VM precompile `0x1008` (`TRAINING_VERIFY`) for on-chain receipt verification
 - JSON-RPC namespace `tenzro_training_*` (post / list / get / enroll / submit / finalize)
-- TNZO escrow, per-trainer reward distribution, network commission (5%), receipt-as-NFT minting
+- TNZO escrow, per-trainer reward distribution, marketplace commission (5%), receipt-as-NFT minting
 
 **Python reference trainer** (`integrations/trainer/`, PyTorch FSDP2 + Hivemind + safetensors):
 - Inner training loop (forward, backward, optimizer step) per modality
@@ -2885,7 +2885,7 @@ low_bps  = 10_000 − high_bps
 
 `steps_completed` comes from the signed handoff, not from either worker's later claim. Overstating a half would take a forged Ed25519 signature over the handoff preimage.
 
-Settlement runs inside `tenzro_mediaGen_submitReceipt`, after the runtime has validated and sealed the receipt, so nothing is paid against a receipt the runtime would reject. The requester is debited `price_paid` and no more: the network commission (`NetworkCommissionRates::inference_commission_bps`, 500 bps) is carved out of that amount rather than added on top, matching the price the worker sealed and the requester was quoted against. `split_payout` divides the remainder by the basis points above; integer division leaves at most one attoTNZO per worker unallocated, and that dust falls to the last share so the parts sum exactly. The commission reaches the treasury at the derived `network_treasury_address()`, which an operator cannot redirect.
+Settlement runs inside `tenzro_mediaGen_submitReceipt`, after the runtime has validated and sealed the receipt, so nothing is paid against a receipt the runtime would reject. The requester is debited `price_paid` and no more: the network's share under the node's economic mode is carved out of that amount rather than added on top, matching the price the worker sealed and the requester was quoted against. `split_payout` divides the remainder by the basis points above; integer division leaves at most one attoTNZO per worker unallocated, and that dust falls to the last share so the parts sum exactly. The commission reaches the treasury at the derived `network_treasury_address()`, which an operator cannot redirect.
 
 The whole debit is checked against the requester's balance before any of it moves, so a requester who cannot cover the job does not pay one expert and strand the other. A transfer that fails after that check leaves the job completed and short-paid rather than unwinding what already moved — the render happened and the receipt is valid, so the shortfall is the requester's to make good. Each unpayable leg is written as an unpaid marker in `CF_SETTLEMENTS` for retry and named in the JSON-RPC error (`-32023`). The response carries a `settlement` block (`price_paid`, `commission_wei`, one payout per assignment) that the CLI prints and the Python worker logs against its own DID.
 

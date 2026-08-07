@@ -1111,7 +1111,7 @@ pub(crate) fn service_key_refusal(
         return None;
     }
     match gate.admit(tenzro_auth::ServiceSurface::JsonRpc, "/", presented) {
-        tenzro_auth::Admission::Allow => return None,
+        tenzro_auth::Admission::Allow => None,
         tenzro_auth::Admission::Deny(reason) => {
             // Refused as an operator surface. The one thing that still gets
             // through is inference on a model published to the network.
@@ -2138,6 +2138,22 @@ async fn dispatch_request(
         // and the fast-track timelock run in the node's
         // `AutoProposalGenerator` alongside the governance executor.
         "tenzro_getBurnRateConfig" => handle_get_burn_rate_config(node).await,
+        "tenzro_getEconomicPolicy" => handle_get_economic_policy(node).await,
+        "tenzro_bindDevice" => {
+            crate::device_rpc::handle_bind_device(node, request.params.clone()).await
+        }
+        "tenzro_listBoundDevices" => {
+            crate::device_rpc::handle_list_bound_devices(node, request.params.clone()).await
+        }
+        "tenzro_revokeBoundDevice" => {
+            crate::device_rpc::handle_revoke_bound_device(node, request.params.clone()).await
+        }
+        "tenzro_walletReadiness" => {
+            crate::device_rpc::handle_wallet_readiness(node, request.params.clone()).await
+        }
+        "tenzro_transferMachineOwnership" => {
+            crate::device_rpc::handle_transfer_machine_ownership(node, request.params.clone()).await
+        }
         "tenzro_getSupplyMetrics" => handle_get_supply_metrics(node).await,
         "tenzro_getBurnRateRecommendation" => handle_get_burn_rate_recommendation(node).await,
         "tenzro_listAdaptiveBurnProposals" => {
@@ -5142,13 +5158,14 @@ enum SettlementOutcome {
     /// "transfer" (direct on-chain token transfer). `margin_wei` is the
     /// developer margin routed to `app_id`'s app wallet on top of the network
     /// cost (zero on unattributed calls and channel debits — channel margin is
-    /// carved at finalize, not per-update). `commission_wei` +
-    /// `provider_wei` sum to the network cost: the split between the treasury
-    /// and `provider`, the wallet actually paid for serving the call.
+    /// carved at finalize, not per-update). `network_wei` + `provider_wei` sum
+    /// to the network cost: everything the split sent to parties other than the
+    /// serving operator, and what `provider` — the wallet actually paid for
+    /// serving the call — received.
     Settled {
         via: &'static str,
         margin_wei: u128,
-        commission_wei: u128,
+        network_wei: u128,
         provider_wei: u128,
         provider: Option<Address>,
         app_id: Option<String>,
@@ -5164,7 +5181,7 @@ impl SettlementOutcome {
             SettlementOutcome::Settled {
                 via,
                 margin_wei,
-                commission_wei,
+                network_wei,
                 provider_wei,
                 provider,
                 app_id,
@@ -5172,7 +5189,7 @@ impl SettlementOutcome {
                 "status": "settled",
                 "via": via,
                 "margin_wei": margin_wei.to_string(),
-                "commission_wei": commission_wei.to_string(),
+                "network_wei": network_wei.to_string(),
                 "provider_wei": provider_wei.to_string(),
                 "provider": provider.map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
                 "app_id": app_id,
@@ -5435,7 +5452,7 @@ fn settle_network_leg(
     };
     // An operator that registered an external endpoint under its own address
     // is both sides of this leg and settles with the upstream out of band.
-    // Transferring to itself would still carve a network commission.
+    // Transferring to itself would still carve a marketplace commission.
     if payer == provider {
         return;
     }
@@ -5470,15 +5487,16 @@ fn settle_network_leg(
 ///      authorization over the next cumulative state, so a failure means the
 ///      caller did NOT authorize any other debit — no fallback to a direct
 ///      transfer.
-///   2. Direct: single-shot on-chain `token.transfer`, split three ways in one
-///      settlement — `cost - commission` to the serving provider,
-///      `commission` (`NetworkCommissionRates::inference_commission_bps`) to
-///      the network treasury, and, when the call is attributed to an app
-///      (`app_id` resolved via [`resolve_app_attribution`]), the developer
-///      margin (`cost × margin_bps/10000`) to the app wallet on top of the
-///      network cost. The channel path applies neither margin nor commission
-///      per-update — the payer signed the exact cumulative debit — both are
-///      carved at channel finalize.
+///   2. Direct: single-shot on-chain `token.transfer` divided by the node's
+///      economic mode — the operator's leg to the serving provider, and one
+///      transfer per remaining leg (the treasury, plus the RPC provider when
+///      this node is advertised but does not validate). When the call is
+///      attributed to an app (`app_id` resolved via
+///      [`resolve_app_attribution`]), the developer margin
+///      (`cost × margin_bps/10000`) goes to the app wallet *on top of* the
+///      network cost. The channel path applies neither margin nor network
+///      share per-update — the payer signed the exact cumulative debit — both
+///      are carved at channel finalize.
 ///
 /// `provider_override` is the payee chosen by network routing: when the
 /// request was routed to a remote provider's offer, that provider is paid
@@ -5523,7 +5541,7 @@ fn settle_inference_cost(
                 Ok(SettlementOutcome::Settled {
                     via: "channel",
                     margin_wei: 0,
-                    commission_wei: 0,
+                    network_wei: 0,
                     provider_wei: cost_wei,
                     provider: provider_override,
                     app_id: None,
@@ -5550,6 +5568,33 @@ fn settle_inference_cost(
         };
     }
 
+    // A charge worth less than the gas to move it must not become its own
+    // on-chain transaction. Below the governance-set floor the payer settles
+    // through a micropayment channel — the same channel path taken above, and
+    // the same one the x402 `batch-settlement` scheme drives — so the charge is
+    // still metered exactly, it is just not moved on its own.
+    //
+    // Refusing here rather than accruing silently is deliberate: an accrual the
+    // payer never signed is a debt they never authorized.
+    let floor = node.economic_policy().micro_settlement_floor;
+    if cost_wei > 0 && cost_wei < floor {
+        return Err(JsonRpcError {
+            code: -32024,
+            message: format!(
+                "This call metered {cost_wei} — below the network's micro-settlement floor of \
+                 {floor}. A charge smaller than the cost of moving it settles through a \
+                 micropayment channel rather than its own transaction: open one and pass \
+                 `channel_id` with a signed `channel_update_sig`, or pay under the x402 \
+                 `upto` / `batch-settlement` scheme."
+            ),
+            data: Some(serde_json::json!({
+                "cost_wei": cost_wei.to_string(),
+                "micro_settlement_floor": floor.to_string(),
+                "remedy": "open_channel_or_use_upto_scheme",
+            })),
+        });
+    }
+
     let Some(token) = node.token() else {
         return Ok(SettlementOutcome::NotApplicable);
     };
@@ -5557,18 +5602,23 @@ fn settle_inference_cost(
         return Ok(SettlementOutcome::NotApplicable);
     };
 
-    // Network commission, carved out of the quoted cost rather than added to
-    // it: the consumer pays what the offer advertised, the provider receives
-    // the remainder. `network_treasury_address()` is derived, so an operator
-    // cannot redirect it, and a node whose token layer has no treasury set
-    // takes the whole cost to the provider rather than silently burning it.
-    let commission_wei = match token.treasury_address_ref() {
-        Some(_) => tenzro_types::NetworkCommissionRates::default()
-            .calculate_inference_commission(cost_wei)
-            .unwrap_or(0),
-        None => 0,
-    };
-    let provider_wei = cost_wei.saturating_sub(commission_wei);
+    // The network's share, carved out of the quoted cost rather than added to
+    // it: the consumer pays what the offer advertised, and the cost divides
+    // among the parties that earned it. The division is the same one every
+    // other charging path uses — a private node keeps it all, a public
+    // validating node shares with the treasury, and a public node that does not
+    // validate also pays the RPC provider validating for its users.
+    let split = resolve_revenue_split_for(
+        node,
+        provider_addr,
+        tenzro_types::node_visibility::Capability::Ai,
+        cost_wei,
+    )?;
+    let provider_wei = split.operator().amount;
+    // Everything that is not the operator's leg. Conservation is exact, so this
+    // is precisely `cost_wei - provider_wei` and the consumer's debit is still
+    // the cost they were quoted.
+    let network_wei = cost_wei.saturating_sub(provider_wei);
 
     // Developer-margin attribution (direct path only). Registration caps
     // margin_bps, so a rejection here means a corrupt record or overflow.
@@ -5594,7 +5644,7 @@ fn settle_inference_cost(
 
     // Pre-check the full debit so the provider transfer never succeeds while
     // the commission or margin transfer would bounce on balance.
-    if (margin_wei > 0 || commission_wei > 0)
+    if (margin_wei > 0 || network_wei > 0)
         && token.balance_of(&caller_addr) < cost_wei.saturating_add(margin_wei)
     {
         let unpaid_key = record_unpaid_settlement(
@@ -5620,26 +5670,37 @@ fn settle_inference_cost(
 
     match token.transfer(&caller_addr, &provider_addr, provider_wei) {
         Ok(_) => {
-            if commission_wei > 0 {
-                let treasury = tenzro_types::network_treasury_address();
-                if let Err(e) = token.transfer(&caller_addr, &treasury, commission_wei) {
+            // Every leg but the operator's, in the split's own order. Each is
+            // a transfer from the consumer, so no party is paid out of
+            // another's share.
+            for share in split
+                .shares
+                .iter()
+                .filter(|s| s.role != tenzro_types::economics::PayeeRole::Operator)
+            {
+                if share.amount == 0 {
+                    continue;
+                }
+                let payee = parse_address(&share.payee)?;
+                if let Err(e) = token.transfer(&caller_addr, &payee, share.amount) {
                     let unpaid_key = record_unpaid_settlement(
                         node,
                         &caller_addr,
-                        Some(&treasury),
+                        Some(&payee),
                         model_id,
-                        commission_wei,
-                        &format!("network commission transfer failed: {}", e),
+                        share.amount,
+                        &format!("{} leg transfer failed: {}", share.role, e),
                     );
                     return Err(JsonRpcError {
                         code: -32023,
                         message: format!(
-                            "Settlement failed: network commission transfer rejected: {}",
-                            e
+                            "Settlement failed: {} leg transfer rejected: {}",
+                            share.role, e
                         ),
                         data: Some(serde_json::json!({
                             "cost_wei": cost_wei.to_string(),
-                            "commission_wei": commission_wei.to_string(),
+                            "role": share.role.as_str(),
+                            "leg_wei": share.amount.to_string(),
                             "unpaid_key": unpaid_key,
                         })),
                     });
@@ -5673,7 +5734,7 @@ fn settle_inference_cost(
             Ok(SettlementOutcome::Settled {
                 via: "transfer",
                 margin_wei,
-                commission_wei,
+                network_wei,
                 provider_wei,
                 provider: Some(provider_addr),
                 app_id,
@@ -6398,20 +6459,18 @@ async fn handle_settle(
 
     let service_proof = ServiceProof::new(ProofType::Cryptographic, proof_data);
 
-    // Three-way division of what the customer paid. One settled payment funds
-    // three parties earning different things: the operator that ran the model
-    // or the enclave, the RPC provider whose node fronted the request and
-    // carried the bandwidth and liveness obligation, and the treasury.
+    // The complete division of what the customer paid, by the mode this node
+    // is actually in: private keeps it, a validating public node shares with
+    // the treasury, and a public node that does not validate also pays the RPC
+    // provider validating on its behalf.
     //
-    // The division is computed here, before the settlement engine moves
-    // anything, so the amount that settles to the provider is already their
-    // share rather than the whole payment with deductions applied afterwards
-    // — the latter is how a rounding error becomes a party who was paid twice.
-    let split = resolve_revenue_split(node, provider, amount as u128)?;
-    let provider_amount = split
-        .as_ref()
-        .map(|s| s.operator.amount)
-        .unwrap_or(amount as u128);
+    // Computed before the settlement engine moves anything, so the amount that
+    // settles to the provider is already their share rather than the whole
+    // payment with deductions applied afterwards — the latter is how a
+    // deduction becomes a party paid twice. The engine's own network fee is
+    // zero, so this really is the only division.
+    let split = resolve_revenue_split(node, provider, &service_type, amount as u128)?;
+    let provider_amount = split.operator().amount;
 
     let settlement_request = SettlementRequest::new(
         provider,
@@ -6436,12 +6495,8 @@ async fn handle_settle(
             data: None,
         })?;
 
-    // The provider's leg is settled; move the other two. Ordered after the
-    // settlement so a failed provider payout does not leave the RPC provider
-    // and treasury paid for a service that was never settled.
-    if let Some(split) = split.as_ref() {
-        pay_split_tail(node, customer, split)?;
-    }
+    // The provider's leg is settled; move the rest.
+    pay_split_tail(node, customer, &split)?;
 
     node.metrics().record_settlement();
     let mut response = serde_json::json!({
@@ -6454,119 +6509,164 @@ async fn handle_settle(
         "status": format!("{:?}", receipt.status),
         "settled_at": receipt.settled_at.as_millis(),
     });
-    if let Some(split) = split.as_ref()
-        && let Some(obj) = response.as_object_mut()
-    {
-        // Reported with the basis points as well as the amounts, so a receipt
-        // can be audited without knowing what the config was at the time.
+    if let Some(obj) = response.as_object_mut() {
+        // Reported with the mode and the basis points as well as the amounts,
+        // so a receipt can be audited without knowing what the policy was at
+        // the time — and so `total` can be checked against `amount`, which is
+        // the invariant that would have caught the payment being divided twice.
         obj.insert(
             "revenue_split".to_string(),
             serde_json::json!({
+                "mode": split.mode.as_str(),
                 "total": split.total().to_string(),
-                "operator": {
-                    "payee": split.operator.payee,
-                    "amount": split.operator.amount.to_string(),
-                    "bps": split.operator.bps,
-                },
-                // Named `custodian` rather than `rpc_provider` because that is
-                // what it is: a testnet stand-in holding the network's cut
-                // until governance can receive it. Zero on a governed split.
-                "custodian": {
-                    "payee": split.custodian.payee,
-                    "amount": split.custodian.amount.to_string(),
-                    "bps": split.custodian.bps,
-                },
-                "treasury": {
-                    "payee": split.treasury.payee,
-                    "amount": split.treasury.amount.to_string(),
-                    "bps": split.treasury.bps,
-                },
+                "shares": split
+                    .shares
+                    .iter()
+                    .map(|share| serde_json::json!({
+                        "role": share.role.as_str(),
+                        "payee": share.payee,
+                        "amount": share.amount.to_string(),
+                        "bps": share.bps,
+                    }))
+                    .collect::<Vec<_>>(),
             }),
         );
     }
     Ok(response)
 }
 
-/// Compute the three-way division for a settlement on this node.
+/// Which advertised capability answers for a settled service.
 ///
-/// Returns `Ok(None)` when the node cannot name all three payees — without a
-/// treasury address there is nowhere for the protocol's share to go, and
-/// inventing one would send it to the zero address. In that case the whole
-/// payment settles to the provider, which is what happened before the split
-/// existed.
+/// The economic mode turns on whether *the capability that served this request*
+/// is published, not on whether the node advertises anything at all. An operator
+/// serving models publicly while keeping their enclave private is two different
+/// economic relationships on one machine, and collapsing them would let a
+/// private enclave's revenue be taxed for a discovery it never used.
+fn capability_for_service(
+    service_type: &tenzro_types::settlement::ServiceType,
+) -> tenzro_types::node_visibility::Capability {
+    use tenzro_types::node_visibility::Capability;
+    use tenzro_types::settlement::ServiceType;
+    match service_type {
+        ServiceType::TeeComputation { .. } => Capability::Tee,
+        // Inference, agent execution and anything custom are served off the AI
+        // capability — an agent task is inference with extra steps, and a
+        // custom service that is not separately advertised is not separately
+        // discoverable either.
+        _ => Capability::Ai,
+    }
+}
+
+/// Compute the division of a settled payment on this node.
+///
+/// The mode is *derived*, never configured: a node that does not advertise the
+/// serving capability is private and keeps the payment; one that advertises and
+/// validates splits with the treasury; one that advertises without validating
+/// also pays the RPC provider that validates on its behalf.
+///
+/// This is the complete division. Nothing downstream takes a further cut — the
+/// settlement engine's own network fee is zero on this path precisely so the
+/// basis points reported here describe what actually moved.
 fn resolve_revenue_split(
     node: &Arc<TenzroNode>,
     provider: tenzro_types::primitives::Address,
+    service_type: &tenzro_types::settlement::ServiceType,
     amount: u128,
-) -> std::result::Result<Option<tenzro_payments::revenue_split::RevenueSplit>, JsonRpcError> {
-    use tenzro_payments::revenue_split::{SplitConfig, SplitPayees, split_revenue};
-
-    if amount == 0 {
-        return Ok(None);
-    }
-    let Some(token) = node.token() else {
-        return Ok(None);
-    };
-    let Some(treasury) = token.treasury_address_ref() else {
-        return Ok(None);
-    };
-    // The interim custodian of the network's cut. During testnet this node's
-    // operator stands in for a treasury/DAO that is not yet operational; when
-    // governance is live, `SplitConfig::governed` zeroes this slot and the
-    // whole network cut goes to the treasury.
-    //
-    // This is *not* an RPC-provider fee. RPC providers bill their own tenants
-    // for API access the way every other chain's RPC operators do; paying them
-    // from here too would pay them twice for one request.
-    //
-    // Holding the interim share is permissionless but not free: it goes to
-    // this node's operator only when they have bonded into Tier 3 alongside
-    // everyone else who wants the position. A node that never staked taking a
-    // cut of another operator's earnings is not permissionless, it is just
-    // unguarded — so an unbonded node runs the governed split and the treasury
-    // takes the whole network cut.
-    let custodian_payee = node.operator_payee().filter(|payee| {
-        node.validator_registry()
-            .and_then(|registry| registry.get(payee))
-            .is_some_and(|entry| entry.tier.admits_rpc_role())
-    });
-    let config = match custodian_payee {
-        Some(_) => SplitConfig::default(),
-        None => SplitConfig::default().governed(),
-    };
-    let custodian = custodian_payee
-        .map(|a| a.to_string())
-        .unwrap_or_else(|| treasury.to_string());
-
-    let payees = SplitPayees {
-        operator: provider.to_string(),
-        custodian,
-        treasury: treasury.to_string(),
-    };
-
-    split_revenue(amount, &config, &payees)
-        .map(Some)
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("revenue split rejected: {e}"),
-            data: None,
-        })
+) -> std::result::Result<tenzro_payments::revenue_split::RevenueSplit, JsonRpcError> {
+    resolve_revenue_split_for(node, provider, capability_for_service(service_type), amount)
 }
 
-/// Move the RPC-provider and treasury shares.
+/// The division of a settled payment for a named capability.
 ///
-/// The operator's share travelled through the settlement engine; these two are
+/// The single place a service payment is divided. Every charging path routes
+/// here — inference, TEE sessions, media generation, marketplace invocations —
+/// so there is one answer to "what did the network take", and it is the same
+/// answer on every path. Before this, four call sites each carved their own
+/// percentage and one of them stacked on top of another.
+fn resolve_revenue_split_for(
+    node: &Arc<TenzroNode>,
+    provider: tenzro_types::primitives::Address,
+    capability: tenzro_types::node_visibility::Capability,
+    amount: u128,
+) -> std::result::Result<tenzro_payments::revenue_split::RevenueSplit, JsonRpcError> {
+    use tenzro_payments::revenue_split::{SplitPayees, split_revenue};
+    use tenzro_types::economics::NodeEconomicMode;
+
+    let policy = node.economic_policy();
+    let advertised = node.advertises(capability);
+    let validating = node.runtime_roles.read().is_validator();
+    let mode = NodeEconomicMode::resolve(advertised, validating);
+
+    let payees = match mode {
+        NodeEconomicMode::Private => SplitPayees::private(provider.to_string()),
+        NodeEconomicMode::PublicValidating | NodeEconomicMode::PublicDelegated => {
+            // A public node owes the treasury a share, so it must be able to
+            // name the treasury. The address is derived rather than configured,
+            // so this only fails when the token subsystem is absent.
+            let treasury = node
+                .token()
+                .and_then(|t| t.treasury_address_ref())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "a publicly advertised node owes the network treasury a share of \
+                              this payment, but the treasury account is unavailable; settling \
+                              would silently keep that share"
+                        .to_string(),
+                    data: None,
+                })?;
+            if mode.requires_rpc_provider() {
+                // This node does not validate, so some RPC provider validates
+                // for its users and is owed that leg. Refusing here is the
+                // point: paying their share to the treasury because nobody
+                // configured them would pay the wrong party quietly.
+                let rpc_provider = node.rpc_provider_payee().ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "this node is advertised but does not validate, so an RPC provider \
+                              validates on its behalf and is owed a share. Name them in \
+                              `[economics] rpc_provider_payee`, or enable the validator role."
+                        .to_string(),
+                    data: None,
+                })?;
+                SplitPayees::delegated(
+                    provider.to_string(),
+                    rpc_provider.to_string(),
+                    treasury.to_string(),
+                )
+            } else {
+                SplitPayees::validating(provider.to_string(), treasury.to_string())
+            }
+        }
+    };
+
+    split_revenue(amount, mode, &policy, &payees).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("revenue split rejected: {e}"),
+        data: None,
+    })
+}
+
+/// Move every leg but the operator's.
+///
+/// The operator's share travelled through the settlement engine; these are
 /// direct transfers from the customer, so the customer's total debit equals the
-/// amount they agreed to and no party is paid out of another's share.
+/// amount they agreed to and no party is paid out of another's share. Ordered
+/// after the operator's settlement so a failed provider payout cannot leave the
+/// downstream legs paid for a service that never settled.
 fn pay_split_tail(
     node: &Arc<TenzroNode>,
     customer: tenzro_types::primitives::Address,
     split: &tenzro_payments::revenue_split::RevenueSplit,
 ) -> std::result::Result<(), JsonRpcError> {
+    use tenzro_types::economics::PayeeRole;
+
     let Some(token) = node.token() else {
         return Ok(());
     };
-    for share in [&split.custodian, &split.treasury] {
+    for share in split
+        .shares
+        .iter()
+        .filter(|s| s.role != PayeeRole::Operator)
+    {
         if share.amount == 0 {
             continue;
         }
@@ -6575,7 +6675,10 @@ fn pay_split_tail(
             .transfer(&customer, &payee, share.amount)
             .map_err(|e| JsonRpcError {
                 code: -32000,
-                message: format!("revenue split payout to {} failed: {e}", share.payee),
+                message: format!(
+                    "revenue split payout of the {} leg to {} failed: {e}",
+                    share.role, share.payee
+                ),
                 data: None,
             })?;
     }
@@ -14444,6 +14547,60 @@ fn supply_metrics_to_json(snapshot: &tenzro_token::adaptive_burn::SupplyMetricsS
     })
 }
 
+/// `tenzro_getEconomicPolicy` — the rates this node is currently applying.
+///
+/// Open, and deliberately so: what a payment will cost and how it will divide
+/// is not privileged information, and a caller who cannot read it before paying
+/// has to take the operator's word for the receipt afterwards.
+async fn handle_get_economic_policy(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::economics::{NodeEconomicMode, PayeeRole};
+
+    let policy = node.economic_policy();
+    let validating = node.runtime_roles.read().is_validator();
+
+    // The mode this node would settle under, per capability, so a caller can
+    // see why a given service divides the way it does rather than inferring it.
+    let modes: Vec<Value> = tenzro_types::node_visibility::Capability::ALL
+        .into_iter()
+        .map(|capability| {
+            let mode = NodeEconomicMode::resolve(node.advertises(capability), validating);
+            serde_json::json!({
+                "capability": capability.as_str(),
+                "advertised": node.advertises(capability),
+                "mode": mode.as_str(),
+                "shares": mode
+                    .payees()
+                    .iter()
+                    .map(|role| serde_json::json!({
+                        "role": role.as_str(),
+                        "bps": policy.share_bps(mode, *role),
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "policy": policy,
+        "validating": validating,
+        "rpc_provider_payee": node
+            .rpc_provider_payee()
+            .map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
+        "modes": modes,
+        // Reported so a caller can check that whatever they are quoted divides
+        // into shares that sum to the whole, on the capability they are using.
+        "operator_share_bps_by_mode": {
+            "private": policy.share_bps(NodeEconomicMode::Private, PayeeRole::Operator),
+            "public_validating": policy
+                .share_bps(NodeEconomicMode::PublicValidating, PayeeRole::Operator),
+            "public_delegated": policy
+                .share_bps(NodeEconomicMode::PublicDelegated, PayeeRole::Operator),
+        },
+    }))
+}
+
 async fn handle_get_burn_rate_config(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -16596,6 +16753,34 @@ async fn handle_create_proposal(
 
     use tenzro_types::token::ProposalType;
     let proposal_type = match proposal_type_str {
+        // The whole economic policy in one proposal. Partial updates are not
+        // offered: a change that moved one leg without the others would not sum
+        // to a whole payment, and would be refused at execution anyway — so the
+        // proposal carries the complete policy and is validated before anyone
+        // votes on it.
+        "economic_policy" => {
+            let policy_value = params.get("policy").ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing params.policy — an economic_policy proposal carries the \
+                     complete policy, not a single field"
+                    .to_string(),
+                data: None,
+            })?;
+            let policy: tenzro_types::economics::EconomicPolicy =
+                serde_json::from_value(policy_value.clone()).map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("params.policy is not a valid economic policy: {e}"),
+                    data: None,
+                })?;
+            // Validated here as well as at execution, so a proposal that can
+            // never be applied does not consume a voting period first.
+            policy.validate().map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("economic policy rejected: {e}"),
+                data: None,
+            })?;
+            ProposalType::EconomicPolicyUpdate { policy }
+        }
         "parameter_change" => ProposalType::ParameterChange {
             parameter: params
                 .get("parameter")
@@ -19100,8 +19285,33 @@ pub(crate) async fn handle_register_identity(
                     })?
                     .identity
             } else {
+                // No sealed/TEE path was available, so the machine has to
+                // anchor itself on whatever root of trust it actually holds.
+                // A host that holds none is refused: an identity nobody can be
+                // held to is the one thing a machine must not be able to mint
+                // for itself.
+                let hardware_identity = tenzro_tee::HardwareIdentity::collect();
+                if !hardware_identity.is_attestable() {
+                    return Err(JsonRpcError {
+                        code: -32000,
+                        message: "This machine cannot register an identity of its own: it holds \
+                         no hardware root of trust that can prove which machine it is. \
+                         Register it as a delegated machine under a human or \
+                         institution controller, or run it on hardware with a TPM, \
+                         secure enclave or secure element."
+                            .to_string(),
+                        data: Some(serde_json::json!({
+                            "rooted": hardware_identity.is_rooted(),
+                            "sources": hardware_identity.sources(),
+                        })),
+                    });
+                }
+                let anchor = tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: hardware_identity.root_hex(),
+                    sources: hardware_identity.sources().to_vec(),
+                };
                 registry
-                    .register_autonomous_machine_with_fee(public_key_bytes, capabilities)
+                    .register_autonomous_machine_with_fee(public_key_bytes, capabilities, anchor)
                     .await
                     .map_err(|e| JsonRpcError {
                         code: -32000,
@@ -32014,7 +32224,7 @@ fn record_media_gen_usage(node: &Arc<TenzroNode>, receipt: &tenzro_types::MediaG
 
 /// Pay out a completed generative-media job.
 ///
-/// The requester pays `price_paid` and no more: the network commission is
+/// The requester pays `price_paid` and no more: the marketplace commission is
 /// carved out of that amount rather than added on top, so the charge matches
 /// the price the worker sealed and the requester was quoted against. What
 /// remains is divided across the job's assignments by the `share_bps` the
@@ -32048,15 +32258,19 @@ fn settle_media_gen_job(
     let model_id = &receipt.task_spec.model_id;
     let total = receipt.price_paid;
 
-    // A node whose token layer has no treasury takes the whole price to the
-    // workers rather than silently burning the commission.
-    let commission_wei = match token.treasury_address_ref() {
-        Some(_) => tenzro_types::NetworkCommissionRates::default()
-            .calculate_inference_commission(total)
-            .unwrap_or(0),
-        None => 0,
-    };
-    let workers_wei = total.saturating_sub(commission_wei);
+    // The same division every other charging path uses. Media generation is
+    // served off the AI capability, so a node that keeps its models private
+    // keeps the whole price, and a public one shares it exactly as it would for
+    // a text completion — the modality changes the units metered, never who is
+    // owed a share.
+    let split = resolve_revenue_split_for(
+        node,
+        receipt.worker_address,
+        tenzro_types::node_visibility::Capability::Ai,
+        total,
+    )?;
+    let workers_wei = split.operator().amount;
+    let network_wei = total.saturating_sub(workers_wei);
 
     // Check the whole debit before moving any of it, so a requester who cannot
     // cover the job does not pay one expert and stiff the other.
@@ -32119,26 +32333,34 @@ fn settle_media_gen_job(
         }));
     }
 
-    if commission_wei > 0 {
-        let treasury = tenzro_types::network_treasury_address();
-        if let Err(e) = token.transfer(payer, &treasury, commission_wei) {
+    for share in split
+        .shares
+        .iter()
+        .filter(|s| s.role != tenzro_types::economics::PayeeRole::Operator)
+    {
+        if share.amount == 0 {
+            continue;
+        }
+        let payee = parse_address(&share.payee)?;
+        if let Err(e) = token.transfer(payer, &payee, share.amount) {
             let unpaid_key = record_unpaid_settlement(
                 node,
                 payer,
-                Some(&treasury),
+                Some(&payee),
                 model_id,
-                commission_wei,
-                &format!("media-generation network commission transfer failed: {}", e),
+                share.amount,
+                &format!("media-generation {} leg transfer failed: {}", share.role, e),
             );
             return Err(JsonRpcError {
                 code: -32023,
                 message: format!(
-                    "Settlement failed: media-generation network commission rejected: {}",
-                    e
+                    "Settlement failed: media-generation {} leg rejected: {}",
+                    share.role, e
                 ),
                 data: Some(serde_json::json!({
                     "job_id": receipt.job_id,
-                    "commission_wei": commission_wei.to_string(),
+                    "role": share.role.as_str(),
+                    "leg_wei": share.amount.to_string(),
                     "unpaid_key": unpaid_key,
                 })),
             });
@@ -32148,14 +32370,16 @@ fn settle_media_gen_job(
     debug!(
         job_id = %receipt.job_id,
         price_paid = %total,
-        commission_wei = %commission_wei,
+        network_wei = %network_wei,
+        mode = %split.mode,
         workers = job.assignments.len(),
         "Media-generation job settled"
     );
 
     Ok(serde_json::json!({
         "price_paid": total.to_string(),
-        "commission_wei": commission_wei.to_string(),
+        "mode": split.mode.as_str(),
+        "network_wei": network_wei.to_string(),
         "payouts": payouts,
     }))
 }
@@ -51156,7 +51380,6 @@ async fn handle_run_agent_template(
 ) -> std::result::Result<Value, JsonRpcError> {
     use crate::commission_policy::{CommissionError, settle_invocation_fee};
     use tenzro_types::agent_template::AgentTemplate;
-    use tenzro_types::marketplace::MARKETPLACE_COMMISSION_BPS;
 
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -51273,6 +51496,7 @@ async fn handle_run_agent_template(
         let receipt = settle_invocation_fee(
             &template,
             fee,
+            node.economic_policy().marketplace_commission_bps as u16,
             payer_wallet_param.as_deref(),
             node.token().map(|t| &**t),
             app.as_ref(),
@@ -51384,7 +51608,7 @@ async fn handle_run_agent_template(
         "steps_failed": report.steps_failed,
         "total_value_dispatched": report.total_value_dispatched.to_string(),
         "fee_paid": fee.to_string(),
-        "commission_bps": MARKETPLACE_COMMISSION_BPS,
+        "commission_bps": node.economic_policy().marketplace_commission_bps,
         "network_commission": commission.to_string(),
         "creator_share": creator_share.to_string(),
         "payer_wallet": payer_hex,
@@ -51851,6 +52075,7 @@ pub(crate) async fn handle_use_skill(
     let receipt = settle_paid_invocation(
         skill.creator_wallet,
         fee,
+        node.economic_policy().marketplace_commission_bps as u16,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
         app.as_ref(),
@@ -52536,6 +52761,7 @@ pub(crate) async fn handle_use_tool(
     let receipt = settle_paid_invocation(
         tool.creator_wallet,
         fee,
+        node.economic_policy().marketplace_commission_bps as u16,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
         app.as_ref(),
@@ -53185,7 +53411,7 @@ async fn handle_heartbeat_tool(
 // Operator-curated, queryable data resources: vector DBs, RAG indices,
 // document corpora, indexed datasets, live data feeds, embedding stores.
 // Same shape as the tools registry — register/list/search/use/get with
-// per-call TNZO settlement, 5% commission split, reputation scoring,
+// per-call TNZO settlement, governance-set marketplace commission, reputation scoring,
 // per-tenant allow-list via AgentDelegation.allowed_knowledge.
 
 async fn handle_register_knowledge(
@@ -53552,6 +53778,7 @@ async fn handle_use_knowledge(
     let receipt = settle_paid_invocation(
         rec.creator_wallet,
         fee,
+        node.economic_policy().marketplace_commission_bps as u16,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
         app.as_ref(),
@@ -53693,7 +53920,7 @@ async fn handle_use_knowledge(
 // via tenzro_listWorkflowTemplates, instantiate via
 // tenzro_instantiateWorkflow which opens a running saga in
 // tenzro-workflow. Settled in TNZO at instantiation time with the
-// 5% commission split.
+// the governance-set marketplace commission.
 
 async fn handle_register_workflow_template(
     node: Arc<TenzroNode>,
@@ -54096,6 +54323,7 @@ async fn handle_instantiate_workflow(
     let receipt = settle_paid_invocation(
         tpl.creator_wallet,
         tpl.price_per_instantiate,
+        node.economic_policy().marketplace_commission_bps as u16,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
         app.as_ref(),

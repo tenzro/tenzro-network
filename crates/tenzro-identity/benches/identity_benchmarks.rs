@@ -61,7 +61,14 @@ fn build_seeded_registry() -> (IdentityRegistry, String) {
     rt.block_on(async {
         let registry = IdentityRegistry::new();
         let identity = registry
-            .register_autonomous_machine(vec![0xab; 32], vec!["payment".to_string()])
+            .register_autonomous_machine(
+                vec![0xab; 32],
+                vec!["payment".to_string()],
+                tenzro_identity::identity::MachineAnchor::HardwareRooted {
+                    hardware_root_hex: "ab".repeat(32),
+                    sources: vec!["tpm:ek".to_string()],
+                },
+            )
             .await
             .expect("register autonomous machine");
         let machine_did_string = identity.did.to_string();

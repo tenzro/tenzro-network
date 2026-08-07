@@ -139,6 +139,7 @@ mod introspect;
 mod rar;
 mod storage;
 mod util;
+mod webauthn_attestation;
 
 pub use aap::{
     AapAgentClaim, AapAuditClaim, AapCapabilityClaim, AapConstraints, AapContextClaim,
@@ -146,8 +147,8 @@ pub use aap::{
     is_valid_action_name, rar_to_aap_action,
 };
 pub use admission::{
-    Admission, AdmissionPolicy, NEVER_GATED_PATHS, ServiceKeyGrant, ServiceKeyHash, ServiceSurface, admit,
-    is_never_gated,
+    Admission, AdmissionPolicy, NEVER_GATED_PATHS, ServiceKeyGrant, ServiceKeyHash, ServiceSurface,
+    admit, is_never_gated,
 };
 pub use claims::{AuthClaims, Cnf};
 pub use dpop::{DpopProof, DpopVerification};
@@ -164,3 +165,4 @@ pub use introspect::IntrospectionResponse;
 pub use rar::{AuthorizationDetail, AuthorizationDetails, ResourceConstraint};
 pub use storage::{ApprovalRecord, ApprovalStatus, AuditEvent, AuditEventKind, RefreshTokenEntry};
 pub use util::peek_unverified_jti;
+pub use webauthn_attestation::{AttestationError, RegistrationFacts, parse_attestation};

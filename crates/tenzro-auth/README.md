@@ -55,6 +55,9 @@ of this key, authorized to take this action for this DID?
 | `ApprovalRecord` / `ApprovalStatus` | Human-in-the-loop approval state |
 | `RefreshTokenEntry` | Refresh-token record with its own binding |
 | `AuthError` | Typed error surface |
+| `parse_attestation` | Verifies a WebAuthn attestation object and returns what the device actually proved |
+| `RegistrationFacts` | Output of `parse_attestation`: AAGUID, UP/UV/BE/BS/AT flags, sign counter, attestation format, key protection, whether the chain verified |
+| `AttestationError` | Typed failure surface for attestation parsing and chain verification |
 
 ### AAP (Agent Access Protocol)
 
@@ -89,13 +92,48 @@ state writes through to RocksDB via `KvStore::write_batch_sync`.
   `ApprovalRecord`; `approval_pending:<approver_did>:<approval_id>` is the
   approver's queue index.
 
+
+## WebAuthn attestation (`webauthn_attestation`)
+
+Answers one question: **did vendor-placed hardware sign this, or is a piece of
+software claiming it did?**
+
+A passkey is hardware-bound only when its credential cannot be replicated off
+the device *and* an attestation verified against a pinned vendor root says the
+key lives in a TEE or secure element. The two are separate checks and neither
+implies the other. `parse_attestation` reads the `authenticatorData` flags,
+AAGUID and signature counter out of the CBOR attestation object, then verifies
+the attestation certificate chain against the roots the operator pinned
+(`webauthn_trusted_roots` in `NodeConfig`, base64 DER).
+
+- **`BE` (backup-eligible) is disqualifying, not informational.** A credential
+  that *may* sync proves control of a cloud account rather than possession of a
+  device, so a backup-eligible credential is never hardware-bound however it is
+  currently stored.
+- **No platform account is an identity authority.** Apple, Google and Microsoft
+  sign-ins are not trusted; what is trusted is a signature from vendor-placed
+  hardware over a challenge Tenzro chose, matched to a root by AAGUID via the
+  FIDO Metadata Service.
+- Formats handled: `packed`, `tpm`, `apple`, `android-key`, and `none`. `none`
+  parses but proves nothing and can never be graded hardware-bound. For
+  `android-key` the key-description extension (OID `1.3.6.1.4.1.11129.2.1.17`)
+  is parsed so StrongBox versus TEE residency is a fact rather than an
+  assumption.
+- An unverifiable chain **degrades the grade** rather than failing the parse —
+  the caller sees `chain_verified: false` and decides, so an operator who has
+  pinned no roots gets an honest answer instead of a silent pass.
+
+Consumed by `tenzro-node`'s `device_rpc` (`tenzro_bindDevice`), which refuses a
+binding whose evidence does not support the grade the identity needs.
+
 ## Used By
 
 - **`tenzro-node`** — owns the `AuthEngine`, exposes `tenzro_oauthDiscovery` /
   `tenzro_exchangeToken` / `tenzro_introspectToken`, serves `/oauth/token`,
   `/oauth/introspect`, `/oauth/revoke`, and `/.well-known/jwks.json`, and gates
   the ambient-auth signing path on `resolve_authority`.
-- **`tenzro-cli`** — `tenzro auth` and `tenzro approval` command groups.
+- **`tenzro-cli`** — `tenzro auth` and `tenzro approval` command groups, and
+  `tenzro device` for the bindings this crate's attestation verifier grades.
 
 ## Tests
 

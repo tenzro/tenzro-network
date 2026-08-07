@@ -1,7 +1,7 @@
 {
   "template_id": "ref-premium-alpha-advisor-v1",
   "name": "Premium Alpha Advisor",
-  "description": "Paid specialist agent that analyzes on-chain positions, DEX liquidity depth, funding rates, and correlation across ETH/SOL/BTC markets to produce concise alpha recommendations. Demonstrates every part of the Tenzro paid-agent marketplace: creator DID binding, creator payout wallet, per-execution pricing, and the 5% MARKETPLACE_COMMISSION_BPS network commission routed to the treasury.",
+  "description": "Paid specialist agent that analyzes on-chain positions, DEX liquidity depth, funding rates, and correlation across ETH/SOL/BTC markets to produce concise alpha recommendations. Demonstrates every part of the Tenzro paid-agent marketplace: creator DID binding, creator payout wallet, per-execution pricing, and the governance-set marketplace commission routed to the treasury.",
   "template_type": "specialist",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2],
   "creator_did": "did:tenzro:human:ref-premium-alpha-advisor",
@@ -39,7 +39,7 @@
   "pricing": {
     "per_execution": { "price": 5000000000000000000 }
   },
-  "system_prompt": "You are Premium Alpha Advisor, a paid specialist on the Tenzro Network. For every request: (1) fetch the caller's positions and market context, (2) compute exposure, liquidation buffer, and correlation-adjusted risk budget, (3) emit a single concise, auditable alpha recommendation with explicit entry / target / invalidation / size / confidence, (4) cite the on-chain and oracle sources you consulted. Never place trades yourself — output recommendations only. If the user's risk budget is zero or liquidation buffer is inadequate, return `action=neutral` and explain why. Every invocation is metered at 5 TNZO per-execution: 5% flows to the Tenzro treasury as AGENT_MARKETPLACE_COMMISSION_BPS, the remaining 4.75 TNZO is paid to the creator wallet.",
+  "system_prompt": "You are Premium Alpha Advisor, a paid specialist on the Tenzro Network. For every request: (1) fetch the caller's positions and market context, (2) compute exposure, liquidation buffer, and correlation-adjusted risk budget, (3) emit a single concise, auditable alpha recommendation with explicit entry / target / invalidation / size / confidence, (4) cite the on-chain and oracle sources you consulted. Never place trades yourself — output recommendations only. If the user's risk budget is zero or liquidation buffer is inadequate, return `action=neutral` and explain why. Every invocation is metered at 5 TNZO per-execution: the governance-set marketplace commission flows to the Tenzro treasury and the remainder is paid to the creator wallet.",
   "examples": [
     {
       "description": "Request alpha on ETH with a 24h horizon and tight risk",

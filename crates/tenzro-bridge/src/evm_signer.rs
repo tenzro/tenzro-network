@@ -775,27 +775,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_with_tee_sealed_off_hardware_returns_error() {
-        // On dev hardware (no /dev/sev-guest, no /dev/tdx_guest), the
-        // TEE-sealed constructor must fail loudly rather than fall back
-        // to a fabricated key. This is the no-simulation policy.
+    async fn test_with_tee_sealed_requires_a_real_hardware_root() {
+        // The no-simulation policy: the TEE-sealed constructor must never
+        // fabricate a key. It may only succeed where a real platform root
+        // exists — SEV-SNP, TDX, or a TPM, the third root that commodity
+        // hardware actually has. Conditioned on the probe rather than on the
+        // SEV/TDX device paths, so this stays meaningful on a TPM host as well
+        // as inside a CVM and on a machine with neither.
         let result = EvmTransactionSigner::with_tee_sealed(
             b"tenzro/bridge/evm-signer",
             1,
             "http://localhost:8545".to_string(),
         )
         .await;
-        assert!(
-            result.is_err(),
-            "must error off-hardware, not silently fall back"
-        );
-        let err = result.err().unwrap();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("TEE-sealed bridge key derivation failed"),
-            "unexpected error message: {}",
-            msg
-        );
+
+        // `EvmTransactionSigner` deliberately has no `Debug` — it holds key
+        // material — so match rather than using `expect_err`, which would
+        // require one.
+        let rooted = tenzro_tee::platform_root::platform_root_available();
+        match result {
+            Ok(_) => assert!(
+                rooted,
+                "a sealed key was derived with no hardware root — the no-simulation policy \
+                 forbids fabricating one"
+            ),
+            Err(e) => {
+                assert!(
+                    !rooted,
+                    "a host with a hardware root must derive a sealed key: {e}"
+                );
+                assert!(
+                    e.to_string()
+                        .contains("TEE-sealed bridge key derivation failed"),
+                    "unexpected error: {e}"
+                );
+            }
+        }
     }
 
     #[test]

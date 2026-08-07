@@ -25,6 +25,7 @@
 //! - `runtime` - RFC-0007: Adaptive Execution Upgrade — runtime types, enums, and capability resolver
 
 pub mod access_policy;
+pub mod access_tier;
 pub mod account;
 pub mod agent;
 pub mod agent_template;
@@ -36,6 +37,8 @@ pub mod capital_intent;
 pub mod config;
 pub mod constants;
 pub mod cortex;
+pub mod device_binding;
+pub mod economics;
 pub mod error;
 pub mod fabric;
 pub mod fees;
@@ -45,6 +48,7 @@ pub mod identity;
 pub mod intent_7683;
 pub mod kill_switch;
 pub mod knowledge;
+pub mod machine_id;
 pub mod marketplace;
 pub mod media_gen;
 pub mod model;
@@ -53,6 +57,7 @@ pub mod node_visibility;
 pub mod paths;
 pub mod primitives;
 pub mod principal_chain;
+pub mod provenance;
 pub mod reserve;
 pub mod resource;
 pub mod runtime;
@@ -74,6 +79,9 @@ pub mod workflow_template;
 pub use access_policy::{
     AccessPolicy, ConfidentialSeal, DEFAULT_READ_ACTION, DEFAULT_WRITE_ACTION, WRAP_ALG,
     WrappedDataKey,
+};
+pub use access_tier::{
+    AccessTier, CredentialKind, PayerKind, RentableResource, RentalFunding, RpcServiceGrant,
 };
 pub use account::{Account, AccountState};
 pub use agent::{AgentConfig, AgentIdentity, AgentMessage, AgentMessageType, Capability};
@@ -100,11 +108,19 @@ pub use cortex::{
     AttestationRequirement, CORTEX_FAMILY_KEY, CortexMetadata, CortexModelFamily, CortexPricing,
     CortexReceipt, CortexRequest, CortexResponse, ReasoningBudget, ReasoningTier,
 };
+pub use device_binding::{
+    Aaguid, AttestationEvidence, AttestationFormat, BindingError, BindingPolicy, BoundDevice,
+    DeviceSession, KeyProtection, WalletReadiness, active_sessions, revoke_sessions_for_device,
+    wallet_readiness,
+};
+pub use economics::{
+    BPS_DENOMINATOR, ConversionPolicy, DelegatedSchedule, EconomicPolicy, EconomicPolicyError,
+    NodeEconomicMode, PayeeRole, ValidatingSchedule,
+};
 pub use error::TenzroError;
 pub use fees::{
-    MAX_DEVELOPER_MARGIN_BPS, NetworkCommissionRates, SETTLEMENT_AUTHORIZATION_COMMISSION_BPS,
-    ServiceFeeSchedule, apply_developer_margin, network_treasury_address,
-    split_settlement_authorization,
+    MAX_DEVELOPER_MARGIN_BPS, SETTLEMENT_AUTHORIZATION_COMMISSION_BPS, ServiceFeeSchedule,
+    apply_developer_margin, network_treasury_address, split_settlement_authorization,
 };
 pub use governance::{GovernanceVote, VoteType};
 pub use hardware::{GpuDevice, GpuVendor, HardwareCapabilities, HardwareClass, Interconnect};
@@ -120,6 +136,9 @@ pub use kill_switch::{KillSwitchAction, KillSwitchReceipt};
 pub use knowledge::{
     KnowledgeFilter, KnowledgeInvocationResult, KnowledgeKind, KnowledgeRecord, KnowledgeStatus,
 };
+pub use machine_id::{
+    IdentifierDomain, IdentifierGrade, IdentifierSource, MachineIdentifier, MachineIdentity,
+};
 pub use media_gen::{
     MAX_MEDIA_GEN_DIMENSION, MAX_MEDIA_GEN_FRAMES, MAX_MEDIA_GEN_PROMPT_BYTES, MAX_MEDIA_GEN_STEPS,
     MediaGenAssignment, MediaGenExpertHolding, MediaGenExpertRole, MediaGenHandoff, MediaGenJob,
@@ -133,13 +152,16 @@ pub use model::{
     ModelParameters, ModelVisibility, MoeExpertHolding, MoeExpertResidency, MoeMetadata,
     MoeProviderRole, MoeRoutingStrategy, PREFIX_RUN_BYTES, PeerHintRecord, PrefixCacheNode,
     PrefixCacheSummary, PricingConfig, PricingModel, ProvenanceManifest, ProviderCapacity,
-    prefix_run_hashes,
+    meter_units_wei, prefix_run_hashes,
 };
 pub use network::{NetworkRole, NodeInfo, PeerInfo, RoleSet};
 pub use primitives::{Address, BlockHeight, ChainId, Hash, Nonce, Signature, Timestamp};
 pub use principal_chain::{
     ControllerActivitySummary, MAX_DELEGATION_DEPTH, PrincipalChain, PrincipalChainSummary,
     PrincipalLink, PrincipalRole,
+};
+pub use provenance::{
+    InboundRail, InteractionKind, InteractionProvenance, PayeeRecord, SecondarySettlement,
 };
 pub use reserve::{ReserveAttestation, ReserveSource};
 pub use resource::{ResourceClass, ResourceDescriptor, ResourceFilter};

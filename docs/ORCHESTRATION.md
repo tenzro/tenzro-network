@@ -37,7 +37,7 @@ consumes these signals instead of inventing a parallel control plane.
 | Discovery | Template/skill/tool marketplaces, provider registry | Capability inventory fed to the planner |
 | Execution | `executor.rs` step pipeline with delegation scopes and hard caps | Budget envelopes inherited across spawn depth |
 | Placement | `InferenceRouter` strategies (price / latency / reputation) | Trail-weighted routing (§4.1) |
-| Economics | Per-execution / per-token / subscription / revenue-share pricing, 5% network commission | Fitness signal for template promotion |
+| Economics | Per-execution / per-token / subscription / revenue-share pricing, 5% marketplace commission | Fitness signal for template promotion |
 | Safety | Creator DID binding, hard-cap enforcement, dry-run reports | Depth limits, quarantine propagation (§4.4) |
 
 An orchestrated agent is not a new kind of object. It is an `AgentTemplate`

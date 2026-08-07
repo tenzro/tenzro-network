@@ -111,8 +111,9 @@ pub use gossip::{
     IDENTITY_TOPIC, IdentityGossipMessage, decode_identity_for_topic, encode_revocation_broadcast,
 };
 pub use identity::{
-    IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry, ServiceEndpoint,
-    TenzroIdentity, validate_username,
+    IdentityData, IdentityStatus, KeyPurpose, MachineAnchor, OwnershipTransfer, PublicKeyInfo,
+    RevocationEntry, ServiceEndpoint, TenzroIdentity, TransferAuthority, TransferError,
+    validate_username,
 };
 pub use iso20022::{
     DecimalAmount, Iso20022Error, Ivms101Mapping, PACS008_NAMESPACE, Pacs008Document,

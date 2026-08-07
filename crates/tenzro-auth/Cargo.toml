@@ -8,6 +8,10 @@ description = "OAuth 2.1 + DPoP + RAR authentication for Tenzro Network — DPoP
 
 [dependencies]
 tenzro-types = { workspace = true }
+# WebAuthn attestation objects are CBOR; their chains are X.509.
+ciborium = { workspace = true }
+x509-cert = { workspace = true }
+der = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-storage = { workspace = true }
 tenzro-identity = { workspace = true }

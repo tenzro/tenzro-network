@@ -123,7 +123,8 @@ pub struct WorkflowTemplate {
     pub creator_did: Option<String>,
     pub creator_wallet: Option<Address>,
     /// One-time TNZO cost to instantiate this template. Goes to
-    /// creator_wallet with the same 5% commission split as tools.
+    /// creator_wallet under the same governance-set marketplace commission as
+    /// tools.
     /// Free templates (price_per_instantiate == 0) may omit
     /// creator_wallet.
     #[serde(with = "crate::primitives::u128_serde")]

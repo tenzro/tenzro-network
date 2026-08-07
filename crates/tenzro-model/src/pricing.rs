@@ -152,48 +152,17 @@ impl PricingEngine {
     ///
     /// Partial seconds round up — a 4.5-second clip bills as five seconds.
     pub fn meter_units(pricing: &PricingConfig, units: &BillableUnits) -> u64 {
-        let rates = &pricing.modality_rates;
-
-        let charge = |quantity: u64, rate: u64| -> u64 { quantity.saturating_mul(rate) };
-
-        // Denoising work is u128 because width × height × steps × frames
-        // overflows u64 for high-resolution video; the charge saturates into the
-        // u64 the settlement path speaks.
-        let pixel_step_cost = units
-            .pixel_steps
-            .saturating_mul(rates.price_per_pixel_step as u128)
-            .min(u64::MAX as u128) as u64;
-
-        // Frames are metered only for a call that *consumed* them, as when a
-        // video encoder samples a clip. A generation reports its frame count for
-        // observability, but frames are already a factor of `pixel_steps`, so
-        // charging per frame on top would bill the same work twice.
-        let frame_cost = if units.pixel_steps == 0 {
-            charge(units.frames as u64, rates.price_per_frame)
-        } else {
-            0
-        };
-
-        [
-            charge(units.input_tokens as u64, pricing.price_per_input_token),
-            charge(units.output_tokens as u64, pricing.price_per_output_token),
-            charge(
-                units.cached_read_tokens as u64,
-                rates.price_per_cached_read_token,
-            ),
-            charge(
-                units.cached_write_tokens as u64,
-                rates.price_per_cached_write_token,
-            ),
-            charge(units.reasoning_loops as u64, rates.price_per_reasoning_loop),
-            charge(units.image_tokens as u64, rates.price_per_image_token),
-            charge(units.audio_seconds(), rates.price_per_audio_second),
-            charge(units.video_seconds(), rates.price_per_video_second),
-            pixel_step_cost,
-            frame_cost,
-        ]
-        .into_iter()
-        .fold(0u64, |acc, cost| acc.saturating_add(cost))
+        // Delegates to the one implementation of the metering rule so this
+        // engine and the node's wei-denominated one can never disagree about
+        // what counts as billable work. The saturation is the only thing this
+        // wrapper adds: the settlement path here speaks u64.
+        tenzro_types::model::meter_units_wei(
+            units,
+            pricing.price_per_input_token as u128,
+            pricing.price_per_output_token as u128,
+            &pricing.modality_rates,
+        )
+        .min(u64::MAX as u128) as u64
     }
 
     /// Prices one call under whichever model its pricing configuration

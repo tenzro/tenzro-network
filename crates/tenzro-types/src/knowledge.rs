@@ -126,7 +126,7 @@ pub struct KnowledgeRecord {
     pub creator_wallet: Option<Address>,
 
     /// TNZO atto-token cost per invocation. The protocol takes 5% as
-    /// network commission; the remaining 95% goes to `creator_wallet`.
+    /// marketplace commission; the remaining 95% goes to `creator_wallet`.
     #[serde(with = "crate::primitives::u128_serde")]
     pub price_per_call: u128,
 

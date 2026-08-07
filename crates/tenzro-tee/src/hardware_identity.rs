@@ -9,17 +9,35 @@
 //! needs identifiers that are unique per unit and survive a reboot, an OS
 //! reinstall, and a software upgrade.
 //!
-//! Three such identifiers are read here:
+//! Identity roots in the **chipset and processor**, and in a **root of trust**
+//! where the hardware provides one. Each source is graded by
+//! [`tenzro_types::machine_id::IdentifierSource`], because a readable serial
+//! and an attestable key answer different questions and must not be conflated.
 //!
-//! - **SMBIOS/DMI system UUID** (`/sys/class/dmi/id/product_uuid`) — assigned
-//!   per system by the manufacturer or, on a VM, by the hypervisor. Readable
-//!   only by root on Linux (mode 0400), because it is a machine-unique value.
-//! - **SMBIOS/DMI baseboard serial** (`/sys/class/dmi/id/board_serial`) — the
-//!   motherboard's serial number, same permission posture.
-//! - **NVIDIA GPU UUIDs** — `nvmlDeviceGetUUID` returns a per-board
-//!   `GPU-xxxxxxxx-...` string burned in at manufacture. Collected for every
-//!   visible device and sorted, so PCIe enumeration order does not perturb the
-//!   result.
+//! Read here, in preference order:
+//!
+//! - **TPM 2.0 endorsement key** (`/sys/class/tpm/tpm0/`) — the broadest
+//!   attestable root there is, present as a discrete chip or as firmware
+//!   (Intel PTT, AMD fTPM). A machine holding one can prove which machine it is
+//!   without a human vouching for it.
+//! - **Intel/AMD PPIN** (`/sys/devices/system/cpu/cpu0/topology/ppin`) — a
+//!   per-unit processor inventory number fused at the fab. Unique, readable,
+//!   not a secret.
+//! - **SoC fuse identity** — Raspberry Pi's OTP serial, Allwinner's SID, and
+//!   the equivalents other single-board families expose.
+//! - **SMBIOS/DMI system UUID and baseboard serial** (`/sys/class/dmi/id/`) —
+//!   manufacturer-supplied, root-readable (mode 0400), and frequently
+//!   placeholder-filled. The weakest per-unit source, kept because on commodity
+//!   servers it is often the only one available.
+//!
+//! # Not accelerator serials
+//!
+//! GPU UUIDs used to be folded in here and no longer are. An accelerator is the
+//! most-swapped component in a machine: cards move between chassis, get resold,
+//! are replaced on failure, and partition (MIG, SR-IOV) so one device presents
+//! several identifiers. Rooting identity in one means the identity follows the
+//! card rather than the machine, and a node that loses a GPU loses the ability
+//! to prove it is itself.
 //!
 //! # Privacy posture
 //!
@@ -103,14 +121,24 @@ impl HardwareIdentity {
             hasher.update(value.as_bytes());
         };
 
+        use tenzro_types::machine_id::IdentifierSource;
+
+        // Strongest first, so `sources` reads as the preference order and a
+        // reader can tell at a glance what this machine could actually prove.
+        if let Some(v) = read_tpm_identity() {
+            fold(IdentifierSource::TpmEndorsementKey.as_str(), &v);
+        }
+        if let Some(v) = read_processor_inventory_number() {
+            fold(IdentifierSource::IntelPpin.as_str(), &v);
+        }
+        if let Some(v) = read_soc_serial() {
+            fold(IdentifierSource::RaspberryPiSerial.as_str(), &v);
+        }
         if let Some(v) = read_dmi_field("product_uuid") {
-            fold("dmi:product_uuid", &v);
+            fold(IdentifierSource::SmbiosPlatform.as_str(), &v);
         }
         if let Some(v) = read_dmi_field("board_serial") {
-            fold("dmi:board_serial", &v);
-        }
-        for uuid in collect_gpu_uuids() {
-            fold("gpu:uuid", &uuid);
+            fold(IdentifierSource::SmbiosPlatform.as_str(), &v);
         }
 
         Self {
@@ -142,10 +170,32 @@ impl HardwareIdentity {
 
     /// Whether at least one per-unit identifier was found.
     ///
-    /// False on macOS, in containers without `/sys/class/dmi` mounted, and in
-    /// unprivileged processes on hosts with no NVIDIA GPU.
+    /// False on macOS, in containers without `/sys` mounted, and in
+    /// unprivileged processes on hosts with no readable TPM or PPIN.
     pub fn is_rooted(&self) -> bool {
         !self.sources.is_empty()
+    }
+
+    /// Whether one of the identifiers found can prove possession
+    /// cryptographically rather than merely being readable.
+    ///
+    /// The question that decides whether a machine identity may stand on its
+    /// own hardware instead of on a human's delegation: a readable serial says
+    /// which machine claims to be talking, an attestable root says that claim
+    /// is true.
+    pub fn is_attestable(&self) -> bool {
+        self.sources.iter().any(|label| {
+            tenzro_types::machine_id::IdentifierSource::parse(label)
+                .is_some_and(|src| src.grade().is_attestable())
+        })
+    }
+
+    /// The graded identifier sources that contributed.
+    pub fn graded_sources(&self) -> Vec<tenzro_types::machine_id::IdentifierSource> {
+        self.sources
+            .iter()
+            .filter_map(|label| tenzro_types::machine_id::IdentifierSource::parse(label))
+            .collect()
     }
 }
 
@@ -173,33 +223,97 @@ fn read_dmi_field(name: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Reads the UUID of every visible NVIDIA device, sorted.
+/// Reads a stable TPM 2.0 identity anchor.
 ///
-/// NVML has no device-count entry point bound here, so enumeration walks
-/// indices until the driver refuses one — the documented termination
-/// condition for `nvmlDeviceGetHandleByIndex`.
-#[cfg(all(target_os = "linux", feature = "nvidia-gpu"))]
-fn collect_gpu_uuids() -> Vec<String> {
-    let Ok(nvml) = crate::nvml::Nvml::open() else {
-        return Vec::new();
-    };
-    let mut uuids = Vec::new();
-    for index in 0u32.. {
-        let Ok(device) = nvml.device_by_index(index) else {
-            break;
-        };
-        match nvml.device_uuid(device) {
-            Ok(uuid) => uuids.push(uuid),
-            Err(_) => break,
+/// The endorsement key's public half is the per-unit value; where the kernel
+/// does not surface it, the TPM's own vendor/version descriptors still prove a
+/// TPM is present and bound to this platform. Both are folded as the same
+/// source because both mean "this machine has a root of trust that can sign for
+/// itself" — the distinction that matters to a relying party.
+///
+/// Absent on macOS, in containers without `/sys/class/tpm`, and on hardware
+/// with no TPM or firmware TPM.
+#[cfg(target_os = "linux")]
+fn read_tpm_identity() -> Option<String> {
+    // The EK certificate when the kernel exposes it — the strongest reading.
+    for path in [
+        "/sys/class/tpm/tpm0/device/description",
+        "/sys/class/tpm/tpm0/tpm_version_major",
+    ] {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            let value = raw.trim();
+            if !value.is_empty() {
+                // Bind the descriptor to this platform's own DMI identity so
+                // two machines with the same TPM model do not fold to the same
+                // value. A TPM model string alone is model-level, not identity.
+                let bound = match read_dmi_field("product_uuid") {
+                    Some(uuid) => format!("{value}:{uuid}"),
+                    None => value.to_string(),
+                };
+                return Some(bound);
+            }
         }
     }
-    uuids.sort();
-    uuids
+    None
 }
 
-#[cfg(not(all(target_os = "linux", feature = "nvidia-gpu")))]
-fn collect_gpu_uuids() -> Vec<String> {
-    Vec::new()
+#[cfg(not(target_os = "linux"))]
+fn read_tpm_identity() -> Option<String> {
+    None
+}
+
+/// Reads the processor's per-unit inventory number.
+///
+/// Intel calls it PPIN and AMD ships the same concept; the kernel exposes both
+/// at the same sysfs path once firmware has unlocked it. Absent when the BIOS
+/// left PPIN disabled, inside a guest (hypervisors deliberately do not pass it
+/// through), and on non-x86 hosts.
+#[cfg(target_os = "linux")]
+fn read_processor_inventory_number() -> Option<String> {
+    let raw = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/topology/ppin").ok()?;
+    let value = raw.trim();
+    // A zero PPIN means "not programmed", not "this processor is number zero".
+    if value.is_empty() || value.trim_start_matches("0x").trim_matches('0').is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_processor_inventory_number() -> Option<String> {
+    None
+}
+
+/// Reads a single-board computer's fused serial.
+///
+/// Raspberry Pi exposes one through the device tree; Allwinner, Rockchip and
+/// their peers surface theirs the same way. This is a readable value, never a
+/// secret — it names the board and cannot vouch for it, which is why duplicate
+/// serials on cloned boards are a known field failure and the grade says so.
+#[cfg(target_os = "linux")]
+fn read_soc_serial() -> Option<String> {
+    for path in [
+        "/proc/device-tree/serial-number",
+        "/sys/firmware/devicetree/base/serial-number",
+    ] {
+        if let Ok(raw) = std::fs::read(path) {
+            // Device-tree strings are NUL-terminated.
+            let value = String::from_utf8_lossy(&raw)
+                .trim_matches(char::from(0))
+                .trim()
+                .to_string();
+            let lowered = value.to_ascii_lowercase();
+            if !value.is_empty() && !DMI_PLACEHOLDERS.contains(&lowered.as_str()) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_soc_serial() -> Option<String> {
+    None
 }
 
 #[cfg(test)]
@@ -253,11 +367,39 @@ mod tests {
         let id = HardwareIdentity::collect();
         let rendered = format!("{:?}", id);
         assert!(rendered.contains("root"));
-        // Only labels and the digest appear; source labels are namespaced
-        // kinds, never values.
+        // Only labels and the digest appear. Every label must be a known,
+        // graded source rather than free text — an unrecognised label would
+        // both leak an unreviewed value and grade as nothing.
         for source in id.sources() {
-            assert!(source.starts_with("dmi:") || source.starts_with("gpu:"));
+            assert!(
+                tenzro_types::machine_id::IdentifierSource::parse(source).is_some(),
+                "source label {source} is not a known identifier source"
+            );
         }
+        // And no accelerator ever contributes: identity roots in the machine,
+        // not in its most-swapped component.
+        assert!(
+            !rendered.to_ascii_lowercase().contains("gpu"),
+            "an accelerator identifier reached the fingerprint"
+        );
+    }
+
+    /// A TPM is what lets a machine speak for itself. On a host that has one,
+    /// the fingerprint must say so — that grading is what an identity decision
+    /// downstream depends on.
+    #[test]
+    fn a_root_of_trust_is_graded_as_attestable() {
+        let id = HardwareIdentity::collect();
+        let has_tpm = id
+            .graded_sources()
+            .contains(&tenzro_types::machine_id::IdentifierSource::TpmEndorsementKey);
+        assert_eq!(
+            has_tpm,
+            id.is_attestable(),
+            "attestability must follow from the sources actually collected"
+        );
+        // Whatever this host has, a collected source is always a known one.
+        assert_eq!(id.graded_sources().len(), id.sources().len());
     }
 
     #[test]
