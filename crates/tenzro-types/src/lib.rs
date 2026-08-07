@@ -42,6 +42,7 @@ pub mod economics;
 pub mod error;
 pub mod fabric;
 pub mod fees;
+pub mod funding;
 pub mod governance;
 pub mod hardware;
 pub mod identity;
@@ -63,6 +64,7 @@ pub mod resource;
 pub mod runtime;
 pub mod saga;
 pub mod settlement;
+pub mod settlement_network;
 pub mod skill;
 pub mod task;
 pub mod tee;
@@ -119,9 +121,10 @@ pub use economics::{
 };
 pub use error::TenzroError;
 pub use fees::{
-    MAX_DEVELOPER_MARGIN_BPS, SETTLEMENT_AUTHORIZATION_COMMISSION_BPS, ServiceFeeSchedule,
-    apply_developer_margin, network_treasury_address, split_settlement_authorization,
+    MAX_DEVELOPER_MARGIN_BPS, ServiceFeeSchedule, apply_developer_margin, network_treasury_address,
+    split_settlement_authorization,
 };
+pub use funding::{CustodyModel, FundingDirection, FundingError, FundingProvider, FundingSource};
 pub use governance::{GovernanceVote, VoteType};
 pub use hardware::{GpuDevice, GpuVendor, HardwareCapabilities, HardwareClass, Interconnect};
 pub use identity::{IdentityType, KycTier, PaymentProtocolId};
@@ -146,13 +149,13 @@ pub use media_gen::{
     MediaGenWorkerCapability,
 };
 pub use model::{
-    AcceptancePolicy, AdvertisedCapacity, BillableUnits, ImageTokenization, InferenceMetadata,
-    InferenceParameters, InferenceProvider, InferenceRequest, InferenceResponse, JurisdictionClaim,
-    JurisdictionReceipt, LicenseTier, ModalityRates, ModelInfo, ModelLoadInfo, ModelModality,
-    ModelParameters, ModelVisibility, MoeExpertHolding, MoeExpertResidency, MoeMetadata,
-    MoeProviderRole, MoeRoutingStrategy, PREFIX_RUN_BYTES, PeerHintRecord, PrefixCacheNode,
-    PrefixCacheSummary, PricingConfig, PricingModel, ProvenanceManifest, ProviderCapacity,
-    meter_units_wei, prefix_run_hashes,
+    AcceptancePolicy, AdvertisedCapacity, BillableUnits, ContentProvenanceManifest,
+    ImageTokenization, InferenceMetadata, InferenceParameters, InferenceProvider, InferenceRequest,
+    InferenceResponse, JurisdictionClaim, JurisdictionReceipt, LicenseTier, ModalityRates,
+    ModelInfo, ModelLoadInfo, ModelModality, ModelParameters, ModelVisibility, MoeExpertHolding,
+    MoeExpertResidency, MoeMetadata, MoeProviderRole, MoeRoutingStrategy, PREFIX_RUN_BYTES,
+    PeerHintRecord, PrefixCacheNode, PrefixCacheSummary, PricingConfig, PricingModel,
+    ProviderCapacity, meter_units_wei, prefix_run_hashes,
 };
 pub use network::{NetworkRole, NodeInfo, PeerInfo, RoleSet};
 pub use primitives::{Address, BlockHeight, ChainId, Hash, Nonce, Signature, Timestamp};
@@ -161,7 +164,8 @@ pub use principal_chain::{
     PrincipalLink, PrincipalRole,
 };
 pub use provenance::{
-    InboundRail, InteractionKind, InteractionProvenance, PayeeRecord, SecondarySettlement,
+    ATTESTATION_DOMAIN, AttestationError, Authority, ChargeRef, InboundRail, InteractionKind,
+    InteractionProvenance, PayeeRecord, SecondarySettlement,
 };
 pub use reserve::{ReserveAttestation, ReserveSource};
 pub use resource::{ResourceClass, ResourceDescriptor, ResourceFilter};
@@ -175,6 +179,10 @@ pub use saga::{AttestedDeadline, SagaStatus, SagaStep, SagaStepStatus, SagaWorkf
 pub use settlement::{
     PaymentIntent, ProofType, ReleaseConditions, SETTLEMENT_AUTHORIZATION_DOMAIN, ServiceProof,
     ServiceType, SettlementAuthorization, SettlementReceipt, SettlementRequest, SettlementStatus,
+};
+pub use settlement_network::{
+    DEFAULT_FEE_RATIO, MICRO_USD, NetworkFamily, SETTLEMENT_NETWORKS, SettlementNetwork,
+    cheapest_rail_for, network_by_caip2, x402_networks,
 };
 pub use skill::{
     BLOB_URI_PREFIX, SYSTEM_CREATOR_DID, SkillBundle, SkillDefinition, SkillFilter,

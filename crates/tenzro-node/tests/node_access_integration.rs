@@ -107,6 +107,20 @@ fn error_message(resp: &Value) -> String {
 // Default-deny method classification
 // ---------------------------------------------------------------------------
 
+/// The asset an unconfigured payee settles in, derived from the economic
+/// policy rather than hardcoded.
+///
+/// The default is governance-settable (`EconomicPolicy::default_conversion`),
+/// so asserting a literal here would bake in whatever it happened to be the
+/// day the test was written — which is exactly how these three tests came to
+/// assert `keep_inbound` long after the network default became TNZO.
+fn policy_default_asset() -> &'static str {
+    tenzro_payments::settlement_asset::SettlementAsset::from_policy(
+        tenzro_types::economics::ConversionPolicy::default(),
+    )
+    .as_str()
+}
+
 /// A method nobody classified must not reach its handler. The unit test proves
 /// the table is complete; this proves the check is actually consulted on the
 /// live dispatch path.
@@ -354,7 +368,7 @@ async fn shell_sign_in_is_open_but_an_unknown_key_opens_nothing() {
 /// Reading a preference is open, and an unconfigured payee reads back as the
 /// default rather than as an error.
 #[tokio::test]
-async fn an_unconfigured_payee_reads_back_as_keep_inbound() {
+async fn an_unconfigured_payee_reads_back_the_policy_default() {
     let n = TestNode::boot().await;
     let resp = n
         .rpc(
@@ -363,8 +377,9 @@ async fn an_unconfigured_payee_reads_back_as_keep_inbound() {
         )
         .await;
     assert_eq!(
-        resp["result"]["asset"], "keep_inbound",
-        "the default must be to keep whatever arrived, got: {resp}"
+        resp["result"]["asset"],
+        policy_default_asset(),
+        "an unconfigured payee must read back the policy default, got: {resp}"
     );
     n.shutdown().await;
 }
@@ -400,7 +415,8 @@ async fn setting_a_preference_requires_the_payees_signature() {
         )
         .await;
     assert_eq!(
-        read_back["result"]["asset"], "keep_inbound",
+        read_back["result"]["asset"],
+        policy_default_asset(),
         "a refused change must not have been applied"
     );
     n.shutdown().await;
@@ -596,7 +612,8 @@ async fn another_partys_key_cannot_change_a_payees_settlement_asset() {
         )
         .await;
     assert_eq!(
-        read_back["result"]["asset"], "keep_inbound",
+        read_back["result"]["asset"],
+        policy_default_asset(),
         "the victim's preference must be untouched"
     );
     n.shutdown().await;

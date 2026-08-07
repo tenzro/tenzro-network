@@ -428,7 +428,7 @@ The workflow runtime is its own state machine. It runs alongside (not inside) th
 ### Compliance & Disclosure (EU AI Act Article 50)
 
 - **§50(1)** chatbot disclosure: every CLI / MCP / A2A AI text response is prefixed with `[AI]`. Single source of truth in `tenzro_node::eu_ai_disclosure`.
-- **§50(2)** synthetic-content marker: every inference output carries a C2PA-style `ProvenanceManifest` keyed by SHA-256 content hash. Validators sign manifests with their Ed25519 block-signing key. RPC `tenzro_getProvenance` and CLI `tenzro provenance get <content_hash>` resolve the cached manifest.
+- **§50(2)** synthetic-content marker: every inference output carries a C2PA-style `ContentProvenanceManifest` keyed by SHA-256 content hash. Validators sign manifests with their Ed25519 block-signing key. RPC `tenzro_getContentProvenance` and CLI `tenzro provenance get <content_hash>` resolve the cached manifest.
 - **§50(4)** deepfake assertion tag: outputs imitating real subjects use the `deepfake` assertion in place of `ai-generated`.
 - **Approval flow**: out-of-scope agent operations are parked for controller review. Inspect via `tenzro approval list/get` and decide via `tenzro approval decide`.
 - **Channel disputes**: durable lifecycle records readable via `tenzro dispute status` and `tenzro dispute list-by-channel`.

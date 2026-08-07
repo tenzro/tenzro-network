@@ -565,10 +565,12 @@ mod tests {
 
     #[test]
     fn an_invalid_policy_refuses_to_split() {
-        let mut policy = EconomicPolicy::default();
-        policy.validating = ValidatingSchedule {
-            operator_bps: 1_000,
-            treasury_bps: 1_000,
+        let policy = EconomicPolicy {
+            validating: ValidatingSchedule {
+                operator_bps: 1_000,
+                treasury_bps: 1_000,
+            },
+            ..EconomicPolicy::default()
         };
         assert!(
             split_revenue(
@@ -602,11 +604,13 @@ mod tests {
     /// code change — but it still cannot invert the incentive.
     #[test]
     fn a_governance_set_policy_is_honoured_within_the_invariant() {
-        let mut policy = EconomicPolicy::default();
-        policy.delegated = DelegatedSchedule {
-            operator_bps: 7_000,
-            rpc_provider_bps: 2_000,
-            treasury_bps: 1_000,
+        let mut policy = EconomicPolicy {
+            delegated: DelegatedSchedule {
+                operator_bps: 7_000,
+                rpc_provider_bps: 2_000,
+                treasury_bps: 1_000,
+            },
+            ..EconomicPolicy::default()
         };
         let split = split_revenue(
             1_000_000,

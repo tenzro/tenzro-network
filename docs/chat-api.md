@@ -112,7 +112,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `stop` | string or array | no | — | Stop sequences. Generation halts when the decoded text ends with one of them, and the matched suffix is trimmed from the returned text. |
 | `draft_n` | uint | no | — | Multi-Token-Prediction draft count (1–6). Requires a drafter paired with the target model. |
 | `seed` | uint | no | 42 | Sampling seed. Pins the generator so a streaming completion can be deterministically re-prefilled by a different provider if the serving one drops mid-stream — see [Streaming failover](#streaming-failover). |
-| `require_signed` | bool | no | false | Verified-response mode: the response must carry a `tenzro_provenance` manifest that verifies against the provider's registered signing key, otherwise the call fails with `-32022`. Off by default — unsigned providers are fully routable. |
+| `require_signed` | bool | no | false | Verified-response mode: the response must carry a `tenzro_contentProvenance` manifest that verifies against the provider's registered signing key, otherwise the call fails with `-32022`. Off by default — unsigned providers are fully routable. |
 | `verifiable` | bool | no | false | Request a TOPLOC top-k logit commitment with the response. See [Verifiable inference](#verifiable-inference-toploc-commitments-and-challenges). Non-streaming, local single-token path only. |
 | `jurisdiction` | string | no | — | Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. `"DE,EU"`), case-insensitive. The serving node must declare a matching locality claim or the request fails with `-32024`. See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts). |
 | `jurisdiction_receipt` | string | no | — | Set to `"required"` to fail the request unless the response carries a verifiable signed `tenzro_jurisdiction` receipt. Off by default — pinned routing works without receipt strictness. |
@@ -152,7 +152,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
       "utilization_percent": 12.5,
       "load_level": "low"
     },
-    "tenzro_provenance": {
+    "tenzro_contentProvenance": {
       "content_hash": "0x...",
       "model_id": "qwen3-8b",
       "provider": "0x...",
@@ -179,7 +179,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `location` | string | `"local"` if served by this node, `"network"` if forwarded to a peer. |
 | `provider` | string | Serving provider identifier. Network path only. |
 | `load` | object | Provider load snapshot. Useful for client-side routing decisions. Local path only. |
-| `tenzro_provenance` | object \| null | Signed provenance manifest over the output bytes. `null` when the serving node has no response signer (unsigned serving is fully supported) or, on the network path, when the provider's manifest failed verification against its registered announce key. Signature preimage: `content_hash \|\| model_id \|\| provider \|\| signed_at_ms (le_u64) \|\| assertion`. |
+| `tenzro_contentProvenance` | object \| null | Signed provenance manifest over the output bytes. `null` when the serving node has no response signer (unsigned serving is fully supported) or, on the network path, when the provider's manifest failed verification against its registered announce key. Signature preimage: `content_hash \|\| model_id \|\| provider \|\| signed_at_ms (le_u64) \|\| assertion`. |
 | `commitment` | object \| null | Present when `verifiable: true` was requested and the serving path supports commitments: `{"hash": "<64-hex>", "k": 16, "steps": <output token count>}`. The hash retrieves the full commitment via `tenzro_getInferenceCommitment` and anchors any later challenge. |
 | `tenzro_jurisdiction` | object \| null | Signed jurisdiction receipt binding request/response hashes to the serving node's locality claim. `null` when the serving node declares no claim or, on the network path, when the provider's receipt failed verification against its registered announce key. See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts). |
 
@@ -197,7 +197,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 
 ### Provenance lookup
 
-The `tenzro_provenance` manifest attached to a chat response is also cached on the serving node keyed by its `content_hash`, so a relying party can retrieve it later without re-running inference. `tenzro_getProvenance` takes `{ "content_hash": "<32-byte hex, 0x optional>" }` and returns the same manifest, or error `-32004` when no manifest is cached for that hash. The manifest is the machine-readable synthetic-content marker for generated output (EU AI Act Art. 50(2)). Wrappers: Rust SDK `inference().get_provenance(hash)`, TS SDK `inference.getProvenance(hash)`, MCP `get_provenance` tool, A2A verification skill (`content_hash` metadata), CLI `tenzro provenance get`.
+The `tenzro_contentProvenance` manifest attached to a chat response is also cached on the serving node keyed by its `content_hash`, so a relying party can retrieve it later without re-running inference. `tenzro_getContentProvenance` takes `{ "content_hash": "<32-byte hex, 0x optional>" }` and returns the same manifest, or error `-32004` when no manifest is cached for that hash. The manifest is the machine-readable synthetic-content marker for generated output (EU AI Act Art. 50(2)). Wrappers: Rust SDK `inference().get_provenance(hash)`, TS SDK `inference.getProvenance(hash)`, MCP `get_provenance` tool, A2A verification skill (`content_hash` metadata), CLI `tenzro provenance get`.
 
 ### Verifiable inference (TOPLOC commitments and challenges)
 
@@ -932,7 +932,7 @@ The response object carries the Responses fields plus the same Tenzro extensions
 }
 ```
 
-`usage` uses the Responses names — `input_tokens` and `output_tokens` where the chat shape says `prompt_tokens` and `completion_tokens`. `native_finish_reason` carries the same engine-reported cause described under [streaming usage chunks](#streaming-usage-chunks). `cost_wei`, `generation_time_ms`, `tokens_per_second`, `tenzro_provenance`, `tenzro_jurisdiction` and `commitment` are the identical bytes the chat surface returns, so a caller that verifies a provenance manifest or a locality receipt there verifies it the same way here.
+`usage` uses the Responses names — `input_tokens` and `output_tokens` where the chat shape says `prompt_tokens` and `completion_tokens`. `native_finish_reason` carries the same engine-reported cause described under [streaming usage chunks](#streaming-usage-chunks). `cost_wei`, `generation_time_ms`, `tokens_per_second`, `tenzro_contentProvenance`, `tenzro_jurisdiction` and `commitment` are the identical bytes the chat surface returns, so a caller that verifies a provenance manifest or a locality receipt there verifies it the same way here.
 
 `id` is derived from the chat completion id: `chatcmpl-abc` yields `resp_abc` and item id `msg_abc`, so a `resp_…` in a caller's logs traces back to the `chatcmpl-…` the gateway recorded for the same generation.
 

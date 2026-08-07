@@ -18,6 +18,20 @@ fn test_config() -> (NodeConfig, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let config = NodeConfig {
         data_dir: tmp.path().to_path_buf(),
+        // This node advertises but does not validate, so an RPC provider
+        // validates on its behalf and is owed a leg of every split. Settlement
+        // refuses when that payee is unnamed — deliberately, because quietly
+        // redirecting their share to the treasury pays the wrong party and
+        // reports nothing wrong. Naming one here exercises the three-way
+        // delegated split rather than routing around it.
+        economics: tenzro_node::EconomicsConfig {
+            // All-numeric so EIP-55 mixed-case checksum validation is moot:
+            // `Address::from_hex` checksums the letters in a 20-byte address,
+            // so a mis-cased one is rejected. That rejection is now logged
+            // rather than swallowed, but an address with no letters cannot
+            // trip it at all.
+            rpc_provider_payee: Some("0x0000000000000000000000000000000000000011".to_string()),
+        },
         ..Default::default()
     };
     (config, tmp)

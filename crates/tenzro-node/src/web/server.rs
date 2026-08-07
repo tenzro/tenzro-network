@@ -390,6 +390,10 @@ impl WebServer {
             // active Tenzro identity. External RFC 9421 verifiers (Visa
             // TAP, Mastercard Agent Pay, Stripe MPP, AP2 facilitators,
             // x402 settlement nodes) resolve `keyid` parameters here.
+            .route(
+                "/.well-known/http-message-signatures-directory",
+                get(handlers::web_bot_auth_directory),
+            )
             .route("/.well-known/jwks.json", get(handlers::jwks))
             .route("/.well-known/jwks.json/:keyid", get(handlers::jwks_get))
             // DIF Universal Resolver-compatible DID resolution. Path is

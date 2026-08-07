@@ -6,7 +6,7 @@
 //! app's on-chain [`crate::app_registry::AppRecord`]. Any node executes it:
 //! after signature, expiry, chain-id, and per-key ceiling checks, TNZO moves
 //! from the developer's app wallet to the payer's wallet, with the network
-//! commission ([`tenzro_types::SETTLEMENT_AUTHORIZATION_COMMISSION_BPS`])
+//! commission (`EconomicPolicy::settlement_authorization_bps`)
 //! routed to the treasury. The node never touches a payment-provider secret
 //! and never holds a fiat float.
 //!
@@ -106,6 +106,9 @@ pub fn execute_settle_authorized(
     identities: &IdentityRegistry,
     token: &TnzoToken,
     storage: &Arc<dyn KvStore>,
+    // `EconomicPolicy::settlement_authorization_bps`, read live from the node
+    // rather than a constant so governance can move it.
+    commission_bps: u32,
 ) -> Result<(SettleAuthorizedOutcome, bool), SettleAuthorizedError> {
     validate_shape(auth)?;
 
@@ -203,7 +206,7 @@ pub fn execute_settle_authorized(
     let treasury = token.treasury_address_ref().ok_or_else(|| {
         SettleAuthorizedError::Unavailable("treasury address not configured".to_string())
     })?;
-    let (payer_net, commission) = split_settlement_authorization(auth.amount_tnzo);
+    let (payer_net, commission) = split_settlement_authorization(auth.amount_tnzo, commission_bps);
 
     let mut outcome = SettleAuthorizedOutcome {
         app_id: auth.app_id.clone(),
@@ -524,7 +527,15 @@ mod tests {
         fx: &Fixture,
         auth: &SettlementAuthorization,
     ) -> Result<(SettleAuthorizedOutcome, bool), SettleAuthorizedError> {
-        execute_settle_authorized(auth, 1337, &fx.apps, &fx.identities, &fx.token, &fx.storage)
+        execute_settle_authorized(
+            auth,
+            1337,
+            &fx.apps,
+            &fx.identities,
+            &fx.token,
+            &fx.storage,
+            tenzro_types::economics::EconomicPolicy::default().settlement_authorization_bps,
+        )
     }
 
     #[tokio::test]

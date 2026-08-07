@@ -11,6 +11,211 @@ stale — the rates here are read from live code, not restated from memory.
 
 ---
 
+
+## Funding: Tenzro integrates providers, it does not become one
+
+Tenzro is **not a licensed provider and does not aim to be**. Every regulated
+function at the fiat boundary — KYC, fiat acceptance, card issuance, network
+settlement — is performed by a licensed party that already does it well. What
+Tenzro adds is the layer none of them occupy: a portable agent identity with
+enforceable delegation, so the *same* agent can be funded through one provider,
+spend through another, and settle on-network under one set of ceilings.
+
+This makes the provider list a **registry of integrations, not a shortlist to
+pick a winner from**. An operator can integrate a provider Tenzro has never
+heard of without a protocol change.
+
+### Funding has a direction, and the two halves are not alternatives
+
+| Direction | What it does | Shape |
+|---|---|---|
+| `fiat_to_stablecoin` | Fiat arrives and becomes stablecoin the agent can spend | Virtual accounts: a deposit account in the customer's name whose incoming fiat converts to USDC |
+| `stablecoin_to_merchant` | The agent spends an existing balance at merchants that never handle stablecoins | Card issuing against stablecoin collateral |
+
+A network with only the first has agents that can be paid but cannot buy; one
+with only the second has agents that can buy but cannot be funded. Both halves
+are needed, which is why picking "a funding partner" is the wrong question.
+
+### Custody is recorded separately from the provider
+
+Custody decides who can lose the money, and it does not follow from the
+provider's name. A custodial orchestrator holds the keys, so the balance is a
+claim on the provider and provider failure is user loss. A non-custodial issuer
+underwrites against collateral sitting in a contract the customer owns and can
+withdraw from at any time. Those are different risks to the same user, and
+`user_can_exit_unilaterally()` is the question a delegating human is actually
+asking.
+
+### Funding never widens a delegation scope
+
+Both the funding source's own cap and the identity's delegation-scope ceiling
+are checked, and **the narrower one binds**. An agent that could not spend an
+amount before it was funded still cannot afterwards. Checking only the source
+cap would make the on-ramp a hole straight through every control the identity
+layer enforces.
+
+### The card networks are integrated at a different layer
+
+Verified against Visa's own newsroom rather than secondary coverage: Visa's
+stablecoin settlement program settles with **issuers and acquirers — banks and
+fintechs — not with merchants directly**. A merchant sees the effect only
+through its acquirer. The program reached nine blockchains in April 2026 at a
+~$7B annualised run rate across USDC, EURC, USDG and PYUSD, with Circle's Arc,
+Base and **Canton** among the named partners.
+
+That is network settlement one layer *below* anything Tenzro touches — it is how
+a card authorisation Tenzro initiated through an issuer eventually settles
+between Visa and the acquiring bank. So Visa and Mastercard are integrated where
+they actually expose a surface to a party in Tenzro's position: as agent
+identity and mandate layers (Trusted Agent Protocol, Agent Pay), both of which
+authenticate over Web Bot Auth, which Tenzro now speaks.
+
+
+## The accounting layer: receipts a third party can check
+
+Tenzro is not only the payment layer for agent activity — it is the **accounting
+layer**, and the two are different problems.
+
+An edge gateway can meter a request and take payment for it. Cloudflare, which
+ships exactly that over x402, states the limit plainly: *payment proves budget,
+not trust*, and audit trails are the developer's problem. So after the money has
+moved, nobody can answer — to anybody else — which party consumed what, under
+whose authority, and whether the payment that cleared corresponds to the work
+that happened. Each side keeps its own log, the logs disagree, and the
+disagreement is settled by whoever is more trusted rather than by evidence.
+
+Every interaction on Tenzro therefore produces one `InteractionProvenance`
+record binding four things that only mean something together:
+
+1. **Who** — the consuming DID, and the DID it acts for when delegated.
+2. **What** — the resource and the units actually consumed.
+3. **Under what authority** — the specific delegation, AP2 mandate, x402
+   payment or credential that permitted it. A receipt carrying only the access
+   tier proves consumption happened, not that it was allowed.
+4. **Against which payment** — settled, folded into a channel, accrued below the
+   floor, or free.
+
+That last field matters more than it looks. A settlement transaction hash alone
+is ambiguous — absent means *either* nothing was charged *or* the charge accrued
+into a channel rather than settling on its own. Those are opposite facts to an
+auditor. **Accrued** is also precisely the state Cloudflare's proposed deferred
+x402 scheme describes and which x402 itself has nowhere to record.
+
+### One record for every kind of interaction
+
+A web fetch, an inference, a storage read and a marketplace invocation are the
+same shape: a party consumed a resource under an authority and a charge landed
+somewhere. They share one record and one digest. Giving web access its own
+receipt type would produce two accounting systems that then have to be
+reconciled — the exact problem the unified record removes. `InteractionKind`
+now carries `Access` alongside inference, rental, storage, database, hosting,
+security, marketplace and RPC brokerage.
+
+### Verification does not require trusting the verifier
+
+The record has a canonical, domain-separated, length-prefixed preimage and a
+SHA-256 content address. Every field a counterparty must be able to check is
+covered; the payee breakdown and secondary-settlement mirrors deliberately are
+not, since those are the serving node's own accounting and change as mirrors
+land — binding them would make the digest unstable for facts the consuming party
+never agreed to.
+
+Length-prefixing is load-bearing rather than stylistic: without it a record for
+subject `"ab"` / resource `"c"` and one for subject `"a"` / resource `"bc"`
+concatenate to identical bytes, so a signature over one would validate the
+other, letting a resource be swapped without breaking the signature.
+
+`tenzro_verifyInteraction` compares content addresses rather than checking a
+signature against the node's key, so the answer does not depend on trusting the
+node that answers — a caller can recompute the same digest offline from the same
+published rule and reach the same conclusion.
+
+| RPC | Gate | Purpose |
+|---|---|---|
+| `tenzro_recordInteraction` | admin | Anchor a record. Admin because the node is the *attester*: an open endpoint would let anyone forge receipts in the operator's name |
+| `tenzro_getInteraction` | open | Read a record and its digest. A receipt only the issuer can read is not a receipt |
+| `tenzro_verifyInteraction` | open | Check a receipt against what was anchored |
+
+CLI `tenzro interaction {get,verify}`; SDK `client.device().get_interaction()` /
+`verify_interaction()`; MCP `get_interaction`; A2A `interaction-receipts` skill;
+TenzroClaw `get_interaction` / `verify_interaction`.
+
+Re-anchoring the same id is permitted and reported: a record legitimately gains
+fields as a charge moves from accrued to settled, and the digest changes when it
+does. Both remain checkable against whatever was anchored at the time.
+
+
+## Which rail a payment settles on
+
+Tenzro settles on its own ledger and treats every other chain as a **secondary**
+settlement layer. Which secondary layer, for a given payment, is a routing
+decision rather than a preference — and getting it wrong is silent, because the
+payment still succeeds, it just destroys more value than it moves.
+
+An economy metered per token produces charges spanning six orders of magnitude:
+a tenth of a cent for one token, tens of dollars for a video render, thousands
+for a month's rental. No single rail is correct across that range.
+
+**Supporting x402 is not the same as being able to carry a micropayment.** Base
+speaks x402 fluently and still cannot carry a one-cent charge without roughly
+10% overhead. A rail chosen on protocol support alone loses money on every
+metered call. So each rail carries an indicative fee floor, and the smallest
+worthwhile payment on it is that floor times a ratio — 100 by default, meaning
+settlement may cost at most 1% of the payment. The ratio is set against the
+split itself: the treasury leg of a public validating node is 10%, so a
+settlement cost above that order would dominate the economics the split
+describes.
+
+| Rail | CAIP-2 | Family | Carries natively | x402 |
+|---|---|---|---|---|
+| Tenzro Ledger | `tenzro:1337` | tenzro | TNZO | yes |
+| Stellar | `stellar:pubnet` | stellar | USDC, PYUSD, USDY | yes |
+| XRP Ledger | `xrpl:0` | xrpl | RLUSD | yes |
+| Solana | `solana:5eykt4Us…` | svm | USDC, PYUSD, USDG | yes |
+| Base | `eip155:8453` | evm | USDC | yes |
+| Plume | `eip155:98866` | evm | pUSD, USDC | no |
+| Arbitrum | `eip155:42161` | evm | USDC | no |
+| Polygon | `eip155:137` | evm | USDC | no |
+| Canton | `canton:global` | canton | USDC | no |
+| Ethereum | `eip155:1` | evm | USDC, USDT, PYUSD, USDP | no |
+
+Ordered cheapest-first, which is also the order the router scans. Canton and
+Ethereum L1 sit at the bottom deliberately: Canton is institutional
+delivery-versus-payment and Ethereum is settlement for size, not frequency.
+Neither should ever win a micropayment race, and both are chosen explicitly.
+
+Routing returns exactly four answers, and they are kept distinct because they
+imply different remedies:
+
+- **Accumulate** — below the governance-set micro-settlement floor. It belongs
+  in a micropayment channel until it is worth settling. The remedy is to open a
+  channel or pay under the x402 `upto` / `batch-settlement` scheme.
+- **Primary** — settle on the Tenzro Ledger. The default, and what a payee
+  holding TNZO always gets.
+- **Secondary** — settle on the cheapest rail carrying the payee's declared
+  asset.
+- **No viable rail** — the charge clears the floor, so it *would* settle, but
+  nothing carries the payee's asset at this size. The remedy is to accumulate or
+  to accept another asset. Reporting this as an accumulation would tell an
+  operator to open a channel when the real fix is the declared asset.
+
+The floor binds before the asset preference. A dust charge does not become
+movable because the payee would like it in USDC.
+
+Read the rails with `tenzro_settlementNetworks`; pass `amount_wei` and `asset`
+to get the routing decision for a specific charge. CLI: `tenzro rails list` and
+`tenzro rails route`.
+
+### Prices are not read from an oracle here
+
+Comparing a TNZO amount against a rail's USD-denominated fee needs a price, and
+the router takes it as an argument rather than reading a feed. A caller with no
+price gets home-chain settlement — the safe answer — instead of a rail chosen on
+an invented number. The fee floors themselves are **indicative ordering hints**,
+not quotes: they rank rails against each other and are deliberately not used to
+quote a payer, because gas markets move and constants do not.
+
+
 ## 1. One division, one place
 
 A settled service payment is divided **exactly once**, by `split_revenue`, and

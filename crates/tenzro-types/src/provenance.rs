@@ -37,6 +37,7 @@
 //! accounted.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::access_tier::{AccessTier, PayerKind};
 use crate::economics::{NodeEconomicMode, PayeeRole};
@@ -69,11 +70,27 @@ pub enum InteractionKind {
     Marketplace,
     /// An external network was brokered on the caller's behalf.
     RpcBrokerage,
+    /// A resource was **accessed** — a page fetched, a dataset read, an API or
+    /// MCP tool called, a crawl performed.
+    ///
+    /// This is the interaction the pay-per-crawl generation of the web created
+    /// and then could not account for. An edge gateway can meter a fetch and
+    /// take payment for it; what it cannot do is answer, afterwards and to
+    /// somebody else, *which* agent accessed *what*, under *whose* authority,
+    /// and whether the payment that cleared corresponds to the access that
+    /// happened. Cloudflare states the position plainly — payment proves
+    /// budget, not trust, and audit trails are the developer's problem.
+    ///
+    /// Recording access as a first-class interaction is what closes that:
+    /// the same record that carries a settled inference carries a settled
+    /// fetch, so a publisher's accounting and a payer's accounting are the same
+    /// row rather than two logs that have to be reconciled on trust.
+    Access,
 }
 
 impl InteractionKind {
     /// Every kind, in a stable order.
-    pub const ALL: [InteractionKind; 8] = [
+    pub const ALL: [InteractionKind; 9] = [
         InteractionKind::Inference,
         InteractionKind::Rental,
         InteractionKind::Storage,
@@ -82,6 +99,7 @@ impl InteractionKind {
         InteractionKind::Security,
         InteractionKind::Marketplace,
         InteractionKind::RpcBrokerage,
+        InteractionKind::Access,
     ];
 
     /// Stable wire form.
@@ -95,6 +113,7 @@ impl InteractionKind {
             InteractionKind::Security => "security",
             InteractionKind::Marketplace => "marketplace",
             InteractionKind::RpcBrokerage => "rpc_brokerage",
+            InteractionKind::Access => "access",
         }
     }
 
@@ -192,6 +211,126 @@ pub struct SecondarySettlement {
 
 /// The full attributable record of one interaction.
 ///
+/// Domain separator for the attestation digest. Prefixed to every preimage so a
+/// signature over an interaction record can never be replayed as a signature
+/// over some other Tenzro structure that happens to serialize to the same bytes.
+pub const ATTESTATION_DOMAIN: &[u8] = b"tenzro/interaction-attestation/v1";
+
+/// What permitted the interaction.
+///
+/// Carried as a typed reference rather than a free string because "under what
+/// authority" is the field most likely to be filled in with something
+/// unfalsifiable if the type permits it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Authority {
+    /// A delegation scope on the consuming identity permitted it.
+    Delegation {
+        /// DID of the controller whose scope was consulted.
+        controller_did: String,
+    },
+    /// An AP2 mandate permitted it, identified by its hash.
+    Ap2Mandate {
+        /// Hash of the signed mandate.
+        mandate_hash: String,
+    },
+    /// An x402 payment payload permitted it — payment *is* the authority, which
+    /// is the on-demand case with no prior relationship.
+    X402Payment {
+        /// Scheme under which it was paid.
+        scheme: String,
+    },
+    /// An operator-issued credential permitted it. Only the digest is carried:
+    /// an attestation is meant to be shown to third parties, and a receipt that
+    /// leaks the key it was authorised with is a receipt that hands over the
+    /// key.
+    Credential {
+        /// SHA-256 digest of the presented credential.
+        digest: String,
+    },
+    /// Nothing gated it — the resource was open.
+    ///
+    /// An explicit variant rather than `None`, because "no authority was
+    /// required" and "we did not record one" are different claims and only the
+    /// first is a defensible thing to attest.
+    Open,
+}
+
+impl Authority {
+    /// Stable wire form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Authority::Delegation { .. } => "delegation",
+            Authority::Ap2Mandate { .. } => "ap2_mandate",
+            Authority::X402Payment { .. } => "x402_payment",
+            Authority::Credential { .. } => "credential",
+            Authority::Open => "open",
+        }
+    }
+
+    /// The bytes this authority contributes to the preimage.
+    fn preimage_value(&self) -> &str {
+        match self {
+            Authority::Delegation { controller_did } => controller_did,
+            Authority::Ap2Mandate { mandate_hash } => mandate_hash,
+            Authority::X402Payment { scheme } => scheme,
+            Authority::Credential { digest } => digest,
+            Authority::Open => "",
+        }
+    }
+}
+
+/// Where the charge for this interaction landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChargeRef {
+    /// Settled on the Tenzro Ledger.
+    Settlement {
+        /// Settlement identifier.
+        settlement_id: String,
+    },
+    /// Applied to a micropayment channel rather than moved on its own.
+    Channel {
+        /// Channel identifier.
+        channel_id: String,
+        /// Channel nonce the charge was folded into.
+        nonce: u64,
+    },
+    /// Accrued below the micro-settlement floor, awaiting aggregation.
+    ///
+    /// This is the state Cloudflare's proposed deferred scheme describes and
+    /// x402 has no place to record. Naming it means an accrued charge is
+    /// accounted for rather than invisible until it settles.
+    Accrued {
+        /// Running total held, in TNZO wei.
+        accrued_wei: String,
+    },
+    /// Nothing was charged. Free interactions are attested too — an unbilled
+    /// access that leaves no record is exactly the access nobody can audit.
+    Free,
+}
+
+impl ChargeRef {
+    /// Stable wire form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChargeRef::Settlement { .. } => "settlement",
+            ChargeRef::Channel { .. } => "channel",
+            ChargeRef::Accrued { .. } => "accrued",
+            ChargeRef::Free => "free",
+        }
+    }
+
+    fn preimage_value(&self) -> String {
+        match self {
+            ChargeRef::Settlement { settlement_id } => settlement_id.clone(),
+            ChargeRef::Channel { channel_id, nonce } => format!("{channel_id}:{nonce}"),
+            ChargeRef::Accrued { accrued_wei } => accrued_wei.clone(),
+            ChargeRef::Free => String::new(),
+        }
+    }
+}
+
 /// Emitted on every metered interaction, chargeable or not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InteractionProvenance {
@@ -227,6 +366,26 @@ pub struct InteractionProvenance {
     pub occurred_at: Timestamp,
 
     // ---- how ------------------------------------------------------------
+    /// DID of the party that served the resource and is making this claim.
+    ///
+    /// Required for third-party verification: a record that says what happened
+    /// but not who asserts it cannot be checked by anyone who was not present,
+    /// which is the entire point of showing it to a counterparty.
+    pub attester_did: String,
+    /// What actually permitted the interaction.
+    ///
+    /// [`AccessTier`] says which *relationship* was used; this says which
+    /// specific delegation, mandate, payment or credential authorised it. A
+    /// receipt carrying only the tier proves consumption happened, not that it
+    /// was allowed.
+    pub authority: Authority,
+    /// Where the charge landed.
+    ///
+    /// `settlement_tx` alone is ambiguous: `None` means *either* nothing was
+    /// charged *or* the charge accrued into a channel rather than settling on
+    /// its own. Those are opposite facts to an auditor, and this field is what
+    /// separates them.
+    pub charge: ChargeRef,
     /// The relationship under which the resource was reached.
     pub tier: AccessTier,
     /// Digest of the credential presented, never the credential. `None` for an
@@ -314,6 +473,13 @@ mod tests {
             resource_id: "qwen3-27b".into(),
             units: BillableUnits::tokens(1_000, 250),
             occurred_at: Timestamp::new(1_700_000_000_000),
+            attester_did: "did:tenzro:machine:node".into(),
+            authority: Authority::X402Payment {
+                scheme: "exact".into(),
+            },
+            charge: ChargeRef::Settlement {
+                settlement_id: "s-1".into(),
+            },
             tier: AccessTier::User,
             credential_digest: None,
             mode: NodeEconomicMode::PublicDelegated,
@@ -455,4 +621,290 @@ mod tests {
         }
         assert_eq!(InteractionKind::parse("llm"), None);
     }
+
+    // ---- attestation: making the record checkable by a third party -------
+
+    #[test]
+    fn digest_is_deterministic_and_binds_every_covered_field() {
+        let a = provenance(1_000, vec![]);
+        assert_eq!(a.attestation_digest(), a.attestation_digest());
+        for mutate in [
+            |p: &mut InteractionProvenance| p.resource_id = "other-model".into(),
+            |p: &mut InteractionProvenance| p.payer_did = "did:tenzro:machine:other".into(),
+            |p: &mut InteractionProvenance| p.attester_did = "did:tenzro:machine:other".into(),
+            |p: &mut InteractionProvenance| p.on_behalf_of = None,
+            |p: &mut InteractionProvenance| p.kind = InteractionKind::Access,
+            |p: &mut InteractionProvenance| p.settled_asset = "other".into(),
+        ] {
+            let mut b = provenance(1_000, vec![]);
+            mutate(&mut b);
+            assert_ne!(a.attestation_digest(), b.attestation_digest());
+        }
+    }
+
+    #[test]
+    fn length_prefixing_prevents_field_boundary_confusion() {
+        // Without length prefixes these concatenate identically, so a signature
+        // over one would validate the other — letting the resource be swapped
+        // while the signature still checks out.
+        let mut a = provenance(1_000, vec![]);
+        a.payer_did = "ab".into();
+        a.resource_id = "c".into();
+        let mut b = provenance(1_000, vec![]);
+        b.payer_did = "a".into();
+        b.resource_id = "bc".into();
+        assert_ne!(a.attestation_digest(), b.attestation_digest());
+    }
+
+    #[test]
+    fn the_domain_separator_is_present() {
+        assert!(
+            provenance(1_000, vec![])
+                .attestation_preimage()
+                .starts_with(ATTESTATION_DOMAIN)
+        );
+    }
+
+    #[test]
+    fn payees_and_mirrors_are_not_covered_by_the_digest() {
+        // The serving node's own accounting, which changes as mirrors land.
+        // Binding it would make the digest unstable for facts the consuming
+        // party never agreed to.
+        let a = provenance(1_000, vec![]);
+        let b = provenance(
+            1_000,
+            vec![PayeeRecord {
+                role: PayeeRole::Operator,
+                address: Address::default(),
+                amount: 1_000,
+                bps: 10_000,
+            }],
+        );
+        assert_eq!(a.attestation_digest(), b.attestation_digest());
+    }
+
+    #[test]
+    fn authority_distinguishes_paid_for_it_from_was_delegated_to_do_it() {
+        let mut a = provenance(1_000, vec![]);
+        a.authority = Authority::Open;
+        let mut b = provenance(1_000, vec![]);
+        b.authority = Authority::Delegation {
+            controller_did: String::new(),
+        };
+        assert_ne!(a.attestation_digest(), b.attestation_digest());
+    }
+
+    #[test]
+    fn charge_ref_separates_free_from_accrued_which_settlement_tx_cannot() {
+        // `settlement_tx: None` means either "nothing charged" or "accrued into
+        // a channel". Opposite facts to an auditor.
+        let mut free = provenance(0, vec![]);
+        free.charge = ChargeRef::Free;
+        free.settlement_tx = None;
+        let mut accrued = provenance(5_000, vec![]);
+        accrued.charge = ChargeRef::Accrued {
+            accrued_wei: "5000".into(),
+        };
+        accrued.settlement_tx = None;
+        assert!(!free.is_billed());
+        assert!(accrued.is_billed());
+        assert_ne!(free.attestation_digest(), accrued.attestation_digest());
+    }
+
+    #[test]
+    fn a_channel_nonce_binds() {
+        let mut a = provenance(1_000, vec![]);
+        a.charge = ChargeRef::Channel {
+            channel_id: "c".into(),
+            nonce: 1,
+        };
+        let mut b = provenance(1_000, vec![]);
+        b.charge = ChargeRef::Channel {
+            channel_id: "c".into(),
+            nonce: 2,
+        };
+        assert_ne!(a.attestation_digest(), b.attestation_digest());
+    }
+
+    #[test]
+    fn an_unattributable_record_is_refused() {
+        for clear in ["payer", "attester", "interaction"] {
+            let mut a = provenance(1_000, vec![]);
+            match clear {
+                "payer" => a.payer_did.clear(),
+                "attester" => a.attester_did.clear(),
+                _ => a.interaction_id.clear(),
+            }
+            assert!(a.validate_attestable().is_err(), "{clear} must be required");
+        }
+    }
+
+    #[test]
+    fn a_record_whose_charge_contradicts_its_amount_is_refused() {
+        let mut free_but_charged = provenance(1_000, vec![]);
+        free_but_charged.charge = ChargeRef::Free;
+        assert!(matches!(
+            free_but_charged.validate_attestable(),
+            Err(AttestationError::ChargeContradictsAmount { .. })
+        ));
+
+        let billed_but_zero = provenance(0, vec![]);
+        assert!(matches!(
+            billed_but_zero.validate_attestable(),
+            Err(AttestationError::ChargeContradictsAmount { .. })
+        ));
+    }
+
+    #[test]
+    fn a_free_interaction_is_still_attestable() {
+        // Unbilled access that leaves no record is exactly the access nobody
+        // can audit.
+        let mut a = provenance(0, vec![]);
+        a.charge = ChargeRef::Free;
+        assert!(a.validate_attestable().is_ok());
+    }
+
+    #[test]
+    fn every_interaction_kind_is_attestable_and_distinct() {
+        // One accounting record for access, inference, storage and the rest —
+        // giving access its own would create two systems to reconcile.
+        let mut seen = std::collections::HashSet::new();
+        for kind in InteractionKind::ALL {
+            let mut a = provenance(1_000, vec![]);
+            a.kind = kind;
+            assert!(a.validate_attestable().is_ok(), "{kind:?}");
+            assert!(seen.insert(a.attestation_digest()), "{kind:?} collided");
+        }
+    }
+
+    #[test]
+    fn digest_hex_is_64_lowercase_hex_chars() {
+        let h = provenance(1_000, vec![]).attestation_digest_hex();
+        assert_eq!(h.len(), 64);
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
+    }
 }
+
+impl InteractionProvenance {
+    /// The bytes an attestation signature covers, and the input to
+    /// [`Self::digest`].
+    ///
+    /// Every field is **length-prefixed**. Without that, a record for subject
+    /// `"ab"` / resource `"c"` and one for subject `"a"` / resource `"bc"`
+    /// would concatenate to identical bytes, so a signature over one would
+    /// validate the other — letting a resource be swapped without breaking the
+    /// signature.
+    ///
+    /// Only the fields a counterparty must be able to check are covered. The
+    /// payee breakdown and secondary-settlement mirrors are deliberately out:
+    /// they are the serving node's own accounting, they change as mirrors land,
+    /// and binding them would make the digest unstable for facts the consuming
+    /// party never agreed to.
+    pub fn attestation_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(256);
+        out.extend_from_slice(ATTESTATION_DOMAIN);
+        let mut field = |bytes: &[u8]| {
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        };
+        field(self.interaction_id.as_bytes());
+        field(self.kind.as_str().as_bytes());
+        field(self.payer_did.as_bytes());
+        field(self.on_behalf_of.as_deref().unwrap_or("").as_bytes());
+        field(self.attester_did.as_bytes());
+        field(self.resource_id.as_bytes());
+        field(self.authority.as_str().as_bytes());
+        field(self.authority.preimage_value().as_bytes());
+        field(self.charge.as_str().as_bytes());
+        field(self.charge.preimage_value().as_bytes());
+        field(self.amount_charged.to_string().as_bytes());
+        field(self.settled_asset.as_bytes());
+        field(&self.occurred_at.0.to_le_bytes());
+        out
+    }
+
+    /// Content address of this interaction — what gets anchored on the ledger
+    /// and what a counterparty recomputes to check a record it was shown.
+    pub fn attestation_digest(&self) -> [u8; 32] {
+        Sha256::digest(self.attestation_preimage()).into()
+    }
+
+    /// Hex form of [`Self::attestation_digest`], for RPC and logs.
+    pub fn attestation_digest_hex(&self) -> String {
+        self.attestation_digest()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// Whether a charge was actually taken.
+    pub fn is_billed(&self) -> bool {
+        !matches!(self.charge, ChargeRef::Free)
+    }
+
+    /// Structural checks before this record is worth anchoring.
+    ///
+    /// These catch records that are internally inconsistent rather than merely
+    /// unproven — one nobody can attribute, or one whose stated amount
+    /// contradicts its stated charge.
+    pub fn validate_attestable(&self) -> Result<(), AttestationError> {
+        if self.payer_did.is_empty() {
+            return Err(AttestationError::MissingField("payer_did"));
+        }
+        if self.attester_did.is_empty() {
+            return Err(AttestationError::MissingField("attester_did"));
+        }
+        if self.interaction_id.is_empty() {
+            return Err(AttestationError::MissingField("interaction_id"));
+        }
+        match (&self.charge, self.amount_charged) {
+            (ChargeRef::Free, a) if a != 0 => Err(AttestationError::ChargeContradictsAmount {
+                charge: "free",
+                amount_wei: a.to_string(),
+            }),
+            (c, 0) if !matches!(c, ChargeRef::Free) => {
+                Err(AttestationError::ChargeContradictsAmount {
+                    charge: c.as_str(),
+                    amount_wei: "0".to_string(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Why a record could not be attested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttestationError {
+    /// A field required for attribution was empty.
+    MissingField(&'static str),
+    /// The stated charge and the stated amount disagree.
+    ChargeContradictsAmount {
+        /// The charge kind claimed.
+        charge: &'static str,
+        /// The amount claimed.
+        amount_wei: String,
+    },
+}
+
+impl core::fmt::Display for AttestationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(
+                f,
+                "interaction record is missing `{field}`; without it the interaction cannot be \
+                 attributed to anyone, which is the only thing an attestation is for"
+            ),
+            Self::ChargeContradictsAmount { charge, amount_wei } => write!(
+                f,
+                "record claims charge kind `{charge}` with amount {amount_wei}; the two disagree, \
+                 and reconciling them would mean guessing which was meant"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AttestationError {}

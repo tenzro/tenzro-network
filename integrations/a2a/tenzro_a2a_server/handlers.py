@@ -1043,7 +1043,7 @@ async def handle_verification(text: str, metadata: dict | None = None) -> str:
                 "Provenance lookup requires a 32-byte hex content_hash.\n"
                 'Pass via metadata: {"content_hash": "0x..."}'
             )
-        result = await rpc_call("tenzro_getProvenance", {"content_hash": content_hash})
+        result = await rpc_call("tenzro_getContentProvenance", {"content_hash": content_hash})
         return f"Provenance manifest:\n{json.dumps(result, indent=2)}"
 
     return (

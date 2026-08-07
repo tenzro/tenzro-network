@@ -1,12 +1,12 @@
 //! C2PA-style provenance inspection.
 //!
 //! Under EU AI Act Article 50(2), synthetic content must carry a
-//! machine-readable origin marker. Tenzro records a `ProvenanceManifest`
+//! machine-readable origin marker. Tenzro records a `ContentProvenanceManifest`
 //! per piece of generated content, keyed by `content_hash`. Validators
 //! sign and persist these manifests; this command lets operators and
 //! verifiers fetch the cached manifest for a given content hash.
 //!
-//! Backed by `tenzro_getProvenance`.
+//! Backed by `tenzro_getContentProvenance`.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -51,7 +51,7 @@ impl ProvenanceGetCmd {
         let rpc = RpcClient::new(&self.rpc);
         let result: Result<serde_json::Value> = rpc
             .call(
-                "tenzro_getProvenance",
+                "tenzro_getContentProvenance",
                 serde_json::json!({ "content_hash": self.content_hash }),
             )
             .await;

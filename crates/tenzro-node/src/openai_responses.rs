@@ -29,7 +29,7 @@ const CARRIED_KEYS: [&str; 6] = [
     "cost_wei",
     "generation_time_ms",
     "tokens_per_second",
-    "tenzro_provenance",
+    "tenzro_contentProvenance",
     "tenzro_jurisdiction",
     "commitment",
 ];
@@ -926,7 +926,7 @@ mod tests {
             }],
             "usage": { "prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5 },
             "cost_wei": "42",
-            "tenzro_provenance": { "sig": "s" },
+            "tenzro_contentProvenance": { "sig": "s" },
         })
     }
 
@@ -955,7 +955,7 @@ mod tests {
     fn the_carried_tenzro_fields_survive_the_rewrite() {
         let out = from_chat_completion(&completion("stop"), "m", ResponsesEcho::default());
         assert_eq!(out["cost_wei"], "42");
-        assert_eq!(out["tenzro_provenance"]["sig"], "s");
+        assert_eq!(out["tenzro_contentProvenance"]["sig"], "s");
     }
 
     #[test]

@@ -49,7 +49,9 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use tenzro_vm::account_abstraction::{EntryPoint, AccountFactory, UserOperation, AccountModule};
+//! use tenzro_vm::account_abstraction::{
+//!     AccountFactory, AccountModule, EntryPoint, Nonce, UserOperation,
+//! };
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create entry point with chain ID for EIP-712
@@ -79,7 +81,11 @@
 //! // Create and validate a user operation (v0.8 split fields)
 //! let user_op = UserOperation {
 //!     sender: account.address.clone(),
-//!     nonce: entry_point.get_nonce(&account.address),
+//!     // `get_nonce` is 2-D per EIP-4337 v0.8 and takes a 192-bit key;
+//!     // `get_nonce_default_key` is the key=0 ordered stream, and `Nonce`
+//!     // packs it into the 32-byte `(key << 64) | seq` field.
+//!     nonce: Nonce::from_seq(entry_point.get_nonce_default_key(&account.address))
+//!         .to_bytes(),
 //!     factory: vec![],
 //!     factory_data: vec![],
 //!     call_data: vec![0x42; 32],

@@ -4,19 +4,25 @@
 //! Base, USDT on Solana, EURC on Ethereum. The payee decides what they want to
 //! *hold*: the stablecoin as it arrived, or TNZO.
 //!
-//! # Why the swap is optional
+//! # Who decides, and what happens by default
 //!
-//! Forcing every inbound stablecoin through a swap to TNZO would be the
-//! simpler router, and it would be wrong for the case that matters most on
-//! testnet: a model provider earning USDC wants spendable USDC. Making them
-//! hold a token whose liquidity is still forming, in order to pay costs
-//! denominated in dollars, converts a working payment into an FX position they
-//! did not ask for.
+//! The network's default is to convert to TNZO
+//! (`EconomicPolicy::default_conversion`), because TNZO is the unit the ledger
+//! accounts in and a treasury holding forty different stablecoins is a
+//! treasury nobody can value.
 //!
-//! So [`SettlementAsset::KeepInbound`] is the default, and a swap happens only
-//! when the payee has asked for one. A route that cannot be built is a refusal,
-//! never a silent fallback to the other asset — a payee who asked for TNZO and
-//! received USDC (or the reverse) has been given something they did not choose.
+//! The obvious objection is real: a model provider earning USDC may want
+//! spendable USDC, and making them hold a token whose liquidity is still
+//! forming — in order to pay costs denominated in dollars — converts a working
+//! payment into an FX position they did not ask for. Two things answer it, and
+//! neither is a hardcoded default. **The payee overrides it** for their own
+//! receipts, self-service and permissionlessly. And **the network default is
+//! governance-set**, so a testnet whose liquidity is still forming can be voted
+//! onto [`SettlementAsset::KeepInbound`] without a code change.
+//!
+//! A route that cannot be built is a refusal, never a silent fallback to the
+//! other asset — a payee who asked for TNZO and received USDC (or the reverse)
+//! has been given something they did not choose.
 //!
 //! # Chain-agnostic asset identity
 //!

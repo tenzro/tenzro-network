@@ -406,6 +406,110 @@ payee and is authorised by their own identity key, not by the admin token of the
 node hosting them, so a shared node's operator cannot change how their tenants
 get paid.
 
+### Funding an agent across the fiat boundary
+
+Tenzro is **not a licensed provider and does not aim to be**. KYC, fiat
+acceptance, card issuance and network settlement are each performed by a
+licensed party that already does them well. What Tenzro adds is the layer none
+of them occupy: a portable agent identity with enforceable delegation, so the
+same agent can be funded through one provider, spend through another, and settle
+on-network under one set of ceilings. The provider list is a registry of
+integrations rather than a shortlist to pick a winner from, and an operator can
+integrate one Tenzro has never heard of without a protocol change.
+
+Funding has a **direction**, and the two halves are not alternatives: an inbound
+orchestrator turns fiat into stablecoin an agent can spend, while an outbound
+issuer lets an agent spend an existing balance at merchants that never handle
+stablecoins. A network with only the first has agents that can be paid but
+cannot buy. **Custody** is recorded separately from the provider, because it
+decides who can lose the money and does not follow from the provider's name — a
+custodial orchestrator holds the keys, while a non-custodial issuer underwrites
+against collateral in a contract the customer owns and can exit at any time.
+
+Crucially, **funding never widens a delegation scope**. Both the funding
+source's cap and the identity's scope ceiling are checked and the narrower one
+binds, so an agent that could not spend an amount before it was funded still
+cannot afterwards. Without that, the on-ramp would be a hole straight through
+every control the identity layer enforces.
+
+The card networks sit at a different layer and are integrated there. Visa's
+stablecoin settlement program settles with issuers and acquirers — banks and
+fintechs — not with merchants directly, which places it one layer below anything
+Tenzro touches. Visa and Mastercard instead expose agent identity and mandate
+surfaces, and both authenticate over Web Bot Auth.
+
+### Which rail a payment settles on
+
+An agentic economy metered per token produces charges spanning six orders of
+magnitude, and no single chain is correct across that range. **Supporting x402
+is not the same as being able to carry a micropayment**: Base speaks x402
+fluently and still cannot carry a one-cent charge without roughly 10% overhead.
+A rail chosen on protocol support alone loses money on every metered call.
+
+So every rail Tenzro settles on carries an indicative fee floor, and the router
+picks the cheapest one that both carries the payee's declared asset and is worth
+using at that size — settlement may cost at most 1% of the payment by default.
+Stellar and the XRP Ledger anchor the cheap end, which is what makes per-token
+metering a real settlement path rather than an accounting fiction. Canton and
+Ethereum L1 sit at the far end deliberately: Canton is institutional
+delivery-versus-payment, Ethereum is settlement for size rather than frequency,
+and neither should ever win a micropayment race.
+
+The decision has exactly four outcomes, kept distinct because they imply
+different remedies: **accumulate** (below the micro-settlement floor — hold it
+in a channel), **primary** (the Tenzro Ledger), **secondary** (the cheapest rail
+carrying the payee's asset), and **no viable rail** (clears the floor, but
+nothing carries that asset at that size). The floor binds before the asset
+preference: a dust charge does not become movable because the payee would like
+it in USDC.
+
+### Agents that other people's infrastructure can verify
+
+A TDIP DID proves an agent's identity *to Tenzro*, and proves nothing to a
+merchant behind a CDN, because nothing outside this network resolves
+`did:tenzro:`. The web converged on a different format for that question —
+HTTP Message Signatures under the Web Bot Auth profile — and both card networks
+build their agent identity on it: Visa's Trusted Agent Protocol and
+Mastercard's Agent Pay authenticate over it, and Cloudflare, AWS WAF, Vercel,
+Shopify and Akamai verify it at the edge.
+
+Tenzro speaks it in both directions. Outbound, an agent signs with the same
+Ed25519 identity key it already has, so an edge that has never heard of Tenzro
+can still tell a declared agent from a scraper wearing a browser's user-agent.
+Inbound, a node verifies the same proof from foreign agents before deciding what
+to serve them. Keys are published at the specified directory path, and only
+active identities appear — a directory that still lists a revoked agent keeps it
+verifiable at every edge that cached it.
+
+The signature covers the authority being addressed and nothing else, which is
+deliberate: the claim is *"this request comes from this agent"*, not *"this
+request means what it says"*. Binding the authority stops replay against a
+different host; expiry stops replay against the same one later. What a payment
+is *for* is a separate proof carried by AP2 mandates and x402 payloads, which do
+sign amounts and recipients.
+
+### Tenzro is the accounting layer, not only the payment layer
+
+An edge gateway can meter a request and take payment for it. What it cannot do
+is answer afterwards, to somebody who trusts neither party, which party consumed
+what, under whose authority, and whether the payment that cleared corresponds to
+the work that happened. Cloudflare, shipping exactly that over x402, states the
+limit plainly: payment proves budget, not trust.
+
+Every interaction on Tenzro produces one record binding the consuming identity,
+the resource, the **specific authority** that permitted it — a delegation, an
+AP2 mandate, an x402 payment, a credential — and where the charge landed:
+settled, folded into a channel, **accrued** below the micro-settlement floor, or
+free. That last distinction is one a settlement hash alone cannot make, and
+accrual is precisely the state a deferred x402 scheme needs and x402 has nowhere
+to record.
+
+A web fetch, an inference, a storage read and a marketplace invocation share one
+record and one content address, so an audit is a lookup rather than a
+reconciliation across per-surface logs. Verification compares content addresses
+rather than signatures, so a counterparty can recompute the digest offline and
+reach the same conclusion without trusting the node that served it.
+
 ### Provenance is the record, not a log
 
 Identity and wallet together are the provenance trail for every resource and

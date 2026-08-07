@@ -2139,6 +2139,18 @@ async fn dispatch_request(
         // `AutoProposalGenerator` alongside the governance executor.
         "tenzro_getBurnRateConfig" => handle_get_burn_rate_config(node).await,
         "tenzro_getEconomicPolicy" => handle_get_economic_policy(node).await,
+        "tenzro_recordInteraction" => {
+            crate::interaction_rpc::handle_record_interaction(node, request.params.clone()).await
+        }
+        "tenzro_getInteraction" => {
+            crate::interaction_rpc::handle_get_interaction(node, request.params.clone()).await
+        }
+        "tenzro_verifyInteraction" => {
+            crate::interaction_rpc::handle_verify_interaction(node, request.params.clone()).await
+        }
+        "tenzro_settlementNetworks" => {
+            handle_settlement_networks(node, request.params.clone()).await
+        }
         "tenzro_bindDevice" => {
             crate::device_rpc::handle_bind_device(node, request.params.clone()).await
         }
@@ -2244,7 +2256,7 @@ async fn dispatch_request(
             handle_get_provider_reputation(node, request.params).await
         }
         "tenzro_getRouterMetrics" => handle_get_router_metrics(node, request.params).await,
-        "tenzro_getProvenance" => handle_get_provenance(node, request.params).await,
+        "tenzro_getContentProvenance" => handle_get_provenance(node, request.params).await,
         "tenzro_getDispute" => handle_get_dispute(node, request.params).await,
         "tenzro_listDisputesByChannel" => {
             handle_list_disputes_by_channel(node, request.params).await
@@ -14550,6 +14562,90 @@ fn supply_metrics_to_json(snapshot: &tenzro_token::adaptive_burn::SupplyMetricsS
 /// `tenzro_getEconomicPolicy` — the rates this node is currently applying.
 ///
 /// Open, and deliberately so: what a payment will cost and how it will divide
+/// `tenzro_settlementNetworks` — the rails a payment can settle on, and which
+/// one a given charge should take.
+///
+/// Open, for the same reason the economic policy is: a payer deciding what
+/// asset to be paid in needs to know which rails carry it and whether their
+/// payment is large enough to survive the fee. Answering afterwards, in a
+/// receipt, is too late to act on.
+///
+/// With no params it returns the whole registry. With `amount_wei` and
+/// `asset` it also returns the routing decision for that specific charge —
+/// accumulate, settle here, settle there, or no viable rail — so a caller can
+/// ask the same question the node will ask at settlement time and get the same
+/// answer.
+async fn handle_settlement_networks(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_payments::micropayment_route::{MicropaymentRoute, route};
+    use tenzro_types::settlement_network::{DEFAULT_FEE_RATIO, SETTLEMENT_NETWORKS};
+
+    let floor = node.economic_policy().micro_settlement_floor;
+
+    let networks: Vec<Value> = SETTLEMENT_NETWORKS
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "caip2": n.caip2,
+                "name": n.name,
+                "family": n.family.as_str(),
+                "native_asset": n.native_asset,
+                "native_stablecoins": n.native_stablecoins,
+                "x402": n.x402,
+                "fee_floor_micro_usd": n.fee_floor_micro_usd,
+                // Smallest charge worth settling here at the default 1%
+                // overhead ceiling. This is the number that decides whether a
+                // metered call can settle on this rail at all.
+                "min_payment_micro_usd": n.fee_floor_micro_usd.saturating_mul(DEFAULT_FEE_RATIO),
+            })
+        })
+        .collect();
+
+    let mut out = serde_json::json!({
+        "networks": networks,
+        "micro_settlement_floor_wei": floor.to_string(),
+        "fee_ratio": DEFAULT_FEE_RATIO,
+        "primary": "tenzro:1337",
+    });
+
+    // Optional: route a specific charge.
+    if let Some(p) = params.as_ref() {
+        let amount_wei = p
+            .get("amount_wei")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u128>().ok());
+        if let Some(amount_wei) = amount_wei {
+            let asset = p.get("asset").and_then(|v| v.as_str());
+            let price = p.get("tnzo_micro_usd").and_then(|v| v.as_u64());
+            let decision = route(amount_wei, floor, asset, price);
+            let detail = match &decision {
+                MicropaymentRoute::Accumulate { floor_wei, .. } => serde_json::json!({
+                    "floor_wei": floor_wei.to_string(),
+                    "remedy": "open_channel_or_use_upto_scheme",
+                }),
+                MicropaymentRoute::Primary { .. } => serde_json::json!({ "caip2": "tenzro:1337" }),
+                MicropaymentRoute::Secondary { caip2, asset, .. } => {
+                    serde_json::json!({ "caip2": caip2, "asset": asset })
+                }
+                MicropaymentRoute::NoViableRail { asset, .. } => serde_json::json!({
+                    "asset": asset,
+                    "remedy": "accumulate_or_accept_another_asset",
+                }),
+            };
+            out["route"] = serde_json::json!({
+                "kind": decision.kind(),
+                "settles_now": decision.settles_now(),
+                "amount_wei": amount_wei.to_string(),
+                "detail": detail,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
 /// is not privileged information, and a caller who cannot read it before paying
 /// has to take the operator's word for the receipt afterwards.
 async fn handle_get_economic_policy(
@@ -16549,7 +16645,7 @@ async fn handle_get_router_metrics(
     })
 }
 
-/// Look up a cached `ProvenanceManifest` by 32-byte content hash.
+/// Look up a cached `ContentProvenanceManifest` by 32-byte content hash.
 ///
 /// Read path for the EU AI Act Art. 50(2) machine-readable
 /// synthetic-content marker: the inference router signs every successful
@@ -31723,7 +31819,7 @@ pub(crate) fn pinned_announcement_pubkey(
         .filter(|pk| !pk.is_empty())
 }
 
-/// Verify a `tenzro_provenance` manifest attached to a forwarded inference
+/// Verify a `tenzro_contentProvenance` manifest attached to a forwarded inference
 /// response: content hash over the output bytes, model-id binding,
 /// registered-key binding when an announcement pubkey is pinned, and the
 /// manifest signature. Returns the manifest when it verifies; logs and
@@ -31735,9 +31831,9 @@ fn verify_forwarded_provenance(
     model_id: &str,
     registered_pubkey: Option<&[u8]>,
     provider_label: &str,
-) -> Option<tenzro_types::ProvenanceManifest> {
+) -> Option<tenzro_types::ContentProvenanceManifest> {
     let value = value.filter(|v| !v.is_null())?;
-    match serde_json::from_value::<tenzro_types::ProvenanceManifest>(value.clone()) {
+    match serde_json::from_value::<tenzro_types::ContentProvenanceManifest>(value.clone()) {
         Ok(manifest) => match tenzro_model::verify_response_manifest(
             &manifest,
             output,
@@ -32933,7 +33029,7 @@ fn sign_local_response(
     node: &Arc<TenzroNode>,
     model_id: &str,
     output: &[u8],
-) -> Option<tenzro_types::ProvenanceManifest> {
+) -> Option<tenzro_types::ContentProvenanceManifest> {
     let signer = node.provenance_signer()?;
     let provider_addr = announce_provider_address(node);
     match signer.sign(
@@ -33449,7 +33545,7 @@ async fn handle_chat_simple(
             "model_id": model_id,
             "location": "local",
             "load": load,
-            "tenzro_provenance": provenance,
+            "tenzro_contentProvenance": provenance,
             "tenzro_jurisdiction": jurisdiction,
             "commitment": commitment,
         }))
@@ -33516,7 +33612,7 @@ async fn handle_chat_simple(
         // caller explicitly asked for a verified response.
         let pinned = pinned_announcement_pubkey(node, &model_id, &svc.provider_name);
         let provenance = verify_forwarded_provenance(
-            rpc_result.get("tenzro_provenance"),
+            rpc_result.get("tenzro_contentProvenance"),
             output.as_bytes(),
             &model_id,
             pinned.as_deref(),
@@ -33591,7 +33687,7 @@ async fn handle_chat_simple(
             "provider": svc.provider_name,
             "cost_wei": cost_wei.to_string(),
             "settlement": settlement.to_json(),
-            "tenzro_provenance": provenance,
+            "tenzro_contentProvenance": provenance,
             "tenzro_jurisdiction": jurisdiction,
             // The provider persists the commitment; the hash rides through
             // so the caller can file a challenge against that provider.
@@ -35233,7 +35329,7 @@ fn openai_data_policy() -> Value {
 /// the serving path: streaming and usage-in-stream are unconditional on this
 /// gateway; MTP reflects the catalog's speculative-decoding capability;
 /// provenance signing reflects whether this node has a provenance signer
-/// bound (local responses carry a signed `tenzro_provenance` manifest).
+/// bound (local responses carry a signed `tenzro_contentProvenance` manifest).
 fn openai_model_features(node: &Arc<TenzroNode>, model_id: &str, local: bool) -> Value {
     let mtp_capable = tenzro_model::get_model_by_id(model_id)
         .is_some_and(|e| e.mtp_kind != tenzro_model::MtpKind::None);
@@ -38847,7 +38943,7 @@ async fn handle_openai_chat_completions(
                     let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
                     // Provider-side response signing: stamp a
-                    // `tenzro_provenance` manifest signed with the node's
+                    // `tenzro_contentProvenance` manifest signed with the node's
                     // long-term Ed25519 key so consumers (and routing nodes
                     // with `require_signed_response`) can verify this output
                     // against the announcement pubkey they pinned. Absent a
@@ -38920,7 +39016,7 @@ async fn handle_openai_chat_completions(
                         "cost_wei": cost_wei.to_string(),
                         "generation_time_ms": result.generation_time_ms,
                         "tokens_per_second": result.tokens_per_second,
-                        "tenzro_provenance": provenance_manifest,
+                        "tenzro_contentProvenance": provenance_manifest,
                         "tenzro_jurisdiction": jurisdiction_receipt,
                         "commitment": commitment,
                     }))
@@ -39512,7 +39608,7 @@ async fn handle_openai_chat_completions(
                     // Invalid manifests are stripped so callers never see an
                     // unverified stamp.
                     if let Some(prov) = body
-                        .get("tenzro_provenance")
+                        .get("tenzro_contentProvenance")
                         .filter(|v| !v.is_null())
                         .cloned()
                         && verify_forwarded_provenance(
@@ -39525,7 +39621,7 @@ async fn handle_openai_chat_completions(
                         .is_none()
                         && let Some(obj) = body.as_object_mut()
                     {
-                        obj.remove("tenzro_provenance");
+                        obj.remove("tenzro_contentProvenance");
                     }
 
                     // Jurisdiction receipt: verify hash bindings, signature
@@ -49982,6 +50078,7 @@ async fn handle_settle_authorized(
         identities,
         token,
         &kv,
+        node.economic_policy().settlement_authorization_bps,
     )
     .map_err(settle_authorized_error)?;
 

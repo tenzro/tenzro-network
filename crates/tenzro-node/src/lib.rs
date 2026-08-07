@@ -120,6 +120,7 @@ pub mod identity_gossip;
 pub mod infer;
 pub mod inference_challenge;
 pub mod ingress;
+mod interaction_rpc;
 pub mod ip_rate_limit;
 pub mod keygen;
 pub mod lane_resolver;
@@ -184,7 +185,10 @@ pub mod workflow_runtime;
 pub mod x402_idempotency_store;
 
 // Re-export commonly used types
-pub use config::NodeConfig;
+// `EconomicsConfig` is the type of a public `NodeConfig` field, so it has to
+// be nameable by anyone constructing a config — otherwise the field can be
+// read but never set from outside the crate.
+pub use config::{EconomicsConfig, NodeConfig};
 pub use error::{NodeError, Result};
 pub use handle::{NodeHandle, spawn_in_background, spawn_in_background_with_unlocker};
 pub use health::{HealthMonitor, HealthStatus, OverallHealth, SubsystemStatus};

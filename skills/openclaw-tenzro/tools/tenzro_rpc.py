@@ -7605,6 +7605,71 @@ def bind_device(identity_did: str, label: str, attestation_object_b64: str) -> d
     )
 
 
+
+
+def get_interaction(interaction_id: str) -> dict:
+    """Read an anchored interaction receipt and its attestation digest.
+
+    This is the accounting layer. An edge gateway can meter a request and
+    charge for it; what it cannot do is answer, afterwards and to somebody who
+    trusts neither party, which party consumed what, under whose authority, and
+    whether the payment that cleared corresponds to the work that happened.
+
+    One record covers every interaction kind — access, inference, storage,
+    marketplace — so an audit is a lookup rather than a reconciliation across
+    per-surface logs.
+    """
+    return _rpc("tenzro_getInteraction", {"interaction_id": interaction_id})
+
+
+def verify_interaction(interaction: dict) -> dict:
+    """Check a receipt you were handed against what the node anchored.
+
+    Compares content addresses rather than checking a signature, so the answer
+    does not depend on trusting the verifying node: the same digest can be
+    recomputed offline from the same published rule. A record altered after
+    issue produces a different digest and is reported as `digest_mismatch`,
+    with both digests returned.
+    """
+    return _rpc("tenzro_verifyInteraction", {"interaction": interaction})
+
+def settlement_networks() -> dict:
+    """The rails a payment can settle on, and the smallest worthwhile payment on each.
+
+    Supporting x402 and being able to carry a micropayment are different
+    properties. Base speaks x402 fluently and still cannot carry a one-cent
+    charge without roughly 10% overhead, so an agent that picks a rail by
+    "does it support x402" loses money on every metered call. Read this before
+    declaring what asset you want to be paid in.
+    """
+    return _rpc("tenzro_settlementNetworks", {})
+
+
+def route_payment(
+    amount_wei: str,
+    asset: str | None = None,
+    tnzo_micro_usd: int | None = None,
+) -> dict:
+    """Where a specific charge would settle.
+
+    Four outcomes: `accumulate` (below the micro-settlement floor — hold it in
+    a channel, settling alone costs more than it moves), `primary` (the Tenzro
+    Ledger), `secondary` (a rail carrying the payee's asset), and
+    `no_viable_rail` (clears the floor, but nothing carries that asset at this
+    size — accumulate or accept another asset).
+
+    Omit `tnzo_micro_usd` and the node settles on the home chain rather than
+    routing real money on a guessed exchange rate.
+    """
+    return _rpc(
+        "tenzro_settlementNetworks",
+        {
+            "amount_wei": amount_wei,
+            "asset": asset,
+            "tnzo_micro_usd": tnzo_micro_usd,
+        },
+    )
+
 def list_bound_devices(identity_did: str) -> dict:
     """List the devices that can authenticate as an identity.
 
@@ -8132,13 +8197,13 @@ def get_provider_reputation(provider_address: str) -> dict:
 
 
 def get_provenance(content_hash: str) -> dict:
-    """Look up a cached ProvenanceManifest by 32-byte hex `content_hash`.
+    """Look up a cached ContentProvenanceManifest by 32-byte hex `content_hash`.
 
     Read path for the EU AI Act Art. 50(2) machine-readable
     synthetic-content marker. The store is bounded LRU-by-signed_at, so a
     `not found` does not prove the response was never signed.
     """
-    return _rpc("tenzro_getProvenance", {"content_hash": content_hash})
+    return _rpc("tenzro_getContentProvenance", {"content_hash": content_hash})
 
 
 def get_dispute(dispute_id: str) -> dict:
@@ -10371,6 +10436,12 @@ COMMANDS = {
     # ── Adaptive Burn (Spec 8) ──
     "bind_device": lambda args: bind_device(
         args["identity_did"], args["label"], args["attestation_object_b64"]
+    ),
+    "get_interaction": lambda args: get_interaction(args["interaction_id"]),
+    "verify_interaction": lambda args: verify_interaction(args["interaction"]),
+    "settlement_networks": lambda args: settlement_networks(),
+    "route_payment": lambda args: route_payment(
+        args["amount_wei"], args.get("asset"), args.get("tnzo_micro_usd")
     ),
     "list_bound_devices": lambda args: list_bound_devices(args["identity_did"]),
     "revoke_bound_device": lambda args: revoke_bound_device(

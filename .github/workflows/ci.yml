@@ -130,6 +130,42 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion -- -D warnings
 
+  sdks:
+    name: SDKs
+    runs-on: ubuntu-latest
+    # The Rust and TypeScript SDKs are standalone workspaces with their own
+    # lockfiles, because each ships as its own published package. That means
+    # `cargo check --workspace` from the repo root does not reach them, and
+    # `-p tenzro-sdk` resolves to nothing at all — a check against them from
+    # the root can look like it passed while compiling none of their code.
+    #
+    # They depend on tenzro-types, so a change there breaks them silently.
+    # This job is the thing that makes that break visible.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Rust SDK — format
+        working-directory: sdk/tenzro-sdk
+        run: cargo fmt --all -- --check
+      - name: Rust SDK — clippy
+        working-directory: sdk/tenzro-sdk
+        run: cargo clippy --lib -- -D warnings
+      - name: Rust SDK — test
+        working-directory: sdk/tenzro-sdk
+        run: cargo test --lib
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: TypeScript SDK — install
+        working-directory: sdk/tenzro-ts-sdk
+        run: npm ci || npm install
+      - name: TypeScript SDK — typecheck
+        working-directory: sdk/tenzro-ts-sdk
+        run: npx tsc --noEmit -p tsconfig.json
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

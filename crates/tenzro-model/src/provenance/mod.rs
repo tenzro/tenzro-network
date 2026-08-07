@@ -11,17 +11,17 @@
 //!   `tenzro-model::routing` to stamp every [`InferenceResponse`] before it
 //!   leaves the inference router.
 //! - [`Ed25519ProvenanceSigner`] is the in-process implementation used on
-//!   testnet: it signs the canonical preimage of [`ProvenanceManifest`] with
+//!   testnet: it signs the canonical preimage of [`ContentProvenanceManifest`] with
 //!   an Ed25519 key, identical to the validator block-signing scheme.
 //! - [`ProvenanceStore`] is a small SHA-256-keyed in-memory cache so
-//!   `tenzro_getProvenance(content_hash)` can resolve a manifest after the
+//!   `tenzro_getContentProvenance(content_hash)` can resolve a manifest after the
 //!   fact (e.g. when an agent quotes an output and the consumer wants to
 //!   verify the original source).
 //!
 //! When the C2PA Content Credentials final spec under the EU AI Office Code
 //! of Practice (June 2026) is finalized, the wire encoding swap point is the
 //! [`ProvenanceSigner::sign`] return value — the
-//! [`tenzro_types::ProvenanceManifest`] in-memory shape is stable.
+//! [`tenzro_types::ContentProvenanceManifest`] in-memory shape is stable.
 //!
 //! [`InferenceResponse`]: tenzro_types::InferenceResponse
 
@@ -30,7 +30,7 @@ pub mod c2pa;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tenzro_types::ProvenanceManifest;
+use tenzro_types::ContentProvenanceManifest;
 use tenzro_types::primitives::{Address, Hash};
 
 /// Standard EU AI Act Art. 50(2) assertion tag for ordinary AI outputs.
@@ -56,7 +56,7 @@ pub fn hash_content(output: &[u8]) -> Hash {
 /// Pluggable provenance signer. The router calls
 /// [`sign`](ProvenanceSigner::sign) before returning each
 /// [`InferenceResponse`]; implementations are responsible for producing a
-/// fully-populated [`ProvenanceManifest`] (including `signature`,
+/// fully-populated [`ContentProvenanceManifest`] (including `signature`,
 /// `signer_public_key`, and `algorithm`) over the canonical preimage.
 ///
 /// [`InferenceResponse`]: tenzro_types::InferenceResponse
@@ -71,19 +71,19 @@ pub trait ProvenanceSigner: Send + Sync {
         provider: Address,
         output: &[u8],
         assertion: &str,
-    ) -> Result<ProvenanceManifest, ProvenanceError>;
+    ) -> Result<ContentProvenanceManifest, ProvenanceError>;
 }
 
 /// In-memory store keyed by `content_hash`. Wired into `tenzro-node` as a
 /// shared `Arc<ProvenanceStore>` consumed by both the router (writer) and
-/// the `tenzro_getProvenance` RPC handler (reader).
+/// the `tenzro_getContentProvenance` RPC handler (reader).
 ///
 /// The store is intentionally bounded by a hard cap so a node serving a
 /// chatty model cannot OOM. When the cap is hit, the oldest entry by
 /// `signed_at` is evicted.
 #[derive(Debug)]
 pub struct ProvenanceStore {
-    inner: DashMap<Hash, ProvenanceManifest>,
+    inner: DashMap<Hash, ContentProvenanceManifest>,
     capacity: usize,
 }
 
@@ -97,7 +97,7 @@ impl ProvenanceStore {
     }
 
     /// Insert a manifest, evicting the oldest entry by `signed_at` when full.
-    pub fn put(&self, manifest: ProvenanceManifest) {
+    pub fn put(&self, manifest: ContentProvenanceManifest) {
         if self.inner.len() >= self.capacity {
             // Evict oldest. DashMap's iteration is not ordered, so we scan —
             // acceptable at this small capacity (a few thousand entries).
@@ -114,7 +114,7 @@ impl ProvenanceStore {
     }
 
     /// Lookup by SHA-256 content hash.
-    pub fn get(&self, content_hash: &Hash) -> Option<ProvenanceManifest> {
+    pub fn get(&self, content_hash: &Hash) -> Option<ContentProvenanceManifest> {
         self.inner.get(content_hash).map(|v| v.value().clone())
     }
 
@@ -177,7 +177,7 @@ pub enum ProvenanceError {
 
 /// Verify a provenance manifest's signature against its embedded public key
 /// and canonical preimage. Returns `Ok(())` if the signature is valid.
-pub fn verify_manifest(manifest: &ProvenanceManifest) -> Result<(), ProvenanceError> {
+pub fn verify_manifest(manifest: &ContentProvenanceManifest) -> Result<(), ProvenanceError> {
     use tenzro_crypto::keys::{KeyType, PublicKey};
     use tenzro_crypto::signatures::{Signature, verify};
 
@@ -202,7 +202,7 @@ pub fn verify_manifest(manifest: &ProvenanceManifest) -> Result<(), ProvenanceEr
 /// registered key pass the key check trivially (self-attested manifest,
 /// verified best-effort only).
 pub fn verify_response_manifest(
-    manifest: &ProvenanceManifest,
+    manifest: &ContentProvenanceManifest,
     output: &[u8],
     model_id: &str,
     registered_pubkey: Option<&[u8]>,

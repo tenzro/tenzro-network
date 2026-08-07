@@ -338,6 +338,16 @@ pub struct EconomicPolicy {
     /// Commission on marketplace invocations (agent templates, skills, tools),
     /// taken from the creator's price.
     pub marketplace_commission_bps: u32,
+    /// Commission on a settlement authorization — an app wallet paying out to
+    /// its own payer.
+    ///
+    /// A separate rate from the settlement split because it prices a different
+    /// thing: an app paying its own user is not a service payment being divided
+    /// between operator, treasury and validator, so the split does not apply
+    /// and the two never stack. It lives here rather than as a constant so it
+    /// is governance-set like every other rate — it was previously the one
+    /// charged rate the network could not vote on.
+    pub settlement_authorization_bps: u32,
     /// The network's default disposition of a non-TNZO inbound asset. A payee
     /// may override it for their own receipts; this is what applies when they
     /// have expressed no preference.
@@ -356,6 +366,7 @@ impl Default for EconomicPolicy {
             validating: ValidatingSchedule::default(),
             delegated: DelegatedSchedule::default(),
             marketplace_commission_bps: 500,
+            settlement_authorization_bps: 50,
             default_conversion: ConversionPolicy::ConvertToTnzo,
             // 10^13 of 10^18 — one ten-thousandth of a TNZO. Chosen so a single
             // token of a cheap model accrues rather than settling alone, while a
@@ -413,6 +424,12 @@ impl EconomicPolicy {
             return Err(EconomicPolicyError::RateOutOfRange {
                 name: "marketplace_commission_bps",
                 bps: self.marketplace_commission_bps,
+            });
+        }
+        if self.settlement_authorization_bps > BPS_DENOMINATOR {
+            return Err(EconomicPolicyError::RateOutOfRange {
+                name: "settlement_authorization_bps",
+                bps: self.settlement_authorization_bps,
             });
         }
 
@@ -575,19 +592,23 @@ mod tests {
     /// for governance too.
     #[test]
     fn the_operator_must_hold_a_strict_majority_in_both_public_modes() {
-        let mut policy = EconomicPolicy::default();
-        policy.validating = ValidatingSchedule {
-            operator_bps: 5_000,
-            treasury_bps: 5_000,
+        let policy = EconomicPolicy {
+            validating: ValidatingSchedule {
+                operator_bps: 5_000,
+                treasury_bps: 5_000,
+            },
+            ..EconomicPolicy::default()
         };
         let err = policy.validate().expect_err("50/50 is not a majority");
         assert!(format!("{err}").contains("not more than half"));
 
-        let mut policy = EconomicPolicy::default();
-        policy.delegated = DelegatedSchedule {
-            operator_bps: 4_000,
-            rpc_provider_bps: 3_000,
-            treasury_bps: 3_000,
+        let policy = EconomicPolicy {
+            delegated: DelegatedSchedule {
+                operator_bps: 4_000,
+                rpc_provider_bps: 3_000,
+                treasury_bps: 3_000,
+            },
+            ..EconomicPolicy::default()
         };
         assert!(matches!(
             policy.validate(),
@@ -595,18 +616,22 @@ mod tests {
         ));
 
         // One bp over half is a majority.
-        let mut policy = EconomicPolicy::default();
-        policy.validating = ValidatingSchedule {
-            operator_bps: 5_001,
-            treasury_bps: 4_999,
+        let policy = EconomicPolicy {
+            validating: ValidatingSchedule {
+                operator_bps: 5_001,
+                treasury_bps: 4_999,
+            },
+            ..EconomicPolicy::default()
         };
         policy.validate().unwrap();
     }
 
     #[test]
     fn a_commission_above_one_hundred_percent_is_refused() {
-        let mut policy = EconomicPolicy::default();
-        policy.marketplace_commission_bps = BPS_DENOMINATOR + 1;
+        let policy = EconomicPolicy {
+            marketplace_commission_bps: BPS_DENOMINATOR + 1,
+            ..EconomicPolicy::default()
+        };
         assert!(matches!(
             policy.validate(),
             Err(EconomicPolicyError::RateOutOfRange {

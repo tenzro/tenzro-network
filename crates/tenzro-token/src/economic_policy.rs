@@ -147,11 +147,13 @@ mod tests {
     #[test]
     fn a_valid_policy_becomes_live() {
         let mgr = EconomicPolicyManager::new();
-        let mut policy = EconomicPolicy::default();
-        policy.delegated = DelegatedSchedule {
-            operator_bps: 7_000,
-            rpc_provider_bps: 2_000,
-            treasury_bps: 1_000,
+        let policy = EconomicPolicy {
+            delegated: DelegatedSchedule {
+                operator_bps: 7_000,
+                rpc_provider_bps: 2_000,
+                treasury_bps: 1_000,
+            },
+            ..EconomicPolicy::default()
         };
         mgr.apply(policy).unwrap();
         assert_eq!(mgr.current().delegated.rpc_provider_bps, 2_000);
@@ -164,10 +166,12 @@ mod tests {
         let mgr = EconomicPolicyManager::new();
         let before = mgr.current();
 
-        let mut broken = EconomicPolicy::default();
-        broken.validating = ValidatingSchedule {
-            operator_bps: 4_000,
-            treasury_bps: 6_000,
+        let broken = EconomicPolicy {
+            validating: ValidatingSchedule {
+                operator_bps: 4_000,
+                treasury_bps: 6_000,
+            },
+            ..EconomicPolicy::default()
         };
         assert!(mgr.apply(broken).is_err());
         assert_eq!(mgr.current(), before, "the live policy must be untouched");

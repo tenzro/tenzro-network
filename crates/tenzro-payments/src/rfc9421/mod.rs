@@ -14,6 +14,7 @@ pub mod jwks;
 pub mod nonce;
 pub mod registry;
 pub mod signature;
+pub mod web_bot_auth;
 
 pub use jwks::{Jwk, JwkSet};
 pub use nonce::NonceCache;

@@ -17,6 +17,40 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
             "streaming": True,
             "pushNotifications": False,
             "stateTransitionHistory": True,
+            # AP2 and its x402 sibling are discovered here, not from the skill
+            # list. A counterparty reads `capabilities.extensions` to decide
+            # whether it can transact with us at all; a skill description is
+            # prose it cannot branch on. Both are implemented in
+            # `tenzro-payments` — declaring them is what makes them reachable.
+            #
+            # `required` is False on purpose. AP2's own samples set it True
+            # because those agents are payment-only and cannot serve an
+            # unpaying caller. Most Tenzro skills are free, and a node serving
+            # a model at `Network` visibility is reachable by payment alone
+            # with no prior relationship, so demanding every client speak AP2
+            # before it may call `resolve_did` would refuse traffic we want.
+            "extensions": [
+                {
+                    "uri": "https://github.com/google-agentic-commerce/ap2/v1",
+                    "description": (
+                        "Supports the Agent Payments Protocol. Intent, Cart and "
+                        "Payment mandates are verified against the signer's TDIP "
+                        "identity and enforced against its delegation scope and "
+                        "runtime spending policy before settlement."
+                    ),
+                    "required": False,
+                },
+                {
+                    "uri": "https://github.com/google-a2a/a2a-x402/v0.1",
+                    "description": (
+                        "Supports payments using the x402 protocol for on-chain "
+                        "settlement. Schemes: exact, tenzro-hybrid, upto "
+                        "(buyer signs a ceiling, seller settles actual usage), "
+                        "and batch-settlement for sub-cent metering."
+                    ),
+                    "required": False,
+                },
+            ],
         },
         "skills": [
             {
@@ -1151,6 +1185,58 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
+            },
+            {
+                "id": "interaction-receipts",
+                "name": "Interaction Receipts and Audit",
+                "description": (
+                    "The accounting layer. An edge gateway can meter a request "
+                    "and charge for it, but cannot answer afterwards, to "
+                    "somebody who trusts neither party, which party consumed "
+                    "what, under whose authority, and whether the payment that "
+                    "cleared corresponds to the work that happened. Every "
+                    "interaction — a web fetch, an inference, a storage read, a "
+                    "marketplace invocation — shares one record and one digest, "
+                    "so an audit is a lookup rather than a reconciliation "
+                    "across per-surface logs. Verification compares content "
+                    "addresses rather than signatures, so it does not depend on "
+                    "trusting the verifying node."
+                ),
+                "tags": [
+                    "accounting", "audit", "receipts", "provenance",
+                    "attestation", "access", "inference", "x402",
+                ],
+                "examples": [
+                    "Read interaction int-1 and its attestation digest",
+                    "Verify this receipt against what the node anchored",
+                    "Which agent accessed this resource and under whose authority?",
+                ],
+            },
+            {
+                "id": "settlement-rails",
+                "name": "Settlement Rails and Micropayment Routing",
+                "description": (
+                    "Which networks a payment can settle on, and where a given "
+                    "charge should go. Tenzro settles on its own ledger and "
+                    "treats every other chain as a secondary layer. Supporting "
+                    "x402 and being able to carry a micropayment are different "
+                    "properties: Base speaks x402 and still cannot carry a "
+                    "one-cent charge without roughly 10% overhead, so a rail "
+                    "chosen on protocol support alone loses money on every "
+                    "metered call. Routing returns one of four answers — "
+                    "accumulate below the micro-settlement floor, settle on the "
+                    "Tenzro Ledger, settle on a secondary rail carrying the "
+                    "payee's asset, or no viable rail at that size."
+                ),
+                "tags": [
+                    "settlement", "micropayments", "x402", "rails", "routing",
+                    "stellar", "xrpl", "canton", "plume", "stablecoin",
+                ],
+                "examples": [
+                    "List the settlement rails and their minimum payment sizes",
+                    "Which rails carry RLUSD?",
+                    "Where would a 0.001 TNZO charge settle if the payee wants USDC?",
+                ],
             },
             {
                 "id": "device-binding",

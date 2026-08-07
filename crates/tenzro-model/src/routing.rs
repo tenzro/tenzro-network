@@ -476,7 +476,7 @@ pub struct InferenceRouter {
     usage_tracker: Option<Arc<UsageTracker>>,
     /// Optional EU AI Act Art. 50(2) provenance signer. When set, every
     /// successful inference response is stamped with a signed
-    /// `ProvenanceManifest` before it is returned. When unset (e.g. unit
+    /// `ContentProvenanceManifest` before it is returned. When unset (e.g. unit
     /// tests, dev-mode nodes that haven't generated a key yet), responses
     /// still carry `synthetic_content = true` but no manifest — downstream
     /// consumers can still tell the content is AI-generated, just not who
@@ -485,7 +485,7 @@ pub struct InferenceRouter {
     /// Optional provenance store. When both `provenance_signer` and
     /// `provenance_store` are set, freshly signed manifests are written
     /// into the store under their `content_hash` so the
-    /// `tenzro_getProvenance(content_hash)` RPC can resolve them later.
+    /// `tenzro_getContentProvenance(content_hash)` RPC can resolve them later.
     provenance_store: Option<Arc<crate::provenance::ProvenanceStore>>,
     /// Prices every routed call under the model its provider declared, and
     /// accumulates the resulting prices as the market history that
@@ -563,7 +563,7 @@ impl InferenceRouter {
     /// so every successful inference response is stamped with a signed
     /// EU AI Act Art. 50(2) provenance manifest. Pair with
     /// [`with_provenance_store`] to make those manifests retrievable via
-    /// `tenzro_getProvenance(content_hash)`.
+    /// `tenzro_getContentProvenance(content_hash)`.
     ///
     /// [`ProvenanceSigner`]: crate::provenance::ProvenanceSigner
     /// [`Ed25519ProvenanceSigner`]: crate::provenance::Ed25519ProvenanceSigner
@@ -579,7 +579,7 @@ impl InferenceRouter {
 
     /// Attaches a shared [`ProvenanceStore`] that the router writes every
     /// freshly signed manifest into. The same `Arc` should be handed to the
-    /// `tenzro_getProvenance` RPC handler so the read and write paths share
+    /// `tenzro_getContentProvenance` RPC handler so the read and write paths share
     /// state.
     ///
     /// [`ProvenanceStore`]: crate::provenance::ProvenanceStore
@@ -1555,7 +1555,7 @@ impl InferenceRouter {
                         .to_string();
 
                     // Provider-attached provenance manifest (optional
-                    // `tenzro_provenance` extension on the OpenAI-compatible
+                    // `tenzro_contentProvenance` extension on the OpenAI-compatible
                     // response). Verified against the output bytes, the
                     // routed model id, and — when the provider registered a
                     // signing key — that key. When the caller demanded a
@@ -1563,9 +1563,9 @@ impl InferenceRouter {
                     // provider failure and the retry loop moves on; when
                     // verification is optional, a bad manifest is dropped
                     // with a warning and routing proceeds unsigned.
-                    let provider_manifest = match resp_body.get("tenzro_provenance") {
+                    let provider_manifest = match resp_body.get("tenzro_contentProvenance") {
                         Some(v) if !v.is_null() => {
-                            match serde_json::from_value::<tenzro_types::ProvenanceManifest>(
+                            match serde_json::from_value::<tenzro_types::ContentProvenanceManifest>(
                                 v.clone(),
                             ) {
                                 Ok(manifest) => {

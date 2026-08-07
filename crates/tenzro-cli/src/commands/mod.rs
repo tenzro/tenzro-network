@@ -79,6 +79,7 @@ pub mod pq_hybrid;
 pub mod presign;
 pub mod provenance;
 pub mod provider;
+pub mod rails;
 pub mod reputation;
 pub mod resources;
 pub mod rpc_cmd;

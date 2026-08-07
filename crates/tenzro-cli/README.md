@@ -787,6 +787,48 @@ rather than the CLI — the attestation object comes from
 `navigator.credentials.create()`. `bind`, `revoke` and `transfer` are
 admin-token gated; `list` and `wallet-readiness` are open.
 
+### Interaction Receipts (the accounting layer)
+
+An edge gateway can meter a request and charge for it; it cannot answer
+afterwards, to somebody who trusts neither party, which party consumed what
+under whose authority. Every interaction — a fetch, an inference, a storage
+read, a marketplace call — shares one record and one content address.
+
+```bash
+# Read an anchored receipt and its attestation digest
+tenzro interaction get int-1
+
+# Check a receipt you were handed against what the node anchored.
+# Compares content addresses, not signatures — so the answer does not
+# depend on trusting the node that answers.
+tenzro interaction verify ./receipt.json
+```
+
+### Settlement Rails and Micropayment Routing
+
+Supporting x402 and being able to carry a micropayment are different properties.
+Base speaks x402 fluently and still cannot carry a one-cent charge without
+roughly 10% overhead, so a rail chosen on protocol support alone loses money on
+every metered call.
+
+```bash
+# Every rail, cheapest-first, with the smallest worthwhile payment on each
+tenzro rails list
+tenzro rails list --x402-only
+tenzro rails list --asset RLUSD
+tenzro rails list --json
+
+# Where would this charge settle? Four possible answers:
+#   accumulate     — below the micro-settlement floor; hold it in a channel
+#   primary        — the Tenzro Ledger
+#   secondary      — the cheapest rail carrying the payee's asset
+#   no_viable_rail — clears the floor, but nothing carries that asset this small
+tenzro rails route 1000000000000000000 --asset USDC --tnzo-micro-usd 1000000
+```
+
+Omitting `--tnzo-micro-usd` settles on the home chain rather than routing real
+money on a guessed exchange rate.
+
 ### Payment Operations
 
 ```bash
@@ -1132,13 +1174,13 @@ tenzro dispute list-by-channel --channel-id <channel_id>
 
 ### Provenance (EU AI Act §50(2))
 
-Tenzro records a C2PA-style `ProvenanceManifest` per AI-generated content,
+Tenzro records a C2PA-style `ContentProvenanceManifest` per AI-generated content,
 keyed by `content_hash` (SHA-256 of the output bytes). Validators sign and
 persist these manifests; this command fetches one back.
 
 ```bash
 # Fetch the cached manifest for a 32-byte content hash
-# (calls tenzro_getProvenance; -32004 if no manifest exists for this hash)
+# (calls tenzro_getContentProvenance; -32004 if no manifest exists for this hash)
 tenzro provenance get 0x<sha256_hex>
 ```
 

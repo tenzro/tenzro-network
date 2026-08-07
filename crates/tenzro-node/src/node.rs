@@ -2334,12 +2334,12 @@ pub struct TenzroNode {
     /// the `tenzro_listInferenceUsage` RPC.
     usage_tracker: Option<Arc<tenzro_model::UsageTracker>>,
     /// EU AI Act Art. 50(2) provenance store. Populated by the inference
-    /// router (writer) and queried by the `tenzro_getProvenance` RPC
+    /// router (writer) and queried by the `tenzro_getContentProvenance` RPC
     /// (reader). Shared via `Arc` so both producer and consumer see the
     /// same SHA-256-keyed manifest cache.
     provenance_store: Option<Arc<tenzro_model::ProvenanceStore>>,
     /// Provenance signer used when this node serves a model itself — the
-    /// `/v1/chat/completions` handler stamps a `tenzro_provenance` manifest
+    /// `/v1/chat/completions` handler stamps a `tenzro_contentProvenance` manifest
     /// on locally-generated responses with it. Built from the node's
     /// long-term Ed25519 key so the manifest verifies against the
     /// announcement pubkey consumers pinned.
@@ -6246,7 +6246,7 @@ impl TenzroNode {
         // the announcement pubkey they already pinned. Nodes without a key
         // on disk fall back to an ephemeral signer (manifest is still a
         // valid disclosure mark, just not bindable to a registered
-        // provider). The store is shared with the `tenzro_getProvenance`
+        // provider). The store is shared with the `tenzro_getContentProvenance`
         // RPC so the read and write paths see the same in-memory cache.
         // Failure to mint any key is non-fatal: the router degrades to
         // "synthetic_content=true but no signature", matching dev-mode
@@ -13144,11 +13144,25 @@ impl TenzroNode {
     /// than defaulted: paying that share to the treasury because nobody was
     /// configured would pay the wrong party without saying so.
     pub fn rpc_provider_payee(&self) -> Option<Address> {
-        self.config
-            .economics
-            .rpc_provider_payee
-            .as_deref()
-            .and_then(|s| Address::from_hex(s).ok())
+        let configured = self.config.economics.rpc_provider_payee.as_deref()?;
+        match Address::from_hex(configured) {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                // Do not fail silently here. Returning `None` for an
+                // unparseable address makes settlement refuse with "name them
+                // in `[economics] rpc_provider_payee`" — to an operator who
+                // did name one, and is now being told to do the thing they
+                // already did. A mis-cased EIP-55 checksum is enough to
+                // trigger it, so the log line has to say which value failed
+                // and why.
+                tracing::error!(
+                    configured,
+                    error = %e,
+                    "[economics] rpc_provider_payee is not a valid address, so this node                      cannot name the RPC provider it owes a share to and settlement will                      refuse. Note that a 20-byte address is EIP-55 checksummed: mixed-case                      hex must carry the correct casing, or be all-lowercase."
+                );
+                None
+            }
+        }
     }
 
     /// The wallet this node is paid at.
@@ -13756,13 +13770,13 @@ impl TenzroNode {
 
     /// Returns the EU AI Act Art. 50(2) provenance store. Populated by the
     /// inference router on every successful response and queried by the
-    /// `tenzro_getProvenance` RPC handler.
+    /// `tenzro_getContentProvenance` RPC handler.
     pub fn provenance_store(&self) -> Option<&Arc<tenzro_model::ProvenanceStore>> {
         self.provenance_store.as_ref()
     }
 
     /// Returns the provenance signer used to stamp locally-served inference
-    /// responses with a `tenzro_provenance` manifest.
+    /// responses with a `tenzro_contentProvenance` manifest.
     pub fn provenance_signer(&self) -> Option<&tenzro_model::SharedProvenanceSigner> {
         self.provenance_signer.as_ref()
     }

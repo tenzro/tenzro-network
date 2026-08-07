@@ -25,6 +25,13 @@ pub struct IdentityDidParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InteractionIdParams {
+    /// The interaction to read, e.g. `int-1`. Joins the provenance record, the
+    /// usage record and the settlement receipt.
+    pub interaction_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetBalanceParams {
     #[schemars(description = "Hex-encoded account address (with or without 0x prefix)")]
     pub address: String,
@@ -13022,7 +13029,7 @@ impl TenzroMcpServer {
         Parameters(params): Parameters<GetProvenanceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "content_hash": params.content_hash });
-        let result = rpc_dispatch(&self.node, "tenzro_getProvenance", payload)
+        let result = rpc_dispatch(&self.node, "tenzro_getContentProvenance", payload)
             .await
             .map_err(|e| err_internal(format!("getProvenance failed: {}", e)))?;
         json_result(result)
@@ -13041,6 +13048,37 @@ impl TenzroMcpServer {
             &self.node,
             "tenzro_listBoundDevices",
             serde_json::json!({ "identity_did": params.identity_did }),
+        )
+        .await?;
+        json_result(v)
+    }
+
+    #[tool(
+        description = "Read an anchored interaction receipt and its attestation digest. This is the accounting layer: an edge gateway can meter a request and charge for it, but cannot answer afterwards, to somebody who trusts neither party, which party consumed what under whose authority and whether the payment that cleared corresponds to the work that happened. Covers every interaction kind — access, inference, storage, marketplace — under one record."
+    )]
+    async fn get_interaction(
+        &self,
+        Parameters(params): Parameters<InteractionIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getInteraction",
+            serde_json::json!({ "interaction_id": params.interaction_id }),
+        )
+        .await?;
+        json_result(v)
+    }
+
+    #[tool(
+        description = "The rails a payment can settle on and the smallest worthwhile payment on each. Supporting x402 and being able to carry a micropayment are different properties: Base speaks x402 and still cannot carry a one-cent charge without roughly 10% overhead. Read this before declaring a settlement asset, because a rail that cannot carry your typical charge will accumulate it in a channel instead of settling it."
+    )]
+    async fn settlement_networks(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_settlementNetworks",
+            serde_json::json!({}),
         )
         .await?;
         json_result(v)

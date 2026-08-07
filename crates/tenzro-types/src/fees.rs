@@ -72,23 +72,23 @@ pub fn apply_developer_margin(network_cost: u128, margin_bps: u32) -> Option<u12
 /// an app wallet to a payer, this fraction of the authorized amount routes to
 /// the network treasury instead. The payer receives `amount_tnzo` minus this
 /// commission; the app wallet is debited exactly `amount_tnzo`.
+/// Splits an authorized settlement amount into `(payer_net, commission)`.
 ///
-/// This is its own rate and **not** part of the `EconomicPolicy` settlement
-/// split — an app paying out to its own user is not a service payment being
-/// divided between operator, treasury and validator, so the split does not
-/// apply and neither charge stacks on the other. It is also not the settlement
-/// engine's former `network_fee_bps`, which is now 0; a comment here once
-/// claimed parity with that rate, which stopped being true when the double
-/// charge it described was removed.
-pub const SETTLEMENT_AUTHORIZATION_COMMISSION_BPS: u32 = 50;
-
-/// Splits an authorized settlement amount into (payer_net, commission).
+/// `bps` is `EconomicPolicy::settlement_authorization_bps`, passed in rather
+/// than read from a constant here so the rate is governance-set like every
+/// other rate. It used to be the one charged rate the network could not vote
+/// on, which also made it the one rate that could silently disagree with the
+/// published policy.
 ///
-/// `commission = amount * SETTLEMENT_AUTHORIZATION_COMMISSION_BPS / 10000`
-/// (integer floor), `payer_net = amount - commission`. Cannot overflow for
-/// any `u128` input because the multiply is decomposed.
-pub fn split_settlement_authorization(amount: u128) -> (u128, u128) {
-    let bps = SETTLEMENT_AUTHORIZATION_COMMISSION_BPS as u128;
+/// `commission = amount * bps / 10000` (integer floor), `payer_net = amount -
+/// commission`. Cannot overflow for any `u128` input because the multiply is
+/// decomposed into quotient and remainder.
+///
+/// This charge is **not** part of the settlement split and never stacks with
+/// it: an app paying out to its own user is not a service payment being
+/// divided between operator, treasury and validator.
+pub fn split_settlement_authorization(amount: u128, bps: u32) -> (u128, u128) {
+    let bps = bps as u128;
     // Quotient/remainder decomposition avoids u128 overflow on amount * bps.
     let commission = (amount / 10000) * bps + (amount % 10000) * bps / 10000;
     (amount - commission, commission)

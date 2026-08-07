@@ -165,6 +165,19 @@ Apache-2.0.
   (`wallet_readiness`). A device counts as hardware-bound only when the
   credential cannot sync **and** an attestation verified to a pinned vendor root
   says the key lives in hardware — no platform account is an identity authority.
+- `provenance` — one accounting record per interaction, and the attestation
+  digest that makes it checkable by a third party. `Authority` records what
+  *specifically* permitted an interaction (delegation / AP2 mandate / x402
+  payment / credential), and `ChargeRef` separates *free* from *accrued into a
+  channel* — a distinction `settlement_tx: None` cannot make and one that is
+  opposite facts to an auditor. `InteractionKind::Access` covers the web fetch
+  alongside inference, so access and inference audit through the same row.
+- `settlement_network` — the rails a payment can settle on, ordered
+  cheapest-first, each with an indicative fee floor. Supporting x402 and being
+  able to carry a micropayment are different properties, and this table is what
+  keeps them apart: `cheapest_rail_for` returns the cheapest rail that both
+  carries the payee's asset and is worth using at that size, or `None` when the
+  charge must accumulate instead.
 - `machine_id` — graded machine-identity sources. `IdentifierGrade` separates
   `Model` (Arm `MIDR_EL1`, x86 CPUID — a design, not a unit), `Fused` (Intel/AMD
   PPIN, Apple ECID, SMBIOS — per-unit but readable) and `Attestable` (TPM EK,

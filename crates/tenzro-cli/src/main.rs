@@ -26,11 +26,23 @@ use commands::{
     SetUsernameCmd, SetupCmd, SkillCommand, StableAssetCommand, StakeCommand, TaskCommand,
     TeeCommand, TextSegmentCommand, TokenCommand, ToolCommand, TrainCommand, TranscribeCommand,
     TreasuryCommand, ValidatorCommand, VrfCommand, WalletCommand, WorkflowCommand, WormholeCommand,
-    X402Command, ZkCommand, attested_clock::AttestedClockCommand, bridge_fee::BridgeFeeCommand,
-    database::DatabaseCommand, device::DeviceCommand, files::FilesCommand,
-    function::FunctionCommand, ivms101::Ivms101Command, lease::LeaseCommand,
-    machine::MachineCommand, rpc_cmd::RpcCommand, site::SiteCommand, status_bar::StatusCmd,
-    urwa::UrwaCommand, visibility::VisibilityCommand, wormhole_ntt::WormholeNttCommand,
+    X402Command, ZkCommand,
+    attested_clock::AttestedClockCommand,
+    bridge_fee::BridgeFeeCommand,
+    database::DatabaseCommand,
+    device::DeviceCommand,
+    files::FilesCommand,
+    function::FunctionCommand,
+    ivms101::Ivms101Command,
+    lease::LeaseCommand,
+    machine::MachineCommand,
+    rails::{InteractionCommand, RailsCommand},
+    rpc_cmd::RpcCommand,
+    site::SiteCommand,
+    status_bar::StatusCmd,
+    urwa::UrwaCommand,
+    visibility::VisibilityCommand,
+    wormhole_ntt::WormholeNttCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -502,6 +514,14 @@ enum Command {
     #[command(subcommand)]
     Device(DeviceCommand),
 
+    /// Settlement rails and micropayment routing
+    #[command(subcommand)]
+    Rails(RailsCommand),
+
+    /// Interaction receipts: read and verify the accounting layer
+    #[command(subcommand)]
+    Interaction(InteractionCommand),
+
     /// Tenant object storage: upload, list, download, and delete files
     #[command(subcommand)]
     Files(FilesCommand),
@@ -769,6 +789,8 @@ async fn main() -> Result<()> {
         Command::Cluster(cmd) => cmd.execute().await?,
         Command::Database(cmd) => cmd.execute().await?,
         Command::Device(cmd) => cmd.execute().await?,
+        Command::Rails(cmd) => cmd.execute().await?,
+        Command::Interaction(cmd) => cmd.execute().await?,
         Command::Files(cmd) => cmd.execute().await?,
         Command::Status(cmd) => cmd.execute().await?,
         Command::Rpc(cmd) => cmd.execute().await?,

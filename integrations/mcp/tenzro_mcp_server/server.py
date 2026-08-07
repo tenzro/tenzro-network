@@ -1505,7 +1505,7 @@ async def get_provenance(content_hash: str) -> dict:
     marker per EU AI Act Art. 50(2). Returns a JSON-RPC `-32004` error when no
     manifest is cached for the hash.
     """
-    result = await rpc_call("tenzro_getProvenance", {"content_hash": content_hash})
+    result = await rpc_call("tenzro_getContentProvenance", {"content_hash": content_hash})
     return result
 
 

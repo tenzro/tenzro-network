@@ -16,7 +16,7 @@
 use super::{ProvenanceError, ProvenanceSigner, hash_content};
 use std::sync::Arc;
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
-use tenzro_types::ProvenanceManifest;
+use tenzro_types::ContentProvenanceManifest;
 use tenzro_types::primitives::{Address, Timestamp};
 
 /// Provenance signer that stamps manifests with an Ed25519 signature.
@@ -57,12 +57,12 @@ impl ProvenanceSigner for Ed25519ProvenanceSigner {
         provider: Address,
         output: &[u8],
         assertion: &str,
-    ) -> Result<ProvenanceManifest, ProvenanceError> {
+    ) -> Result<ContentProvenanceManifest, ProvenanceError> {
         // Build the manifest *first* with empty signature, then compute the
         // canonical preimage from the populated fields and sign that. This
         // avoids the bug where the signed bytes drift from what verifiers
         // re-compute (e.g. timestamp skew between sign and serialize).
-        let mut manifest = ProvenanceManifest {
+        let mut manifest = ContentProvenanceManifest {
             content_hash: hash_content(output),
             model_id: model_id.to_string(),
             provider,

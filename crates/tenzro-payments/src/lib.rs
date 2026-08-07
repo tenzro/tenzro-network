@@ -37,6 +37,7 @@ pub mod ap2;
 
 pub mod gateway;
 pub mod identity_binding;
+pub mod micropayment_route;
 pub mod middleware;
 pub mod revenue_split;
 pub mod settlement_asset;

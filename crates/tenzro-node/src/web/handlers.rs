@@ -1231,6 +1231,47 @@ pub async fn jwks(State(state): State<Arc<WebState>>) -> Json<tenzro_payments::r
     Json(tenzro_payments::rfc9421::JwkSet::from_agents(&agents))
 }
 
+/// `GET /.well-known/http-message-signatures-directory` — Web Bot Auth key
+/// directory.
+///
+/// This is **not** `/.well-known/jwks.json` under another name. That document
+/// publishes service keys for OAuth introspection; this one publishes agent
+/// signing keys so an edge that has never heard of `did:tenzro:` can still
+/// verify a Tenzro agent's requests. Visa's Trusted Agent Protocol and
+/// Mastercard's Agent Pay both authenticate over this format, and Cloudflare,
+/// AWS WAF, Vercel, Shopify and Akamai verify it. Serving the wrong document
+/// here would hand verifiers keys that cannot verify the signatures they are
+/// checking.
+///
+/// Only Ed25519 keys appear: the Web Bot Auth profile Tenzro implements signs
+/// with Ed25519 only, so publishing a key of any other type would advertise a
+/// verification path no signature will ever take. Revoked and suspended
+/// identities are excluded — a directory that still lists them keeps a revoked
+/// agent verifiable at every edge that cached it.
+pub async fn web_bot_auth_directory(
+    State(state): State<Arc<WebState>>,
+) -> Json<tenzro_payments::rfc9421::web_bot_auth::SignatureDirectory> {
+    use tenzro_payments::rfc9421::web_bot_auth::{DirectoryKey, SignatureDirectory};
+
+    let agents = match state.node.as_ref().and_then(|n| n.identity_registry()) {
+        Some(registry) => {
+            tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone()).list_all_agents()
+        }
+        None => Vec::new(),
+    };
+
+    let keys = agents
+        .into_iter()
+        .filter(|a| a.is_active)
+        .filter_map(|a| {
+            let pk: [u8; 32] = a.public_key_bytes.as_slice().try_into().ok()?;
+            Some(DirectoryKey::from_ed25519(&pk, a.agent_did))
+        })
+        .collect();
+
+    Json(SignatureDirectory::new(keys))
+}
+
 /// `GET /.well-known/jwks.json/:keyid` — single JWK lookup. The `:keyid`
 /// path segment is URL-decoded by axum and passed through to the agent
 /// registry, which accepts `did:tenzro:...` (first compatible key) and
