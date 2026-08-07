@@ -15,7 +15,7 @@
 //!   and returns it (ERC-721 `tokenId` semantics).
 //! - **0x101b — ReputationRegistry**: `submitFeedback(uint256,int8,string)`,
 //!   `getFeedback(uint256,uint256)`, `getFeedbackCount(uint256)`, plus the
-//!   v0.6+ `revokeFeedback` / `appendResponse` / `isFeedbackRevoked` /
+//!   Jan 2026 revision `revokeFeedback` / `appendResponse` / `isFeedbackRevoked` /
 //!   `getFeedbackResponses` mutators. All selectors are uint256-keyed on
 //!   the subject `agentId`.
 //! - **0x101c — ValidationRegistry**: `validationRequest` / `validationResponse`
@@ -52,7 +52,7 @@ const GAS_REGISTER_WITH_URI: u64 = 80_000;
 /// charged on top of this base via `GAS_SET_METADATA`.
 const GAS_REGISTER_WITH_METADATA: u64 = 80_000;
 /// Gas cost for unsetting an agent's controller wallet
-/// (`unsetAgentWallet(uint256)` per ERC-8004 v0.6+). Cheaper than
+/// (`unsetAgentWallet(uint256)` per ERC-8004 (Jan 2026 revision)). Cheaper than
 /// `setAgentWallet` because no signature payload is verified.
 const GAS_UNSET_AGENT_WALLET: u64 = 30_000;
 /// Gas cost for updating just the metadata URI on an existing agent.
@@ -69,11 +69,11 @@ const GAS_SET_METADATA: u64 = 30_000;
 /// Gas cost for submitting a feedback entry to ReputationRegistry
 const GAS_SUBMIT_FEEDBACK: u64 = 60_000;
 /// Gas cost for revoking a previously-submitted feedback entry
-/// (`revokeFeedback` per ERC-8004 v0.6+). Cheaper than submit because
+/// (`revokeFeedback` per ERC-8004 (Jan 2026 revision)). Cheaper than submit because
 /// it only flips a flag on an existing record.
 const GAS_REVOKE_FEEDBACK: u64 = 30_000;
 /// Gas cost for attaching a response URI to a feedback entry
-/// (`appendResponse` per ERC-8004 v0.6+). Same envelope as submit since
+/// (`appendResponse` per ERC-8004 (Jan 2026 revision)). Same envelope as submit since
 /// both write a UTF-8 string.
 const GAS_APPEND_RESPONSE: u64 = 50_000;
 /// Gas cost for opening a validation request (`validationRequest`).
@@ -105,13 +105,13 @@ const SELECTOR_REGISTER_WITH_METADATA: [u8; 4] = [0x8e, 0xa4, 0x22, 0x86];
 /// metadataUri, bool exists)`.
 /// Selector = `bytes4(keccak256("getAgent(uint256)"))` = `0x2de5aaf7`.
 const SELECTOR_GET_AGENT: [u8; 4] = [0x2d, 0xe5, 0xaa, 0xf7];
-/// `setAgentURI(uint256 agentId, string metadataUri)` per ERC-8004 v0.6+.
+/// `setAgentURI(uint256 agentId, string metadataUri)` per ERC-8004 (Jan 2026 revision).
 /// Selector = `bytes4(keccak256("setAgentURI(uint256,string)"))` =
 /// `0x0af28bd3`. Updates the metadata URI on an already-registered
 /// agent without rebinding the wallet.
 const SELECTOR_SET_AGENT_URI: [u8; 4] = [0x0a, 0xf2, 0x8b, 0xd3];
 /// `setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature)`
-/// per ERC-8004 v0.6+.
+/// per ERC-8004 (Jan 2026 revision).
 /// Selector = `bytes4(keccak256("setAgentWallet(uint256,address,uint256,bytes)"))`
 /// = `0x2d1ef5ae`. Rebinds the controller wallet on an
 /// already-registered agent. The `deadline + signature` pair is the
@@ -120,7 +120,7 @@ const SELECTOR_SET_AGENT_URI: [u8; 4] = [0x0a, 0xf2, 0x8b, 0xd3];
 /// (the outer EVM caller is auditable), but accepts the trailing pair
 /// so callers can emit byte-identical calldata for both targets.
 const SELECTOR_SET_AGENT_WALLET: [u8; 4] = [0x2d, 0x1e, 0xf5, 0xae];
-/// `unsetAgentWallet(uint256 agentId)` per ERC-8004 v0.6+. Selector =
+/// `unsetAgentWallet(uint256 agentId)` per ERC-8004 (Jan 2026 revision). Selector =
 /// `bytes4(keccak256("unsetAgentWallet(uint256)"))` = `0x3fddcf19`.
 /// Clears the controller wallet (sets to zero address) on an
 /// already-registered agent — used when an operator wants to disable a
@@ -128,30 +128,30 @@ const SELECTOR_SET_AGENT_WALLET: [u8; 4] = [0x2d, 0x1e, 0xf5, 0xae];
 /// `false` if the agent is unknown.
 const SELECTOR_UNSET_AGENT_WALLET: [u8; 4] = [0x3f, 0xdd, 0xcf, 0x19];
 /// `setMetadata(uint256 agentId, string metadataKey, bytes metadataValue)`
-/// per ERC-8004 v0.6+.
+/// per ERC-8004 (Jan 2026 revision).
 /// Selector = `bytes4(keccak256("setMetadata(uint256,string,bytes)"))` =
 /// `0x466648da`. Writes one `(key → value)` pair against an agent. An
 /// empty `metadataValue` deletes the entry, matching the reference
 /// contract's "set to empty = clear" convention.
 const SELECTOR_SET_METADATA: [u8; 4] = [0x46, 0x66, 0x48, 0xda];
 /// `getMetadata(uint256 agentId, string metadataKey)` per ERC-8004
-/// v0.6+. Selector = `bytes4(keccak256("getMetadata(uint256,string)"))`
+/// Jan 2026 revision. Selector = `bytes4(keccak256("getMetadata(uint256,string)"))`
 /// = `0xcb4799f2`. Reads back the bytes stored under
 /// `(agentId, metadataKey)`; returns an empty bytestring if the entry
 /// doesn't exist.
 const SELECTOR_GET_METADATA: [u8; 4] = [0xcb, 0x47, 0x99, 0xf2];
-/// `getAgentURI(uint256 agentId)` per ERC-8004 v0.6+. Selector =
+/// `getAgentURI(uint256 agentId)` per ERC-8004 (Jan 2026 revision). Selector =
 /// `bytes4(keccak256("getAgentURI(uint256)"))` = `0xce91aede`. Returns
 /// the metadata URI stored against an agent, or empty string if the
 /// agent isn't registered. Pairs with `setAgentURI`.
 const SELECTOR_GET_AGENT_URI: [u8; 4] = [0xce, 0x91, 0xae, 0xde];
-/// `getAgentWallet(uint256 agentId)` per ERC-8004 v0.6+. Selector =
+/// `getAgentWallet(uint256 agentId)` per ERC-8004 (Jan 2026 revision). Selector =
 /// `bytes4(keccak256("getAgentWallet(uint256)"))` = `0x00339509`.
 /// Returns the controller address bound to an agent, or the zero
 /// address if the agent isn't registered. Pairs with `setAgentWallet`.
 const SELECTOR_GET_AGENT_WALLET: [u8; 4] = [0x00, 0x33, 0x95, 0x09];
 /// `submitFeedback(uint256 subject, int8 rating, string contextUri)` —
-/// ERC-8004 v0.6+ uint256-keyed feedback submission.
+/// ERC-8004 (Jan 2026 revision) uint256-keyed feedback submission.
 /// Selector = `bytes4(keccak256("submitFeedback(uint256,int8,string)"))`
 /// = `0xe5679c29`.
 const SELECTOR_SUBMIT_FEEDBACK: [u8; 4] = [0xe5, 0x67, 0x9c, 0x29];
@@ -164,13 +164,13 @@ const SELECTOR_GET_FEEDBACK: [u8; 4] = [0x2d, 0x15, 0x04, 0x57];
 /// = `0x4537b764`.
 const SELECTOR_GET_FEEDBACK_COUNT: [u8; 4] = [0x45, 0x37, 0xb7, 0x64];
 /// `revokeFeedback(uint256 agentId, bytes32 feedbackId)` per ERC-8004
-/// v0.6+. Selector = `bytes4(keccak256("revokeFeedback(uint256,bytes32)"))`
+/// Jan 2026 revision. Selector = `bytes4(keccak256("revokeFeedback(uint256,bytes32)"))`
 /// = `0xa28334ce`. Marks an existing feedback entry as revoked without
 /// removing it from the append-only log — `getFeedback` continues to
 /// return the entry but with `revoked=true`.
 const SELECTOR_REVOKE_FEEDBACK: [u8; 4] = [0xa2, 0x83, 0x34, 0xce];
 /// `appendResponse(uint256 agentId, bytes32 feedbackId, string responseUri)`
-/// per ERC-8004 v0.6+.
+/// per ERC-8004 (Jan 2026 revision).
 /// Selector = `bytes4(keccak256("appendResponse(uint256,bytes32,string)"))`
 /// = `0x601f5676`. Lets the rated agent attach a single response URI to
 /// a feedback entry. Idempotent overwrite: a second call replaces the
@@ -178,7 +178,7 @@ const SELECTOR_REVOKE_FEEDBACK: [u8; 4] = [0xa2, 0x83, 0x34, 0xce];
 /// semantics).
 const SELECTOR_APPEND_RESPONSE: [u8; 4] = [0x60, 0x1f, 0x56, 0x76];
 /// `isFeedbackRevoked(uint256 agentId, bytes32 feedbackId)` per
-/// ERC-8004 v0.6+. Selector =
+/// ERC-8004 (Jan 2026 revision). Selector =
 /// `bytes4(keccak256("isFeedbackRevoked(uint256,bytes32)"))` =
 /// `0xb017cb04`. Returns `true` only if the entry exists and has been
 /// revoked. Unknown entries return `false` (not an error) — callers
@@ -186,10 +186,10 @@ const SELECTOR_APPEND_RESPONSE: [u8; 4] = [0x60, 0x1f, 0x56, 0x76];
 /// "missing" from "present and not revoked".
 const SELECTOR_IS_FEEDBACK_REVOKED: [u8; 4] = [0xb0, 0x17, 0xcb, 0x04];
 /// `getFeedbackResponses(uint256 agentId, bytes32 feedbackId)` per
-/// ERC-8004 v0.6+. Selector =
+/// ERC-8004 (Jan 2026 revision). Selector =
 /// `bytes4(keccak256("getFeedbackResponses(uint256,bytes32)"))` =
 /// `0xcc84633b`. Returns the response URI attached to a feedback entry
-/// (empty string if none). Note: the v0.6 spec implies a *list* of
+/// (empty string if none). Note: the Jan 2026 spec implies a *list* of
 /// responses, but the reference contract only stores the latest, so we
 /// surface a single string for round-trip parity with `appendResponse`.
 const SELECTOR_GET_FEEDBACK_RESPONSES: [u8; 4] = [0xcc, 0x84, 0x63, 0x3b];
@@ -252,7 +252,7 @@ fn word_to_agent_id(word: &[u8]) -> Option<u64> {
 ///
 /// `feedback_id` is derived inside `Erc8004ReputationRegistry::submit`
 /// as `keccak256(subject ‖ index_be(8) ‖ context_uri)` and is what the
-/// v0.6+ `revokeFeedback` / `appendResponse` selectors look up by. The
+/// Jan 2026 revision `revokeFeedback` / `appendResponse` selectors look up by. The
 /// older index-based reads (`getFeedback(subject, index)`) keep working
 /// because the per-subject `Vec` is preserved alongside.
 ///
@@ -312,7 +312,7 @@ pub struct ValidationEntry {
 /// Native Tenzro IdentityRegistry — owns `agentId` allocation, the
 /// `agentId -> AgentRecord` table, and a per-agent `(key → value)`
 /// metadata KV store covering the `setMetadata` / `getMetadata` selectors
-/// introduced in ERC-8004 v0.6+.
+/// introduced in ERC-8004 (Jan 2026 revision).
 ///
 /// `agentId` is allocated sequentially as a `u64` starting at `1`
 /// (mirroring the ERC-721 `tokenId` convention used by the reference
@@ -466,7 +466,7 @@ impl Default for Erc8004IdentityRegistry {
 ///   the legacy `getFeedback(subject, index)` and `getFeedbackCount`
 ///   reads.
 /// - **Hash-keyed**: `index_by_id: (subject, feedback_id) -> usize`.
-///   Drives the v0.6+ `revokeFeedback` and `appendResponse` mutators.
+///   Drives the Jan 2026 revision `revokeFeedback` and `appendResponse` mutators.
 ///
 /// Both views see the same backing entries — there is no separate
 /// storage for revocations or responses; mutators reach through
@@ -487,7 +487,7 @@ impl Erc8004ReputationRegistry {
     }
 
     /// Append a feedback entry. Derives `feedback_id` deterministically
-    /// from `(subject, index_at_submit_time, context_uri)` so the v0.6+
+    /// from `(subject, index_at_submit_time, context_uri)` so the Jan 2026 revision
     /// hash-keyed selectors can address it. The caller is expected to
     /// emit the same `feedback_id` in any event log so off-chain
     /// indexers can correlate the two paths.
@@ -748,7 +748,7 @@ fn execute_identity(
 }
 
 /// `register()` (no args) — allocate a fresh sequential `agentId` with
-/// the zero wallet address and an empty URI. Per ERC-8004 v0.6+ this
+/// the zero wallet address and an empty URI. Per ERC-8004 (Jan 2026 revision) this
 /// matches the bare `register()` overload on the reference contract,
 /// which mints a new ERC-721 `tokenId` to the caller and lets later
 /// `setAgentURI` / `setAgentWallet` calls populate the record.
@@ -777,7 +777,7 @@ fn handle_register_bare(
 }
 
 /// `register(string tokenURI)` — allocate a fresh sequential `agentId`
-/// and set the metadata URI in one call. Per ERC-8004 v0.6+.
+/// and set the metadata URI in one call. Per ERC-8004 (Jan 2026 revision).
 ///
 /// Calldata layout (after selector):
 ///   [0..32]    offset to tokenURI (= 32)
@@ -813,7 +813,7 @@ fn handle_register_with_uri(
 /// `register(string tokenURI, (string,bytes)[] metadata)` — allocate a
 /// fresh sequential `agentId`, set the metadata URI, and write N
 /// `(key, value)` metadata entries in one transaction. Per ERC-8004
-/// v0.6+.
+/// Jan 2026 revision.
 ///
 /// Calldata layout (after selector):
 ///   [0..32]    offset to tokenURI
@@ -870,7 +870,7 @@ fn handle_register_with_metadata(
 
 /// `unsetAgentWallet(uint256 agentId)` — clear the controller wallet on
 /// an already-registered agent (sets it to the zero address). Per
-/// ERC-8004 v0.6+. Used to disable a compromised key without
+/// ERC-8004 (Jan 2026 revision). Used to disable a compromised key without
 /// re-registering.
 ///
 /// Calldata layout (after selector):
@@ -1538,7 +1538,7 @@ fn handle_is_feedback_revoked(
 ///
 /// Returns the response URI attached via `appendResponse`. Empty string
 /// if no response was attached or the entry doesn't exist. Although the
-/// v0.6 spec naming hints at a list, the reference contract only stores
+/// spec naming hints at a list, the reference contract only stores
 /// the latest response, so this returns a single string.
 fn handle_get_feedback_responses(
     registry: &Erc8004ReputationRegistry,
@@ -1961,7 +1961,7 @@ mod tests {
         out
     }
 
-    /// Build calldata for `register(string tokenURI)` per ERC-8004 v0.6+.
+    /// Build calldata for `register(string tokenURI)` per ERC-8004 (Jan 2026 revision).
     /// Calldata head: [offset=32], tail: [length, utf8-padded-32].
     fn encode_register_with_uri_calldata(metadata_uri: &str) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 64 + metadata_uri.len() + 32);
@@ -2034,7 +2034,7 @@ mod tests {
 
     #[test]
     fn identity_get_unknown_agent_reverts() {
-        // ERC-8004 v0.6+ semantics: unknown agentId reverts (no
+        // ERC-8004 (Jan 2026 revision) semantics: unknown agentId reverts (no
         // exists-flag fallback). The precompile signals this by returning
         // a failed PrecompileResult. Callers must distinguish "allocated
         // with empty fields" from "never allocated" — that's what the
@@ -2301,7 +2301,7 @@ mod tests {
 
     #[test]
     fn set_agent_uri_reverts_for_unknown_agent() {
-        // ERC-8004 v0.6+: unknown agentId reverts (no fallback to
+        // ERC-8004 (Jan 2026 revision): unknown agentId reverts (no fallback to
         // bool-false). Registry stays untouched.
         let registry = Arc::new(Erc8004IdentityRegistry::new());
 
@@ -2455,7 +2455,7 @@ mod tests {
     }
 
     /// Submit a feedback entry through the precompile dispatcher and
-    /// return the derived `feedback_id`. Used by the v0.6+ mutator
+    /// return the derived `feedback_id`. Used by the Jan 2026 revision mutator
     /// tests below so they exercise the same code path as production
     /// (register → submit → derive → mutate).
     fn submit_basic_feedback(

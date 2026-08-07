@@ -6289,23 +6289,23 @@ def ap2_list_mandates(controller_did: str) -> dict:
     return _rpc("tenzro_listMandates", {"controller_did": controller_did})
 
 
-# ── ERC-8004 (Trustless Agents Registry — full v0.6+ surface) ────
+# ── ERC-8004 (Trustless Agents Registry — full Jan 2026 revision surface) ────
 
 
 # -- Identity registry --------------------------------------------------
 
 def erc8004_encode_register() -> dict:
-    """Encode calldata for IdentityRegistry.register() (v0.6+ no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId)."""
+    """Encode calldata for IdentityRegistry.register() (Jan 2026 revision no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId)."""
     return _rpc("tenzro_erc8004EncodeRegister", {})
 
 
 def erc8004_encode_register_with_uri(agent_uri: str) -> dict:
-    """Encode calldata for IdentityRegistry.register(string agentURI) (v0.6+ overload with agent URI)."""
+    """Encode calldata for IdentityRegistry.register(string agentURI) (Jan 2026 revision overload with agent URI)."""
     return _rpc("tenzro_erc8004EncodeRegisterWithUri", {"agent_uri": agent_uri})
 
 
 def erc8004_encode_register_with_metadata(agent_uri: str, metadata: list) -> dict:
-    """Encode calldata for IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (v0.6+ overload with metadata entries).
+    """Encode calldata for IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (Jan 2026 revision overload with metadata entries).
 
     metadata: list of {"key": str, "value": str (hex-encoded bytes)}.
     """
@@ -6329,7 +6329,7 @@ def erc8004_decode_get_agent(return_data: str) -> dict:
 
 
 def erc8004_encode_set_agent_uri(agent_id: str, metadata_uri: str) -> dict:
-    """Encode calldata for IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (v0.6+)."""
+    """Encode calldata for IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeSetAgentURI", {
         "agent_id": agent_id,
         "metadata_uri": metadata_uri,
@@ -6338,7 +6338,7 @@ def erc8004_encode_set_agent_uri(agent_id: str, metadata_uri: str) -> dict:
 
 def erc8004_encode_set_agent_wallet(agent_id: str, new_wallet: str,
                                      deadline: int, signature: str) -> dict:
-    """Encode calldata for IdentityRegistry.setAgentWallet(uint256, address, uint256, bytes) (v0.6+)."""
+    """Encode calldata for IdentityRegistry.setAgentWallet(uint256, address, uint256, bytes) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeSetAgentWallet", {
         "agent_id": agent_id,
         "new_wallet": new_wallet,
@@ -6349,7 +6349,7 @@ def erc8004_encode_set_agent_wallet(agent_id: str, new_wallet: str,
 
 def erc8004_encode_set_metadata(agent_id: str, metadata_key: str,
                                  metadata_value: str) -> dict:
-    """Encode calldata for IdentityRegistry.setMetadata(uint256, string, bytes) (v0.6+)."""
+    """Encode calldata for IdentityRegistry.setMetadata(uint256, string, bytes) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeSetMetadata", {
         "agent_id": agent_id,
         "metadata_key": metadata_key,
@@ -6358,7 +6358,7 @@ def erc8004_encode_set_metadata(agent_id: str, metadata_key: str,
 
 
 def erc8004_encode_get_metadata(agent_id: str, metadata_key: str) -> dict:
-    """Encode calldata for IdentityRegistry.getMetadata(uint256, string) (v0.6+)."""
+    """Encode calldata for IdentityRegistry.getMetadata(uint256, string) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeGetMetadata", {
         "agent_id": agent_id,
         "metadata_key": metadata_key,
@@ -6366,17 +6366,17 @@ def erc8004_encode_get_metadata(agent_id: str, metadata_key: str) -> dict:
 
 
 def erc8004_decode_get_metadata(return_data: str) -> dict:
-    """Decode bytes returndata from getMetadata() into {metadata_value} (v0.6+)."""
+    """Decode bytes returndata from getMetadata() into {metadata_value} (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004DecodeGetMetadata", {"return_data": return_data})
 
 
 def erc8004_encode_get_agent_uri(agent_id: str) -> dict:
-    """Encode calldata for IdentityRegistry.getAgentURI(uint256 agentId) (v0.6+)."""
+    """Encode calldata for IdentityRegistry.getAgentURI(uint256 agentId) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeGetAgentURI", {"agent_id": agent_id})
 
 
 def erc8004_encode_get_agent_wallet(agent_id: str) -> dict:
-    """Encode calldata for IdentityRegistry.getAgentWallet(uint256 agentId) (v0.6+)."""
+    """Encode calldata for IdentityRegistry.getAgentWallet(uint256 agentId) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeGetAgentWallet", {"agent_id": agent_id})
 
 
@@ -6411,7 +6411,7 @@ def erc8004_encode_get_feedback_count(subject_agent_id: str) -> dict:
 
 
 def erc8004_encode_revoke_feedback(agent_id: str, feedback_id: str) -> dict:
-    """Encode calldata for ReputationRegistry.revokeFeedback(uint256, bytes32) (v0.6+)."""
+    """Encode calldata for ReputationRegistry.revokeFeedback(uint256, bytes32) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeRevokeFeedback", {
         "agent_id": agent_id,
         "feedback_id": feedback_id,
@@ -6420,7 +6420,7 @@ def erc8004_encode_revoke_feedback(agent_id: str, feedback_id: str) -> dict:
 
 def erc8004_encode_append_response(agent_id: str, feedback_id: str,
                                     response_uri: str) -> dict:
-    """Encode calldata for ReputationRegistry.appendResponse(uint256, bytes32, string) (v0.6+)."""
+    """Encode calldata for ReputationRegistry.appendResponse(uint256, bytes32, string) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeAppendResponse", {
         "agent_id": agent_id,
         "feedback_id": feedback_id,
@@ -6429,7 +6429,7 @@ def erc8004_encode_append_response(agent_id: str, feedback_id: str,
 
 
 def erc8004_encode_is_feedback_revoked(agent_id: str, feedback_id: str) -> dict:
-    """Encode calldata for ReputationRegistry.isFeedbackRevoked(uint256, bytes32) (v0.6+)."""
+    """Encode calldata for ReputationRegistry.isFeedbackRevoked(uint256, bytes32) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeIsFeedbackRevoked", {
         "agent_id": agent_id,
         "feedback_id": feedback_id,
@@ -6437,7 +6437,7 @@ def erc8004_encode_is_feedback_revoked(agent_id: str, feedback_id: str) -> dict:
 
 
 def erc8004_encode_get_feedback_responses(agent_id: str, feedback_id: str) -> dict:
-    """Encode calldata for ReputationRegistry.getFeedbackResponses(uint256, bytes32) (v0.6+)."""
+    """Encode calldata for ReputationRegistry.getFeedbackResponses(uint256, bytes32) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeGetFeedbackResponses", {
         "agent_id": agent_id,
         "feedback_id": feedback_id,
@@ -6476,7 +6476,7 @@ def erc8004_encode_validation_response(request_hash: str, response: int,
 
 
 def erc8004_encode_get_validation(request_hash: str) -> dict:
-    """Encode calldata for ValidationRegistry.getValidation(bytes32 requestHash) (v0.6+)."""
+    """Encode calldata for ValidationRegistry.getValidation(bytes32 requestHash) (Jan 2026 revision)."""
     return _rpc("tenzro_erc8004EncodeGetValidation", {"request_hash": request_hash})
 
 
@@ -10216,7 +10216,7 @@ COMMANDS = {
     "ap2_get_session": lambda args: ap2_get_session(args[0]),
     "ap2_list_agent_sessions": lambda args: ap2_list_agent_sessions(args[0]),
     "ap2_list_mandates": lambda args: ap2_list_mandates(args[0]),
-    # ── ERC-8004 (Trustless Agents Registry — full v0.6+ surface) ──
+    # ── ERC-8004 (Trustless Agents Registry — full Jan 2026 revision surface) ──
     "erc8004_encode_register": lambda args: erc8004_encode_register(),
     "erc8004_encode_register_with_uri": lambda args: erc8004_encode_register_with_uri(args[0]),
     "erc8004_encode_register_with_metadata": lambda args: erc8004_encode_register_with_metadata(

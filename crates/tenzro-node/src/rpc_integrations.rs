@@ -2129,7 +2129,7 @@ pub(crate) async fn handle_erc8004_encode_validation_response(
     }))
 }
 
-// ----- ERC-8004 v0.6+ identity mutators -------------------------------
+// ----- ERC-8004 (Jan 2026 revision) identity mutators -------------------------------
 
 /// `tenzro_erc8004EncodeSetAgentURI` — produce calldata for
 /// `setAgentURI(uint256 agentId, string metadataUri)`.
@@ -2239,7 +2239,7 @@ pub(crate) async fn handle_erc8004_encode_set_metadata(
     }))
 }
 
-// ----- ERC-8004 v0.6+ identity reads ----------------------------------
+// ----- ERC-8004 (Jan 2026 revision) identity reads ----------------------------------
 
 /// `tenzro_erc8004EncodeGetMetadata` — produce calldata for
 /// `getMetadata(uint256 agentId, string metadataKey)`.
@@ -2341,7 +2341,7 @@ pub(crate) async fn handle_erc8004_encode_get_agent_wallet(
     }))
 }
 
-// ----- ERC-8004 v0.6+ reputation mutators -----------------------------
+// ----- ERC-8004 (Jan 2026 revision) reputation mutators -----------------------------
 
 /// `tenzro_erc8004EncodeRevokeFeedback` — produce calldata for
 /// `revokeFeedback(uint256 agentId, bytes32 feedbackId)`.
@@ -2410,7 +2410,7 @@ pub(crate) async fn handle_erc8004_encode_append_response(
     }))
 }
 
-// ----- ERC-8004 v0.6+ reputation reads --------------------------------
+// ----- ERC-8004 (Jan 2026 revision) reputation reads --------------------------------
 
 /// `tenzro_erc8004EncodeIsFeedbackRevoked` — produce calldata for
 /// `isFeedbackRevoked(uint256 agentId, bytes32 feedbackId)`.

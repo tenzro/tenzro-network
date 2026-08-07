@@ -3744,7 +3744,7 @@ async fn dispatch_request(
             crate::rpc_integrations::handle_erc8004_encode_validation_response(node, request.params)
                 .await
         }
-        // ERC-8004 v0.6+ identity mutators
+        // ERC-8004 (Jan 2026 revision) identity mutators
         "tenzro_erc8004EncodeSetAgentURI" => {
             crate::rpc_integrations::handle_erc8004_encode_set_agent_uri(node, request.params).await
         }
@@ -3755,7 +3755,7 @@ async fn dispatch_request(
         "tenzro_erc8004EncodeSetMetadata" => {
             crate::rpc_integrations::handle_erc8004_encode_set_metadata(node, request.params).await
         }
-        // ERC-8004 v0.6+ identity reads
+        // ERC-8004 (Jan 2026 revision) identity reads
         "tenzro_erc8004EncodeGetMetadata" => {
             crate::rpc_integrations::handle_erc8004_encode_get_metadata(node, request.params).await
         }
@@ -3769,7 +3769,7 @@ async fn dispatch_request(
             crate::rpc_integrations::handle_erc8004_encode_get_agent_wallet(node, request.params)
                 .await
         }
-        // ERC-8004 v0.6+ reputation mutators
+        // ERC-8004 (Jan 2026 revision) reputation mutators
         "tenzro_erc8004EncodeRevokeFeedback" => {
             crate::rpc_integrations::handle_erc8004_encode_revoke_feedback(node, request.params)
                 .await
@@ -3778,7 +3778,7 @@ async fn dispatch_request(
             crate::rpc_integrations::handle_erc8004_encode_append_response(node, request.params)
                 .await
         }
-        // ERC-8004 v0.6+ reputation reads
+        // ERC-8004 (Jan 2026 revision) reputation reads
         "tenzro_erc8004EncodeIsFeedbackRevoked" => {
             crate::rpc_integrations::handle_erc8004_encode_is_feedback_revoked(node, request.params)
                 .await

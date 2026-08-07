@@ -266,7 +266,7 @@ Transaction submission goes through `tenzro_signAndSendTransaction` (server-cust
 | `GET /facilitator/x402/supported` | Advertise the x402 schemes and chains this facilitator settles |
 
 **MCP Server** (default `0.0.0.0:3001`):
-Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 526 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
+Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 526 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 (Jan 2026 revision), Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -1444,7 +1444,7 @@ Each Tenzro node runs a Model Context Protocol (MCP) server (default port 3001) 
 - Capabilities: Tools
 - Server name: `tenzro`
 
-**Available tools (526)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
+**Available tools (526)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 (Jan 2026 revision) Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -1800,7 +1800,7 @@ Payments are bound to TDIP identities through the `identity_binding` module. Whe
 
 ### 13.10 ERC-8004 Trustless Agents Registry
 
-ERC-8004 v0.6+ defines three on-chain registries (Identity, Reputation, Validation) for discovering and trusting agents across heterogeneous principal chains. Tenzro implements byte-identical selectors so the same calldata works against either the native Tenzro registry (precompiles `0x101a` / `0x101b` / `0x101c`) or the Ethereum mirror. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — it is server-allocated, never derivable client-side. The TDIP `IdentityData::Machine.erc8004_agent_id` field captures the allocation for cross-system lookup.
+ERC-8004 (Jan 2026 revision) defines three on-chain registries (Identity, Reputation, Validation) for discovering and trusting agents across heterogeneous principal chains. Tenzro implements byte-identical selectors so the same calldata works against either the native Tenzro registry (precompiles `0x101a` / `0x101b` / `0x101c`) or the Ethereum mirror. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — it is server-allocated, never derivable client-side. The TDIP `IdentityData::Machine.erc8004_agent_id` field captures the allocation for cross-system lookup.
 
 **IdentityRegistry (12 surfaces):**
 
@@ -1849,7 +1849,7 @@ The `tenzro-payments` crate provides axum middleware for automatic payment handl
 | `x402` | Enabled | Coinbase x402 protocol support |
 | `ap2` | Enabled | AP2 v0.2 sign + verify + validate-pair |
 | `stripe-spt` | Enabled | Stripe SharedPaymentToken issuance + verify + cap-check |
-| `erc8004` | Enabled | ERC-8004 v0.6+ Trustless Agents Registry encode/decode |
+| `erc8004` | Enabled | ERC-8004 (Jan 2026 revision) Trustless Agents Registry encode/decode |
 | `visa-tap` | Enabled | Visa Trusted Agent Protocol (TAP) — identity + delegation + audit layer for card-rail settlement |
 | `mastercard-agent-pay` | Enabled | Mastercard Agent Pay SDK support |
 | `tempo-bridge` | Disabled | Direct Tempo network settlement |

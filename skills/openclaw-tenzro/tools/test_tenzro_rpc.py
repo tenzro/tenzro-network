@@ -1313,7 +1313,7 @@ class TestCLIDispatch(unittest.TestCase):
             "ap2_authorize_payment", "ap2_execute_payment",
             "ap2_cancel_session", "ap2_get_session",
             "ap2_list_agent_sessions",
-            # ERC-8004 Trustless Agents (full v0.6+ surface)
+            # ERC-8004 Trustless Agents (full Jan 2026 revision surface)
             "erc8004_encode_register",
             "erc8004_encode_register_with_uri",
             "erc8004_encode_register_with_metadata",
@@ -1497,7 +1497,7 @@ class TestAp2(unittest.TestCase):
 
 
 class TestErc8004(unittest.TestCase):
-    """Tests for ERC-8004 Trustless Agents Registry wrappers (full v0.6+ surface)."""
+    """Tests for ERC-8004 Trustless Agents Registry wrappers (full Jan 2026 revision surface)."""
 
     # ---- identity ----
 

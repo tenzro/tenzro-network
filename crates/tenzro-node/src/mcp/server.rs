@@ -17866,7 +17866,7 @@ impl TenzroMcpServer {
     // ─── ERC-8004 (Trustless Agents Registry) Tools ─────────────────────────
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.register() (ERC-8004 v0.6+ no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.register() (ERC-8004 (Jan 2026 revision) no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId). Returns hex calldata."
     )]
     async fn erc8004_encode_register(
         &self,
@@ -17882,7 +17882,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.register(string agentURI) (ERC-8004 v0.6+ overload with agent URI). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.register(string agentURI) (ERC-8004 (Jan 2026 revision) overload with agent URI). Returns hex calldata."
     )]
     async fn erc8004_encode_register_with_uri(
         &self,
@@ -17901,7 +17901,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (ERC-8004 v0.6+ overload with metadata entries). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (ERC-8004 (Jan 2026 revision) overload with metadata entries). Returns hex calldata."
     )]
     async fn erc8004_encode_register_with_metadata(
         &self,
@@ -17964,7 +17964,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (ERC-8004 v0.6+ mutator). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (ERC-8004 (Jan 2026 revision) mutator). Returns hex calldata."
     )]
     async fn erc8004_encode_set_agent_uri(
         &self,
@@ -17984,7 +17984,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature) (ERC-8004 v0.6+ wallet rotation). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature) (ERC-8004 (Jan 2026 revision) wallet rotation). Returns hex calldata."
     )]
     async fn erc8004_encode_set_agent_wallet(
         &self,
@@ -18006,7 +18006,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.setMetadata(uint256 agentId, string metadataKey, bytes metadataValue) (ERC-8004 v0.6+ key-value metadata). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.setMetadata(uint256 agentId, string metadataKey, bytes metadataValue) (ERC-8004 (Jan 2026 revision) key-value metadata). Returns hex calldata."
     )]
     async fn erc8004_encode_set_metadata(
         &self,
@@ -18027,7 +18027,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.getMetadata(uint256 agentId, string metadataKey) (ERC-8004 v0.6+ read). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.getMetadata(uint256 agentId, string metadataKey) (ERC-8004 (Jan 2026 revision) read). Returns hex calldata."
     )]
     async fn erc8004_encode_get_metadata(
         &self,
@@ -18066,7 +18066,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.getAgentURI(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.getAgentURI(uint256 agentId) (ERC-8004 (Jan 2026 revision) read). Returns hex calldata."
     )]
     async fn erc8004_encode_get_agent_uri(
         &self,
@@ -18085,7 +18085,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode IdentityRegistry.getAgentWallet(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata."
+        description = "ABI-encode IdentityRegistry.getAgentWallet(uint256 agentId) (ERC-8004 (Jan 2026 revision) read). Returns hex calldata."
     )]
     async fn erc8004_encode_get_agent_wallet(
         &self,
@@ -18164,7 +18164,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode ReputationRegistry.revokeFeedback(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ mutator). Returns hex calldata."
+        description = "ABI-encode ReputationRegistry.revokeFeedback(uint256 agentId, bytes32 feedbackId) (ERC-8004 (Jan 2026 revision) mutator). Returns hex calldata."
     )]
     async fn erc8004_encode_revoke_feedback(
         &self,
@@ -18184,7 +18184,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode ReputationRegistry.appendResponse(uint256 agentId, bytes32 feedbackId, string responseURI) (ERC-8004 v0.6+ mutator). Returns hex calldata."
+        description = "ABI-encode ReputationRegistry.appendResponse(uint256 agentId, bytes32 feedbackId, string responseURI) (ERC-8004 (Jan 2026 revision) mutator). Returns hex calldata."
     )]
     async fn erc8004_encode_append_response(
         &self,
@@ -18205,7 +18205,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode ReputationRegistry.isFeedbackRevoked(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata."
+        description = "ABI-encode ReputationRegistry.isFeedbackRevoked(uint256 agentId, bytes32 feedbackId) (ERC-8004 (Jan 2026 revision) read). Returns hex calldata."
     )]
     async fn erc8004_encode_is_feedback_revoked(
         &self,
@@ -18225,7 +18225,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode ReputationRegistry.getFeedbackResponses(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata."
+        description = "ABI-encode ReputationRegistry.getFeedbackResponses(uint256 agentId, bytes32 feedbackId) (ERC-8004 (Jan 2026 revision) read). Returns hex calldata."
     )]
     async fn erc8004_encode_get_feedback_responses(
         &self,
@@ -18290,7 +18290,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "ABI-encode ValidationRegistry.getValidation(bytes32 requestHash) (ERC-8004 v0.6+ read). Returns hex calldata."
+        description = "ABI-encode ValidationRegistry.getValidation(bytes32 requestHash) (ERC-8004 (Jan 2026 revision) read). Returns hex calldata."
     )]
     async fn erc8004_encode_get_validation(
         &self,
@@ -21192,29 +21192,29 @@ impl ServerHandler for TenzroMcpServer {
              • ap2_verify_mandate — Verify a single AP2 VDC mandate (Intent/Cart/Payment)\n\
              • ap2_validate_mandate_pair — Validate Intent+Cart consistency\n\
              • ap2_protocol_info — AP2 protocol metadata (version, supported types)\n\n\
-             ERC-8004 (Trustless Agents Registry — v0.6+ surface):\n\
+             ERC-8004 (Trustless Agents Registry — Jan 2026 revision surface):\n\
              • erc8004_encode_register — ABI-encode IdentityRegistry.register() (no-arg overload)\n\
              • erc8004_encode_register_with_uri — ABI-encode IdentityRegistry.register(string agentURI)\n\
              • erc8004_encode_register_with_metadata — ABI-encode IdentityRegistry.register(string,(string,bytes)[])\n\
              • erc8004_encode_get_agent — ABI-encode IdentityRegistry.getAgent()\n\
              • erc8004_decode_get_agent — Decode (address,string) returndata from getAgent()\n\
-             • erc8004_encode_set_agent_uri — ABI-encode IdentityRegistry.setAgentURI() (v0.6+)\n\
-             • erc8004_encode_set_agent_wallet — ABI-encode IdentityRegistry.setAgentWallet() (v0.6+)\n\
-             • erc8004_encode_set_metadata — ABI-encode IdentityRegistry.setMetadata() (v0.6+)\n\
-             • erc8004_encode_get_metadata — ABI-encode IdentityRegistry.getMetadata() (v0.6+)\n\
-             • erc8004_decode_get_metadata — Decode bytes returndata from getMetadata() (v0.6+)\n\
-             • erc8004_encode_get_agent_uri — ABI-encode IdentityRegistry.getAgentURI() (v0.6+)\n\
-             • erc8004_encode_get_agent_wallet — ABI-encode IdentityRegistry.getAgentWallet() (v0.6+)\n\
+             • erc8004_encode_set_agent_uri — ABI-encode IdentityRegistry.setAgentURI() (Jan 2026 revision)\n\
+             • erc8004_encode_set_agent_wallet — ABI-encode IdentityRegistry.setAgentWallet() (Jan 2026 revision)\n\
+             • erc8004_encode_set_metadata — ABI-encode IdentityRegistry.setMetadata() (Jan 2026 revision)\n\
+             • erc8004_encode_get_metadata — ABI-encode IdentityRegistry.getMetadata() (Jan 2026 revision)\n\
+             • erc8004_decode_get_metadata — Decode bytes returndata from getMetadata() (Jan 2026 revision)\n\
+             • erc8004_encode_get_agent_uri — ABI-encode IdentityRegistry.getAgentURI() (Jan 2026 revision)\n\
+             • erc8004_encode_get_agent_wallet — ABI-encode IdentityRegistry.getAgentWallet() (Jan 2026 revision)\n\
              • erc8004_encode_feedback — ABI-encode ReputationRegistry.submitFeedback(bytes32,int8,string)\n\
              • erc8004_encode_get_feedback — ABI-encode ReputationRegistry.getFeedback()\n\
              • erc8004_encode_get_feedback_count — ABI-encode ReputationRegistry.getFeedbackCount()\n\
-             • erc8004_encode_revoke_feedback — ABI-encode ReputationRegistry.revokeFeedback() (v0.6+)\n\
-             • erc8004_encode_append_response — ABI-encode ReputationRegistry.appendResponse() (v0.6+)\n\
-             • erc8004_encode_is_feedback_revoked — ABI-encode ReputationRegistry.isFeedbackRevoked() (v0.6+)\n\
-             • erc8004_encode_get_feedback_responses — ABI-encode ReputationRegistry.getFeedbackResponses() (v0.6+)\n\
+             • erc8004_encode_revoke_feedback — ABI-encode ReputationRegistry.revokeFeedback() (Jan 2026 revision)\n\
+             • erc8004_encode_append_response — ABI-encode ReputationRegistry.appendResponse() (Jan 2026 revision)\n\
+             • erc8004_encode_is_feedback_revoked — ABI-encode ReputationRegistry.isFeedbackRevoked() (Jan 2026 revision)\n\
+             • erc8004_encode_get_feedback_responses — ABI-encode ReputationRegistry.getFeedbackResponses() (Jan 2026 revision)\n\
              • erc8004_encode_validation_request — ABI-encode ValidationRegistry.validationRequest(address,uint256,string,bytes32)\n\
              • erc8004_encode_validation_response — ABI-encode ValidationRegistry.validationResponse(bytes32,uint8,string,bytes32,string)\n\
-             • erc8004_encode_get_validation — ABI-encode ValidationRegistry.getValidation() (v0.6+)\n\n\
+             • erc8004_encode_get_validation — ABI-encode ValidationRegistry.getValidation() (Jan 2026 revision)\n\n\
              Wormhole Cross-Chain:\n\
              • wormhole_chain_id — Look up Wormhole numeric chain id by chain name\n\
              • wormhole_parse_vaa_id — Parse {chain}/{emitter}/{sequence} VAA id\n\

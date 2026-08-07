@@ -202,29 +202,29 @@ pub mod selectors {
     /// `getAgent(uint256)` — ERC-8004 read returning
     /// `(address controller, string metadataUri)` for an agent id.
     pub const GET_AGENT: [u8; 4] = [0x2d, 0xe5, 0xaa, 0xf7];
-    /// `setAgentURI(uint256,string)` — ERC-8004 v0.6+ selector for
+    /// `setAgentURI(uint256,string)` — ERC-8004 (Jan 2026 revision) selector for
     /// updating an agent's metadata URI in place.
     pub const SET_AGENT_URI: [u8; 4] = [0x0a, 0xf2, 0x8b, 0xd3];
-    /// `setAgentWallet(uint256,address,uint256,bytes)` — ERC-8004 v0.6+
+    /// `setAgentWallet(uint256,address,uint256,bytes)` — ERC-8004 (Jan 2026 revision)
     /// selector for rebinding an agent's controller wallet, with the
     /// reference contract's `(deadline, signature)` consent pair.
     pub const SET_AGENT_WALLET: [u8; 4] = [0x2d, 0x1e, 0xf5, 0xae];
-    /// `unsetAgentWallet(uint256)` — ERC-8004 v0.6+ selector for
+    /// `unsetAgentWallet(uint256)` — ERC-8004 (Jan 2026 revision) selector for
     /// clearing an agent's controller wallet binding (sets it to the
     /// zero address). Used when retiring or rotating an agent.
     pub const UNSET_AGENT_WALLET: [u8; 4] = [0x3f, 0xdd, 0xcf, 0x19];
-    /// `setMetadata(uint256,string,bytes)` — ERC-8004 v0.6+ selector for
+    /// `setMetadata(uint256,string,bytes)` — ERC-8004 (Jan 2026 revision) selector for
     /// writing a `(key → value)` metadata entry. Empty `value` deletes.
     pub const SET_METADATA: [u8; 4] = [0x46, 0x66, 0x48, 0xda];
-    /// `getMetadata(uint256,string)` — ERC-8004 v0.6+ selector for
+    /// `getMetadata(uint256,string)` — ERC-8004 (Jan 2026 revision) selector for
     /// reading the bytes stored at `(agentId, metadataKey)`.
     pub const GET_METADATA: [u8; 4] = [0xcb, 0x47, 0x99, 0xf2];
-    /// `getAgentURI(uint256)` — ERC-8004 v0.6+ read selector returning
+    /// `getAgentURI(uint256)` — ERC-8004 (Jan 2026 revision) read selector returning
     /// the metadata URI bound to an agent. Splits out from `getAgent` so
     /// callers that only need the URI avoid decoding the full
     /// `(address, string)` tuple.
     pub const GET_AGENT_URI: [u8; 4] = [0xce, 0x91, 0xae, 0xde];
-    /// `getAgentWallet(uint256)` — ERC-8004 v0.6+ read selector returning
+    /// `getAgentWallet(uint256)` — ERC-8004 (Jan 2026 revision) read selector returning
     /// the controller wallet bound to an agent. Splits out from
     /// `getAgent` for the same reason: callers that only need the
     /// address skip the dynamic-string decode path.
@@ -242,22 +242,22 @@ pub mod selectors {
     /// `getFeedbackCount(uint256)` — read selector returning the number
     /// of feedback entries recorded against a subject agent.
     pub const GET_FEEDBACK_COUNT: [u8; 4] = [0x45, 0x37, 0xb7, 0x64];
-    /// `revokeFeedback(uint256,bytes32)` — ERC-8004 v0.6+ mutator. Marks
+    /// `revokeFeedback(uint256,bytes32)` — ERC-8004 (Jan 2026 revision) mutator. Marks
     /// a previously-submitted feedback entry as withdrawn by its rater.
     /// Idempotent on the wire: a second call against an already-revoked
     /// entry returns `false`.
     pub const REVOKE_FEEDBACK: [u8; 4] = [0xa2, 0x83, 0x34, 0xce];
-    /// `appendResponse(uint256,bytes32,string)` — ERC-8004 v0.6+
+    /// `appendResponse(uint256,bytes32,string)` — ERC-8004 (Jan 2026 revision)
     /// mutator. Lets the rated agent attach (or replace) a response URI
     /// on a feedback entry. "Latest response wins" — repeated calls
     /// overwrite the previous URI rather than appending to a list.
     pub const APPEND_RESPONSE: [u8; 4] = [0x60, 0x1f, 0x56, 0x76];
-    /// `isFeedbackRevoked(uint256,bytes32)` — ERC-8004 v0.6+ read
+    /// `isFeedbackRevoked(uint256,bytes32)` — ERC-8004 (Jan 2026 revision) read
     /// selector returning whether a `(agentId, feedbackId)` entry is in
     /// the revoked state. Unknown entries return `false` (i.e. an
     /// unsubmitted feedback is not revoked, it simply doesn't exist).
     pub const IS_FEEDBACK_REVOKED: [u8; 4] = [0xb0, 0x17, 0xcb, 0x04];
-    /// `getFeedbackResponses(uint256,bytes32)` — ERC-8004 v0.6+ read
+    /// `getFeedbackResponses(uint256,bytes32)` — ERC-8004 (Jan 2026 revision) read
     /// selector returning the response URI most recently attached via
     /// `appendResponse`. Returns the empty string when no response has
     /// landed (or when the entry is unknown).
@@ -631,7 +631,7 @@ pub mod abi {
     }
 
     /// `revokeFeedback(uint256 agentId, bytes32 feedbackId)` per ERC-8004
-    /// v0.6+. Both arguments are static 32-byte words, so the calldata
+    /// Jan 2026 revision. Both arguments are static 32-byte words, so the calldata
     /// is a flat `[selector | agent_id | feedback_id]` (4 + 64 bytes).
     pub fn encode_revoke_feedback(
         selector: [u8; 4],
@@ -646,7 +646,7 @@ pub mod abi {
     }
 
     /// `appendResponse(uint256 agentId, bytes32 feedbackId, string responseUri)`
-    /// per ERC-8004 v0.6+.
+    /// per ERC-8004 (Jan 2026 revision).
     ///
     /// Head: `[agent_id | feedback_id | offset-to-response-uri (= 96)]`,
     /// followed by the standard `(length, utf8-padded-bytes)` tail.
@@ -667,7 +667,7 @@ pub mod abi {
         data
     }
 
-    /// `getAgentURI(uint256 agentId)` — ERC-8004 v0.6+ read. Static
+    /// `getAgentURI(uint256 agentId)` — ERC-8004 (Jan 2026 revision) read. Static
     /// 32-byte argument, so calldata is `[selector | agent_id]`.
     pub fn encode_get_agent_uri(selector: [u8; 4], agent_id: u64) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 32);
@@ -676,7 +676,7 @@ pub mod abi {
         data
     }
 
-    /// `getAgentWallet(uint256 agentId)` — ERC-8004 v0.6+ read. Static
+    /// `getAgentWallet(uint256 agentId)` — ERC-8004 (Jan 2026 revision) read. Static
     /// 32-byte argument, so calldata is `[selector | agent_id]`.
     pub fn encode_get_agent_wallet(selector: [u8; 4], agent_id: u64) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 32);
@@ -686,7 +686,7 @@ pub mod abi {
     }
 
     /// `isFeedbackRevoked(uint256 agentId, bytes32 feedbackId)` —
-    /// ERC-8004 v0.6+ read. Both arguments are static 32-byte words, so
+    /// ERC-8004 (Jan 2026 revision) read. Both arguments are static 32-byte words, so
     /// the calldata is a flat `[selector | agent_id | feedback_id]`.
     pub fn encode_is_feedback_revoked(
         selector: [u8; 4],
@@ -701,7 +701,7 @@ pub mod abi {
     }
 
     /// `getFeedbackResponses(uint256 agentId, bytes32 feedbackId)` —
-    /// ERC-8004 v0.6+ read. Same shape as `isFeedbackRevoked`.
+    /// ERC-8004 (Jan 2026 revision) read. Same shape as `isFeedbackRevoked`.
     pub fn encode_get_feedback_responses(
         selector: [u8; 4],
         agent_id: u64,
@@ -786,7 +786,7 @@ pub mod abi {
     }
 
     /// `setAgentURI(uint256 agentId, string metadataUri)` — ERC-8004
-    /// v0.6+. Head: `[agent_id | offset-to-uri (=64)]`, then the URI
+    /// Jan 2026 revision. Head: `[agent_id | offset-to-uri (=64)]`, then the URI
     /// string tail.
     pub fn encode_set_agent_uri(selector: [u8; 4], agent_id: u64, metadata_uri: &str) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 64 + 32 + metadata_uri.len().div_ceil(32) * 32);
@@ -799,7 +799,7 @@ pub mod abi {
     }
 
     /// `setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature)`
-    /// — ERC-8004 v0.6+.
+    /// — ERC-8004 (Jan 2026 revision).
     ///
     /// Head: `[agent_id | new_wallet (32-padded) | deadline | sig_offset]`
     /// = 4 × 32 = 128. The signature tail follows at offset 128.
@@ -825,7 +825,7 @@ pub mod abi {
     }
 
     /// `setMetadata(uint256 agentId, string metadataKey, bytes metadataValue)`
-    /// — ERC-8004 v0.6+.
+    /// — ERC-8004 (Jan 2026 revision).
     ///
     /// Head: `[agent_id | key_offset (=96) | value_offset]`. The
     /// `value_offset` is `96 + 32 + ceil(key_len/32)*32`.
@@ -853,7 +853,7 @@ pub mod abi {
     }
 
     /// `getMetadata(uint256 agentId, string metadataKey)` — ERC-8004
-    /// v0.6+ read selector. Head: `[agent_id | key_offset (=64)]`.
+    /// Jan 2026 revision read selector. Head: `[agent_id | key_offset (=64)]`.
     pub fn encode_get_metadata(selector: [u8; 4], agent_id: u64, metadata_key: &str) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 64 + 32 + metadata_key.len().div_ceil(32) * 32);
         data.extend_from_slice(&selector);
@@ -1109,7 +1109,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     }
 
     /// Build calldata for `revokeFeedback(uint256 agentId, bytes32 feedbackId)`
-    /// per ERC-8004 v0.6+. The byte-identical calldata works against
+    /// per ERC-8004 (Jan 2026 revision). The byte-identical calldata works against
     /// either the native Tenzro ReputationRegistry precompile or an
     /// Ethereum-side mirror contract.
     pub fn build_revoke_feedback_calldata(&self, agent_id: u64, feedback_id: &[u8; 32]) -> Vec<u8> {
@@ -1117,7 +1117,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     }
 
     /// Build calldata for `appendResponse(uint256 agentId, bytes32 feedbackId, string responseUri)`
-    /// per ERC-8004 v0.6+. Lets the rated agent attach (or replace) a
+    /// per ERC-8004 (Jan 2026 revision). Lets the rated agent attach (or replace) a
     /// response URI on a feedback entry.
     pub fn build_append_response_calldata(
         &self,
@@ -1223,7 +1223,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
         })
     }
 
-    /// Build calldata for `setAgentURI(uint256,string)` — ERC-8004 v0.6+.
+    /// Build calldata for `setAgentURI(uint256,string)` — ERC-8004 (Jan 2026 revision).
     /// Submission requires a signed transaction; the wallet binder
     /// owns that step.
     pub fn build_set_agent_uri_calldata(&self, agent_id: u64, metadata_uri: &str) -> Vec<u8> {
@@ -1231,7 +1231,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     }
 
     /// Build calldata for `setAgentWallet(uint256,address,uint256,bytes)`
-    /// — ERC-8004 v0.6+. The `(deadline, signature)` pair is the
+    /// — ERC-8004 (Jan 2026 revision). The `(deadline, signature)` pair is the
     /// reference contract's EIP-712 consent payload; pass `&[]` if
     /// targeting the Tenzro precompile, which trusts the outer-tx
     /// `from` for authorization.
@@ -1252,7 +1252,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     }
 
     /// Build calldata for `setMetadata(uint256,string,bytes)` — ERC-8004
-    /// v0.6+. An empty `metadata_value` deletes the entry.
+    /// Jan 2026 revision. An empty `metadata_value` deletes the entry.
     pub fn build_set_metadata_calldata(
         &self,
         agent_id: u64,
@@ -1283,7 +1283,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
         })
     }
 
-    /// Read the metadata URI bound to an agent — ERC-8004 v0.6+
+    /// Read the metadata URI bound to an agent — ERC-8004 (Jan 2026 revision)
     /// `getAgentURI(uint256)`.
     pub async fn get_agent_uri(&self, agent_id: u64) -> Result<String> {
         let data = abi::encode_get_agent_uri(selectors::GET_AGENT_URI, agent_id);
@@ -1296,7 +1296,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
         })
     }
 
-    /// Read the controller wallet bound to an agent — ERC-8004 v0.6+
+    /// Read the controller wallet bound to an agent — ERC-8004 (Jan 2026 revision)
     /// `getAgentWallet(uint256)`.
     pub async fn get_agent_wallet(&self, agent_id: u64) -> Result<EthAddress> {
         let data = abi::encode_get_agent_wallet(selectors::GET_AGENT_WALLET, agent_id);
@@ -1311,7 +1311,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
         })
     }
 
-    /// Check whether a feedback entry is revoked — ERC-8004 v0.6+
+    /// Check whether a feedback entry is revoked — ERC-8004 (Jan 2026 revision)
     /// `isFeedbackRevoked(uint256,bytes32)`. Unknown entries return
     /// `false`.
     pub async fn is_feedback_revoked(&self, agent_id: u64, feedback_id: &[u8; 32]) -> Result<bool> {
@@ -1329,7 +1329,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     }
 
     /// Read the most recent response URI attached to a feedback entry —
-    /// ERC-8004 v0.6+ `getFeedbackResponses(uint256,bytes32)`. Returns
+    /// ERC-8004 (Jan 2026 revision) `getFeedbackResponses(uint256,bytes32)`. Returns
     /// the empty string when no response has been attached.
     pub async fn get_feedback_responses(
         &self,
@@ -1695,7 +1695,7 @@ mod tests {
         assert!(decoded.exists);
     }
 
-    // -- v0.6+ identity-side mutators (selectors unchanged) --
+    // -- Jan 2026 revision identity-side mutators (selectors unchanged) --
 
     #[test]
     fn encode_set_agent_uri_layout() {
@@ -1835,7 +1835,7 @@ mod tests {
         assert_eq!(selectors::APPEND_RESPONSE, [0x60, 0x1f, 0x56, 0x76]);
     }
 
-    // -- ERC-8004 v0.6+ read selectors --
+    // -- ERC-8004 (Jan 2026 revision) read selectors --
 
     #[test]
     fn v06_read_selectors_match_canonical_keccak() {

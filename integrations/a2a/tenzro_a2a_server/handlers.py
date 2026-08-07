@@ -2733,7 +2733,7 @@ async def handle_ap2(text: str, metadata: dict | None = None) -> str:
 
 
 async def handle_erc8004(text: str, metadata: dict | None = None) -> str:
-    """ERC-8004 Trustless Agents Registry — full v0.6+ calldata surface (Identity / Reputation / Validation)."""
+    """ERC-8004 Trustless Agents Registry — full Jan 2026 revision calldata surface (Identity / Reputation / Validation)."""
     t = text.lower()
     md = metadata or {}
 
@@ -3033,7 +3033,7 @@ async def handle_erc8004(text: str, metadata: dict | None = None) -> str:
         )
 
     return (
-        "ERC-8004 Trustless Agents Registry (v0.6+) operations:\n"
+        "ERC-8004 Trustless Agents Registry (Jan 2026 revision) operations:\n"
         "  Identity:\n"
         "    - 'Derive agent id' (metadata.did)\n"
         "    - 'Register agent' (metadata.did, agent_address, metadata_uri)\n"

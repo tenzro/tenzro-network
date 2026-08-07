@@ -4,7 +4,23 @@
 //! ValidationRegistry contracts. `agentId` is a sequential `uint256`
 //! (1-indexed) allocated by the registry at `register*()` time —
 //! server-allocated, never derivable client-side.
-
+//!
+//! # On versioning
+//!
+//! ERC-8004 is a **Draft** EIP (created 2025-08-13) and carries no semantic
+//! version — the only version identifier in the spec is the registration file
+//! schema, `registration-v1`. Earlier revisions of this codebase cited
+//! "ERC-8004 Jan 2026 revision", which is not a designation the standard has ever used.
+//!
+//! What actually distinguishes revisions is the ERC text itself, and it has
+//! moved materially: the January 2026 revision dropped the agent-signed
+//! `feedbackAuth` pre-authorization that the October 2025 text required. So
+//! the vendored contracts and this surface are pinned to the **January 2026
+//! revision**, and that is what the comments here name.
+//!
+//! A v2 track is in progress upstream — deeper MCP support, richer on-chain
+//! reputation primitives, and standardized x402 payment-proof schemas inside
+//! feedback attestations. None of it is in this surface yet.
 use crate::output;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -12,11 +28,11 @@ use clap::{Parser, Subcommand};
 /// ERC-8004 Trustless Agents Registry operations
 #[derive(Debug, Subcommand)]
 pub enum Erc8004Command {
-    /// Build calldata for register() (v0.6+ no-arg overload)
+    /// Build calldata for register() (Jan 2026 revision no-arg overload)
     EncodeRegister(EncodeRegisterCmd),
-    /// Build calldata for register(string agentURI) (v0.6+ overload)
+    /// Build calldata for register(string agentURI) (Jan 2026 revision overload)
     EncodeRegisterWithUri(EncodeRegisterWithUriCmd),
-    /// Build calldata for register(string,(string,bytes)[]) (v0.6+ overload)
+    /// Build calldata for register(string,(string,bytes)[]) (Jan 2026 revision overload)
     EncodeRegisterWithMetadata(EncodeRegisterWithMetadataCmd),
     /// Build calldata for getAgent(uint256)
     EncodeGet(EncodeGetAgentCmd),
@@ -28,27 +44,27 @@ pub enum Erc8004Command {
     EncodeValidationRequest(EncodeValidationRequestCmd),
     /// Build calldata for validationResponse(bytes32,uint8,string,bytes32,string) per ERC-8004
     EncodeValidationResponse(EncodeValidationResponseCmd),
-    /// Build calldata for setAgentURI(uint256, string) per ERC-8004 v0.6+
+    /// Build calldata for setAgentURI(uint256, string) per ERC-8004 (Jan 2026 revision)
     EncodeSetAgentUri(EncodeSetAgentUriCmd),
-    /// Build calldata for setAgentWallet(uint256, address, uint256, bytes) per ERC-8004 v0.6+
+    /// Build calldata for setAgentWallet(uint256, address, uint256, bytes) per ERC-8004 (Jan 2026 revision)
     EncodeSetAgentWallet(EncodeSetAgentWalletCmd),
-    /// Build calldata for setMetadata(uint256, string, bytes) per ERC-8004 v0.6+
+    /// Build calldata for setMetadata(uint256, string, bytes) per ERC-8004 (Jan 2026 revision)
     EncodeSetMetadata(EncodeSetMetadataCmd),
-    /// Build calldata for getMetadata(uint256, string) per ERC-8004 v0.6+
+    /// Build calldata for getMetadata(uint256, string) per ERC-8004 (Jan 2026 revision)
     EncodeGetMetadata(EncodeGetMetadataCmd),
     /// Decode the ABI return of getMetadata()
     DecodeGetMetadata(DecodeGetMetadataCmd),
-    /// Build calldata for getAgentURI(uint256) per ERC-8004 v0.6+
+    /// Build calldata for getAgentURI(uint256) per ERC-8004 (Jan 2026 revision)
     EncodeGetAgentUri(EncodeGetAgentUriCmd),
-    /// Build calldata for getAgentWallet(uint256) per ERC-8004 v0.6+
+    /// Build calldata for getAgentWallet(uint256) per ERC-8004 (Jan 2026 revision)
     EncodeGetAgentWallet(EncodeGetAgentWalletCmd),
-    /// Build calldata for revokeFeedback(uint256, bytes32) per ERC-8004 v0.6+
+    /// Build calldata for revokeFeedback(uint256, bytes32) per ERC-8004 (Jan 2026 revision)
     EncodeRevokeFeedback(EncodeRevokeFeedbackCmd),
-    /// Build calldata for appendResponse(uint256, bytes32, string) per ERC-8004 v0.6+
+    /// Build calldata for appendResponse(uint256, bytes32, string) per ERC-8004 (Jan 2026 revision)
     EncodeAppendResponse(EncodeAppendResponseCmd),
-    /// Build calldata for isFeedbackRevoked(uint256, bytes32) per ERC-8004 v0.6+
+    /// Build calldata for isFeedbackRevoked(uint256, bytes32) per ERC-8004 (Jan 2026 revision)
     EncodeIsFeedbackRevoked(EncodeIsFeedbackRevokedCmd),
-    /// Build calldata for getFeedbackResponses(uint256, bytes32) per ERC-8004 v0.6+
+    /// Build calldata for getFeedbackResponses(uint256, bytes32) per ERC-8004 (Jan 2026 revision)
     EncodeGetFeedbackResponses(EncodeGetFeedbackResponsesCmd),
     /// Build calldata for getFeedback(bytes32, uint256)
     EncodeGetFeedback(EncodeGetFeedbackCmd),
@@ -87,7 +103,7 @@ impl Erc8004Command {
     }
 }
 
-/// Encode register() calldata (v0.6+ no-arg overload)
+/// Encode register() calldata (Jan 2026 revision no-arg overload)
 #[derive(Debug, Parser)]
 pub struct EncodeRegisterCmd {
     /// RPC endpoint
@@ -114,7 +130,7 @@ impl EncodeRegisterCmd {
     }
 }
 
-/// Encode register(string agentURI) calldata (v0.6+ overload)
+/// Encode register(string agentURI) calldata (Jan 2026 revision overload)
 #[derive(Debug, Parser)]
 pub struct EncodeRegisterWithUriCmd {
     /// Agent URI (e.g. https://agent.example.com or ipfs://...)
@@ -147,7 +163,7 @@ impl EncodeRegisterWithUriCmd {
     }
 }
 
-/// Encode register(string,(string,bytes)[]) calldata (v0.6+ overload)
+/// Encode register(string,(string,bytes)[]) calldata (Jan 2026 revision overload)
 #[derive(Debug, Parser)]
 pub struct EncodeRegisterWithMetadataCmd {
     /// Agent URI
@@ -416,7 +432,7 @@ impl EncodeValidationResponseCmd {
 }
 
 // ---------------------------------------------------------------------
-// ERC-8004 v0.6+ identity mutators
+// ERC-8004 (Jan 2026 revision) identity mutators
 // ---------------------------------------------------------------------
 
 /// Encode setAgentURI calldata
@@ -549,7 +565,7 @@ impl EncodeSetMetadataCmd {
 }
 
 // ---------------------------------------------------------------------
-// ERC-8004 v0.6+ identity reads
+// ERC-8004 (Jan 2026 revision) identity reads
 // ---------------------------------------------------------------------
 
 /// Encode getMetadata calldata
@@ -691,7 +707,7 @@ impl EncodeGetAgentWalletCmd {
 }
 
 // ---------------------------------------------------------------------
-// ERC-8004 v0.6+ reputation mutators / reads
+// ERC-8004 (Jan 2026 revision) reputation mutators / reads
 // ---------------------------------------------------------------------
 
 /// Encode revokeFeedback calldata
