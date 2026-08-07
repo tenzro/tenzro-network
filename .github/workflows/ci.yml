@@ -165,6 +165,24 @@ jobs:
       - name: TypeScript SDK — typecheck
         working-directory: sdk/tenzro-ts-sdk
         run: npx tsc --noEmit -p tsconfig.json
+      # Both of the checks below exist because the two most recent publish
+      # blockers were findable only by attempting a publish, and would have
+      # shipped broken packages.
+      #
+      # `cargo publish --dry-run` packages the crate the way the registry
+      # will. That matters because cargo selects files via the VCS, and
+      # `sdk/` is gitignored in the monorepo — so a newly added module was
+      # silently omitted from the tarball while compiling fine in place.
+      - name: Rust SDK — publish dry-run (catches files missing from the tarball)
+        working-directory: sdk/tenzro-sdk
+        run: cargo publish --dry-run
+      # A clean checkout has no node_modules, so it resolves the newest
+      # TypeScript rather than the pinned one. That is what a publish does,
+      # and it is how a TS-7-only type error reached the registry gate
+      # unnoticed. Run it explicitly rather than waiting to find out.
+      - name: TypeScript SDK — typecheck against the newest compiler
+        working-directory: sdk/tenzro-ts-sdk
+        run: npx -y typescript@latest --noEmit -p tsconfig.json
 
   fmt:
     name: Format

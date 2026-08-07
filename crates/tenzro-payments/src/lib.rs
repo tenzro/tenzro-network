@@ -41,6 +41,7 @@ pub mod micropayment_route;
 pub mod middleware;
 pub mod revenue_split;
 pub mod settlement_asset;
+pub mod settlement_mirror;
 
 // Re-export commonly used types
 pub use challenge_store::ChallengeStore;

@@ -111,6 +111,23 @@ pub struct ChainInfo {
 }
 
 impl ChainInfo {
+    /// The CAIP-2 identifier for this chain, where a verified one exists.
+    ///
+    /// The bridge layer names chains (`"ethereum"`) because that is what the
+    /// underlying protocols route on; settlement uses CAIP-2 (`eip155:1`)
+    /// because that is what x402 v2 puts on the wire. This resolves across the
+    /// two through the single mapping in `tenzro-types`, rather than each
+    /// adapter keeping a table that can drift from the settlement registry.
+    ///
+    /// `None` means no *verified* mapping — Cosmos and Move family chains, and
+    /// chains whose mainnet is absent from the EIP-155 registry. Those remain
+    /// reachable and mirrorable by name; the alternative, inventing an
+    /// identifier, is the only option that could route value to the wrong
+    /// chain.
+    pub fn caip2(&self) -> Option<&'static str> {
+        tenzro_types::settlement_network::caip2_for_chain_name(&self.chain_id)
+    }
+
     /// Creates a new ChainInfo
     pub fn new(
         chain_id: impl Into<String>,
@@ -239,5 +256,35 @@ impl TransferStatus {
             self,
             Self::Pending | Self::SourceConfirmed | Self::InTransit
         )
+    }
+}
+
+#[cfg(test)]
+mod caip2_tests {
+    use super::*;
+
+    #[test]
+    fn an_adapter_chain_resolves_to_its_settlement_identifier() {
+        // The two identifier schemes meeting: the adapter names the chain,
+        // settlement needs CAIP-2, and neither layer keeps its own table.
+        let base = ChainInfo::new("base", "Base", "ETH", 2);
+        assert_eq!(base.caip2(), Some("eip155:8453"));
+        let xrpl = ChainInfo::new("xrpl", "XRP Ledger", "XRP", 4);
+        assert_eq!(xrpl.caip2(), Some("xrpl:0"));
+    }
+
+    #[test]
+    fn a_chain_with_no_verified_identifier_resolves_to_none_not_a_guess() {
+        // Still fully reachable through its adapter — it just mirrors by name.
+        let osmosis = ChainInfo::new("osmosis", "Osmosis", "OSMO", 6);
+        assert_eq!(osmosis.caip2(), None);
+    }
+
+    #[test]
+    fn resolution_does_not_depend_on_how_the_adapter_cased_the_name() {
+        assert_eq!(
+            ChainInfo::new("Ethereum", "Ethereum", "ETH", 780).caip2(),
+            Some("eip155:1")
+        );
     }
 }

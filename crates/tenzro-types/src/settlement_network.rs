@@ -144,6 +144,24 @@ pub const DEFAULT_FEE_RATIO: u64 = 100;
 
 /// Every network Tenzro can settle on.
 ///
+/// # Where these identifiers come from
+///
+/// Each was verified against its authoritative registry rather than inferred,
+/// because a wrong chain id routes real money to the wrong place and looks
+/// perfectly healthy while doing it:
+///
+/// - `xrpl:0` — CASA `xrpl` namespace: `xrpl:{network_id}`, livenet is 0
+///   (testnet 1, devnet 2). Some libraries use `xrpl:mainnet` instead; that
+///   form is *not* the registered one.
+/// - `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` — CASA `solana` namespace: the
+///   44-character genesis hash truncated to its first 32 characters.
+/// - `stellar:pubnet` — Stellar's own x402 documentation.
+/// - `eip155:98866` — Plume mainnet per ChainList and Plume's docs. Note 98865
+///   is *Plume Legacy* and 98867 is testnet; neither belongs here.
+/// - `canton:global` — **not** a registered CAIP-2 namespace. Canton is
+///   identified by its synchronizer, so this is a Tenzro-local key that exists
+///   only so one lookup type covers every rail. Do not publish it as CAIP-2.
+///
 /// Ordered cheapest-first so `iter().find(...)` yields the cheapest viable rail
 /// without a sort at every call. A test enforces the ordering.
 pub static SETTLEMENT_NETWORKS: &[SettlementNetwork] = &[
@@ -256,6 +274,131 @@ pub static SETTLEMENT_NETWORKS: &[SettlementNetwork] = &[
         fee_floor_micro_usd: 500_000,
     },
 ];
+
+/// Canonical CAIP-2 identifier for a bridge adapter's chain name.
+///
+/// # Why this exists
+///
+/// Tenzro carries two identifier schemes for the same chains. The bridge
+/// adapters name them (`ChainInfo::chain_id` is `"ethereum"`, `"arbitrum"`),
+/// because that is what the underlying protocols use in their own routing
+/// tables. Settlement uses CAIP-2 (`eip155:1`), because that is what x402 v2
+/// puts on the wire. Both are correct in their own layer, and a settlement
+/// mirror has to span them.
+///
+/// This is the one place they meet. Without it, every caller that needs to
+/// cross the boundary invents its own table, and those tables drift.
+///
+/// # Every value here was read from a registry, not recalled
+///
+/// EVM ids come from the canonical EIP-155 registry at `chainid.network`.
+/// That check was not ceremonial: a naive lookup by short name resolves
+/// `plume` to **98865, which is Plume *Legacy***, and `story` to a *testnet*.
+/// Both would have silently pointed settlements at the wrong chain.
+///
+/// # `None` means "no verified mapping", not "unreachable"
+///
+/// Several chains the adapters reach have no entry: Cosmos-family chains
+/// (Osmosis, Juno, Neutron, Injective, Evmos, Kava, Kujira, Crescent),
+/// Move-family chains (Aptos, Sui), and chains whose mainnet is absent from
+/// the EIP-155 registry (Hyperliquid and Story list only testnets there).
+///
+/// Returning `None` for those is deliberate. They remain fully reachable
+/// through their adapters and fully mirrorable — `MirrorPlan` accepts a plain
+/// chain name exactly so a chain without a verified CAIP-2 is not shut out.
+/// Inventing an identifier to fill the gap is the one option that could route
+/// real value to the wrong chain, so it is the one option not taken.
+pub fn caip2_for_chain_name(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        // The primary layer.
+        "tenzro" => "tenzro:1337",
+
+        // EVM, per the EIP-155 registry.
+        "ethereum" => "eip155:1",
+        "optimism" => "eip155:10",
+        "bsc" | "binance" => "eip155:56",
+        "gnosis" => "eip155:100",
+        "polygon" => "eip155:137",
+        "monad" => "eip155:143",
+        "sonic" => "eip155:146",
+        "manta" => "eip155:169",
+        "blast" => "eip155:238",
+        "fantom" => "eip155:250",
+        "fraxtal" => "eip155:252",
+        "filecoin" => "eip155:314",
+        "zksync" => "eip155:324",
+        "moonbeam" => "eip155:1284",
+        "sei" => "eip155:1329",
+        "megaeth" => "eip155:4326",
+        "mantle" => "eip155:5000",
+        "base" => "eip155:8453",
+        "mode" => "eip155:34443",
+        "arbitrum" => "eip155:42161",
+        "celo" => "eip155:42220",
+        "avalanche" => "eip155:43114",
+        "linea" => "eip155:59144",
+        "berachain" => "eip155:80094",
+        // 98866 is Plume *Mainnet*. 98865 is Legacy and 98867 is testnet;
+        // a short-name lookup returns the Legacy chain, which is why this
+        // entry is pinned explicitly.
+        "plume" => "eip155:98866",
+        "aurora" => "eip155:1313161554",
+        "scroll" => "eip155:534352",
+
+        // Non-EVM, per their CASA namespaces.
+        "solana" => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        "stellar" => "stellar:pubnet",
+        "xrpl" => "xrpl:0",
+
+        // Reachable, but with no verified CAIP-2. See the note above: these
+        // mirror by name rather than being excluded.
+        _ => return None,
+    })
+}
+
+/// The chain name a CAIP-2 identifier corresponds to, where one is mapped.
+///
+/// The reverse of [`caip2_for_chain_name`], for resolving a settlement target
+/// back to the adapter that can carry it.
+pub fn chain_name_for_caip2(caip2: &str) -> Option<&'static str> {
+    const NAMES: &[&str] = &[
+        "tenzro",
+        "ethereum",
+        "optimism",
+        "bsc",
+        "gnosis",
+        "polygon",
+        "monad",
+        "sonic",
+        "manta",
+        "blast",
+        "fantom",
+        "fraxtal",
+        "filecoin",
+        "zksync",
+        "moonbeam",
+        "sei",
+        "megaeth",
+        "mantle",
+        "base",
+        "mode",
+        "arbitrum",
+        "celo",
+        "avalanche",
+        "linea",
+        "berachain",
+        "plume",
+        "aurora",
+        "scroll",
+        "solana",
+        "stellar",
+        "xrpl",
+    ];
+    NAMES
+        .iter()
+        .find(|n| caip2_for_chain_name(n) == Some(caip2))
+        .copied()
+}
 
 /// Look up a network by CAIP-2 identifier.
 pub fn network_by_caip2(caip2: &str) -> Option<&'static SettlementNetwork> {
@@ -460,5 +603,121 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- the two identifier schemes meeting -----------------------------
+
+    #[test]
+    fn every_native_settlement_network_resolves_from_its_chain_name() {
+        // The registry and the name mapping must agree, or a mirror resolves
+        // to a chain the settlement layer does not recognise.
+        for (name, caip2) in [
+            ("tenzro", "tenzro:1337"),
+            ("stellar", "stellar:pubnet"),
+            ("xrpl", "xrpl:0"),
+            ("solana", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"),
+            ("base", "eip155:8453"),
+            ("plume", "eip155:98866"),
+            ("arbitrum", "eip155:42161"),
+            ("polygon", "eip155:137"),
+            ("ethereum", "eip155:1"),
+        ] {
+            assert_eq!(caip2_for_chain_name(name), Some(caip2), "{name}");
+            assert!(
+                network_by_caip2(caip2).is_some(),
+                "{caip2} maps from a name but is not a settlement network"
+            );
+        }
+    }
+
+    #[test]
+    fn plume_resolves_to_mainnet_not_the_legacy_chain() {
+        // A short-name lookup against the EIP-155 registry returns 98865,
+        // which is Plume *Legacy*. Settling there would be silently wrong.
+        assert_eq!(caip2_for_chain_name("plume"), Some("eip155:98866"));
+        assert_ne!(caip2_for_chain_name("plume"), Some("eip155:98865"));
+    }
+
+    #[test]
+    fn name_lookup_is_case_insensitive() {
+        for spelling in ["Base", "BASE", "base"] {
+            assert_eq!(caip2_for_chain_name(spelling), Some("eip155:8453"));
+        }
+    }
+
+    #[test]
+    fn an_unmapped_chain_returns_none_rather_than_a_guess() {
+        // Cosmos and Move family chains, and chains whose mainnet is absent
+        // from the EIP-155 registry, have no verified CAIP-2. They stay
+        // reachable by name; inventing an id is the one thing that could
+        // route value to the wrong chain.
+        for unmapped in [
+            "osmosis",
+            "juno",
+            "aptos",
+            "sui",
+            "hyperliquid",
+            "story",
+            "injective",
+        ] {
+            assert_eq!(caip2_for_chain_name(unmapped), None, "{unmapped}");
+        }
+    }
+
+    #[test]
+    fn the_mapping_round_trips() {
+        for name in [
+            "ethereum", "base", "plume", "solana", "stellar", "xrpl", "arbitrum",
+        ] {
+            let caip2 = caip2_for_chain_name(name).unwrap();
+            assert_eq!(chain_name_for_caip2(caip2), Some(name), "{name}");
+        }
+        assert_eq!(chain_name_for_caip2("bitcoin:mainnet"), None);
+    }
+
+    #[test]
+    fn no_two_chain_names_share_a_caip2_except_declared_aliases() {
+        // `bsc` and `binance` are deliberately the same chain. Any other
+        // collision means two different chains were given one identifier.
+        let names = [
+            "ethereum",
+            "optimism",
+            "gnosis",
+            "polygon",
+            "monad",
+            "sonic",
+            "manta",
+            "blast",
+            "fantom",
+            "fraxtal",
+            "filecoin",
+            "zksync",
+            "moonbeam",
+            "sei",
+            "megaeth",
+            "mantle",
+            "base",
+            "mode",
+            "arbitrum",
+            "celo",
+            "avalanche",
+            "linea",
+            "berachain",
+            "plume",
+            "aurora",
+            "scroll",
+            "solana",
+            "stellar",
+            "xrpl",
+            "tenzro",
+        ];
+        let mut seen = std::collections::HashMap::new();
+        for n in names {
+            let id = caip2_for_chain_name(n).unwrap();
+            if let Some(prev) = seen.insert(id, n) {
+                panic!("{id} claimed by both {prev} and {n}");
+            }
+        }
+        assert_eq!(caip2_for_chain_name("bsc"), caip2_for_chain_name("binance"));
     }
 }

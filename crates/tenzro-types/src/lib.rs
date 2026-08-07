@@ -182,7 +182,7 @@ pub use settlement::{
 };
 pub use settlement_network::{
     DEFAULT_FEE_RATIO, MICRO_USD, NetworkFamily, SETTLEMENT_NETWORKS, SettlementNetwork,
-    cheapest_rail_for, network_by_caip2, x402_networks,
+    caip2_for_chain_name, chain_name_for_caip2, cheapest_rail_for, network_by_caip2, x402_networks,
 };
 pub use skill::{
     BLOB_URI_PREFIX, SYSTEM_CREATOR_DID, SkillBundle, SkillDefinition, SkillFilter,

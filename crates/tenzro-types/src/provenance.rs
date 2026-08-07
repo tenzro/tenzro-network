@@ -209,8 +209,6 @@ pub struct SecondarySettlement {
     pub reference: String,
 }
 
-/// The full attributable record of one interaction.
-///
 /// Domain separator for the attestation digest. Prefixed to every preimage so a
 /// signature over an interaction record can never be replayed as a signature
 /// over some other Tenzro structure that happens to serialize to the same bytes.
@@ -331,6 +329,8 @@ impl ChargeRef {
     }
 }
 
+/// The full attributable record of one interaction.
+///
 /// Emitted on every metered interaction, chargeable or not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InteractionProvenance {
