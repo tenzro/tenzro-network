@@ -7,6 +7,23 @@
 //! Li.Fi, Hyperlane, Axelar, Stargate, IBC Eureka, Hyperbridge, NEAR chain
 //! signatures and Canton.
 //!
+//! # A mirror is evidence, not an instruction
+//!
+//! This is the property that keeps mirroring from double-paying, and it is
+//! worth stating because the payload makes it look otherwise: a self-contained
+//! mirror writes the whole settlement record, `payees` and `amount_charged`
+//! included, onto another chain.
+//!
+//! Those fields are a **record of a division that already happened on the
+//! Tenzro Ledger**, not a request for that chain to perform one. The revenue
+//! split runs exactly once, at settlement, before any mirror is dispatched —
+//! nothing in this module calls `split_revenue`, and a test asserts the record
+//! is byte-identical before and after mirroring.
+//!
+//! So mirroring onto five chains produces five copies of one settlement, not
+//! five settlements. A reader of a mirrored record learns who was paid and how
+//! much; it does not learn that it owes anyone anything.
+//!
 //! # Each target is dispatched on its own
 //!
 //! There is no two-phase commit across chains that do not know about each
@@ -223,5 +240,60 @@ mod tests {
         assert_eq!(chain_name_for_caip2("xrpl:0"), Some("xrpl"));
         // A chain with no registered CAIP-2 passes through as its own name.
         assert_eq!(chain_name_for_caip2("osmosis"), None);
+    }
+
+    #[test]
+    fn mirroring_does_not_alter_the_settled_amounts_or_payees() {
+        // The no-double-charge invariant. The split runs once at settlement;
+        // a mirror copies the result and must not touch it. If this ever
+        // fails, mirroring onto N chains has started to mean N divisions.
+        let r = record();
+        let before = serde_json::to_vec(&r).unwrap();
+        let payload = mirror_payload(&r, MirrorDurability::SelfContained).unwrap();
+        assert_eq!(
+            payload, before,
+            "the mirrored payload must be the settlement verbatim"
+        );
+        let decoded: InteractionProvenance = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(decoded.amount_charged, r.amount_charged);
+        assert_eq!(decoded.payees.len(), r.payees.len());
+    }
+
+    #[test]
+    fn mirroring_to_many_chains_still_describes_one_settlement() {
+        // Five copies of one settlement, not five settlements. Each payload is
+        // identical, so no chain sees a different amount or a different set of
+        // payees that it might act on.
+        let r = record();
+        let payloads: Vec<Vec<u8>> = ["eip155:8453", "canton:global", "xrpl:0", "stellar:pubnet"]
+            .iter()
+            .map(|_| mirror_payload(&r, MirrorDurability::SelfContained).unwrap())
+            .collect();
+        assert!(
+            payloads.windows(2).all(|w| w[0] == w[1]),
+            "every target must carry the same settlement"
+        );
+        // And the total charged is what it always was, however many carry it.
+        let decoded: InteractionProvenance = serde_json::from_slice(&payloads[0]).unwrap();
+        assert_eq!(decoded.amount_charged, r.amount_charged);
+    }
+
+    #[test]
+    fn this_module_never_reaches_the_revenue_split() {
+        // A structural guard rather than a behavioural one: the split lives in
+        // tenzro-payments::revenue_split and is applied at settlement. If a
+        // future edit imports it here, that is the moment mirroring starts
+        // dividing a payment a second time.
+        // Scoped to the implementation, not this module's own tests — the
+        // assertion text below necessarily contains the very name it forbids.
+        let src = include_str!("settlement_mirror_dispatch.rs");
+        let impl_only = src.split("#[cfg(test)]").next().unwrap();
+        // A call, not a mention — the module docs name it descriptively, and
+        // forbidding the word would make the documentation trip its own guard.
+        let forbidden = concat!("split", "_revenue(");
+        assert!(
+            !impl_only.contains(forbidden),
+            "the mirror path must never divide a payment; the split runs once, at settlement"
+        );
     }
 }

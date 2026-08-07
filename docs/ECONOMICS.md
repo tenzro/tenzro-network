@@ -201,6 +201,51 @@ publishes this node's attestation under its own name). CLI
 `mirror_settlement`; A2A `interaction-receipts`; TenzroClaw `mirror_settlement`.
 
 
+## Fee splits and mirroring: the division happens once
+
+A settlement mirrored onto five chains is **five copies of one settlement, not
+five settlements**. This is worth stating because the payload makes it look
+otherwise: a self-contained mirror writes the whole record, `payees` and
+`amount_charged` included, onto each target chain.
+
+Those fields are a **record of a division that already happened on the Tenzro
+Ledger**, not a request for that chain to perform one. The revenue split runs
+exactly once, at settlement, before any mirror is dispatched. Nothing in the
+mirror path calls it, and three tests enforce that: the mirrored payload is
+byte-identical to the settled record, every target carries the same payload,
+and a structural guard fails the build if the split is ever called from the
+dispatch path.
+
+So a reader of a mirrored record learns who was paid and how much. It does not
+learn that it owes anyone anything.
+
+## Multi-VM: what executes versus where it settles
+
+Tenzro executes four VMs — EVM, SVM, DAML/Canton, and its own native runtime —
+and every transaction routes to exactly one of them with no fallthrough. An
+agent can settle on the Tenzro Ledger and, in the same breath, record that
+settlement on EVM, SVM and Canton in parallel.
+
+The two vocabularies are deliberately not the same size:
+
+| | Covers |
+|---|---|
+| `VmType` (4) | What Tenzro **executes**: EVM, SVM, DAML, Tenzro native |
+| `NetworkFamily` (6) | Where Tenzro **settles**: those four, plus Stellar and XRPL |
+
+Every VM has a settlement family, because a VM that can execute work nobody can
+be paid for is not useful. The reverse deliberately does not hold: Stellar and
+the XRP Ledger are settlement families with no VM, because Tenzro settles there
+through an adapter rather than executing there. A test asserts the first
+direction and not the second — asserting a bijection would assert something
+false.
+
+**One accounting layer is a first-class choice.** A plan with no mirror targets
+settles on the Tenzro Ledger alone and is complete. It is simply reported as not
+durable beyond the primary, which is the honest answer rather than a flattering
+one.
+
+
 ## Which rail a payment settles on
 
 Tenzro settles on its own ledger and treats every other chain as a **secondary**

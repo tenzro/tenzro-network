@@ -646,4 +646,65 @@ mod tests {
             );
         }
     }
+
+    // ---- multi-VM correspondence ----------------------------------------
+
+    #[test]
+    fn every_vm_tenzro_executes_has_a_settlement_family() {
+        // Tenzro executes four VMs — EVM, SVM, DAML/Canton and its own native
+        // runtime — and an agent settling "anything they want" must be able to
+        // settle on each of them. If a VM ever exists with no settlement family
+        // to carry it, that VM can execute work nobody can be paid for.
+        //
+        // The reverse does not hold and should not: Stellar and XRPL are
+        // settlement families with no VM, because Tenzro settles there through
+        // an adapter rather than executing there. Asserting a bijection would
+        // be asserting something false.
+        for family in [
+            NetworkFamily::Evm,
+            NetworkFamily::Svm,
+            NetworkFamily::Canton,
+            NetworkFamily::Tenzro,
+        ] {
+            let reachable = tenzro_types::settlement_network::SETTLEMENT_NETWORKS
+                .iter()
+                .any(|n| n.family == family);
+            assert!(reachable, "{family:?} is executable but not settleable");
+        }
+    }
+
+    #[test]
+    fn a_settlement_can_target_evm_svm_and_canton_in_one_plan() {
+        // The generalized case the multi-VM design exists for: one settlement,
+        // mirrored across three unrelated execution environments at once.
+        let plan = MirrorPlan::native_only(vec![
+            MirrorTarget::self_contained("eip155:8453"),
+            MirrorTarget::self_contained("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"),
+            MirrorTarget::self_contained("canton:global"),
+        ])
+        .unwrap();
+        let families: Vec<_> = plan.targets.iter().filter_map(|t| t.family()).collect();
+        assert!(families.contains(&NetworkFamily::Evm));
+        assert!(families.contains(&NetworkFamily::Svm));
+        assert!(families.contains(&NetworkFamily::Canton));
+        assert!(plan.survives_primary_loss());
+    }
+
+    #[test]
+    fn the_primary_needs_no_mirror_to_be_a_complete_settlement() {
+        // "Tenzro Ledger as a single accounting layer" is a first-class choice,
+        // not a degraded one. A plan with no targets is valid and settles.
+        let plan = MirrorPlan::primary_only();
+        let report = MirrorReport {
+            primary_committed: true,
+            outcomes: Vec::new(),
+        };
+        assert!(!plan.is_mirrored());
+        // Vacuously fully mirrored: there was nothing to mirror.
+        assert!(report.fully_mirrored());
+        assert!(report.secondaries().is_empty());
+        // But it is explicitly not durable beyond the primary, which is the
+        // honest answer rather than a flattering one.
+        assert!(!report.is_durable_beyond_primary());
+    }
 }
