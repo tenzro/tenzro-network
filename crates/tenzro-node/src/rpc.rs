@@ -2145,6 +2145,9 @@ async fn dispatch_request(
         "tenzro_getInteraction" => {
             crate::interaction_rpc::handle_get_interaction(node, request.params.clone()).await
         }
+        "tenzro_mirrorSettlement" => {
+            crate::interaction_rpc::handle_mirror_settlement(node, request.params.clone()).await
+        }
         "tenzro_verifyInteraction" => {
             crate::interaction_rpc::handle_verify_interaction(node, request.params.clone()).await
         }

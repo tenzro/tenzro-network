@@ -159,6 +159,7 @@ pub mod sealed_agent_wallet_signer;
 pub mod sealed_model_attester;
 pub mod serving_admission;
 pub mod settle_authorized;
+pub mod settlement_mirror_dispatch;
 pub mod settlement_preferences_bridge;
 pub mod single_instance;
 pub mod sites;

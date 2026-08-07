@@ -25,6 +25,19 @@ pub struct IdentityDidParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MirrorSettlementParams {
+    /// The anchored interaction to mirror.
+    pub interaction_id: String,
+    /// Chains to mirror onto — CAIP-2 ids (`eip155:8453`) or adapter chain
+    /// names (`base`). Both are accepted.
+    pub chains: Vec<String>,
+    /// Write only the digest rather than the full settlement bytes. Cheaper,
+    /// but the record then does not survive the Tenzro Ledger losing state.
+    #[serde(default)]
+    pub digest_only: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct InteractionIdParams {
     /// The interaction to read, e.g. `int-1`. Joins the provenance record, the
     /// usage record and the settlement receipt.
@@ -13048,6 +13061,31 @@ impl TenzroMcpServer {
             &self.node,
             "tenzro_listBoundDevices",
             serde_json::json!({ "identity_did": params.identity_did }),
+        )
+        .await?;
+        json_result(v)
+    }
+
+    #[tool(
+        description = "Record an anchored settlement on other chains in parallel. A self-contained mirror writes the canonical settlement bytes, so the record stays readable with no Tenzro node in existence — the only form that survives the Tenzro Ledger losing state, which matters while Tenzro is on testnet. A digest-only mirror proves a payload you already hold is the one that settled but cannot say what settled. Each target is dispatched independently: there is no two-phase commit across chains that do not know about each other, so partial success is the normal case."
+    )]
+    async fn mirror_settlement(
+        &self,
+        Parameters(params): Parameters<MirrorSettlementParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let targets: Vec<serde_json::Value> = params
+            .chains
+            .iter()
+            .map(|c| serde_json::json!({ "chain": c, "self_contained": !params.digest_only }))
+            .collect();
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_mirrorSettlement",
+            serde_json::json!({
+                "interaction_id": params.interaction_id,
+                "targets": targets,
+                "primary_committed": true,
+            }),
         )
         .await?;
         json_result(v)

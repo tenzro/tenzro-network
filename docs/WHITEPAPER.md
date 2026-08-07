@@ -438,6 +438,26 @@ fintechs — not with merchants directly, which places it one layer below anythi
 Tenzro touches. Visa and Mastercard instead expose agent identity and mandate
 surfaces, and both authenticate over Web Bot Auth.
 
+### The same settlement, on several chains at once
+
+A settler may want one book or several. A settlement can be recorded on the
+Tenzro Ledger alone, or fanned out in parallel across EVM chains, Solana,
+Stellar, the XRP Ledger, Canton and anywhere else the bridge adapters reach.
+
+What makes that useful rather than decorative is **durability**. Tenzro is on
+testnet, and a testnet can be reset. Writing a Tenzro reference onto another
+chain produces a record that is only interpretable by asking Tenzro what the
+reference meant — so when Tenzro's state is gone, the settler holds a hash of
+nothing. A self-contained mirror instead embeds the canonical settlement bytes,
+and stays readable and verifiable with no Tenzro node in existence. That is the
+form that survives a reset or a mainnet cutover, and the protocol reports
+whether a given settlement has one rather than leaving a settler to assume it.
+
+Mirrors are independent. No two-phase commit exists across chains that do not
+know about each other, so a congested or reorganising chain never rolls back a
+settlement that already committed elsewhere; partial success is reported
+honestly, and a mirror that did not land never enters the record.
+
 ### Which rail a payment settles on
 
 An agentic economy metered per token produces charges spanning six orders of

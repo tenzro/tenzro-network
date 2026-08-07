@@ -174,6 +174,8 @@ pub enum InteractionCommand {
     Get(GetInteractionCmd),
     /// Check a receipt you were handed against what the node anchored.
     Verify(VerifyInteractionCmd),
+    /// Record an anchored settlement on other chains, in parallel.
+    Mirror(MirrorInteractionCmd),
 }
 
 impl InteractionCommand {
@@ -181,6 +183,7 @@ impl InteractionCommand {
         match self {
             Self::Get(c) => c.execute().await,
             Self::Verify(c) => c.execute().await,
+            Self::Mirror(c) => c.execute().await,
         }
     }
 }
@@ -242,6 +245,88 @@ impl VerifyInteractionCmd {
             output::print_warning(
                 "The receipt does not match what this node anchored. Either it was altered after \
                  issue, or it was anchored on a different node.",
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct MirrorInteractionCmd {
+    /// Interaction id, already anchored.
+    interaction_id: String,
+    /// Chains to mirror onto — CAIP-2 ids or adapter chain names.
+    /// Repeat the flag for several.
+    #[arg(long = "chain", required = true)]
+    chains: Vec<String>,
+    /// Write only the digest rather than the full settlement bytes.
+    ///
+    /// Cheaper, and it proves a payload you already hold is the one that
+    /// settled — but it cannot say *what* settled, so it does not survive the
+    /// Tenzro Ledger losing state.
+    #[arg(long)]
+    digest_only: bool,
+    /// Whether the primary settlement committed.
+    #[arg(long, default_value_t = true)]
+    primary_committed: bool,
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl MirrorInteractionCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let targets: Vec<serde_json::Value> = self
+            .chains
+            .iter()
+            .map(|c| serde_json::json!({ "chain": c, "self_contained": !self.digest_only }))
+            .collect();
+        let r: serde_json::Value = RpcClient::new(&self.rpc)
+            .call(
+                "tenzro_mirrorSettlement",
+                serde_json::json!({
+                    "interaction_id": self.interaction_id,
+                    "targets": targets,
+                    "primary_committed": self.primary_committed,
+                }),
+            )
+            .await?;
+
+        output::print_header("Settlement mirror");
+        output::print_field("Interaction", &self.interaction_id);
+        output::print_field("Digest", r["attestation_digest"].as_str().unwrap_or("?"));
+        output::print_field(
+            "Fully mirrored",
+            if r["fully_mirrored"].as_bool().unwrap_or(false) {
+                "yes"
+            } else {
+                "no"
+            },
+        );
+        println!();
+        for o in r["outcomes"].as_array().unwrap_or(&vec![]) {
+            let state = o["state"].as_str().unwrap_or("?");
+            output::print_field(
+                o["chain"].as_str().unwrap_or("?"),
+                &format!(
+                    "{state} ({}){}",
+                    o["durability"].as_str().unwrap_or("?"),
+                    o["reference"]
+                        .as_str()
+                        .map(|s| format!(" — {s}"))
+                        .or_else(|| o["reason"].as_str().map(|s| format!(" — {s}")))
+                        .unwrap_or_default()
+                ),
+            );
+        }
+        println!();
+        if r["durable_beyond_primary"].as_bool().unwrap_or(false) {
+            output::print_field("Durability", "survives the Tenzro Ledger losing state");
+        } else {
+            output::print_warning(
+                "This settlement does NOT survive the Tenzro Ledger losing state. A digest-only \
+                 mirror proves a payload matches but cannot say what settled; mirror at least one \
+                 chain with the full settlement bytes.",
             );
         }
         Ok(())

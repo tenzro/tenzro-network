@@ -804,6 +804,24 @@ tenzro interaction get int-1
 tenzro interaction verify ./receipt.json
 ```
 
+### Parallel Settlement
+
+```bash
+# Mirror an anchored settlement onto several chains at once.
+# Each target is dispatched independently — partial success is normal.
+tenzro interaction mirror int-1 --chain eip155:8453 --chain canton:global
+
+# Adapter chain names work too; both forms are accepted.
+tenzro interaction mirror int-1 --chain base --chain xrpl
+
+# Digest-only: cheaper, but the record then does NOT survive the
+# Tenzro Ledger losing state.
+tenzro interaction mirror int-1 --chain eip155:8453 --digest-only
+```
+
+The command reports `durable_beyond_primary` — whether the settlement survives
+a testnet reset or a mainnet cutover — and warns when it does not.
+
 ### Settlement Rails and Micropayment Routing
 
 Supporting x402 and being able to carry a micropayment are different properties.

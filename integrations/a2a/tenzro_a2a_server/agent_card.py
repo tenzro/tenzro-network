@@ -1205,9 +1205,12 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "tags": [
                     "accounting", "audit", "receipts", "provenance",
                     "attestation", "access", "inference", "x402",
+                    "mirror", "parallel-settlement", "durability",
                 ],
                 "examples": [
                     "Read interaction int-1 and its attestation digest",
+                    "Mirror this settlement onto Base and Canton in parallel",
+                    "Does this settlement survive the Tenzro Ledger losing state?",
                     "Verify this receipt against what the node anchored",
                     "Which agent accessed this resource and under whose authority?",
                 ],

@@ -108,6 +108,7 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_memoryAdmit",
     "tenzro_memoryRelease",
     "tenzro_mirrorObligationToCanton",
+    "tenzro_mirrorSettlement",
     "tenzro_mirrorWorkflowToCanton",
     "tenzro_mpcKeygen",
     "tenzro_mpcKeygenStatus",

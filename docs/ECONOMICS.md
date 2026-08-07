@@ -145,6 +145,62 @@ fields as a charge moves from accrued to settled, and the digest changes when it
 does. Both remain checkable against whatever was anchored at the time.
 
 
+## Parallel settlement: the same settlement on several chains
+
+Tenzro settles on its own ledger and treats every other chain as a **secondary**
+layer. A settler may want one book or several, and both are first-class: a plan
+with no targets settles only on the Tenzro Ledger, and a plan with targets fans
+the same settlement out across them.
+
+### Durability is the whole point
+
+Tenzro is on testnet. A testnet can be reset, and a mainnet migration can
+renumber or discard chain state. **A settlement mirrored to another chain must
+remain meaningful after that happens** — the settler owns that record, not
+Tenzro.
+
+That rules out the obvious design. Writing a Tenzro reference to the external
+chain produces a record only interpretable by asking Tenzro what the reference
+meant; when Tenzro's state is gone, the settler holds a hash of nothing. So each
+target declares its durability:
+
+| Durability | What is written | Survives Tenzro losing state |
+|---|---|---|
+| `self_contained` | The canonical settlement bytes | **Yes** — readable and verifiable with no Tenzro node |
+| `digest_only` | The 32-byte commitment | No — proves a payload you already hold matches, cannot say what settled |
+
+Both are legitimate; only one is durable. `durable_beyond_primary` in the
+response answers it directly, and it requires **both** a committed primary and
+at least one confirmed self-contained mirror — a self-contained mirror of a
+settlement that never committed is a record of something that did not happen.
+
+### Mirrors are independent, and partial success is normal
+
+There is no two-phase commit across chains that do not know about each other. A
+congested chain, a reorg or a rejected transaction must not roll back a
+settlement that already committed elsewhere, so every target is dispatched on
+its own and the report says plainly which landed. A failed or pending mirror
+never enters the provenance record — listing it would claim a settlement that
+does not exist on that chain.
+
+### Every chain the adapters reach
+
+Targets are validated against what this node can actually write to: the
+networks it settles on natively **plus** every chain the registered bridge
+adapters reach — LayerZero, Chainlink CCIP, Wormhole, deBridge, Li.Fi,
+Hyperlane, Axelar, Stargate, IBC Eureka, Hyperbridge, NEAR chain signatures and
+Canton, which is well over a hundred chains between them.
+
+Both identifier forms are accepted. The adapters route on names (`base`) while
+settlement uses CAIP-2 (`eip155:8453`), and a caller should not have to know
+which this node happens to hold.
+
+RPC `tenzro_mirrorSettlement` (admin — mirroring spends gas on every target and
+publishes this node's attestation under its own name). CLI
+`tenzro interaction mirror`; SDK `client.device().mirror_settlement()`; MCP
+`mirror_settlement`; A2A `interaction-receipts`; TenzroClaw `mirror_settlement`.
+
+
 ## Which rail a payment settles on
 
 Tenzro settles on its own ledger and treats every other chain as a **secondary**

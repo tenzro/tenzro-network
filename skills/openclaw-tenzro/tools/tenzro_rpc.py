@@ -7607,6 +7607,35 @@ def bind_device(identity_did: str, label: str, attestation_object_b64: str) -> d
 
 
 
+
+def mirror_settlement(
+    interaction_id: str,
+    targets: list[dict],
+    primary_committed: bool = True,
+) -> dict:
+    """Record an anchored settlement on other chains, in parallel.
+
+    `targets` is `[{"chain": "eip155:8453", "self_contained": True}, ...]`.
+
+    A self-contained mirror writes the canonical settlement bytes, so the
+    record stays readable with no Tenzro node in existence — the only form that
+    survives the Tenzro Ledger losing state, which matters while Tenzro is on
+    testnet. A digest-only mirror is cheaper and proves a payload you already
+    hold is the one that settled, but cannot tell you what settled.
+
+    Each target is dispatched independently. There is no two-phase commit
+    across chains that do not know about each other, so a failure on one does
+    not roll back one that already landed; the report says which did.
+    """
+    return _rpc(
+        "tenzro_mirrorSettlement",
+        {
+            "interaction_id": interaction_id,
+            "targets": targets,
+            "primary_committed": primary_committed,
+        },
+    )
+
 def get_interaction(interaction_id: str) -> dict:
     """Read an anchored interaction receipt and its attestation digest.
 
@@ -10436,6 +10465,9 @@ COMMANDS = {
     # ── Adaptive Burn (Spec 8) ──
     "bind_device": lambda args: bind_device(
         args["identity_did"], args["label"], args["attestation_object_b64"]
+    ),
+    "mirror_settlement": lambda args: mirror_settlement(
+        args["interaction_id"], args["targets"], args.get("primary_committed", True)
     ),
     "get_interaction": lambda args: get_interaction(args["interaction_id"]),
     "verify_interaction": lambda args: verify_interaction(args["interaction"]),

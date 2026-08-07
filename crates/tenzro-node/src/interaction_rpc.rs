@@ -248,6 +248,161 @@ pub(crate) async fn handle_verify_interaction(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// tenzro_mirrorSettlement
+// ---------------------------------------------------------------------------
+
+/// Params for `tenzro_mirrorSettlement`.
+#[derive(Debug, Deserialize)]
+pub struct MirrorSettlementRequest {
+    /// The interaction to mirror. Must already be anchored.
+    pub interaction_id: String,
+    /// Chains to mirror onto, as CAIP-2 ids or adapter chain names.
+    pub targets: Vec<MirrorTargetSpec>,
+    /// Whether the primary settlement committed. Durability requires both a
+    /// committed primary and a confirmed self-contained mirror.
+    #[serde(default = "default_true")]
+    pub primary_committed: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One requested target.
+#[derive(Debug, Deserialize)]
+pub struct MirrorTargetSpec {
+    /// CAIP-2 id or adapter chain name.
+    pub chain: String,
+    /// `true` writes the canonical settlement bytes, so the record stays
+    /// readable with no Tenzro node — the only form that survives a testnet
+    /// reset or a mainnet cutover. `false` writes the digest alone.
+    #[serde(default = "default_true")]
+    pub self_contained: bool,
+}
+
+/// `tenzro_mirrorSettlement` — record an anchored settlement on other chains.
+///
+/// Admin-gated: mirroring spends gas on every target and writes this node's
+/// attestation onto public chains. An open endpoint would let anyone drain the
+/// operator's bridge balances and publish records in their name.
+///
+/// Each target is dispatched independently. There is no two-phase commit across
+/// chains that do not know about each other, so a failure on one is reported
+/// rather than rolling back one that already landed — partial success is the
+/// normal case.
+pub(crate) async fn handle_mirror_settlement(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    use tenzro_payments::settlement_mirror::{MirrorPlan, MirrorTarget};
+
+    let req: MirrorSettlementRequest = crate::passkey_rpc::parse_params(params)?;
+
+    let store = storage(node)?;
+    let raw = store
+        .get(CF_SETTLEMENTS, &interaction_key(&req.interaction_id))
+        .map_err(|e| internal("read interaction", e))?
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!(
+                "No interaction anchored under `{}`. Anchor it before mirroring: a mirror of a \
+                 record this node never attested is a claim it cannot stand behind.",
+                req.interaction_id
+            ),
+            data: None,
+        })?;
+    let mut record: InteractionProvenance =
+        serde_json::from_slice(&raw).map_err(|e| internal("decode interaction", e))?;
+
+    let targets: Vec<MirrorTarget> = req
+        .targets
+        .iter()
+        .map(|t| {
+            if t.self_contained {
+                MirrorTarget::self_contained(t.chain.clone())
+            } else {
+                MirrorTarget::digest_only(t.chain.clone())
+            }
+        })
+        .collect();
+
+    // Every chain the registered adapters can reach, so a plan is validated
+    // against what this node can actually write to rather than against the
+    // smaller set of networks it settles on natively.
+    let reachable = reachable_chains(node).await;
+    let plan = MirrorPlan::new(targets, &reachable).map_err(|e| invalid(e.to_string()))?;
+
+    let report = crate::settlement_mirror_dispatch::mirror_and_record(
+        node,
+        &mut record,
+        &plan,
+        req.primary_committed,
+    )
+    .await;
+
+    // Persist the record with its confirmed secondaries folded in.
+    store
+        .put(
+            CF_SETTLEMENTS,
+            &interaction_key(&record.interaction_id),
+            &serde_json::to_vec(&record).map_err(|e| internal("encode interaction", e))?,
+        )
+        .map_err(|e| internal("persist interaction", e))?;
+
+    Ok(serde_json::json!({
+        "interaction_id": record.interaction_id,
+        "attestation_digest": record.attestation_digest_hex(),
+        "primary_committed": report.primary_committed,
+        "fully_mirrored": report.fully_mirrored(),
+        // The question the whole feature exists to answer: does this record
+        // survive the Tenzro Ledger losing state?
+        "durable_beyond_primary": report.is_durable_beyond_primary(),
+        "outcomes": report.outcomes.iter().map(|o| serde_json::json!({
+            "chain": o.target.caip2,
+            "durability": o.target.durability.as_str(),
+            "state": o.state.as_str(),
+            "reference": match &o.state {
+                tenzro_payments::settlement_mirror::MirrorState::Confirmed { reference, .. } => {
+                    Some(reference.clone())
+                }
+                _ => None,
+            },
+            "reason": match &o.state {
+                tenzro_payments::settlement_mirror::MirrorState::Failed { reason } => {
+                    Some(reason.clone())
+                }
+                _ => None,
+            },
+        })).collect::<Vec<_>>(),
+        "secondary_settlements": record.secondary_settlements,
+    }))
+}
+
+/// Every chain this node can write to: the networks it settles on natively,
+/// plus every chain the registered bridge adapters reach.
+async fn reachable_chains(node: &Arc<TenzroNode>) -> Vec<String> {
+    let mut out: Vec<String> = tenzro_types::settlement_network::SETTLEMENT_NETWORKS
+        .iter()
+        .map(|n| n.caip2.to_string())
+        .collect();
+    if let Some(router) = node.bridge_router() {
+        for coverage in router.list_chains().await {
+            let chain = coverage.chain.chain_id;
+            // Record both forms: adapters route on names, plans are usually
+            // written in CAIP-2, and a caller should not have to know which
+            // this node happens to hold.
+            if let Some(caip2) = tenzro_types::settlement_network::caip2_for_chain_name(&chain) {
+                out.push(caip2.to_string());
+            }
+            out.push(chain);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
