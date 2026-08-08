@@ -54,6 +54,7 @@ pub mod marketplace;
 pub mod media_gen;
 pub mod model;
 pub mod network;
+pub mod node_alias;
 pub mod node_visibility;
 pub mod paths;
 pub mod primitives;

@@ -156,6 +156,15 @@ pub const SELECTOR_WORKFLOW_KILL_SWITCH: [u8; 4] = [0x01, 0x00, 0x00, 0x49];
 pub const SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN: [u8; 4] = [0x01, 0x00, 0x00, 0x4A];
 pub const SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN: [u8; 4] = [0x01, 0x00, 0x00, 0x4B];
 
+// Node aliases — the readable name a node is addressed by. These are typed
+// transactions rather than RPC writes because the network is permissionless:
+// a registry held in one node's memory would mean whoever you asked decides
+// who owns `alice`. Ordered by consensus, every node applies the same
+// transition and first-claim-wins falls out of block order.
+pub const SELECTOR_NODE_ALIAS_CLAIM: [u8; 4] = [0x01, 0x00, 0x00, 0x50];
+pub const SELECTOR_NODE_ALIAS_BIND: [u8; 4] = [0x01, 0x00, 0x00, 0x51];
+pub const SELECTOR_NODE_ALIAS_RELEASE: [u8; 4] = [0x01, 0x00, 0x00, 0x52];
+
 // Gas costs for native operations
 const GAS_TRANSFER: u64 = 21_000;
 const GAS_STAKE: u64 = 50_000;
@@ -220,6 +229,13 @@ const GAS_WORKFLOW_SUBMIT_DECISION: u64 = 50_000;
 const GAS_WORKFLOW_KILL_SWITCH: u64 = 100_000;
 const GAS_WORKFLOW_REGISTER_PRIVACY_DOMAIN: u64 = 90_000;
 const GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN: u64 = 40_000;
+
+// Claiming is priced well above binding/releasing: it consumes a globally
+// unique name out of a finite namespace, and a trivially cheap claim is a
+// squatting subsidy.
+const GAS_NODE_ALIAS_CLAIM: u64 = 100_000;
+const GAS_NODE_ALIAS_BIND: u64 = 40_000;
+const GAS_NODE_ALIAS_RELEASE: u64 = 25_000;
 
 // Maximum size of an inline workflow JSON payload. Workflows with payloads
 // larger than this must be referenced by a DA pointer and submitted with the
@@ -3063,6 +3079,327 @@ impl NativeExecutor {
         ))
     }
 
+    /// Debit the flat gas cost of a fixed-price native op from `tx.from`.
+    ///
+    /// Returns `(old_balance, new_balance)` for the caller's `StateChange`
+    /// record. Refuses rather than saturating when the payer cannot cover the
+    /// cost, so an unfunded account cannot claim a name for free.
+    fn charge_gas(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas: u64,
+    ) -> Result<(u128, u128)> {
+        let gas_cost = tx.gas_price.saturating_mul(gas as u128);
+        let bal = state.get_balance(&tx.from);
+        if bal < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: bal,
+            });
+        }
+        let new_bal = bal.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_bal);
+        Ok((bal, new_bal))
+    }
+
+    /// `ClaimNodeAlias` — take a readable name for a node, permissionlessly.
+    ///
+    /// Uniqueness is enforced here, against consensus state, which is what
+    /// makes the whole scheme node-operator-independent: every validator
+    /// executes this same handler over the same ordered transactions, so they
+    /// all agree on who claimed `alice` first. Nothing about the outcome
+    /// depends on which RPC endpoint the claimant used.
+    ///
+    /// A re-claim by the existing owner is accepted and refreshes the record
+    /// (it is how `exposed_prefixes` is changed); a claim over someone else's
+    /// name is refused.
+    async fn execute_node_alias_claim(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_NODE_ALIAS_CLAIM)?;
+
+        let payload: ClaimNodeAliasPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid ClaimNodeAlias payload: {}", e))
+            })?;
+
+        tenzro_types::node_alias::validate_alias(&payload.name)
+            .map_err(|e| VmError::InvalidTransaction(format!("Invalid node alias: {e}")))?;
+        if payload.owner_did.trim().is_empty() {
+            return Err(VmError::InvalidTransaction(
+                "ClaimNodeAlias requires a non-empty owner_did".to_string(),
+            ));
+        }
+
+        let now_ms = deterministic_now_ms(tx).max(0) as u64;
+        let sender_hex = hex::encode(&tx.from);
+        let key = node_alias_storage_key(&payload.name);
+        let existing = state.get_storage(&SYSTEM_ADDRESS, &key);
+
+        // Preserve the bind across an owner's re-claim: re-declaring the
+        // exposed paths must not silently unbind a running node.
+        let (claimed_at, machine_did, endpoint_id) = match &existing {
+            Some(blob) if !blob.is_empty() => {
+                let prior: tenzro_types::node_alias::NodeAlias = serde_json::from_slice(blob)
+                    .map_err(|e| {
+                        VmError::InvalidTransaction(format!("Corrupt node-alias record: {e}"))
+                    })?;
+                // This is the whole uniqueness rule, and it is enforced
+                // against consensus state so every node reaches the same
+                // verdict on the same ordered transactions.
+                if prior.owner_address != sender_hex {
+                    return Err(VmError::InvalidTransaction(format!(
+                        "node alias '{}' is already claimed",
+                        payload.name
+                    )));
+                }
+                (prior.claimed_at, prior.machine_did, prior.endpoint_id)
+            }
+            _ => (now_ms, None, None),
+        };
+
+        let record = tenzro_types::node_alias::NodeAlias {
+            name: payload.name.clone(),
+            owner_address: sender_hex,
+            owner_did: payload.owner_did.clone(),
+            machine_did,
+            endpoint_id,
+            exposed_prefixes: payload
+                .exposed_prefixes
+                .unwrap_or_else(tenzro_types::node_alias::default_exposed_prefixes),
+            claimed_at,
+            updated_at: now_ms,
+        };
+        let blob = serde_json::to_vec(&record).map_err(|e| {
+            VmError::InvalidTransaction(format!("Unserializable node-alias record: {e}"))
+        })?;
+
+        let (bal, new_bal) = self.charge_gas(tx, state, GAS_NODE_ALIAS_CLAIM)?;
+        state.set_storage(&SYSTEM_ADDRESS, &key, blob.clone());
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"NodeAliasClaim".to_vec()],
+            blob.clone(),
+        );
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            tx.from.to_vec(),
+            vec![log],
+            vec![
+                StateChange::new(
+                    tx.from.clone(),
+                    b"balance".to_vec(),
+                    Some(bal.to_le_bytes().to_vec()),
+                    Some(new_bal.to_le_bytes().to_vec()),
+                ),
+                StateChange::new(SYSTEM_ADDRESS.to_vec(), key, existing, Some(blob)),
+                StateChange::new(
+                    tx.from.clone(),
+                    b"nonce".to_vec(),
+                    Some(old_nonce.to_le_bytes().to_vec()),
+                    Some((old_nonce + 1).to_le_bytes().to_vec()),
+                ),
+            ],
+        ))
+    }
+
+    /// `BindNodeAlias` — point a claimed name at a specific node.
+    ///
+    /// Only the claim's owner may bind it, so possession of a name cannot be
+    /// separated from the right to direct where it resolves.
+    async fn execute_node_alias_bind(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_NODE_ALIAS_BIND)?;
+
+        let payload: BindNodeAliasPayload = serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+            VmError::InvalidTransaction(format!("Invalid BindNodeAlias payload: {}", e))
+        })?;
+        if payload.machine_did.trim().is_empty() || payload.endpoint_id.trim().is_empty() {
+            return Err(VmError::InvalidTransaction(
+                "BindNodeAlias requires machine_did and endpoint_id".to_string(),
+            ));
+        }
+
+        let key = node_alias_storage_key(&payload.name);
+        let existing = state.get_storage(&SYSTEM_ADDRESS, &key);
+        let Some(blob) = existing.clone().filter(|b| !b.is_empty()) else {
+            return Err(VmError::InvalidTransaction(format!(
+                "node alias '{}' is not claimed",
+                payload.name
+            )));
+        };
+        let mut record: tenzro_types::node_alias::NodeAlias = serde_json::from_slice(&blob)
+            .map_err(|e| VmError::InvalidTransaction(format!("Corrupt node-alias record: {e}")))?;
+
+        // Two independent checks, because binding needs consent from both
+        // sides and either one alone is forgeable by the other.
+        //
+        // (1) Only the address that claimed the name may repoint it —
+        //     otherwise a third party redirects a name they do not hold.
+        if record.owner_address != hex::encode(&tx.from) {
+            return Err(VmError::InvalidTransaction(format!(
+                "node alias '{}' is owned by another account",
+                payload.name
+            )));
+        }
+
+        // (2) The machine must have consented to being bound. `machine_did`
+        //     and `endpoint_id` arrive as caller-supplied strings; without a
+        //     signature over them, the name's owner could point it at any
+        //     node on the network and have that node serve traffic under a
+        //     name its operator never agreed to. On a registrable domain
+        //     shared by every node — the one every passkey is scoped to —
+        //     that is a phishing primitive, so this is fail-closed.
+        //
+        //     The signature is checked against `endpoint_id`, which is the
+        //     node's Ed25519 public key, keeping the verdict identical on
+        //     every validator with no registry lookup.
+        // `EndpointId` renders as hex; accept an explicit `0x` either way.
+        let endpoint_key = hex::decode(payload.endpoint_id.trim_start_matches("0x"))
+            .ok()
+            .filter(|k| k.len() == 32)
+            .ok_or_else(|| {
+                VmError::InvalidTransaction(
+                    "endpoint_id is not a 32-byte hex Ed25519 key".to_string(),
+                )
+            })?;
+        let consent = tenzro_types::node_alias::bind_consent_preimage(
+            &payload.name,
+            &record.owner_address,
+            &payload.machine_did,
+            &payload.endpoint_id,
+        );
+        let machine_key =
+            tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, endpoint_key.clone());
+        let signature = tenzro_crypto::signatures::Signature::new(
+            tenzro_crypto::KeyType::Ed25519,
+            payload.machine_consent.clone(),
+        );
+        tenzro_crypto::signatures::verify(&machine_key, &consent, &signature).map_err(|e| {
+            VmError::InvalidTransaction(format!(
+                "machine did not consent to binding '{}': {e}",
+                payload.name
+            ))
+        })?;
+
+        record.machine_did = Some(payload.machine_did.clone());
+        record.endpoint_id = Some(payload.endpoint_id.clone());
+        if let Some(prefixes) = payload.exposed_prefixes {
+            record.exposed_prefixes = prefixes;
+        }
+        record.updated_at = deterministic_now_ms(tx).max(0) as u64;
+
+        let new_blob = serde_json::to_vec(&record).map_err(|e| {
+            VmError::InvalidTransaction(format!("Unserializable node-alias record: {e}"))
+        })?;
+
+        let (bal, new_bal) = self.charge_gas(tx, state, GAS_NODE_ALIAS_BIND)?;
+        state.set_storage(&SYSTEM_ADDRESS, &key, new_blob.clone());
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"NodeAliasBind".to_vec()],
+            new_blob.clone(),
+        );
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            tx.from.to_vec(),
+            vec![log],
+            vec![
+                StateChange::new(
+                    tx.from.clone(),
+                    b"balance".to_vec(),
+                    Some(bal.to_le_bytes().to_vec()),
+                    Some(new_bal.to_le_bytes().to_vec()),
+                ),
+                StateChange::new(SYSTEM_ADDRESS.to_vec(), key, existing, Some(new_blob)),
+                StateChange::new(
+                    tx.from.clone(),
+                    b"nonce".to_vec(),
+                    Some(old_nonce.to_le_bytes().to_vec()),
+                    Some((old_nonce + 1).to_le_bytes().to_vec()),
+                ),
+            ],
+        ))
+    }
+
+    /// `ReleaseNodeAlias` — return a name to the unclaimed pool.
+    async fn execute_node_alias_release(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_NODE_ALIAS_RELEASE)?;
+
+        let payload: ReleaseNodeAliasPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid ReleaseNodeAlias payload: {}", e))
+            })?;
+
+        let key = node_alias_storage_key(&payload.name);
+        let existing = state.get_storage(&SYSTEM_ADDRESS, &key);
+        let Some(blob) = existing.clone().filter(|b| !b.is_empty()) else {
+            return Err(VmError::InvalidTransaction(format!(
+                "node alias '{}' is not claimed",
+                payload.name
+            )));
+        };
+        let record: tenzro_types::node_alias::NodeAlias = serde_json::from_slice(&blob)
+            .map_err(|e| VmError::InvalidTransaction(format!("Corrupt node-alias record: {e}")))?;
+        if record.owner_address != hex::encode(&tx.from) {
+            return Err(VmError::InvalidTransaction(format!(
+                "node alias '{}' is owned by another account",
+                payload.name
+            )));
+        }
+
+        let (bal, new_bal) = self.charge_gas(tx, state, GAS_NODE_ALIAS_RELEASE)?;
+        // Empty value is the tombstone; `resolve` treats it as unclaimed.
+        state.set_storage(&SYSTEM_ADDRESS, &key, Vec::new());
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"NodeAliasRelease".to_vec()],
+            record.name.as_bytes().to_vec(),
+        );
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            tx.from.to_vec(),
+            vec![log],
+            vec![
+                StateChange::new(
+                    tx.from.clone(),
+                    b"balance".to_vec(),
+                    Some(bal.to_le_bytes().to_vec()),
+                    Some(new_bal.to_le_bytes().to_vec()),
+                ),
+                StateChange::new(SYSTEM_ADDRESS.to_vec(), key, existing, Some(Vec::new())),
+                StateChange::new(
+                    tx.from.clone(),
+                    b"nonce".to_vec(),
+                    Some(old_nonce.to_le_bytes().to_vec()),
+                    Some((old_nonce + 1).to_le_bytes().to_vec()),
+                ),
+            ],
+        ))
+    }
+
     async fn execute_validator_exit(
         &self,
         tx: &VmTransaction,
@@ -3671,6 +4008,60 @@ struct ValidatorUpdateMetadataPayload {
     metadata_uri: Option<String>,
     #[serde(default)]
     tee_attestation_hash: Option<Vec<u8>>,
+}
+
+// ---- Node-alias payloads ----------------------------------------------------
+
+/// JSON payload decoded from `tx.data[4..]` for `ClaimNodeAlias`.
+///
+/// `name` is a bare DNS label — never a hostname. The public suffix is a
+/// node-configuration presentation detail (and a temporary one, present only
+/// because WebAuthn demands a registrable domain), so recording it here would
+/// tie every claim to a domain the network expects to outlive.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ClaimNodeAliasPayload {
+    name: String,
+    owner_did: String,
+    #[serde(default)]
+    exposed_prefixes: Option<Vec<String>>,
+}
+
+/// JSON payload decoded from `tx.data[4..]` for `BindNodeAlias`.
+///
+/// Binding is separate from claiming because the wizard claims a name before
+/// the node has ever run, and neither `machine_did` nor `endpoint_id` exists
+/// until first boot.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct BindNodeAliasPayload {
+    name: String,
+    machine_did: String,
+    endpoint_id: String,
+    /// The machine's own Ed25519 signature over
+    /// [`tenzro_types::node_alias::bind_consent_preimage`].
+    ///
+    /// Without this, `machine_did` / `endpoint_id` would be unverified
+    /// caller-supplied strings and any claimant could point their name at
+    /// somebody else's node. Verified against `endpoint_id`, which is the
+    /// node's Ed25519 public key — so the check is deterministic in-VM with
+    /// no DID resolution, and possession of the machine key (TPM-sealed for
+    /// an autonomous node, node key of a passkey-controlled account
+    /// otherwise) is what actually authorises the bind.
+    machine_consent: Vec<u8>,
+    #[serde(default)]
+    exposed_prefixes: Option<Vec<String>>,
+}
+
+/// JSON payload decoded from `tx.data[4..]` for `ReleaseNodeAlias`.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ReleaseNodeAliasPayload {
+    name: String,
+}
+
+/// Consensus-state key a claimed alias lives under, within `SYSTEM_ADDRESS`
+/// storage. The `node_alias:` prefix keeps the namespace distinct from human
+/// `@usernames` and agent names by construction.
+fn node_alias_storage_key(name: &str) -> Vec<u8> {
+    format!("node_alias:{name}").into_bytes()
 }
 
 // ---- Kill-switch payloads (Agent-Swarm Spec 1) ------------------------------
@@ -4360,6 +4751,18 @@ impl VmExecutor for NativeExecutor {
                 self.execute_workflow_register_privacy_domain(tx, state, &mut gas_meter)
                     .await
             }
+            SELECTOR_NODE_ALIAS_CLAIM => {
+                self.execute_node_alias_claim(tx, state, &mut gas_meter)
+                    .await
+            }
+            SELECTOR_NODE_ALIAS_BIND => {
+                self.execute_node_alias_bind(tx, state, &mut gas_meter)
+                    .await
+            }
+            SELECTOR_NODE_ALIAS_RELEASE => {
+                self.execute_node_alias_release(tx, state, &mut gas_meter)
+                    .await
+            }
             SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN => {
                 self.execute_workflow_freeze_privacy_domain(tx, state, &mut gas_meter)
                     .await
@@ -4437,6 +4840,9 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_WORKFLOW_SUBMIT_DECISION => GAS_WORKFLOW_SUBMIT_DECISION,
             SELECTOR_WORKFLOW_KILL_SWITCH => GAS_WORKFLOW_KILL_SWITCH,
             SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN => GAS_WORKFLOW_REGISTER_PRIVACY_DOMAIN,
+            SELECTOR_NODE_ALIAS_CLAIM => GAS_NODE_ALIAS_CLAIM,
+            SELECTOR_NODE_ALIAS_BIND => GAS_NODE_ALIAS_BIND,
+            SELECTOR_NODE_ALIAS_RELEASE => GAS_NODE_ALIAS_RELEASE,
             SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN => GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN,
             _ => GAS_TRANSFER, // Default to transfer cost
         })

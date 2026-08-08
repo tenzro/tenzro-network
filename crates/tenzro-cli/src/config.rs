@@ -39,6 +39,27 @@ pub struct PersistedConfig {
     pub display_name: Option<String>,
     pub username: Option<String>,
     pub role: Option<String>,
+    /// Bare DNS label this machine claimed, e.g. `alice`. Never a full
+    /// hostname — the public suffix is node configuration and is expected to
+    /// change, so storing it here would tie the machine to a domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
+    /// Whether the operator chose to make this node publicly reachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
+    /// `"autonomous"` (hardware-rooted, no human controller) or `"self"`
+    /// (a human operator holds the passkey).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_mode: Option<String>,
+    /// Canonical `RoleSet` string, e.g. `"ai,storage,validator"`. Distinct
+    /// from the legacy single-valued `role` above, which stays for the other
+    /// CLI commands that still read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<String>,
+    /// How this operator offers the resources they provide: any of
+    /// `on-demand`, `subscription`, `rental`, comma-separated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_models: Option<String>,
     pub schedule: Option<ProviderSchedule>,
     pub pricing: Option<ProviderPricing>,
     #[serde(default)]

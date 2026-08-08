@@ -30,8 +30,20 @@ pub enum NetworkRole {
     ComputeProvider,
     /// Storage provider node
     StorageProvider,
-    /// Cloud operator node — hosted functions, static sites, managed
-    /// databases and machines
+    /// Database provider node — hosts managed, queryable databases
+    /// (replicated and partitioned, with consistency guarantees). Distinct
+    /// from [`Self::CloudProvider`] for the same reason
+    /// [`Self::ComputeProvider`] is distinct from [`Self::ModelProvider`]:
+    /// serving live queryable data and serving stateless functions/sites are
+    /// different obligations and carry different bonds.
+    DatabaseProvider,
+    /// Cloud operator node — hosted functions, static sites, and machines.
+    /// A hosted app's own backing resources (storage, compute, model
+    /// inference, a database) are served by whichever provider role
+    /// actually offers them — the same node if it holds that role too, or
+    /// another node on the network otherwise; `CloudProvider` orchestrates
+    /// access to those resources for the apps it hosts, it does not itself
+    /// provide them.
     CloudProvider,
     /// Edge/ingress node — terminates public TLS at a controlled DNS name and
     /// host-routes any incoming hostname to whichever fleet node holds the
@@ -62,6 +74,7 @@ impl NetworkRole {
                 | Self::ModelProvider
                 | Self::ComputeProvider
                 | Self::StorageProvider
+                | Self::DatabaseProvider
                 | Self::CloudProvider
         )
     }
@@ -94,6 +107,7 @@ impl NetworkRole {
             Self::ModelProvider => "ai",
             Self::ComputeProvider => "compute",
             Self::StorageProvider => "storage",
+            Self::DatabaseProvider => "database",
             Self::CloudProvider => "cloud",
             Self::Edge => "edge",
             Self::Archive => "archive",
@@ -126,6 +140,9 @@ impl FromStr for NetworkRole {
             }
             "compute" | "computeprovider" | "compute_provider" | "gpu" => Ok(Self::ComputeProvider),
             "storage" | "storageprovider" | "storage_provider" => Ok(Self::StorageProvider),
+            "database" | "db" | "databaseprovider" | "database_provider" => {
+                Ok(Self::DatabaseProvider)
+            }
             "cloud" | "cloudprovider" | "cloud_provider" => Ok(Self::CloudProvider),
             "edge" | "ingress" => Ok(Self::Edge),
             "archive" => Ok(Self::Archive),
@@ -220,6 +237,11 @@ impl RoleSet {
     /// True if the node hosts sites, functions and machines for the network.
     pub fn serves_cloud(&self) -> bool {
         self.has(NetworkRole::CloudProvider)
+    }
+
+    /// True if the node hosts managed, queryable databases for the network.
+    pub fn serves_database(&self) -> bool {
+        self.has(NetworkRole::DatabaseProvider)
     }
 
     /// True if the node offers TEE confidential compute.
@@ -617,19 +639,60 @@ mod tests {
 
     #[test]
     fn role_roundtrips_through_str() {
+        // Every variant, so adding one without a matching `as_str` /
+        // `FromStr` arm fails here rather than silently shipping a role that
+        // cannot survive the `--roles` CLI round trip.
         for role in [
             NetworkRole::Validator,
             NetworkRole::FullNode,
             NetworkRole::LightClient,
             NetworkRole::TeeProvider,
             NetworkRole::ModelProvider,
+            NetworkRole::ComputeProvider,
             NetworkRole::StorageProvider,
+            NetworkRole::DatabaseProvider,
+            NetworkRole::CloudProvider,
             NetworkRole::Edge,
             NetworkRole::Archive,
             NetworkRole::Bootstrap,
             NetworkRole::MicroNode,
         ] {
             assert_eq!(NetworkRole::from_str(role.as_str()).unwrap(), role);
+        }
+    }
+
+    /// Hosting live replicated data is its own obligation, distinct from the
+    /// stateless site/function hosting `CloudProvider` covers — a node may
+    /// hold either, both, or neither.
+    #[test]
+    fn database_provider_is_distinct_from_cloud_provider() {
+        let db: RoleSet = "database".parse().unwrap();
+        assert!(db.serves_database());
+        assert!(!db.serves_cloud());
+        assert!(db.is_provider());
+
+        let cloud: RoleSet = "cloud".parse().unwrap();
+        assert!(cloud.serves_cloud());
+        assert!(
+            !cloud.serves_database(),
+            "cloud hosting must not imply database hosting"
+        );
+
+        // The composition the wizard produces for an operator who runs an app
+        // and its backing database on the same machine.
+        let both: RoleSet = "cloud,database".parse().unwrap();
+        assert!(both.serves_cloud() && both.serves_database());
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn database_role_accepts_its_spelling_aliases() {
+        for spelling in ["database", "db", "database_provider", "database-provider"] {
+            assert_eq!(
+                NetworkRole::from_str(spelling).unwrap(),
+                NetworkRole::DatabaseProvider,
+                "spelling `{spelling}` must resolve"
+            );
         }
     }
 

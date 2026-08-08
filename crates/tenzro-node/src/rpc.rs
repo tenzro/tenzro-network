@@ -526,11 +526,33 @@ async fn handle_rpc_post(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
-    // Reconstruct the `htu` for DPoP verification. V1 uses the configured
-    // RPC address (matches what the auth engine was issued with as
-    // `audience`); production deployments behind a reverse proxy will
-    // supply this via the `X-Forwarded-*` headers in a later iteration.
-    let http_uri = format!("http://{}/", node.config().rpc_addr);
+    // Reconstruct the `htu` for DPoP verification from the request as the
+    // *client* saw it, per RFC 9449 §4.3.
+    //
+    // This used to be `format!("http://{}/", node.config().rpc_addr)` — the
+    // node's own bind address. With the default `--rpc-addr 0.0.0.0:8545`
+    // that made the expected `htu` `http://0.0.0.0:8545/`, which no honest
+    // client can ever produce: `0.0.0.0` is a wildcard to bind, never an
+    // address to dial. An operator connecting to `127.0.0.1:8545` got
+    // `DPoP htu mismatch: proof=http://127.0.0.1:8545/,
+    // request=http://0.0.0.0:8545/` and could only proceed by forging the
+    // proof against an address they had not actually contacted. It also
+    // hardcoded `http://`, so every TLS deployment mismatched on scheme too.
+    //
+    // `Host` is what the client dialled; `X-Forwarded-Proto` carries the
+    // scheme through a reverse proxy. Falling back to the configured address
+    // keeps behaviour defined for a request that arrives without `Host`
+    // (HTTP/1.0), which cannot be DPoP-authenticated anyway.
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    let authority = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.to_string())
+        .unwrap_or_else(|| node.config().rpc_addr.to_string());
+    let http_uri = format!("{scheme}://{authority}/");
     let auth_ctx = AuthContext::from_headers(&headers, "POST", &http_uri);
 
     // Extract the per-request API key (used to gate scoped methods like
@@ -2448,6 +2470,9 @@ async fn dispatch_request(
             handle_set_username(node, request.params).await
         }
         "tenzro_resolveUsername" => handle_resolve_username(node, request.params).await,
+        "tenzro_nodeAliasConsent" => handle_node_alias_consent(node, request.params).await,
+        "tenzro_resolveNodeAlias" => handle_resolve_node_alias(node, request.params).await,
+        "tenzro_listNodeAliases" => handle_list_node_aliases(node, request.params).await,
         // `tenzro_updateIdentity` is the did:tenzro spec §3.3 name for a
         // controller-signed identity update. The implementation dispatches
         // to the existing field-level update handlers based on the
@@ -17760,6 +17785,193 @@ async fn handle_resolve_username(
             data: None,
         }),
     }
+}
+
+/// `tenzro_nodeAliasConsent` — this node signs its agreement to answer for a
+/// name, so the name's owner can carry that consent in a `BindNodeAlias`
+/// transaction.
+///
+/// Binding takes two parties and two keys: the *owner* sends the transaction
+/// (they hold the claim), and the *machine* must consent (it holds the node
+/// key). Neither can produce the other's half, which is precisely what stops
+/// someone claiming a name and pointing it at a node they do not run.
+///
+/// Open rather than admin-gated: the response is a signature over a public
+/// statement about this node's own identity, discloses no secret, and is
+/// worthless without the matching claim. Requiring the operator's admin token
+/// would also break the ordinary case where the machine and the human
+/// operating it are deliberately different principals.
+async fn handle_node_alias_consent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(Value::Null);
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: name".to_string(),
+            data: None,
+        })?
+        .trim()
+        .to_ascii_lowercase();
+    let owner_address = params
+        .get("owner_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: owner_address".to_string(),
+            data: None,
+        })?
+        .trim_start_matches("0x")
+        .to_ascii_lowercase();
+
+    tenzro_types::node_alias::validate_alias(&name).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid node alias: {e}"),
+        data: None,
+    })?;
+
+    let addressing = node.self_addressing().await;
+    let (Some(machine_did), Some(endpoint_id)) = (
+        addressing.did.clone(),
+        addressing
+            .iroh_endpoint_id
+            .clone()
+            .or_else(|| addressing.ed25519_public_key_hex.clone()),
+    ) else {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "Node has no provisioned identity or endpoint yet".to_string(),
+            data: None,
+        });
+    };
+
+    let signer = node.announce_signer().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Node has no signing key provisioned".to_string(),
+        data: None,
+    })?;
+
+    let preimage = tenzro_types::node_alias::bind_consent_preimage(
+        &name,
+        &owner_address,
+        &machine_did,
+        &endpoint_id,
+    );
+    let signature = signer.sign(&preimage).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Consent signing failed: {e}"),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "name": name,
+        "owner_address": format!("0x{owner_address}"),
+        "machine_did": machine_did,
+        "endpoint_id": endpoint_id,
+        "machine_consent": signature.as_bytes(),
+    }))
+}
+
+/// `tenzro_resolveNodeAlias` — look up who owns a node name.
+///
+/// Read-only by construction. Claiming, binding and releasing a name are
+/// `ClaimNodeAlias` / `BindNodeAlias` / `ReleaseNodeAlias` **transactions**,
+/// submitted through `tenzro_signAndSendTransaction` like any other — an RPC
+/// must never be the authority for who owns a name, because that would make
+/// ownership depend on which node operator you asked. This is the same shape
+/// as escrow, whose convenience write RPCs were removed for the same reason.
+async fn handle_resolve_node_alias(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(Value::Null);
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: name".to_string(),
+            data: None,
+        })?
+        .trim()
+        .to_ascii_lowercase();
+
+    let registry = node.node_alias_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Node-alias registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    match registry.resolve(&name) {
+        Some(alias) => {
+            // The hostname is rendered from this node's configured suffix,
+            // never read off the record — the claim itself is domain-agnostic.
+            let hostname = registry.suffix().map(|s| alias.hostname(s));
+            Ok(serde_json::json!({
+                "name": alias.name,
+                "owner_address": format!("0x{}", alias.owner_address),
+                "owner_did": alias.owner_did,
+                "machine_did": alias.machine_did,
+                "endpoint_id": alias.endpoint_id,
+                "exposed_prefixes": alias.exposed_prefixes,
+                "bound": alias.is_bound(),
+                "hostname": hostname,
+                "claimed_at": alias.claimed_at,
+                "updated_at": alias.updated_at,
+            }))
+        }
+        None => Err(JsonRpcError {
+            code: -32000,
+            message: format!("Node alias not found: {name}"),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_listNodeAliases` — every claim this node knows about, optionally
+/// filtered to one owner address.
+async fn handle_list_node_aliases(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(Value::Null);
+    let registry = node.node_alias_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Node-alias registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let aliases = match params.get("owner_address").and_then(|v| v.as_str()) {
+        Some(addr) => {
+            let normalized = addr.trim_start_matches("0x").to_ascii_lowercase();
+            registry.list_for_owner(&normalized)
+        }
+        None => registry.list(),
+    };
+
+    let suffix = registry.suffix();
+    let rows: Vec<Value> = aliases
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({
+                "name": a.name,
+                "owner_address": format!("0x{}", a.owner_address),
+                "owner_did": a.owner_did,
+                "machine_did": a.machine_did,
+                "bound": a.is_bound(),
+                "hostname": suffix.map(|s| a.hostname(s)),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "count": rows.len(),
+        "suffix": suffix,
+        "aliases": rows,
+    }))
 }
 
 async fn handle_get_payment_receipt(
@@ -45007,11 +45219,14 @@ fn primary_wallet_address(node: &Arc<TenzroNode>) -> std::result::Result<Address
     })
 }
 
+/// Read an address parameter, accepting every form the node emits.
+///
+/// Was hex-only, and additionally required exactly 32 bytes via
+/// `Address::from_bytes`, so a 20-byte EVM address silently returned `None`
+/// as well. [`Address::parse`] handles hex (20 or 32 byte) and base58 alike.
 fn parse_address_param(params: &Value, key: &str) -> Option<Address> {
     let s = params.get(key).and_then(|v| v.as_str())?;
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).ok()?;
-    Address::from_bytes(&bytes)
+    Address::parse(s).ok()
 }
 
 /// Parse a u128 amount field denominated in **base units (wei)**. JSON has no
@@ -46385,26 +46600,20 @@ async fn handle_web3_sha3(params: Option<Value>) -> std::result::Result<Value, J
 // Helper functions
 
 /// Parse hex address string to Address type
+/// Parse an address RPC parameter in any form the node itself emits.
+///
+/// Delegates to [`Address::parse`], which accepts hex (20-byte EIP-55 or
+/// 32-byte, with or without `0x`) *and* base58. Accepting only hex meant an
+/// operator who copied the wallet address `tenzro join` had just printed —
+/// rendered base58 by `Address`'s `Display` impl — got `-32602 Invalid address`
+/// back for an address this node produced. The error also now names both
+/// accepted forms instead of leaking a bare hex-decoder message.
 fn parse_address(addr_str: &str) -> std::result::Result<Address, JsonRpcError> {
-    let hex_clean = addr_str.strip_prefix("0x").unwrap_or(addr_str);
-    let bytes = hex::decode(hex_clean).map_err(|e| JsonRpcError {
+    Address::parse(addr_str).map_err(|e| JsonRpcError {
         code: -32602,
-        message: format!("Invalid address hex: {}", e),
+        message: format!("Invalid address: {e}"),
         data: None,
-    })?;
-
-    if bytes.len() > 32 {
-        return Err(JsonRpcError {
-            code: -32602,
-            message: format!("Address too long: {} bytes", bytes.len()),
-            data: None,
-        });
-    }
-
-    let mut addr_bytes = [0u8; 32];
-    let len = bytes.len().min(32);
-    addr_bytes[..len].copy_from_slice(&bytes[..len]);
-    Ok(Address::new(addr_bytes))
+    })
 }
 
 /// Admission-time TDIP delegation gate for `PauseAgent` /
@@ -64259,6 +64468,9 @@ fn tx_type_selector(tx_type: &TransactionType) -> [u8; 4] {
         TransactionType::RegisterValidator { .. } => "RegisterValidator",
         TransactionType::UpdateValidatorMetadata { .. } => "UpdateValidatorMetadata",
         TransactionType::ExitValidator => "ExitValidator",
+        TransactionType::ClaimNodeAlias { .. } => "ClaimNodeAlias",
+        TransactionType::BindNodeAlias { .. } => "BindNodeAlias",
+        TransactionType::ReleaseNodeAlias { .. } => "ReleaseNodeAlias",
     };
     let hash = tenzro_crypto::hash::keccak256(name.as_bytes());
     let bytes = hash.as_bytes();
@@ -64534,6 +64746,11 @@ fn enforce_typed_tx_spend_ceilings(
         // parties never signed this tx, so there is no payer delegation scope
         // to enforce (authorization is the off-chain-verified x402 credential).
         tenzro_types::TransactionType::X402Settle { .. } => return Ok(()),
+        // Same delegation axis as the event-loop pre-check; keep the operation
+        // names identical so a scope written once constrains both paths.
+        tenzro_types::TransactionType::ClaimNodeAlias { .. } => ("claim_node_alias", 0u128),
+        tenzro_types::TransactionType::BindNodeAlias { .. } => ("bind_node_alias", 0u128),
+        tenzro_types::TransactionType::ReleaseNodeAlias { .. } => ("release_node_alias", 0u128),
         tenzro_types::TransactionType::TeeProviderRegister { .. }
         | tenzro_types::TransactionType::RegisterValidator { .. }
         | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }

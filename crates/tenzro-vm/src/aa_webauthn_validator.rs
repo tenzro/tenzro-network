@@ -67,7 +67,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use tenzro_crypto::pq::{ML_DSA_65_SIG_LEN, ML_DSA_65_VK_LEN, ml_dsa_verify};
-use tenzro_crypto::webauthn::{WebAuthnAssertion, WebAuthnCeremonyType, verify_webauthn_assertion};
+use tenzro_crypto::webauthn::{
+    WebAuthnAssertion, WebAuthnCeremonyType, WebAuthnRelyingParty, verify_webauthn_assertion,
+};
 
 use crate::aa_validators::{
     ERC1271_FAILURE_VALUE, ERC1271_MAGIC_VALUE, IValidator, ValidationData, ValidatorError,
@@ -223,9 +225,10 @@ impl HybridWebAuthnSignature {
 pub struct WebAuthnValidator {
     /// Module address (used as the registry key).
     address: [u8; 20],
-    /// Pinned origin (e.g. `https://keys.tenzro.xyz`). The WebAuthn
-    /// `clientDataJSON.origin` field must match exactly.
-    expected_origin: String,
+    /// Relying Party identity this validator checks assertions against —
+    /// either a pinned exact origin, or a registrable-domain RP ID that
+    /// accepts a ceremony run from any of its subdomains.
+    relying_party: WebAuthnRelyingParty,
     /// Per-account credential set. The outer map keys on the smart-
     /// account address; the inner map keys on `credential_id` so the
     /// validator can dispatch a signature directly to the credential
@@ -248,13 +251,13 @@ pub struct WebAuthnValidator {
 }
 
 impl WebAuthnValidator {
-    /// Build a new validator pinned to `expected_origin`. The address
+    /// Build a new validator pinned to `relying_party`. The address
     /// uniquely identifies the module instance in the
     /// [`crate::aa_validators::ValidatorRegistry`].
-    pub fn new(address: [u8; 20], expected_origin: String) -> Self {
+    pub fn new(address: [u8; 20], relying_party: WebAuthnRelyingParty) -> Self {
         Self {
             address,
-            expected_origin,
+            relying_party,
             enrollments: DashMap::new(),
             policies: DashMap::new(),
             storage: None,
@@ -268,12 +271,12 @@ impl WebAuthnValidator {
     /// call instead of `new` whenever the node owns a `KvStore`.
     pub fn with_storage(
         address: [u8; 20],
-        expected_origin: String,
+        relying_party: WebAuthnRelyingParty,
         storage: Arc<dyn tenzro_storage::KvStore>,
     ) -> Self {
         let v = Self {
             address,
-            expected_origin,
+            relying_party,
             enrollments: DashMap::new(),
             policies: DashMap::new(),
             storage: Some(storage),
@@ -528,11 +531,12 @@ impl WebAuthnValidator {
             .unwrap_or_default()
     }
 
-    /// The exact `Origin` string this validator checks `clientDataJSON.origin`
-    /// against. A signer building an assertion must write this value verbatim;
-    /// deriving it independently risks drifting from the pinned value.
-    pub fn expected_origin(&self) -> &str {
-        &self.expected_origin
+    /// The [`WebAuthnRelyingParty`] this validator checks assertions
+    /// against. A signer building a `create()`/`get()` call must derive its
+    /// `rp.id`/`rpId` from this value; deriving it independently risks
+    /// drifting from the pinned value.
+    pub fn relying_party(&self) -> &WebAuthnRelyingParty {
+        &self.relying_party
     }
 
     /// Look up a specific credential by `(account, credential_id)`.
@@ -617,7 +621,7 @@ impl WebAuthnValidator {
                 &entry.assertion,
                 &pubkey_xy,
                 &expected_challenge,
-                &self.expected_origin,
+                &self.relying_party,
                 WebAuthnCeremonyType::Get,
             )
             .is_err()
@@ -832,7 +836,10 @@ mod tests {
         let op_hash = [0x42u8; 32];
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id, enrollment)
@@ -848,7 +855,10 @@ mod tests {
         let op_hash = [0x42u8; 32];
         let (_cred_id, _enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         // Note: did NOT call validator.enroll().
         let op = dummy_user_op(account, sig_bytes);
@@ -861,7 +871,10 @@ mod tests {
         let op_hash = [0x42u8; 32];
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id, enrollment)
@@ -884,7 +897,10 @@ mod tests {
         bundle[0].ml_dsa_signature.truncate(100);
         let bad_bytes = HybridWebAuthnSignature::encode_bundle(&bundle).unwrap();
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id, enrollment)
@@ -904,7 +920,10 @@ mod tests {
         bundle[0].ml_dsa_signature[100] ^= 0x01;
         let bad_bytes = HybridWebAuthnSignature::encode_bundle(&bundle).unwrap();
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id, enrollment)
@@ -921,8 +940,10 @@ mod tests {
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         // Validator pinned to a different origin.
-        let validator =
-            WebAuthnValidator::new([0xCCu8; 20], "https://attacker.example".to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin("https://attacker.example".to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id, enrollment)
@@ -935,7 +956,10 @@ mod tests {
 
     #[test]
     fn enroll_and_revoke_round_trip() {
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         let cred_id = vec![0xDEu8; 16];
 
@@ -963,7 +987,10 @@ mod tests {
         let op_hash = [0x42u8; 32];
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id, enrollment)
@@ -986,7 +1013,10 @@ mod tests {
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         let module_addr = [0x77u8; 20];
-        let validator = WebAuthnValidator::new(module_addr, ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            module_addr,
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id, enrollment)
@@ -1024,7 +1054,10 @@ mod tests {
         let (cred_id_b, key_b, sig_b) = make_hybrid_sig(&op_hash_b);
         assert_ne!(cred_id_a, cred_id_b);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_id_a.clone(), key_a)
@@ -1072,7 +1105,10 @@ mod tests {
         let (cred_id_a, key_a, _sig_a) = make_hybrid_sig(&op_hash);
         let (cred_id_b, key_b, _sig_b) = make_hybrid_sig(&op_hash);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator.enroll(account.clone(), cred_id_a, key_a).unwrap();
         validator.enroll(account.clone(), cred_id_b, key_b).unwrap();
@@ -1092,7 +1128,10 @@ mod tests {
         let (cred_b, key_b, leg_b) = make_hybrid_leg(&op_hash);
         assert_ne!(cred_a, cred_b);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator.enroll(account.clone(), cred_a, key_a).unwrap();
         validator.enroll(account.clone(), cred_b, key_b).unwrap();
@@ -1162,7 +1201,10 @@ mod tests {
     fn set_two_credential_policy_requires_two_enrollments() {
         let op_hash = [0x42u8; 32];
         let (cred_id, key, _leg) = make_hybrid_leg(&op_hash);
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
 
         // Zero enrolled → refuse.
@@ -1190,7 +1232,10 @@ mod tests {
         let (cred_a, key_a, _leg_a) = make_hybrid_leg(&op_hash);
         let (cred_b, key_b, _leg_b) = make_hybrid_leg(&op_hash);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator
             .enroll(account.clone(), cred_a.clone(), key_a)
@@ -1218,7 +1263,10 @@ mod tests {
         let (cred_a, key_a, _leg_a) = make_hybrid_leg(&op_hash);
         let (cred_b, key_b, _leg_b) = make_hybrid_leg(&op_hash);
 
-        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::Origin(ORIGIN.to_string()),
+        );
         let account = vec![0x01; 20];
         validator.enroll(account.clone(), cred_a, key_a).unwrap();
         validator.enroll(account.clone(), cred_b, key_b).unwrap();
@@ -1239,7 +1287,7 @@ mod tests {
         use std::sync::Arc;
         let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
         let module_addr = [0x10u8; 20];
-        let origin = ORIGIN.to_string();
+        let origin = WebAuthnRelyingParty::Origin(ORIGIN.to_string());
         let account = vec![0xA1u8; 20];
         let cred_a = vec![0xC1u8; 16];
         let cred_b = vec![0xC2u8; 16];
@@ -1294,7 +1342,7 @@ mod tests {
         use std::sync::Arc;
         let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
         let module_addr = [0x10u8; 20];
-        let origin = "https://wallet.tenzro.xyz".to_string();
+        let origin = WebAuthnRelyingParty::Origin("https://wallet.tenzro.xyz".to_string());
         let account_a = vec![0xA1u8; 20];
         let account_b = vec![0xB2u8; 20];
         let cred_a1 = vec![0xC1u8; 16];

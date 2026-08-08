@@ -72,6 +72,7 @@ pub mod multimodal;
 pub mod near_chain_sig;
 pub mod nft;
 pub mod node;
+pub mod node_alias;
 pub mod passkey;
 pub mod payment;
 pub mod permit2;

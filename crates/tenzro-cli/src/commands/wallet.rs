@@ -490,7 +490,7 @@ impl WalletSendCmd {
         // Ed25519 signature before accepting — see node/src/rpc.rs
         // `handle_sign_and_send_transaction`.
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": from_address,

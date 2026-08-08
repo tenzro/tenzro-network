@@ -1297,7 +1297,7 @@ impl AgentPauseCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.controller,
@@ -1392,7 +1392,7 @@ impl AgentQuarantineCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.controller,
@@ -1478,7 +1478,7 @@ impl AgentTerminateCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.controller,

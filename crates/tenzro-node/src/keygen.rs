@@ -12,9 +12,29 @@
 //! "mount lost, identity recreated, stake bonded to dead pubkey,
 //! slashing imminent." Explicit `init` keeps that fault loud.
 //!
+//! ## Key custody at rest
+//!
+//! Secrets are never written in the clear when there is any alternative.
+//! `write_secret` tries, in order:
+//!
+//! 1. **TPM-sealed** — `{file}.sealed/`, bound to this machine's TPM storage
+//!    hierarchy, so a copied blob is inert on any other host. Covers Intel
+//!    PTT, AMD fTPM, discrete TPMs, and ARM/Jetson via OP-TEE's fTPM.
+//! 2. **Encrypted at rest** — `{file}.enc`, AES-256-GCM under an Argon2id key
+//!    derived from the operator's unlock secret (a passkey-gated device key,
+//!    or their KMS on a headless validator). This is the path for hosts with
+//!    no TPM, which notably includes **every Apple machine** — Apple ships a
+//!    Secure Enclave, not a TPM, so a TPM-only design would exclude them.
+//! 3. **Plaintext `0o600`** — last resort only, when neither is available,
+//!    and logged loudly at both write and read. Mode bits stop another user;
+//!    they stop nothing that can read the disk.
+//!
+//! Reads reverse the same order, so a node upgraded to stronger custody never
+//! silently falls back to a stale plaintext copy.
+//!
 //! ## Persisted files
 //!
-//! All are written to `{data_dir}/` with mode `0o600` on Unix:
+//! Under `{data_dir}/`, in whichever of the three forms above applies:
 //!
 //! | File | Contents | Pubkey derivation |
 //! |------|----------|-------------------|
@@ -53,6 +73,7 @@
 use std::path::Path;
 
 use tenzro_crypto::bls::{BlsKeyPair, BlsSecretKey};
+use tenzro_crypto::encryption::SymmetricKey;
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::{KeyPair, KeyType};
 
@@ -138,7 +159,7 @@ pub fn generate_and_persist_keyset(data_dir: &Path, force: bool) -> Result<Valid
     if !force {
         let mut existing = Vec::new();
         for p in [&ed_path, &pq_path, &bls_path] {
-            if p.exists() {
+            if secret_exists(p) {
                 existing.push(p.display().to_string());
             }
         }
@@ -164,15 +185,14 @@ pub fn generate_and_persist_keyset(data_dir: &Path, force: bool) -> Result<Valid
 /// node binary on `start` MUST fail loud here rather than generate.
 pub fn load_validator_keypair(data_dir: &Path) -> Result<KeyPair> {
     let key_path = data_dir.join("validator_key");
-    if !key_path.exists() {
+    if !secret_exists(&key_path) {
         return Err(NodeError::KeyMissing {
             kind: "Ed25519 validator key",
             path: key_path.display().to_string(),
             hint: "run `tenzro-node init --data-dir <dir>` to generate",
         });
     }
-    let bytes = std::fs::read(&key_path)
-        .map_err(|e| NodeError::Other(format!("read {}: {}", key_path.display(), e)))?;
+    let bytes = read_secret(&key_path)?;
     KeyPair::from_bytes(KeyType::Ed25519, &bytes)
         .map_err(|e| NodeError::Other(format!("decode {}: {}", key_path.display(), e)))
 }
@@ -182,15 +202,14 @@ pub fn load_validator_keypair(data_dir: &Path) -> Result<KeyPair> {
 /// the file does not exist.
 pub fn load_validator_pq_key(data_dir: &Path) -> Result<MlDsaSigningKey> {
     let key_path = data_dir.join("validator_pq_key");
-    if !key_path.exists() {
+    if !secret_exists(&key_path) {
         return Err(NodeError::KeyMissing {
             kind: "ML-DSA-65 validator key",
             path: key_path.display().to_string(),
             hint: "run `tenzro-node init --data-dir <dir>` to generate",
         });
     }
-    let bytes = std::fs::read(&key_path)
-        .map_err(|e| NodeError::Other(format!("read {}: {}", key_path.display(), e)))?;
+    let bytes = read_secret(&key_path)?;
     MlDsaSigningKey::from_seed(&bytes)
         .map_err(|e| NodeError::Other(format!("decode {}: {}", key_path.display(), e)))
 }
@@ -200,15 +219,14 @@ pub fn load_validator_pq_key(data_dir: &Path) -> Result<MlDsaSigningKey> {
 /// the file does not exist.
 pub fn load_validator_bls_key(data_dir: &Path) -> Result<BlsKeyPair> {
     let key_path = data_dir.join("validator_bls_key");
-    if !key_path.exists() {
+    if !secret_exists(&key_path) {
         return Err(NodeError::KeyMissing {
             kind: "BLS12-381 validator key",
             path: key_path.display().to_string(),
             hint: "run `tenzro-node init --data-dir <dir>` to generate",
         });
     }
-    let bytes = std::fs::read(&key_path)
-        .map_err(|e| NodeError::Other(format!("read {}: {}", key_path.display(), e)))?;
+    let bytes = read_secret(&key_path)?;
     BlsSecretKey::from_bytes(&bytes)
         .map(BlsKeyPair::from_secret_key)
         .map_err(|e| NodeError::Other(format!("decode {}: {}", key_path.display(), e)))
@@ -233,9 +251,8 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
 
     let key_path = data_dir.join("validator_erc8004_system_key");
 
-    if key_path.exists() {
-        let bytes = std::fs::read(&key_path)
-            .map_err(|e| NodeError::Other(format!("read {}: {}", key_path.display(), e)))?;
+    if secret_exists(&key_path) {
+        let bytes = read_secret(&key_path)?;
         if bytes.len() != 32 {
             return Err(NodeError::Other(format!(
                 "{} has wrong length {} (expected 32)",
@@ -297,9 +314,8 @@ pub fn load_or_generate_model_recipient_key(data_dir: &Path) -> Result<[u8; 32]>
 
     let key_path = data_dir.join("model_recipient_x25519_key");
 
-    if key_path.exists() {
-        let bytes = std::fs::read(&key_path)
-            .map_err(|e| NodeError::Other(format!("read {}: {}", key_path.display(), e)))?;
+    if secret_exists(&key_path) {
+        let bytes = read_secret(&key_path)?;
         if bytes.len() != 32 {
             return Err(NodeError::Other(format!(
                 "{} has wrong length {} (expected 32)",
@@ -324,7 +340,108 @@ pub fn load_or_generate_model_recipient_key(data_dir: &Path) -> Result<[u8; 32]>
     Ok(buf)
 }
 
+/// Directory holding the TPM-sealed form of the secret at `path`.
+///
+/// Sealing produces two blobs (public area + encrypted private area) rather
+/// than one file, so each secret gets its own subdirectory beside the key it
+/// replaces: `validator_key` seals into `validator_key.sealed/`.
+fn sealed_dir_for(path: &Path) -> std::path::PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".sealed");
+    std::path::PathBuf::from(p)
+}
+
+/// Persist a secret, sealed to the TPM whenever this host has one.
+///
+/// A private key written as plaintext is readable by anything that can read
+/// the filesystem — a stolen disk, a backup, a container escape, a stray
+/// `tar`. Mode `0o600` stops another *user*; it stops nothing that runs as
+/// this user or gets the bytes offline. Sealing binds the secret to this
+/// TPM's storage hierarchy, so the blob is worthless if copied elsewhere,
+/// which is exactly the property a machine's own identity has to have before
+/// it can vouch for itself (autonomous registration, and the node-alias bind
+/// consent that proves this machine agreed to answer for a name).
+///
+/// On a host with no usable TPM the secret still has to be persisted or the
+/// node cannot run at all, so it falls back to `0o600` and says so loudly —
+/// once, at the point of writing, rather than leaving the operator to infer
+/// it. That is the honest position: refusing outright would make every
+/// developer machine and TPM-less VM unusable, and silently degrading would
+/// let an operator believe in protection they do not have.
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
+    let sealed_dir = sealed_dir_for(path);
+    if tenzro_tee::tpm_seal::tpm_available() {
+        std::fs::create_dir_all(&sealed_dir)
+            .map_err(|e| NodeError::Other(format!("create {}: {}", sealed_dir.display(), e)))?;
+        match tenzro_tee::tpm_seal::seal(&sealed_dir, bytes) {
+            Ok(()) => {
+                // Remove any plaintext predecessor: leaving it behind would
+                // mean the key is sealed and also still lying next to it.
+                if path.exists() {
+                    let _ = std::fs::remove_file(path);
+                    tracing::info!(
+                        target: "tenzro::keygen",
+                        path = %path.display(),
+                        "removed plaintext key superseded by its TPM-sealed form"
+                    );
+                }
+                tracing::info!(
+                    target: "tenzro::keygen",
+                    dir = %sealed_dir.display(),
+                    "secret sealed to TPM"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&sealed_dir);
+                tracing::warn!(
+                    target: "tenzro::keygen",
+                    path = %path.display(),
+                    "TPM present but sealing failed ({e}); falling back to a 0o600 file"
+                );
+            }
+        }
+    }
+
+    // No TPM — passkey custody. Both paths are first-class: a validator
+    // without a TPM is not a lesser validator, it is one whose operator holds
+    // the key behind their own authenticator. Never refuse and never fall
+    // through to plaintext; encrypt at rest under the operator's unlock
+    // secret, which on a desktop is a hardware-backed device key gated by a
+    // passkey/biometric and on a headless validator is their configured
+    // unlock source.
+    if let Some(passphrase) = operator_unlock_secret() {
+        let ciphertext = encrypt_at_rest(bytes, &passphrase)?;
+        let enc_path = encrypted_path_for(path);
+        std::fs::write(&enc_path, &ciphertext)
+            .map_err(|e| NodeError::Other(format!("write {}: {}", enc_path.display(), e)))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&enc_path, std::fs::Permissions::from_mode(0o600));
+        }
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        tracing::info!(
+            target: "tenzro::keygen",
+            path = %enc_path.display(),
+            "no TPM — key encrypted at rest under the operator's passkey-gated unlock secret"
+        );
+        return Ok(());
+    }
+
+    // Neither TPM nor a configured unlock secret. Still persist — refusing
+    // would brick first-run and dev hosts — but make the exposure explicit
+    // rather than letting an operator assume protection they do not have.
+    tracing::warn!(
+        target: "tenzro::keygen",
+        path = %path.display(),
+        "writing this key as a 0o600 PLAINTEXT file: no TPM on this host and no operator \
+         unlock secret configured. Mode bits stop another user, not anyone who can read the \
+         disk. Install tpm2-tools on a TPM host, or configure your passkey-gated unlock \
+         secret, then re-run keygen to upgrade this key in place"
+    );
     std::fs::write(path, bytes)
         .map_err(|e| NodeError::Other(format!("write {}: {}", path.display(), e)))?;
     #[cfg(unix)]
@@ -334,6 +451,174 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
             .map_err(|e| NodeError::Other(format!("chmod 600 {}: {}", path.display(), e)))?;
     }
     Ok(())
+}
+
+/// Path of the passphrase-encrypted form of a secret.
+fn encrypted_path_for(path: &Path) -> std::path::PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".enc");
+    std::path::PathBuf::from(p)
+}
+
+/// The operator's keystore-unlock secret, if one is configured.
+///
+/// # Where the secret legitimately comes from
+///
+/// This is the passkey half of "TPM or passkey". Hardware custody is a
+/// tiered story because no single mechanism covers the fleet:
+///
+///   1. **TPM 2.0** — handled above, before this function is reached. Covers
+///      Intel (PTT on the CSME), AMD (fTPM on the PSP), discrete Infineon /
+///      ST / Nuvoton parts, and — importantly — ARM and Jetson, where
+///      OP-TEE's fTPM TA plus `tpm_ftpm_tee` present a real `/dev/tpm0`, so
+///      tpm2-tools works unmodified.
+///   2. **Apple Secure Enclave** — `tenzro-device-key`, gated by Touch ID.
+///      Not an optional nicety: **Apple ships no TPM on any Mac**, so a
+///      TPM-only design would exclude every Apple machine outright. SEP keys
+///      are P-256-only with no seal/unseal, so the symmetric key is wrapped
+///      via ECDH rather than sealed.
+///   3. **Android StrongBox / KeyMint** — Titan M2, Qualcomm SPU.
+///   4. **WebAuthn PRF** (CTAP2 `hmac-secret`) — a passkey deriving a stable
+///      secret rather than only signing. Note the hard limit: **PRF requires
+///      user verification, so it cannot run unattended.** It suits an
+///      operator unlocking a node interactively; it cannot be the unlock
+///      path for a validator that must survive an unattended restart.
+///   5. **KMS / operator secret store** — the non-interactive path a headless
+///      validator actually needs, which is why this function reads a
+///      configured source rather than prompting.
+///
+/// Deliberately not assumed: that Pluton means TPM (from 2026 silicon it no
+/// longer backs the TPM on AMD and Qualcomm), or that Chinese TCM/TPCM parts
+/// answer TPM commands (different algorithms — SM2/SM3/SM4 — and a different
+/// command set entirely).
+///
+/// In every case the bytes on disk stay ciphertext and the unlocking factor
+/// lives in hardware or a secret store the operator controls.
+///
+/// Reuses the `KeystoreUnlocker` contract the wallet keystore already relies
+/// on, so a node has one unlock story rather than two: a hardware-backed
+/// device key behind a passkey/biometric on desktop, the operator's
+/// configured source on a headless validator.
+fn operator_unlock_secret() -> Option<zeroize::Zeroizing<String>> {
+    use tenzro_keystore_unlock::KeystoreUnlocker as _;
+    // Same variable the wallet keystore unlocks from (`main.rs`), so an
+    // operator configures their passkey-gated device key or KMS once and both
+    // the wallet and the node's own identity keys are covered by it.
+    tenzro_keystore_unlock::EnvUnlocker::new(crate::KEYSTORE_PASSWORD_ENV)
+        .unlock_password()
+        .ok()
+        .filter(|p| !p.is_empty())
+}
+
+/// Argon2id KDF matching the wallet keystore's profile (64 MiB, t=3, p=4), so
+/// both stores cost an attacker the same to grind.
+fn derive_at_rest_key(passphrase: &str, salt: &[u8; 32]) -> Result<SymmetricKey> {
+    let params = argon2::Params::new(65536, 3, 4, Some(32))
+        .map_err(|e| NodeError::Other(format!("argon2 params: {e}")))?;
+    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key_bytes = [0u8; 32];
+    argon2
+        .hash_password_into(passphrase.as_bytes(), salt, &mut key_bytes)
+        .map_err(|e| NodeError::Other(format!("argon2 derivation: {e}")))?;
+    SymmetricKey::from_bytes(&key_bytes).map_err(|e| NodeError::Other(e.to_string()))
+}
+
+/// Encrypt at rest: `salt(32) || AES-256-GCM(nonce||ct||tag)`.
+fn encrypt_at_rest(secret: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    let mut salt = [0u8; 32];
+    getrandom_0_4::fill(&mut salt)
+        .map_err(|e| NodeError::Other(format!("salt generation: {e}")))?;
+    let key = derive_at_rest_key(passphrase, &salt)?;
+    let ct = tenzro_crypto::encryption::encrypt_aes(&key, secret)
+        .map_err(|e| NodeError::Other(format!("encrypt-at-rest: {e}")))?;
+    let mut out = Vec::with_capacity(salt.len() + ct.len());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Inverse of [`encrypt_at_rest`].
+fn decrypt_at_rest(blob: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    if blob.len() <= 32 {
+        return Err(NodeError::Other(
+            "encrypted key blob is truncated".to_string(),
+        ));
+    }
+    let (salt_bytes, ct) = blob.split_at(32);
+    let mut salt = [0u8; 32];
+    salt.copy_from_slice(salt_bytes);
+    let key = derive_at_rest_key(passphrase, &salt)?;
+    tenzro_crypto::encryption::decrypt_aes(&key, ct)
+        .map_err(|e| NodeError::Other(format!("decrypt-at-rest: {e}")))
+}
+
+/// Whether a secret is stored at `path` in *any* of the forms
+/// [`read_secret`] can read.
+///
+/// A secret lives in one of three places and only one of them is the path
+/// itself: TPM-sealed under `<path>.sealed/`, encrypted at rest beside it, or
+/// plaintext at `path`. [`write_secret`] deletes the plaintext once it has
+/// sealed, so testing `path.exists()` reports a sealed key as *absent* — which
+/// made loaders raise `KeyMissing` for a key that was right there, and made the
+/// overwrite guard wave through a clobber of a key it could not see.
+///
+/// That stayed hidden because sealing never actually succeeded: the sealing
+/// parent was created at the Endorsement Key's handle and every seal failed, so
+/// every host fell back to plaintext and `path.exists()` happened to be right.
+/// Fixing the handle made sealing work and turned this into 191 failures.
+///
+/// Mirrors `read_secret`'s precedence deliberately. If the two ever disagree,
+/// the node either refuses to start on a key it can read or overwrites one it
+/// cannot see.
+fn secret_exists(path: &Path) -> bool {
+    tenzro_tee::tpm_seal::is_sealed(&sealed_dir_for(path))
+        || encrypted_path_for(path).exists()
+        || path.exists()
+}
+
+/// Read a secret back, preferring the TPM-sealed form.
+///
+/// Sealed first so a node that has been upgraded to sealed storage never
+/// silently falls back to a stale plaintext copy. `unseal` fails on a blob
+/// produced by a different TPM, which is the point — a copied key directory
+/// does not become a working identity on another machine.
+fn read_secret(path: &Path) -> Result<Vec<u8>> {
+    // Strongest custody first, so a node upgraded to sealed or encrypted
+    // storage never silently falls back to a stale plaintext copy.
+    let sealed_dir = sealed_dir_for(path);
+    if tenzro_tee::tpm_seal::is_sealed(&sealed_dir) {
+        return tenzro_tee::tpm_seal::unseal(&sealed_dir)
+            .map(|z| z.to_vec())
+            .map_err(|e| NodeError::Other(format!("unseal {}: {}", sealed_dir.display(), e)));
+    }
+
+    let enc_path = encrypted_path_for(path);
+    if enc_path.exists() {
+        let blob = std::fs::read(&enc_path)
+            .map_err(|e| NodeError::Other(format!("read {}: {}", enc_path.display(), e)))?;
+        let passphrase = operator_unlock_secret().ok_or_else(|| {
+            NodeError::Other(format!(
+                "{} is encrypted at rest but no operator unlock secret is available. \
+                 Authenticate with your passkey-gated device key, or set \
+                 TENZRO_KEYSTORE_PASSWORD, before starting the node.",
+                enc_path.display()
+            ))
+        })?;
+        return decrypt_at_rest(&blob, &passphrase);
+    }
+
+    // Plaintext remains readable so an existing node still starts, but say so
+    // — the operator should know this key is not protected at rest, and
+    // re-running keygen now upgrades it in place.
+    let bytes = std::fs::read(path)
+        .map_err(|e| NodeError::Other(format!("read {}: {}", path.display(), e)))?;
+    tracing::warn!(
+        target: "tenzro::keygen",
+        path = %path.display(),
+        "loaded a PLAINTEXT key: not TPM-sealed and not encrypted at rest. \
+         Anything able to read this file holds this node's identity"
+    );
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -439,5 +724,43 @@ mod tests {
         assert!(toml.contains("pq_public_key = \"0x"));
         assert!(toml.contains("bls_public_key = \"0x"));
         assert!(toml.contains("stake = 1000000"));
+    }
+}
+
+#[cfg(test)]
+mod at_rest_tests {
+    use super::*;
+
+    /// A key written with an operator unlock secret must not be recoverable
+    /// from the bytes alone — that is the whole point of the passkey fallback
+    /// for hosts without a TPM.
+    #[test]
+    fn encrypted_at_rest_round_trips_and_hides_the_secret() {
+        let secret = b"this-is-a-validator-private-key!";
+        let blob = encrypt_at_rest(secret, "operator-passkey-derived").unwrap();
+
+        // Ciphertext must not contain the plaintext.
+        assert!(
+            blob.windows(secret.len()).all(|w| w != secret),
+            "plaintext key must not appear in the at-rest blob"
+        );
+        // Salt is prepended, so two encryptions of the same secret differ.
+        let blob2 = encrypt_at_rest(secret, "operator-passkey-derived").unwrap();
+        assert_ne!(blob, blob2, "each write must use a fresh salt");
+
+        let out = decrypt_at_rest(&blob, "operator-passkey-derived").unwrap();
+        assert_eq!(out, secret);
+    }
+
+    /// The wrong operator cannot recover the key.
+    #[test]
+    fn decrypt_at_rest_rejects_a_wrong_secret() {
+        let blob = encrypt_at_rest(b"validator-key-bytes-here-000000!", "right").unwrap();
+        assert!(decrypt_at_rest(&blob, "wrong").is_err());
+    }
+
+    #[test]
+    fn truncated_blob_is_rejected_rather_than_panicking() {
+        assert!(decrypt_at_rest(&[0u8; 8], "x").is_err());
     }
 }

@@ -143,8 +143,8 @@ pub use pq::{
 };
 pub use signatures::{Signature, Signer, Verifier};
 pub use webauthn::{
-    WebAuthnAssertion, WebAuthnCeremonyType, unwrap_der_signature, verify_webauthn_assertion,
-    webauthn_signed_hash, webauthn_signed_payload,
+    WebAuthnAssertion, WebAuthnCeremonyType, WebAuthnRelyingParty, unwrap_der_signature,
+    verify_webauthn_assertion, webauthn_signed_hash, webauthn_signed_payload,
 };
 
 #[cfg(test)]

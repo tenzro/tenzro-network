@@ -266,7 +266,16 @@ Against the running local node this provisions an identity and wallet,
 detects your hardware (CPU, RAM, GPUs, TEE), funds the wallet from the
 testnet faucet if needed, posts the 1,000 TNZO compute bond, registers you as
 a model provider with default per-token pricing, and downloads + serves the
-largest catalog model that fits the machine. Your node advertises its
+largest catalog model that fits the machine.
+
+The faucet grants slightly more than the bond (up to 1,010 TNZO) because
+posting the bond costs gas: a wallet funded with exactly 1,000 TNZO cannot pay
+for the transaction that bonds 1,000 TNZO. Operators running their own testnet
+set the grant with `TENZRO_FAUCET_DISPENSE_AMOUNT`.
+
+Addresses may be given in either form the node prints — 32-byte hex
+(`0x1ac72f09…`) or base58 (`3F5YuHJUov…`, what the wallet displays). Both are
+accepted everywhere an `address` parameter is taken. Your node advertises its
 capacity on the provider gossip topic automatically; inference demand routes
 to you and settles in TNZO. Use `--rpc <url>` to target a node you operate
 remotely.

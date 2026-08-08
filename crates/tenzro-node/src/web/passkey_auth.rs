@@ -170,13 +170,46 @@ pub async fn session_complete(
 
 /// `GET /auth/passkey` — the ceremony page. Session-specific ceremony
 /// data is fetched client-side from the session-info endpoint using the
-/// `session` query parameter; the only server-side templating is the
-/// device-handoff QR code, rendered when a well-formed session id is
-/// present so the user can continue the ceremony on a phone.
+/// `session` query parameter; the server-side templating is the
+/// device-handoff QR code (rendered when a well-formed session id is
+/// present so the user can continue the ceremony on a phone) and the
+/// WebAuthn RP ID.
+///
+/// The RP ID is injected server-side rather than derived in the page,
+/// because no client-side heuristic gets it right: "last two labels" is
+/// correct for `tenzro.xyz` and wrong for `network.tenzro.com`. It must
+/// also match what the server verifies against
+/// (`WebAuthnRelyingParty::RegistrableDomain`), and a credential minted
+/// under the wrong RP ID is unusable rather than merely misconfigured.
+/// Falls back to `location.hostname` (the browser default) when the node
+/// has no registrable-domain RP ID configured.
 pub async fn passkey_page(
     headers: HeaderMap,
+    State(state): State<Arc<WebState>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Html<String> {
+    let rp_id_block = {
+        let configured = state
+            .node
+            .as_ref()
+            .and_then(|node| node.webauthn_validator())
+            .and_then(|v| match v.relying_party() {
+                tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain { rp_id } => {
+                    Some(rp_id.clone())
+                }
+                // An exact-origin policy pins one host, which is what
+                // `location.hostname` already yields — no override needed.
+                tenzro_crypto::webauthn::WebAuthnRelyingParty::Origin(_) => None,
+            });
+        match configured {
+            Some(rp_id) => format!(
+                "<script>window.__TENZRO_RP_ID = {};</script>",
+                serde_json::Value::String(rp_id)
+            ),
+            None => String::new(),
+        }
+    };
+
     let qr_block = query
         .get("session")
         .filter(|sid| sid.len() == 64 && sid.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -193,8 +226,14 @@ pub async fn passkey_page(
                 .render::<qrcode::render::svg::Color>()
                 .min_dimensions(168, 168)
                 .quiet_zone(true)
-                .dark_color(qrcode::render::svg::Color("#e5e5e5"))
-                .light_color(qrcode::render::svg::Color("#111111"))
+                // `currentColor` for the modules and `transparent` for the
+                // quiet zone lets one server-rendered SVG stay scannable in
+                // both themes. The previous fixed pair was a light-on-dark
+                // inversion that vanished against a light background — and an
+                // unscannable QR silently breaks the phone hand-off, which is
+                // the only path a user without a local authenticator has.
+                .dark_color(qrcode::render::svg::Color("currentColor"))
+                .light_color(qrcode::render::svg::Color("transparent"))
                 .build();
             format!(
                 "<div id=\"qr\">{}<p>Or scan with your phone to continue there.</p></div>",
@@ -202,7 +241,11 @@ pub async fn passkey_page(
             )
         })
         .unwrap_or_default();
-    Html(PASSKEY_PAGE_HTML.replace("<!--QR-->", &qr_block))
+    Html(
+        PASSKEY_PAGE_HTML
+            .replace("<!--QR-->", &qr_block)
+            .replace("<!--RPID-->", &rp_id_block),
+    )
 }
 
 const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
@@ -212,43 +255,93 @@ const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tenzro Passkey</title>
 <style>
-  :root { color-scheme: dark; }
+  /* Tenzro design language, ported from apps/tenzro-control/src/index.css.
+     Monochrome with one indigo accent; 0px radius throughout is a deliberate
+     brand choice, not an oversight. Fonts degrade to the system stack rather
+     than fetching Geist — this page is served by a node that may have no
+     outbound network, and a blocked font request must not delay a security
+     ceremony. */
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #0a0c12;
+    --muted: #f2f3f5;
+    --muted-fg: #5b6070;
+    --border: #e3e5ea;
+    --accent: #6b79aa;
+    --ok: #2f7d55;
+    --err: #b4331f;
+    --radius: 0px;
+    --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000;
+      --fg: #ffffff;
+      --muted: #14171f;
+      --muted-fg: #8a8f9e;
+      --border: #1c2030;
+      --ok: #4ade80;
+      --err: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center;
-    justify-content: center; background: #0a0a0a; color: #e5e5e5;
-    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    justify-content: center; padding: 1.5rem;
+    background: var(--bg); color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
   }
   .card {
-    max-width: 26rem; width: 100%; padding: 2rem; border-radius: 0.75rem;
-    border: 1px solid #262626; background: #111111;
+    max-width: 26rem; width: 100%; padding: 2rem; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--bg);
   }
-  h1 { font-size: 1.1rem; margin: 0 0 0.5rem; font-weight: 600; }
-  p { font-size: 0.9rem; line-height: 1.5; color: #a3a3a3; margin: 0.5rem 0; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.6875rem; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.18em; color: var(--muted-fg);
+    margin: 0 0 0.75rem;
+  }
+  h1 {
+    font-size: 1.25rem; margin: 0 0 0.5rem; font-weight: 500;
+    letter-spacing: -0.02em;
+  }
+  p { font-size: 0.9rem; line-height: 1.5; color: var(--muted-fg); margin: 0.5rem 0; }
   code {
-    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.8rem;
-    color: #d4d4d4; word-break: break-all;
+    font-family: var(--font-mono); font-size: 0.8rem;
+    color: var(--fg); word-break: break-all;
   }
   button {
-    margin-top: 1rem; width: 100%; padding: 0.65rem 1rem; border-radius: 0.5rem;
-    border: 1px solid #404040; background: #fafafa; color: #0a0a0a;
-    font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    margin-top: 1.25rem; width: 100%; padding: 0.7rem 1rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--fg); background: var(--fg); color: var(--bg);
+    font-family: var(--font-sans); font-size: 0.9rem; font-weight: 500;
+    cursor: pointer;
   }
+  button:hover:not(:disabled) { opacity: 0.9; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button:disabled { opacity: 0.4; cursor: default; }
-  .ok { color: #4ade80; }
-  .err { color: #f87171; }
-  #qr { margin-top: 1.25rem; text-align: center; }
-  #qr svg { border-radius: 0.5rem; }
+  .ok { color: var(--ok); }
+  .err { color: var(--err); }
+  #qr { margin-top: 1.5rem; text-align: center; }
+  #qr svg {
+    border-radius: var(--radius); border: 1px solid var(--border);
+    background: var(--bg); max-width: 100%; height: auto;
+  }
   #qr p { font-size: 0.8rem; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1 id="title">Tenzro Passkey</h1>
+  <p class="eyebrow">Tenzro</p>
+  <h1 id="title">Passkey</h1>
   <p id="msg">Loading session&hellip;</p>
   <p id="detail"></p>
   <button id="go" hidden></button>
   <!--QR-->
 </div>
+<!--RPID-->
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -269,6 +362,14 @@ const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
   const bytesToHex = (buf) =>
     Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
   const bytesToArray = (buf) => Array.from(new Uint8Array(buf));
+
+  // The RP ID scopes the credential. Injected by the server when the node
+  // uses a registrable-domain policy, so a passkey created while onboarding
+  // one node authenticates at every other node under the same domain; when
+  // absent, omitting rp.id/rpId lets the browser default to this exact
+  // host, which is the correct behaviour for an origin-pinned node.
+  const RP_ID = window.__TENZRO_RP_ID || null;
+  const withRpId = (opts) => (RP_ID ? Object.assign({ rpId: RP_ID }, opts) : opts);
 
   const sessionId = new URLSearchParams(location.search).get('session');
   if (!sessionId) { msg('Missing session parameter in the URL.', 'err'); return; }
@@ -295,7 +396,7 @@ const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
         : (info.display_name || 'Tenzro account');
       const opts = {
         challenge,
-        rp: { name: 'Tenzro', id: location.hostname },
+        rp: RP_ID ? { name: 'Tenzro', id: RP_ID } : { name: 'Tenzro' },
         user: {
           id: hexToBytes(info.session_id).slice(0, 16),
           name,
@@ -332,14 +433,14 @@ const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
         }
         msg('Confirm with a device already on this account…');
         const proof = await navigator.credentials.get({
-          publicKey: {
+          publicKey: withRpId({
             challenge: b64urlToBytes(info.custody_challenge_b64),
             allowCredentials: info.credential_ids_hex.map((h) => ({
               type: 'public-key', id: hexToBytes(h),
             })),
             userVerification: 'required',
             timeout: 120000,
-          },
+          }),
         });
         const pr = proof.response;
         authorization = {
@@ -363,11 +464,11 @@ const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
       return out;
     }
     // sign — the challenge IS the op hash.
-    const opts = {
+    const opts = withRpId({
       challenge,
       userVerification: 'required',
       timeout: 120000,
-    };
+    });
     if (Array.isArray(info.credential_ids_hex) && info.credential_ids_hex.length) {
       opts.allowCredentials = info.credential_ids_hex.map((h) => ({
         type: 'public-key', id: hexToBytes(h),

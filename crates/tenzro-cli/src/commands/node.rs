@@ -32,6 +32,9 @@ pub enum NodeCommand {
     Stats(NodeStatsCmd),
     /// Show this node's DID Document — every way of reaching it, in one place
     DidDocument(NodeDidDocumentCmd),
+    /// Claim, bind, or look up this node's readable name
+    #[command(subcommand)]
+    Alias(crate::commands::node_alias::NodeAliasCommand),
     /// Storage-provider operations (store objects, open/charge streaming deals, pricing)
     #[command(subcommand)]
     Storage(StorageCommand),
@@ -54,6 +57,7 @@ impl NodeCommand {
             Self::MempoolLane(cmd) => cmd.execute().await,
             Self::Stats(cmd) => cmd.execute().await,
             Self::DidDocument(cmd) => cmd.execute().await,
+            Self::Alias(cmd) => cmd.execute().await,
             Self::Storage(cmd) => cmd.execute().await,
             Self::Compute(cmd) => cmd.execute().await,
         }

@@ -88,10 +88,12 @@ pub fn webauthn_signed_hash(authenticator_data: &[u8], client_data_json: &[u8]) 
 /// inside `clientDataJSON` byte-for-byte (base64url, no padding, per the
 /// WebAuthn spec).
 ///
-/// `expected_origin` is the exact `Origin` the relying party expects (e.g.
-/// `https://keys.tenzro.xyz`); it must match the `origin` field inside
-/// `clientDataJSON`. Wildcard origins are not supported by the spec and
-/// not accepted here.
+/// `relying_party` is the [`WebAuthnRelyingParty`] policy the credential
+/// must satisfy — either one exact pinned origin, or a registrable-domain
+/// RP ID shared across its subdomains. Wildcard *origins* are not supported
+/// by the spec and are not accepted; cross-subdomain reuse is expressed as
+/// [`WebAuthnRelyingParty::RegistrableDomain`], which is a different
+/// mechanism (RP ID scoping, WebAuthn L3 §5.1.3 step 8 / §7.1).
 ///
 /// `expected_type` is `"webauthn.get"` for assertions and
 /// `"webauthn.create"` for registrations; pass the value matching the
@@ -100,7 +102,7 @@ pub fn verify_webauthn_assertion(
     assertion: &WebAuthnAssertion,
     public_key_xy: &[u8],
     expected_challenge_b64url: &str,
-    expected_origin: &str,
+    relying_party: &WebAuthnRelyingParty,
     expected_type: WebAuthnCeremonyType,
 ) -> Result<()> {
     // 1. Parse and validate clientDataJSON. Per the spec we may NOT
@@ -121,20 +123,58 @@ pub fn verify_webauthn_assertion(
             "clientDataJSON challenge mismatch".to_string(),
         ));
     }
-    if cdj.origin != expected_origin {
-        return Err(CryptoError::InvalidSignature(format!(
-            "clientDataJSON origin mismatch: expected {}, got {}",
-            expected_origin, cdj.origin
-        )));
-    }
 
-    // 2. Validate authenticatorData minimum length and User Present flag.
+    // 2. Validate authenticatorData minimum length. Checked before the
+    // relying-party arm below because the `RegistrableDomain` arm reads the
+    // leading 32-byte rpIdHash out of it.
     if assertion.authenticator_data.len() < AUTHENTICATOR_DATA_MIN_LEN {
         return Err(CryptoError::InvalidSignature(format!(
             "authenticatorData too short: {} bytes",
             assertion.authenticator_data.len()
         )));
     }
+
+    // 3. Enforce the relying-party policy.
+    match relying_party {
+        WebAuthnRelyingParty::Origin(expected_origin) => {
+            if &cdj.origin != expected_origin {
+                return Err(CryptoError::InvalidSignature(format!(
+                    "clientDataJSON origin mismatch: expected {}, got {}",
+                    expected_origin, cdj.origin
+                )));
+            }
+        }
+        WebAuthnRelyingParty::RegistrableDomain { rp_id } => {
+            let host = origin_host(&cdj.origin)?;
+            let is_local = host == "localhost" || host == "127.0.0.1";
+            if !is_local && !cdj.origin.starts_with("https://") {
+                return Err(CryptoError::InvalidSignature(
+                    "clientDataJSON origin must be https (except localhost)".to_string(),
+                ));
+            }
+            // The dot-prefixed suffix test is load-bearing: a bare
+            // `ends_with(rp_id)` would also accept `evilnetwork.tenzro.com`
+            // for an RP ID of `network.tenzro.com`.
+            if host != rp_id.as_str() && !host.ends_with(&format!(".{rp_id}")) {
+                return Err(CryptoError::InvalidSignature(format!(
+                    "clientDataJSON origin {} is not {rp_id} or a subdomain of it",
+                    cdj.origin
+                )));
+            }
+            // The origin string is browser-supplied; the rpIdHash is what
+            // the authenticator itself committed to, and is the check that
+            // actually binds the credential to this RP ID (WebAuthn L3
+            // §7.2 step 13).
+            let expected_rp_id_hash = Sha256::digest(rp_id.as_bytes());
+            if assertion.authenticator_data[0..32] != expected_rp_id_hash[..] {
+                return Err(CryptoError::InvalidSignature(
+                    "authenticatorData rpIdHash does not match the configured RP ID".to_string(),
+                ));
+            }
+        }
+    }
+
+    // 4. Enforce the User Present flag.
     let flags = assertion.authenticator_data[AUTHENTICATOR_DATA_FLAGS_OFFSET];
     if flags & AUTH_DATA_FLAG_UP == 0 {
         return Err(CryptoError::InvalidSignature(
@@ -146,10 +186,10 @@ pub fn verify_webauthn_assertion(
     // path. Plain `verify_webauthn_assertion` allows UP-only because
     // some flows (low-value reads, recovery setup) accept it.
 
-    // 3. Compute the hash the authenticator signed.
+    // 5. Compute the hash the authenticator signed.
     let prehash = webauthn_signed_hash(&assertion.authenticator_data, &assertion.client_data_json);
 
-    // 4. Unwrap signature from DER if needed and verify.
+    // 6. Unwrap signature from DER if needed and verify.
     let raw_sig = unwrap_der_signature(&assertion.signature)?;
     let p256_sig = P256Signature::from_bytes(raw_sig);
     let verifier = P256Verifier::from_public_key_bytes(public_key_xy)?;
@@ -165,14 +205,14 @@ pub fn verify_webauthn_assertion_require_uv(
     assertion: &WebAuthnAssertion,
     public_key_xy: &[u8],
     expected_challenge_b64url: &str,
-    expected_origin: &str,
+    relying_party: &WebAuthnRelyingParty,
     expected_type: WebAuthnCeremonyType,
 ) -> Result<()> {
     verify_webauthn_assertion(
         assertion,
         public_key_xy,
         expected_challenge_b64url,
-        expected_origin,
+        relying_party,
         expected_type,
     )?;
     let flags = assertion.authenticator_data[AUTHENTICATOR_DATA_FLAGS_OFFSET];
@@ -184,6 +224,51 @@ pub fn verify_webauthn_assertion_require_uv(
         ));
     }
     Ok(())
+}
+
+/// Relying Party identity policy for [`verify_webauthn_assertion`].
+///
+/// A WebAuthn credential is scoped to whichever RP ID the authenticator
+/// committed to at creation time (the `rpIdHash` inside `authenticatorData`),
+/// not to the `origin` string alone — `origin` is browser-supplied and on
+/// its own only proves the ceremony ran somewhere under that host, not which
+/// RP ID the credential is bound to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebAuthnRelyingParty {
+    /// Exact-origin match (e.g. `https://keys.tenzro.xyz`) — the behavior of
+    /// [`verify_webauthn_assertion`]. A credential is scoped to one origin
+    /// and cannot be used from any other host, including a subdomain.
+    Origin(String),
+    /// Parent-domain RP ID (e.g. `network.tenzro.com`). Per WebAuthn L3
+    /// §5.1.3 step 8 / §7.1, an RP ID may be any registrable-domain suffix
+    /// of the origin, so a credential created under one subdomain
+    /// authenticates under any other subdomain of the same RP ID —
+    /// `alice.network.tenzro.com` and `bob.network.tenzro.com` share
+    /// credentials.
+    RegistrableDomain {
+        /// The registrable domain both the origin's host and the
+        /// authenticator's committed `rpIdHash` must match.
+        rp_id: String,
+    },
+}
+
+/// Extracts the host (no scheme, no port, no path) from an `Origin` string
+/// as found in `clientDataJSON.origin`.
+fn origin_host(origin: &str) -> Result<&str> {
+    let without_scheme = origin.split_once("://").map_or(origin, |(_, rest)| rest);
+    let host = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(without_scheme);
+    if host.is_empty() {
+        return Err(CryptoError::InvalidSignature(
+            "clientDataJSON origin has no host".to_string(),
+        ));
+    }
+    Ok(host)
 }
 
 /// WebAuthn ceremony discriminator written to `clientDataJSON.type`.
@@ -397,7 +482,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.xyz",
+            &WebAuthnRelyingParty::Origin("https://keys.tenzro.xyz".to_string()),
             WebAuthnCeremonyType::Get,
         )
         .unwrap();
@@ -425,7 +510,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.xyz",
+            &WebAuthnRelyingParty::Origin("https://keys.tenzro.xyz".to_string()),
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
@@ -453,7 +538,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.xyz",
+            &WebAuthnRelyingParty::Origin("https://keys.tenzro.xyz".to_string()),
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
@@ -481,7 +566,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.xyz",
+            &WebAuthnRelyingParty::Origin("https://keys.tenzro.xyz".to_string()),
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
@@ -510,9 +595,182 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.xyz",
+            &WebAuthnRelyingParty::Origin("https://keys.tenzro.xyz".to_string()),
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
+    }
+
+    /// Builds a `(assertion, public_key)` pair whose `authenticatorData`
+    /// carries `sha256(rp_id)` as its rpIdHash — what a real authenticator
+    /// would commit to for a `create()`/`get()` scoped to that RP ID.
+    fn build_assertion_for_rp_id(
+        rp_id: &str,
+        origin: &str,
+        challenge_b64url: &str,
+    ) -> (WebAuthnAssertion, P256KeyPair) {
+        let kp = P256KeyPair::generate();
+        let signer = P256Signer::from_keypair(&kp);
+        let cdj = format!(
+            r#"{{"type":"webauthn.get","challenge":"{challenge_b64url}","origin":"{origin}"}}"#
+        )
+        .into_bytes();
+
+        let mut auth_data = Sha256::digest(rp_id.as_bytes()).to_vec();
+        auth_data.push(AUTH_DATA_FLAG_UP);
+        auth_data.extend_from_slice(&0u32.to_be_bytes());
+
+        let prehash = webauthn_signed_hash(&auth_data, &cdj);
+        let sig = signer.sign_prehash(&prehash);
+
+        (
+            WebAuthnAssertion {
+                authenticator_data: auth_data,
+                client_data_json: cdj,
+                signature: sig.as_bytes().to_vec(),
+                user_handle: None,
+            },
+            kp,
+        )
+    }
+
+    #[test]
+    fn registrable_domain_accepts_any_subdomain_of_rp_id() {
+        let rp = WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: "network.tenzro.com".to_string(),
+        };
+        // A credential minted while onboarding one node...
+        let (assertion, kp) = build_assertion_for_rp_id(
+            "network.tenzro.com",
+            "https://alice.network.tenzro.com",
+            "Y2hhbGxlbmdlLTAx",
+        );
+        // ...verifies against an assertion presented from a *different* node
+        // under the same RP ID — the whole point of the fix.
+        verify_webauthn_assertion(
+            &assertion,
+            &kp.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            &rp,
+            WebAuthnCeremonyType::Get,
+        )
+        .unwrap();
+
+        let (assertion2, kp2) = build_assertion_for_rp_id(
+            "network.tenzro.com",
+            "https://bob.network.tenzro.com",
+            "Y2hhbGxlbmdlLTAx",
+        );
+        verify_webauthn_assertion(
+            &assertion2,
+            &kp2.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            &rp,
+            WebAuthnCeremonyType::Get,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn registrable_domain_rejects_origin_outside_the_domain() {
+        let rp = WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: "network.tenzro.com".to_string(),
+        };
+        let (assertion, kp) = build_assertion_for_rp_id(
+            "network.tenzro.com",
+            "https://attacker.example",
+            "Y2hhbGxlbmdlLTAx",
+        );
+        let res = verify_webauthn_assertion(
+            &assertion,
+            &kp.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            &rp,
+            WebAuthnCeremonyType::Get,
+        );
+        assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
+    }
+
+    #[test]
+    fn registrable_domain_rejects_suffix_lookalike() {
+        // "evilnetwork.tenzro.com" ends with "network.tenzro.com" as a raw
+        // string but is not a subdomain of it — the dot-prefixed suffix
+        // check must reject this, not a bare `ends_with`.
+        let rp = WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: "network.tenzro.com".to_string(),
+        };
+        let (assertion, kp) = build_assertion_for_rp_id(
+            "network.tenzro.com",
+            "https://evilnetwork.tenzro.com",
+            "Y2hhbGxlbmdlLTAx",
+        );
+        let res = verify_webauthn_assertion(
+            &assertion,
+            &kp.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            &rp,
+            WebAuthnCeremonyType::Get,
+        );
+        assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
+    }
+
+    #[test]
+    fn registrable_domain_rejects_rp_id_hash_mismatch() {
+        // Origin is within the domain, but the authenticator committed to a
+        // different RP ID than configured — the rpIdHash check must catch
+        // this even though the origin-string check alone would pass.
+        let rp = WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: "network.tenzro.com".to_string(),
+        };
+        let (assertion, kp) = build_assertion_for_rp_id(
+            "some-other-rp-id.example",
+            "https://alice.network.tenzro.com",
+            "Y2hhbGxlbmdlLTAx",
+        );
+        let res = verify_webauthn_assertion(
+            &assertion,
+            &kp.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            &rp,
+            WebAuthnCeremonyType::Get,
+        );
+        assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
+    }
+
+    #[test]
+    fn registrable_domain_rejects_non_https_origin() {
+        let rp = WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: "network.tenzro.com".to_string(),
+        };
+        let (assertion, kp) = build_assertion_for_rp_id(
+            "network.tenzro.com",
+            "http://alice.network.tenzro.com",
+            "Y2hhbGxlbmdlLTAx",
+        );
+        let res = verify_webauthn_assertion(
+            &assertion,
+            &kp.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            &rp,
+            WebAuthnCeremonyType::Get,
+        );
+        assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
+    }
+
+    #[test]
+    fn registrable_domain_allows_http_localhost_for_dev() {
+        let rp = WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: "localhost".to_string(),
+        };
+        let (assertion, kp) =
+            build_assertion_for_rp_id("localhost", "http://localhost:8080", "Y2hhbGxlbmdlLTAx");
+        verify_webauthn_assertion(
+            &assertion,
+            &kp.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            &rp,
+            WebAuthnCeremonyType::Get,
+        )
+        .unwrap();
     }
 }

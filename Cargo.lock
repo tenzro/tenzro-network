@@ -15720,6 +15720,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "argon2",
  "arrow-array",
  "arrow-schema",
  "async-stream",

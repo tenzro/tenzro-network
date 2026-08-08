@@ -769,6 +769,84 @@ impl IrohIngressHandler {
         )
     }
 
+    /// Node-alias path: serve a request addressed to this node by its public
+    /// name, by replaying it against the node's own local web server.
+    ///
+    /// # The allowlist is enforced here, on the serving node
+    ///
+    /// A node's local web server also carries `/wallet/`, `/auth/passkey`,
+    /// `/faucet` and the operator's status plane. "Public" must not mean
+    /// "publish all of that" — and on a registrable domain shared by every
+    /// node, an exposed `/auth/passkey` is a phishing surface against other
+    /// nodes' users, since the credential origin would look legitimate.
+    ///
+    /// The check runs on the **serving** side rather than at the edge so a
+    /// buggy or hostile edge cannot widen what this operator agreed to
+    /// expose. `exposed_prefixes` is fail-closed: an empty list serves
+    /// nothing.
+    async fn serve_node_alias(
+        &self,
+        alias: &tenzro_types::node_alias::NodeAlias,
+        head: &RequestHead,
+        body: Vec<u8>,
+    ) -> Vec<u8> {
+        let path = head.path();
+        if !alias.allows_path(&path) {
+            debug!(
+                alias = %alias.name,
+                %path,
+                "ingress: path outside the alias's exposed prefixes"
+            );
+            return http_response(
+                404,
+                "text/plain; charset=utf-8",
+                b"not exposed under this name",
+            );
+        }
+
+        // The local web server's own bind address. Deliberately read at
+        // request time rather than stored on the claim: the port is a fact
+        // about this node's current runtime, meaningless to any other node
+        // and wrong the moment the operator rebinds it.
+        let web_addr = &self.node.config().web_addr;
+        let target: std::net::SocketAddr = match web_addr.parse() {
+            Ok(addr) => addr,
+            Err(_) => {
+                // A wildcard bind (`0.0.0.0:8080`) is not dialable as-is;
+                // reach the same listener over loopback.
+                let port = web_addr.rsplit(':').next().and_then(|p| p.parse().ok());
+                match port {
+                    Some(port) => ([127, 0, 0, 1], port).into(),
+                    None => {
+                        warn!(%web_addr, "ingress: cannot derive a local web address");
+                        return http_response(
+                            502,
+                            "text/plain; charset=utf-8",
+                            b"node web server unavailable",
+                        );
+                    }
+                }
+            }
+        };
+        let target = if target.ip().is_unspecified() {
+            std::net::SocketAddr::from(([127, 0, 0, 1], target.port()))
+        } else {
+            target
+        };
+
+        match bridge_to_loopback(target, head, &body).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(alias = %alias.name, "ingress: local bridge failed: {e}");
+                http_response(
+                    502,
+                    "text/plain; charset=utf-8",
+                    b"node web server unreachable",
+                )
+            }
+        }
+    }
+
     /// Machine path: bridge the forwarded HTTP request to the assigned app's
     /// microVM. The supervisor boots (or confirms already-running) the
     /// Firecracker instance for this deployment and returns the host-routable
@@ -810,7 +888,7 @@ impl IrohIngressHandler {
             }
         };
 
-        match bridge_to_guest(guest_addr, head, &body).await {
+        match bridge_to_loopback(guest_addr, head, &body).await {
             Ok(resp) => resp,
             Err(e) => {
                 warn!("ingress: machine {} bridge failed: {e}", deployment.id);
@@ -853,6 +931,21 @@ impl HttpForwardHandler for IrohIngressHandler {
                 return Ok(());
             }
         };
+
+        // Node aliases resolve first, and outside the shared-id namespace.
+        // `<name>.<suffix>` names a *node*, not a deployment, so it never has
+        // a `compute_site_id` id to look up and cannot be folded into the
+        // three-registry dispatch below.
+        if let Some(host) = head.host()
+            && let Some(registry) = self.node.node_alias_registry()
+            && let Some(alias) = registry.resolve_host(&host)
+        {
+            let body = read_full_body(&head, &mut recv).await;
+            let resp = self.serve_node_alias(&alias, &head, body).await;
+            let _ = send.write_all(&resp).await;
+            let _ = send.finish();
+            return Ok(());
+        }
 
         // Resolve the host/path to a shared-namespace id once. A given id is a
         // function deployment, a machine deployment, or a static site — never
@@ -950,11 +1043,15 @@ async fn read_full_body(head: &RequestHead, recv: &mut RecvStream) -> Vec<u8> {
 /// exact request line + headers from the parsed [`RequestHead`] and append the
 /// buffered body, then read the response to end-of-stream. Framing stays raw:
 /// the guest speaks ordinary HTTP/1.1 on loopback, and the response bytes flow
-/// back to the edge unchanged. `Connection: close` is forced so the guest
+/// back to the edge unchanged. `Connection: close` is forced so the target
 /// signals end-of-response by closing, which bounds the read without parsing
 /// content-length / chunked encoding on the response.
-#[cfg(feature = "firecracker")]
-async fn bridge_to_guest(
+///
+/// Not gated on any feature: the same raw replay serves a Firecracker guest's
+/// loopback port and a node's own local web server, and duplicating it per
+/// caller would be two copies of the one piece of code most sensitive to
+/// header handling.
+async fn bridge_to_loopback(
     guest_addr: std::net::SocketAddr,
     head: &RequestHead,
     body: &[u8],

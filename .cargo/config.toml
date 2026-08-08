@@ -17,6 +17,22 @@
 # On Linux x86_64, AVX2/AVX-512 are still auto-detected by the compiler.
 CMAKE_ARGS = "-DGGML_NATIVE=OFF"
 
+# C++ flags for the vendored/`-sys` C++ builds (rocksdb, snappy, zstd).
+#
+# `-include cstdint` — rocksdb 8.10 (librocksdb-sys 0.16) predates GCC 13's
+# stricter libstdc++ headers, which stopped transitively including
+# `<cstdint>`. Without it every `uint64_t` / `uint32_t` in
+# `db/blob/blob_file_meta.h` and friends fails with "has not been declared",
+# and dependent types cascade ("'LinkedSsts' does not name a type"). The
+# upstream fix landed in a later rocksdb; forcing the include is the
+# minimal equivalent and is a no-op on toolchains that already provide it.
+#
+# Safe on every target — `<cstdint>` is standard C++ everywhere — so this
+# stays in the global `[env]`. The companion x86-only ISA fix is handled by
+# advertising `pclmulqdq` in the x86_64 target section below, rather than by
+# forcing a `-m` flag here that an aarch64 compiler would reject.
+CXXFLAGS = "-include cstdint"
+
 # Spawned-thread stack size, 32 MiB.
 #
 # Rust gives a spawned thread 2 MiB by default. libtest (and cargo-nextest) run
@@ -35,7 +51,20 @@ RUST_MIN_STACK = "33554432"
 
 [target.x86_64-unknown-linux-gnu]
 # x86_64 Linux: enable AVX2 for modern CPUs (Haswell+ / Zen+)
-rustflags = ["-C", "target-cpu=x86-64-v3"]
+#
+# `+pclmulqdq` is not cosmetic. rocksdb's `util/crc32c.cc` compiles
+# `__builtin_ia32_pclmulqdq128`, and librocksdb-sys only passes the matching
+# `-mpclmul` to the C++ compiler when the Rust target-feature list contains
+# `pclmulqdq` (its build.rs gates on exactly that). `x86-64-v3` implies
+# avx2/sse4.1/sse4.2 but *not* pclmulqdq, so without this the intrinsic is
+# compiled with no ISA flag enabling it and the build dies with
+# "'__builtin_ia32_pclmulqdq128' needs isa option -mpclmul -msse2".
+#
+# Declaring it here rather than forcing `-mpclmul` through global CXXFLAGS
+# keeps the fix inside the x86 target section (an aarch64 compiler would
+# reject the flag) and lets librocksdb-sys's own detection do the work.
+# Every x86-64-v3-class CPU has the instruction — it shipped with Westmere.
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+pclmulqdq"]
 
 [target.x86_64-unknown-linux-musl]
 # x86_64 Linux musl (Alpine/static): same AVX2 baseline

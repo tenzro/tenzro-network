@@ -48,32 +48,6 @@ const DEFAULT_BOND_POST_GAS: u64 = 80_000;
 const DEFAULT_BOND_INCREASE_GAS: u64 = 60_000;
 const DEFAULT_BOND_WITHDRAW_GAS: u64 = 50_000;
 
-/// Query nonce + chain_id for the sender.
-async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
-    let nonce = rpc
-        .call::<serde_json::Value>(
-            "eth_getTransactionCount",
-            serde_json::json!([address, "latest"]),
-        )
-        .await
-        .ok()
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        })
-        .unwrap_or(0);
-    let chain_id = rpc
-        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
-        .await
-        .ok()
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        })
-        .unwrap_or(1337);
-    (nonce, chain_id)
-}
-
 fn extract_tx_hash(result: &serde_json::Value) -> String {
     result
         .get("tx_hash")
@@ -117,7 +91,7 @@ impl BondPostCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.from).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.from).await;
         spinner.set_message("Signing PostAgentBond transaction...");
 
         let tx_type = serde_json::json!({
@@ -129,7 +103,7 @@ impl BondPostCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.from,
@@ -185,7 +159,7 @@ impl BondIncreaseCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.from).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.from).await;
         spinner.set_message("Signing IncreaseAgentBond transaction...");
 
         let tx_type = serde_json::json!({
@@ -196,7 +170,7 @@ impl BondIncreaseCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.from,
@@ -247,7 +221,7 @@ impl BondWithdrawCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.from).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.from).await;
         spinner.set_message("Signing WithdrawAgentBond transaction...");
 
         let tx_type = serde_json::json!({
@@ -257,7 +231,7 @@ impl BondWithdrawCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.from,

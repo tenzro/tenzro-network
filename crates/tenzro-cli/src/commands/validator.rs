@@ -73,32 +73,6 @@ fn hex_to_vec(s: &str, label: &str) -> Result<Vec<u8>> {
     hex::decode(trimmed).map_err(|e| anyhow!("invalid hex for {}: {}", label, e))
 }
 
-/// Query nonce + chain_id for the sender.
-async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
-    let nonce = rpc
-        .call::<serde_json::Value>(
-            "eth_getTransactionCount",
-            serde_json::json!([address, "latest"]),
-        )
-        .await
-        .ok()
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        })
-        .unwrap_or(0);
-    let chain_id = rpc
-        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
-        .await
-        .ok()
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        })
-        .unwrap_or(1337);
-    (nonce, chain_id)
-}
-
 fn extract_tx_hash(result: &serde_json::Value) -> String {
     result
         .get("tx_hash")
@@ -181,7 +155,7 @@ impl ValidatorRegisterCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.from).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.from).await;
         spinner.set_message("Signing RegisterValidator transaction...");
 
         // The Address / Vec<u8> fields serde-derive to JSON arrays of numbers.
@@ -197,7 +171,7 @@ impl ValidatorRegisterCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.from,
@@ -255,7 +229,7 @@ impl ValidatorExitCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.from).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.from).await;
         spinner.set_message("Signing ExitValidator transaction...");
 
         // ExitValidator is a unit variant — `data` field omitted entirely.
@@ -263,7 +237,7 @@ impl ValidatorExitCmd {
         let tx_type = serde_json::json!("ExitValidator");
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.from,
@@ -334,7 +308,7 @@ impl ValidatorUpdateMetadataCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.from).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.from).await;
         spinner.set_message("Signing UpdateValidatorMetadata transaction...");
 
         let mut data = serde_json::Map::new();
@@ -358,7 +332,7 @@ impl ValidatorUpdateMetadataCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.from,

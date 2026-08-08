@@ -1601,6 +1601,18 @@ pub struct EconomicsConfig {
     pub rpc_provider_payee: Option<String>,
 }
 
+/// Public DNS suffix node aliases render under during the testnet.
+///
+/// A domain is required at all because WebAuthn scopes every credential to a
+/// registrable domain — a raw IP or a DID cannot be an RP ID. It is therefore
+/// a presentation detail with an expected shelf life, which is why a claim
+/// stores only its bare label and this suffix lives in configuration.
+pub const DEFAULT_PUBLIC_NODE_SUFFIX: &str = "network.tenzro.com";
+
+fn default_public_node_suffix() -> Option<String> {
+    Some(DEFAULT_PUBLIC_NODE_SUFFIX.to_string())
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1788,6 +1800,26 @@ pub struct NodeConfig {
     /// Example: `Some("https://rpc.tenzro.xyz".to_string())`.
     #[serde(default)]
     pub external_rpc_addr: Option<String>,
+
+    /// Public DNS suffix that node aliases are rendered under, e.g.
+    /// `network.tenzro.com` — a node claiming the alias `alice` is then
+    /// reachable at `alice.network.tenzro.com`.
+    ///
+    /// Deliberately configuration rather than a constant, and deliberately
+    /// absent from the stored claim: the claim records a bare label, and the
+    /// suffix exists only because WebAuthn requires a registrable domain for
+    /// its RP ID. That makes the domain a temporary, swappable presentation
+    /// detail — retiring or changing it must not invalidate a single claim.
+    ///
+    /// `None` disables public hostname resolution on this node entirely: a
+    /// node with no configured suffix must not claim to answer for any
+    /// public hostname.
+    ///
+    /// Defaults to [`DEFAULT_PUBLIC_NODE_SUFFIX`]. Safe as a default because
+    /// resolution additionally requires a *bound* alias, so a node that has
+    /// claimed nothing answers for nothing regardless of the suffix.
+    #[serde(default = "default_public_node_suffix")]
+    pub public_node_suffix: Option<String>,
 
     /// External (advertised) MCP endpoint URL. Used when gossiping model
     /// service registrations so peers can dial the MCP server from outside
@@ -2195,6 +2227,7 @@ impl NodeConfig {
             training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
+            public_node_suffix: Some(DEFAULT_PUBLIC_NODE_SUFFIX.to_string()),
             external_mcp_addr: None,
             did_fallback_rpc: None,
             geography: None,
@@ -2251,6 +2284,7 @@ impl NodeConfig {
             training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
+            public_node_suffix: Some(DEFAULT_PUBLIC_NODE_SUFFIX.to_string()),
             external_mcp_addr: None,
             did_fallback_rpc: None,
             geography: None,
@@ -2307,6 +2341,7 @@ impl NodeConfig {
             training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
+            public_node_suffix: Some(DEFAULT_PUBLIC_NODE_SUFFIX.to_string()),
             external_mcp_addr: None,
             did_fallback_rpc: None,
             geography: None,
@@ -2363,6 +2398,7 @@ impl NodeConfig {
             training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
+            public_node_suffix: Some(DEFAULT_PUBLIC_NODE_SUFFIX.to_string()),
             external_mcp_addr: None,
             did_fallback_rpc: None,
             geography: None,

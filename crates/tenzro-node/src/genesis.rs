@@ -66,7 +66,21 @@ pub const FAUCET_MIN_GRANT_TNZO: u128 = 100;
 /// A testnet faucet exists to get a new participant to their first real
 /// action — a provider posting the 1,000 TNZO admission bond is the largest
 /// of those — not to hand out a balance worth farming.
-pub const FAUCET_MAX_GRANT_TNZO: u128 = 1_000;
+///
+/// The ceiling is the bond **plus headroom for the gas that posting it costs**.
+/// It used to be exactly 1,000, equal to `MIN_MODEL_PROVIDER_STAKE`, which
+/// deadlocked provider onboarding: the faucet funded a wallet with precisely
+/// the bond principal, and the bond transaction then reverted with
+/// `Insufficient balance: required 1000000320000000000000, available
+/// 1000000000000000000000` — short by the 0.00032 TNZO of its own fee. The
+/// operator could not top up either, because the faucet is rate-limited per
+/// address for 24h. A faucet whose grant equals the cheapest thing it exists
+/// to fund can never actually fund it.
+///
+/// 10 TNZO of headroom is far more than one bond's gas (0.00032 TNZO at the
+/// 4× open-lane fee floor) so it also survives a few failed attempts and any
+/// future fee-floor rise, without approaching a balance worth farming.
+pub const FAUCET_MAX_GRANT_TNZO: u128 = 1_010;
 
 /// Resolve how much TNZO one faucet request hands out, in whole TNZO.
 ///

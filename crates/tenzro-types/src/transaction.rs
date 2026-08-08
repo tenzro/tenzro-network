@@ -507,6 +507,62 @@ pub enum TransactionType {
     ///
     /// Authorization: `tx.from` MUST equal the validator's registry address.
     ExitValidator,
+    /// Claim a readable node name (a bare DNS label) for the sender.
+    ///
+    /// Naming is permissionless: ownership is decided by block order, not by
+    /// whichever RPC endpoint the claimant reached, so the claim has to be an
+    /// ordered transaction rather than a write against one node's registry.
+    ///
+    /// Authorization: `tx.from` becomes the claim's sole authority. A
+    /// re-claim by that same address refreshes the record (this is how
+    /// `exposed_prefixes` is changed); a claim over anyone else's name is
+    /// refused by the handler against consensus state.
+    ClaimNodeAlias {
+        /// Bare DNS label, e.g. `alice`. Never a hostname — the public
+        /// suffix is node configuration and is expected to change.
+        name: String,
+        /// DID to display alongside the name. Informational only; the
+        /// authority is `tx.from`.
+        owner_did: String,
+        /// Request paths this node serves publicly under the name. `None`
+        /// takes the fail-closed default set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exposed_prefixes: Option<Vec<String>>,
+    },
+    /// Point a claimed name at a specific node.
+    ///
+    /// Separate from the claim because a name is claimed during setup, before
+    /// the node has ever run and therefore before either identifier exists.
+    ///
+    /// Authorization: `tx.from` MUST equal the claiming address.
+    BindNodeAlias {
+        /// The claimed label being bound.
+        name: String,
+        /// Machine DID of the node the name resolves to.
+        machine_did: String,
+        /// The node's iroh `EndpointId`, which peers dial. Doubles as the
+        /// Ed25519 public key `machine_consent` is verified against.
+        endpoint_id: String,
+        /// The machine's Ed25519 signature over
+        /// `node_alias::bind_consent_preimage(name, owner_address,
+        /// machine_did, endpoint_id)`.
+        ///
+        /// Proof the machine agreed to answer for this name. Without it a
+        /// name's owner could bind it to any node on the network; the
+        /// signing key is TPM-sealed on an autonomous node, or the node key
+        /// of a passkey-controlled account otherwise.
+        machine_consent: Vec<u8>,
+        /// Optionally re-declare the public path allowlist at bind time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exposed_prefixes: Option<Vec<String>>,
+    },
+    /// Return a claimed name to the unclaimed pool.
+    ///
+    /// Authorization: `tx.from` MUST equal the claiming address.
+    ReleaseNodeAlias {
+        /// The claimed label being released.
+        name: String,
+    },
     /// Update validator metadata (moniker / TEE attestation commitment).
     ///
     /// At least one of `metadata_uri` or `tee_attestation_hash` should be

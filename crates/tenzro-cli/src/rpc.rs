@@ -55,7 +55,18 @@ struct JsonRpcResponse<T> {
 struct JsonRpcError {
     code: i64,
     message: String,
+    /// Structured payload the node attaches to some rejections.
+    ///
+    /// The mempool fee-floor rejection (`-32012`) carries the gas price it
+    /// actually requires here, which is the only way a client can resubmit
+    /// correctly without hardcoding a floor that drifts out of date.
+    #[serde(default)]
+    data: Option<Value>,
 }
+
+/// JSON-RPC error code the node returns when a transaction's `gas_price` is
+/// below the mempool lane's fee floor. Its `data.required` names the floor.
+pub const RPC_ERR_FEE_FLOOR: i64 = -32012;
 
 impl RpcClient {
     /// Create a new RPC client
@@ -240,11 +251,62 @@ impl RpcClient {
         let body: JsonRpcResponse<T> = response.json().await?;
 
         if let Some(err) = body.error {
+            // Surface the required floor in a form the caller can act on, so a
+            // fee-floor rejection is recoverable rather than terminal.
+            if err.code == RPC_ERR_FEE_FLOOR
+                && let Some(required) = err
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("required"))
+                    .and_then(json_u128)
+            {
+                anyhow::bail!(
+                    "RPC error [{}]: {} (required_gas_price={})",
+                    err.code,
+                    err.message,
+                    required
+                );
+            }
             anyhow::bail!("RPC error [{}]: {}", err.code, err.message);
         }
 
         body.result
             .ok_or_else(|| anyhow::anyhow!("Empty RPC response"))
+    }
+
+    /// Send a signed transaction, resubmitting once at the node's required
+    /// gas price if the first attempt is below the mempool fee floor.
+    ///
+    /// Every transaction-submitting command used to hardcode
+    /// `gas_price: 1_000_000_000` (1 gwei). The deployed open lane requires
+    /// `4×` that, so `tenzro join --provider` could not post its compute bond
+    /// at all: the node rejected it with `Fee floor not met for open lane:
+    /// gas_price 1000000000 < required 4000000000`, and the operator had to
+    /// hand-sign a replacement. Hardcoding `4_000_000_000` instead would only
+    /// move the cliff — the floor is a deployment setting and moves with the
+    /// fee market.
+    ///
+    /// The node already reports the exact figure it wants in `data.required`,
+    /// so ask, then comply. One retry only: a second rejection means something
+    /// other than the floor is wrong, and looping would just spend the
+    /// operator's nonce.
+    pub async fn send_tx_clearing_fee_floor(
+        &self,
+        method: &str,
+        mut params: Value,
+    ) -> Result<Value> {
+        match self.call::<Value>(method, params.clone()).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let Some(required) = parse_required_gas_price(&e.to_string()) else {
+                    return Err(e);
+                };
+                if let Some(map) = params.as_object_mut() {
+                    map.insert("gas_price".to_string(), Value::from(required));
+                }
+                self.call::<Value>(method, params).await
+            }
+        }
     }
 
     /// Make a GET request to the Web API
@@ -275,6 +337,36 @@ pub fn parse_hex_u128(hex: &str) -> u128 {
 }
 
 /// Parse a hex string (with or without 0x prefix) to u64
+/// Fetch `(nonce, chain_id)` for `address`, the pair every native typed
+/// transaction needs before it can be signed.
+///
+/// Both reads are best-effort: a fresh account has no nonce yet (0 is
+/// correct), and a node that cannot answer `eth_chainId` is almost certainly
+/// the local devnet, whose id is 1337. Returning defaults rather than an
+/// error keeps first-run flows working against a node still coming up.
+///
+/// This lived as five separate copies across the command modules, which had
+/// already drifted — three hand-rolled the hex parse instead of using
+/// [`parse_hex_u64`].
+pub async fn fetch_nonce_and_chain_id(rpc: &RpcClient, address: &str) -> (u64, u64) {
+    let nonce = rpc
+        .call::<serde_json::Value>(
+            "eth_getTransactionCount",
+            serde_json::json!([address, "latest"]),
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(parse_hex_u64))
+        .unwrap_or(0);
+    let chain_id = rpc
+        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(parse_hex_u64))
+        .unwrap_or(1337);
+    (nonce, chain_id)
+}
+
 pub fn parse_hex_u64(hex: &str) -> u64 {
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
     u64::from_str_radix(hex, 16).unwrap_or(0)
@@ -331,5 +423,59 @@ mod tests {
 
         let client2 = RpcClient::new("https://rpc.tenzro.xyz");
         assert_eq!(client2.api_url, "https://api.tenzro.xyz");
+    }
+}
+
+/// Read a JSON number-or-string as `u128`.
+///
+/// JSON has no native u128, so the node sends large integers as decimal
+/// strings and small ones as numbers; accept both.
+fn json_u128(v: &Value) -> Option<u128> {
+    if let Some(s) = v.as_str() {
+        return s.parse::<u128>().ok();
+    }
+    v.as_u64().map(u128::from)
+}
+
+/// Pull `required_gas_price=N` back out of a fee-floor error string.
+///
+/// `call` formats the structured `data.required` into its message so the
+/// figure survives the crossing into `anyhow::Error`, which erases types.
+fn parse_required_gas_price(msg: &str) -> Option<u64> {
+    let tail = msg.split("required_gas_price=").nth(1)?;
+    let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u64>().ok()
+}
+
+#[cfg(test)]
+mod fee_floor_tests {
+    use super::*;
+
+    #[test]
+    fn the_required_gas_price_survives_the_error_string() {
+        let msg = "RPC error [-32012]: Fee floor not met for open lane: \
+                   gas_price 1000000000 < required 4000000000 (4.00× base 1000000000) \
+                   (required_gas_price=4000000000)";
+        assert_eq!(parse_required_gas_price(msg), Some(4_000_000_000));
+    }
+
+    #[test]
+    fn an_unrelated_error_yields_no_retry_price() {
+        assert_eq!(
+            parse_required_gas_price("RPC error [-32602]: Invalid address: 3F5Yu"),
+            None
+        );
+    }
+
+    #[test]
+    fn json_u128_takes_both_encodings() {
+        assert_eq!(
+            json_u128(&Value::from(4_000_000_000u64)),
+            Some(4_000_000_000)
+        );
+        assert_eq!(
+            json_u128(&Value::from("1000000000000000000000")),
+            Some(10u128.pow(21))
+        );
     }
 }

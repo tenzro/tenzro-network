@@ -374,26 +374,6 @@ const COMPUTE_BOND_POST_GAS: u64 = 80_000;
 /// Native transactions carry their payload in `tx_type`, so `to` is unused.
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Query nonce + chain_id for the sender.
-async fn fetch_nonce_and_chain_id(rpc: &RpcClient, address: &str) -> (u64, u64) {
-    let nonce = rpc
-        .call::<serde_json::Value>(
-            "eth_getTransactionCount",
-            serde_json::json!([address, "latest"]),
-        )
-        .await
-        .ok()
-        .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
-        .unwrap_or(0);
-    let chain_id = rpc
-        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
-        .await
-        .ok()
-        .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
-        .unwrap_or(1337);
-    (nonce, chain_id)
-}
-
 /// Automatic provider provisioning against the node at `rpc`.
 ///
 /// Returns the pricing that was set on the node plus the model id that
@@ -508,7 +488,7 @@ async fn run_provider_flow(
             "Posting compute bond ({})...",
             crate::rpc::format_tnzo(COMPUTE_BOND_MIN_WEI)
         ));
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(rpc, wallet_address).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(rpc, wallet_address).await;
         rpc.call::<serde_json::Value>(
             "tenzro_signAndSendTransaction",
             serde_json::json!({

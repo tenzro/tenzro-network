@@ -38,6 +38,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use zeroize::Zeroizing;
 
@@ -46,12 +47,61 @@ use crate::error::{Result, TeeError};
 /// Filenames of the two halves of a sealed object, inside its directory.
 const SEALED_PUB: &str = "sealed.pub";
 const SEALED_PRIV: &str = "sealed.priv";
-/// Persistent handle the sealing parent is created at.
+/// Default persistent handle the sealing parent is created at.
 ///
-/// A fixed handle rather than a context file so the parent survives reboots and
-/// every process finds the same one. `0x81010001` is inside the TCG-reserved
-/// owner-hierarchy persistent range for application keys.
-const PARENT_HANDLE: &str = "0x81010001";
+/// A *fixed* handle rather than a scan for a vacant one: the parent has to be
+/// findable by every process, across reboots, for the lifetime of the sealed
+/// blobs. Picking whatever is free at first use would hand a different handle
+/// to a machine that had been re-provisioned, and its existing blobs — which
+/// are bound to the object, not the handle — would become unloadable.
+///
+/// It must live in the **storage/owner** persistent range,
+/// `0x81000000`-`0x8100FFFF`, because the parent is created with
+/// `tpm2_createprimary -C o`. Within that range this is an arbitrary but
+/// deliberate offset: clear of the conventional SRK at `0x81000001` and of the
+/// low handles platform firmware and Windows provision when they take
+/// ownership. It is a *default*, not an assumption — see
+/// [`TENZRO_TPM_PARENT_HANDLE_ENV`] for hosts where it collides.
+///
+/// It used to be `0x81010001`, which is not an owner-hierarchy handle at all:
+/// `0x81010000`-`0x8101FFFF` is the *endorsement* range, and `0x81010001`
+/// specifically is the conventional RSA Endorsement Key handle (see
+/// tpm2_createek(1)). On any TPM with a provisioned EK — every Windows machine,
+/// and most others by convention — that handle is already the EK, an
+/// `adminWithPolicy` object with no authValue, so `tpm2_create -C 0x81010001`
+/// fails with `0x12F authValue or authPolicy is not available`.
+const DEFAULT_PARENT_HANDLE: &str = "0x81000100";
+
+/// Environment override for the sealing parent's persistent handle.
+///
+/// The default cannot be right everywhere: the owner range is shared with
+/// firmware, other products, and site provisioning, so on some hosts it will be
+/// occupied by something that is not ours. Rather than evict a stranger's key
+/// or silently wander to another handle, the module refuses and the operator
+/// points it somewhere free. Must be in `0x81000000`-`0x8100FFFF`.
+const TENZRO_TPM_PARENT_HANDLE_ENV: &str = "TENZRO_TPM_PARENT_HANDLE";
+
+/// Persistent handle the sealing parent lives at, honouring the override.
+///
+/// Resolved once per process: the handle must not change under a running node,
+/// or a key sealed early would be unloadable later.
+fn parent_handle() -> &'static str {
+    static RESOLVED: OnceLock<String> = OnceLock::new();
+    RESOLVED.get_or_init(|| {
+        std::env::var(TENZRO_TPM_PARENT_HANDLE_ENV)
+            .ok()
+            .map(|h| h.trim().to_owned())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| DEFAULT_PARENT_HANDLE.to_owned())
+    })
+}
+
+/// The handle this module used before the owner/endorsement range mix-up was
+/// found. Read-only fallback: a machine that sealed under the old handle back
+/// when it happened to be vacant still has to be able to unseal, and sealing
+/// fails closed, so an orphaned blob would otherwise stop the node from
+/// starting rather than degrade. Never sealed to again.
+const LEGACY_PARENT_HANDLE: &str = "0x81010001";
 
 /// Whether this host has a TPM this module can drive.
 ///
@@ -110,7 +160,7 @@ fn run(tool: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// Ensure the sealing parent exists at [`PARENT_HANDLE`].
+/// Ensure the sealing parent exists at [`parent_handle`].
 ///
 /// Idempotent: creating it when it is already there fails, and that failure is
 /// the success case on every boot after the first. Distinguished from a real
@@ -119,6 +169,22 @@ fn run(tool: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
 fn ensure_parent() -> Result<()> {
     if parent_exists() {
         return Ok(());
+    }
+    // Occupied, but by something we cannot seal under. Refuse rather than
+    // evict: a persistent handle we did not create belongs to another
+    // subsystem — a platform SRK, an EK, another product's key — and
+    // `tpm2_evictcontrol` on it would be a destructive act on shared platform
+    // state to work around our own misconfiguration. Say which handle and why,
+    // because the TPM's own error for this is `0x12F` and names neither.
+    if run("tpm2_readpublic", &["-c", parent_handle()], None).is_ok() {
+        let handle = parent_handle();
+        return Err(TeeError::not_available(format!(
+            "persistent handle {handle} is already occupied by an object this node cannot use as \
+             a sealing parent — it is not a userWithAuth restricted decryption key. Refusing to \
+             evict it, because it belongs to another subsystem. Either clear it deliberately with \
+             `tpm2_evictcontrol -C o -c {handle}` if it really is stale, or point this node at a \
+             free handle in the owner range with {TENZRO_TPM_PARENT_HANDLE_ENV}."
+        )));
     }
     // A primary in the owner hierarchy is deterministically re-derivable from
     // the TPM's own seed, so this reconstructs the *same* parent after a
@@ -134,23 +200,99 @@ fn ensure_parent() -> Result<()> {
         &["-C", "o", "-g", "sha256", "-G", "ecc", "-c", &ctx_path],
         None,
     )?;
-    run(
-        "tpm2_evictcontrol",
-        &["-C", "o", "-c", &ctx_path, PARENT_HANDLE],
-        None,
-    )?;
 
-    if !parent_exists() {
-        return Err(TeeError::not_available(
-            "sealing parent could not be made persistent",
-        ));
+    // Racy by construction: every probe above is a separate process, so two
+    // nodes (or two tests) starting together can both find the handle vacant
+    // and both try to claim it. The loser gets `0x14C persistent object already
+    // defined`. That is not a failure — the postcondition is "a usable parent
+    // is at this handle", and the winner established it. Re-probe and decide on
+    // the observed state rather than on which call happened to return an error,
+    // because the primary is deterministically re-derived from the TPM's seed:
+    // both processes created the *same* object, so either one persisting it is
+    // equally correct.
+    let evicted = run(
+        "tpm2_evictcontrol",
+        &["-C", "o", "-c", &ctx_path, parent_handle()],
+        None,
+    );
+
+    if parent_exists() {
+        return Ok(());
     }
-    Ok(())
+
+    // Only now is the eviction error a real one: nothing usable is at the
+    // handle, so surface why the attempt failed rather than a bare postcondition
+    // message.
+    match evicted {
+        Err(e) => Err(e),
+        Ok(_) => Err(TeeError::not_available(format!(
+            "sealing parent could not be made persistent at {}",
+            parent_handle()
+        ))),
+    }
 }
 
-/// Whether the persistent sealing parent is present.
+/// TPMA_OBJECT bits that decide whether a persistent object can be our parent.
+const TPMA_USER_WITH_AUTH: u32 = 0x0000_0040;
+const TPMA_ADMIN_WITH_POLICY: u32 = 0x0000_0080;
+const TPMA_RESTRICTED: u32 = 0x0001_0000;
+const TPMA_DECRYPT: u32 = 0x0002_0000;
+
+/// Whether `handle` holds an object this module can actually seal under.
+///
+/// Presence is not enough, and assuming it was the second half of the EK-handle
+/// bug. `tpm2_readpublic` requires no authorisation, so it succeeds against
+/// *any* object — including the Endorsement Key, which is `adminWithPolicy`
+/// and usable only through a policy session this module never builds. Probing
+/// with `readpublic` alone therefore reported "parent ready" for an object we
+/// could not use, and the real failure surfaced one call later out of
+/// `tpm2_create`, naming neither the handle nor the reason.
+///
+/// A usable parent is a restricted decryption key we can authorise with a
+/// plain auth value: `userWithAuth` set, `adminWithPolicy` clear.
+fn handle_is_usable_parent(handle: &str) -> bool {
+    let Ok(out) = run("tpm2_readpublic", &["-c", handle], None) else {
+        return false;
+    };
+    let Some(attrs) = parse_object_attributes(&String::from_utf8_lossy(&out)) else {
+        return false;
+    };
+    attrs & TPMA_USER_WITH_AUTH != 0
+        && attrs & TPMA_ADMIN_WITH_POLICY == 0
+        && attrs & TPMA_RESTRICTED != 0
+        && attrs & TPMA_DECRYPT != 0
+}
+
+/// Pull the numeric attributes out of `tpm2_readpublic` YAML.
+///
+/// Reads the `raw:` line of the `attributes:` block rather than matching names
+/// in the `value:` line, so a tools release that renames or reorders the
+/// human-readable flags does not silently turn every parent unusable.
+fn parse_object_attributes(text: &str) -> Option<u32> {
+    let mut in_attributes = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("attributes:") {
+            in_attributes = true;
+            continue;
+        }
+        if in_attributes {
+            if let Some(raw) = trimmed.strip_prefix("raw:") {
+                return u32::from_str_radix(raw.trim().trim_start_matches("0x"), 16).ok();
+            }
+            // The block is `attributes:` then `value:` then `raw:`. Anything
+            // else means we have walked out of it and should not keep reading.
+            if !trimmed.starts_with("value:") {
+                in_attributes = false;
+            }
+        }
+    }
+    None
+}
+
+/// Whether the persistent sealing parent is present *and* usable.
 fn parent_exists() -> bool {
-    run("tpm2_readpublic", &["-c", PARENT_HANDLE], None).is_ok()
+    handle_is_usable_parent(parent_handle())
 }
 
 /// Seal `secret` to this TPM, writing the sealed object into `dir`.
@@ -186,7 +328,7 @@ pub fn seal(dir: &Path, secret: &[u8]) -> Result<()> {
         "tpm2_create",
         &[
             "-C",
-            PARENT_HANDLE,
+            parent_handle(),
             "-g",
             "sha256",
             // A keyedhash object with no signing/decrypt use is a sealed data
@@ -237,20 +379,41 @@ pub fn unseal(dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
         .map_err(|e| TeeError::not_available(format!("temp file: {e}")))?;
     let ctx_path = ctx.path().to_string_lossy().into_owned();
 
-    run(
-        "tpm2_load",
-        &[
-            "-C",
-            PARENT_HANDLE,
-            "-u",
-            &pub_path.to_string_lossy(),
-            "-r",
-            &priv_path.to_string_lossy(),
-            "-c",
-            &ctx_path,
-        ],
-        None,
-    )?;
+    let load_under = |parent: &str| {
+        run(
+            "tpm2_load",
+            &[
+                "-C",
+                parent,
+                "-u",
+                &pub_path.to_string_lossy(),
+                "-r",
+                &priv_path.to_string_lossy(),
+                "-c",
+                &ctx_path,
+            ],
+            None,
+        )
+    };
+
+    // A blob is bound to the parent it was created under, so one sealed before
+    // the handle moved will not load under the current parent. Fall back to the
+    // legacy handle, but only when the object sitting there is genuinely a
+    // usable parent — on a machine where that handle is the EK the check fails
+    // and we do not waste a confusing error on it. Sealing always uses
+    // parent_handle(), so this path drains as keys are rotated.
+    if load_under(parent_handle()).is_err() {
+        if !handle_is_usable_parent(LEGACY_PARENT_HANDLE) {
+            return Err(TeeError::not_available(format!(
+                "sealed key under {} could not be loaded under {}, and the legacy handle \
+                 {LEGACY_PARENT_HANDLE} holds no usable parent to try instead",
+                dir.display(),
+                parent_handle()
+            )));
+        }
+        load_under(LEGACY_PARENT_HANDLE)?;
+    }
+
     let secret = run("tpm2_unseal", &["-c", &ctx_path], None)?;
     Ok(Zeroizing::new(secret))
 }
@@ -272,6 +435,85 @@ fn restrict(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse a `0x`-prefixed handle into its numeric value.
+    fn handle_value(handle: &str) -> u32 {
+        u32::from_str_radix(handle.trim_start_matches("0x"), 16)
+            .unwrap_or_else(|e| panic!("handle {handle} is not hex: {e}"))
+    }
+
+    #[test]
+    fn the_sealing_parent_lives_in_the_owner_range() {
+        // The bug this guards against cost a silent failure on every TPM host:
+        // the parent is created with `tpm2_createprimary -C o`, so its
+        // persistent handle must be in the storage/owner range
+        // 0x81000000-0x8100FFFF. The previous value, 0x81010001, was in the
+        // *endorsement* range and is by convention the RSA Endorsement Key —
+        // an adminWithPolicy object no authValue can use as a parent.
+        //
+        // Hardware-independent on purpose: a host with no TPM must still catch
+        // a handle moved back into the wrong hierarchy.
+        let handle = handle_value(DEFAULT_PARENT_HANDLE);
+        assert!(
+            (0x8100_0000..=0x8100_FFFF).contains(&handle),
+            "{DEFAULT_PARENT_HANDLE} is not in the owner-hierarchy persistent range \
+             0x81000000-0x8100FFFF; a parent created with `-C o` cannot be persisted outside it"
+        );
+        assert_ne!(
+            handle, 0x8100_0001,
+            "0x81000001 is the conventional SRK handle and belongs to the platform, not to us"
+        );
+    }
+
+    #[test]
+    fn the_legacy_handle_is_never_sealed_to() {
+        // The legacy handle exists only so a blob sealed before the move can
+        // still be read. If it were ever equal to the active handle the
+        // fallback would mask a real misconfiguration instead of draining.
+        assert_ne!(
+            LEGACY_PARENT_HANDLE,
+            parent_handle(),
+            "the legacy fallback handle must never become the active one"
+        );
+    }
+
+    #[test]
+    fn object_attributes_come_from_the_raw_field() {
+        // Real `tpm2_readpublic` output, an SRK on an Intel fTPM. The parser
+        // must read `raw:` rather than matching names in `value:`, so a tools
+        // release that renames a flag cannot quietly make every parent look
+        // unusable.
+        let srk = "\
+name: 000b1234
+attributes:
+  value: fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|restricted|decrypt
+  raw: 0x30472
+type:
+  value: ecc
+";
+        let attrs = parse_object_attributes(srk).expect("attributes parse");
+        assert_eq!(attrs, 0x30472);
+        assert!(attrs & TPMA_USER_WITH_AUTH != 0);
+        assert!(attrs & TPMA_ADMIN_WITH_POLICY == 0);
+        assert!(attrs & TPMA_RESTRICTED != 0 && attrs & TPMA_DECRYPT != 0);
+    }
+
+    #[test]
+    fn an_endorsement_key_is_rejected_as_a_parent() {
+        // The EK template as this machine's TPM reports it: adminWithPolicy and
+        // no userWithAuth. Presence alone said "parent ready"; the attribute
+        // check is what turns that into "not usable".
+        let ek = "\
+attributes:
+  value: fixedtpm|fixedparent|sensitivedataorigin|adminwithpolicy|restricted|decrypt
+  raw: 0x300b2
+";
+        let attrs = parse_object_attributes(ek).expect("attributes parse");
+        assert!(
+            attrs & TPMA_USER_WITH_AUTH == 0 && attrs & TPMA_ADMIN_WITH_POLICY != 0,
+            "an EK must not satisfy the usable-parent predicate"
+        );
+    }
 
     /// Every assertion below needs real hardware. Skipping rather than failing
     /// keeps the suite green on build hosts with no TPM, which is most of them

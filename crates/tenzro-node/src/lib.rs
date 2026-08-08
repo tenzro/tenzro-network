@@ -139,6 +139,14 @@ pub mod mpc_libp2p_adapter;
 pub mod mpc_threshold_signer;
 pub mod network_catalog;
 pub mod node;
+/// Environment variable carrying the operator's keystore-unlock secret.
+///
+/// One variable for the whole node: the wallet keystore and the node's own
+/// identity keys unlock from the same source, so an operator configures their
+/// passkey-gated device key (or KMS) once rather than per subsystem.
+pub const KEYSTORE_PASSWORD_ENV: &str = "TENZRO_KEYSTORE_PASSWORD";
+
+pub mod node_alias;
 pub mod node_did_document;
 pub mod openai_responses;
 pub mod orchestrator;

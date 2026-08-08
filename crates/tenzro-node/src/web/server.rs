@@ -76,6 +76,50 @@ async fn host_alias_rewrite(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         let path = req.uri().path().to_string();
+
+        // Node aliases resolve ahead of site aliases: `<name>.<suffix>` names
+        // a node, not a deployment, and the two namespaces are disjoint.
+        //
+        // Deliberately NOT gated on `is_reserved_path`. That guard exists so a
+        // site alias cannot shadow this node's control plane, but the point of
+        // a public node name is that `alice.<suffix>/v1/chat/completions`
+        // works. The equivalent protection for this path is the alias's own
+        // `exposed_prefixes` allowlist, enforced fail-closed on the *serving*
+        // node in `ingress::serve_node_alias` — putting it there means a buggy
+        // or hostile edge cannot widen what the operator agreed to expose.
+        if let Some(ref host) = host
+            && let Some(registry) = node.node_alias_registry()
+            && let Some(alias) = registry.resolve_host(host)
+        {
+            let bound_endpoint = alias.endpoint_id.clone();
+            let local = node
+                .iroh_resolver()
+                .map(|resolver| resolver.endpoint_id().to_string());
+
+            match (bound_endpoint, local) {
+                // Resolves to this very node: serve locally.
+                //
+                // This branch is mandatory, not an optimisation. Without it
+                // the node forwards to itself over iroh, the replayed request
+                // still carries `Host: <name>.<suffix>` (the relay preserves
+                // every caller header, correctly), this middleware matches the
+                // alias table again, and the node forwards to itself forever.
+                (Some(bound), Some(local)) if bound == local => {
+                    return next.run(req).await;
+                }
+                (Some(bound), _) => match bound.parse::<tenzro_iroh::EndpointId>() {
+                    Ok(endpoint) => {
+                        return forward_to_alias_node(node.clone(), endpoint, req).await;
+                    }
+                    Err(e) => {
+                        tracing::debug!(alias = %alias.name, "unparseable bound endpoint: {e}");
+                    }
+                },
+                // Claimed but never bound — nothing to route to yet.
+                (None, _) => {}
+            }
+        }
+
         if let Some(host) = host
             && !is_reserved_path(&path)
             && let Some(site_id) = node
@@ -122,9 +166,6 @@ async fn forward_to_serving_node(
     remotes: Vec<tenzro_iroh::EndpointId>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse;
-
-    let method = req.method().clone();
     // Rewrite the forwarded path to the site-scoped form the serving node's
     // ingress handler resolves (`/sites/<id><suffix>`), so the serving node
     // does not depend on its own alias/domain tables to identify the site.
@@ -140,6 +181,42 @@ async fn forward_to_serving_node(
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
     let forwarded_target = format!("/sites/{site_id}{suffix}{query}");
+    forward_over_iroh(node, remotes, req, forwarded_target).await
+}
+
+/// Forward a request to a node alias's bound node, preserving the original
+/// path verbatim.
+///
+/// Unlike the site path there is no target rewrite: the serving node resolves
+/// the alias from the `Host` header the caller sent, and the request is for
+/// that node's own surface rather than for a deployment it hosts.
+async fn forward_to_alias_node(
+    node: Arc<crate::node::TenzroNode>,
+    endpoint: tenzro_iroh::EndpointId,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    forward_over_iroh(node, vec![endpoint], req, format!("{path}{query}")).await
+}
+
+/// Shared raw-HTTP relay over the `tenzro/http` ALPN: assemble the request
+/// head, read the body, and try each candidate in order (the rest are
+/// failover). Extracted so the site and node-alias paths cannot drift in how
+/// they preserve caller headers or bound the body.
+async fn forward_over_iroh(
+    node: Arc<crate::node::TenzroNode>,
+    remotes: Vec<tenzro_iroh::EndpointId>,
+    req: axum::extract::Request,
+    forwarded_target: String,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let method = req.method().clone();
 
     // Build the raw HTTP/1.1 head. Preserve the caller's headers (Host,
     // payment credential, if-none-match, etc.) so the serving node renders and
@@ -179,7 +256,7 @@ async fn forward_to_serving_node(
 
     (
         axum::http::StatusCode::BAD_GATEWAY,
-        "no serving node reachable for site",
+        "no serving node reachable for host",
     )
         .into_response()
 }

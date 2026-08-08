@@ -450,32 +450,6 @@ const DEFAULT_ESCROW_REFUND_GAS: u64 = 50_000;
 // forwarded by RpcClient::call). The node enforces that the bearer's
 // authorized wallet matches `payer` for every escrow tx-type.
 
-/// Query nonce + chain_id for the sender (defaults if unreachable).
-async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
-    let nonce = rpc
-        .call::<serde_json::Value>(
-            "eth_getTransactionCount",
-            serde_json::json!([address, "latest"]),
-        )
-        .await
-        .ok()
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        })
-        .unwrap_or(0);
-    let chain_id = rpc
-        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
-        .await
-        .ok()
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        })
-        .unwrap_or(1337);
-    (nonce, chain_id)
-}
-
 fn parse_escrow_id(s: &str) -> Result<[u8; 32]> {
     let clean = s.trim_start_matches("0x");
     let bytes = hex::decode(clean).map_err(|e| anyhow::anyhow!("invalid escrow_id hex: {}", e))?;
@@ -544,7 +518,7 @@ impl EscrowCreateCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.payer).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.payer).await;
         spinner.set_message("Signing CreateEscrow transaction...");
 
         // The `tx_type` field is parsed server-side as `TransactionType::CreateEscrow`.
@@ -559,7 +533,7 @@ impl EscrowCreateCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.payer,
@@ -642,7 +616,7 @@ impl EscrowReleaseCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.payer).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.payer).await;
         spinner.set_message("Signing ReleaseEscrow transaction...");
 
         let tx_type = serde_json::json!({
@@ -658,7 +632,7 @@ impl EscrowReleaseCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.payer,
@@ -718,7 +692,7 @@ impl EscrowRefundCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let spinner = output::create_spinner("Querying nonce and chain ID...");
-        let (nonce, chain_id) = fetch_nonce_and_chain_id(&rpc, &self.payer).await;
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.payer).await;
         spinner.set_message("Signing RefundEscrow transaction...");
 
         let tx_type = serde_json::json!({
@@ -726,7 +700,7 @@ impl EscrowRefundCmd {
         });
 
         let result: serde_json::Value = rpc
-            .call(
+            .send_tx_clearing_fee_floor(
                 "tenzro_signAndSendTransaction",
                 serde_json::json!({
                     "from": self.payer,

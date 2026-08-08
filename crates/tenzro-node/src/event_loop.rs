@@ -567,6 +567,9 @@ pub struct EventLoop {
     /// don't initialize the database subsystem; in that case inbound database
     /// gossip is decoded and logged but not applied.
     database_registry: Option<Arc<tenzro_database::DatabaseRegistry>>,
+    /// Read model for consensus-decided node aliases. Absent on nodes that
+    /// were built without one — alias logs are then simply not reflected.
+    node_alias_registry: Option<Arc<crate::node_alias::NodeAliasRegistry>>,
     /// Persistent kill-switch receipt store. Wired from the node so that the
     /// post-execute scan in `handle_block_finalized` can record the
     /// canonical `KillSwitchReceipt` (with the real `frozen_at_block`)
@@ -812,6 +815,7 @@ impl EventLoop {
             media_gen_output_store: None,
             seed_agent_manager: None,
             database_registry: None,
+            node_alias_registry: None,
             kill_switch_store: None,
             staking: None,
             identity_registry: None,
@@ -1236,6 +1240,17 @@ impl EventLoop {
         registry: Arc<tenzro_database::DatabaseRegistry>,
     ) -> Self {
         self.database_registry = Some(registry);
+        self
+    }
+
+    /// Wires the node-alias read model so `ClaimNodeAlias` / `BindNodeAlias`
+    /// / `ReleaseNodeAlias` logs from finalized blocks are reflected into the
+    /// table hostname resolution reads.
+    pub fn with_node_alias_registry(
+        mut self,
+        registry: Arc<crate::node_alias::NodeAliasRegistry>,
+    ) -> Self {
+        self.node_alias_registry = Some(registry);
         self
     }
 
@@ -4439,6 +4454,12 @@ impl EventLoop {
                         // has already deducted gas and persisted markers.
                         self.process_validator_logs(&result, block_height).await;
 
+                        // Node aliases — mirror the consensus-decided
+                        // name→node binding into the local read model that
+                        // hostname resolution uses on the request path. The
+                        // VM already decided ownership; this only records it.
+                        self.process_node_alias_logs(&result, block_height).await;
+
                         // Workflow scan — same pattern across the 12
                         // privileged workflow selectors (0x01000040–0x0100004B).
                         // The VM has already validated payload size, JSON
@@ -6006,6 +6027,81 @@ impl EventLoop {
     /// Errors are logged but never abort the block — divergence between
     /// the VM marker and the registry is recoverable on restart via
     /// `load_from_storage`.
+    /// Mirror VM-emitted node-alias logs into the local [`NodeAliasRegistry`].
+    ///
+    /// Ownership was already decided by the `ClaimNodeAlias` /
+    /// `BindNodeAlias` / `ReleaseNodeAlias` handlers against consensus
+    /// state — every node ran the same handler over the same ordered
+    /// transactions. This only reflects that decision into the read model
+    /// the request path uses, so hostname resolution is a map lookup.
+    ///
+    /// Errors are logged and never abort the block: the VM's
+    /// `node_alias:<name>` marker under `SYSTEM_ADDRESS` remains the source
+    /// of truth, and a divergent read model is recoverable by re-hydrating
+    /// on restart.
+    async fn process_node_alias_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        let any_alias = result.logs.iter().any(|l| {
+            l.topics
+                .first()
+                .map(|t| {
+                    let s = t.as_slice();
+                    s == b"NodeAliasClaim" || s == b"NodeAliasBind" || s == b"NodeAliasRelease"
+                })
+                .unwrap_or(false)
+        });
+        if !any_alias {
+            return;
+        }
+
+        let Some(registry) = self.node_alias_registry.as_ref() else {
+            debug!(
+                block_height = block_height.0,
+                "Node-alias log observed but NodeAliasRegistry not wired; skipping reflection"
+            );
+            return;
+        };
+
+        for log in &result.logs {
+            let Some(topic) = log.topics.first().map(|t| t.as_slice()) else {
+                continue;
+            };
+            match topic {
+                b"NodeAliasClaim" | b"NodeAliasBind" => {
+                    match serde_json::from_slice::<tenzro_types::node_alias::NodeAlias>(&log.data) {
+                        Ok(record) => {
+                            let name = record.name.clone();
+                            let bound = record.is_bound();
+                            if let Err(e) = registry.apply(record) {
+                                warn!(%name, "Failed to apply node alias: {e}");
+                            } else {
+                                info!(%name, bound, "Applied node alias from consensus");
+                            }
+                        }
+                        Err(e) => warn!(
+                            data_len = log.data.len(),
+                            "Malformed node-alias log payload, skipping: {e}"
+                        ),
+                    }
+                }
+                b"NodeAliasRelease" => match std::str::from_utf8(&log.data) {
+                    Ok(name) => {
+                        if let Err(e) = registry.apply_release(name) {
+                            warn!(%name, "Failed to release node alias: {e}");
+                        } else {
+                            info!(%name, "Released node alias from consensus");
+                        }
+                    }
+                    Err(e) => warn!("Malformed NodeAliasRelease payload, skipping: {e}"),
+                },
+                _ => {}
+            }
+        }
+    }
+
     async fn process_validator_logs(
         &self,
         result: &tenzro_vm::ExecutionResult,
@@ -6504,6 +6600,14 @@ impl EventLoop {
             // scope to enforce here (the settling parties never signed this
             // tx). Skip the delegation/spending-policy pre-check.
             tenzro_types::TransactionType::X402Settle { .. } => return Ok(()),
+            // Naming is a real, gas-costing operation, so it is nameable on
+            // the `allowed_operations` axis: a machine acting under a
+            // delegation can be permitted inference while still being denied
+            // the ability to claim public names in its controller's name.
+            // No TNZO moves, so the per-tx value ceiling sees 0.
+            tenzro_types::TransactionType::ClaimNodeAlias { .. } => ("claim_node_alias", 0),
+            tenzro_types::TransactionType::BindNodeAlias { .. } => ("bind_node_alias", 0),
+            tenzro_types::TransactionType::ReleaseNodeAlias { .. } => ("release_node_alias", 0),
             tenzro_types::TransactionType::TeeProviderRegister { .. }
             | tenzro_types::TransactionType::RegisterValidator { .. }
             | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }
@@ -6945,7 +7049,8 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         SELECTOR_ESCROW_CREATE, SELECTOR_ESCROW_REFUND, SELECTOR_ESCROW_RELEASE,
         SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL, SELECTOR_INCREASE_AGENT_BOND,
         SELECTOR_INCREASE_COMPUTE_BOND, SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE,
-        SELECTOR_KILLSWITCH_TERMINATE, SELECTOR_PAY_INSURANCE_CLAIM, SELECTOR_POST_AGENT_BOND,
+        SELECTOR_KILLSWITCH_TERMINATE, SELECTOR_NODE_ALIAS_BIND, SELECTOR_NODE_ALIAS_CLAIM,
+        SELECTOR_NODE_ALIAS_RELEASE, SELECTOR_PAY_INSURANCE_CLAIM, SELECTOR_POST_AGENT_BOND,
         SELECTOR_POST_COMPUTE_BOND, SELECTOR_VALIDATOR_EXIT, SELECTOR_VALIDATOR_REGISTER,
         SELECTOR_VALIDATOR_UPDATE_METADATA, SELECTOR_WITHDRAW_AGENT_BOND,
         SELECTOR_WITHDRAW_COMPUTE_BOND, SELECTOR_X402_SETTLE,
@@ -7328,6 +7433,70 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         TransactionType::ExitValidator => {
             // No payload — selector alone signals voluntary exit.
             (0, SELECTOR_VALIDATOR_EXIT.to_vec(), VmType::Tenzro)
+        }
+        TransactionType::ClaimNodeAlias {
+            name,
+            owner_did,
+            exposed_prefixes,
+        } => {
+            #[derive(serde::Serialize)]
+            struct ClaimNodeAliasPayload<'a> {
+                name: &'a str,
+                owner_did: &'a str,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                exposed_prefixes: &'a Option<Vec<String>>,
+            }
+            let payload = ClaimNodeAliasPayload {
+                name,
+                owner_did,
+                exposed_prefixes,
+            };
+            let mut data = SELECTOR_NODE_ALIAS_CLAIM.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload).expect("ClaimNodeAlias payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::BindNodeAlias {
+            name,
+            machine_did,
+            endpoint_id,
+            machine_consent,
+            exposed_prefixes,
+        } => {
+            #[derive(serde::Serialize)]
+            struct BindNodeAliasPayload<'a> {
+                name: &'a str,
+                machine_did: &'a str,
+                endpoint_id: &'a str,
+                machine_consent: &'a [u8],
+                #[serde(skip_serializing_if = "Option::is_none")]
+                exposed_prefixes: &'a Option<Vec<String>>,
+            }
+            let payload = BindNodeAliasPayload {
+                name,
+                machine_did,
+                endpoint_id,
+                machine_consent,
+                exposed_prefixes,
+            };
+            let mut data = SELECTOR_NODE_ALIAS_BIND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload).expect("BindNodeAlias payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::ReleaseNodeAlias { name } => {
+            #[derive(serde::Serialize)]
+            struct ReleaseNodeAliasPayload<'a> {
+                name: &'a str,
+            }
+            let mut data = SELECTOR_NODE_ALIAS_RELEASE.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&ReleaseNodeAliasPayload { name })
+                    .expect("ReleaseNodeAlias payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
         }
         TransactionType::UpdateValidatorMetadata {
             metadata_uri,

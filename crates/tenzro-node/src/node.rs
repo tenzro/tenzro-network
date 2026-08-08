@@ -2520,6 +2520,9 @@ pub struct TenzroNode {
     /// local / LAN-cluster / network with the same tiering the model and
     /// storage layers use. RocksDB-backed via `CF_DATABASES`.
     database_registry: Option<Arc<tenzro_database::DatabaseRegistry>>,
+    /// Consensus-decided `name → node` read model. Populated from
+    /// `NodeAlias*` logs in finalized blocks; never an authority itself.
+    node_alias_registry: Option<Arc<crate::node_alias::NodeAliasRegistry>>,
 
     /// Live database-engine backends this node serves, keyed by engine id. The
     /// registry above tracks placement; this holds the concrete drivers the
@@ -3156,6 +3159,7 @@ impl TenzroNode {
             visa_tap_verifier: None,
             x402_settle_event_slot: None,
             database_registry: None,
+            node_alias_registry: None,
             db_engine_registry: Arc::new(crate::db_engine_registry::EngineRegistry::new()),
             db_usage_meter: Arc::new(tenzro_database::DatabaseUsageMeter::new()),
             site_registry: Arc::new(crate::sites::SiteRegistry::new()),
@@ -3609,12 +3613,21 @@ impl TenzroNode {
         // 7b-ter. Wire the database replicated-write inbound server
         // (`/tenzro/db/replicate`). A node that holds a partition applies writes
         // fanned out to it by the serving holder to its own copy of the
-        // partition and replies with the engine's response body. Runs on any
-        // role with a network handle + a database registry — a ModelProvider or
-        // dedicated database node can hold a partition without being a
-        // validator. Fail-closed inside the handler: it applies only when this
-        // node and the origin peer are both recognized holders.
-        if let (Some(network), Some(db_registry)) =
+        // partition and replies with the engine's response body.
+        //
+        // Gated on `roles.serves_database()`: accepting partition writes is the
+        // hosting obligation `NetworkRole::DatabaseProvider` declares, and it is
+        // independent of consensus — a DatabaseProvider holds partitions without
+        // being a validator. Consuming a database needs no such declaration and
+        // is not gated here (the registry itself is unconditional; see its
+        // construction above). Still fail-closed inside the handler: it applies
+        // only when this node and the origin peer are both recognized holders.
+        if !self.config.roles.serves_database() {
+            debug!(
+                "Database replicated-write server not wired — node does not serve \
+                 the database role (add `database` to --roles to host partitions)"
+            );
+        } else if let (Some(network), Some(db_registry)) =
             (self.network.clone(), self.database_registry.clone())
         {
             match network.local_peer_id().await {
@@ -10201,6 +10214,19 @@ impl TenzroNode {
         // Distributed database registry — RocksDB-backed when storage is up,
         // hydrating every database this node serves on boot; in-memory
         // otherwise (storage-less test/dev node).
+        //
+        // Deliberately NOT gated on `roles.serves_database()`. The registry is
+        // dual-purpose: besides the partitions this node hosts, it is the
+        // network-wide discovery/routing table that gossip populates
+        // (`NodeEvent::DatabaseGossipReceived` → `upsert_descriptor`). Every
+        // *consumer* path needs it to resolve a database hosted somewhere
+        // else — `tenzro_databaseQuery`, `tenzro_listDatabases`,
+        // `tenzro_issueDatabaseConnection` all read it. A CloudProvider whose
+        // hosted app talks to a database on another node holds no partition
+        // yet still must resolve one, so gating construction on the hosting
+        // role would break querying for everyone who is not themselves a
+        // database host. The hosting *obligation* is gated instead, at the
+        // replicated-write inbound server (see `serves_database()` there).
         let database_registry = if let Some(storage) = &self.storage {
             match tenzro_database::DatabaseRegistry::with_storage(
                 storage.clone() as Arc<dyn KvStore>
@@ -10221,6 +10247,58 @@ impl TenzroNode {
             Arc::new(tenzro_database::DatabaseRegistry::new())
         };
         self.database_registry = Some(database_registry);
+
+        // Node-alias read model. Built unconditionally: resolving a name is
+        // useful to any node, and the table is only ever written from
+        // finalized-block logs, so carrying it costs nothing on a node that
+        // has claimed nothing. `public_node_suffix` being `None` leaves
+        // hostname resolution disabled while still letting the node answer
+        // `tenzro_resolveNodeAlias` for the network's claims.
+        let alias_suffix = self.config.public_node_suffix.clone();
+        let node_alias_registry = if let Some(storage) = &self.storage {
+            match crate::node_alias::NodeAliasRegistry::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+                alias_suffix.clone(),
+            ) {
+                Ok(reg) => {
+                    info!(
+                        aliases = reg.len(),
+                        suffix = ?reg.suffix(),
+                        "Node-alias registry hydrated"
+                    );
+                    Arc::new(reg)
+                }
+                Err(e) => {
+                    warn!("Node-alias registry hydration failed ({e}); starting empty");
+                    Arc::new(crate::node_alias::NodeAliasRegistry::new(alias_suffix))
+                }
+            }
+        } else {
+            Arc::new(crate::node_alias::NodeAliasRegistry::new(alias_suffix))
+        };
+        self.node_alias_registry = Some(node_alias_registry);
+
+        // Report an alias already bound to this machine, so an operator can
+        // see at a glance that the name they claimed resolves here.
+        //
+        // Binding itself is deliberately NOT done automatically from inside
+        // the node: a bind is a transaction the *claim owner* signs, and the
+        // node holds the machine key, not the owner's. The node's half is the
+        // consent signature it serves from `tenzro_nodeAliasConsent`; the
+        // owner carries that into `tenzro node alias bind`. Auto-binding here
+        // would mean a node could repoint names using only its own key, which
+        // is exactly the property the two-signature design exists to prevent.
+        if let (Some(registry), Some(addressing_did)) = (
+            self.node_alias_registry.as_ref(),
+            self.self_addressing().await.did,
+        ) && let Some(name) = registry.name_for_machine(&addressing_did)
+        {
+            let hostname = registry
+                .suffix()
+                .map(|s| format!("{name}.{s}"))
+                .unwrap_or_else(|| name.clone());
+            info!(%name, %hostname, "Node alias bound to this machine");
+        }
 
         // Usage meter alongside the registry — durable per-database counters
         // (queries, bytes, billed totals) under `CF_DATABASES / usage/*`.
@@ -10669,8 +10747,36 @@ impl TenzroNode {
             };
             self.account_factory = Some(account_factory.clone());
 
-            let webauthn_origin = std::env::var("TENZRO_WEBAUTHN_ORIGIN")
-                .unwrap_or_else(|_| "https://wallet.tenzro.xyz".to_string());
+            // RP ID takes priority: a registrable-domain RP ID lets a
+            // passkey created while onboarding one node authenticate from
+            // any other node under the same public suffix (the Apple-ID-
+            // style "link this device to my identity" model), whereas the
+            // legacy `TENZRO_WEBAUTHN_ORIGIN` pins one exact origin with no
+            // cross-node portability. `network.tenzro.com` — not
+            // `tenzro.xyz`, which is Tenzro Labs' separate commercial
+            // RPC/API domain — is the default RP ID.
+            // RP ID, not an exact origin. A credential scoped to one hostname
+            // cannot authenticate at another, so pinning an origin would mean
+            // a passkey created while onboarding one node is useless at every
+            // other node the same person owns. The registrable domain is what
+            // makes one identity span an operator's whole fleet.
+            //
+            // Flag-day: the old `TENZRO_WEBAUTHN_ORIGIN` is gone rather than
+            // accepted as a fallback. Honouring it would silently re-pin a
+            // deployment to one host and reintroduce exactly the breakage
+            // this replaced, and it is the kind of shim that survives long
+            // after anyone remembers why it exists.
+            let webauthn_relying_party = std::env::var("TENZRO_WEBAUTHN_RP_ID")
+                .map(
+                    |rp_id| tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
+                        rp_id,
+                    },
+                )
+                .unwrap_or_else(|_| {
+                    tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
+                        rp_id: crate::config::DEFAULT_PUBLIC_NODE_SUFFIX.to_string(),
+                    }
+                });
             let webauthn_module_addr = {
                 let mut a = [0u8; 20];
                 a[18] = 0x10;
@@ -10680,13 +10786,13 @@ impl TenzroNode {
             let webauthn_validator = if let Some(ref storage) = self.storage {
                 Arc::new(tenzro_vm::WebAuthnValidator::with_storage(
                     webauthn_module_addr,
-                    webauthn_origin.clone(),
+                    webauthn_relying_party.clone(),
                     storage.clone() as Arc<dyn tenzro_storage::KvStore>,
                 ))
             } else {
                 Arc::new(tenzro_vm::WebAuthnValidator::new(
                     webauthn_module_addr,
-                    webauthn_origin.clone(),
+                    webauthn_relying_party.clone(),
                 ))
             };
             self.webauthn_validator = Some(webauthn_validator.clone());
@@ -10827,7 +10933,7 @@ impl TenzroNode {
             }
 
             info!(
-                webauthn_origin = %webauthn_origin,
+                webauthn_relying_party = ?webauthn_relying_party,
                 factory_addr = "0x0000...0400",
                 "Passkey-first custody substrate initialized — WebAuthnValidator, \
                  SocialRecoveryValidator, SessionKeyValidator, SpendingLimitValidator, \
@@ -11445,6 +11551,13 @@ impl TenzroNode {
                 capabilities.push("site-hosting".to_string());
                 capabilities.push("function-hosting".to_string());
             }
+            if self.config.roles.serves_database() {
+                // Peers placing a new database read this to find nodes willing
+                // to hold a partition. Separate from `site-hosting` /
+                // `function-hosting`: a cloud node serves stateless apps, a
+                // database node answers for live replicated data.
+                capabilities.push("database-hosting".to_string());
+            }
             if self.config.roles.serves_storage() {
                 capabilities.push("storage".to_string());
             }
@@ -11462,6 +11575,8 @@ impl TenzroNode {
                 "tee"
             } else if self.config.roles.serves_compute() {
                 "compute"
+            } else if self.config.roles.serves_database() {
+                "database"
             } else if self.config.roles.serves_cloud() {
                 "cloud"
             } else if self.config.roles.serves_storage() {
@@ -11697,6 +11812,11 @@ impl TenzroNode {
         // and metadata-only — the receiver is not a partition holder, so it
         // records the origin's authoritative descriptor without recomputing
         // placement.
+        let event_loop = if let Some(alias_registry) = self.node_alias_registry.clone() {
+            event_loop.with_node_alias_registry(alias_registry)
+        } else {
+            event_loop
+        };
         let event_loop = if let Some(db_registry) = self.database_registry.clone() {
             event_loop.with_database_registry(db_registry)
         } else {
@@ -13325,6 +13445,11 @@ impl TenzroNode {
     /// Returns the distributed database registry if initialized.
     pub fn database_registry(&self) -> Option<&Arc<tenzro_database::DatabaseRegistry>> {
         self.database_registry.as_ref()
+    }
+
+    /// The node-alias read model, when this node keeps one.
+    pub fn node_alias_registry(&self) -> Option<&Arc<crate::node_alias::NodeAliasRegistry>> {
+        self.node_alias_registry.as_ref()
     }
 
     /// Returns the live database-engine backend registry (always present, may be

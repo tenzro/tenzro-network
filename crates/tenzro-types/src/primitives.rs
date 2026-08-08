@@ -121,6 +121,78 @@ impl Address {
         Self::from_bytes(&bytes).ok_or(bs58::decode::Error::BufferTooSmall)
     }
 
+    /// Parse an address from any textual form this workspace emits.
+    ///
+    /// An address leaves the node rendered two different ways, and both end up
+    /// pasted back into RPC parameters by real callers:
+    ///
+    /// - **hex** — `to_hex()`, `hex::encode`, and every `"address": format!("0x{}", …)`
+    ///   JSON field. 20-byte EIP-55 and 32-byte forms both land here.
+    /// - **base58** — the [`fmt::Display`] impl, which is what `display_address`
+    ///   carries and what a dozen `"address"`/`"wallet_address"` fields built with
+    ///   `format!("{}", addr)` emit.
+    ///
+    /// Accepting only hex is what made provider onboarding fail: `tenzro join`
+    /// showed the operator a base58 wallet address, they passed it straight to
+    /// `tenzro_faucet`, and got `-32602 Invalid address` for an address the node
+    /// had printed itself moments earlier. A caller copying a value out of one
+    /// RPC response and into the next must not have to know which renderer
+    /// produced it.
+    ///
+    /// Hex wins the ambiguity. A 40- or 64-character all-hex-digit string is
+    /// treated as hex even though it may also be legal base58, because hex is
+    /// the canonical machine form; base58 addresses are 43-44 characters and so
+    /// do not collide in practice.
+    pub fn parse(s: &str) -> Result<Self, crate::error::TenzroError> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(crate::error::TenzroError::InvalidAddress(
+                "address is empty".to_string(),
+            ));
+        }
+
+        let unprefixed = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+        let looks_hex = trimmed.starts_with("0x")
+            || ((unprefixed.len() == 40 || unprefixed.len() == 64)
+                && unprefixed.chars().all(|c| c.is_ascii_hexdigit()));
+
+        if looks_hex {
+            // EIP-55 encodes its checksum in the *case* of the hex letters, so
+            // only a mixed-case 20-byte address carries one to verify. An
+            // all-lowercase (or all-uppercase) address — the form every tool
+            // prints by default, and the form this workspace's own tests and
+            // RPC callers use — has no checksum, and rejecting it as
+            // "Invalid EIP-55 checksum" refuses a perfectly valid address.
+            //
+            // `from_hex_checksummed` stays strict for callers that want a
+            // typo-detecting parse. This entry point is the permissive one
+            // that RPC parameters flow through.
+            if unprefixed.len() == 40 {
+                let has_upper = unprefixed.chars().any(|c| c.is_ascii_uppercase());
+                let has_lower = unprefixed.chars().any(|c| c.is_ascii_lowercase());
+                if !(has_upper && has_lower) {
+                    let bytes = hex::decode(unprefixed).map_err(|e| {
+                        crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {e}"))
+                    })?;
+                    // Left-aligned widening, matching `from_hex_checksummed`:
+                    // the 20 significant bytes lead and the trailing 12 are
+                    // zero. This is the one widening the workspace uses.
+                    let mut addr = [0u8; 32];
+                    addr[..20].copy_from_slice(&bytes);
+                    return Ok(Self(addr));
+                }
+            }
+            return Self::from_hex(trimmed);
+        }
+
+        Self::from_base58(trimmed).map_err(|e| {
+            crate::error::TenzroError::InvalidAddress(format!(
+                "{trimmed:?} is neither a hex address (20 or 32 bytes, with or \
+                 without 0x) nor a base58 address: {e}"
+            ))
+        })
+    }
+
     /// Validates that a hex string is properly formatted
     ///
     /// Returns true if the string is valid hexadecimal (with or without 0x prefix)
@@ -912,5 +984,54 @@ mod address_widening_tests {
     #[test]
     fn a_bad_checksum_is_refused() {
         assert!(Address::from_hex("0x3d0291c0FC59EdA83f2D9f5f00A09e12f3f6a067").is_err());
+    }
+}
+
+#[cfg(test)]
+mod address_parse_tests {
+    use super::Address;
+
+    #[test]
+    fn base58_and_hex_name_the_same_address() {
+        let addr = Address::new([7u8; 32]);
+        let from_b58 = Address::parse(&addr.to_base58()).expect("base58 parses");
+        let from_hex = Address::parse(&format!("0x{}", hex::encode(addr.0))).expect("hex parses");
+        assert_eq!(from_b58, addr);
+        assert_eq!(from_hex, addr);
+    }
+
+    #[test]
+    fn a_wallets_display_address_is_accepted_by_rpc() {
+        // The regression: `tenzro join` prints the base58 Display form, the
+        // operator passes it to `tenzro_faucet`, and hex-only parsing answered
+        // "-32602 Invalid address" for an address the node itself had printed.
+        let displayed = format!("{}", Address::new([3u8; 32]));
+        assert!(
+            Address::parse(&displayed).is_ok(),
+            "the address form the CLI displays must be accepted as a parameter"
+        );
+    }
+
+    #[test]
+    fn a_lowercase_evm_address_has_no_checksum_to_fail() {
+        // EIP-55 puts the checksum in the letter case, so an all-lowercase
+        // address carries none. Rejecting it refuses the form nearly every
+        // tool prints.
+        let lower = "0xd30cb495438fec31b14db1c14e9886ffa17350b8";
+        let parsed = Address::parse(lower).expect("all-lowercase 20-byte address parses");
+        assert_eq!(&parsed.0[..20], &hex::decode(&lower[2..]).unwrap()[..]);
+        assert_eq!(
+            &parsed.0[20..],
+            &[0u8; 12],
+            "20-byte widening is left-aligned"
+        );
+        assert!(Address::parse(&lower.to_uppercase().replace("0X", "0x")).is_ok());
+    }
+
+    #[test]
+    fn garbage_is_still_refused_and_says_both_forms() {
+        let err = Address::parse("not-an-address").unwrap_err().to_string();
+        assert!(err.contains("hex") && err.contains("base58"), "got: {err}");
+        assert!(Address::parse("").is_err());
     }
 }

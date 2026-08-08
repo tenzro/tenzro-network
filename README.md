@@ -527,7 +527,9 @@ serving one and is unchanged.
 
 **Infrastructure**: The public endpoints on `tenzro.xyz` are operated by Tenzro Labs, the first reference RPC provider on the network. The RPC provider role is open — any operator that meets the validator bond can register their own endpoint and serve the same protocol surface. TLS at the edge is PQ-hybrid X25519MLKEM768. The repository is the reference implementation — anyone can run a node and join.
 
-**Genesis**: 1,000,000,000 TNZO total supply. Faucet: 1,000 TNZO per request, 24h cooldown.
+**Genesis**: 1,000,000,000 TNZO total supply. Faucet: up to 1,010 TNZO per request, 24h
+cooldown. The ceiling is the 1,000 TNZO model-provider bond plus headroom for the gas that
+posting it costs — a grant equal to the bond cannot fund the transaction that posts it.
 
 ## Development
 

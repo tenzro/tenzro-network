@@ -20,7 +20,7 @@ use tenzro_storage::KvStore;
 
 /// Environment variable holding the wallet-keystore password. Set it to make
 /// wallets persist; leave it unset for an ephemeral node.
-const KEYSTORE_PASSWORD_ENV: &str = "TENZRO_KEYSTORE_PASSWORD";
+use tenzro_node::KEYSTORE_PASSWORD_ENV;
 
 /// Tenzro Network Node CLI
 #[derive(Parser, Debug)]
