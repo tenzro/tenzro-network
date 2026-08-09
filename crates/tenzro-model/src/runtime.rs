@@ -310,11 +310,41 @@ fn matched_stop_len(text: &str, stop: &[String]) -> Option<usize> {
 /// stop sequences configured `hold` is zero and every piece is released the
 /// moment it is decoded.
 pub(crate) struct StopStream {
+    /// Text the caller is meant to see: reasoning spans removed.
     text: String,
+    /// The model's reasoning, accumulated separately.
+    reasoning: String,
+    /// Bytes decoded but not yet classified, because they could still turn out
+    /// to be the leading part of a `<think>` / `</think>` marker.
+    pending: String,
     emitted: usize,
     hold: usize,
     stop: Vec<String>,
     hit: bool,
+    in_think: bool,
+}
+
+/// Reasoning-span markers. Ordinary text, not special tokens, so they arrive
+/// split across pieces like anything else.
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// Length of the longest suffix of `s` that is a strict prefix of `marker`.
+///
+/// Those bytes cannot be classified yet: `<thi` is either the start of a marker
+/// or four literal characters, and only the next piece decides. Holding them is
+/// the same trick the stop-sequence path already uses.
+fn dangling_prefix(s: &str, marker: &str) -> usize {
+    // Inclusive bound: when the buffer is shorter than the marker the *whole*
+    // buffer can be the prefix — `<thi` against `<think>` is the common case,
+    // and an exclusive bound silently released it as visible text.
+    let max = s.len().min(marker.len() - 1);
+    (1..=max)
+        .rev()
+        .find(|&k| {
+            s.is_char_boundary(s.len() - k) && s.as_bytes()[s.len() - k..] == marker.as_bytes()[..k]
+        })
+        .unwrap_or(0)
 }
 
 impl StopStream {
@@ -327,10 +357,13 @@ impl StopStream {
             .unwrap_or(0);
         Self {
             text: String::new(),
+            reasoning: String::new(),
+            pending: String::new(),
             emitted: 0,
             hold,
             stop,
             hit: false,
+            in_think: false,
         }
     }
 
@@ -341,13 +374,62 @@ impl StopStream {
         piece: &str,
         tx: Option<&tokio::sync::mpsc::Sender<String>>,
     ) -> bool {
-        self.text.push_str(piece);
+        self.pending.push_str(piece);
+        self.classify();
         if let Some(n) = matched_stop_len(&self.text, &self.stop) {
             self.text.truncate(self.text.len() - n);
             self.emitted = self.emitted.min(self.text.len());
             self.hit = true;
         }
         self.release(tx)
+    }
+
+    /// Move settled bytes out of `pending` into either the visible text or the
+    /// reasoning buffer, leaving behind only what a marker could still claim.
+    fn classify(&mut self) {
+        loop {
+            if self.in_think {
+                if let Some(i) = self.pending.find(THINK_CLOSE) {
+                    self.reasoning.push_str(&self.pending[..i]);
+                    self.pending.drain(..i + THINK_CLOSE.len());
+                    self.in_think = false;
+                    continue;
+                }
+                let keep = dangling_prefix(&self.pending, THINK_CLOSE);
+                let take = self.pending.len() - keep;
+                self.reasoning.push_str(&self.pending[..take]);
+                self.pending.drain(..take);
+                return;
+            }
+
+            if let Some(i) = self.pending.find(THINK_OPEN) {
+                self.text.push_str(&self.pending[..i]);
+                self.pending.drain(..i + THINK_OPEN.len());
+                self.in_think = true;
+                continue;
+            }
+
+            // A close with no open: the chat template opened the block in the
+            // prompt, so the model's output starts mid-thought. Everything so
+            // far was reasoning — reclaimable only while nothing has been
+            // streamed yet, since bytes already sent cannot be recalled.
+            if let Some(i) = self.pending.find(THINK_CLOSE) {
+                self.text.push_str(&self.pending[..i]);
+                self.pending.drain(..i + THINK_CLOSE.len());
+                if self.emitted == 0 {
+                    self.reasoning.push_str(&self.text);
+                    self.text.clear();
+                }
+                continue;
+            }
+
+            let keep = dangling_prefix(&self.pending, THINK_OPEN)
+                .max(dangling_prefix(&self.pending, THINK_CLOSE));
+            let take = self.pending.len() - keep;
+            self.text.push_str(&self.pending[..take]);
+            self.pending.drain(..take);
+            return;
+        }
     }
 
     fn release(&mut self, tx: Option<&tokio::sync::mpsc::Sender<String>>) -> bool {
@@ -372,11 +454,26 @@ impl StopStream {
         self.hit
     }
 
-    /// Release anything still held back and hand over the accumulated text.
-    pub(crate) fn finish(mut self, tx: Option<&tokio::sync::mpsc::Sender<String>>) -> String {
+    /// Release anything still held back, then hand over the visible text and
+    /// the reasoning span the model produced, if any.
+    pub(crate) fn finish_parts(
+        mut self,
+        tx: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> (String, Option<String>) {
+        // Whatever is still pending was never completed into a marker. Inside a
+        // block it is reasoning; outside, it is text — unless it is a partial
+        // marker, which is residue rather than something the model meant to
+        // say.
+        let leftover = std::mem::take(&mut self.pending);
+        if self.in_think {
+            self.reasoning.push_str(&leftover);
+        } else if !THINK_OPEN.starts_with(&leftover) && !THINK_CLOSE.starts_with(&leftover) {
+            self.text.push_str(&leftover);
+        }
         self.hit = true;
         self.release(tx);
-        self.text
+        let reasoning = self.reasoning.trim().to_string();
+        (self.text, (!reasoning.is_empty()).then_some(reasoning))
     }
 }
 
@@ -423,7 +520,15 @@ impl StopReason {
 /// Result from running inference
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceResult {
+    /// What the caller is meant to see. Reasoning spans are already removed —
+    /// [`StopStream`] classifies them as the tokens decode, so a caller never
+    /// has to strip `<think>` itself and a streamed turn never emits one.
     pub text: String,
+    /// The model's reasoning, when it produced any. Separate from [`Self::text`]
+    /// so a surface can render, collapse or drop it; concatenating the two is
+    /// what put bare `</think>` in front of users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub generation_time_ms: u64,
@@ -474,9 +579,13 @@ pub struct ToolCall {
 /// stop reason inferred from the output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatWithToolsResult {
-    /// Free-text portion of the model's reply (with tool-call markers
-    /// stripped).
+    /// Free-text portion of the model's reply (with tool-call markers and any
+    /// reasoning span stripped).
     pub text: String,
+    /// The model's reasoning span, when it emitted one. Carried separately so
+    /// a caller can render or discard it; it must never be concatenated into
+    /// [`Self::text`], which is the answer.
+    pub thinking: Option<String>,
     /// Tool calls extracted from the raw output, in emission order.
     pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u32,
@@ -1867,6 +1976,13 @@ impl ModelRuntime {
 
         // Parse tool-call markers from the raw output.
         let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
+        // `StopStream` already classified the reasoning span as the tokens
+        // decoded, so `inner.thinking` is normally the answer. The second split
+        // is for text that reached us without passing through it — an external
+        // engine's reply, or a model that emitted a nested block — and is a
+        // no-op on already-clean text.
+        let (clean_text, split_thinking) = split_reasoning(&clean_text);
+        let thinking = inner.thinking.clone().or(split_thinking);
 
         // A tool call outranks the engine's own cause: the turn ends because
         // control passes to the caller's tool, whatever halted decoding.
@@ -1882,6 +1998,7 @@ impl ModelRuntime {
 
         Ok(ChatWithToolsResult {
             text: clean_text,
+            thinking,
             tool_calls,
             input_tokens: inner.input_tokens,
             output_tokens: inner.output_tokens,
@@ -2045,6 +2162,8 @@ impl ModelRuntime {
                     .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??;
 
                     let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
+                    let (clean_text, split_thinking) = split_reasoning(&clean_text);
+                    let thinking = inner.thinking.clone().or(split_thinking);
                     let stop_reason = if !tool_calls.is_empty() {
                         "tool_use".to_string()
                     } else {
@@ -2056,6 +2175,7 @@ impl ModelRuntime {
                     };
                     Ok(ChatWithToolsResult {
                         text: clean_text,
+                        thinking,
                         tool_calls,
                         input_tokens: inner.input_tokens,
                         output_tokens: inner.output_tokens,
@@ -2450,7 +2570,7 @@ impl ModelRuntime {
         // unconditionally to release held bytes.
         let stop_reason =
             StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
-        let output_text = stream.finish(token_tx);
+        let (output_text, output_thinking) = stream.finish_parts(token_tx);
 
         let elapsed = start.elapsed();
         let generation_time_ms = elapsed.as_millis() as u64;
@@ -2470,6 +2590,7 @@ impl ModelRuntime {
 
         Ok(InferenceResult {
             text: output_text,
+            thinking: output_thinking,
             input_tokens,
             output_tokens,
             generation_time_ms,
@@ -2740,8 +2861,10 @@ impl ModelRuntime {
 
         // Emit the seed token.
         if loaded.model.is_eog_token(id_last) {
+            let (text, thinking) = stream.finish_parts(token_tx);
             return Ok(InferenceResult {
-                text: stream.finish(token_tx),
+                text,
+                thinking,
                 input_tokens,
                 output_tokens,
                 generation_time_ms: start.elapsed().as_millis() as u64,
@@ -2767,8 +2890,10 @@ impl ModelRuntime {
         if !seed_open {
             let stop_reason =
                 StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
+            let (text, thinking) = stream.finish_parts(token_tx);
             return Ok(InferenceResult {
-                text: stream.finish(token_tx),
+                text,
+                thinking,
                 input_tokens,
                 output_tokens,
                 generation_time_ms: start.elapsed().as_millis() as u64,
@@ -2879,8 +3004,10 @@ impl ModelRuntime {
                             output_tokens,
                             config.max_tokens,
                         );
+                        let (text, thinking) = stream.finish_parts(token_tx);
                         return Ok(InferenceResult {
-                            text: stream.finish(token_tx),
+                            text,
+                            thinking,
                             input_tokens,
                             output_tokens,
                             generation_time_ms: start.elapsed().as_millis() as u64,
@@ -2916,8 +3043,10 @@ impl ModelRuntime {
                             output_tokens,
                             config.max_tokens,
                         );
+                        let (text, thinking) = stream.finish_parts(token_tx);
                         return Ok(InferenceResult {
-                            text: stream.finish(token_tx),
+                            text,
+                            thinking,
                             input_tokens,
                             output_tokens,
                             generation_time_ms: start.elapsed().as_millis() as u64,
@@ -2954,8 +3083,10 @@ impl ModelRuntime {
         };
         let stop_reason =
             StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
+        let (text, thinking) = stream.finish_parts(token_tx);
         Ok(InferenceResult {
-            text: stream.finish(token_tx),
+            text,
+            thinking,
             input_tokens,
             output_tokens,
             generation_time_ms,
@@ -3098,6 +3229,56 @@ fn inject_tools_preamble(messages: &mut Vec<ChatMessage>, tools: &[ToolDefinitio
     }
 }
 
+/// Split a reasoning span off the front of raw model output, returning
+/// `(visible_text, reasoning)`.
+///
+/// Reasoning models emit `<think>…</think>` inline. Left in place it reaches
+/// the user as prose that reads like the answer but is not, and the closing
+/// tag shows up bare in a terminal.
+///
+/// The unbalanced cases are the ones that actually occur, so both are handled
+/// rather than treated as malformed:
+///
+/// - **Closing tag only.** A template that opens the think block itself puts
+///   `<think>` in the prompt, so the model never emits it and its output
+///   begins mid-thought, ending at `</think>`. Everything before the first
+///   close is reasoning.
+/// - **Opening tag only.** Generation hit the token ceiling before the model
+///   closed the block, so the whole remainder is reasoning and there is no
+///   answer to show.
+pub(crate) fn split_reasoning(raw: &str) -> (String, Option<String>) {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+
+    match (raw.find(OPEN), raw.find(CLOSE)) {
+        // Well-formed, or a stray close before the open (treat the close as
+        // authoritative — it is what would otherwise leak).
+        (Some(o), Some(c)) if o < c => {
+            let reasoning = raw[o + OPEN.len()..c].trim().to_string();
+            let mut visible = String::with_capacity(raw.len());
+            visible.push_str(&raw[..o]);
+            visible.push_str(&raw[c + CLOSE.len()..]);
+            (visible.trim().to_string(), non_empty(reasoning))
+        }
+        (_, Some(c)) => {
+            let reasoning = raw[..c].trim().to_string();
+            (
+                raw[c + CLOSE.len()..].trim().to_string(),
+                non_empty(reasoning),
+            )
+        }
+        (Some(o), None) => {
+            let reasoning = raw[o + OPEN.len()..].trim().to_string();
+            (raw[..o].trim().to_string(), non_empty(reasoning))
+        }
+        (None, None) => (raw.to_string(), None),
+    }
+}
+
+fn non_empty(s: String) -> Option<String> {
+    (!s.is_empty()).then_some(s)
+}
+
 /// Scan raw model output for tool-call markers and return
 /// `(clean_text, tool_calls)` with all markers stripped from the text.
 ///
@@ -3236,7 +3417,50 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
         }
     }
 
-    (text.trim().to_string(), calls)
+    (strip_orphan_markers(&text), calls)
+}
+
+/// Remove tool-call markers left in the text after extraction.
+///
+/// Every pass above consumes a *balanced* marker pair. A model that emits a
+/// stray closing tag — or an opening tag whose body never parsed — leaves the
+/// marker behind, and it reaches the user as literal `</tool_use>` at the end
+/// of an otherwise clean answer. The same shape as the `</think>` leak
+/// [`split_reasoning`] handles, for the tool-call vocabulary.
+///
+/// Only exact protocol markers are removed. Anything that survived extraction
+/// is residue by definition: a marker that parsed became a `ToolCall` and was
+/// cut with its body, so what is left cannot be part of the answer. Prose that
+/// merely *mentions* a tag is unaffected, since these are matched literally and
+/// a model discussing tool calls writes them inside code fences.
+fn strip_orphan_markers(text: &str) -> String {
+    const ORPHANS: &[&str] = &[
+        "</tool_use>",
+        "</tool_call>",
+        "<tool_call>",
+        "</function>",
+        "</invoke>",
+        "<|eom_id|>",
+        "<|python_tag|>",
+    ];
+    let mut out = text.to_string();
+    for marker in ORPHANS {
+        if out.contains(marker) {
+            out = out.replace(marker, "");
+        }
+    }
+    // An unclosed `<tool_use …>` opener leaves an attribute soup that is not a
+    // sentence; drop from the opener to the end of that tag.
+    while let Some(start) = out.find("<tool_use ") {
+        match out[start..].find('>') {
+            Some(rel) => out.replace_range(start..start + rel + 1, ""),
+            None => {
+                out.truncate(start);
+                break;
+            }
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Parse a single tool-call JSON object. Accepts both
@@ -3687,6 +3911,168 @@ mod tests {
     /// carrying those tokens. This sample came from a Qwen 3.6 build told to
     /// emit JSON instead, which produced a hybrid of the two: neither valid
     /// JSON nor clean XML, but unambiguous as a call.
+    /// The case that actually leaked: a template that opens the think block in
+    /// the prompt, so the model's output starts mid-thought and only the
+    /// closing tag appears. Everything before it is reasoning, and a bare
+    /// `</think>` must not reach the user.
+    #[test]
+    fn reasoning_split_handles_a_closing_tag_with_no_opening_one() {
+        let (text, thinking) =
+            split_reasoning("Let me read the file first.\n</think>\n\nFixed it.");
+        assert_eq!(text, "Fixed it.");
+        assert_eq!(thinking.as_deref(), Some("Let me read the file first."));
+        assert!(!text.contains("think"));
+    }
+
+    #[test]
+    fn reasoning_split_handles_a_well_formed_block() {
+        let (text, thinking) = split_reasoning("<think>weighing options</think>The answer is 4.");
+        assert_eq!(text, "The answer is 4.");
+        assert_eq!(thinking.as_deref(), Some("weighing options"));
+    }
+
+    /// Hit the token ceiling mid-thought: there is no answer, and the
+    /// reasoning must not be promoted into one.
+    #[test]
+    fn reasoning_split_handles_an_unclosed_block() {
+        let (text, thinking) = split_reasoning("<think>still thinking about");
+        assert!(text.is_empty());
+        assert_eq!(thinking.as_deref(), Some("still thinking about"));
+    }
+
+    /// Feed pieces through a `StopStream` the way the decode loop does, with
+    /// no streaming receiver, and read back what a non-streaming caller gets.
+    fn drain(pieces: &[&str]) -> (String, Option<String>) {
+        let mut s = StopStream::new(vec![]);
+        for p in pieces {
+            s.push(p, None);
+        }
+        s.finish_parts(None)
+    }
+
+    #[test]
+    fn a_reasoning_span_never_reaches_the_visible_text() {
+        let (text, thinking) = drain(&["<think>", "weighing it", "</think>", "The answer is 4."]);
+        assert_eq!(text, "The answer is 4.");
+        assert_eq!(thinking.as_deref(), Some("weighing it"));
+    }
+
+    /// The markers arrive as ordinary text, so a tokenizer splits them wherever
+    /// it likes. Holding the ambiguous tail is the whole point of doing this in
+    /// the stream rather than on the finished string.
+    #[test]
+    fn a_marker_split_across_pieces_is_still_caught() {
+        let (text, thinking) = drain(&["<th", "ink>", "hmm", "</thi", "nk>", "Done."]);
+        assert_eq!(text, "Done.", "a split marker leaked into visible text");
+        assert_eq!(thinking.as_deref(), Some("hmm"));
+
+        // One character at a time — the worst case.
+        let per_char: Vec<String> = "<think>abc</think>xyz"
+            .chars()
+            .map(|c| c.to_string())
+            .collect();
+        let refs: Vec<&str> = per_char.iter().map(String::as_str).collect();
+        let (text, thinking) = drain(&refs);
+        assert_eq!(text, "xyz");
+        assert_eq!(thinking.as_deref(), Some("abc"));
+    }
+
+    /// The template opened the block in the prompt, so output starts
+    /// mid-thought and only the close appears.
+    #[test]
+    fn a_close_with_no_open_reclaims_what_came_before_it() {
+        let (text, thinking) = drain(&["Let me look.", "</think>", "Fixed it."]);
+        assert_eq!(text, "Fixed it.");
+        assert_eq!(thinking.as_deref(), Some("Let me look."));
+    }
+
+    #[test]
+    fn text_that_never_mentions_thinking_is_untouched() {
+        let (text, thinking) = drain(&["Just ", "an ", "answer."]);
+        assert_eq!(text, "Just an answer.");
+        assert!(thinking.is_none());
+    }
+
+    /// Hitting the token ceiling mid-thought: there is no answer, and the
+    /// reasoning must not be promoted into one.
+    #[test]
+    fn an_unclosed_block_yields_no_visible_text() {
+        let (text, thinking) = drain(&["<think>", "still going"]);
+        assert!(
+            text.is_empty(),
+            "unclosed reasoning surfaced as an answer: {text:?}"
+        );
+        assert_eq!(thinking.as_deref(), Some("still going"));
+    }
+
+    /// A dangling `<thi` at end of generation is residue, not something the
+    /// model meant to say.
+    #[test]
+    fn a_partial_marker_at_the_end_is_not_emitted() {
+        let (text, _) = drain(&["Answer.", "<thi"]);
+        assert_eq!(text, "Answer.");
+    }
+
+    /// Stop sequences still work, and are matched against what the caller sees
+    /// rather than against the reasoning.
+    #[test]
+    fn stop_sequences_still_apply_to_the_visible_text() {
+        let mut s = StopStream::new(vec!["END".to_string()]);
+        // The decode loop breaks the moment `hit_stop` is set, so nothing is
+        // pushed after the stop — feeding more here would test a sequence the
+        // engine never produces.
+        for p in ["<think>", "plan", "</think>", "keep", "END"] {
+            s.push(p, None);
+        }
+        assert!(s.hit_stop());
+        let (text, thinking) = s.finish_parts(None);
+        assert_eq!(text, "keep");
+        assert_eq!(thinking.as_deref(), Some("plan"));
+    }
+
+    /// Multi-byte characters must not be split when holding back a tail.
+    #[test]
+    fn holding_a_tail_never_splits_a_character() {
+        let (text, _) = drain(&["héllo ", "wörld — ", "ünïcode"]);
+        assert_eq!(text, "héllo wörld — ünïcode");
+    }
+
+    /// The leak seen in a live run: a trailing `"}</tool_use>` after an
+    /// otherwise complete answer.
+    #[test]
+    fn an_orphan_tool_use_close_never_reaches_the_user() {
+        let (text, calls) = extract_tool_calls("All tests passed.\"}</tool_use>");
+        assert!(calls.is_empty());
+        assert!(!text.contains("tool_use"), "leaked marker: {text:?}");
+        assert!(text.starts_with("All tests passed."));
+    }
+
+    #[test]
+    fn an_unclosed_tool_use_opener_is_dropped_with_its_attributes() {
+        let (text, _) = extract_tool_calls("Here you go.<tool_use id=\"t1\" name=\"bash\">");
+        assert_eq!(text, "Here you go.");
+    }
+
+    /// A balanced pair still parses into a call — the sweep must not shadow
+    /// the extraction it runs after.
+    #[test]
+    fn stripping_orphans_does_not_swallow_a_real_call() {
+        let (text, calls) = extract_tool_calls(
+            "<tool_use id=\"t1\" name=\"read_file\">{\"path\":\"a.rs\"}</tool_use>",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].input["path"], "a.rs");
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn reasoning_split_leaves_ordinary_output_alone() {
+        let (text, thinking) = split_reasoning("Just an answer.");
+        assert_eq!(text, "Just an answer.");
+        assert!(thinking.is_none());
+    }
+
     #[test]
     fn extract_arg_key_value_dialect() {
         let raw = "<think>\n\n</think>\n\n<tool_call>\n{\"name\">\"read_file\"</name>\n\

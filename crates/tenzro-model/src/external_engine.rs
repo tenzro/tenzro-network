@@ -239,8 +239,13 @@ impl ExternalEngine {
             0.0
         };
 
+        // An upstream OpenAI-compatible server hands back whatever the model
+        // emitted, reasoning tags included — there is no `StopStream` on this
+        // path to classify them as they decode, so split the finished text.
+        let (content, thinking) = crate::runtime::split_reasoning(&content);
         Ok(InferenceResult {
             text: content,
+            thinking,
             input_tokens,
             output_tokens,
             generation_time_ms: elapsed_ms,
@@ -398,8 +403,12 @@ fn finalize(
     } else {
         0.0
     };
+    // Streamed deltas were already forwarded verbatim, so this only cleans the
+    // assembled text a non-streaming caller reads back.
+    let (text, thinking) = crate::runtime::split_reasoning(&text);
     InferenceResult {
         text,
+        thinking,
         input_tokens,
         output_tokens,
         generation_time_ms: elapsed_ms,

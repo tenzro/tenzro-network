@@ -848,24 +848,36 @@ fn estimate_cost(model: &ModelInfo, input_tokens: u64, output_tokens: u64) -> u1
     input.saturating_add(output).max(p.minimum_price as u128)
 }
 
-/// Classifies a model into a quality tier from its declared parameters. A
-/// larger parameter count, a bigger context window, or an explicit
-/// `reasoning`/`code` capability tag lifts a model into the strong tier.
+/// Classifies a model into a quality tier from its declared parameters.
+///
+/// Size is the primary signal; an explicit `reasoning`/`code` capability tag
+/// also lifts a model, but only once it is large enough for the claim to mean
+/// anything.
+///
+/// **Context window is deliberately not a signal.** It used to be, as a third
+/// independent `||` term at a 32k floor, and that made the classifier
+/// degenerate: essentially every model shipping today clears 32k, including
+/// 0.8B ones at 131k, so every model classified `Strong`. With every candidate
+/// in the strong tier, the cost term then picked the *smallest* model for every
+/// rung — `qwen3.5-0.8b` was answering `quality_floor=strong` for code tasks
+/// while a 35B sat in the fallback chain. A long window means a model can read
+/// a lot at once, not that it can reason; conflating the two inverted the
+/// ladder it was meant to order.
 fn quality_tier(model: &ModelInfo) -> QualityTier {
     const STRONG_PARAM_FLOOR: u64 = 30_000_000_000; // 30B
-    const STRONG_CTX_FLOOR: u32 = 32_768;
+    /// A `code`/`reasoning` tag is a publisher's claim, and below this size it
+    /// describes what the model was *trained for*, not what it can carry.
+    const TAG_PARAM_FLOOR: u64 = 7_000_000_000; // 7B
 
-    let big = model
-        .parameters
-        .parameter_count
-        .is_some_and(|c| c >= STRONG_PARAM_FLOOR);
-    let long_ctx = model.parameters.context_window >= STRONG_CTX_FLOOR;
-    let capable = model.parameters.capabilities.iter().any(|c| {
-        let c = c.to_lowercase();
-        c.contains("reasoning") || c.contains("code")
-    });
+    let params = model.parameters.parameter_count;
+    let big = params.is_some_and(|c| c >= STRONG_PARAM_FLOOR);
+    let tagged_and_substantial = params.is_some_and(|c| c >= TAG_PARAM_FLOOR)
+        && model.parameters.capabilities.iter().any(|c| {
+            let c = c.to_lowercase();
+            c.contains("reasoning") || c.contains("code")
+        });
 
-    if big || long_ctx || capable {
+    if big || tagged_and_substantial {
         QualityTier::Strong
     } else {
         QualityTier::Cheap
@@ -945,6 +957,32 @@ mod tests {
             quality_tier(&model("c", 3_000_000_000, 8192, 1, 1)),
             QualityTier::Cheap
         );
+    }
+
+    /// A long window is capacity, not capability. Every model shipping today
+    /// clears the old 32k floor, so counting it lifted *everything* into the
+    /// strong tier — after which the cost term picked the smallest candidate
+    /// for every rung, and a 0.8B answered `quality_floor=strong`.
+    #[test]
+    fn a_long_context_window_alone_is_not_strength() {
+        // The exact shape that broke routing: 0.8B at 131k.
+        assert_eq!(
+            quality_tier(&model("tiny-long-ctx", 800_000_000, 131_072, 1, 1)),
+            QualityTier::Cheap
+        );
+    }
+
+    /// A `code`/`reasoning` tag on a tiny model describes what it was trained
+    /// for, not what it can carry.
+    #[test]
+    fn a_capability_tag_needs_size_behind_it() {
+        let mut small = model("tagged-tiny", 800_000_000, 131_072, 1, 1);
+        small.parameters.capabilities = vec!["code".into()];
+        assert_eq!(quality_tier(&small), QualityTier::Cheap);
+
+        let mut mid = model("tagged-mid", 8_000_000_000, 131_072, 1, 1);
+        mid.parameters.capabilities = vec!["reasoning".into()];
+        assert_eq!(quality_tier(&mid), QualityTier::Strong);
     }
 
     #[test]

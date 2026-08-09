@@ -14991,7 +14991,31 @@ impl TenzroNode {
     ) -> String {
         use tenzro_types::model::PricingConfig;
 
-        let instance_id = uuid::Uuid::new_v4().to_string();
+        // Reuse this node's existing instance for the same model rather than
+        // minting a second one. A node serves a model once — concurrency is
+        // `max_concurrent` on the one instance, not a second registration — so
+        // a re-serve is a refresh, not a new offer.
+        //
+        // Minting unconditionally meant every `tenzro model serve` of an
+        // already-served model left another instance behind, persisted to
+        // `CF_MODEL_SERVICES` and re-hydrated on boot, so restarting never
+        // cleared them. `/v1/models` then listed one model several times and
+        // peers saw duplicate offers for the same weights on the same node.
+        let existing = self.model_services.iter().find_map(|e| {
+            let v = e.value();
+            (v.model_id == model_id && v.location == location)
+                .then(|| (v.instance_id.clone(), v.created_at))
+        });
+        let (instance_id, created_at) = match existing {
+            Some(pair) => pair,
+            None => (
+                uuid::Uuid::new_v4().to_string(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+        };
         let pricing = self.provider_pricing.read();
 
         let instance = ModelServiceInstance {
@@ -15025,10 +15049,9 @@ impl TenzroNode {
                 pricing_model: pricing.pricing_model,
                 ..PricingConfig::default()
             },
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            // Carried over on a refresh: the offer dates from when the model
+            // was first served here, not from the last time it was re-served.
+            created_at,
             last_seen: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

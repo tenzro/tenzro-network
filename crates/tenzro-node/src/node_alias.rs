@@ -137,10 +137,10 @@ impl NodeAliasRegistry {
 
     /// Apply a release observed in a finalized block.
     pub fn apply_release(&self, name: &str) -> Result<(), NodeAliasError> {
-        if let Some((_, record)) = self.aliases.remove(name) {
-            if let Some(machine) = record.machine_did {
-                self.by_machine.remove(&machine);
-            }
+        if let Some((_, record)) = self.aliases.remove(name)
+            && let Some(machine) = record.machine_did
+        {
+            self.by_machine.remove(&machine);
         }
         if let Some(ref storage) = self.storage {
             storage

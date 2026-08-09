@@ -1067,18 +1067,31 @@ fn record_multimodal_visibility(
     model_id: &str,
 ) -> std::result::Result<(), JsonRpcError> {
     let visibility = match params.get("visibility").and_then(|v| v.as_str()) {
-        Some(s) => ModelVisibility::parse(s).ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: format!(
-                "Unknown visibility '{}'. Expected 'network', 'gated' or 'private'",
-                s
-            ),
-            data: None,
-        })?,
+        Some(s) => parse_visibility_str(s)?,
         None => ModelVisibility::Private,
     };
     node.served_models.insert(model_id.to_string(), visibility);
     Ok(())
+}
+
+/// Read a `visibility` parameter, defaulting to `Network`.
+///
+/// The language-model serve path defaults to announcing, unlike
+/// [`record_multimodal_visibility`], which defaults to `Private` because
+/// warming weights is not the same act as offering them.
+fn parse_visibility_param(params: &Value) -> std::result::Result<ModelVisibility, JsonRpcError> {
+    match params.get("visibility").and_then(|v| v.as_str()) {
+        None => Ok(ModelVisibility::Network),
+        Some(s) => parse_visibility_str(s),
+    }
+}
+
+fn parse_visibility_str(s: &str) -> std::result::Result<ModelVisibility, JsonRpcError> {
+    ModelVisibility::parse(s).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("Unknown visibility '{s}'. Expected 'network', 'gated' or 'private'"),
+        data: None,
+    })
 }
 
 /// The model a public-inference request targets, if this is one.
@@ -5933,6 +5946,7 @@ async fn handle_inference_request(
                 return Ok(serde_json::json!({
                     "model_id": model_id,
                     "output": result.text,
+                    "thinking": result.thinking,
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,
                     "generation_time_ms": result.generation_time_ms,
@@ -26703,12 +26717,23 @@ async fn handle_serve_model(
         data: None,
     })?;
 
-    // Check if already serving
+    // Check if already serving.
+    //
+    // Visibility is applied here rather than only on the load path below,
+    // because a re-serve is how an operator changes it: `tenzro model serve
+    // <id> --private` on a model that is already loaded returned
+    // `already_serving` and left the model announced, so the one command the
+    // CLI documents for going private reported success and did nothing. That
+    // is the wrong direction to fail silently in — the operator believes the
+    // model has stopped being advertised while peers are still routing to it.
     if model_runtime.is_loaded(model_id) {
+        let visibility = parse_visibility_param(&params)?;
+        node.served_models.insert(model_id.to_string(), visibility);
         return Ok(serde_json::json!({
             "success": true,
             "model_id": model_id,
             "status": "already_serving",
+            "visibility": visibility.as_str(),
         }));
     }
 
@@ -27477,6 +27502,31 @@ async fn handle_serve_model(
             // hashing fails the model stays out of the registry rather than
             // entering with a fabricated hash.
             if let Some(registry) = registry {
+                // Serving a model must make it routable, whatever else happens
+                // below. `tenzro_stopModel` deactivates the registry row, and a
+                // re-serve of an already-downloaded model has no fresh
+                // `file_record` to hash — so it takes one of the fallback arms
+                // and never touches the row. The model then sits `Online` in
+                // the service list and `Inactive` in the registry: served, but
+                // invisible to `tenzro_routeIntent`, which reports "no Text
+                // model fits budget/quality" while the model is plainly loaded.
+                //
+                // Publication of integrity metadata is a separate concern and
+                // still requires the hash; this only restores routability.
+                if let Ok(existing) = registry.get_model(&model_id_c)
+                    && existing.status != tenzro_types::model::ModelStatus::Active
+                {
+                    let mut reactivated = existing;
+                    reactivated.status = tenzro_types::model::ModelStatus::Active;
+                    if let Err(e) = registry.update_model(reactivated) {
+                        tracing::warn!(
+                            model_id = %model_id_c,
+                            error = %e,
+                            "Failed to reactivate ModelRegistry row for a served model"
+                        );
+                    }
+                }
+
                 match (
                     provider_wallet,
                     file_record.as_ref(),
@@ -33747,6 +33797,11 @@ async fn handle_chat_simple(
 
         Ok(serde_json::json!({
             "output": result.text,
+            // Reported beside the answer, never concatenated into it. A
+            // reasoning model that spends its whole budget thinking returns an
+            // empty `output`, and without this the caller cannot tell that
+            // apart from a model that had nothing to say.
+            "thinking": result.thinking,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
             // Every billable dimension this call consumed, so a node that
@@ -38934,6 +38989,7 @@ async fn handle_openai_chat_completions(
                     let _ = token_tx.send(result.text.clone()).await;
                     Ok(InferenceResult {
                         text: result.text,
+                        thinking: result.thinking,
                         input_tokens: result.input_tokens,
                         output_tokens: result.output_tokens,
                         generation_time_ms: result.generation_time_ms,
@@ -39134,6 +39190,7 @@ async fn handle_openai_chat_completions(
                     .await
                     .map(|r| InferenceResult {
                         text: r.text,
+                        thinking: r.thinking,
                         input_tokens: r.input_tokens,
                         output_tokens: r.output_tokens,
                         generation_time_ms: r.generation_time_ms,
@@ -40586,9 +40643,24 @@ pub async fn handle_chat_stream_rich(
             }
         };
 
-        // Build the ordered block list: free text (if any) then each
-        // tool_use in extraction order.
+        // Build the ordered block list: reasoning (if any), then free text,
+        // then each tool_use in extraction order.
         let mut blocks: Vec<ContentBlock> = Vec::new();
+        // Reasoning leads, because that is the order the model produced it in
+        // and a client rendering blocks in sequence should show it that way.
+        // It is a block of its own rather than a prefix on the text so a client
+        // can collapse or drop it — concatenating the two is what leaked bare
+        // `</think>` tags into terminals.
+        if let Some(thinking) = result
+            .thinking
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            blocks.push(ContentBlock::Thinking {
+                thinking: thinking.to_string(),
+            });
+        }
         if !result.text.trim().is_empty() {
             blocks.push(ContentBlock::Text {
                 text: result.text.clone(),
@@ -40678,22 +40750,12 @@ pub async fn handle_chat_stream_rich(
             }
         }
 
-        // ── message_delta ────────────────────────────────────────────
-        let stop_reason_str = map_stop_reason(&result.stop_reason);
-
-        let delta_payload = serde_json::json!({
-            "delta": {
-                "stop_reason": stop_reason_str,
-                "stop_sequence": serde_json::Value::Null,
-            },
-            "usage": {
-                "input_tokens": result.input_tokens,
-                "output_tokens": result.output_tokens,
-            },
-        });
-        yield sse_event!("message_delta", delta_payload);
-
         // ── billing — same flow as the non-streaming rich path (wei) ─
+        // Priced before `message_delta` is emitted, not after, so the frame
+        // carrying final usage can carry the cost with it. A client that only
+        // ever sees this stream would otherwise have no way to learn what the
+        // turn cost — the non-streaming path reports `cost_wei` and this one
+        // reported tokens alone, so every streamed turn metered as free.
         let units = tenzro_types::model::BillableUnits::tokens(
             result.input_tokens,
             result.output_tokens,
@@ -40706,6 +40768,25 @@ pub async fn handle_chat_stream_rich(
             &units,
             result.generation_time_ms,
         );
+
+        // ── message_delta ────────────────────────────────────────────
+        let stop_reason_str = map_stop_reason(&result.stop_reason);
+
+        let delta_payload = serde_json::json!({
+            "delta": {
+                "stop_reason": stop_reason_str,
+                "stop_sequence": serde_json::Value::Null,
+            },
+            "usage": {
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+            },
+            // Stringified for the same reason as the non-streaming path: wei
+            // is u128 and JSON numbers are f64, which silently loses precision
+            // above 2^53.
+            "cost_wei": cost_wei.to_string(),
+        });
+        yield sse_event!("message_delta", delta_payload);
 
         // Inside the SSE closure a JsonRpcError cannot be returned — surface
         // settlement failure as a terminal `error` event instead. The unpaid

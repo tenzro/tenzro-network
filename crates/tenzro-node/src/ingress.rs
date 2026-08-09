@@ -791,7 +791,7 @@ impl IrohIngressHandler {
         body: Vec<u8>,
     ) -> Vec<u8> {
         let path = head.path();
-        if !alias.allows_path(&path) {
+        if !alias.allows_path(path) {
             debug!(
                 alias = %alias.name,
                 %path,

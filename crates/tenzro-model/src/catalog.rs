@@ -6666,6 +6666,11 @@ impl HfModelEntry {
         info.description = self.description.clone();
         info.size_bytes = self.size_bytes;
         info.parameters.context_window = self.context_length;
+        // `parameters` is a display string ("35B (MoE, 3B active)"); the router
+        // tiers on the numeric count, and nothing was filling it in — so every
+        // locally-served model looked size-less and no model could satisfy
+        // `quality_floor=strong`.
+        info.parameters.parameter_count = parse_parameter_count(&self.parameters);
         if let Some(shape) = self.moe {
             info = info.with_moe(shape.to_metadata());
         }
@@ -6673,6 +6678,42 @@ impl HfModelEntry {
         info = info.with_license(tier, self.license.clone(), license_id);
         info
     }
+}
+
+/// Reads a parameter count out of a catalog entry's display string.
+///
+/// The catalog writes these for humans — `"0.8B"`, `"35B (MoE, 3B active)"`,
+/// `"270M"` — so only the leading magnitude is authoritative and the rest is
+/// prose. For a MoE entry that leading figure is the **total**, not the active,
+/// count, which is the one worth tiering on: a 35B-A3B reasons like a large
+/// model even though it runs at the cost of a small one, and reading `3B active`
+/// here would file it next to a 3B dense model.
+///
+/// Returns `None` when there is no leading number, which keeps an
+/// undeclared-size entry out of the strong tier rather than guessing it in.
+fn parse_parameter_count(declared: &str) -> Option<u64> {
+    // Gemma 4 states an *effective* count as `E2B` / `E4B` — the size the
+    // model behaves as, which is the figure to tier on, with more raw weights
+    // behind it. Drop the marker and read the magnitude that follows.
+    let s = declared.trim();
+    let s = s.strip_prefix(['E', 'e']).unwrap_or(s);
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let magnitude: f64 = digits.parse().ok()?;
+    let unit = s[digits.len()..].trim_start().chars().next()?;
+    let scale = match unit.to_ascii_uppercase() {
+        'T' => 1e12,
+        'B' => 1e9,
+        'M' => 1e6,
+        'K' => 1e3,
+        _ => return None,
+    };
+    Some((magnitude * scale) as u64)
 }
 
 /// Classifies an `HfModelEntry` license string into a [`LicenseTier`] plus an
@@ -6778,6 +6819,81 @@ mod tests {
             catalog.len() >= 20,
             "Expected at least 20 models in catalog"
         );
+    }
+
+    #[test]
+    fn parameter_counts_come_off_the_declared_string() {
+        assert_eq!(parse_parameter_count("0.8B"), Some(800_000_000));
+        // MoE: the leading total, not the parenthesised active count.
+        assert_eq!(
+            parse_parameter_count("35B (MoE, 3B active)"),
+            Some(35_000_000_000)
+        );
+        assert_eq!(parse_parameter_count("270M"), Some(270_000_000));
+        // Gemma's effective-parameter notation.
+        assert_eq!(parse_parameter_count("E2B"), Some(2_000_000_000));
+        assert_eq!(parse_parameter_count("E4B"), Some(4_000_000_000));
+        // Nothing to read: stay out of the strong tier rather than guess.
+        assert_eq!(parse_parameter_count(""), None);
+        assert_eq!(parse_parameter_count("MTP head"), None);
+        assert_eq!(parse_parameter_count("12"), None);
+    }
+
+    /// The router tiers on `parameter_count`. Leaving it unset is what made
+    /// `quality_floor=strong` unsatisfiable for every locally-served model.
+    ///
+    /// The only entries without a size are MTP draft heads, which are loaded
+    /// alongside a target model and never routed to on their own — `None` is
+    /// the honest answer for those, and keeps them out of the strong tier.
+    #[test]
+    fn a_served_catalog_model_carries_its_size_into_the_registry() {
+        let provider = tenzro_types::Address::new([7; 32]);
+        let mut sized = 0usize;
+        for entry in get_model_catalog() {
+            let count = entry.to_model_info(provider).parameters.parameter_count;
+            // Digit-leading, or Gemma's `E2B` effective-parameter form.
+            let declares_size = entry
+                .parameters
+                .trim_start_matches(['E', 'e'])
+                .starts_with(|c: char| c.is_ascii_digit());
+            if declares_size {
+                assert!(
+                    count.is_some(),
+                    "{} declares parameters {:?} but no count reached ModelInfo",
+                    entry.id,
+                    entry.parameters
+                );
+                sized += 1;
+            } else {
+                assert_eq!(
+                    entry.mtp_kind,
+                    MtpKind::None,
+                    "{} has no declared size but is not a draft head: {:?}",
+                    entry.id,
+                    entry.parameters
+                );
+                assert!(count.is_none());
+            }
+        }
+        assert!(sized > 20, "expected most of the catalog to declare a size");
+    }
+
+    /// The two models this machine serves must land on opposite sides of the
+    /// strong-tier floor, or the ladder has nothing to choose between.
+    #[test]
+    fn the_served_pair_straddles_the_strong_tier_floor() {
+        let provider = tenzro_types::Address::new([7; 32]);
+        let count = |id: &str| {
+            get_model_catalog()
+                .into_iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from catalog"))
+                .to_model_info(provider)
+                .parameters
+                .parameter_count
+        };
+        assert_eq!(count("qwen3.5-0.8b"), Some(800_000_000));
+        assert_eq!(count("qwen3.6-35b-a3b-mtp"), Some(35_000_000_000));
     }
 
     #[test]

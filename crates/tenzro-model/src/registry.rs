@@ -23,6 +23,39 @@ use tracing::{debug, info, warn};
 /// same column family.
 const MODEL_INFO_KEY_PREFIX: &[u8] = b"info:";
 
+/// Re-derive catalog-owned fields on a record loaded from storage.
+///
+/// A persisted `ModelInfo` mixes two kinds of field: facts about *this*
+/// deployment (artifact hash, provider, status, endpoint) and facts about the
+/// model itself (size, context window, license), which the built-in catalog
+/// owns. Only the first kind belongs in storage. When the second kind is
+/// persisted too, a record written by an older build shadows the catalog
+/// forever, and no amount of re-serving fixes it — the row is loaded before
+/// anything would rewrite it.
+///
+/// That is not hypothetical: `parameter_count` was never populated, so every
+/// stored model hydrated size-less, the router tiered them all `Cheap`, and
+/// `quality_floor=strong` was unsatisfiable on a node serving a 35B. Filling
+/// the field in at its source fixed new registrations and did nothing for the
+/// rows already on disk.
+///
+/// Deployment facts are left exactly as stored.
+fn refresh_catalog_fields(mut model: ModelInfo) -> ModelInfo {
+    let Some(entry) = crate::catalog::get_model_catalog()
+        .into_iter()
+        .find(|e| e.id == model.model_id)
+    else {
+        // Not a catalog model (a peer's offer, a cortex worker, an operator's
+        // own GGUF): nothing to re-derive, and its stored metadata is the only
+        // description that exists.
+        return model;
+    };
+    let fresh = entry.to_model_info(model.provider);
+    model.parameters.parameter_count = fresh.parameters.parameter_count;
+    model.parameters.context_window = fresh.parameters.context_window;
+    model
+}
+
 /// Filter criteria for searching models
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelFilter {
@@ -183,6 +216,9 @@ impl ModelRegistry {
     /// scanning keys with the `info:` prefix. Subsequent calls to
     /// `register_model`, `update_model`, and `deactivate_model` write
     /// through to storage so the catalog survives restarts.
+    ///
+    /// Catalog-derived fields are re-read from the built-in catalog as each
+    /// record loads — see [`refresh_catalog_fields`].
     pub fn with_storage(storage: Arc<dyn KvStore>) -> Self {
         let models: Arc<DashMap<String, ModelInfo>> = Arc::new(DashMap::new());
 
@@ -195,7 +231,7 @@ impl ModelRegistry {
                         Ok(Some(data)) => match serde_json::from_slice::<ModelInfo>(&data) {
                             Ok(model) => {
                                 let model_id = model.model_id.clone();
-                                models.insert(model_id, model);
+                                models.insert(model_id, refresh_catalog_fields(model));
                                 hydrated += 1;
                             }
                             Err(e) => {
@@ -671,6 +707,45 @@ mod tests {
         let results = registry.search_models(&filter);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].model_id, "multimodal");
+    }
+
+    /// A row written by an older build must not pin stale catalog metadata.
+    /// `parameter_count` hydrating as `None` is what made every stored model
+    /// tier `Cheap`, so `quality_floor=strong` could not be satisfied.
+    #[test]
+    fn hydration_re_reads_catalog_owned_fields() {
+        let mut stale = create_test_model("qwen3.6-35b-a3b-mtp");
+        stale.parameters.parameter_count = None;
+        stale.parameters.context_window = 1;
+        // A deployment fact, which must survive untouched.
+        stale.status = tenzro_types::model::ModelStatus::Active;
+        let stored_hash = stale.model_hash;
+
+        let fresh = refresh_catalog_fields(stale);
+        assert_eq!(
+            fresh.parameters.parameter_count,
+            Some(35_000_000_000),
+            "the catalog owns size; storage must not pin it"
+        );
+        assert!(fresh.parameters.context_window > 1);
+        assert_eq!(
+            fresh.model_hash, stored_hash,
+            "artifact hash is deployment state"
+        );
+        assert_eq!(fresh.status, tenzro_types::model::ModelStatus::Active);
+    }
+
+    /// A model the catalog has never heard of — a peer's offer, an operator's
+    /// own GGUF — keeps exactly what was stored.
+    #[test]
+    fn hydration_leaves_non_catalog_models_alone() {
+        let mut stored = create_test_model("someones-private-finetune");
+        stored.parameters.parameter_count = Some(123);
+        stored.parameters.context_window = 4096;
+
+        let after = refresh_catalog_fields(stored);
+        assert_eq!(after.parameters.parameter_count, Some(123));
+        assert_eq!(after.parameters.context_window, 4096);
     }
 
     fn create_test_model(id: &str) -> ModelInfo {

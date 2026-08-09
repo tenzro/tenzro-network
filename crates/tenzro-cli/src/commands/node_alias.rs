@@ -393,7 +393,6 @@ async fn submit(
         }),
     )
     .await
-    .map_err(Into::into)
 }
 
 fn print_tx(result: &serde_json::Value) {

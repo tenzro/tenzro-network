@@ -284,10 +284,11 @@ impl Sequence {
             StopReason::Eos
         };
         let token_tx = self.token_tx.take();
-        let text = self.stream.finish(token_tx.as_ref());
+        let (text, thinking) = self.stream.finish_parts(token_tx.as_ref());
         if let Some(result_tx) = self.result_tx.take() {
             let _ = result_tx.send(Ok(InferenceResult {
                 text,
+                thinking,
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
                 generation_time_ms,
