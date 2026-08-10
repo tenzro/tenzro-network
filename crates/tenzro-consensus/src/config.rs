@@ -105,12 +105,15 @@ pub struct ConsensusConfig {
     /// `create_empty_blocks_interval` pattern. Set to 0 to disable suppression and
     /// restore always-on block production (every beat mints a block).
     ///
-    /// Default: 30000ms — the conservative end of the
-    /// `create_empty_blocks_interval` range for production chains. An idle
-    /// chain mints ~2,880 keepalive headers/day instead of ~17,280 at 5s.
-    /// The heartbeat is decoupled from liveness — followers detect a dead
-    /// leader via the view-change timer, not this interval — so raising it
-    /// only trades a staler idle-tip timestamp for fewer empty headers.
+    /// Default: 600000ms (10 min) — activity-driven production with only a
+    /// rare liveness heartbeat. Real (transaction-bearing) blocks are always
+    /// produced immediately; a fully idle chain mints at most ~144 keepalive
+    /// headers/day (vs ~2,880 at 30s / ~17,280 at 5s). The heartbeat is
+    /// decoupled from liveness — followers detect a dead leader via the
+    /// view-change timer, not this interval — so a long interval only trades a
+    /// staler idle-tip timestamp for far fewer empty headers, which is the
+    /// intended policy: don't accumulate millions of empty blocks on an idle
+    /// network. Set to 0 to disable suppression (mint every beat — dev only).
     pub empty_block_heartbeat_ms: u64,
 
     /// Floor on the adaptive view-change base timeout, in milliseconds.
@@ -156,7 +159,7 @@ impl Default for ConsensusConfig {
             transaction_ttl_seconds: 600,
             optimistic_responsiveness: true,
             proposer_election: ProposerElectionKind::Reputation,
-            empty_block_heartbeat_ms: 30_000,
+            empty_block_heartbeat_ms: 600_000,
             adaptive_timeout_floor_ms: 1000,
         }
     }

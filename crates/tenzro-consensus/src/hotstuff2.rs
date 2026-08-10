@@ -1603,6 +1603,20 @@ impl HotStuff2Engine {
         self.behind_hint_tx.subscribe()
     }
 
+    /// Inject a behind-hint from outside the consensus loop.
+    ///
+    /// A validator emits behind-hints itself when it rejects a peer proposal
+    /// above its height (see `on_proposal`). A **verify-only / non-validator**
+    /// node never runs that path, so when it observes a gossiped block ahead of
+    /// its tip it has no way to drop block-sync's engage tolerance to zero and
+    /// stays stranded below the tip. The event loop calls this from the
+    /// gossip-defer path with the observed height so block-sync engages and
+    /// catches the node up — the mechanism a syncing node needs to track the
+    /// chain tip regardless of whether it participates in consensus.
+    pub fn note_behind_hint(&self, observed_height: u64) {
+        self.behind_hint_tx.send_replace(observed_height);
+    }
+
     /// Subscribe to finality notifications.
     ///
     /// Returns a broadcast receiver that emits `FinalityNotification` each time
@@ -2597,6 +2611,32 @@ impl HotStuff2Engine {
                 "Commit phase completed, finalizing block"
             );
 
+            // Embed the commit-QC into the block's `consensus_proof.proof_data`
+            // BEFORE finalizing, so the copy that lands in the block store and
+            // is served over block-sync carries a verifiable finality proof.
+            // The `on_proposal` finalize path (see the block_with_qc handling
+            // near the commit-QC-observed branch) already does this; this
+            // `run_consensus_step` commit path did NOT, so blocks finalized
+            // here (e.g. the leader's own blocks, including height 1 and idle
+            // heartbeat blocks) reached storage with empty `proof_data` and
+            // every syncing peer rejected them ("no embedded commit-QC").
+            // BlockHeader::hash() excludes `consensus_proof`, so embedding does
+            // not change the block's identity.
+            let mut block_with_qc = block.clone();
+            match bincode::serialize(&qc) {
+                Ok(qc_bytes) => {
+                    block_with_qc.header.consensus_proof.proof_data = qc_bytes;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        height = %block.header.height,
+                        "Failed to serialize commit QC into block (run_consensus_step path); \
+                         proceeding without embedded QC"
+                    );
+                }
+            }
+
             // Finalize the block.
             // If finalization fails due to a height mismatch (e.g. after a restart
             // where the finality tracker is ahead of view state), re-sync state.height
@@ -2604,7 +2644,7 @@ impl HotStuff2Engine {
             // the error — the next proposal will be at the correct height.
             if let Err(e) = self
                 .finality_tracker
-                .finalize_block(block.clone(), qc.clone())
+                .finalize_block(block_with_qc.clone(), qc.clone())
             {
                 let corrected_height = self.finality_tracker.finalized_height() + 1u64;
                 tracing::warn!(

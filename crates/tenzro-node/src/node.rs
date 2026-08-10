@@ -3515,7 +3515,8 @@ impl TenzroNode {
             // epoch's validator set).
             if let Some(genesis) = &self.config.genesis {
                 for gv in &genesis.validators {
-                    match hex::decode(&gv.public_key) {
+                    let pk_hex = gv.public_key.strip_prefix("0x").unwrap_or(&gv.public_key);
+                    match hex::decode(pk_hex) {
                         Ok(pubkey) => registry.add_identity(pubkey),
                         Err(e) => warn!(
                             key = %gv.public_key,
@@ -5521,7 +5522,46 @@ impl TenzroNode {
                 out
             }
             _ => {
-                info!("No genesis validators configured, running as single-node validator");
+                // Empty validator set. A PROPOSING validator (`!verify_only`)
+                // may self-quorum ONLY when the genesis is explicitly solo
+                // (`--solo`/isolated mode). An empty set from any other source —
+                // a malformed genesis, or the old silent `default_testnet()`
+                // fallback — must never let a proposing validator anoint itself
+                // the sole validator and fork a private chain.
+                //
+                // A verify-only node (light client / non-validator) never
+                // proposes, so it cannot fork anything; it uses a single-entry
+                // placeholder set until it obtains the real set by sync. In
+                // production a light client joins with the bundled public
+                // genesis and never reaches this arm — this only occurs in
+                // dev/test with an explicitly empty genesis.
+                let is_solo = self
+                    .config
+                    .genesis
+                    .as_ref()
+                    .map(|g| g.solo)
+                    .unwrap_or(false);
+                if !is_solo && !verify_only {
+                    return Err(NodeError::Config(
+                        "Validator has an empty genesis validator set and is not in \
+                         --solo mode. Refusing to self-quorum onto a private chain. \
+                         Provide a genesis with a real validator set (join the public \
+                         network by omitting --genesis, or pass --genesis <file>), or \
+                         pass --solo to run an intentional single-validator chain."
+                            .to_string(),
+                    ));
+                }
+                if is_solo {
+                    info!(
+                        "Solo genesis: running as the single-node validator (this is an \
+                         intentional isolated chain, not the public network)"
+                    );
+                } else {
+                    info!(
+                        "Verify-only node with no genesis validators: using a placeholder \
+                         set pending state-sync (this node does not propose)"
+                    );
+                }
                 vec![ValidatorInfo::new(
                     address,
                     keypair.public_key().clone(),

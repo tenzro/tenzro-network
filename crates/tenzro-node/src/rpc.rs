@@ -1979,14 +1979,11 @@ async fn dispatch_request(
             handle_list_receipts_by_controller(node, request.params).await
         }
         "tenzro_summarizeController" => handle_summarize_controller(node, request.params).await,
-        // Escrow writes are now consensus-mediated: callers must build and sign
-        // a `CreateEscrow`/`ReleaseEscrow`/`RefundEscrow` transaction and submit
-        // it via `eth_sendRawTransaction` (or the helper `tenzro_signAndSendTransaction`).
-        // The legacy convenience handlers were removed because they bypassed
-        // signature verification and persisted only to a detached in-memory map.
-        "tenzro_createEscrow" | "tenzro_releaseEscrow" | "tenzro_refundEscrow" => {
-            handle_escrow_write_deprecated(request.method.as_str())
-        }
+        // Escrow writes are consensus-mediated: build and sign a
+        // CreateEscrow/ReleaseEscrow/RefundEscrow transaction and submit via
+        // eth_sendRawTransaction (or tenzro_signAndSendTransaction). The legacy
+        // write RPC names are no longer special-cased — they fall through to the
+        // standard method-not-found path like any other unknown method.
         "tenzro_getEscrow" => handle_get_escrow(node, request.params).await,
         "tenzro_listEscrowsByPayer" => handle_list_escrows_by_payer(node, request.params).await,
         "tenzro_listEscrowsByPayee" => handle_list_escrows_by_payee(node, request.params).await,
@@ -8914,28 +8911,6 @@ async fn handle_faucet(
             amount_wei, address_str
         ),
     }))
-}
-
-/// Returns a structured deprecation error for the legacy escrow write RPCs.
-///
-/// The previous `tenzro_createEscrow` / `tenzro_releaseEscrow` handlers were
-/// removed in favor of consensus-mediated, signature-verified escrow
-/// transactions. Callers must build a `CreateEscrow` / `ReleaseEscrow` /
-/// `RefundEscrow` transaction with `tenzro_wallet::TransactionBuilder`, sign
-/// it, and submit via `eth_sendRawTransaction` (or use
-/// `tenzro_signAndSendTransaction` for server-side signing).
-fn handle_escrow_write_deprecated(method: &str) -> std::result::Result<Value, JsonRpcError> {
-    Err(JsonRpcError {
-        code: -32601,
-        message: format!(
-            "{} is removed. Build and sign a CreateEscrow/ReleaseEscrow/RefundEscrow \
-             transaction and submit via eth_sendRawTransaction or \
-             tenzro_signAndSendTransaction. Read-only escrow RPCs (tenzro_getEscrow, \
-             tenzro_listEscrowsByPayer, tenzro_listEscrowsByPayee) remain available.",
-            method
-        ),
-        data: None,
-    })
 }
 
 /// Render an `EscrowAccount` as JSON for read-only RPC responses.
@@ -19242,8 +19217,8 @@ async fn handle_get_snapshot_chunk(
 // Identity (TDIP) handlers
 
 /// Dispatch identity registration based on `identity_type` ∈ {`human`, `machine`,
-/// `autonomous`}. Defaults to `human` when omitted (back-compat with single-arg
-/// callers). Machine registrations require `controller_did` + `capabilities`;
+/// `autonomous`}. Defaults to `human` when omitted. Machine registrations
+/// require `controller_did` + `capabilities`;
 /// `autonomous` registrations only require `capabilities`. Both honor the optional
 /// `delegation_scope` block.
 pub(crate) async fn handle_register_identity(
@@ -19256,18 +19231,12 @@ pub(crate) async fn handle_register_identity(
         data: None,
     })?;
 
-    // Identity type — default human for back-compat. Accept both
-    // top-level `identity_type` and nested `metadata.identity_type` for legacy
-    // clients that nested everything under metadata.
+    // Identity type — read from the top-level `identity_type` param only.
+    // The nested `metadata.identity_type` fallback for legacy clients is gone
+    // `human` remains the explicit default when omitted.
     let identity_type = params
         .get("identity_type")
         .and_then(|v| v.as_str())
-        .or_else(|| {
-            params
-                .get("metadata")
-                .and_then(|m| m.get("identity_type"))
-                .and_then(|v| v.as_str())
-        })
         .unwrap_or("human")
         .to_lowercase();
 
@@ -23072,11 +23041,29 @@ async fn handle_join_as_micro_node(
         data: None,
     })?;
 
+    // Bind the identity to the EXACT wallet just provisioned above. The old
+    // path called `register_human_with_fee(wallet.public_key, …)`, which
+    // internally provisioned a SECOND, unrelated wallet through the binder and
+    // stored that as the identity's canonical `wallet_id`/`wallet_address` —
+    // while this handler faucet-funded and reported the FIRST wallet. The two
+    // never matched, so signing (which resolves the wallet from the identity's
+    // DID) used the empty second wallet and every `provider bond post` against
+    // the funded address failed with "sender does not match wallet address".
+    // Binding the provisioned wallet directly is the fix.
+    let binding = tenzro_identity::WalletBinding {
+        wallet_id: wallet.wallet_id.0.clone(),
+        address: wallet.address,
+        public_key: wallet.public_key.to_bytes(),
+        key_type: format!("{:?}", wallet.key_type()),
+        pq_verifying_key: wallet.pq_verifying_key_bytes(),
+        bls_verifying_key: wallet.bls_verifying_key_bytes().to_vec(),
+    };
     let mut identity = registry
-        .register_human_with_fee(
-            wallet.public_key.to_bytes(),
+        .register_human_with_binding(
+            tenzro_identity::TenzroDid::new_human(),
             display_name.clone(),
             tenzro_types::identity::KycTier::Unverified,
+            binding,
         )
         .await
         .map_err(|e| JsonRpcError {
@@ -23086,13 +23073,9 @@ async fn handle_join_as_micro_node(
         })?
         .identity;
 
-    // Bind micro-node metadata to identity
-    identity
-        .metadata
-        .insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
-    identity
-        .metadata
-        .insert("wallet_address".to_string(), format!("{}", wallet.address));
+    // Micro-node metadata. The wallet is the identity's canonical binding now
+    // (see above), so no wallet_id/wallet_address metadata is duplicated here —
+    // there is exactly one wallet per identity and it is the one that signs.
     identity
         .metadata
         .insert("network_role".to_string(), "micro_node".to_string());
@@ -47929,9 +47912,9 @@ async fn handle_complete_task(
     let final_price = task.quoted_price.unwrap_or(task.max_price);
     let remainder = task.max_price.saturating_sub(final_price);
 
-    // Settlement. Prefer escrow release (vault → assignee) when the task was
-    // funded at assign time; otherwise fall back to the legacy direct transfer
-    // (poster → assignee) for tasks assigned before escrow funding existed.
+    // Settlement is escrow-only: a task is funded into a vault at assign time
+    // and released vault → assignee here. A task with no escrow is not settleable
+    // (fail closed) — there is no direct poster → assignee transfer path.
     let settlement = if let Some(ref assignee) = task.assignee {
         if final_price > 0 {
             let token = node.token().ok_or_else(|| JsonRpcError {
@@ -47969,14 +47952,17 @@ async fn handle_complete_task(
                     })?;
                 info!(task_id = %task_id, escrow_id = %escrow_id, amount = escrow.amount, "Task escrow released (vault → assignee)");
             } else {
-                // Legacy path: no escrow was funded — direct poster → assignee.
-                token
-                    .transfer(&task.poster, assignee, final_price)
-                    .map_err(|e| JsonRpcError {
-                        code: -32000,
-                        message: format!("Settlement transfer failed: {}", e),
-                        data: None,
-                    })?;
+                // Fail closed: a settleable task must have been funded into an
+                // escrow vault at assign time. There is no direct-transfer path.
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: format!(
+                        "Task {} has no escrow and cannot be settled: tasks must be \
+                         escrow-funded at assign time",
+                        task_id
+                    ),
+                    data: None,
+                });
             }
 
             let agent_balance = token.balance_of(assignee);
@@ -58068,10 +58054,8 @@ async fn handle_mint_nft(
         params
     };
 
-    // Accept either `collection` (CLI) or `collection_id` (legacy).
     let collection_id = params
         .get("collection")
-        .or_else(|| params.get("collection_id"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonRpcError {
             code: -32602,

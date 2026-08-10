@@ -118,6 +118,22 @@ struct Cli {
     #[arg(short, long, value_name = "FILE")]
     genesis: Option<PathBuf>,
 
+    /// Run a self-contained solo chain: fabricate a single-validator genesis
+    /// with this node as the only validator, and let it form quorum alone.
+    ///
+    /// This is for local development and isolated/sovereign bring-up ONLY. A
+    /// validator meant to join the public network must NEVER run solo — doing
+    /// so silently forks a private chain that only cosmetically resembles the
+    /// real network (same chain_id, same faucet), peers with it, and then
+    /// diverges at QC verification. Requiring an explicit opt-in is what keeps
+    /// "join the network" from degrading into "fork my own chain" when a
+    /// genesis file is missing.
+    ///
+    /// Implied automatically by isolated mode (`--boot-nodes ""`). Rejected if
+    /// combined with a real `--genesis` file or with configured boot peers.
+    #[arg(long)]
+    solo: bool,
+
     /// MCP server listen address
     #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3001")]
     mcp_addr: String,
@@ -1567,10 +1583,12 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         if config.roles.is_validator() && config.consensus.is_none() {
             config.consensus = Some(tenzro_consensus::ConsensusConfig::default());
         }
-        // Auto-create default genesis if not already set
-        if config.genesis.is_none() {
-            config.genesis = Some(GenesisConfig::default_testnet());
-        }
+        // NOTE: genesis is deliberately NOT auto-filled here. A missing genesis
+        // must never silently become `default_testnet()` (empty validator set),
+        // which would make the node self-quorum onto a private chain that only
+        // cosmetically resembles the real network. Genesis is resolved below,
+        // AFTER boot nodes are known, so "join the network" and "run solo" are
+        // distinguishable.
     }
 
     // Merge role-specific defaults per served role when no config file was
@@ -1722,39 +1740,71 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         }
     });
     if let Some(name) = &bootstrap_dns_name {
-        match tenzro_node::bootstrap_dns::resolve_bootstrap_dns(name).await {
-            Ok(resolved) => {
-                if resolved.is_empty() {
-                    tracing::warn!(
-                        "Bootstrap DNS resolution returned no peers for {}; \
-                         continuing with whatever was already in --boot-nodes",
-                        name
-                    );
-                } else {
-                    config.network.boot_nodes.extend(resolved.iter().cloned());
-                    info!(
-                        "Bootstrap DNS resolved {}: {} multiaddrs appended to boot_nodes (total {})",
-                        name,
-                        resolved.len(),
-                        config.network.boot_nodes.len(),
-                    );
-                }
-            }
-            Err(e) => {
-                // Fail loud but do not abort startup — operators using
-                // bootstrap-DNS as a *supplement* to a static --boot-nodes
-                // list should still come up if DNS is degraded. Operators
-                // using bootstrap-DNS as the *only* boot path will see
-                // an empty boot_nodes set and the node will sit isolated
-                // until the next reachable peer dials it — that's the
-                // explicit failure mode, not a silent hang.
-                tracing::warn!(
-                    "Bootstrap DNS resolution failed for {}: {}. \
-                     Node will rely on whatever was in --boot-nodes (may be empty).",
-                    name,
-                    e
-                );
-            }
+        // Retry with backoff rather than a single attempt: a node that boots
+        // right after the machine comes up can lose the one-shot lookup to a
+        // resolver-warmup race (systemd-resolved not answering yet), and a
+        // one-shot failure would leave it permanently isolated — Kademlia can't
+        // re-bootstrap from zero known peers. The helper retries transient
+        // failures and empty results, logging each attempt.
+        let resolved =
+            tenzro_node::bootstrap_dns::resolve_bootstrap_dns_with_retry(name, 6).await;
+        if resolved.is_empty() {
+            tracing::warn!(
+                "Bootstrap DNS produced no peers for {} after retries; continuing with \
+                 whatever was already in --boot-nodes (may be empty).",
+                name
+            );
+        } else {
+            config.network.boot_nodes.extend(resolved.iter().cloned());
+            info!(
+                "Bootstrap DNS resolved {}: {} multiaddrs appended to boot_nodes (total {})",
+                name,
+                resolved.len(),
+                config.network.boot_nodes.len(),
+            );
+        }
+    }
+
+    // Genesis resolution — runs AFTER boot nodes are known so "join the
+    // network" and "run a solo chain" are never confused. An explicit
+    // `--genesis <file>` (loaded further below) always wins; this only fills a
+    // still-absent genesis. Three cases:
+    //
+    //   1. Solo (explicit `--solo`, or isolated `--boot-nodes ""`): fabricate a
+    //      single-validator genesis with this node as the sole validator. This
+    //      is the ONLY path that may self-quorum, and it is now opt-in.
+    //   2. Joining the real network (has boot peers, not solo): use the
+    //      built-in public-network genesis so the node verifies against the
+    //      real validator set instead of inventing its own.
+    //   3. A validator asked to join with neither a genesis nor a solo opt-in
+    //      AND no boot peers at all: hard error rather than silently forking.
+    if cli.genesis.is_none() && config.genesis.is_none() {
+        let solo = cli.solo || isolated;
+        let has_boot = !config.network.boot_nodes.is_empty();
+        if solo {
+            info!(
+                "Solo mode: fabricating a single-validator genesis (this node is the \
+                 only validator). This chain is private and does not join the public network."
+            );
+            let mut g = GenesisConfig::default_testnet();
+            g.solo = true;
+            config.genesis = Some(g);
+        } else if has_boot {
+            info!(
+                "No genesis provided; using the built-in public-network genesis \
+                 (chain_id {}) so this node verifies against the real validator set",
+                tenzro_node::config::PUBLIC_NETWORK_CHAIN_ID
+            );
+            config.genesis = Some(tenzro_node::config::public_network_genesis()?);
+        } else {
+            return Err(error::NodeError::Config(
+                "Refusing to start a validator with no genesis, no boot peers, and no \
+                 --solo flag: this is the configuration that used to silently fork a \
+                 private chain. Pass --genesis <file> to join a specific network, rely \
+                 on the default bootstrap (omit --boot-nodes) to join the public \
+                 network, or pass --solo to run an isolated single-validator chain."
+                    .to_string(),
+            ));
         }
     }
 

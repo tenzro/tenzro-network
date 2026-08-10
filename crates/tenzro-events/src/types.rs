@@ -293,9 +293,7 @@ pub enum TenzroEvent {
         provider: [u8; 20],
         /// Modality of the registered model — lets subscribers filter per modality
         /// (e.g. only react to Audio model registrations) without re-querying the
-        /// registry. Default-deserialized to Text for backward compatibility with
-        /// rows persisted before this field existed.
-        #[serde(default)]
+        /// registry.
         modality: tenzro_types::model::ModelModality,
     },
 

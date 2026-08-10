@@ -81,6 +81,54 @@ pub struct GenesisConfig {
     /// inline in the genesis instead of passed via CLI.
     #[serde(default)]
     pub weak_subjectivity: Option<WeakSubjectivityAnchor>,
+
+    /// True only for a genesis fabricated by `default_testnet()` for solo/dev
+    /// operation. Never serialized: an operator-supplied genesis.toml is by
+    /// definition not solo, and a solo genesis is never written to disk. This
+    /// marker is what lets consensus distinguish "the operator handed me a
+    /// legitimately single-validator network" from "I invented this because no
+    /// genesis was provided" — only the latter is allowed to self-quorum.
+    #[serde(skip)]
+    pub solo: bool,
+}
+
+/// Chain ID of the canonical public Tenzro network. A node joining the public
+/// network without an explicit `--genesis` verifies against the built-in
+/// genesis carrying this id (see [`public_network_genesis`]).
+pub const PUBLIC_NETWORK_CHAIN_ID: u64 = 1338;
+
+/// The canonical public-network genesis, compiled into the binary.
+///
+/// A self-serve operator running `tenzro-node --roles validator` with default
+/// bootstrap has no way to obtain the fleet's `genesis-prod.toml` (it ships
+/// out-of-band via terraform). Embedding it here means "join the public
+/// network" works with zero manual genesis distribution, and the node
+/// verifies against the real validator set instead of fabricating its own.
+/// This file contains only public key material + genesis parameters — the
+/// same information every validator already gossips — so compiling it in
+/// leaks nothing.
+const PUBLIC_NETWORK_GENESIS_TOML: &str = include_str!("../genesis/public-testnet.toml");
+
+/// Parse the built-in public-network genesis. Fails loudly if the bundled
+/// file is malformed or its chain_id has drifted from
+/// [`PUBLIC_NETWORK_CHAIN_ID`] — a compiled-in genesis that disagrees with the
+/// constant would be a silent footgun.
+pub fn public_network_genesis() -> Result<GenesisConfig> {
+    let g: GenesisConfig = toml::from_str(PUBLIC_NETWORK_GENESIS_TOML).map_err(|e| {
+        NodeError::Config(format!("built-in public-network genesis is malformed: {e}"))
+    })?;
+    if g.chain_id != PUBLIC_NETWORK_CHAIN_ID {
+        return Err(NodeError::Config(format!(
+            "built-in public-network genesis chain_id {} != PUBLIC_NETWORK_CHAIN_ID {}",
+            g.chain_id, PUBLIC_NETWORK_CHAIN_ID
+        )));
+    }
+    if g.validators.is_empty() {
+        return Err(NodeError::Config(
+            "built-in public-network genesis has no validators".to_string(),
+        ));
+    }
+    Ok(g)
 }
 
 /// Weak-subjectivity checkpoint embedded in genesis.toml.
@@ -114,6 +162,7 @@ impl GenesisConfig {
                 enabled: true,
             }),
             weak_subjectivity: None,
+            solo: false,
         }
     }
 }

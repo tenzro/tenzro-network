@@ -270,6 +270,12 @@ const BOND_MIN_RESIDUAL: u128 = 10 * 1_000_000_000_000_000_000u128;
 // System address for native operations (all 0xFF)
 const SYSTEM_ADDRESS: [u8; 20] = [0xFF; 20];
 
+// Staking vault: the reserved account that holds bonded validator stake.
+// Bonded stake lives in replicated VM balance state (CF_ACCOUNTS → state root)
+// so every node agrees on who bonded what — no side-structure drift. Distinct
+// from SYSTEM_ADDRESS (0xFF..) so it can never alias a real or system account.
+const STAKING_VAULT_ADDRESS: [u8; 20] = [0xFE; 20];
+
 /// Native transaction executor for Tenzro-specific operations
 pub struct NativeExecutor {
     _config: VmConfig,
@@ -3007,17 +3013,49 @@ impl NativeExecutor {
             )));
         }
 
-        // Charge gas.
+        // A validator must bond real balance. Reject a zero-stake
+        // registration outright. The *policy* floor (minimum self-stake for
+        // admission) is enforced deterministically at the epoch gate against
+        // the registry's configurable `min_self_stake`, so it is NOT hardcoded
+        // here — that would drift from governance. The VM enforces only the
+        // correctness invariant: you hold and escrow what you declare.
+        let stake = payload.self_stake;
+        if stake == 0 {
+            return Err(VmError::InvalidTransaction(
+                "RegisterValidator requires a non-zero self_stake".to_string(),
+            ));
+        }
+
+        // Charge gas + escrow the declared stake in one balance check, so an
+        // account cannot register a validator with stake it does not hold.
         let gas_cost = tx.gas_price.saturating_mul(GAS_VALIDATOR_REGISTER as u128);
+        let total_debit = stake
+            .checked_add(gas_cost)
+            .ok_or_else(|| VmError::Internal("stake + gas overflow".to_string()))?;
         let bal = state.get_balance(&tx.from);
-        if bal < gas_cost {
+        if bal < total_debit {
             return Err(VmError::InsufficientBalance {
-                required: gas_cost,
+                required: total_debit,
                 available: bal,
             });
         }
-        let new_bal = bal.saturating_sub(gas_cost);
+        let new_bal = bal.saturating_sub(total_debit);
         state.set_balance(&tx.from, new_bal);
+
+        // Move the bonded stake into the staking vault (replicated VM balance
+        // state) and record the per-validator bond so ValidatorExit can refund
+        // the exact amount. Both are part of the state root, so all nodes agree.
+        let old_vault = state.get_balance(&STAKING_VAULT_ADDRESS);
+        let new_vault = old_vault
+            .checked_add(stake)
+            .ok_or_else(|| VmError::Internal("staking vault overflow".to_string()))?;
+        state.set_balance(&STAKING_VAULT_ADDRESS, new_vault);
+        let bond_key = format!("staking_bond:{}", hex::encode(&tx.from));
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            bond_key.as_bytes(),
+            stake.to_le_bytes().to_vec(),
+        );
 
         // Persist a marker for re-org replay & audit. Body is the JSON
         // payload — the registry hydrates from this if it ever needs to.
@@ -3056,6 +3094,18 @@ impl NativeExecutor {
                 b"balance".to_vec(),
                 Some(bal.to_le_bytes().to_vec()),
                 Some(new_bal.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                STAKING_VAULT_ADDRESS.to_vec(),
+                b"balance".to_vec(),
+                Some(old_vault.to_le_bytes().to_vec()),
+                Some(new_vault.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                bond_key.as_bytes().to_vec(),
+                None,
+                Some(stake.to_le_bytes().to_vec()),
             ),
             StateChange::new(
                 SYSTEM_ADDRESS.to_vec(),
@@ -3425,8 +3475,33 @@ impl NativeExecutor {
                 available: bal,
             });
         }
-        let new_bal = bal.saturating_sub(gas_cost);
+        let after_gas = bal.saturating_sub(gas_cost);
+
+        // Refund the bonded stake from the staking vault. Immediate refund on
+        // exit keeps escrow non-trapping; the unbonding delay + slashing
+        // seizure are deterministic follow-ons layered on this base.
+        let bond_key = format!("staking_bond:{}", hex::encode(&tx.from));
+        let bonded = state
+            .get_storage(&SYSTEM_ADDRESS, bond_key.as_bytes())
+            .filter(|b| b.len() == 16)
+            .map(|b| {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&b);
+                u128::from_le_bytes(a)
+            })
+            .unwrap_or(0);
+        let new_bal = after_gas
+            .checked_add(bonded)
+            .ok_or_else(|| VmError::Internal("stake refund overflow".to_string()))?;
         state.set_balance(&tx.from, new_bal);
+
+        let old_vault = state.get_balance(&STAKING_VAULT_ADDRESS);
+        let new_vault = old_vault.saturating_sub(bonded);
+        if bonded > 0 {
+            state.set_balance(&STAKING_VAULT_ADDRESS, new_vault);
+            // Clear the bond record so a repeated exit cannot double-refund.
+            state.set_storage(&SYSTEM_ADDRESS, bond_key.as_bytes(), Vec::new());
+        }
 
         let marker_key = format!("validator_exit:{}", hex::encode(&tx.from));
         let marker_blob = b"requested".to_vec();
@@ -3441,7 +3516,7 @@ impl NativeExecutor {
             tx.from.to_vec(),
         );
 
-        let state_changes = vec![
+        let mut state_changes = vec![
             StateChange::new(
                 tx.from.clone(),
                 b"balance".to_vec(),
@@ -3461,6 +3536,20 @@ impl NativeExecutor {
                 Some((old_nonce + 1).to_le_bytes().to_vec()),
             ),
         ];
+        if bonded > 0 {
+            state_changes.push(StateChange::new(
+                STAKING_VAULT_ADDRESS.to_vec(),
+                b"balance".to_vec(),
+                Some(old_vault.to_le_bytes().to_vec()),
+                Some(new_vault.to_le_bytes().to_vec()),
+            ));
+            state_changes.push(StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                bond_key.as_bytes().to_vec(),
+                Some(bonded.to_le_bytes().to_vec()),
+                Some(Vec::new()),
+            ));
+        }
 
         Ok(ExecutionResult::success(
             gas_meter.final_used(),
@@ -5103,6 +5192,134 @@ mod tests {
             .get_storage(&SYSTEM_ADDRESS, vote_key.as_bytes())
             .unwrap();
         assert_eq!(vote[0], 1);
+    }
+
+    // ---- Validator staking (register escrow / exit refund) tests -------------
+
+    fn make_register_validator_data(self_stake: u128) -> Vec<u8> {
+        let payload = serde_json::json!({
+            "consensus_pubkey": vec![1u8; 32],
+            "pq_pubkey": vec![2u8; 1952],
+            "bls_pubkey": vec![3u8; 48],
+            "withdrawal_address": Address::new([9u8; 32]),
+            "self_stake": self_stake,
+            "metadata_uri": "",
+        });
+        let mut data = SELECTOR_VALIDATOR_REGISTER.to_vec();
+        data.extend(serde_json::to_vec(&payload).unwrap());
+        data
+    }
+
+    fn register_tx(from: Vec<u8>, self_stake: u128, nonce: u64) -> VmTransaction {
+        VmTransaction::new(
+            from,
+            None,
+            0,
+            make_register_validator_data(self_stake),
+            300_000,
+            1_000_000_000,
+            nonce,
+            VmType::Evm,
+            1337,
+        )
+    }
+
+    const REG_GAS_COST: u128 = 1_000_000_000u128 * GAS_VALIDATOR_REGISTER as u128;
+    const EXIT_GAS_COST: u128 = 1_000_000_000u128 * GAS_VALIDATOR_EXIT as u128;
+
+    #[tokio::test]
+    async fn test_validator_register_escrows_stake() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![1u8; 20];
+        let stake: u128 = 1_000_000_000_000_000; // 1e15 wei
+        let start: u128 = 10_000_000_000_000_000_000; // 10 TNZO
+        state.set_balance(&from, start);
+
+        let tx = register_tx(from.clone(), stake, 0);
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert!(result.success);
+
+        // Balance debited by stake + gas; stake moved into the vault.
+        assert_eq!(state.get_balance(&from), start - stake - REG_GAS_COST);
+        assert_eq!(state.get_balance(&STAKING_VAULT_ADDRESS), stake);
+        // Bond recorded for exact refund on exit.
+        let bond = state
+            .get_storage(
+                &SYSTEM_ADDRESS,
+                format!("staking_bond:{}", hex::encode(&from)).as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(u128::from_le_bytes(bond.try_into().unwrap()), stake);
+    }
+
+    #[tokio::test]
+    async fn test_validator_register_insufficient_balance_rejected() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![2u8; 20];
+        let stake: u128 = 1_000_000_000_000_000_000; // 1 TNZO
+        let start: u128 = 500_000_000_000_000_000; // 0.5 TNZO — gas ok, stake not
+        state.set_balance(&from, start);
+
+        let tx = register_tx(from.clone(), stake, 0);
+        let result = executor.execute_transaction(&tx, &mut state).await;
+        assert!(result.is_err(), "registration must fail without the stake");
+        // No partial escrow: balance untouched, vault empty.
+        assert_eq!(state.get_balance(&from), start);
+        assert_eq!(state.get_balance(&STAKING_VAULT_ADDRESS), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validator_register_zero_stake_rejected() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![3u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000);
+
+        let tx = register_tx(from.clone(), 0, 0);
+        assert!(
+            executor.execute_transaction(&tx, &mut state).await.is_err(),
+            "zero-stake registration must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validator_exit_refunds_stake() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![4u8; 20];
+        let stake: u128 = 1_000_000_000_000_000; // 1e15
+        let start: u128 = 10_000_000_000_000_000_000;
+        state.set_balance(&from, start);
+
+        // Register (bonds the stake).
+        let reg = register_tx(from.clone(), stake, 0);
+        assert!(executor.execute_transaction(&reg, &mut state).await.unwrap().success);
+        let after_register = state.get_balance(&from);
+        assert_eq!(state.get_balance(&STAKING_VAULT_ADDRESS), stake);
+
+        // Exit (refunds the stake, drains the vault, clears the bond).
+        let exit = VmTransaction::new(
+            from.clone(),
+            None,
+            0,
+            SELECTOR_VALIDATOR_EXIT.to_vec(),
+            200_000,
+            1_000_000_000,
+            1,
+            VmType::Evm,
+            1337,
+        );
+        assert!(executor.execute_transaction(&exit, &mut state).await.unwrap().success);
+
+        assert_eq!(state.get_balance(&from), after_register - EXIT_GAS_COST + stake);
+        assert_eq!(state.get_balance(&STAKING_VAULT_ADDRESS), 0);
+        let bond = state.get_storage(
+            &SYSTEM_ADDRESS,
+            format!("staking_bond:{}", hex::encode(&from)).as_bytes(),
+        );
+        assert!(bond.map(|b| b.is_empty()).unwrap_or(true), "bond record cleared");
     }
 
     // ---- Escrow handler tests ------------------------------------------------

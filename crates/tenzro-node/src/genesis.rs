@@ -1186,6 +1186,7 @@ mod tests {
             }],
             faucet: None,
             weak_subjectivity: None,
+            solo: false,
         };
 
         // First initialization should create genesis
@@ -1222,6 +1223,7 @@ mod tests {
                 enabled: true,
             }),
             weak_subjectivity: None,
+            solo: false,
         };
 
         let block = initialize_genesis(&store, &genesis_config).await.unwrap();
@@ -1267,6 +1269,7 @@ mod tests {
             }],
             faucet: None,
             weak_subjectivity: None,
+            solo: false,
         };
 
         let config2 = GenesisConfig {
@@ -1280,6 +1283,7 @@ mod tests {
             }],
             faucet: None,
             weak_subjectivity: None,
+            solo: false,
         };
 
         // Use a fixed dummy predeploy commitment for both — the test is
@@ -1304,6 +1308,7 @@ mod tests {
             }],
             faucet: None,
             weak_subjectivity: None,
+            solo: false,
         }
     }
 

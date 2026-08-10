@@ -3,7 +3,6 @@
 use crate::output::{self};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tenzro_wallet::{ProvisioningConfig, WalletProvisioner};
 
 /// Wallet management commands
 #[derive(Debug, Subcommand)]
@@ -78,38 +77,57 @@ impl WalletCreateCmd {
 
         let spinner = output::create_spinner("Generating MPC wallet...");
 
-        // Create provisioning config
-        let config = ProvisioningConfig::new(self.threshold, self.total_shares)?;
-        let provisioner = WalletProvisioner::with_config(config)?;
-
-        // Provision wallet
-        let wallet = provisioner.provision_wallet()?;
-
-        // Register wallet with node
+        // The node provisions and durably registers the wallet; its response
+        // is the only identity that `auth link-wallet`, `wallet list`, and
+        // every other subcommand can ever resolve. A prior version of this
+        // command additionally provisioned a *second*, entirely separate
+        // wallet locally (`WalletProvisioner::provision_wallet`) and printed
+        // that one's id/address instead — the node's `tenzro_createWallet`
+        // handler doesn't accept a caller-supplied wallet_id, so the two
+        // never had any relationship, and the id/address a user copied out
+        // of this command's output was never registered anywhere. Every
+        // wallet this command ever "created" was consequently unusable.
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
             .call(
                 "tenzro_createWallet",
                 serde_json::json!([{
-                    "address": wallet.address.to_string(),
-                    "threshold": wallet.threshold,
-                    "total_shares": wallet.total_shares,
-                    "key_type": format!("{:?}", wallet.key_type())
+                    "threshold": self.threshold,
+                    "total_shares": self.total_shares,
                 }]),
             )
             .await?;
 
         spinner.finish_and_clear();
 
+        let wallet_id = result
+            .get("wallet_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("node response missing wallet_id"))?;
+        let display_address = result
+            .get("display_address")
+            .and_then(|v| v.as_str())
+            .or_else(|| result.get("address").and_then(|v| v.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("node response missing address"))?;
+        let threshold = result
+            .get("threshold")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.threshold as u64);
+        let total_shares = result
+            .get("total_shares")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.total_shares as u64);
+        let key_type = result
+            .get("key_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Ed25519");
+
         output::print_success("Wallet created successfully!");
         println!();
-        output::print_field("Wallet ID", &wallet.wallet_id.to_string());
-        output::print_field("Address", &wallet.address.to_string());
-        output::print_field(
-            "Threshold",
-            &format!("{}-of-{}", wallet.threshold, wallet.total_shares),
-        );
-        output::print_field("Key Type", &format!("{:?}", wallet.key_type()));
+        output::print_field("Wallet ID", wallet_id);
+        output::print_field("Address", display_address);
+        output::print_field("Threshold", &format!("{threshold}-of-{total_shares}"));
+        output::print_field("Key Type", key_type);
 
         if let Some(name) = &self.name {
             output::print_field("Name", name);

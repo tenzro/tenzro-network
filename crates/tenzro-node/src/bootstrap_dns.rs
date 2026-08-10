@@ -204,3 +204,53 @@ pub async fn resolve_bootstrap_dns(base: &str) -> Result<Vec<Multiaddr>, Bootstr
     );
     Ok(out)
 }
+
+/// Resolve bootstrap multiaddrs, absorbing transient DNS failures.
+///
+/// A node whose one-shot startup resolution fails stays peerless forever:
+/// Kademlia's periodic bootstrap needs an existing routing-table entry to
+/// work from, so there is no later path back onto the network. The failure
+/// observed in production was a resolver-warmup race — the node started
+/// right after boot, systemd-resolved refused the first SRV query, and the
+/// node ran isolated until an operator restarted it by hand.
+///
+/// Retries on both hard errors and empty result sets, sleeping on the same
+/// decorrelated-jitter schedule the network layer uses for peer re-dials
+/// (2s floor here, 60s ceiling — the caller is blocking node startup, so
+/// the ceiling stays well under the reconnect sweep's 5min cap). Returns
+/// the first non-empty set, or empty once `attempts` is exhausted; the
+/// caller decides whether an empty set is fatal.
+pub async fn resolve_bootstrap_dns_with_retry(base: &str, attempts: usize) -> Vec<Multiaddr> {
+    use tenzro_network::discovery::ReconnectBackoff;
+
+    let mut backoff = ReconnectBackoff::new(Duration::from_secs(2), Duration::from_secs(60));
+    for attempt in 1..=attempts.max(1) {
+        match resolve_bootstrap_dns(base).await {
+            Ok(addrs) if !addrs.is_empty() => return addrs,
+            Ok(_) => {
+                warn!(
+                    target: "bootstrap_dns",
+                    base = %base,
+                    attempt,
+                    attempts,
+                    "Bootstrap DNS resolved to an empty set"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    target: "bootstrap_dns",
+                    base = %base,
+                    attempt,
+                    attempts,
+                    error = %e,
+                    "Bootstrap DNS resolution failed"
+                );
+            }
+        }
+        if attempt < attempts {
+            let delay = backoff.record_attempt();
+            tokio::time::sleep(delay).await;
+        }
+    }
+    Vec::new()
+}

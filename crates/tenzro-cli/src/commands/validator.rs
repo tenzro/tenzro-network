@@ -121,6 +121,14 @@ pub struct ValidatorRegisterCmd {
     #[arg(long, default_value = "")]
     metadata_uri: String,
 
+    /// Sign locally with the self-custody hybrid key and submit a pre-signed
+    /// transaction, instead of asking the node to sign. Required for
+    /// permissionless / first-boot onboarding where no DPoP bearer exists.
+    /// The stake-owning `from` is the local key's Ed25519 pubkey. The key
+    /// password is read from TENZRO_KEYSTORE_PASSWORD, else prompted.
+    #[arg(long)]
+    self_custody: bool,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -151,6 +159,13 @@ impl ValidatorRegisterCmd {
         }
         let withdrawal_bytes: [u8; 32] =
             hex_to_fixed(&self.withdrawal_address, "withdrawal_address")?;
+
+        // Self-custody: sign locally and submit a pre-signed tx (no DPoP).
+        if self.self_custody {
+            return self
+                .execute_self_custody(consensus_bytes, pq_bytes, bls_bytes, withdrawal_bytes)
+                .await;
+        }
 
         let rpc = RpcClient::new(&self.rpc);
 
@@ -203,6 +218,100 @@ impl ValidatorRegisterCmd {
             "Candidate is staged under PendingActive. The next epoch boundary \
              admits it (subject to churn budget); activation is effective \
              ACTIVATION_EFFECTIVE_DELAY_BLOCKS after that boundary.",
+        );
+        Ok(())
+    }
+
+    /// Self-custody register: unlock the local hybrid key, build the
+    /// RegisterValidator transaction, sign both legs locally, and submit it
+    /// pre-signed via `eth_sendRawTransaction`. The node reconstructs the same
+    /// typed transaction from the `tx_type` + `timestamp` fields, so its
+    /// recomputed hash matches the local signature bit-for-bit. `from` is the
+    /// local key's Ed25519 pubkey — the stake-owning account the VM debits.
+    async fn execute_self_custody(
+        &self,
+        consensus_bytes: [u8; 32],
+        pq_bytes: Vec<u8>,
+        bls_bytes: Vec<u8>,
+        withdrawal_bytes: [u8; 32],
+    ) -> Result<()> {
+        use crate::rpc::RpcClient;
+        use tenzro_types::primitives::{Address, ChainId, Nonce};
+        use tenzro_types::transaction::{Transaction, TransactionType};
+
+        // Password: env for non-interactive (first-boot / automation), else prompt.
+        let password = match std::env::var("TENZRO_KEYSTORE_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => dialoguer::Password::new()
+                .with_prompt("Self-custody key password")
+                .interact()?,
+        };
+        let signer = crate::keystore::unlock_local_key(&password)?;
+        let from_hex = signer.from_address_hex();
+        let from_address = Address::from_bytes(signer.ed25519_public_key())
+            .ok_or_else(|| anyhow!("local Ed25519 pubkey is not a valid 32-byte address"))?;
+        let to_address = Address::from_bytes(&[0u8; 32])
+            .ok_or_else(|| anyhow!("zero address invalid"))?;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &from_hex).await;
+
+        let tx_type = TransactionType::RegisterValidator {
+            consensus_pubkey: consensus_bytes.to_vec(),
+            pq_pubkey: pq_bytes,
+            bls_pubkey: bls_bytes,
+            withdrawal_address: Address::from_bytes(&withdrawal_bytes)
+                .ok_or_else(|| anyhow!("withdrawal address invalid"))?,
+            self_stake: self.self_stake,
+            metadata_uri: self.metadata_uri.clone(),
+        };
+
+        // Gas price must already clear the open-lane fee floor (4 gwei): a
+        // pre-signed tx cannot be re-priced server-side without breaking the
+        // signature, so we sign over a price above the floor.
+        let gas_price: u64 = 5_000_000_000;
+        let tx = Transaction::new(
+            ChainId::new(chain_id),
+            from_address,
+            to_address,
+            Nonce::new(nonce),
+            tx_type.clone(),
+            DEFAULT_REGISTER_GAS,
+            gas_price,
+            signer.ml_dsa_verifying_key().to_vec(),
+        );
+        let hash = tx.hash();
+        let (ed_sig, ml_dsa_sig) = signer.sign_hybrid(hash.as_bytes())?;
+
+        let result: serde_json::Value = rpc
+            .call(
+                "eth_sendRawTransaction",
+                serde_json::json!({
+                    "from": from_hex,
+                    "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "value": "0",
+                    "gas_limit": DEFAULT_REGISTER_GAS,
+                    "gas_price": gas_price,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "timestamp": tx.timestamp.0,
+                    "tx_type": serde_json::to_value(&tx_type)?,
+                    "public_key": hex::encode(signer.ed25519_public_key()),
+                    "signature": hex::encode(&ed_sig),
+                    "pq_public_key": hex::encode(signer.ml_dsa_verifying_key()),
+                    "pq_signature": hex::encode(&ml_dsa_sig),
+                }),
+            )
+            .await?;
+
+        output::print_success("RegisterValidator (self-custody) submitted");
+        println!();
+        output::print_field("From (self-custody)", &from_hex);
+        output::print_field("Self-stake (wei)", &self.self_stake.to_string());
+        output::print_field("Transaction Hash", &extract_tx_hash(&result));
+        output::print_warning(
+            "Candidate is staged under PendingActive. The next epoch boundary \
+             admits it (subject to churn budget + min self-stake).",
         );
         Ok(())
     }

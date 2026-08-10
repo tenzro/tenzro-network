@@ -5162,6 +5162,19 @@ impl EventLoop {
                 received = block_height.0,
                 "Deferring out-of-order network block to block-sync"
             );
+            // A block ABOVE our expected height means a peer is ahead of us.
+            // On a validator, `on_proposal` would emit a behind-hint that drops
+            // block-sync's engage tolerance to zero; a verify-only /
+            // non-validator node never runs that path, so without this it would
+            // never engage block-sync for a small gap and would stay stranded
+            // below the tip (observed live: joiners peered + received gossip but
+            // stayed at height 0). Feed the observed height as a behind-hint so
+            // block-sync engages and catches this node up regardless of role.
+            if block_height.0 > expected_height
+                && let Some(consensus) = &self.consensus
+            {
+                consensus.note_behind_hint(block_height.0);
+            }
             return Ok(());
         }
 

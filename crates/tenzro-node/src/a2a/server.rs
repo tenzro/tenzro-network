@@ -1765,9 +1765,12 @@ fn handle_create_token(
     }
 
     if !authenticated {
-        // Legacy fallback: deterministic creator address derived from the symbol
-        let creator_hash = tenzro_crypto::hash::sha256(symbol.as_bytes());
-        creator.copy_from_slice(creator_hash.as_bytes());
+        // No legacy symbol-hash fallback: deriving a "creator" from the token
+        // symbol let any caller mint under an unauthenticated, spoofable
+        // address. A creator must be a real authenticated identity — fail closed.
+        return "Token creation requires an authenticated creator: provide a wallet_address \
+                or a resolvable agent_id in task metadata."
+            .to_string();
     }
 
     let evm_addr: [u8; 20] = {

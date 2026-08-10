@@ -241,7 +241,8 @@ impl TenzroMessage {
         let pubkey_bytes = match &self.signer_public_key {
             Some(bytes) if !bytes.is_empty() => bytes,
             _ => {
-                // Legacy messages without signer_public_key: can't verify
+                // A message with a signature but no signer_public_key cannot be
+                // verified — reject it (fail closed).
                 tracing::warn!("Message has signature but no signer_public_key — cannot verify");
                 return Ok(false);
             }

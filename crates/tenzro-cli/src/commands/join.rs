@@ -98,11 +98,13 @@ impl JoinCmd {
 
         let clean_name = self.name.trim_start_matches('@').to_string();
 
-        // Step 2: Try tenzro_joinAsMicroNode first, fall back to tenzro_participate
+        // Step 2: provision the MicroNode identity + wallet. One RPC, no
+        // legacy fallback — `tenzro_participate` was the pre-MicroNode path and
+        // is being removed network-wide.
         let spinner = output::create_spinner("Provisioning MicroNode identity and wallet...");
 
-        let (result, is_micro_node) = match rpc
-            .call::<serde_json::Value>(
+        let result: serde_json::Value = rpc
+            .call(
                 "tenzro_joinAsMicroNode",
                 serde_json::json!([{
                     "display_name": clean_name,
@@ -111,28 +113,10 @@ impl JoinCmd {
                 }]),
             )
             .await
-        {
-            Ok(r) => {
-                spinner.finish_and_clear();
-                output::print_success("MicroNode provisioned on Tenzro Network");
-                (r, true)
-            }
-            Err(_) => {
-                // Fall back to legacy tenzro_participate
-                let r: serde_json::Value = rpc
-                    .call(
-                        "tenzro_participate",
-                        serde_json::json!([{
-                            "display_name": clean_name
-                        }]),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to join network: {}", e))?;
-                spinner.finish_and_clear();
-                output::print_success("Identity and wallet provisioned on Tenzro Ledger");
-                (r, false)
-            }
-        };
+            .map_err(|e| anyhow::anyhow!("Failed to join network: {}", e))?;
+        spinner.finish_and_clear();
+        output::print_success("MicroNode provisioned on Tenzro Network");
+        let is_micro_node = true;
 
         // Extract identity from RPC response
         let identity = result.get("identity").cloned().unwrap_or_default();

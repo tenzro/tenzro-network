@@ -65,7 +65,10 @@ fn test_config() -> (NodeConfig, tempfile::TempDir) {
             validators: Vec::new(),
             accounts: Vec::new(),
             faucet: None,
+            // Standalone single-node test: it is the only validator, so it must
+            // opt into solo self-quorum (an empty validator set is otherwise rejected).
             weak_subjectivity: None,
+            solo: true,
         }),
         ..Default::default()
     };

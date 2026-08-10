@@ -265,11 +265,7 @@ pub struct ValidatorRegistryEntry {
     /// API-key minting) can branch on tier without taking the config
     /// lock.
     ///
-    /// Persistence-safe `#[serde(default)]` for back-compat read of
-    /// pre-tier registry entries: those rows default to `Staked` (see
-    /// `ValidatorTier::default`) because pre-tier code required at
-    /// least `min_self_stake`.
-    #[serde(default)]
+    /// Economic tier of the validator (self-staked vs. delegated-backed, etc.).
     pub tier: ValidatorTier,
     /// Current lifecycle status.
     pub status: ValidatorRegistryStatus,
@@ -988,13 +984,21 @@ impl ValidatorRegistry {
         }
 
         // Phase 2: admit new candidates up to the activation budget.
-        // Order by stake descending, then by registered_at_epoch ascending
-        // (earlier registration wins ties) for deterministic ordering across
-        // all validators.
+        // Only candidates meeting the configured minimum self-stake are
+        // admissible — this is the single policy floor for the validator set.
+        // The VM already guarantees the declared stake is really bonded, so a
+        // candidate below the floor simply stays a Candidate until it bonds
+        // more or exits (no free admission). Order by stake descending, then by
+        // registered_at_epoch ascending (earlier registration wins ties) for
+        // deterministic ordering across all validators.
+        let min_self_stake = self.config.read().min_self_stake;
         let mut candidates: Vec<(Address, u128, u64)> = self
             .entries
             .iter()
-            .filter(|e| e.value().status == ValidatorRegistryStatus::Candidate)
+            .filter(|e| {
+                e.value().status == ValidatorRegistryStatus::Candidate
+                    && e.value().self_stake >= min_self_stake
+            })
             .map(|e| {
                 (
                     e.value().address,
@@ -1281,6 +1285,59 @@ mod tests {
         assert_eq!(plan.effective_exits, vec![a]);
         assert_eq!(reg.get(&a).unwrap().status, ValidatorRegistryStatus::Exited);
         assert_eq!(reg.get(&a).unwrap().exited_at_epoch, Some(3));
+    }
+
+    #[test]
+    fn epoch_gate_rejects_below_min_self_stake() {
+        let reg = ValidatorRegistry::new();
+        let (ck, pk, bk) = make_keys();
+        let low = make_address(1);
+        let ok = make_address(2);
+
+        // Below the floor: registers fine (correctness invariant lives in the
+        // VM, which bonded whatever was declared) but must NOT be admitted.
+        reg.register_candidate(
+            low,
+            ck.clone(),
+            pk.clone(),
+            bk.clone(),
+            low,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE - 1,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        // At the floor: admissible.
+        reg.register_candidate(
+            ok,
+            ck,
+            pk,
+            bk,
+            ok,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            0,
+            String::new(),
+        )
+        .unwrap();
+
+        let plan = reg.compute_epoch_transition(1);
+        assert!(
+            !plan.activations.contains(&low),
+            "below-min candidate must not be promoted"
+        );
+        assert!(
+            plan.activations.contains(&ok),
+            "at-min candidate must be promoted"
+        );
+        assert_eq!(
+            reg.get(&low).unwrap().status,
+            ValidatorRegistryStatus::Candidate,
+            "below-min candidate stays a Candidate"
+        );
+        assert_eq!(
+            reg.get(&ok).unwrap().status,
+            ValidatorRegistryStatus::PendingActive
+        );
     }
 
     #[test]

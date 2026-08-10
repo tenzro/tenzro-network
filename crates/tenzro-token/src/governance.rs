@@ -399,8 +399,9 @@ impl GovernanceEngine {
     /// * `vote_type` - Type of vote (For/Against/Abstain)
     /// * `voting_power` - Voting power (staked TNZO amount)
     ///
-    /// Note: If a staking manager is configured, voting_power will be verified
-    /// against the voter's actual staked balance to prevent sybil attacks.
+    /// A staking manager is required: `voting_power` is verified against the
+    /// voter's actual staked balance to prevent sybil attacks. Without one, the
+    /// vote is rejected rather than counted on unverified, caller-claimed power.
     pub fn vote(
         &self,
         proposal_id: &str,
@@ -468,9 +469,12 @@ impl GovernanceEngine {
                 }
             }
         } else {
-            // No staking manager - accept claimed voting power
-            // (This is the legacy behavior for backward compatibility)
-            voting_power
+            // Fail closed: without a staking manager there is no way to verify
+            // the voter's power, so a vote cannot be counted. Accepting the
+            // caller-claimed `voting_power` here would let anyone vote with any
+            // weight — a governance soundness hole.
+            warn!("No staking manager available; cannot verify voting power for {voter}");
+            return Err(TokenError::InvalidVotingPower);
         };
 
         // Get effective voting power (including delegations)
@@ -771,10 +775,18 @@ mod tests {
 
     #[test]
     fn test_vote() {
-        let engine = GovernanceEngine::new();
         let proposer = Address::new([1u8; 32]);
         let voter = Address::new([2u8; 32]);
         let stake = 100_000 * 1_000_000_000_000_000_000u128;
+
+        // Voting power is verified against real stake, so the voter must be
+        // bonded and the engine backed by a staking manager. Without one, votes
+        // are rejected (fail closed) rather than counted on claimed power.
+        let staking = std::sync::Arc::new(crate::staking::StakingManager::new());
+        staking
+            .stake(voter, stake, tenzro_types::token::ProviderType::Validator)
+            .unwrap();
+        let engine = GovernanceEngine::with_staking_manager(staking);
 
         let proposal_id = engine
             .create_proposal(
