@@ -3904,11 +3904,313 @@ impl TenzroNode {
                 .spawn_gc(std::time::Duration::from_secs(30)),
         );
 
+        // 17. Permissionless / first-boot validator self-registration. A node
+        // configured with the validator role + a self-stake registers itself
+        // into the ValidatorRegistry using its own unsealed validator keys —
+        // no CLI, no bearer token, no key export. Non-fatal: a failure here
+        // (e.g. underfunded account) must not block the node from running.
+        if let Err(e) = self.maybe_self_register_validator().await {
+            warn!("Validator self-registration failed (continuing): {}", e);
+        }
+
         // Mark as running
         *self.state.write() = NodeState::Running;
         info!("Tenzro Network node started successfully");
 
         Ok(())
+    }
+
+    /// Permissionless validator self-registration (see call site in `start`).
+    ///
+    /// If this node holds the validator role and a configured `validator_self_stake`,
+    /// build a `RegisterValidator` transaction with the node's OWN consensus /
+    /// ML-DSA / BLS public keys, sign it with the node's hybrid validator signer,
+    /// and submit it to the local consensus mempool (then gossip). Because the
+    /// node registers the exact keys it signs blocks with, the resulting
+    /// validator can actually vote once admitted. Idempotent: skips if already a
+    /// genesis validator or already registered/in-flight, and skips (non-fatal)
+    /// if the account is underfunded for stake + gas.
+    async fn maybe_self_register_validator(&self) -> Result<()> {
+        use tenzro_types::primitives::{Address, ChainId, Nonce, Signature};
+        use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
+
+        let self_stake = match self.config.validator_self_stake {
+            Some(s) if self.config.roles.is_validator() => s,
+            _ => return Ok(()),
+        };
+        let signer = match self.validator_hybrid_signer() {
+            Some(s) => s.clone(),
+            None => return Ok(()),
+        };
+
+        let consensus_pubkey = signer.public_key().classical.as_bytes().to_vec();
+        let pq_vk = signer.public_key().pq.clone();
+        let bls_vk = crate::keygen::load_validator_bls_key(&self.config.data_dir)?
+            .public_key()
+            .to_bytes()
+            .to_vec();
+
+        // Validator-derived account: SHA-256(ed25519 pubkey)[..20] in bytes
+        // [0..20] of a 32-byte Address, right-zero-padded. This is the tx.from
+        // the stake escrow debits, so it must be funded before boot.
+        let crypto_addr = signer.public_key().classical.to_address();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+        let address = Address::new(addr_bytes);
+
+        // Skip if this pubkey is already a genesis (seeded-Active) validator.
+        let local_pk_hex = hex::encode(&consensus_pubkey);
+        if let Some(g) = &self.config.genesis
+            && g.validators.iter().any(|v| {
+                v.public_key
+                    .trim_start_matches("0x")
+                    .eq_ignore_ascii_case(&local_pk_hex)
+            })
+        {
+            info!("Self-register: already a genesis validator, skipping");
+            return Ok(());
+        }
+        // Skip if already registered / in-flight (only re-register after a full Exit).
+        if let Some(reg) = self.validator_registry()
+            && let Some(entry) = reg.get(&address)
+            && !matches!(
+                entry.status,
+                tenzro_token::validator_registry::ValidatorRegistryStatus::Exited
+            )
+        {
+            info!(status = ?entry.status, "Self-register: already registered, skipping");
+            return Ok(());
+        }
+
+        // Fail early below the policy floor (the epoch gate enforces it too).
+        if self_stake < tenzro_types::constants::MIN_VALIDATOR_STAKE {
+            warn!(
+                self_stake,
+                min = tenzro_types::constants::MIN_VALIDATOR_STAKE,
+                "Self-register: configured self_stake below minimum, skipping"
+            );
+            return Ok(());
+        }
+
+        // Balance gate: the account must cover stake + gas or the escrow (and
+        // thus admission) will fail. Skip non-fatally so the operator can fund
+        // it and restart.
+        let gas_limit: u64 = 200_000;
+        let gas_price: u64 = 5_000_000_000; // clears the Open-lane 4-gwei floor
+        let storage = match self.storage() {
+            Some(s) => s.clone(),
+            None => return Ok(()),
+        };
+        let (balance, nonce) = {
+            let state = tenzro_vm::StateAdapter::with_storage(
+                storage as Arc<dyn tenzro_storage::KvStore>,
+            );
+            use tenzro_vm::traits::VmState as _;
+            (
+                state.get_balance(address.as_bytes()),
+                state.get_nonce(address.as_bytes()),
+            )
+        };
+        let needed =
+            self_stake.saturating_add((gas_price as u128).saturating_mul(gas_limit as u128));
+        if balance < needed {
+            warn!(
+                %address, balance, needed,
+                "Self-register: validator account underfunded for stake + gas; fund it and restart"
+            );
+            return Ok(());
+        }
+
+        let chain_id = self
+            .config
+            .genesis
+            .as_ref()
+            .map(|g| g.chain_id)
+            .unwrap_or(1337);
+        let tx = Transaction::new(
+            ChainId::from(chain_id),
+            address,
+            Address::new([0u8; 32]),
+            Nonce::from(nonce),
+            TransactionType::RegisterValidator {
+                consensus_pubkey: consensus_pubkey.clone(),
+                pq_pubkey: pq_vk.clone(),
+                bls_pubkey: bls_vk,
+                withdrawal_address: address,
+                self_stake,
+                metadata_uri: String::new(),
+            },
+            gas_limit,
+            gas_price,
+            pq_vk.clone(),
+        );
+        let tx_hash = tx.hash();
+        let composite = signer
+            .sign(tx_hash.as_bytes())
+            .map_err(|e| NodeError::Config(format!("self-register signing failed: {}", e)))?;
+        let signed_tx = SignedTransaction::new(
+            tx,
+            Signature::new(composite.classical, consensus_pubkey.clone()),
+            composite.pq,
+        );
+
+        match self.consensus() {
+            Some(consensus) => consensus
+                .submit_transaction(signed_tx.clone())
+                .map_err(|e| NodeError::Config(format!("self-register rejected by mempool: {}", e)))?,
+            None => return Ok(()),
+        }
+        if let Some(sender) = self.event_sender() {
+            let _ = sender
+                .send(NodeEvent::LocallyAdmittedTransaction(signed_tx))
+                .await;
+        }
+        info!(
+            %address, self_stake,
+            "Self-registered as validator (permissionless); pending epoch admission"
+        );
+        Ok(())
+    }
+
+    /// Replicate a freshly-created identity into consensus state via a
+    /// `RegisterIdentity` native transaction (TDIP).
+    ///
+    /// Historically each RPC registration handler wrote the identity
+    /// **local-only** (`storage.put(CF_IDENTITIES, …)` + registry insert), so
+    /// a DID created on node A never resolved on node B. This builds a
+    /// `RegisterIdentity` tx carrying the identity's *replicable* public
+    /// record — DID, controller pubkey, wallet bindings, verifying keys,
+    /// metadata — signs it with the node's system hybrid signer, and submits
+    /// it through the same consensus mempool path `eth_sendRawTransaction`
+    /// uses (then gossips). Key MATERIAL (FROST shares / sealed keys) is never
+    /// carried and stays node-local by design.
+    ///
+    /// The VM enforces DID uniqueness against consensus state; every node
+    /// then mirrors the emitted `IdentityRegister` log into its
+    /// `IdentityRegistry`, so the registration becomes async-confirmed and
+    /// resolvable network-wide. Returns the submitted transaction hash.
+    pub async fn submit_identity_register(
+        &self,
+        identity: &tenzro_identity::TenzroIdentity,
+        identity_type: &str,
+    ) -> Result<String> {
+        use tenzro_types::primitives::{ChainId, Nonce, Signature};
+        use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
+
+        let controller_pubkey = identity
+            .public_keys
+            .first()
+            .map(|k| k.public_key.clone())
+            .unwrap_or_default();
+        let key_type = identity
+            .public_keys
+            .first()
+            .map(|k| k.key_type.clone())
+            .unwrap_or_else(|| "Ed25519".to_string());
+
+        // HashMap → BTreeMap so the bincode tx-hash preimage is identical on
+        // every node that re-serializes the received transaction.
+        let metadata: std::collections::BTreeMap<String, String> = identity
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let gas_limit: u64 = 200_000;
+        let gas_price: u64 = 5_000_000_000; // clears the Open-lane 4-gwei floor
+
+        // Sign with the node's hybrid signer — the same one x402 settlements use
+        // for system-mediated txs. It exists only on a node that runs consensus;
+        // a node without it cannot relay a replicated identity registration.
+        let signer = self
+            .validator_hybrid_signer()
+            .ok_or_else(|| {
+                NodeError::Config(
+                    "no hybrid signer on this node — identity replication requires a \
+                     consensus node"
+                        .to_string(),
+                )
+            })?
+            .clone();
+        // from = the signer's own derived account (SHA-256(ed25519)[..20] padded
+        // to 32), so the tx signature verifies against a matching from address.
+        let from_addr = {
+            let crypto = signer.public_key().classical.to_address();
+            let mut b = [0u8; 32];
+            b[..20].copy_from_slice(crypto.as_bytes());
+            Address::new(b)
+        };
+        let chain_id = self
+            .config
+            .genesis
+            .as_ref()
+            .map(|g| g.chain_id)
+            .unwrap_or(1337);
+        let nonce = {
+            let storage = self.storage().ok_or_else(|| {
+                NodeError::Config("storage not wired; cannot replicate identity".to_string())
+            })?;
+            let state = tenzro_vm::StateAdapter::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            );
+            use tenzro_vm::traits::VmState as _;
+            state.get_nonce(from_addr.as_bytes())
+        };
+        let tx = Transaction::new(
+            ChainId::from(chain_id),
+            from_addr,
+            Address::new([0u8; 32]),
+            Nonce::from(nonce),
+            TransactionType::RegisterIdentity {
+                did: identity.did_string(),
+                identity_type: identity_type.to_string(),
+                display_name: identity.display_name().to_string(),
+                controller_pubkey,
+                key_type,
+                wallet_id: identity.wallet_id.clone(),
+                wallet_address: identity.wallet_address,
+                pq_verifying_key: identity.pq_verifying_key.clone(),
+                bls_verifying_key: identity.bls_verifying_key.clone(),
+                metadata,
+            },
+            gas_limit,
+            gas_price,
+            signer.public_key().pq.clone(),
+        );
+        let tx_hash = tx.hash();
+        let composite = signer
+            .sign(tx_hash.as_bytes())
+            .map_err(|e| NodeError::Config(format!("identity-register signing failed: {}", e)))?;
+        let classical_pubkey = signer.public_key().classical.as_bytes().to_vec();
+        let signed_tx = SignedTransaction::new(
+            tx,
+            Signature::new(composite.classical, classical_pubkey),
+            composite.pq,
+        );
+        let in_block_hash = signed_tx.clone().hash();
+        let hash_str = format!("{}", in_block_hash);
+
+        match self.consensus() {
+            Some(consensus) => consensus.submit_transaction(signed_tx.clone()).map_err(|e| {
+                NodeError::Config(format!("identity-register rejected by mempool: {}", e))
+            })?,
+            None => {
+                return Err(NodeError::Config(
+                    "consensus not wired; cannot replicate identity registration".to_string(),
+                ));
+            }
+        }
+        if let Some(sender) = self.event_sender() {
+            let _ = sender
+                .send(NodeEvent::LocallyAdmittedTransaction(signed_tx))
+                .await;
+        }
+        info!(
+            did = %identity.did_string(),
+            tx = %hash_str,
+            "Submitted RegisterIdentity tx (TDIP replication)"
+        );
+        Ok(hash_str)
     }
 
     /// Stop all subsystems gracefully
@@ -4085,7 +4387,8 @@ impl TenzroNode {
                 .map(|f| f.enabled)
                 .unwrap_or(false)
             {
-                crate::genesis::provision_faucet_signing_key(&store).await?;
+                crate::genesis::provision_faucet_signing_key(&store, genesis_config.chain_id)
+                    .await?;
                 // Refill the faucet on every boot if its balance has run dry.
                 // Pre-alpha-only safety: a chain-state divergence post-OOM can
                 // leave the faucet at zero, which blocks all onboarding flows
@@ -4494,6 +4797,22 @@ impl TenzroNode {
         let mut network_config = self.config.network.clone();
         network_config.data_dir = Some(self.config.data_dir.clone());
 
+        // bind the libp2p Identify protocol_version to our chain-id, so we
+        // advertise `tenzro/<chain_id>/<version>`. The peering gate in
+        // tenzro-network parses this chain-id segment and fail-closed
+        // disconnects any peer on a different chain — the mechanism that keeps
+        // distinct chains from silently meshing over a shared discovery
+        // substrate and re-forming the solo-chain fork. Default chain_id
+        // 1337 matches the local/dev genesis fallback used elsewhere.
+        let chain_id = self
+            .config
+            .genesis
+            .as_ref()
+            .map(|g| g.chain_id)
+            .unwrap_or(1337);
+        network_config.protocol_version =
+            format!("tenzro/{}/{}", chain_id, env!("CARGO_PKG_VERSION"));
+
         // Validators attach a signed peer binding to the Identify
         // agent_version: the validator Ed25519 key signs the node's
         // transport PeerId, letting remote peers verify — over the
@@ -4616,6 +4935,21 @@ impl TenzroNode {
         info!("Initializing VM runtime...");
 
         let mut vm_config = VmConfig::default();
+
+        // Bind the VM's chain id to the genesis chain id. VmConfig::default()
+        // carries the legacy testnet id (1337); leaving it unset makes the
+        // executor reject EVERY transaction on any other chain with
+        // "Chain ID mismatch" (the signing side already uses the genesis id),
+        // which silently breaks all transfers/faucet/registration on a fresh
+        // network. There is no production genesis-less node, so fall back to the
+        // default id only for tests that construct a node without genesis.
+        vm_config.chain_id = self
+            .config
+            .genesis
+            .as_ref()
+            .map(|g| g.chain_id)
+            .unwrap_or(vm_config.chain_id);
+        info!(chain_id = vm_config.chain_id, "VM chain id bound to genesis");
 
         // If Canton is not enabled, remove Daml from enabled VMs
         if !self.config.canton.enabled {
@@ -5837,6 +6171,23 @@ impl TenzroNode {
             self.consensus = Some(Arc::new(engine));
             info!(
                 "Consensus engine built for block verification (not started; this node does not vote)"
+            );
+            return Ok(());
+        }
+
+        // A validator-role node that is not yet in the active validator set — a
+        // permissionless joiner that has not been admitted — cannot start
+        // consensus: HotStuff-2 requires set membership to propose/vote, and
+        // `start()` refuses otherwise. Boot the engine unstarted (block
+        // verification only, like a non-validator) so the node comes up, syncs,
+        // and self-registers; once admitted at an epoch boundary a restart brings
+        // it up as an active proposer/voter.
+        if !engine.is_validator() {
+            self.consensus = Some(Arc::new(engine));
+            info!(
+                "Validator-role node not yet in the validator set — consensus built but not \
+                 started (pending admission). Self-registration will submit a RegisterValidator; \
+                 restart once admitted to begin proposing and voting."
             );
             return Ok(());
         }
@@ -7226,7 +7577,22 @@ impl TenzroNode {
         {
             use tenzro_agent::AgentError;
             use tenzro_types::agent::Capability;
-            let system_addr = Address::zero();
+            // #28 — node-scoped agent identity (SOVOX: each node a distinct
+            // TPM-bound agent). `AgentIdentityManager::generate_agent_id`
+            // hashes `owner:nonce`, so keying every node's baseline agents off
+            // `Address::zero()` made ALL nodes derive IDENTICAL agent_ids —
+            // each then rejected the others' announcements as "pubkey differs
+            // from pinned key" (the announcements are signed by per-node
+            // announce keys but collided on a shared id). Deriving the owner
+            // from THIS node's announce key makes each node's TenzroClaw
+            // instance a distinct agent_id, so cross-node announcements no
+            // longer collide. Falls back to zero only when no announce key is
+            // wired — such a node cannot broadcast announcements anyway.
+            let agent_owner_addr = self
+                .announce_signer
+                .as_ref()
+                .and_then(|s| announce_signer_wallet_address(s.as_ref()))
+                .unwrap_or_else(Address::zero);
             let tenzroclaw_caps = vec![
                 Capability::NaturalLanguageProcessing {
                     languages: vec!["en".to_string()],
@@ -7246,7 +7612,7 @@ impl TenzroNode {
             if let Some(ref ar) = self.agent_runtime {
                 let ar1 = ar.clone();
                 let caps1 = tenzroclaw_caps.clone();
-                let addr1 = system_addr;
+                let addr1 = agent_owner_addr;
                 tokio::spawn(async move {
                     match ar1
                         .register_agent("TenzroClaw-1".to_string(), addr1, caps1, false, 1)
@@ -7266,7 +7632,7 @@ impl TenzroNode {
                     }
                 });
                 let ar2 = ar.clone();
-                let addr2 = system_addr;
+                let addr2 = agent_owner_addr;
                 tokio::spawn(async move {
                     match ar2
                         .register_agent(
@@ -12088,7 +12454,12 @@ impl TenzroNode {
                     .as_ref()
                     .map(|g| g.chain_id)
                     .unwrap_or(1337);
-                let protocol_version = format!("tenzro/{}", env!("CARGO_PKG_VERSION"));
+                // mirror the chain-aware Identify protocol_version on the
+                // status plane (`tenzro/<chain_id>/<version>`) so status-driven
+                // peer tracking sees the same chain-scoped identifier as the
+                // libp2p Identify peering gate.
+                let protocol_version =
+                    format!("tenzro/{}/{}", local_chain_id, env!("CARGO_PKG_VERSION"));
                 // TEE capability is fixed at startup (no hot-attach
                 // path), so we snapshot it once here and embed it in
                 // every status broadcast. Peers consult these fields to

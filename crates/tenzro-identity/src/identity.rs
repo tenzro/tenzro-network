@@ -498,6 +498,33 @@ pub enum IdentityData {
     },
 }
 
+/// A signable wallet bound to an identity beyond its primary wallet.
+///
+/// an identity may hold more than one MPC wallet so a lost or corrupt
+/// wallet is a degraded state, not a full lockout. The primary wallet still
+/// lives directly on [`TenzroIdentity`] (`wallet_id` / `wallet_address` and
+/// the two verifying keys); each *additional* wallet an identity accrues via
+/// `tenzro_addWallet` is recorded as one of these, keyed by DID in the
+/// registry's wallet index.
+///
+/// Every field mirrors the per-wallet material the primary carries, so
+/// `tenzro_setPrimaryWallet` can promote an additional wallet to primary by a
+/// straight swap — including the ML-DSA-65 and BLS verifying keys the identity
+/// exposes for hybrid auth and HotStuff-2 vote aggregation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalletRef {
+    /// Wallet ID for signing operations (resolvable by the shared `WalletService`).
+    pub wallet_id: String,
+    /// On-chain address this wallet owns — matched against a request's `from`.
+    pub address: Address,
+    /// ML-DSA-65 (FIPS 204) verifying key bound to this wallet.
+    #[serde(default)]
+    pub pq_verifying_key: Vec<u8>,
+    /// BLS12-381 G1-compressed verifying key (`min_pk`) bound to this wallet.
+    #[serde(default)]
+    pub bls_verifying_key: Vec<u8>,
+}
+
 /// A unified Tenzro identity
 ///
 /// Represents both human and machine identities in a single type.

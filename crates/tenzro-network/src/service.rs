@@ -1870,6 +1870,15 @@ struct EventLoopState {
     /// gap where a small mesh loses a peer and would otherwise wait for a slow
     /// DHT walk to notice.
     peer_redial: HashMap<PeerId, (Multiaddr, crate::discovery::ReconnectBackoff)>,
+
+    /// Our own chain-id, parsed once at startup from `config.protocol_version`
+    /// (`tenzro/<chain_id>/<semver>`). Consulted by the Identify `Received`
+    /// handler to fail-closed-disconnect any peer whose advertised chain-id is
+    /// absent or differs from ours — the cross-chain peering gate that
+    /// stops nodes on distinct chains from meshing over a shared discovery
+    /// substrate. `None` only if our own protocol_version is legacy-form, in
+    /// which case the gate is disabled (we cannot assert a chain to compare).
+    local_chain_id: Option<u64>,
 }
 
 /// Target minimum number of live peer connections below which mid-session
@@ -1893,6 +1902,25 @@ const PEER_RECOVERY_FLOOR: usize = 8;
 /// is already meshed, which is the very problem this primitive is meant
 /// to solve.
 const OBSERVED_ADDR_CONFIRMATION_THRESHOLD: usize = 1;
+
+/// Parse the chain-id segment out of a Tenzro Identify `protocol_version`
+/// string of the canonical form `tenzro/<chain_id>/<semver>` (e.g.
+/// `tenzro/1337/0.1.0`).
+///
+/// Returns `None` for anything that does not carry a numeric chain-id in the
+/// second `/`-separated segment — in particular the legacy `tenzro/<semver>`
+/// form (`tenzro/1.0.0`), a foreign prefix, or garbage. Cross-chain admission
+/// (`handle_swarm_event`, Identify `Received`) is fail-closed on `None`: a peer
+/// that cannot prove a chain-id matching ours is disconnected. Comparing only
+/// this segment means peers running different node versions on the *same* chain
+/// still peer normally.
+fn peer_chain_id(pv: &str) -> Option<u64> {
+    let mut parts = pv.split('/');
+    if parts.next()? != "tenzro" {
+        return None;
+    }
+    parts.next()?.parse::<u64>().ok()
+}
 
 /// Main event loop for the network service
 async fn run_event_loop(
@@ -2142,6 +2170,7 @@ async fn run_event_loop(
         bootstrap_peers,
         bootstrap_addrs_peerless,
         peer_redial: HashMap::new(),
+        local_chain_id: peer_chain_id(&config.protocol_version),
     };
 
     // Create periodic cleanup timer (every 60 seconds)
@@ -3553,6 +3582,32 @@ async fn handle_swarm_event(state: &mut EventLoopState, event: SwarmEvent<Tenzro
                     info.agent_version
                 );
 
+                // Cross-chain peering gate, fail-closed. Our advertised
+                // protocol_version carries the chain-id as
+                // `tenzro/<chain_id>/<semver>`. A peer whose advertised
+                // chain-id is absent (legacy build) or differs from ours is on
+                // a different chain and must NOT be admitted — cross-chain
+                // gossip over a shared discovery substrate is what let nodes
+                // silently fork solo chains. Only the chain-id segment is
+                // compared, so peers on differing node *versions* of the same
+                // chain still mesh. Skipped only if our own protocol_version is
+                // legacy-form (`local_chain_id == None`): with no chain to
+                // assert we cannot classify a peer as cross-chain.
+                if let Some(our_chain_id) = state.local_chain_id {
+                    let their_chain_id = peer_chain_id(&info.protocol_version);
+                    if their_chain_id != Some(our_chain_id) {
+                        tracing::warn!(
+                            peer = %peer_id,
+                            our_chain_id,
+                            peer_chain_id = ?their_chain_id,
+                            peer_protocol_version = %info.protocol_version,
+                            "Rejecting cross-chain peer (chain-id mismatch); disconnecting"
+                        );
+                        let _ = state.swarm.disconnect_peer_id(peer_id);
+                        return;
+                    }
+                }
+
                 // Dynamically admit validators into the registry so their
                 // consensus / attestation messages don't get rejected and
                 // cause gossipsub peer-score decay → mutual ban. Admission
@@ -4766,6 +4821,39 @@ mod tests {
 
     fn ma(s: &str) -> Multiaddr {
         s.parse().expect("valid multiaddr")
+    }
+
+    #[test]
+    fn peer_chain_id_parses_canonical_form() {
+        assert_eq!(peer_chain_id("tenzro/1337/0.1.0"), Some(1337));
+        assert_eq!(peer_chain_id("tenzro/42/1.2.3"), Some(42));
+        // Trailing segments beyond the semver are ignored — only the
+        // chain-id segment matters.
+        assert_eq!(peer_chain_id("tenzro/7/0.1.0/extra"), Some(7));
+    }
+
+    #[test]
+    fn peer_chain_id_rejects_legacy_and_foreign_forms() {
+        // Legacy `tenzro/<semver>` carries no numeric chain-id → None
+        // (fail-closed: such a peer is treated as cross-chain).
+        assert_eq!(peer_chain_id("tenzro/1.0.0"), None);
+        // Foreign prefix.
+        assert_eq!(peer_chain_id("substrate/1337/1.0.0"), None);
+        // Degenerate inputs.
+        assert_eq!(peer_chain_id(""), None);
+        assert_eq!(peer_chain_id("tenzro"), None);
+        assert_eq!(peer_chain_id("tenzro/"), None);
+    }
+
+    #[test]
+    fn same_chain_accepted_cross_chain_rejected() {
+        let ours = peer_chain_id("tenzro/1337/0.1.0").expect("our chain-id parses");
+        // Same chain, different node version → accepted.
+        assert_eq!(peer_chain_id("tenzro/1337/9.9.9"), Some(ours));
+        // Different chain → rejected.
+        assert_ne!(peer_chain_id("tenzro/1338/0.1.0"), Some(ours));
+        // Chain-less legacy peer → rejected (fail-closed).
+        assert_ne!(peer_chain_id("tenzro/0.1.0"), Some(ours));
     }
 
     #[test]

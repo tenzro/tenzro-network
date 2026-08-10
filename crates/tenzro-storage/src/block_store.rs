@@ -313,8 +313,8 @@ mod tests {
     /// "Bincode does not support Deserializer::deserialize_identifier" because
     /// `TransactionType` carries `#[serde(tag = "type", content = "data")]`.
     /// Result: any tx-bearing block written to RocksDB was unreadable, and
-    /// `eth_getBlockByNumber` returned -32000 for them. We now serialize blocks
-    /// as JSON and fall back to bincode on read for older empty blocks.
+    /// `eth_getBlockByNumber` returned -32000 for them. Blocks are now
+    /// serialized as JSON on both write and read — there is no bincode path.
     #[tokio::test]
     async fn test_block_with_typed_transactions_roundtrip() {
         use tenzro_crypto::pq::MlDsaSigningKey;

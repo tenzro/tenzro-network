@@ -268,10 +268,12 @@ testnet faucet if needed, posts the 1,000 TNZO compute bond, registers you as
 a model provider with default per-token pricing, and downloads + serves the
 largest catalog model that fits the machine.
 
-The faucet grants slightly more than the bond (up to 1,010 TNZO) because
-posting the bond costs gas: a wallet funded with exactly 1,000 TNZO cannot pay
-for the transaction that bonds 1,000 TNZO. Operators running their own testnet
-set the grant with `TENZRO_FAUCET_DISPENSE_AMOUNT`.
+The faucet grants up to 20,000 TNZO per request — enough to cover a validator
+self-stake (10,000 TNZO) plus the gas to post it, so a permissionless node can
+faucet once and self-register as a voting validator the same day (it also
+covers the smaller 1,000 TNZO model-provider bond). Operators running their own
+testnet set the grant with `TENZRO_FAUCET_DISPENSE_AMOUNT` (clamped to the
+20,000 TNZO ceiling).
 
 Addresses may be given in either form the node prints — 32-byte hex
 (`0x1ac72f09…`) or base58 (`3F5YuHJUov…`, what the wallet displays). Both are
@@ -375,9 +377,33 @@ curl -X POST http://localhost:8545 \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
-### 4.6 Graceful shutdown
+### 4.6 Shutdown, restart, and upgrade
 
 Ctrl+C or `kill -TERM <pid>`. The node drains pending RPC requests, flushes RocksDB with fsync, and persists agent/swarm state before exit.
+
+**Your identity and wallets are persistent.** A node's autonomous identity — the
+validator keyset (Ed25519 + ML-DSA-65 + BLS12-381) and its ERC-8004 system key —
+and every wallet live under the data directory (`<data-dir>/validator_key`,
+`validator_pq_key`, `validator_bls_key`, `validator_erc8004_system_key`, and
+`wallets/`), alongside the libp2p peer identity. On restart the node **loads**
+these files; it never regenerates them. A voting validator that finds a key
+missing fails loudly rather than mint a new one, so a mis-mounted or empty volume
+can never silently fork your identity or double-sign.
+
+**To upgrade, replace the binary — never the data directory.** Stop the node,
+swap in the new `tenzro-node`, and start it again pointing at the same
+`--data-dir`. Identity, wallets, staking position, and chain state all carry
+across untouched:
+
+```bash
+kill -TERM <pid>                   # graceful stop
+cp tenzro-node /usr/local/bin/     # install the new binary
+tenzro-node --roles ... --data-dir <same-dir> --genesis <same-genesis>
+```
+
+Never `rm -rf` the data directory as part of an upgrade — that discards the keys
+that *are* the node's identity. The key files are small and are the only thing
+that cannot be regenerated, so back the directory up before any risky operation.
 
 ### 4.7 Bootstrap a local or sovereign network
 
@@ -393,7 +419,7 @@ tenzro setup --path local --network-name lab --yes
 ```
 
 This generates the full validator keyset (Ed25519 + ML-DSA-65 + BLS12-381),
-assembles a schema-v3 `genesis.toml` with your node as the founding validator
+assembles a schema-v1 `genesis.toml` with your node as the founding validator
 plus a funded account and faucet, persists the libp2p peer identity, and writes
 a service unit (launchd plist on macOS, systemd unit on Linux) into the data
 directory. It then prints three things:
@@ -475,6 +501,55 @@ marketplace registry — agents, skills, workflows, MCP servers — is
 permissionless: you set your own TNZO price or offer it free, and no
 operator approves the listing. See [`api-keys.md`](api-keys.md) for the full
 reference.
+
+### 4.9 Joining an existing network as a validator — what to expect
+
+Joining is permissionless — no one approves you. The flow, and the behaviours
+that surprise first-time operators:
+
+1. **You join as a non-voting (verify-only) node first.** Start with the
+   network's `genesis.toml` and at least one `--boot-nodes` peer. Until you hold
+   enough stake and are admitted at an epoch boundary you validate and sync but
+   do not propose — this is normal, not an error.
+
+2. **A freshly-joined node can sit at block 0 on an idle chain — that is
+   expected, not a stuck node.** The chain suppresses empty blocks: with no
+   transactions the leader only mints on a long heartbeat (default 10 min). Join
+   while the chain is idle and your node shows `peer_count ≥ 1` but
+   `block_height 0` until the next real block, then catches up automatically.
+   Send any transaction (or wait for the heartbeat) and it advances to the tip.
+   A node at height 0 *with peers* is not broken.
+
+3. **Run the exact same binary and genesis as the network.** State is
+   deterministic — every node must compute byte-identical state for the same
+   blocks. A different binary or an edited genesis yields a different state root
+   and your blocks are rejected ("message validation rejected"). Persistent
+   rejections mean your genesis or node version does not match the network's.
+
+4. **Becoming a voting validator.** Fund your validator account (on testnet the
+   faucet grants up to 20,000 TNZO — a validator self-stake plus gas), then
+   self-register: boot with `--validator-self-stake <wei>` (the node registers
+   itself with its own keys) or run `tenzro validator register`. You are
+   admitted to the active set at the next epoch boundary after a short
+   activation delay. Registering below the minimum self-stake, or with a zero
+   balance, is rejected.
+
+5. **Identity and wallets are persistent — run the node as a service.** Your
+   keyset and wallets live in the data directory, not the binary (§4.6). With a
+   TPM, keys are sealed to it and unseal non-interactively at boot, so a service
+   restarts with no console. Run under systemd with automatic restart so a
+   crash, OOM, or reboot returns on the same identity. Never wipe the data
+   directory to "reset" — that discards the only unregenerable material.
+
+6. **Provider resources are gated; you choose how.** If you run provider roles
+   (`ai`, `storage`, `database`, `cloud`), access is controlled — see
+   [`ACCESS.md`](ACCESS.md): on-demand (pay-per-use, open to the network),
+   subscription (an API key you issue), and rental (a service key). Visibility
+   (public/private) controls *discovery*, not access.
+
+7. **Benign startup noise.** Peer-discovery relay publish warnings and "inbound
+   block-sync request during bootstrap window" lines appear while the node is
+   still attaching subscribers; they are not failures.
 
 ---
 

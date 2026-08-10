@@ -105,3 +105,30 @@ pub fn save_config(config: &PersistedConfig) -> anyhow::Result<()> {
     std::fs::write(&path, json)?;
     Ok(())
 }
+
+/// Config path scoped to an explicit data directory (`<dir>/config.json`).
+/// Used when `--data-dir` is given so a scoped/isolated run neither reads nor
+/// mutates the global `~/.tenzro/config.json`.
+pub fn config_path_in(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("config.json")
+}
+
+/// Load config from a data-dir-scoped path (default if absent).
+pub fn load_config_in(data_dir: &std::path::Path) -> PersistedConfig {
+    let path = config_path_in(data_dir);
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&contents).unwrap_or_default()
+    } else {
+        PersistedConfig::default()
+    }
+}
+
+/// Save config to a data-dir-scoped path.
+pub fn save_config_in(data_dir: &std::path::Path, config: &PersistedConfig) -> anyhow::Result<()> {
+    let path = config_path_in(data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(config)?)?;
+    Ok(())
+}

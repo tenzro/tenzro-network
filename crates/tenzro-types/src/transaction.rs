@@ -28,7 +28,7 @@ pub const MAX_TX_DATA_SIZE: usize = 131_072;
 /// (FIPS 204, exactly 1952 bytes) and is **mandatory**. Tenzro Network does
 /// not support classical-only transactions — the field has no `Option`
 /// wrapper and no `serde(default)`. Decoders reject any payload that omits
-/// or mis-sizes this field. There is no legacy fallback: a classical-only
+/// or mis-sizes this field. There is  fallback: a classical-only
 /// transaction cannot be constructed in this codebase and cannot be parsed
 /// from any external source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,6 +577,51 @@ pub enum TransactionType {
         /// New 32-byte SHA-256 commitment to the attestation document.
         tee_attestation_hash: Option<[u8; 32]>,
     },
+    /// Register an identity (DID) into replicated consensus state (TDIP).
+    ///
+    /// Identities were historically written **local-only** by each RPC
+    /// registration handler, so a DID created on node A never resolved on
+    /// node B. This native tx mirrors the node-alias exemplar: the record is
+    /// ordered by consensus, DID uniqueness is enforced against
+    /// `SYSTEM_ADDRESS` storage in the VM, and every node re-executes and
+    /// converges. On execution the VM emits an `IdentityRegister` typed log
+    /// carrying the JSON [`crate::identity::RegisterIdentityPayload`]; the
+    /// node-side `IdentityRegistry` consumes the log and upserts the record
+    /// so it becomes replicated read-model state.
+    ///
+    /// Key MATERIAL (FROST shares / TEE-sealed signing keys) is NOT carried
+    /// here and stays node-local by design — only the public identity record
+    /// (DID, controller pubkey, wallet bindings, verifying keys, metadata)
+    /// replicates.
+    ///
+    /// Authorization: `tx.from` is the payer (the node's system key when the
+    /// registration is dispatched by the node on the identity's behalf). DID
+    /// uniqueness — not `tx.from` — is the consensus-enforced invariant: a
+    /// re-registration of the same DID by the same controller refreshes the
+    /// record, a DID already held by a different controller is refused.
+    RegisterIdentity {
+        /// The DID being registered. Uniqueness is consensus-enforced.
+        did: String,
+        /// Identity class: `"human"` | `"machine"` | `"institution"`.
+        identity_type: String,
+        /// Human-readable display / legal name.
+        display_name: String,
+        /// Classical controller public key (Ed25519 / Secp256k1).
+        controller_pubkey: Vec<u8>,
+        /// Key type string for `controller_pubkey`.
+        key_type: String,
+        /// Wallet ID bound to the identity's primary wallet.
+        wallet_id: String,
+        /// On-chain address of the identity's primary wallet.
+        wallet_address: Address,
+        /// ML-DSA-65 (FIPS 204) verifying key. Empty when unset.
+        pq_verifying_key: Vec<u8>,
+        /// BLS12-381 G1-compressed verifying key (`min_pk`). Empty when unset.
+        bls_verifying_key: Vec<u8>,
+        /// Additional public metadata. `BTreeMap` for deterministic ordering
+        /// so the bincode tx-hash preimage is identical on every node.
+        metadata: std::collections::BTreeMap<String, String>,
+    },
 }
 
 /// A signed transaction ready for submission
@@ -783,6 +828,29 @@ impl SignedTransaction {
                     && uri.len() > 256
                 {
                     return Err("metadata_uri exceeds 256 bytes");
+                }
+            }
+            TransactionType::RegisterIdentity {
+                did,
+                identity_type,
+                display_name,
+                controller_pubkey,
+                ..
+            } => {
+                if did.trim().is_empty() {
+                    return Err("RegisterIdentity requires a non-empty did");
+                }
+                if did.len() > 256 {
+                    return Err("did exceeds 256 bytes");
+                }
+                if !matches!(identity_type.as_str(), "human" | "machine" | "institution") {
+                    return Err("identity_type must be human|machine|institution");
+                }
+                if display_name.len() > MAX_TX_DATA_SIZE {
+                    return Err("display_name exceeds maximum size");
+                }
+                if controller_pubkey.len() > 128 {
+                    return Err("controller_pubkey exceeds 128 bytes");
                 }
             }
             // Other transaction types have bounded data (strings, primitives)

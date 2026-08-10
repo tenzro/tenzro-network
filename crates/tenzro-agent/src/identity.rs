@@ -1106,6 +1106,24 @@ mod tests {
         assert_eq!(agent.reputation_score, 50);
     }
 
+    #[test]
+    fn agent_id_is_node_scoped_by_owner_address() {
+        // #28 — baseline agents keyed off a shared owner (Address::zero) made
+        // every node derive the SAME agent_id for the same (nonce), so each
+        // node rejected the others' announcements as "pubkey differs from
+        // pinned key". Deriving the owner per-node makes the id distinct.
+        let node_a = Address::from([0xA1u8; 32]);
+        let node_b = Address::from([0xB2u8; 32]);
+        let id_a = AgentIdentityManager::generate_agent_id(&node_a, 1);
+        let id_b = AgentIdentityManager::generate_agent_id(&node_b, 1);
+        assert_ne!(
+            id_a, id_b,
+            "distinct node owners must yield distinct agent_ids for the same nonce"
+        );
+        // And it stays deterministic for a given owner (idempotent restarts).
+        assert_eq!(id_a, AgentIdentityManager::generate_agent_id(&node_a, 1));
+    }
+
     #[tokio::test]
     async fn test_duplicate_registration() {
         let manager = AgentIdentityManager::new().unwrap();

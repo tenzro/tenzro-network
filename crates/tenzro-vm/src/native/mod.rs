@@ -165,6 +165,14 @@ pub const SELECTOR_NODE_ALIAS_CLAIM: [u8; 4] = [0x01, 0x00, 0x00, 0x50];
 pub const SELECTOR_NODE_ALIAS_BIND: [u8; 4] = [0x01, 0x00, 0x00, 0x51];
 pub const SELECTOR_NODE_ALIAS_RELEASE: [u8; 4] = [0x01, 0x00, 0x00, 0x52];
 
+// Identity registration (TDIP) — replicate a DID + its public record into
+// consensus state so an identity created on one node resolves on every node.
+// Same rationale as node aliases: a registry held in one node's memory would
+// mean whoever you asked decides who owns a DID. Ordered by consensus, every
+// node applies the same transition and DID uniqueness falls out of block order.
+// Next free block after node-alias 0x50-0x52.
+pub const SELECTOR_IDENTITY_REGISTER: [u8; 4] = [0x01, 0x00, 0x00, 0x60];
+
 // Gas costs for native operations
 const GAS_TRANSFER: u64 = 21_000;
 const GAS_STAKE: u64 = 50_000;
@@ -236,6 +244,11 @@ const GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN: u64 = 40_000;
 const GAS_NODE_ALIAS_CLAIM: u64 = 100_000;
 const GAS_NODE_ALIAS_BIND: u64 = 40_000;
 const GAS_NODE_ALIAS_RELEASE: u64 = 25_000;
+
+// Registering a DID consumes a globally unique name out of the DID namespace
+// and writes a record every node must carry, so it is priced with the
+// claim-class ops rather than the cheaper binds (TDIP).
+const GAS_IDENTITY_REGISTER: u64 = 100_000;
 
 // Maximum size of an inline workflow JSON payload. Workflows with payloads
 // larger than this must be referenced by a DA pointer and submitted with the
@@ -3260,6 +3273,106 @@ impl NativeExecutor {
         ))
     }
 
+    /// `RegisterIdentity` — land a DID + its public record into consensus
+    /// state (TDIP). Mirrors [`Self::execute_node_alias_claim`]: the
+    /// record lives under `SYSTEM_ADDRESS` at `identity:<did>`, DID
+    /// uniqueness is enforced against that consensus state so every node
+    /// reaches the same verdict on the same ordered transactions, and the
+    /// emitted `IdentityRegister` log drives the node-side registry mirror.
+    ///
+    /// Uniqueness rule: a DID already held by a *different* controller pubkey
+    /// is refused (fail-closed); a re-registration by the same controller
+    /// refreshes the record (idempotent replay across re-orgs / restarts).
+    async fn execute_identity_register(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_IDENTITY_REGISTER)?;
+
+        let payload: tenzro_types::identity::RegisterIdentityPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid RegisterIdentity payload: {}", e))
+            })?;
+
+        if payload.did.trim().is_empty() {
+            return Err(VmError::InvalidTransaction(
+                "RegisterIdentity requires a non-empty did".to_string(),
+            ));
+        }
+        if payload.did.len() > 256 {
+            return Err(VmError::InvalidTransaction(format!(
+                "did exceeds 256 bytes (got {})",
+                payload.did.len()
+            )));
+        }
+        if !matches!(
+            payload.identity_type.as_str(),
+            "human" | "machine" | "institution"
+        ) {
+            return Err(VmError::InvalidTransaction(format!(
+                "identity_type must be human|machine|institution, got '{}'",
+                payload.identity_type
+            )));
+        }
+
+        let key = identity_storage_key(&payload.did);
+        let existing = state.get_storage(&SYSTEM_ADDRESS, &key);
+
+        // DID uniqueness is the whole invariant, enforced against consensus
+        // state so every node agrees on the same ordered transactions. A DID
+        // already claimed by a different controller is refused fail-closed.
+        if let Some(blob) = existing.as_ref().filter(|b| !b.is_empty()) {
+            let prior: tenzro_types::identity::RegisterIdentityPayload =
+                serde_json::from_slice(blob).map_err(|e| {
+                    VmError::InvalidTransaction(format!("Corrupt identity record: {e}"))
+                })?;
+            if prior.controller_pubkey != payload.controller_pubkey {
+                return Err(VmError::InvalidTransaction(format!(
+                    "identity DID '{}' is already registered",
+                    payload.did
+                )));
+            }
+        }
+
+        // Canonical blob = the exact JSON body the submitter signed over, so
+        // the stored record and the emitted log are byte-identical on every
+        // node (no re-serialization drift).
+        let blob = tx.data[4..].to_vec();
+
+        let (bal, new_bal) = self.charge_gas(tx, state, GAS_IDENTITY_REGISTER)?;
+        state.set_storage(&SYSTEM_ADDRESS, &key, blob.clone());
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"IdentityRegister".to_vec()],
+            blob.clone(),
+        );
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            tx.from.to_vec(),
+            vec![log],
+            vec![
+                StateChange::new(
+                    tx.from.clone(),
+                    b"balance".to_vec(),
+                    Some(bal.to_le_bytes().to_vec()),
+                    Some(new_bal.to_le_bytes().to_vec()),
+                ),
+                StateChange::new(SYSTEM_ADDRESS.to_vec(), key, existing, Some(blob)),
+                StateChange::new(
+                    tx.from.clone(),
+                    b"nonce".to_vec(),
+                    Some(old_nonce.to_le_bytes().to_vec()),
+                    Some((old_nonce + 1).to_le_bytes().to_vec()),
+                ),
+            ],
+        ))
+    }
+
     /// `BindNodeAlias` — point a claimed name at a specific node.
     ///
     /// Only the claim's owner may bind it, so possession of a name cannot be
@@ -4153,6 +4266,14 @@ fn node_alias_storage_key(name: &str) -> Vec<u8> {
     format!("node_alias:{name}").into_bytes()
 }
 
+/// Consensus-state key a registered identity record lives under, within
+/// `SYSTEM_ADDRESS` storage. The `identity:` prefix keeps the DID namespace
+/// distinct from node aliases and human `@usernames` by construction, and the
+/// DID is globally unique so the key doubles as the uniqueness guard (TDIP).
+fn identity_storage_key(did: &str) -> Vec<u8> {
+    format!("identity:{did}").into_bytes()
+}
+
 // ---- Kill-switch payloads (Agent-Swarm Spec 1) ------------------------------
 
 /// JSON payload decoded from `tx.data[4..]` for `PauseAgent`.
@@ -4852,6 +4973,10 @@ impl VmExecutor for NativeExecutor {
                 self.execute_node_alias_release(tx, state, &mut gas_meter)
                     .await
             }
+            SELECTOR_IDENTITY_REGISTER => {
+                self.execute_identity_register(tx, state, &mut gas_meter)
+                    .await
+            }
             SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN => {
                 self.execute_workflow_freeze_privacy_domain(tx, state, &mut gas_meter)
                     .await
@@ -4932,6 +5057,7 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_NODE_ALIAS_CLAIM => GAS_NODE_ALIAS_CLAIM,
             SELECTOR_NODE_ALIAS_BIND => GAS_NODE_ALIAS_BIND,
             SELECTOR_NODE_ALIAS_RELEASE => GAS_NODE_ALIAS_RELEASE,
+            SELECTOR_IDENTITY_REGISTER => GAS_IDENTITY_REGISTER,
             SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN => GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN,
             _ => GAS_TRANSFER, // Default to transfer cost
         })
@@ -5281,6 +5407,109 @@ mod tests {
         assert!(
             executor.execute_transaction(&tx, &mut state).await.is_err(),
             "zero-stake registration must be rejected"
+        );
+    }
+
+    // ---- RegisterIdentity (TDIP) ----------------------------------------
+
+    fn make_identity_register_data(did: &str, controller: &[u8]) -> Vec<u8> {
+        let payload = tenzro_types::identity::RegisterIdentityPayload {
+            did: did.to_string(),
+            identity_type: "human".to_string(),
+            display_name: "Alice".to_string(),
+            controller_pubkey: controller.to_vec(),
+            key_type: "Ed25519".to_string(),
+            wallet_id: "wallet-1".to_string(),
+            wallet_address: Address::new([7u8; 32]),
+            pq_verifying_key: vec![1u8; 1952],
+            bls_verifying_key: vec![2u8; 48],
+            metadata: Default::default(),
+        };
+        let mut data = SELECTOR_IDENTITY_REGISTER.to_vec();
+        data.extend(serde_json::to_vec(&payload).unwrap());
+        data
+    }
+
+    fn identity_register_tx(from: Vec<u8>, did: &str, controller: &[u8], nonce: u64) -> VmTransaction {
+        VmTransaction::new(
+            from,
+            None,
+            0,
+            make_identity_register_data(did, controller),
+            300_000,
+            1_000_000_000,
+            nonce,
+            VmType::Tenzro,
+            1337,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_identity_register_stores_record_and_emits_log() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![1u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000);
+
+        let did = "did:tenzro:human:abc";
+        let tx = identity_register_tx(from.clone(), did, &[9u8; 32], 0);
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert!(result.success);
+
+        // Record landed under SYSTEM_ADDRESS at identity:<did>.
+        let stored = state
+            .get_storage(&SYSTEM_ADDRESS, &identity_storage_key(did))
+            .expect("identity record must be stored");
+        let decoded: tenzro_types::identity::RegisterIdentityPayload =
+            serde_json::from_slice(&stored).unwrap();
+        assert_eq!(decoded.did, did);
+
+        // IdentityRegister log emitted with the canonical blob.
+        assert!(
+            result
+                .logs
+                .iter()
+                .any(|l| l.topics.first().map(|t| t.as_slice()) == Some(b"IdentityRegister".as_ref())),
+            "IdentityRegister log must be emitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_register_duplicate_did_rejected() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![1u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000);
+        let did = "did:tenzro:human:dup";
+
+        // First registration by controller A succeeds.
+        let tx1 = identity_register_tx(from.clone(), did, &[9u8; 32], 0);
+        assert!(executor.execute_transaction(&tx1, &mut state).await.unwrap().success);
+
+        // Second registration of the SAME did by a DIFFERENT controller is
+        // refused fail-closed (consensus-enforced DID uniqueness).
+        let tx2 = identity_register_tx(from.clone(), did, &[8u8; 32], 1);
+        assert!(
+            executor.execute_transaction(&tx2, &mut state).await.is_err(),
+            "duplicate DID from a different controller must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_register_same_controller_refresh_ok() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![1u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000);
+        let did = "did:tenzro:human:refresh";
+
+        let tx1 = identity_register_tx(from.clone(), did, &[9u8; 32], 0);
+        assert!(executor.execute_transaction(&tx1, &mut state).await.unwrap().success);
+        // Same controller re-registers — idempotent refresh, not a rejection.
+        let tx2 = identity_register_tx(from.clone(), did, &[9u8; 32], 1);
+        assert!(
+            executor.execute_transaction(&tx2, &mut state).await.unwrap().success,
+            "same-controller re-registration must be allowed as a refresh"
         );
     }
 

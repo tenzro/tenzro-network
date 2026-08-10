@@ -10,9 +10,6 @@
 //!   stdin/stdout. Used for most third-party MCPs distributed as npm
 //!   packages or executables (Stripe MCP, GitHub MCP, Notion MCP,
 //!   Linear MCP, etc.). Credentials injected via env var.
-//! - **`mcp-sse`** — legacy Server-Sent Events MCP transport. Some
-//!   older MCPs still use this. Behavior matches `mcp` for the
-//!   request side; the SSE-streamed response is collected synchronously.
 //!
 //! The operator's upstream credentials are never exposed to the
 //! tenant. The plaintext secret is read from the sealed vault at
@@ -438,8 +435,6 @@ impl McpPluginHost {
     ///
     /// - `Mcp` → JSON-RPC over HTTP POST
     /// - `McpStdio` → JSON-RPC over subprocess stdin/stdout
-    /// - `McpSse` → JSON-RPC over HTTP POST, response collected from
-    ///   the SSE stream
     /// - `Api` → POST the params directly as the request body
     /// - `Native` → caller handles (this host returns an error)
     pub async fn invoke(
@@ -455,7 +450,6 @@ impl McpPluginHost {
                 self.invoke_streamable_http(tool, method_name, params, &auth)
                     .await
             }
-            ToolTransportMode::McpSse => self.invoke_sse(tool, method_name, params, &auth).await,
             ToolTransportMode::McpStdio => {
                 self.invoke_stdio(tool, method_name, params, &auth).await
             }
@@ -515,23 +509,6 @@ impl McpPluginHost {
             )));
         }
         Ok(json.get("result").cloned().unwrap_or(json))
-    }
-
-    async fn invoke_sse(
-        &self,
-        tool: &ToolDefinition,
-        method_name: &str,
-        params: serde_json::Value,
-        auth: &ResolvedAuth,
-    ) -> Result<serde_json::Value, McpPluginError> {
-        // Pragmatic implementation: send a single POST, accept a
-        // JSON-RPC response payload directly. Full SSE chunk-stream
-        // collection is implemented on demand for MCPs that require
-        // it; today no production MCP requires this path because
-        // Streamable HTTP has superseded SSE since the rmcp 0.1
-        // protocol revision.
-        self.invoke_streamable_http(tool, method_name, params, auth)
-            .await
     }
 
     async fn invoke_stdio(

@@ -2804,10 +2804,20 @@ impl EventLoop {
                                     "Rejecting agent announcement (replay window)"
                                 );
                             } else if let Some(ref na) = self.network_agents {
-                                // First-seen pubkey pinning + monotonic timestamps
-                                // (see ModelAnnouncement handler for rationale).
+                                // Pin per (agent_id, origin_peer_id). The same
+                                // baseline agent_id is announced by every node
+                                // that runs that agent, each signing with its
+                                // own key, so pinning on agent_id alone made
+                                // each node reject the others' announcements.
+                                // Scoping the pin key by the announcing peer
+                                // lets a shared agent_id coexist across nodes
+                                // while still catching a key swap from the SAME
+                                // peer (first-seen pubkey pinning + monotonic
+                                // timestamps, see the ModelAnnouncement handler).
+                                let agent_key =
+                                    format!("{}@{}", ann.agent_id, ann.origin_peer_id);
                                 let prior = na
-                                    .get(&ann.agent_id)
+                                    .get(&agent_key)
                                     .map(|e| (e.announcement.pubkey.clone(), e.announcement.timestamp));
                                 if let Some((pinned_pubkey, prev_ts)) = prior {
                                     if pinned_pubkey != ann.pubkey {
@@ -2825,7 +2835,7 @@ impl EventLoop {
                                         continue;
                                     }
                                 }
-                                na.insert(ann.agent_id.clone(), crate::node::NetworkAgentEntry {
+                                na.insert(agent_key.clone(), crate::node::NetworkAgentEntry {
                                     announcement: ann.clone(),
                                     last_seen: std::time::Instant::now(),
                                 });
@@ -4459,6 +4469,14 @@ impl EventLoop {
                         // hostname resolution uses on the request path. The
                         // VM already decided ownership; this only records it.
                         self.process_node_alias_logs(&result, block_height).await;
+
+                        // Identities — mirror the consensus-decided DID record
+                        // into the local IdentityRegistry read model so an
+                        // identity created on any node resolves on all nodes
+                        // (TDIP). The VM already enforced DID uniqueness and
+                        // persisted the `identity:<did>` marker; this only
+                        // records it into the resolve path.
+                        self.process_identity_logs(&result, block_height).await;
 
                         // Workflow scan — same pattern across the 12
                         // privileged workflow selectors (0x01000040–0x0100004B).
@@ -6115,6 +6133,72 @@ impl EventLoop {
         }
     }
 
+    /// Mirror VM-emitted `IdentityRegister` logs into the local
+    /// [`IdentityRegistry`] (TDIP).
+    ///
+    /// DID uniqueness was already decided by `execute_identity_register`
+    /// against consensus state — every node re-ran the same handler over the
+    /// same ordered transactions, so the `identity:<did>` marker under
+    /// `SYSTEM_ADDRESS` is the source of truth. This only reflects that
+    /// decision into the DID→identity read model the RPC resolve path uses,
+    /// which is what makes an identity created on ANY node resolve on ALL
+    /// nodes.
+    ///
+    /// Errors are logged and never abort the block: a divergent read model is
+    /// recoverable on restart via `load_from_storage`, and the origin node's
+    /// authoritative record is left untouched (`upsert_from_chain` is
+    /// origin-safe and idempotent).
+    async fn process_identity_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        let any_identity = result.logs.iter().any(|l| {
+            l.topics
+                .first()
+                .map(|t| t.as_slice() == b"IdentityRegister")
+                .unwrap_or(false)
+        });
+        if !any_identity {
+            return;
+        }
+
+        let Some(registry) = self.identity_registry.as_ref() else {
+            debug!(
+                block_height = block_height.0,
+                "IdentityRegister log observed but IdentityRegistry not wired; skipping reflection"
+            );
+            return;
+        };
+
+        for log in &result.logs {
+            let Some(topic) = log.topics.first().map(|t| t.as_slice()) else {
+                continue;
+            };
+            if topic != b"IdentityRegister" {
+                continue;
+            }
+            match serde_json::from_slice::<tenzro_types::identity::RegisterIdentityPayload>(
+                &log.data,
+            ) {
+                Ok(payload) => {
+                    let did = payload.did.clone();
+                    match registry.upsert_from_chain(&payload) {
+                        Ok(true) => info!(%did, "Mirrored replicated identity from consensus"),
+                        Ok(false) => {
+                            debug!(%did, "Identity already known locally; mirror is a no-op")
+                        }
+                        Err(e) => warn!(%did, "Failed to mirror replicated identity: {e}"),
+                    }
+                }
+                Err(e) => warn!(
+                    data_len = log.data.len(),
+                    "Malformed IdentityRegister log payload, skipping: {e}"
+                ),
+            }
+        }
+    }
+
     async fn process_validator_logs(
         &self,
         result: &tenzro_vm::ExecutionResult,
@@ -6625,6 +6709,11 @@ impl EventLoop {
             | tenzro_types::TransactionType::RegisterValidator { .. }
             | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }
             | tenzro_types::TransactionType::ExitValidator => return Ok(()),
+            // Identity registration is dispatched by the node's system key on
+            // the identity's behalf; there is no payer delegation scope to
+            // enforce here (DID uniqueness is enforced in-VM). Skip the
+            // delegation/spending-policy pre-check (TDIP).
+            tenzro_types::TransactionType::RegisterIdentity { .. } => return Ok(()),
         };
 
         // (1) DelegationScope. Humans pass through inside enforce_operation.
@@ -7062,7 +7151,8 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         SELECTOR_ESCROW_CREATE, SELECTOR_ESCROW_REFUND, SELECTOR_ESCROW_RELEASE,
         SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL, SELECTOR_INCREASE_AGENT_BOND,
         SELECTOR_INCREASE_COMPUTE_BOND, SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE,
-        SELECTOR_KILLSWITCH_TERMINATE, SELECTOR_NODE_ALIAS_BIND, SELECTOR_NODE_ALIAS_CLAIM,
+        SELECTOR_IDENTITY_REGISTER, SELECTOR_KILLSWITCH_TERMINATE, SELECTOR_NODE_ALIAS_BIND,
+        SELECTOR_NODE_ALIAS_CLAIM,
         SELECTOR_NODE_ALIAS_RELEASE, SELECTOR_PAY_INSURANCE_CLAIM, SELECTOR_POST_AGENT_BOND,
         SELECTOR_POST_COMPUTE_BOND, SELECTOR_VALIDATOR_EXIT, SELECTOR_VALIDATOR_REGISTER,
         SELECTOR_VALIDATOR_UPDATE_METADATA, SELECTOR_WITHDRAW_AGENT_BOND,
@@ -7532,6 +7622,39 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             data.extend_from_slice(
                 &serde_json::to_vec(&payload)
                     .expect("UpdateValidatorMetadata payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::RegisterIdentity {
+            did,
+            identity_type,
+            display_name,
+            controller_pubkey,
+            key_type,
+            wallet_id,
+            wallet_address,
+            pq_verifying_key,
+            bls_verifying_key,
+            metadata,
+        } => {
+            // Serialize the shared `RegisterIdentityPayload` directly so the
+            // JSON body is byte-identical to what the VM decoder and node-side
+            // registry mirror both expect (TDIP). One struct, one shape.
+            let payload = tenzro_types::identity::RegisterIdentityPayload {
+                did: did.clone(),
+                identity_type: identity_type.clone(),
+                display_name: display_name.clone(),
+                controller_pubkey: controller_pubkey.clone(),
+                key_type: key_type.clone(),
+                wallet_id: wallet_id.clone(),
+                wallet_address: *wallet_address,
+                pq_verifying_key: pq_verifying_key.clone(),
+                bls_verifying_key: bls_verifying_key.clone(),
+                metadata: metadata.clone(),
+            };
+            let mut data = SELECTOR_IDENTITY_REGISTER.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload).expect("RegisterIdentity payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }

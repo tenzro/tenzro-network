@@ -112,7 +112,7 @@ pub use gossip::{
 };
 pub use identity::{
     IdentityData, IdentityStatus, KeyPurpose, MachineAnchor, OwnershipTransfer, PublicKeyInfo,
-    RevocationEntry, ServiceEndpoint, TenzroIdentity, TransferAuthority, TransferError,
+    RevocationEntry, ServiceEndpoint, TenzroIdentity, TransferAuthority, TransferError, WalletRef,
     validate_username,
 };
 pub use iso20022::{

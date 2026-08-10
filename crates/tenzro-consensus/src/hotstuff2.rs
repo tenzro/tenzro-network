@@ -1617,6 +1617,22 @@ impl HotStuff2Engine {
         self.behind_hint_tx.send_replace(observed_height);
     }
 
+    /// Whether the latest behind-tip hint observes a height strictly above our
+    /// local height — i.e. the network has finalized (or is finalizing) blocks
+    /// we do not yet have.
+    ///
+    /// The hint value is whatever was last published to `behind_hint_tx`: by
+    /// `on_proposal` rejecting a too-high proposal, by `on_timeout` observing a
+    /// higher finalized height, or by `note_behind_hint` from the gossip-defer
+    /// path. It is compared against our current view height. The sync-before-
+    /// propose guard consults this so a leader that has fallen behind
+    /// holds its proposal instead of forking a fresh block off a stale parent
+    /// — the behaviour that let a lagging replica start a divergent solo chain.
+    fn is_behind_hinted(&self) -> bool {
+        let hinted = *self.behind_hint_tx.borrow();
+        hinted > self.view_state.read().height.as_u64()
+    }
+
     /// Subscribe to finality notifications.
     ///
     /// Returns a broadcast receiver that emits `FinalityNotification` each time
@@ -1686,8 +1702,12 @@ impl HotStuff2Engine {
             .map(|e| e.validator_set)
     }
 
-    /// Checks if this node is a validator
-    fn is_validator(&self) -> bool {
+    /// Checks if this node is a validator in the active set. Public so the node
+    /// can decide, before calling `start()`, whether it is admitted (start as an
+    /// active proposer/voter) or a not-yet-admitted permissionless joiner (boot
+    /// the engine unstarted for block verification, self-register, and activate
+    /// after admission).
+    pub fn is_validator(&self) -> bool {
         self.validator_set().is_validator(&self.address)
     }
 
@@ -1870,11 +1890,32 @@ impl HotStuff2Engine {
 
     /// Checks if the current view has timed out
     fn check_view_timeout(&self) -> bool {
-        let state = self.view_state.read();
-        let timer = self.view_timer.read();
-        let time_in_view = state.time_in_view();
+        let timed_out = {
+            let state = self.view_state.read();
+            let timer = self.view_timer.read();
+            state.time_in_view() >= timer.current_timeout()
+        };
+        if !timed_out {
+            return false;
+        }
 
-        time_in_view >= timer.current_timeout()
+        // IDLE VIEW-CHURN BACK-OFF: a bare view timeout on an idle,
+        // caught-up chain only rotates leaders pointlessly — every rotation
+        // broadcasts a timeout and burns a view with no block to show for it,
+        // and each new leader immediately re-hits empty-block suppression. Do
+        // not fire the timeout while there is nothing to propose (empty
+        // mempool, no pending TC, still inside the heartbeat window) AND we are
+        // not behind the tip. This self-clears the instant real work arrives
+        // (`should_propose_now` → true, e.g. a queued transaction or the
+        // elapsed heartbeat) or we fall behind (`is_behind_hinted` → true), so
+        // a genuinely stuck leader is still detected the moment there is any
+        // progress to make — an idle chain has no progress to lose. When
+        // empty-block suppression is disabled, `should_propose_now` is always
+        // true and this preserves the original always-rotate behaviour.
+        if !self.should_propose_now() && !self.is_behind_hinted() {
+            return false;
+        }
+        true
     }
 
     /// Handles view timeout.
@@ -2822,6 +2863,23 @@ impl HotStuff2Engine {
                 if is_leader && !self.is_draining() {
                     // Leader proposes a block
                     if state.proposed_block.is_none() {
+                        // SYNC-BEFORE-PROPOSE: if a behind-tip hint
+                        // observes a height above ours, the network has
+                        // finalized blocks we don't hold. Proposing now would
+                        // build a fresh block on our stale parent — a fork off
+                        // the real chain, which is exactly how a lagging replica
+                        // spun up a divergent solo chain. Hold the view
+                        // (we keep voting and timing out) until block-sync
+                        // closes the gap and the hint no longer leads our
+                        // height; only then do we resume proposing.
+                        if self.is_behind_hinted() {
+                            tracing::debug!(
+                                view = state.view,
+                                height = %state.height,
+                                "sync-before-propose: behind network tip; holding proposal until caught up"
+                            );
+                            return Ok(());
+                        }
                         // EMPTY-BLOCK SUPPRESSION (the standard
                         // `create_empty_blocks=false` pattern adapted for HotStuff-2):
                         // on an idle chain, don't mint a fresh empty block on
@@ -4934,6 +4992,92 @@ mod tests {
         assert!(
             engine_off.should_propose_now(),
             "suppression disabled must always propose"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_behind_hinted_gates_on_local_height() {
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        let config = ConsensusConfig::default();
+        let validators = create_test_validators(4);
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager);
+
+        // Fresh engine: no hint published (default 0), local height 0 → caught up.
+        assert!(
+            !engine.is_behind_hinted(),
+            "no hint above local height must read caught-up"
+        );
+
+        // A hint above our height marks us behind.
+        engine.note_behind_hint(5);
+        assert!(
+            engine.is_behind_hinted(),
+            "hint (5) above local height (0) must read behind"
+        );
+
+        // Once local height reaches the hint, we are no longer behind
+        // (the comparison is strict: hinted > local).
+        engine.view_state.write().height = BlockHeight(5);
+        assert!(
+            !engine.is_behind_hinted(),
+            "local height caught up to hint must read caught-up"
+        );
+
+        // And past the hint, still caught up.
+        engine.view_state.write().height = BlockHeight(6);
+        assert!(
+            !engine.is_behind_hinted(),
+            "local height past hint must read caught-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_idle_view_timeout_backoff() {
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        // Tiny view timeout (and floor) so the view expires within the test;
+        // long heartbeat so an idle chain stays inside the suppression window.
+        let config = ConsensusConfig::default()
+            .with_view_timeout(10)
+            .with_adaptive_timeout_floor(1)
+            .with_empty_block_heartbeat(60_000);
+        let validators = create_test_validators(4);
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager);
+
+        // Reset the heartbeat clock and let the view timer expire.
+        engine.mark_block_proposed();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Preconditions: idle (empty mempool, no TC, within heartbeat window)
+        // and caught up.
+        assert!(
+            !engine.should_propose_now(),
+            "precondition: idle chain must be under empty-block suppression"
+        );
+        assert!(
+            !engine.is_behind_hinted(),
+            "precondition: engine must be caught up"
+        );
+
+        // Idle + caught-up: the elapsed view timer must NOT fire — no pointless
+        // leader rotation on a chain with nothing to make progress on.
+        assert!(
+            !engine.check_view_timeout(),
+            "idle + caught-up view timeout must back off, not rotate"
+        );
+
+        // Falling behind re-arms the timeout so the pacemaker's backward-sync
+        // broadcast (on_view_timeout) still runs for a lagging node.
+        engine.note_behind_hint(5);
+        assert!(engine.is_behind_hinted());
+        assert!(
+            engine.check_view_timeout(),
+            "a behind node must still fire the view timeout"
         );
     }
 

@@ -1765,7 +1765,7 @@ fn handle_create_token(
     }
 
     if !authenticated {
-        // No legacy symbol-hash fallback: deriving a "creator" from the token
+        //  symbol-hash fallback: deriving a "creator" from the token
         // symbol let any caller mint under an unauthenticated, spoofable
         // address. A creator must be a real authenticated identity — fail closed.
         return "Token creation requires an authenticated creator: provide a wallet_address \

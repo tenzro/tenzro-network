@@ -196,9 +196,15 @@ impl RpcClient {
         };
 
         let mut req = self.http.post(&self.rpc_url).json(&request);
-        if let Ok(bearer) = std::env::var("TENZRO_BEARER_JWT")
-            && !bearer.is_empty()
-        {
+        // Resolve the bearer: the env var wins (override / debugging), otherwise
+        // fall back to the session token persisted by `tenzro auth`, so
+        // privileged commands work after login without manually exporting
+        // TENZRO_BEARER_JWT.
+        let bearer_token = std::env::var("TENZRO_BEARER_JWT")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .or_else(|| crate::config::load_config().access_token.filter(|t| !t.is_empty()));
+        if let Some(ref bearer) = bearer_token {
             req = req.header("Authorization", format!("DPoP {}", bearer));
         }
         // A DPoP proof is per-request: it commits to this method and URL,
@@ -215,17 +221,16 @@ impl RpcClient {
         } else if crate::dpop::DpopKey::exists() {
             // Only when a bearer token is present: the proof binds to it via
             // `ath`, and an unbound proof authorises nothing on its own.
-            match std::env::var("TENZRO_BEARER_JWT") {
-                Ok(token) if !token.is_empty() => match crate::dpop::DpopKey::load()
-                    .and_then(|k| k.proof("POST", &self.rpc_url, Some(&token)))
+            if let Some(ref token) = bearer_token {
+                match crate::dpop::DpopKey::load()
+                    .and_then(|k| k.proof("POST", &self.rpc_url, Some(token)))
                 {
                     Ok(proof) => req = req.header("DPoP", proof),
                     // A key that will not load or sign is worth saying so
                     // about: the request would otherwise fail at the node
                     // with a bare "missing DPoP proof".
                     Err(e) => eprintln!("warning: could not mint a DPoP proof: {e}"),
-                },
-                _ => {}
+                }
             }
         }
         if let Some(ref api_key) = self.api_key_override {

@@ -17,7 +17,6 @@
 //!   supervises the subprocess and speaks JSON-RPC over stdin/stdout.
 //!   This is how most third-party MCPs are distributed (Stripe MCP, GitHub MCP,
 //!   Notion MCP, Linear MCP, Slack MCP, etc.).
-//! - `mcp-sse` — legacy SSE transport. Some older MCPs still use this.
 //!
 //! For all three modes, the operator's upstream credentials (their
 //! Stripe secret, OpenAI key, etc.) are injected into the MCP via
@@ -42,8 +41,6 @@ pub enum ToolTransportMode {
     /// Local MCP subprocess speaking JSON-RPC over stdin/stdout.
     /// Requires `spawn_spec` to be set.
     McpStdio,
-    /// Legacy MCP over Server-Sent Events.
-    McpSse,
     /// OpenAPI-compatible REST endpoint (POST JSON body).
     Api,
     /// Built-in node capability — handled inline.
@@ -57,7 +54,6 @@ impl ToolTransportMode {
         match self {
             ToolTransportMode::Mcp => "mcp",
             ToolTransportMode::McpStdio => "mcp-stdio",
-            ToolTransportMode::McpSse => "mcp-sse",
             ToolTransportMode::Api => "api",
             ToolTransportMode::Native => "native",
         }
@@ -70,7 +66,6 @@ impl ToolTransportMode {
         match s {
             "mcp" => Some(ToolTransportMode::Mcp),
             "mcp-stdio" => Some(ToolTransportMode::McpStdio),
-            "mcp-sse" => Some(ToolTransportMode::McpSse),
             "api" => Some(ToolTransportMode::Api),
             "native" => Some(ToolTransportMode::Native),
             _ => None,
@@ -252,34 +247,30 @@ pub struct ToolDefinition {
 
     /// Unix timestamp (seconds) of the last liveness signal. Liveness
     /// sweeper flips `status` to `Inactive` once the tool stays silent past
-    /// the configured TTL. Charitable serde default keeps pre-upgrade rows
-    /// alive until they actually go silent.
-    #[serde(default = "default_last_seen")]
+    /// the configured TTL. Mandatory field: rows are always written with it.
     pub last_seen_at: u64,
 
     // ── Plugin-host extensions (operator brokerage of custom + third-
-    // party MCPs). All optional; default-None preserves the legacy
-    // remote-Streamable-HTTP behavior for existing entries.
+    // party MCPs). Each field is mandatory in the serialized row; a
+    // value of `None` means the feature is not configured (e.g. public
+    // MCPs carry `upstream_auth: null`).
     /// Upstream credential injection for this tool. When `Some`, the
     /// operator's sealed secret (looked up by `sealed_secret_ref` at
     /// invocation time) is injected per the variant rules — into a
-    /// request header for `Mcp` / `McpSse` / `Api`, into an env var
+    /// request header for `Mcp` / `Api`, into an env var
     /// for `McpStdio`. Tenants NEVER see the underlying secret.
-    /// Default `None` means no credentials are injected (public MCPs).
-    #[serde(default)]
+    /// `None` means no credentials are injected (public MCPs).
     pub upstream_auth: Option<UpstreamAuth>,
 
     /// Subprocess spawn specification for `McpStdio` transport.
     /// Required when `tool_type == "mcp-stdio"`. Ignored for other
     /// transports.
-    #[serde(default)]
     pub spawn_spec: Option<StdioSpawnSpec>,
 
     /// Optional subject-level access list. When `Some(vec)`, only
     /// API-key subjects whose `subject` appears in `vec` are permitted
-    /// to invoke this tool. `None` (the default) means the tool is
+    /// to invoke this tool. `None` means the tool is
     /// open to any API key that is allowed by `AgentDelegation`.
-    #[serde(default)]
     pub allowed_to_subjects: Option<Vec<String>>,
 }
 

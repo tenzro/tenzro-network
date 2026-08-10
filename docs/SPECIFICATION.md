@@ -3047,9 +3047,9 @@ Tenzro Labs operates the initial public endpoints on `tenzro.xyz` with PQ-hybrid
 
 **Testnet configuration:**
 - Chain ID: 1337
-- Faucet: up to 1,010 TNZO per request, 24-hour cooldown per address. The ceiling covers the
-  1,000 TNZO model-provider admission bond **plus the gas to post it**; a grant exactly equal
-  to the bond leaves a new provider unable to pay its own bond transaction.
+- Faucet: up to 20,000 TNZO per request, 24-hour cooldown per address. The ceiling covers a
+  validator self-stake (10,000 TNZO) **plus the gas to post it** — so one grant is enough to
+  self-register as a voting validator — and also the smaller 1,000 TNZO model-provider bond.
 - Docker image: `<your-registry>/tenzro-node:<tag>` (build from the repo `Dockerfile`)
 
 ---

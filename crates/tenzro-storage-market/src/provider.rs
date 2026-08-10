@@ -1,4 +1,4 @@
-//! Storage provider daemon (D1): accept objects, persist erasure shards over
+//! Storage provider daemon: accept objects, persist erasure shards over
 //! the iroh content-addressed transport, and serve objects back on request.
 //!
 //! # Flow

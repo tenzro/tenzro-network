@@ -547,32 +547,6 @@ impl CapabilityRegistry {
         self.submit_attestation(signed)
     }
 
-    /// Legacy attestation API (CRITICAL #52 deprecated path).
-    ///
-    /// This method exists for backward compatibility with callers that
-    /// pass the attester public key + raw signature bytes directly. It
-    /// internally constructs a [`CapabilityAttestation`], stamps the
-    /// signature, and forwards to [`Self::submit_attestation`] which
-    /// performs the same eager verification + policy enforcement.
-    ///
-    /// New code should prefer [`Self::attest_capability_with_signer`]
-    /// which couples signing and submission into a single, race-free
-    /// call.
-    pub fn attest_capability(
-        &self,
-        agent_id: String,
-        capability: Capability,
-        tee_backed: bool,
-        attester_public_key: Option<PublicKey>,
-        signature: Option<Vec<u8>>,
-    ) -> Result<()> {
-        let mut attestation = CapabilityAttestation::new(agent_id, capability, tee_backed);
-        if let (Some(pk), Some(sig)) = (attester_public_key, signature) {
-            attestation = attestation.with_signature(pk, sig);
-        }
-        self.submit_attestation(attestation)
-    }
-
     /// Verifies a capability attestation signature
     pub fn verify_attestation(&self, attestation: &CapabilityAttestation) -> Result<bool> {
         // Check expiration
@@ -815,7 +789,11 @@ mod tests {
             .unwrap();
 
         registry
-            .attest_capability("agent1".to_string(), capability.clone(), true, None, None)
+            .submit_attestation(CapabilityAttestation::new(
+                "agent1".to_string(),
+                capability.clone(),
+                true,
+            ))
             .unwrap();
 
         let attestations = registry.get_attestations(&capability);
@@ -1009,12 +987,9 @@ mod tests {
         let pubkey = signer.public_key().clone();
 
         // Submit garbage signature bytes — must be rejected eagerly.
-        let result = registry.attest_capability(
-            "agent1".to_string(),
-            cap.clone(),
-            true,
-            Some(pubkey),
-            Some(vec![0u8; 64]),
+        let result = registry.submit_attestation(
+            CapabilityAttestation::new("agent1".to_string(), cap.clone(), true)
+                .with_signature(pubkey, vec![0u8; 64]),
         );
 
         match result {
@@ -1188,12 +1163,9 @@ mod tests {
         let pubkey = signer.public_key().clone();
 
         for _ in 0..3 {
-            let _ = registry.attest_capability(
-                "agent1".to_string(),
-                cap.clone(),
-                false,
-                Some(pubkey.clone()),
-                Some(vec![0u8; 64]),
+            let _ = registry.submit_attestation(
+                CapabilityAttestation::new("agent1".to_string(), cap.clone(), false)
+                    .with_signature(pubkey.clone(), vec![0u8; 64]),
             );
         }
         assert_eq!(registry.rejected_attestation_count(), 3);
@@ -1267,8 +1239,11 @@ mod tests {
         let cap = Capability::SmartContractExecution;
         let registry = registry_with(AttestationConfig::default(), "agent1", &cap);
 
-        let result =
-            registry.attest_capability("agent1".to_string(), cap.clone(), true, None, None);
+        let result = registry.submit_attestation(CapabilityAttestation::new(
+            "agent1".to_string(),
+            cap.clone(),
+            true,
+        ));
         match result {
             Err(AgentError::InvalidAttestationSignature { reason, .. }) => {
                 assert!(reason.contains("missing"), "unexpected reason: {}", reason);

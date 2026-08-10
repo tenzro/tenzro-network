@@ -3284,6 +3284,8 @@ fn non_empty(s: String) -> Option<String> {
 ///
 /// Recognized formats (in priority order):
 /// - `<tool_call>{json}</tool_call>` — Qwen 3, our preamble's canonical form
+/// - `<function=name><parameter=k>v</parameter></function>` — the same dialect
+///   without the wrapper, which Qwen 3.6 falls back to on long turns
 /// - `<|python_tag|>{json}<|eom_id|>` or `<|python_tag|>{json}` — Llama 3.x
 /// - `[TOOL_CALLS] [{json}, ...]` — Mistral/Mixtral function-calling
 /// - Bare top-level JSON object with `{"name":..., "input":...}` — fallback
@@ -3317,6 +3319,55 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
             calls.push(call);
         }
         text.replace_range(start..close_end, "");
+    }
+
+    // ── Unwrapped: <function=name><parameter=k>v</parameter></function> ─
+    //
+    // The dialect [`tool_grammar`] elicits, emitted *without* the `<tool_call>`
+    // wrapper the chat template teaches. `qwen3.6-35b-a3b-mtp` drops the
+    // wrapper on long agent turns over a real repository — the call keeps its
+    // shape, it loses its frame — and unread it reaches the caller as prose. An
+    // agent then reports an edit it narrated but never made, and the working
+    // tree is untouched while the turn claims success.
+    //
+    // The name is in the opening tag, not the body, so this cannot go through
+    // [`parse_xml_tool_call_body`], which infers the name from the head. A call
+    // is only taken when that name looks like an identifier: prose mentioning
+    // the tag names no function, and every real emission does. Running after
+    // the `<tool_call>` pass means a wrapped call is consumed there first, and
+    // one whose wrapper was truncated mid-generation is still recovered here.
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find("<function=") {
+        let start = from + rel;
+        let after_open = start + "<function=".len();
+        let Some(rel_gt) = text[after_open..].find('>') else {
+            break;
+        };
+        let name_end = after_open + rel_gt;
+        let Some(rel_end) = text[name_end..].find("</function>") else {
+            break;
+        };
+        let end = name_end + rel_end;
+        let close_end = end + "</function>".len();
+
+        let name = text[after_open..name_end]
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        if is_tool_name(&name) {
+            let body = text[name_end + 1..end].to_string();
+            calls.push(ToolCall {
+                id: format!("toolu_{}", uuid::Uuid::new_v4().simple()),
+                name,
+                input: serde_json::Value::Object(parse_xml_parameters(&body)),
+            });
+            text.replace_range(start..close_end, "");
+        } else {
+            // Not a call, so the span is someone's sentence. Skip past the
+            // opener rather than cutting the words after it; the tag itself is
+            // cleaned up with the other orphans at the end.
+            from = after_open;
+        }
     }
 
     // ── Anthropic-shaped: <tool_use id="…" name="…">{json}</tool_use> ─
@@ -3439,6 +3490,7 @@ fn strip_orphan_markers(text: &str) -> String {
         "</tool_call>",
         "<tool_call>",
         "</function>",
+        "</parameter>",
         "</invoke>",
         "<|eom_id|>",
         "<|python_tag|>",
@@ -3450,13 +3502,19 @@ fn strip_orphan_markers(text: &str) -> String {
         }
     }
     // An unclosed `<tool_use …>` opener leaves an attribute soup that is not a
-    // sentence; drop from the opener to the end of that tag.
-    while let Some(start) = out.find("<tool_use ") {
-        match out[start..].find('>') {
-            Some(rel) => out.replace_range(start..start + rel + 1, ""),
-            None => {
-                out.truncate(start);
-                break;
+    // sentence; drop from the opener to the end of that tag. `<function=…>` and
+    // `<parameter=…>` are the same shape from the unwrapped dialect: a call
+    // that parsed was cut with its body above, so an opener that is still here
+    // never closed, and only its tag is residue — the text between openers is
+    // left alone, since a truncated call is often the model's last words.
+    for opener in ["<tool_use ", "<function=", "<parameter="] {
+        while let Some(start) = out.find(opener) {
+            match out[start..].find('>') {
+                Some(rel) => out.replace_range(start..start + rel + 1, ""),
+                None => {
+                    out.truncate(start);
+                    break;
+                }
             }
         }
     }
@@ -3673,36 +3731,7 @@ fn repair_key_separators(s: &str) -> Option<String> {
 /// Returns `None` unless both a name and at least one delimiter were found, so
 /// prose that merely mentions the tags cannot masquerade as a call.
 fn parse_xml_tool_call_body(body: &str) -> Option<ToolCall> {
-    /// Text between the first `open` and the following `close`, plus the
-    /// offset just past `close`.
-    fn between<'a>(hay: &'a str, from: usize, open: &str, close: &str) -> Option<(&'a str, usize)> {
-        let s = hay[from..].find(open)? + from + open.len();
-        let e = hay[s..].find(close)? + s;
-        Some((&hay[s..e], e + close.len()))
-    }
-
-    let mut input = serde_json::Map::new();
-
-    // `<arg_key>k</arg_key> <arg_value>v</arg_value>` pairs.
-    let mut cursor = 0usize;
-    while let Some((key, after_key)) = between(body, cursor, "<arg_key>", "</arg_key>") {
-        let Some((value, after_value)) = between(body, after_key, "<arg_value>", "</arg_value>")
-        else {
-            break;
-        };
-        input.insert(key.trim().to_string(), xml_arg_value(value));
-        cursor = after_value;
-    }
-
-    // `<parameter=k>v</parameter>` pairs.
-    let mut cursor = 0usize;
-    while let Some((key, after_key)) = between(body, cursor, "<parameter=", ">") {
-        let Some((value, after_value)) = between(body, after_key, "", "</parameter>") else {
-            break;
-        };
-        input.insert(key.trim().to_string(), xml_arg_value(value));
-        cursor = after_value;
-    }
+    let input = parse_xml_parameters(body);
 
     // The name sits ahead of the first argument delimiter. Prefer the last
     // quoted string there — in `{"name">"read_file"</name>` that is the value
@@ -3736,6 +3765,64 @@ fn parse_xml_tool_call_body(body: &str) -> Option<ToolCall> {
         name,
         input: serde_json::Value::Object(input),
     })
+}
+
+/// The arguments an XML-dialect tool call carries, in either spelling:
+/// `<arg_key>k</arg_key><arg_value>v</arg_value>`, which GLM emits, and
+/// `<parameter=k>v</parameter>`, which [`tool_grammar`] elicits. Both passes
+/// run over the same body, so one that mixes the two keeps every pair.
+///
+/// Shared by the wrapped form, where the name has to be read out of the body,
+/// and the unwrapped `<function=…>` form, where the opening tag already
+/// carries it — the arguments are spelled identically in both.
+///
+/// [`tool_grammar`]: crate::tool_grammar
+fn parse_xml_parameters(body: &str) -> serde_json::Map<String, serde_json::Value> {
+    /// Text between the first `open` and the following `close`, plus the
+    /// offset just past `close`.
+    fn between<'a>(hay: &'a str, from: usize, open: &str, close: &str) -> Option<(&'a str, usize)> {
+        let s = hay[from..].find(open)? + from + open.len();
+        let e = hay[s..].find(close)? + s;
+        Some((&hay[s..e], e + close.len()))
+    }
+
+    let mut input = serde_json::Map::new();
+
+    // `<arg_key>k</arg_key> <arg_value>v</arg_value>` pairs.
+    let mut cursor = 0usize;
+    while let Some((key, after_key)) = between(body, cursor, "<arg_key>", "</arg_key>") {
+        let Some((value, after_value)) = between(body, after_key, "<arg_value>", "</arg_value>")
+        else {
+            break;
+        };
+        input.insert(key.trim().to_string(), xml_arg_value(value));
+        cursor = after_value;
+    }
+
+    // `<parameter=k>v</parameter>` pairs.
+    let mut cursor = 0usize;
+    while let Some((key, after_key)) = between(body, cursor, "<parameter=", ">") {
+        let Some((value, after_value)) = between(body, after_key, "", "</parameter>") else {
+            break;
+        };
+        input.insert(key.trim().to_string(), xml_arg_value(value));
+        cursor = after_value;
+    }
+
+    input
+}
+
+/// Whether a string can be the name of a tool.
+///
+/// The unwrapped `<function=…>` form has no JSON to fail on and no delimiter to
+/// insist on, so the name is the only evidence that a span is a call at all.
+/// Tool names are identifiers; a `<` followed by a sentence is prose. Bounded
+/// so a stray `<function=` early in a long answer cannot swallow it.
+fn is_tool_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
 }
 
 /// Coerce one XML-carried argument value. JSON first, so `3`, `true` and
@@ -4107,6 +4194,90 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].input["path"], "src/parser.rs");
+    }
+
+    /// The same dialect with no `<tool_call>` wrapper, which is what Qwen 3.6
+    /// emitted on a long turn over a 52k-line repository. Unread, the edit it
+    /// describes never happens while the turn reports success.
+    #[test]
+    fn extract_unwrapped_function_parameter_dialect() {
+        let raw = "I'll fix the failing test.\n\
+                   <function=edit_file>\n\
+                   <parameter=path>src/ledger.rs</parameter>\n\
+                   <parameter=line>42</parameter>\n\
+                   </function>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "edit_file");
+        assert_eq!(calls[0].input["path"], "src/ledger.rs");
+        assert_eq!(calls[0].input["line"], 42);
+        assert_eq!(text, "I'll fix the failing test.");
+    }
+
+    /// The literal shape attempt 1 of task E produced: a stray quote welded to
+    /// the tool name. The name is still unambiguous, and dropping the call over
+    /// one character loses the turn.
+    #[test]
+    fn extract_unwrapped_call_with_a_stray_quote_in_the_name() {
+        let raw = "<function=grep\">\n<parameter=pattern>TODO</parameter>\n</function>";
+        let (_text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1, "got {:?}", calls);
+        assert_eq!(calls[0].name, "grep");
+        assert_eq!(calls[0].input["pattern"], "TODO");
+    }
+
+    /// Several unwrapped calls in one turn, and the prose between them survives.
+    #[test]
+    fn extract_several_unwrapped_calls() {
+        let raw = "<function=read_file><parameter=path>a.rs</parameter></function>\n\
+                   then\n\
+                   <function=read_file><parameter=path>b.rs</parameter></function>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].input["path"], "a.rs");
+        assert_eq!(calls[1].input["path"], "b.rs");
+        assert_eq!(text, "then");
+    }
+
+    /// A wrapped call is consumed by the `<tool_call>` pass, not counted twice
+    /// by the unwrapped one that follows it.
+    #[test]
+    fn wrapped_dialect_is_not_extracted_twice() {
+        let raw = "<tool_call>\n<function=read_file>\n\
+                   <parameter=path>src/parser.rs</parameter>\n</function>\n</tool_call>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1, "got {:?}", calls);
+        assert!(text.is_empty(), "got {text:?}");
+    }
+
+    /// A wrapper truncated mid-generation still yields its call.
+    #[test]
+    fn unclosed_wrapper_still_yields_the_unwrapped_call() {
+        let raw = "<tool_call>\n<function=read_file>\n\
+                   <parameter=path>src/parser.rs</parameter>\n</function>";
+        let (_text, calls) = extract_tool_calls(raw);
+        assert_eq!(calls.len(), 1, "got {:?}", calls);
+        assert_eq!(calls[0].input["path"], "src/parser.rs");
+    }
+
+    /// Prose that mentions the unwrapped opener names no function, so there is
+    /// nothing to promote into a call — and the tag does not reach the user.
+    #[test]
+    fn unwrapped_dialect_does_not_invent_calls_from_prose() {
+        let raw = "The model emits <function=some name with spaces> and stops.</function>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert!(calls.is_empty(), "got {:?}", calls);
+        assert_eq!(text, "The model emits  and stops.");
+    }
+
+    /// An opener with no closing tag is residue, not an answer fragment: the
+    /// tag goes, the words the model wrote stay.
+    #[test]
+    fn unclosed_unwrapped_opener_is_stripped_from_the_text() {
+        let raw = "Reading the file now. <function=read_file>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert!(calls.is_empty(), "got {:?}", calls);
+        assert_eq!(text, "Reading the file now.");
     }
 
     /// Prose that merely mentions the tags is not a call — the XML fallback

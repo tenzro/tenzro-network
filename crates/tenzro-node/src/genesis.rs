@@ -77,10 +77,12 @@ pub const FAUCET_MIN_GRANT_TNZO: u128 = 100;
 /// address for 24h. A faucet whose grant equals the cheapest thing it exists
 /// to fund can never actually fund it.
 ///
-/// 10 TNZO of headroom is far more than one bond's gas (0.00032 TNZO at the
-/// 4× open-lane fee floor) so it also survives a few failed attempts and any
-/// future fee-floor rise, without approaching a balance worth farming.
-pub const FAUCET_MAX_GRANT_TNZO: u128 = 1_010;
+/// Sized to cover one validator self-stake (MIN_VALIDATOR_SELF_STAKE =
+/// 10,000 TNZO) in a single grant, plus headroom for gas and a few failed
+/// attempts, so a permissionless node can faucet once and self-register as a
+/// voting validator the same day. Still a hard ceiling that bounds per-request
+/// drain on a public faucet.
+pub const FAUCET_MAX_GRANT_TNZO: u128 = 20_000;
 
 /// Resolve how much TNZO one faucet request hands out, in whole TNZO.
 ///
@@ -287,9 +289,19 @@ fn install_erc8004_predeploys(
         code_count += 1;
 
         // --- Nonce (only write if non-zero; absent key reads as 0) ---
+        // Canonical home: CF_ACCOUNTS under `b"nonce:" + raw address`, exactly
+        // as `StateAdapter::commit()` writes runtime nonce updates, so the state
+        // root sees a single nonce location whether the nonce was set at genesis
+        // or by later execution (see `StateAdapter::compute_state_root`).
         if account.nonce > 0 {
-            let nonce_key = format!("nonce:{}", addr_hex_lower);
-            state_entries.push((nonce_key.into_bytes(), account.nonce.to_le_bytes().to_vec()));
+            let raw_addr = parse_hex_bytes(&addr_hex_lower, "predeploy address")?;
+            let mut nonce_key = b"nonce:".to_vec();
+            nonce_key.extend_from_slice(&raw_addr);
+            token_entries.push(WriteOp::Put {
+                cf: CF_ACCOUNTS.to_string(),
+                key: nonce_key,
+                value: account.nonce.to_le_bytes().to_vec(),
+            });
         }
 
         // --- Storage slots ---
@@ -315,7 +327,9 @@ fn install_erc8004_predeploys(
         let balance = parse_hex_u128(&account.balance, "predeploy balance")?;
         if balance > 0 {
             let padded = evm_address_to_tnzo32(&evm_addr)?;
-            // Canonical: CF_ACCOUNTS under tnzo_balance_key layout.
+            // Single canonical home: CF_ACCOUNTS under tnzo_balance_key layout.
+            // No CF_STATE balance mirror — balances are read from CF_ACCOUNTS
+            // and the state root is cache-derived.
             let mut token_key = b"balance:".to_vec();
             token_key.extend_from_slice(&padded);
             token_entries.push(WriteOp::Put {
@@ -323,10 +337,6 @@ fn install_erc8004_predeploys(
                 key: token_key,
                 value: balance.to_le_bytes().to_vec(),
             });
-            // Mirror: CF_STATE legacy key (hex-encoded 32-byte addr) so any
-            // legacy reader still sees the same balance.
-            let legacy_key = format!("balance:{}", hex::encode(padded));
-            state_entries.push((legacy_key.into_bytes(), balance.to_le_bytes().to_vec()));
             *total_supply = total_supply.saturating_add(balance);
             funded_count += 1;
         }
@@ -396,11 +406,8 @@ pub async fn initialize_genesis(
             .await
             .map_err(|e| NodeError::Other(format!("Failed to store genesis account: {}", e)))?;
 
-        // Store the full u128 balance in CF_STATE for the VM/token system
-        let balance_key = format!("balance:{}", hex::encode(address.as_bytes()));
-        state_entries.push((balance_key.into_bytes(), balance_raw.to_le_bytes().to_vec()));
-
-        // Also store in CF_ACCOUNTS with TnzoToken-compatible key format (balance:{raw_bytes})
+        // Single canonical home: CF_ACCOUNTS with the TnzoToken-compatible key
+        // format (balance:{raw_bytes}). No CF_STATE balance mirror.
         let mut token_key = b"balance:".to_vec();
         token_key.extend_from_slice(address.as_bytes());
         token_entries.push(WriteOp::Put {
@@ -870,7 +877,29 @@ fn compute_genesis_state_root(genesis: &GenesisConfig, predeploys_commitment: &H
 ///
 /// Callers: invoked once at node startup, immediately after
 /// `initialize_genesis()`.
-pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<()> {
+/// Deterministic faucet key material. Every node MUST derive the SAME faucet
+/// address: the provisioning step migrates the 1B TNZO genesis balance to this
+/// address, so a random per-node key diverges each node's genesis state, breaks
+/// the state root, and makes joiners reject the founder's blocks. Deriving from
+/// the chain id makes all nodes agree. (This is a testnet dispenser whose key is
+/// intentionally public-derivable; drain is bounded by the per-address cooldown.)
+fn faucet_ed25519_seed(chain_id: u64) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"tenzro-faucet-ed25519-v1");
+    h.update(chain_id.to_le_bytes());
+    h.finalize().into()
+}
+
+fn faucet_pq_seed(chain_id: u64) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"tenzro-faucet-pq-v1");
+    h.update(chain_id.to_le_bytes());
+    h.finalize().into()
+}
+
+pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>, chain_id: u64) -> Result<()> {
     // Idempotent check: if a privkey is already persisted, ensure the
     // ML-DSA-65 leg is also present and back-fill it if not. This handles
     // upgrades from a classical-only node that only persisted the Ed25519 key.
@@ -880,7 +909,8 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<(
             return Ok(());
         }
         info!("Back-filling faucet PQ signing key (hybrid PQ migration)");
-        let pq_key = tenzro_crypto::pq::MlDsaSigningKey::generate();
+        let pq_key = tenzro_crypto::pq::MlDsaSigningKey::from_seed(&faucet_pq_seed(chain_id))
+            .map_err(|e| NodeError::Other(format!("Failed to derive faucet PQ key: {}", e)))?;
         let pq_seed_hex = hex::encode(pq_key.seed_bytes());
         let pq_vk_hex = hex::encode(pq_key.verifying_key_bytes());
         let ops = vec![
@@ -904,8 +934,11 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<(
     info!("Provisioning faucet signing key (one-time bootstrap)");
 
     // Generate a fresh Ed25519 keypair for the faucet.
-    let keypair = KeyPair::generate(KeyType::Ed25519)
-        .map_err(|e| NodeError::Other(format!("Failed to generate faucet keypair: {}", e)))?;
+    let keypair = KeyPair::from_secret_key(tenzro_crypto::SecretKey::new(
+        KeyType::Ed25519,
+        faucet_ed25519_seed(chain_id).to_vec(),
+    ))
+    .map_err(|e| NodeError::Other(format!("Failed to derive faucet keypair: {}", e)))?;
     let pubkey_bytes = keypair.public_key().as_bytes().to_vec();
     let privkey_bytes = keypair.secret_key().as_bytes().to_vec();
 
@@ -945,7 +978,8 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<(
     // Provision the faucet's PQ signing identity (hybrid migration).
     // The seed is the deterministic source of truth — the verifying key is
     // rederived from it on every load.
-    let pq_key = tenzro_crypto::pq::MlDsaSigningKey::generate();
+    let pq_key = tenzro_crypto::pq::MlDsaSigningKey::from_seed(&faucet_pq_seed(chain_id))
+        .map_err(|e| NodeError::Other(format!("Failed to derive faucet PQ key: {}", e)))?;
     let pq_seed_hex = hex::encode(pq_key.seed_bytes());
     let pq_vk_hex = hex::encode(pq_key.verifying_key_bytes());
 
@@ -1166,7 +1200,11 @@ mod tests {
     fn faucet_grant_is_clamped_to_the_permitted_range() {
         assert_eq!(resolve_faucet_grant_tnzo(500), 500);
         assert_eq!(resolve_faucet_grant_tnzo(1), FAUCET_MIN_GRANT_TNZO);
-        assert_eq!(resolve_faucet_grant_tnzo(10_000), FAUCET_MAX_GRANT_TNZO);
+        // Within the raised range now (covers a validator self-stake).
+        assert_eq!(resolve_faucet_grant_tnzo(10_000), 10_000);
+        assert_eq!(resolve_faucet_grant_tnzo(20_000), 20_000);
+        // Still hard-capped above the ceiling.
+        assert_eq!(resolve_faucet_grant_tnzo(50_000), FAUCET_MAX_GRANT_TNZO);
     }
 
     #[tokio::test]
@@ -1176,7 +1214,7 @@ mod tests {
         let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
 
         let genesis_config = GenesisConfig {
-            version: crate::config::MIN_GENESIS_VERSION,
+            version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
             validators: vec![],
@@ -1211,7 +1249,7 @@ mod tests {
         let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
 
         let genesis_config = GenesisConfig {
-            version: crate::config::MIN_GENESIS_VERSION,
+            version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
             validators: vec![],
@@ -1259,7 +1297,7 @@ mod tests {
     #[test]
     fn test_compute_state_root() {
         let config1 = GenesisConfig {
-            version: crate::config::MIN_GENESIS_VERSION,
+            version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
             validators: vec![],
@@ -1273,7 +1311,7 @@ mod tests {
         };
 
         let config2 = GenesisConfig {
-            version: crate::config::MIN_GENESIS_VERSION,
+            version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
             validators: vec![],
@@ -1298,7 +1336,7 @@ mod tests {
 
     fn chain_compat_genesis(chain_id: u64, balance: u128) -> GenesisConfig {
         GenesisConfig {
-            version: crate::config::MIN_GENESIS_VERSION,
+            version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id,
             timestamp: 0,
             validators: vec![],

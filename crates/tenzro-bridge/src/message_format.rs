@@ -468,9 +468,12 @@ pub fn verify_inner_message(
             "inbound TenzroMessage hash mismatch".into(),
         ));
     }
-    if message.signature.is_some() && !message.verify_signature().unwrap_or(false) {
+    // Every inbound TenzroMessage must carry a valid signature. An unsigned
+    // message (signature.is_none() ⇒ verify_signature() == Ok(false)) is
+    // rejected — there is  unsigned-message path.
+    if !message.verify_signature().unwrap_or(false) {
         return Err(BridgeError::InvalidParameter(
-            "inbound TenzroMessage signature verification failed".into(),
+            "inbound TenzroMessage is unsigned or its signature failed verification".into(),
         ));
     }
     if let Some(tracker) = nonce_tracker {

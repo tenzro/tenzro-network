@@ -246,6 +246,11 @@ impl SetupCmd {
                 "You (passkey)"
             },
         );
+        // Autonomous operator identity is only meaningful if the key is truly
+        // hardware-sealed. Require it for every key write in this process so a
+        // TPM permission/absence failure becomes a hard error instead of a
+        // silent plaintext fallback.
+        tenzro_node::keygen::set_require_hw_seal(autonomous);
         wiz_gap();
 
         // ---- 4. Roles ------------------------------------------------
@@ -264,7 +269,15 @@ impl SetupCmd {
 
         // ---- 5. Identity and wallet (blocking) -----------------------
         wiz_section("Identity and wallet");
-        if autonomous {
+        if autonomous && self.data_dir.is_some() {
+            // A scoped run (explicit --data-dir) must not anchor a real
+            // on-chain machine identity — that would register against the live
+            // network from an isolated/test sandbox. Skip the on-chain step;
+            // the local keyset + scoped config are still written.
+            wiz_note(
+                "Scoped --data-dir run: skipping on-chain autonomous identity registration.",
+            );
+        } else if autonomous {
             // Deliberately not the `join` path: that provisions a MicroNode
             // whose `participant_type` is human/agent/bot, none of which
             // describes a machine that answers for itself. `registerIdentity`
@@ -578,7 +591,14 @@ impl SetupCmd {
         roles: &RoleSet,
         access: &[String],
     ) -> Result<()> {
-        let mut cfg = config::load_config();
+        // When --data-dir is given, scope config to that directory so an
+        // isolated run neither reads nor mutates the global
+        // ~/.tenzro/config.json.
+        let scoped = self.data_dir.as_ref().map(|d| tenzro_types::paths::expand_tilde(d));
+        let mut cfg = match &scoped {
+            Some(dir) => config::load_config_in(dir),
+            None => config::load_config(),
+        };
         cfg.display_name = Some(display_name.to_string());
         cfg.machine_name = Some(machine_name.to_string());
         cfg.public = Some(public);
@@ -603,7 +623,10 @@ impl SetupCmd {
                     .unwrap_or_else(|| "https://rpc.tenzro.xyz".to_string()),
             );
         }
-        config::save_config(&cfg)
+        match &scoped {
+            Some(dir) => config::save_config_in(dir, &cfg),
+            None => config::save_config(&cfg),
+        }
     }
 
     async fn run_public_validator(&self, interactive: bool, name: &str) -> Result<()> {
@@ -714,8 +737,8 @@ impl SetupCmd {
             let founder_address = hex::encode(&pubkeys.ed25519);
             let mut g = String::new();
             g.push_str(&format!(
-                "version = 3\nchain_id = {}\ntimestamp = 0\n\n",
-                chain_id
+                "version = {}\nchain_id = {}\ntimestamp = 0\n\n",
+                tenzro_node::config::GENESIS_SCHEMA_VERSION, chain_id
             ));
             g.push_str(&format!("# founding validator (peer_id={})\n", peer_id));
             g.push_str(&pubkeys.to_genesis_toml(self.stake));

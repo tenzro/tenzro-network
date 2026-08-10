@@ -475,10 +475,6 @@ impl CantonClientConfig {
         format!("{}://{}:{}", scheme, self.host, self.admin_api_port)
     }
 
-    /// Backwards-compatible alias for ledger_api_endpoint
-    pub fn endpoint(&self) -> String {
-        self.ledger_api_endpoint()
-    }
 }
 
 /// Connection state for a gRPC channel

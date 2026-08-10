@@ -9,6 +9,7 @@ use crate::did::TenzroDid;
 use crate::error::{IdentityError, Result};
 use crate::identity::{
     IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry, TenzroIdentity,
+    WalletRef,
 };
 use crate::wallet_binding::{WalletBinder, WalletBinding};
 use chrono::Utc;
@@ -170,6 +171,16 @@ pub struct IdentityRegistry {
     seen_credential_ids: DashSet<String>,
     /// Username → DID mapping for on-chain username uniqueness
     usernames: DashMap<String, String>,
+    /// DID → *additional* MPC wallets bound to that identity.
+    ///
+    /// The primary wallet lives on the identity record itself
+    /// (`TenzroIdentity::wallet_id` / `wallet_address`); this index holds every
+    /// extra wallet an identity accrues via `tenzro_addWallet`, so a lost or
+    /// corrupt primary is a degraded state rather than a full lockout. Keyed by
+    /// DID, each value is the ordered list of that identity's non-primary
+    /// wallets. Write-through persisted under `wallets:<did>` in
+    /// `CF_IDENTITIES` and hydrated in [`Self::with_storage`].
+    wallet_index: DashMap<String, Vec<WalletRef>>,
     /// Optional wallet binder for auto-provisioning
     wallet_binder: Option<Arc<WalletBinder>>,
     /// Fee schedule for registration operations
@@ -221,6 +232,7 @@ impl IdentityRegistry {
             revocations: DashMap::new(),
             seen_credential_ids: DashSet::new(),
             usernames: DashMap::new(),
+            wallet_index: DashMap::new(),
             wallet_binder: None,
             fee_schedule: ServiceFeeSchedule::default(),
             storage: None,
@@ -242,6 +254,7 @@ impl IdentityRegistry {
             revocations: DashMap::new(),
             seen_credential_ids: DashSet::new(),
             usernames: DashMap::new(),
+            wallet_index: DashMap::new(),
             wallet_binder: Some(wallet_binder),
             fee_schedule: ServiceFeeSchedule::default(),
             storage: None,
@@ -263,6 +276,7 @@ impl IdentityRegistry {
             revocations: DashMap::new(),
             seen_credential_ids: DashSet::new(),
             usernames: DashMap::new(),
+            wallet_index: DashMap::new(),
             wallet_binder: None,
             fee_schedule,
             storage: None,
@@ -391,11 +405,40 @@ impl IdentityRegistry {
             }
         }
 
+        // Hydrate DID → additional-wallet mappings from storage. Keys are
+        // `wallets:<did>`; each value is a bincode `Vec<WalletRef>`.
+        let wallet_index = DashMap::new();
+        match storage.get_keys_with_prefix(CF_IDENTITIES, b"wallets:") {
+            Ok(keys) => {
+                let mut loaded_wallets = 0usize;
+                for key in &keys {
+                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key)
+                        && let Ok(wallets) = bincode::deserialize::<Vec<WalletRef>>(&data)
+                        && let Ok(did) = std::str::from_utf8(key)
+                        && let Some(did) = did.strip_prefix("wallets:")
+                    {
+                        wallet_index.insert(did.to_string(), wallets);
+                        loaded_wallets += 1;
+                    }
+                }
+                if loaded_wallets > 0 {
+                    info!(
+                        "Loaded additional-wallet sets for {} identities from storage",
+                        loaded_wallets
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load additional-wallet mappings from storage: {}", e);
+            }
+        }
+
         Self {
             identities,
             revocations,
             seen_credential_ids,
             usernames,
+            wallet_index,
             wallet_binder: None,
             fee_schedule: ServiceFeeSchedule::default(),
             storage: Some(storage),
@@ -1484,10 +1527,8 @@ impl IdentityRegistry {
         if !identity.is_machine() {
             return;
         }
-        // Map the bound wallet's hex string to a 20-byte EVM address. If the
-        // wallet binder produced a non-EVM placeholder (legacy stub), zero out
-        // the address — the on-chain record still resolves, just without a
-        // wallet pointer.
+        // Derive the 20-byte EVM address from the bound wallet's 32-byte
+        // Tenzro address (trailing 20 bytes; see `derive_evm_address`).
         let agent_address = derive_evm_address(&identity.wallet_address);
         // Metadata URI = the canonical DID URL. Future: route through a
         // gateway that resolves to the W3C DID document JSON.
@@ -1610,6 +1651,194 @@ impl IdentityRegistry {
     /// backend).
     pub fn find_wallet_id_for_did(&self, did: &str) -> Result<String> {
         Ok(self.resolve(did)?.wallet_id)
+    }
+
+    /// Write-through persist the additional-wallet set for `did`.
+    fn persist_wallet_index(&self, did: &str, wallets: &[WalletRef]) {
+        if let Some(ref store) = self.storage {
+            let key = format!("wallets:{}", did);
+            match bincode::serialize(wallets) {
+                Ok(data) => {
+                    if let Err(e) = store.put(CF_IDENTITIES, key.as_bytes(), &data) {
+                        warn!("Failed to persist wallet index for {}: {}", did, e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to serialize wallet index for {}: {}", did, e);
+                }
+            }
+        }
+    }
+
+    /// Binds an *additional* MPC wallet to an already-registered identity.
+    ///
+    /// The identity keeps its existing primary (`wallet_id` / `wallet_address`);
+    /// `wallet` is appended to the identity's additional-wallet set so a lost or
+    /// corrupt primary no longer locks the identity out — it can sign from, or be
+    /// re-homed onto (`set_primary_wallet`), any wallet it owns.
+    ///
+    /// Fail-closed: the DID must resolve to a known, active local identity, and
+    /// the wallet must not already be bound to this or any other identity (no
+    /// silent cross-identity aliasing). Returns [`IdentityError::NotFound`] for
+    /// an unknown DID and [`IdentityError::WalletError`] for a duplicate.
+    pub fn add_wallet(&self, did: &str, wallet: WalletRef) -> Result<()> {
+        // The DID must be a known local identity — we never attach a wallet to a
+        // remotely-resolved or absent record.
+        let identity = self
+            .identities
+            .get(did)
+            .ok_or_else(|| IdentityError::NotFound(did.to_string()))?;
+        if identity.status != IdentityStatus::Active {
+            return Err(IdentityError::NotActive(did.to_string()));
+        }
+        // Reject a wallet that already belongs to the primary of this identity.
+        if identity.wallet_id == wallet.wallet_id || identity.wallet_address == wallet.address {
+            return Err(IdentityError::WalletError(format!(
+                "wallet {} is already the primary wallet of {}",
+                wallet.wallet_id, did
+            )));
+        }
+        drop(identity);
+
+        // Reject a wallet already bound to any identity, primary or additional.
+        if let Some(owner) = self.find_did_by_wallet_id(&wallet.wallet_id) {
+            return Err(IdentityError::WalletError(format!(
+                "wallet {} is already bound to identity {}",
+                wallet.wallet_id, owner
+            )));
+        }
+        if self
+            .wallet_index
+            .iter()
+            .any(|e| e.value().iter().any(|w| w.wallet_id == wallet.wallet_id))
+        {
+            return Err(IdentityError::WalletError(format!(
+                "wallet {} is already bound as an additional wallet",
+                wallet.wallet_id
+            )));
+        }
+
+        let mut entry = self.wallet_index.entry(did.to_string()).or_default();
+        entry.push(wallet);
+        let snapshot = entry.clone();
+        drop(entry);
+        self.persist_wallet_index(did, &snapshot);
+        info!(
+            "Bound additional wallet to identity {} (now {} additional wallet(s))",
+            did,
+            snapshot.len()
+        );
+        Ok(())
+    }
+
+    /// Returns every wallet an identity owns, primary first, then additional
+    /// wallets in bind order. Fail-closed: errors if `did` is unknown.
+    pub fn wallets_for_did(&self, did: &str) -> Result<Vec<WalletRef>> {
+        let identity = self.resolve(did)?;
+        let mut wallets = vec![WalletRef {
+            wallet_id: identity.wallet_id.clone(),
+            address: identity.wallet_address,
+            pq_verifying_key: identity.pq_verifying_key.clone(),
+            bls_verifying_key: identity.bls_verifying_key.clone(),
+        }];
+        if let Some(extra) = self.wallet_index.get(did) {
+            wallets.extend(extra.value().iter().cloned());
+        }
+        Ok(wallets)
+    }
+
+    /// `from`-aware wallet resolution for the auth-mediated signing path.
+    ///
+    /// * `from == None` → the identity's **primary** wallet id.
+    /// * `from == Some(addr)` → the wallet id (primary or additional) whose
+    ///   address equals `addr`, **only** if that wallet is owned by `did`.
+    ///
+    /// Fail-closed: a `from` address that does not belong to any wallet owned by
+    /// `did` is rejected with [`IdentityError::WalletError`] — never a silent
+    /// fallback to the primary wallet, which is exactly the confused-deputy hole
+    /// this closes. An unknown DID errors via [`Self::resolve`].
+    pub fn resolve_wallet_for_did_from(
+        &self,
+        did: &str,
+        from: Option<&Address>,
+    ) -> Result<String> {
+        let identity = self.resolve(did)?;
+        let from = match from {
+            None => return Ok(identity.wallet_id),
+            Some(addr) => addr,
+        };
+        if identity.wallet_address == *from {
+            return Ok(identity.wallet_id);
+        }
+        if let Some(extra) = self.wallet_index.get(did)
+            && let Some(w) = extra.value().iter().find(|w| w.address == *from)
+        {
+            return Ok(w.wallet_id.clone());
+        }
+        Err(IdentityError::WalletError(format!(
+            "'from' address {} is not owned by identity {}",
+            from, did
+        )))
+    }
+
+    /// Promotes an already-bound wallet to be the identity's primary.
+    ///
+    /// The current primary is demoted into the additional-wallet set and the
+    /// named `wallet_id` — which must already be owned by `did` — becomes the
+    /// primary, taking over `wallet_id` / `wallet_address` and the identity's
+    /// exposed ML-DSA-65 + BLS verifying keys (so validator vote aggregation and
+    /// hybrid auth track the new signing wallet). A no-op if `wallet_id` is
+    /// already primary.
+    ///
+    /// Fail-closed: `wallet_id` not owned by `did` is rejected — an identity
+    /// cannot adopt a wallet it does not hold.
+    pub fn set_primary_wallet(&self, did: &str, wallet_id: &str) -> Result<()> {
+        let mut identity = self
+            .identities
+            .get_mut(did)
+            .ok_or_else(|| IdentityError::NotFound(did.to_string()))?;
+
+        if identity.wallet_id == wallet_id {
+            return Ok(());
+        }
+
+        let mut extra = self.wallet_index.entry(did.to_string()).or_default();
+        let pos = extra
+            .iter()
+            .position(|w| w.wallet_id == wallet_id)
+            .ok_or_else(|| {
+                IdentityError::WalletError(format!(
+                    "wallet {} is not owned by identity {}",
+                    wallet_id, did
+                ))
+            })?;
+
+        // Snapshot the old primary as a demoted WalletRef, install the new one.
+        let new_primary = extra.remove(pos);
+        let old_primary = WalletRef {
+            wallet_id: std::mem::replace(&mut identity.wallet_id, new_primary.wallet_id),
+            address: std::mem::replace(&mut identity.wallet_address, new_primary.address),
+            pq_verifying_key: std::mem::replace(
+                &mut identity.pq_verifying_key,
+                new_primary.pq_verifying_key,
+            ),
+            bls_verifying_key: std::mem::replace(
+                &mut identity.bls_verifying_key,
+                new_primary.bls_verifying_key,
+            ),
+        };
+        extra.push(old_primary);
+        identity.updated_at = Utc::now();
+
+        let extra_snapshot = extra.clone();
+        let identity_snapshot = identity.clone();
+        drop(extra);
+        drop(identity);
+
+        self.persist_identity(did, &identity_snapshot);
+        self.persist_wallet_index(did, &extra_snapshot);
+        info!("Set primary wallet of identity {} to {}", did, wallet_id);
+        Ok(())
     }
 
     /// Reverse-lookup: find the local DID whose auto-provisioned MPC wallet
@@ -2685,6 +2914,109 @@ impl IdentityRegistry {
         }
         self.identities.insert(key, identity);
         Ok(())
+    }
+
+    /// Mirror a `RegisterIdentity` record decoded from an `IdentityRegister`
+    /// consensus log into the local read model (TDIP).
+    ///
+    /// This is what makes an identity created on ANY node resolve on ALL
+    /// nodes: the VM already enforced DID uniqueness against consensus state
+    /// and every node re-executed the same ordered transaction, so here we
+    /// only reflect that decision into the DID→identity map + RocksDB
+    /// (`CF_IDENTITIES`) that `resolve` reads from.
+    ///
+    /// Idempotent and origin-safe: if the DID already exists locally we leave
+    /// it untouched — the origin node holds the authoritative, richer record
+    /// (credentials, services, full wallet metadata), and re-org / restart
+    /// replays must not clobber it with the leaner wire projection. Returns
+    /// `Ok(true)` when a new record was landed, `Ok(false)` when the DID was
+    /// already known.
+    ///
+    /// Fail-closed on malformed keys: the reconstructed record must carry a
+    /// well-formed ML-DSA-65 (1952-byte) and BLS (48-byte) verifying key, or
+    /// it would fail to hydrate from its own canonical bytes on restart, so a
+    /// payload without them is rejected rather than persisted.
+    pub fn upsert_from_chain(
+        &self,
+        payload: &tenzro_types::identity::RegisterIdentityPayload,
+    ) -> Result<bool> {
+        use crate::identity::ML_DSA_65_VERIFYING_KEY_LEN;
+
+        if self.identities.contains_key(&payload.did) {
+            return Ok(false);
+        }
+
+        if payload.pq_verifying_key.len() != ML_DSA_65_VERIFYING_KEY_LEN {
+            return Err(IdentityError::InvalidPublicKey(format!(
+                "replicated identity {} has malformed ML-DSA-65 verifying key ({} bytes)",
+                payload.did,
+                payload.pq_verifying_key.len()
+            )));
+        }
+        if payload.bls_verifying_key.len() != crate::identity::BLS_G1_COMPRESSED_LEN {
+            return Err(IdentityError::InvalidPublicKey(format!(
+                "replicated identity {} has malformed BLS verifying key ({} bytes)",
+                payload.did,
+                payload.bls_verifying_key.len()
+            )));
+        }
+
+        let did = TenzroDid::parse(&payload.did)
+            .map_err(|e| IdentityError::InvalidDid(format!("{}: {e}", payload.did)))?;
+
+        let identity_data = match payload.identity_type.as_str() {
+            "human" => IdentityData::Human {
+                display_name: payload.display_name.clone(),
+                kyc_tier: KycTier::Unverified,
+                controlled_machines: Vec::new(),
+            },
+            "institution" => IdentityData::Institution {
+                legal_name: payload.display_name.clone(),
+                lei: String::new(),
+                kyb_tier: KycTier::Unverified,
+                vlei_credential_id: None,
+                controlled_machines: Vec::new(),
+                country_iso2: None,
+            },
+            // Default to machine for "machine" and any unrecognized class —
+            // the VM validated identity_type before this record was emitted.
+            _ => IdentityData::Machine {
+                capabilities: Vec::new(),
+                delegation_scope: DelegationScope::default(),
+                controller_did: None,
+                reputation: 0,
+                tenzro_agent_id: None,
+                is_seed_agent: false,
+                erc8004_agent_id: None,
+            },
+        };
+
+        let identity = TenzroIdentity {
+            did,
+            public_keys: vec![PublicKeyInfo {
+                key_id: "key-1".to_string(),
+                key_type: payload.key_type.clone(),
+                public_key: payload.controller_pubkey.clone(),
+                purposes: vec![KeyPurpose::Authentication, KeyPurpose::AssertionMethod],
+            }],
+            identity_data,
+            status: IdentityStatus::Active,
+            wallet_address: payload.wallet_address,
+            wallet_id: payload.wallet_id.clone(),
+            pq_verifying_key: payload.pq_verifying_key.clone(),
+            bls_verifying_key: payload.bls_verifying_key.clone(),
+            credentials: Vec::new(),
+            services: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: payload.metadata.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            username: None,
+        };
+
+        self.persist_identity(&payload.did, &identity);
+        self.identities.insert(payload.did.clone(), identity);
+        info!(did = %payload.did, "Mirrored replicated identity from consensus (TDIP)");
+        Ok(true)
     }
 
     /// Registers a unique username for an identity.
@@ -4296,5 +4628,244 @@ mod tests {
 
         assert_eq!(pc.actor_bond, Some(amount));
         assert_eq!(pc.controller_bond_aggregate, Some(amount));
+    }
+
+    // ----- multiple wallets per identity + from-aware resolution -----
+
+    /// Builds a distinct additional wallet reference for tests.
+    fn test_wallet_ref(wallet_id: &str, addr_seed: u8) -> WalletRef {
+        WalletRef {
+            wallet_id: wallet_id.to_string(),
+            address: Address::new([addr_seed; 32]),
+            pq_verifying_key: vec![addr_seed; 8],
+            bls_verifying_key: vec![addr_seed; 4],
+        }
+    }
+
+    #[tokio::test]
+    async fn add_wallet_binds_second_wallet_under_did() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+        let did = alice.did_string();
+
+        // Registration binds exactly one (primary) wallet.
+        let before = registry.wallets_for_did(&did).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].wallet_id, alice.wallet_id);
+
+        registry
+            .add_wallet(&did, test_wallet_ref("wallet-2", 0xB2))
+            .unwrap();
+
+        let after = registry.wallets_for_did(&did).unwrap();
+        assert_eq!(after.len(), 2, "identity should now hold two wallets");
+        assert_eq!(after[0].wallet_id, alice.wallet_id, "primary stays first");
+        assert_eq!(after[1].wallet_id, "wallet-2");
+    }
+
+    #[tokio::test]
+    async fn add_wallet_rejects_duplicate_and_unknown_did() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(2), "Alice".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+        let did = alice.did_string();
+
+        registry
+            .add_wallet(&did, test_wallet_ref("wallet-2", 0xB2))
+            .unwrap();
+        // Same wallet_id again → rejected (no silent aliasing).
+        assert!(
+            registry
+                .add_wallet(&did, test_wallet_ref("wallet-2", 0xC3))
+                .is_err()
+        );
+        // Unknown DID → fail-closed.
+        assert!(
+            registry
+                .add_wallet("did:tenzro:human:ghost:uuid", test_wallet_ref("wallet-9", 0x99))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn from_aware_resolution_selects_named_wallet() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(3), "Alice".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+        let did = alice.did_string();
+        let primary_addr = alice.wallet_address;
+
+        let second = test_wallet_ref("wallet-2", 0xB2);
+        // Guard: the fixture address must differ from the primary.
+        assert_ne!(second.address, primary_addr);
+        registry.add_wallet(&did, second.clone()).unwrap();
+
+        // No `from` → primary.
+        assert_eq!(
+            registry.resolve_wallet_for_did_from(&did, None).unwrap(),
+            alice.wallet_id
+        );
+        // `from` == primary address → primary wallet.
+        assert_eq!(
+            registry
+                .resolve_wallet_for_did_from(&did, Some(&primary_addr))
+                .unwrap(),
+            alice.wallet_id
+        );
+        // `from` == second wallet's address → the second wallet.
+        assert_eq!(
+            registry
+                .resolve_wallet_for_did_from(&did, Some(&second.address))
+                .unwrap(),
+            "wallet-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn from_aware_resolution_rejects_unowned_from() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(4), "Alice".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+        let bob = registry
+            .register_human_with_fee(test_pubkey(5), "Bob".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+
+        // Bob's primary address is not owned by Alice → fail-closed, never a
+        // silent fallback to Alice's primary wallet.
+        let denied = registry.resolve_wallet_for_did_from(&alice.did_string(), Some(&bob.wallet_address));
+        assert!(denied.is_err(), "a `from` Alice does not own must be rejected");
+
+        // An address owned by nobody is likewise rejected.
+        let nobody = Address::new([0xEE; 32]);
+        assert!(
+            registry
+                .resolve_wallet_for_did_from(&alice.did_string(), Some(&nobody))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_primary_wallet_promotes_and_swaps() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(6), "Alice".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+        let did = alice.did_string();
+        let old_primary_id = alice.wallet_id.clone();
+        let old_primary_addr = alice.wallet_address;
+
+        let second = test_wallet_ref("wallet-2", 0xB2);
+        registry.add_wallet(&did, second.clone()).unwrap();
+
+        // Promote the second wallet to primary.
+        registry.set_primary_wallet(&did, "wallet-2").unwrap();
+
+        // Primary resolution now returns the promoted wallet, and its verifying
+        // keys have moved onto the identity record.
+        let identity = registry.resolve(&did).unwrap();
+        assert_eq!(identity.wallet_id, "wallet-2");
+        assert_eq!(identity.wallet_address, second.address);
+        assert_eq!(identity.pq_verifying_key, second.pq_verifying_key);
+        assert_eq!(identity.bls_verifying_key, second.bls_verifying_key);
+
+        // The old primary is demoted but still owned → both remain resolvable.
+        assert_eq!(
+            registry.resolve_wallet_for_did_from(&did, None).unwrap(),
+            "wallet-2"
+        );
+        assert_eq!(
+            registry
+                .resolve_wallet_for_did_from(&did, Some(&old_primary_addr))
+                .unwrap(),
+            old_primary_id
+        );
+        assert_eq!(registry.wallets_for_did(&did).unwrap().len(), 2);
+
+        // Promoting a wallet the identity does not own is fail-closed.
+        assert!(registry.set_primary_wallet(&did, "wallet-unknown").is_err());
+    }
+
+    fn chain_identity_payload(did: &str) -> tenzro_types::identity::RegisterIdentityPayload {
+        tenzro_types::identity::RegisterIdentityPayload {
+            did: did.to_string(),
+            identity_type: "human".to_string(),
+            display_name: "Remote Alice".to_string(),
+            controller_pubkey: vec![9u8; 32],
+            key_type: "Ed25519".to_string(),
+            wallet_id: "remote-wallet".to_string(),
+            wallet_address: Address::from_bytes(&[3u8; 32]).unwrap(),
+            pq_verifying_key: vec![1u8; 1952],
+            bls_verifying_key: vec![2u8; 48],
+            metadata: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_from_chain_lands_replicated_identity() {
+        // Mirrors what a node does when it observes an `IdentityRegister`
+        // consensus log for a DID it has never seen (TDIP): the identity
+        // becomes resolvable locally.
+        let registry = IdentityRegistry::new();
+        let did = "did:tenzro:human:remote1";
+        assert!(registry.resolve(did).is_err(), "unknown DID must not resolve yet");
+
+        let landed = registry
+            .upsert_from_chain(&chain_identity_payload(did))
+            .unwrap();
+        assert!(landed, "a new DID must be landed");
+
+        let resolved = registry.resolve(did).unwrap();
+        assert_eq!(resolved.did_string(), did);
+        assert_eq!(resolved.wallet_id, "remote-wallet");
+    }
+
+    #[tokio::test]
+    async fn upsert_from_chain_is_origin_safe_noop_when_did_exists() {
+        // The origin node already holds the authoritative (richer) record; the
+        // mirror must not clobber it on re-org / restart replay.
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(7), "Alice".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+        let did = alice.did_string();
+
+        let mut payload = chain_identity_payload(&did);
+        payload.display_name = "Overwrite Attempt".to_string();
+        let landed = registry.upsert_from_chain(&payload).unwrap();
+        assert!(!landed, "an already-known DID must be a no-op");
+
+        // KYC tier / display name from the authoritative record are preserved.
+        let resolved = registry.resolve(&did).unwrap();
+        assert_eq!(resolved.display_name(), "Alice");
+    }
+
+    #[tokio::test]
+    async fn upsert_from_chain_rejects_malformed_keys() {
+        let registry = IdentityRegistry::new();
+        let mut payload = chain_identity_payload("did:tenzro:human:badkey");
+        payload.pq_verifying_key = vec![1u8; 10]; // wrong length
+        assert!(
+            registry.upsert_from_chain(&payload).is_err(),
+            "a record with a malformed PQ key must be rejected fail-closed"
+        );
     }
 }

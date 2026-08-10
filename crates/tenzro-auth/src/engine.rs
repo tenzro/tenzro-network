@@ -596,13 +596,15 @@ impl AuthEngine {
             .min(parent_remaining)
             .clamp(1, self.cfg.max_ttl_secs);
 
-        // 4. Delegation chain.
-        let parent_delegation = parent_claims.aap_delegation.clone().unwrap_or_else(|| {
-            // Parent didn't carry a delegation claim (legacy / root
-            // tokens minted before AAP). Treat parent as depth 0 with
-            // a default max_depth.
-            crate::aap::AapDelegationClaim::root(parent_claims.sub.clone(), 5)
-        });
+        // 4. Delegation chain. A parent that carries no AAP delegation claim
+        // is not implicitly a root — it is rejected. There is 
+        // "missing delegation ⇒ root" path.
+        let parent_delegation = parent_claims.aap_delegation.clone().ok_or_else(|| {
+            AuthError::DelegationViolation(
+                "parent token carries no AAP delegation claim; cannot mint a delegated child"
+                    .to_string(),
+            )
+        })?;
         let child_delegation = crate::aap::AapDelegationClaim::child(
             &parent_delegation,
             &request.child_bearer_did,
@@ -662,8 +664,38 @@ impl AuthEngine {
         validation.set_audience(&[&self.cfg.audience]);
         validation.set_required_spec_claims(&["sub", "iss", "aud", "exp", "iat", "nbf", "jti"]);
 
-        let data = decode::<AuthClaims>(token, &self.decoding_key, &validation)
-            .map_err(AuthError::from)?;
+        let data = match decode::<AuthClaims>(token, &self.decoding_key, &validation) {
+            Ok(d) => d,
+            Err(e) => {
+                // `jsonwebtoken` verifies the signature before the claims, and
+                // each node instance signs with its own secret. A token minted
+                // for a different endpoint/audience therefore fails at the
+                // signature step and surfaces as a bare InvalidToken, hiding the
+                // real cause. Re-decode with signature + aud/exp/nbf checks
+                // disabled to report the actual mismatch instead.
+                let mut probe = validation.clone();
+                probe.insecure_disable_signature_validation();
+                probe.validate_aud = false;
+                probe.validate_exp = false;
+                probe.validate_nbf = false;
+                if let Ok(unverified) = decode::<AuthClaims>(token, &self.decoding_key, &probe) {
+                    let c = &unverified.claims;
+                    if c.aud != self.cfg.audience {
+                        return Err(AuthError::InvalidToken(format!(
+                            "audience/endpoint mismatch: token aud='{}' but this node expects '{}'",
+                            c.aud, self.cfg.audience
+                        )));
+                    }
+                    if c.iss != self.cfg.issuer {
+                        return Err(AuthError::InvalidToken(format!(
+                            "issuer mismatch: token iss='{}' but this node expects '{}'",
+                            c.iss, self.cfg.issuer
+                        )));
+                    }
+                }
+                return Err(AuthError::from(e));
+            }
+        };
         let claims = data.claims;
 
         // Direct revocation.

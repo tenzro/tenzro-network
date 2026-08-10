@@ -96,7 +96,7 @@ pub struct ResourceDescriptor {
 
     /// Optional kind / sub-type from the source registry, projected
     /// as a plain string. E.g. for `Tool` this is the transport mode
-    /// (`mcp` / `mcp-stdio` / `mcp-sse` / `api` / `native`); for
+    /// (`mcp` / `mcp-stdio` / `api` / `native`); for
     /// `Knowledge` this is the kind (`vector_index` / `feed` / ...).
     pub subtype: Option<String>,
 

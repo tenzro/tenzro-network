@@ -96,13 +96,6 @@ fn parent_handle() -> &'static str {
     })
 }
 
-/// The handle this module used before the owner/endorsement range mix-up was
-/// found. Read-only fallback: a machine that sealed under the old handle back
-/// when it happened to be vacant still has to be able to unseal, and sealing
-/// fails closed, so an orphaned blob would otherwise stop the node from
-/// starting rather than degrade. Never sealed to again.
-const LEGACY_PARENT_HANDLE: &str = "0x81010001";
-
 /// Whether this host has a TPM this module can drive.
 ///
 /// Checks both the resource-manager device and the tooling, because either
@@ -396,23 +389,16 @@ pub fn unseal(dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
         )
     };
 
-    // A blob is bound to the parent it was created under, so one sealed before
-    // the handle moved will not load under the current parent. Fall back to the
-    // legacy handle, but only when the object sitting there is genuinely a
-    // usable parent — on a machine where that handle is the EK the check fails
-    // and we do not waste a confusing error on it. Sealing always uses
-    // parent_handle(), so this path drains as keys are rotated.
-    if load_under(parent_handle()).is_err() {
-        if !handle_is_usable_parent(LEGACY_PARENT_HANDLE) {
-            return Err(TeeError::not_available(format!(
-                "sealed key under {} could not be loaded under {}, and the legacy handle \
-                 {LEGACY_PARENT_HANDLE} holds no usable parent to try instead",
-                dir.display(),
-                parent_handle()
-            )));
-        }
-        load_under(LEGACY_PARENT_HANDLE)?;
-    }
+    // A blob is bound to the parent it was created under. Sealing always uses
+    // parent_handle(), so a blob that cannot be loaded under the current parent
+    // is unusable — fail closed rather than probing any other handle.
+    load_under(parent_handle()).map_err(|_| {
+        TeeError::not_available(format!(
+            "sealed key under {} could not be loaded under the current parent {}",
+            dir.display(),
+            parent_handle()
+        ))
+    })?;
 
     let secret = run("tpm2_unseal", &["-c", &ctx_path], None)?;
     Ok(Zeroizing::new(secret))
@@ -462,18 +448,6 @@ mod tests {
         assert_ne!(
             handle, 0x8100_0001,
             "0x81000001 is the conventional SRK handle and belongs to the platform, not to us"
-        );
-    }
-
-    #[test]
-    fn the_legacy_handle_is_never_sealed_to() {
-        // The legacy handle exists only so a blob sealed before the move can
-        // still be read. If it were ever equal to the active handle the
-        // fallback would mask a real misconfiguration instead of draining.
-        assert_ne!(
-            LEGACY_PARENT_HANDLE,
-            parent_handle(),
-            "the legacy fallback handle must never become the active one"
         );
     }
 

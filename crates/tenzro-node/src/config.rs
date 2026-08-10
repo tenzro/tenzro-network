@@ -38,20 +38,23 @@ mod u128_as_string {
     }
 }
 
-/// Minimum genesis schema version supported by this build.
+/// The exact genesis schema version this build accepts.
 ///
-/// Version 2 introduces mandatory hybrid post-quantum signing keys:
-/// every `[[validators]]` entry must carry a `pq_public_key` (hex-encoded
-/// 1952-byte ML-DSA-65 verifying key) alongside the classical Ed25519
-/// `public_key`. Any genesis file with `version < 2` (or no `version`
-/// field) is rejected at startup.
-pub const MIN_GENESIS_VERSION: u32 = 2;
+/// The current schema mandates the full three-key validator identity: a
+/// classical Ed25519 `public_key`, a post-quantum ML-DSA-65 `pq_public_key`
+/// (hex-encoded 1952-byte verifying key), and a BLS12-381 `bls_public_key`
+/// for HotStuff-2 vote aggregation. A genesis file whose `version` is missing
+/// or not exactly this value is rejected at startup — no backward or forward
+/// compat.
+pub const GENESIS_SCHEMA_VERSION: u32 = 1;
 
 /// Genesis configuration for network initialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisConfig {
-    /// Genesis schema version. Must be >= MIN_GENESIS_VERSION (2).
-    #[serde(default)]
+    /// Genesis schema version. Must equal GENESIS_SCHEMA_VERSION (1) exactly;
+    /// the field is mandatory (no serde default). Distinct from the block
+    /// metadata `protocol_version` (PQ_HYBRID_PROTOCOL_VERSION), which marks the
+    /// post-quantum signature era and is a separate number.
     pub version: u32,
 
     /// Chain ID
@@ -150,7 +153,7 @@ pub struct WeakSubjectivityAnchor {
 impl GenesisConfig {
     pub fn default_testnet() -> Self {
         Self {
-            version: MIN_GENESIS_VERSION,
+            version: GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
             validators: Vec::new(),
@@ -1671,6 +1674,14 @@ pub struct NodeConfig {
     /// validator,storage,ai`.
     pub roles: RoleSet,
 
+    /// Self-stake (wei) committed when a validator-role node auto-registers
+    /// itself into the ValidatorRegistry on boot (permissionless / first-boot
+    /// onboarding). `None` disables self-registration. Must be >= the registry
+    /// minimum (10,000 TNZO). The node's own validator-derived account must be
+    /// funded with this stake plus gas before boot.
+    #[serde(default)]
+    pub validator_self_stake: Option<u128>,
+
     /// Data directory for storage
     pub data_dir: PathBuf,
 
@@ -2235,6 +2246,7 @@ impl NodeConfig {
         };
         Self {
             roles: RoleSet::validator_only(),
+            validator_self_stake: None,
             data_dir: tenzro_types::paths::instance_data_dir("validator"),
             network,
             consensus: Some(ConsensusConfig::default()),
@@ -2298,6 +2310,7 @@ impl NodeConfig {
     pub fn default_provider() -> Self {
         Self {
             roles: RoleSet::from(NetworkRole::ModelProvider),
+            validator_self_stake: None,
             data_dir: tenzro_types::paths::instance_data_dir("provider"),
             network: NetworkConfig::default(),
             consensus: None,
@@ -2355,6 +2368,7 @@ impl NodeConfig {
     pub fn default_tee_provider() -> Self {
         Self {
             roles: RoleSet::from(NetworkRole::TeeProvider),
+            validator_self_stake: None,
             data_dir: tenzro_types::paths::instance_data_dir("tee-provider"),
             network: NetworkConfig::default(),
             consensus: None,
@@ -2412,6 +2426,7 @@ impl NodeConfig {
     pub fn default_user() -> Self {
         Self {
             roles: RoleSet::from(NetworkRole::LightClient),
+            validator_self_stake: None,
             data_dir: tenzro_types::paths::default_data_dir(),
             network: NetworkConfig::default(),
             consensus: None,
@@ -2522,12 +2537,13 @@ impl NodeConfig {
         // carry a ML-DSA-65 verifying key. Reject genesis files that
         // predate the PQ migration.
         if let Some(g) = &self.genesis {
-            if g.version < MIN_GENESIS_VERSION {
+            if g.version != GENESIS_SCHEMA_VERSION {
                 return Err(NodeError::Config(format!(
-                    "Genesis schema version {} is too old; required version is {}. \
-                     This build requires hybrid PQ validator keys (ML-DSA-65). \
-                     Regenerate genesis with `pq_public_key` set on every validator.",
-                    g.version, MIN_GENESIS_VERSION
+                    "Genesis schema version {} is not supported; this build requires \
+                     version {} exactly. This build requires hybrid PQ validator keys \
+                     (ML-DSA-65). Regenerate genesis with `pq_public_key` set on every \
+                     validator.",
+                    g.version, GENESIS_SCHEMA_VERSION
                 )));
             }
             for (i, gv) in g.validators.iter().enumerate() {

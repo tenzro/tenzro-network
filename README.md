@@ -177,7 +177,7 @@ tenzro interactive
 ### Run Your Own Network
 
 ```bash
-# Bootstrap a self-contained network: validator keyset, schema-v3 genesis,
+# Bootstrap a self-contained network: validator keyset, schema-v1 genesis,
 # service unit, and the exact join command for each peer
 tenzro setup --path local --network-name lab
 

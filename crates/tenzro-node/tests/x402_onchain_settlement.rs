@@ -59,7 +59,7 @@ fn test_config() -> (NodeConfig, tempfile::TempDir) {
         roles: RoleSet::validator_only(),
         consensus: Some(ConsensusConfig::default()),
         genesis: Some(tenzro_node::config::GenesisConfig {
-            version: tenzro_node::config::MIN_GENESIS_VERSION,
+            version: tenzro_node::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
             validators: Vec::new(),

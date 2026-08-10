@@ -3987,7 +3987,7 @@ mod tests {
         });
 
         // Top-level keys MUST be exactly `eventFormat` and
-        // `activeAtOffset` — no legacy `filter` or top-level `verbose`.
+        // `activeAtOffset` —  `filter` or top-level `verbose`.
         let obj = request_body.as_object().unwrap();
         assert!(obj.contains_key("eventFormat"));
         assert!(obj.contains_key("activeAtOffset"));

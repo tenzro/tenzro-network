@@ -6571,6 +6571,42 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         });
     }
 
+    // Muse Glimmer 30B — multimodal (text + image) dense causal transformer
+    // with a frozen ViT-G/14 perception encoder, served from the GGUF repo.
+    // Registered 2026-08-10 from meta-models/Muse-Glimmer-30B-GGUF.
+    catalog.push(HfModelEntry {
+        id: "muse-glimmer-30b".into(),
+        name: "Muse Glimmer 30B".into(),
+        family: "muse-glimmer".into(),
+        hf_repo: "meta-models/Muse-Glimmer-30B-GGUF".into(),
+        hf_filename: "muse-glimmer-30B-kquant-17gb.gguf".into(),
+        parameters: "30B".into(),
+        architecture: ModelArchitecture::Llama,
+        context_length: 131072,
+        quantization: "Q4_K".into(),
+        size_bytes: 16_756_681_056,
+        min_ram_gb: 24,
+        license: "Apache 2.0".into(),
+        description: "Multimodal (text + image) 30B dense causal transformer with a frozen ViT-G/14 perception encoder (mmproj-kquant.gguf), 128K context. K-Quant build sized to fit 24GB VRAM; the repo also ships a DFlash speculative-decoding drafter (dflash-kquant.gguf) and a larger dynamic-quant variant.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec {
+            filename: "mmproj-kquant.gguf".into(),
+        }),
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
     // Stamp every entry with its model-author-recommended serving profile.
     // The literals above carry a placeholder `ServingProfile::default()`;
     // this single pass is the source of truth for per-family sampler /

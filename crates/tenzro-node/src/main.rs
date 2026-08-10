@@ -43,6 +43,13 @@ struct Cli {
     #[arg(short, long, value_name = "ROLES")]
     roles: Option<String>,
 
+    /// Self-stake in wei to auto-register this node as a validator on boot
+    /// (permissionless / first-boot onboarding). Requires the validator role;
+    /// the node's validator-derived account must hold this stake plus gas.
+    /// Omit to disable self-registration.
+    #[arg(long, value_name = "WEI")]
+    validator_self_stake: Option<String>,
+
     /// libp2p multiaddrs to listen on. Comma-separated.
     /// When omitted, the node listens on BOTH `/ip4/0.0.0.0/tcp/9000` and
     /// `/ip4/0.0.0.0/udp/9000/quic-v1` — the universal default that lets any
@@ -1589,6 +1596,16 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         // cosmetically resembles the real network. Genesis is resolved below,
         // AFTER boot nodes are known, so "join the network" and "run solo" are
         // distinguishable.
+    }
+
+    if let Some(stake_str) = &cli.validator_self_stake {
+        let wei = stake_str.parse::<u128>().map_err(|e| {
+            error::NodeError::Other(format!(
+                "invalid --validator-self-stake '{}': {}",
+                stake_str, e
+            ))
+        })?;
+        config.validator_self_stake = Some(wei);
     }
 
     // Merge role-specific defaults per served role when no config file was

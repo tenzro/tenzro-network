@@ -3641,6 +3641,10 @@ async fn dispatch_request(
 
         // Custody/Wallet methods (SDK)
         "tenzro_createMpcWallet" => handle_create_mpc_wallet(node, request.params).await,
+        "tenzro_addWallet" => handle_add_wallet(node, request.params, auth_ctx).await,
+        "tenzro_setPrimaryWallet" => {
+            handle_set_primary_wallet(node, request.params, auth_ctx).await
+        }
         "tenzro_exportKeystore" => handle_export_keystore(node, request.params).await,
         "tenzro_importKeystore" => handle_import_keystore(node, request.params).await,
         "tenzro_getKeyShares" => handle_get_key_shares(node, request.params).await,
@@ -19628,29 +19632,32 @@ pub(crate) async fn handle_register_identity(
         }
     };
 
-    // Persist identity to RocksDB.
-    if let Some(storage) = node.storage() {
-        let did_key = identity.did_string();
-        // bincode is the canonical CF_IDENTITIES format — the registry's
-        // write-through and startup hydration both use it; a serde_json
-        // record here would be silently dropped at hydration.
-        let identity_bytes = bincode::serialize(&identity).map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Identity serialization failed: {}", e),
-            data: None,
-        })?;
-        storage
-            .put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes)
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Identity persistence failed: {}", e),
-                data: None,
-            })?;
-        info!(
-            did = %did_key,
+    // TDIP — : route creation through a `RegisterIdentity`
+    // native tx so the identity REPLICATES across the network, instead of the
+    // old local-only `storage.put(CF_IDENTITIES, …)` that never left this
+    // node. The `register_*` registry methods above already persisted the
+    // authoritative local record (write-through to CF_IDENTITIES) so this
+    // node resolves it immediately; the tx carries only the replicable public
+    // record (no key material) into consensus, where the VM enforces DID
+    // uniqueness and every node mirrors the emitted `IdentityRegister` log
+    // into its own registry — that is what makes the DID resolve on node B.
+    //
+    // Best-effort: a node without consensus wired (single-node / test setups)
+    // keeps a working local identity; the replication step is skipped with a
+    // warning rather than failing the whole registration.
+    match node.submit_identity_register(&identity, &identity_type).await {
+        Ok(tx_hash) => info!(
+            did = %identity.did_string(),
             identity_type = %identity_type,
-            "Identity persisted to ledger storage (CF_IDENTITIES)"
-        );
+            tx = %tx_hash,
+            "Identity registration submitted for network replication (TDIP)"
+        ),
+        Err(e) => warn!(
+            did = %identity.did_string(),
+            identity_type = %identity_type,
+            error = %e,
+            "Identity created locally but network replication tx was not submitted"
+        ),
     }
 
     // Phase B Thread 3 / B.3.5 (#164) — install a `DelegationScopeValidator`
@@ -20147,45 +20154,59 @@ async fn handle_resolve_identity(
             data: None,
         })?;
 
-    // Resolve identity from RocksDB (the authoritative on-chain store)
-    let storage = node.storage().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Storage not initialized".to_string(),
-        data: None,
-    })?;
-
-    let bytes = storage
-        .get(CF_IDENTITIES, did.as_bytes())
-        .map_err(|e| JsonRpcError {
+    // TDIP — resolve from the REPLICATED registry read model first. The
+    // registry is hydrated from CF_IDENTITIES at startup and kept live by the
+    // `IdentityRegister` consensus-log mirror, so a DID created on ANY node
+    // resolves here once the registering block is applied. This is what makes
+    // cross-node resolve work; the old path read this node's local RocksDB
+    // directly and never saw identities born on other nodes.
+    let identity = if let Some(registry) = node.identity_registry()
+        && let Ok(id) = registry.resolve(did)
+    {
+        id
+    } else {
+        // Fall back to the on-disk store (covers a registry that isn't wired,
+        // or a record persisted before the registry hydrated).
+        let storage = node.storage().ok_or_else(|| JsonRpcError {
             code: -32000,
-            message: format!("Ledger storage read failed: {}", e),
+            message: "Storage not initialized".to_string(),
             data: None,
         })?;
 
-    let identity = match bytes {
-        Some(data) if !data.is_empty() => {
-            use tenzro_identity::TenzroIdentity;
-            bincode::deserialize::<TenzroIdentity>(&data).map_err(|e| {
-                let preview: String = data.iter().take(16).map(|b| format!("{:02x}", b)).collect();
-                JsonRpcError {
-                    code: -32000,
-                    message: format!(
-                        "Identity record corrupt for {}: {} bytes, first 16=0x{}, parse error: {}",
-                        did,
-                        data.len(),
-                        preview,
-                        e
-                    ),
-                    data: None,
-                }
-            })?
-        }
-        _ => {
-            return Err(JsonRpcError {
-                code: -32404,
-                message: format!("Identity not found on ledger: {}", did),
+        let bytes = storage
+            .get(CF_IDENTITIES, did.as_bytes())
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Ledger storage read failed: {}", e),
                 data: None,
-            });
+            })?;
+
+        match bytes {
+            Some(data) if !data.is_empty() => {
+                use tenzro_identity::TenzroIdentity;
+                bincode::deserialize::<TenzroIdentity>(&data).map_err(|e| {
+                    let preview: String =
+                        data.iter().take(16).map(|b| format!("{:02x}", b)).collect();
+                    JsonRpcError {
+                        code: -32000,
+                        message: format!(
+                            "Identity record corrupt for {}: {} bytes, first 16=0x{}, parse error: {}",
+                            did,
+                            data.len(),
+                            preview,
+                            e
+                        ),
+                        data: None,
+                    }
+                })?
+            }
+            _ => {
+                return Err(JsonRpcError {
+                    code: -32404,
+                    message: format!("Identity not found on ledger: {}", did),
+                    data: None,
+                });
+            }
         }
     };
 
@@ -64338,6 +64359,24 @@ async fn resolve_auth_to_wallet(
     auth_ctx: &AuthContext,
     intent: Option<tenzro_auth::AuthorityRequest>,
 ) -> AuthOutcome {
+    resolve_auth_to_wallet_from(node, auth_ctx, intent, None).await
+}
+
+/// `from`-aware variant of [`resolve_auth_to_wallet`].
+///
+/// Identical JWT/DPoP validation and RAR scope-check, but wallet selection is
+/// driven by the request's `from` address: when `from` is `Some`, the wallet
+/// resolved for the bearer DID is the one that *owns that address*, verified
+/// against the identity's wallet set — so an identity holding more than one
+/// wallet signs from the wallet the caller named, and a `from` the bearer does
+/// not own is rejected (fail-closed). `from == None` resolves the primary
+/// wallet, preserving the single-wallet behavior for every existing call site.
+async fn resolve_auth_to_wallet_from(
+    node: &Arc<TenzroNode>,
+    auth_ctx: &AuthContext,
+    intent: Option<tenzro_auth::AuthorityRequest>,
+    from: Option<&tenzro_types::Address>,
+) -> AuthOutcome {
     let auth_header = match &auth_ctx.authorization {
         Some(h) => h,
         None => return AuthOutcome::Unauthenticated,
@@ -64437,12 +64476,16 @@ async fn resolve_auth_to_wallet(
             });
         }
     };
-    let wallet_id = match registry.find_wallet_id_for_did(&claims.sub) {
+    // `from`-aware resolution. With no `from` this is the identity's
+    // primary wallet (unchanged single-wallet behavior); with a `from` it is the
+    // bearer-owned wallet holding that address, or a fail-closed error if the
+    // bearer does not own it.
+    let wallet_id = match registry.resolve_wallet_for_did_from(&claims.sub, from) {
         Ok(w) => w,
         Err(e) => {
             return AuthOutcome::AuthError(JsonRpcError {
                 code: -32001,
-                message: format!("No wallet bound to bearer DID {}: {}", claims.sub, e),
+                message: format!("No wallet resolvable for bearer DID {}: {}", claims.sub, e),
                 data: None,
             });
         }
@@ -64536,6 +64579,7 @@ fn tx_type_selector(tx_type: &TransactionType) -> [u8; 4] {
         TransactionType::ClaimNodeAlias { .. } => "ClaimNodeAlias",
         TransactionType::BindNodeAlias { .. } => "BindNodeAlias",
         TransactionType::ReleaseNodeAlias { .. } => "ReleaseNodeAlias",
+        TransactionType::RegisterIdentity { .. } => "RegisterIdentity",
     };
     let hash = tenzro_crypto::hash::keccak256(name.as_bytes());
     let bytes = hash.as_bytes();
@@ -64820,6 +64864,10 @@ fn enforce_typed_tx_spend_ceilings(
         | tenzro_types::TransactionType::RegisterValidator { .. }
         | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }
         | tenzro_types::TransactionType::ExitValidator => return Ok(()),
+        // Identity registration is dispatched by the node's system key on the
+        // identity's behalf; DID uniqueness is enforced in-VM and there is no
+        // payer delegation scope to enforce here (TDIP).
+        tenzro_types::TransactionType::RegisterIdentity { .. } => return Ok(()),
     };
 
     // (1) DelegationScope — typed error on violation. `enforce_operation`
@@ -65351,7 +65399,9 @@ async fn handle_sign_transaction(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let intent = intent_for_transaction(&intent_tx, approval_id);
-    let outcome = resolve_auth_to_wallet(node, auth_ctx, intent).await;
+    // resolve against the wallet that owns `from` among the bearer's
+    // wallets — an identity may hold >1 wallet — rejecting a `from` it doesn't own.
+    let outcome = resolve_auth_to_wallet_from(node, auth_ctx, intent, Some(&from_addr)).await;
     let wallet_id = match outcome {
         AuthOutcome::Authenticated { wallet_id, .. } => wallet_id,
         AuthOutcome::AuthError(err) => return Err(err),
@@ -67064,6 +67114,145 @@ async fn handle_create_mpc_wallet(
         "threshold": threshold,
         "total_shares": total_shares,
         "status": "created",
+    }))
+}
+
+/// `tenzro_addWallet` — bind an **additional** MPC wallet to the caller's
+/// existing authenticated identity.
+///
+/// Closes the other half of the lost/corrupt-wallet lockout bug: rather than
+/// forking a fresh identity (which stranded funds and reputation), the caller
+/// provisions another wallet in the shared `WalletService` and attaches it to
+/// their own controller DID. The identity keeps its primary wallet; the new
+/// wallet joins its additional-wallet set and is immediately usable as a
+/// `from`-selectable signing wallet (`tenzro_signTransaction`) or promotable to
+/// primary (`tenzro_setPrimaryWallet`).
+///
+/// Auth is mandatory: the request must carry `Authorization: DPoP <jwt>` +
+/// `DPoP: <proof>`. The wallet is bound to the **bearer** DID (`claims.sub`) —
+/// the same DID whose wallet the signing path resolves — so `from`-aware
+/// resolution finds it. Fail-closed on every error.
+async fn handle_add_wallet(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+    auth_ctx: &AuthContext,
+) -> std::result::Result<Value, JsonRpcError> {
+    let bearer_did = match resolve_auth_to_wallet(node, auth_ctx, None).await {
+        AuthOutcome::Authenticated { bearer_did, .. } => bearer_did,
+        AuthOutcome::AuthError(err) => return Err(err),
+        AuthOutcome::Unauthenticated => {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "Authentication required: present an OAuth/DPoP JWT via the \
+                          'Authorization: DPoP <jwt>' + 'DPoP: <proof>' headers."
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Identity registry not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service
+        .provision_wallet()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("MPC wallet creation failed: {}", e),
+            data: None,
+        })?;
+
+    let wallet_ref = tenzro_identity::WalletRef {
+        wallet_id: wallet.wallet_id.0.clone(),
+        address: wallet.address,
+        pq_verifying_key: wallet.pq_verifying_key_bytes(),
+        bls_verifying_key: wallet.bls_verifying_key_bytes().to_vec(),
+    };
+
+    registry
+        .add_wallet(&bearer_did, wallet_ref)
+        .map_err(|e| JsonRpcError {
+            code: -32001,
+            message: format!("Failed to bind wallet to identity: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "did": bearer_did,
+        "wallet_id": wallet.wallet_id.0,
+        "address": format!("{}", wallet.address),
+        "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        "primary": false,
+        "status": "bound",
+    }))
+}
+
+/// `tenzro_setPrimaryWallet` — promote one of the caller's bound wallets to be
+/// the identity's primary.
+///
+/// The current primary is demoted into the additional-wallet set; `wallet_id`
+/// (which must already be owned by the caller's identity) takes over as primary,
+/// including the identity's exposed ML-DSA-65 + BLS verifying keys. Auth is
+/// mandatory. Fail-closed: a `wallet_id` the caller does not own is rejected.
+async fn handle_set_primary_wallet(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    auth_ctx: &AuthContext,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+    let wallet_id = params
+        .get("wallet_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing wallet_id".to_string(),
+            data: None,
+        })?;
+
+    let bearer_did = match resolve_auth_to_wallet(node, auth_ctx, None).await {
+        AuthOutcome::Authenticated { bearer_did, .. } => bearer_did,
+        AuthOutcome::AuthError(err) => return Err(err),
+        AuthOutcome::Unauthenticated => {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "Authentication required: present an OAuth/DPoP JWT via the \
+                          'Authorization: DPoP <jwt>' + 'DPoP: <proof>' headers."
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Identity registry not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    registry
+        .set_primary_wallet(&bearer_did, wallet_id)
+        .map_err(|e| JsonRpcError {
+            code: -32001,
+            message: format!("Failed to set primary wallet: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "did": bearer_did,
+        "wallet_id": wallet_id,
+        "primary": true,
+        "status": "updated",
     }))
 }
 

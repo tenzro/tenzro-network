@@ -3,7 +3,7 @@
 //! This crate turns the content-addressed iroh transport (`tenzro-iroh`) into a
 //! paid, fault-tolerant storage service with four cooperating layers:
 //!
-//! - [`provider`] (D1) — the provider daemon: accept an object, erasure-encode
+//! - [`provider`] — the provider daemon: accept an object, erasure-encode
 //!   it, publish the shards over iroh, and serve the object back on request.
 //! - [`por`] (D2) — proof of retrievability: random nonce-based spot-check
 //!   challenges proving a provider still holds the shards it was paid for.

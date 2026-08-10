@@ -123,6 +123,11 @@ impl From<jsonwebtoken::errors::Error> for AuthError {
         use jsonwebtoken::errors::ErrorKind;
         match e.kind() {
             ErrorKind::ExpiredSignature => AuthError::TokenExpired,
+            // `nbf` in the future — not a codec failure. Report it accurately
+            // rather than letting it fall into the generic codec bucket.
+            ErrorKind::ImmatureSignature => {
+                AuthError::InvalidToken("token not yet valid (nbf is in the future)".to_string())
+            }
             ErrorKind::InvalidSignature
             | ErrorKind::InvalidToken
             | ErrorKind::InvalidAlgorithm

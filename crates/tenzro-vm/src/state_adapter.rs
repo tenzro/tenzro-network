@@ -189,18 +189,14 @@ impl StateAdapter {
                 if let Some(balance) = self.balance_cache.get(addr) {
                     let balance_bytes = balance.value().to_le_bytes().to_vec();
 
-                    // Canonical: native TNZO ledger (CF_ACCOUNTS)
+                    // Single canonical home: the native TNZO ledger
+                    // (CF_ACCOUNTS). No CF_STATE mirror — the state root is
+                    // computed from the in-memory caches and every balance read
+                    // goes through CF_ACCOUNTS, so a second on-disk copy could
+                    // only drift.
                     ops.push(WriteOp::Put {
                         cf: CF_ACCOUNTS.to_string(),
                         key: tnzo_balance_key(addr),
-                        value: balance_bytes.clone(),
-                    });
-
-                    // Mirror: legacy VM state key (CF_STATE) for back-compat
-                    let legacy_key = format!("balance:{}", hex::encode(addr));
-                    ops.push(WriteOp::Put {
-                        cf: CF_STATE.to_string(),
-                        key: legacy_key.into_bytes(),
                         value: balance_bytes,
                     });
                 }
@@ -222,20 +218,13 @@ impl StateAdapter {
                 if let Some(nonce) = self.nonce_cache.get(addr) {
                     let nonce_bytes = nonce.value().to_le_bytes().to_vec();
 
-                    // Canonical: account ledger (CF_ACCOUNTS), AccountStore layout.
+                    // Single canonical home: CF_ACCOUNTS, AccountStore layout —
+                    // no CF_STATE mirror (see balance rationale above).
                     let mut canonical_key = b"nonce:".to_vec();
                     canonical_key.extend_from_slice(addr);
                     ops.push(WriteOp::Put {
                         cf: CF_ACCOUNTS.to_string(),
                         key: canonical_key,
-                        value: nonce_bytes.clone(),
-                    });
-
-                    // Mirror: VM state key (CF_STATE) for VM-internal reads.
-                    let legacy_key = format!("nonce:{}", hex::encode(addr));
-                    ops.push(WriteOp::Put {
-                        cf: CF_STATE.to_string(),
-                        key: legacy_key.into_bytes(),
                         value: nonce_bytes,
                     });
                 }
@@ -408,88 +397,91 @@ impl StateAdapter {
     /// `MerklePatriciaTrie::verify_proof`.
     ///
     /// Key encoding scheme (prefix ensures different namespaces never collide):
-    /// - code:    `b"c" || address`
-    /// - balance: `b"b" || address`
-    /// - nonce:   `b"n" || address`
-    /// - storage: `b"s" || address || storage_key`
+    /// Compute the state root as a Merkle-Patricia-Trie commitment over the
+    /// **canonical persistent state**, overlaid with this block's in-flight
+    /// (uncommitted) writes.
+    ///
+    /// The trie is keyed by the *raw on-disk storage key*, namespaced by column
+    /// family (`b"A/"` for CF_ACCOUNTS, `b"S/"` for CF_STATE):
+    /// - `A/balance:<addr>`  — account balance (16-byte LE u128)
+    /// - `A/nonce:<addr>`    — account nonce (8-byte LE u64)
+    /// - `S/code:<hex-addr>` — contract code
+    /// - `S/storage:<hex-addr>:<hex-slot>` — storage slot
+    ///
+    /// Committing to the exact bytes RocksDB holds — rather than re-deriving
+    /// addresses — means the root is a commitment to precisely what is
+    /// persisted, is identical on every node, and **survives restart** (it never
+    /// depends on which accounts a given process happens to have cached). The
+    /// in-memory maps are a read-through / write-buffer tier only; the root is
+    /// never computed from them alone. In-flight dirty writes are overlaid in
+    /// their exact eventual on-disk key form (byte-identical to what `commit()`
+    /// writes), so a value written this block overrides its committed copy and a
+    /// brand-new account is included before it is flushed.
     pub fn compute_state_root(&self) -> Hash {
+        use std::collections::BTreeMap;
+
+        // Deterministic, deduplicated key -> value set. Dirty (in-flight)
+        // writes are applied last so they override the committed on-disk copy.
+        let mut entries: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+
+        // 1. Canonical persistent state: hash the account ledger (CF_ACCOUNTS)
+        //    and VM state (CF_STATE) by their raw on-disk keys.
+        if let Some(store) = &self.storage {
+            for (cf, prefix, ns) in [
+                (CF_ACCOUNTS, b"balance:".as_ref(), b'A'),
+                (CF_ACCOUNTS, b"nonce:".as_ref(), b'A'),
+                (CF_STATE, b"code:".as_ref(), b'S'),
+                (CF_STATE, b"storage:".as_ref(), b'S'),
+            ] {
+                let _ = store.scan_prefix_for_each(cf, prefix, &mut |k, v| {
+                    let mut tk = Vec::with_capacity(2 + k.len());
+                    tk.push(ns);
+                    tk.push(b'/');
+                    tk.extend_from_slice(k);
+                    entries.insert(tk, v.to_vec());
+                    Ok(())
+                });
+            }
+        }
+
+        // 2. Overlay in-flight writes in their exact on-disk key form so the
+        //    root reflects post-execution state before `commit()` flushes it.
+        for entry in self.balance_cache.iter() {
+            let dk = tnzo_balance_key(entry.key());
+            let mut tk = vec![b'A', b'/'];
+            tk.extend_from_slice(&dk);
+            entries.insert(tk, entry.value().to_le_bytes().to_vec());
+        }
+        for entry in self.nonce_cache.iter() {
+            let mut tk = vec![b'A', b'/'];
+            tk.extend_from_slice(b"nonce:");
+            tk.extend_from_slice(entry.key());
+            entries.insert(tk, entry.value().to_le_bytes().to_vec());
+        }
+        for entry in self.code_cache.iter() {
+            let dk = format!("code:{}", hex::encode(entry.key())).into_bytes();
+            let mut tk = vec![b'S', b'/'];
+            tk.extend_from_slice(&dk);
+            entries.insert(tk, entry.value().clone());
+        }
+        for entry in self.storage_cache.iter() {
+            let addr = entry.key();
+            for slot in entry.value().iter() {
+                let dk = format!("storage:{}:{}", hex::encode(addr), hex::encode(slot.key()))
+                    .into_bytes();
+                let mut tk = vec![b'S', b'/'];
+                tk.extend_from_slice(&dk);
+                entries.insert(tk, slot.value().clone());
+            }
+        }
+
+        // 3. Build the trie from the merged, sorted entry set.
         let mut trie = MerklePatriciaTrie::new();
-
-        // Insert code entries
-        let mut code_entries: Vec<_> = self
-            .code_cache
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-        code_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (addr, code) in &code_entries {
-            let mut key = Vec::with_capacity(1 + addr.len());
-            key.push(b'c');
-            key.extend_from_slice(addr);
-            if let Err(e) = trie.insert(&key, code) {
-                tracing::warn!("MPT insert (code) failed: {}", e);
+        for (k, v) in &entries {
+            if let Err(e) = trie.insert(k, v) {
+                tracing::warn!("MPT insert failed during state root computation: {}", e);
             }
         }
-
-        // Insert balance entries
-        let mut balance_entries: Vec<_> = self
-            .balance_cache
-            .iter()
-            .map(|entry| (entry.key().clone(), *entry.value()))
-            .collect();
-        balance_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (addr, balance) in &balance_entries {
-            let mut key = Vec::with_capacity(1 + addr.len());
-            key.push(b'b');
-            key.extend_from_slice(addr);
-            if let Err(e) = trie.insert(&key, &balance.to_le_bytes()) {
-                tracing::warn!("MPT insert (balance) failed: {}", e);
-            }
-        }
-
-        // Insert nonce entries
-        let mut nonce_entries: Vec<_> = self
-            .nonce_cache
-            .iter()
-            .map(|entry| (entry.key().clone(), *entry.value()))
-            .collect();
-        nonce_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (addr, nonce) in &nonce_entries {
-            let mut key = Vec::with_capacity(1 + addr.len());
-            key.push(b'n');
-            key.extend_from_slice(addr);
-            if let Err(e) = trie.insert(&key, &nonce.to_le_bytes()) {
-                tracing::warn!("MPT insert (nonce) failed: {}", e);
-            }
-        }
-
-        // Insert storage entries (sorted for determinism)
-        let mut storage_entries: Vec<_> = self
-            .storage_cache
-            .iter()
-            .map(|entry| {
-                let mut inner: Vec<_> = entry
-                    .value()
-                    .iter()
-                    .map(|e| (e.key().clone(), e.value().clone()))
-                    .collect();
-                inner.sort_by(|a, b| a.0.cmp(&b.0));
-                (entry.key().clone(), inner)
-            })
-            .collect();
-        storage_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (addr, slots) in &storage_entries {
-            for (storage_key, value) in slots {
-                let mut key = Vec::with_capacity(1 + addr.len() + storage_key.len());
-                key.push(b's');
-                key.extend_from_slice(addr);
-                key.extend_from_slice(storage_key);
-                if let Err(e) = trie.insert(&key, value) {
-                    tracing::warn!("MPT insert (storage) failed: {}", e);
-                }
-            }
-        }
-
         match trie.commit() {
             Ok(root) => root,
             Err(e) => {
@@ -1215,5 +1207,75 @@ mod tests {
 
         // Value lost (no persistence)
         assert_eq!(adapter.get_balance(&address), 0);
+    }
+
+    /// Regression: the state root must commit to the *canonical persistent
+    /// state* (CF_ACCOUNTS), not the in-memory cache. Genesis writes balances
+    /// straight to disk, and a node restart starts with empty caches — the old
+    /// cache-only `compute_state_root` returned an empty-trie root in both
+    /// cases, so post-genesis blocks (and every block after a restart) carried
+    /// a meaningless state root.
+    #[test]
+    fn state_root_commits_to_persistent_state_not_cache() {
+        let store = Arc::new(MemoryStore::new());
+
+        // Simulate genesis: write balances directly to CF_ACCOUNTS, bypassing
+        // the adapter's caches entirely.
+        let addr_a = vec![0xAAu8; 32];
+        let addr_b = vec![0xBBu8; 32];
+        let mut kbal_a = b"balance:".to_vec();
+        kbal_a.extend_from_slice(&addr_a);
+        let mut kbal_b = b"balance:".to_vec();
+        kbal_b.extend_from_slice(&addr_b);
+        store
+            .put(CF_ACCOUNTS, &kbal_a, &1_000_000u128.to_le_bytes())
+            .unwrap();
+        store
+            .put(CF_ACCOUNTS, &kbal_b, &42u128.to_le_bytes())
+            .unwrap();
+
+        // A fresh adapter (empty caches, as after a restart) MUST still root the
+        // on-disk state — this is the exact bug that produced a zero root.
+        let cold = StateAdapter::with_storage(store.clone());
+        let root_cold = cold.compute_state_root();
+        assert_ne!(
+            root_cold,
+            Hash::zero(),
+            "state root must reflect on-disk balances even with empty caches"
+        );
+
+        // Deterministic and restart-stable: a second independent adapter over
+        // the same store yields the identical root.
+        let cold2 = StateAdapter::with_storage(store.clone());
+        assert_eq!(
+            root_cold,
+            cold2.compute_state_root(),
+            "state root must be deterministic and survive restart"
+        );
+
+        // It truly commits to state: mutating a persisted balance changes it.
+        store
+            .put(CF_ACCOUNTS, &kbal_b, &99u128.to_le_bytes())
+            .unwrap();
+        assert_ne!(
+            root_cold,
+            StateAdapter::with_storage(store.clone()).compute_state_root(),
+            "state root must change when persistent state changes"
+        );
+
+        // In-flight (uncommitted) cache writes overlay disk, and the pre-commit
+        // root equals the post-commit disk root — the write buffer and the
+        // canonical store agree.
+        let mut warm = StateAdapter::with_storage(store.clone());
+        let base = warm.compute_state_root();
+        warm.set_balance(&vec![0xCCu8; 32], 7);
+        let with_overlay = warm.compute_state_root();
+        assert_ne!(base, with_overlay, "in-flight write must affect the root");
+        warm.commit().unwrap();
+        assert_eq!(
+            with_overlay,
+            StateAdapter::with_storage(store.clone()).compute_state_root(),
+            "pre-commit overlay root must equal the post-commit disk root"
+        );
     }
 }

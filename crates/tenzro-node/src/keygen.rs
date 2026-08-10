@@ -368,6 +368,18 @@ fn sealed_dir_for(path: &Path) -> std::path::PathBuf {
 /// it. That is the honest position: refusing outright would make every
 /// developer machine and TPM-less VM unusable, and silently degrading would
 /// let an operator believe in protection they do not have.
+/// Process-level flag: when set, key persistence MUST use hardware TPM sealing
+/// and refuses to degrade to encrypt-at-rest or plaintext. Autonomous operator
+/// mode sets this before keygen so a TPM permission/absence failure is a hard
+/// error, never a silent unsealed-key fallback.
+static REQUIRE_HW_SEAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Require (or stop requiring) hardware TPM sealing for all subsequent key
+/// writes in this process. Called by autonomous-operator setup.
+pub fn set_require_hw_seal(require: bool) {
+    REQUIRE_HW_SEAL.store(require, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
     let sealed_dir = sealed_dir_for(path);
     if tenzro_tee::tpm_seal::tpm_available() {
@@ -394,6 +406,14 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&sealed_dir);
+                if REQUIRE_HW_SEAL.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(NodeError::Other(format!(
+                        "operator=autonomous requires a hardware-sealed key but TPM sealing \
+                         failed for {}: {e}. Refusing to write an unsealed key — fix TPM access \
+                         (permissions / tpm2-tools) and re-run, or use --operator self.",
+                        path.display()
+                    )));
+                }
                 tracing::warn!(
                     target: "tenzro::keygen",
                     path = %path.display(),
@@ -401,6 +421,17 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
                 );
             }
         }
+    }
+
+    // Autonomous operator: hardware sealing is mandatory. If control reaches
+    // here the TPM is absent or sealing failed — refuse rather than degrade to
+    // encrypt-at-rest or plaintext.
+    if REQUIRE_HW_SEAL.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(NodeError::Other(format!(
+            "operator=autonomous requires TPM-sealed keys but no working TPM is available \
+             for {}. Refusing to write an unsealed key.",
+            path.display()
+        )));
     }
 
     // No TPM — passkey custody. Both paths are first-class: a validator

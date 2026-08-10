@@ -565,9 +565,13 @@ impl WalletSendCmd {
         use tenzro_types::transaction::{Transaction, TransactionType};
 
         // Unlock the local key.
-        let password = dialoguer::Password::new()
-            .with_prompt("Self-custody key password")
-            .interact()?;
+        // Password: env for non-interactive (first-boot / automation), else prompt.
+        let password = match std::env::var("TENZRO_KEYSTORE_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => dialoguer::Password::new()
+                .with_prompt("Self-custody key password")
+                .interact()?,
+        };
         let signer = crate::keystore::unlock_local_key(&password)?;
 
         // The native `from` is the raw 32-byte Ed25519 pubkey — the node's
@@ -637,7 +641,9 @@ impl WalletSendCmd {
             Nonce::new(nonce),
             TransactionType::Transfer { amount: amount_wei },
             21_000,
-            1_000_000_000,
+            // Clear the open-lane fee floor (4 gwei): a pre-signed self-custody
+            // tx cannot be re-priced server-side, so sign over a price above it.
+            5_000_000_000,
             signer.ml_dsa_verifying_key().to_vec(),
         );
 
@@ -654,7 +660,7 @@ impl WalletSendCmd {
                     "to": self.to,
                     "value": amount_wei.to_string(),
                     "gas_limit": 21_000u64,
-                    "gas_price": 1_000_000_000u64,
+                    "gas_price": 5_000_000_000u64,
                     "nonce": nonce,
                     "chain_id": chain_id,
                     "timestamp": tx.timestamp.0,
@@ -1029,10 +1035,13 @@ impl WalletCreateLocalCmd {
             }
         }
 
-        let password = dialoguer::Password::new()
-            .with_prompt("New key password")
-            .with_confirmation("Confirm password", "Passwords do not match")
-            .interact()?;
+        let password = match std::env::var("TENZRO_KEYSTORE_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => dialoguer::Password::new()
+                .with_prompt("New key password")
+                .with_confirmation("Confirm password", "Passwords do not match")
+                .interact()?,
+        };
 
         let address = crate::keystore::create_local_key(&password)?;
 
@@ -1074,10 +1083,13 @@ impl WalletImportLocalCmd {
             }
         }
 
-        let password = dialoguer::Password::new()
-            .with_prompt("New key password")
-            .with_confirmation("Confirm password", "Passwords do not match")
-            .interact()?;
+        let password = match std::env::var("TENZRO_KEYSTORE_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => dialoguer::Password::new()
+                .with_prompt("New key password")
+                .with_confirmation("Confirm password", "Passwords do not match")
+                .interact()?,
+        };
 
         let address = crate::keystore::import_local_key(&self.secret, &password)?;
 
