@@ -355,7 +355,7 @@ The `system` field is **not** a message — it is a top-level parameter applied 
 
 `image` blocks carry raw PNG, JPEG, WebP, or GIF bytes, base64-encoded. `media_type` is the label; the serving projector reads the actual format from the bytes.
 
-An image reaches a model through its multimodal projector — a companion GGUF (Gemma 4's SigLIP tower, Kimi K3's MoonViT-3d) that the model's catalog entry declares and `tenzro model download` fetches alongside the weights. The projector is loaded at model-load time, and a model serving with one takes attachments; a model without one serves text.
+An image reaches a model through its multimodal projector — a companion GGUF (Gemma 4's SigLIP tower, Kimi K3's MoonViT-3d, muse-glimmer's ViT perception encoder) that the model's catalog entry declares and `tenzro model download` fetches alongside the weights. The projector is loaded at model-load time, and a model serving with one takes attachments; a model without one serves text.
 
 Read `accepts_media` on `tenzro_listModelEndpoints` or `tenzro_getModelEndpoint` to see which locally-served models take images. It is reported for locally-served models only — a model reached over the network is served by another node, which answers for its own capability.
 
@@ -1360,7 +1360,8 @@ ChatML (`<|im_start|>role\n…<|im_end|>`).
 |--------|------------|----------|--------|-----------------|-------|
 | Qwen 3 / 3.5 / 3.6 | yes | yes (`<think>` tags) | no | ChatML + `<tool_call>` JSON | Tool calls expressed as `<tool_call>{...}</tool_call>` JSON; mapped to `tool_use` blocks. |
 | Gemma 3 / 4 | yes | no | yes (Gemma 4) | Gemma chat | Vision through the in-process multimodal projector. |
-| Kimi K2 / K3 | yes | yes | no | Kimi chat | MoE; expert residency and dispatch are handled by the serving node. |
+| Kimi K2 / K3 | yes | yes | yes (K3) | Kimi chat | MoE; expert residency and dispatch are handled by the serving node. K3 vision through the in-process multimodal projector (MoonViT-3d). |
+| muse-glimmer | yes | yes (intrinsic) | yes | harmony / onyx channels | Reasoning and tool calls parsed from the harmony channel format, not a `<think>`/template toggle. Vision through the in-process multimodal projector (ViT-G/14). |
 | Mistral | yes | no | no | Mistral tools | `[TOOL_CALLS]` prefix. |
 | DeepSeek V3 | yes | yes | no | DeepSeek-V3 | Native tool calls; thinking via `<think>` like Qwen. |
 | Granite 4 | yes | no | no | Granite chat | Includes the hybrid `granite4-h-*` entries. |

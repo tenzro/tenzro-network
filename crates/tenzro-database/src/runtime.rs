@@ -295,6 +295,7 @@ mod tests {
                 "did:tenzro:human:test-owner",
             ),
             pricing: crate::pricing::DatabasePricing::free(),
+            access: tenzro_types::resource_access::ResourceAccess::Private,
             confidential: None,
         }
     }

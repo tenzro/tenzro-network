@@ -167,7 +167,7 @@ where
 /// FIPS 204 fixes the ML-DSA-65 verifying key length at exactly **1952 bytes**.
 /// This deserializer rejects any other length — including the empty vector —
 /// so a `Transaction` cannot be constructed without a valid PQ key. There is
-///  fallback path: a payload that omits or mis-sizes this field is
+/// no legacy fallback path: a payload that omits or mis-sizes this field is
 /// not a Tenzro transaction.
 pub fn bounded_pq_public_key_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where

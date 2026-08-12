@@ -19632,7 +19632,7 @@ pub(crate) async fn handle_register_identity(
         }
     };
 
-    // TDIP — : route creation through a `RegisterIdentity`
+    // TDIP D5 — CLEAN CUTOFF: route creation through a `RegisterIdentity`
     // native tx so the identity REPLICATES across the network, instead of the
     // old local-only `storage.put(CF_IDENTITIES, …)` that never left this
     // node. The `register_*` registry methods above already persisted the
@@ -19650,7 +19650,7 @@ pub(crate) async fn handle_register_identity(
             did = %identity.did_string(),
             identity_type = %identity_type,
             tx = %tx_hash,
-            "Identity registration submitted for network replication (TDIP)"
+            "Identity registration submitted for network replication (TDIP D5)"
         ),
         Err(e) => warn!(
             did = %identity.did_string(),
@@ -20154,7 +20154,7 @@ async fn handle_resolve_identity(
             data: None,
         })?;
 
-    // TDIP — resolve from the REPLICATED registry read model first. The
+    // TDIP D5 — resolve from the REPLICATED registry read model first. The
     // registry is hydrated from CF_IDENTITIES at startup and kept live by the
     // `IdentityRegister` consensus-log mirror, so a DID created on ANY node
     // resolves here once the registering block is applied. This is what makes
@@ -25080,6 +25080,62 @@ async fn handle_create_database(
         }
     };
 
+    // Serving mode (the operator's Open/Gated/Private decision), orthogonal to
+    // the `access_policy` above (which says *who*, not *whether*). Accepts either
+    // a bare string ("open"|"gated"|"private", with an optional top-level
+    // `price_per_request` for Open) or a full ResourceAccess object. Unset =
+    // Private (fail-closed): a database is not exposed off the box until the
+    // operator says so.
+    let access = match params.get("access") {
+        Some(Value::Null) | None => tenzro_types::resource_access::ResourceAccess::Private,
+        Some(Value::String(s)) => {
+            let mode = tenzro_types::resource_access::ResourceAccess::parse(s).ok_or_else(|| {
+                JsonRpcError {
+                    code: -32602,
+                    message: format!("Unknown 'access' mode '{s}' (open|gated|private)"),
+                    data: None,
+                }
+            })?;
+            // Layer the optional price onto an Open mode.
+            if let tenzro_types::resource_access::ResourceAccess::Open { .. } = mode {
+                let price_per_request = match params.get("price_per_request") {
+                    Some(Value::Null) | None => 0u128,
+                    Some(Value::Number(n)) => {
+                        n.as_u64().map(u128::from).ok_or_else(|| JsonRpcError {
+                            code: -32602,
+                            message: "'price_per_request' must be a non-negative integer".to_string(),
+                            data: None,
+                        })?
+                    }
+                    Some(Value::String(s)) => s.parse::<u128>().map_err(|_| JsonRpcError {
+                        code: -32602,
+                        message: "'price_per_request' string must parse as u128".to_string(),
+                        data: None,
+                    })?,
+                    Some(_) => {
+                        return Err(JsonRpcError {
+                            code: -32602,
+                            message: "'price_per_request' must be a number or decimal string"
+                                .to_string(),
+                            data: None,
+                        });
+                    }
+                };
+                tenzro_types::resource_access::ResourceAccess::Open { price_per_request }
+            } else {
+                mode
+            }
+        }
+        Some(obj) => serde_json::from_value::<tenzro_types::resource_access::ResourceAccess>(
+            obj.clone(),
+        )
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid 'access': {e}"),
+            data: None,
+        })?,
+    };
+
     let desc = tenzro_database::DatabaseDescriptor {
         database_id,
         engine_id,
@@ -25089,6 +25145,7 @@ async fn handle_create_database(
         engine_config,
         access_policy,
         pricing,
+        access,
         confidential,
     };
 
@@ -35199,7 +35256,7 @@ async fn handle_get_transaction_history(
 
 /// OpenAI-compatible request body for /v1/chat/completions
 #[derive(Debug, Deserialize)]
-struct OpenAIChatRequest {
+pub(crate) struct OpenAIChatRequest {
     model: String,
     messages: Vec<OpenAIChatMessage>,
     #[serde(default)]
@@ -35285,6 +35342,54 @@ struct OpenAIChatRequest {
     /// mid-stream failover to the providers the caller is willing to pay.
     #[serde(default)]
     provider: Option<ProviderPreferences>,
+}
+
+impl OpenAIChatRequest {
+    /// Build a request from the plain `/chat` web shape (role/text messages
+    /// plus the sampling knobs that surface carries). Every OpenAI/Tenzro
+    /// extension defaults off, so a `/chat` request served through this
+    /// constructor behaves exactly as the equivalent `/v1/chat/completions`
+    /// call would on the local in-process path. Sampling values are passed
+    /// through unchanged — the in-process path applies its own defaults for
+    /// anything left `None`, so reasoning models are never forced to greedy.
+    pub(crate) fn from_web_chat(
+        model: String,
+        messages: Vec<(String, String)>,
+        stream: bool,
+        max_tokens: Option<u32>,
+        temperature: Option<f64>,
+    ) -> Self {
+        Self {
+            model,
+            messages: messages
+                .into_iter()
+                .map(|(role, content)| OpenAIChatMessage {
+                    role,
+                    content: MessageContent::Text(content),
+                })
+                .collect(),
+            temperature,
+            max_tokens,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            stop: None,
+            n: None,
+            stream: Some(stream),
+            stream_options: None,
+            user: None,
+            draft_n: None,
+            verifiable: None,
+            seed: None,
+            jurisdiction: None,
+            jurisdiction_receipt: None,
+            models: None,
+            provider: None,
+        }
+    }
 }
 
 /// Caller-supplied provider pin. Entries match a provider's announced name or
@@ -38647,6 +38752,22 @@ async fn handle_openai_chat_completions(
     State(node): State<Arc<TenzroNode>>,
     headers: HeaderMap,
     Json(request): Json<OpenAIChatRequest>,
+) -> Response {
+    openai_chat_completions_inner(node, headers, request).await
+}
+
+/// The in-process inference implementation behind `/v1/chat/completions`.
+///
+/// Split out from the axum handler so the Web API `/chat` fast-path
+/// (`web::handlers::chat_completion`) can serve a locally-loaded model
+/// through the *same* engine path — model runtime `generate_chat` /
+/// `generate_chat_stream` — instead of the marketplace router, which only
+/// knows network providers announced over gossip. This is the single source
+/// of truth for local (and network-forwarding) OpenAI-compatible chat.
+pub(crate) async fn openai_chat_completions_inner(
+    node: Arc<TenzroNode>,
+    headers: HeaderMap,
+    request: OpenAIChatRequest,
 ) -> Response {
     let stream_requested = request.stream.unwrap_or(false);
 
@@ -64362,7 +64483,7 @@ async fn resolve_auth_to_wallet(
     resolve_auth_to_wallet_from(node, auth_ctx, intent, None).await
 }
 
-/// `from`-aware variant of [`resolve_auth_to_wallet`].
+/// `from`-aware variant of [`resolve_auth_to_wallet`] (D2b).
 ///
 /// Identical JWT/DPoP validation and RAR scope-check, but wallet selection is
 /// driven by the request's `from` address: when `from` is `Some`, the wallet
@@ -64476,7 +64597,7 @@ async fn resolve_auth_to_wallet_from(
             });
         }
     };
-    // `from`-aware resolution. With no `from` this is the identity's
+    // D2b: `from`-aware resolution. With no `from` this is the identity's
     // primary wallet (unchanged single-wallet behavior); with a `from` it is the
     // bearer-owned wallet holding that address, or a fail-closed error if the
     // bearer does not own it.
@@ -64866,7 +64987,7 @@ fn enforce_typed_tx_spend_ceilings(
         | tenzro_types::TransactionType::ExitValidator => return Ok(()),
         // Identity registration is dispatched by the node's system key on the
         // identity's behalf; DID uniqueness is enforced in-VM and there is no
-        // payer delegation scope to enforce here (TDIP).
+        // payer delegation scope to enforce here (TDIP D5).
         tenzro_types::TransactionType::RegisterIdentity { .. } => return Ok(()),
     };
 
@@ -65399,7 +65520,7 @@ async fn handle_sign_transaction(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let intent = intent_for_transaction(&intent_tx, approval_id);
-    // resolve against the wallet that owns `from` among the bearer's
+    // D2b: resolve against the wallet that owns `from` among the bearer's
     // wallets — an identity may hold >1 wallet — rejecting a `from` it doesn't own.
     let outcome = resolve_auth_to_wallet_from(node, auth_ctx, intent, Some(&from_addr)).await;
     let wallet_id = match outcome {
@@ -67118,7 +67239,7 @@ async fn handle_create_mpc_wallet(
 }
 
 /// `tenzro_addWallet` — bind an **additional** MPC wallet to the caller's
-/// existing authenticated identity.
+/// existing authenticated identity (D2b).
 ///
 /// Closes the other half of the lost/corrupt-wallet lockout bug: rather than
 /// forking a fresh identity (which stranded funds and reputation), the caller
@@ -67199,7 +67320,7 @@ async fn handle_add_wallet(
 }
 
 /// `tenzro_setPrimaryWallet` — promote one of the caller's bound wallets to be
-/// the identity's primary.
+/// the identity's primary (D2b).
 ///
 /// The current primary is demoted into the additional-wallet set; `wallet_id`
 /// (which must already be owned by the caller's identity) takes over as primary,

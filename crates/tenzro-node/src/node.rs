@@ -4073,7 +4073,7 @@ impl TenzroNode {
     }
 
     /// Replicate a freshly-created identity into consensus state via a
-    /// `RegisterIdentity` native transaction (TDIP).
+    /// `RegisterIdentity` native transaction (TDIP D5).
     ///
     /// Historically each RPC registration handler wrote the identity
     /// **local-only** (`storage.put(CF_IDENTITIES, …)` + registry insert), so
@@ -4208,7 +4208,7 @@ impl TenzroNode {
         info!(
             did = %identity.did_string(),
             tx = %hash_str,
-            "Submitted RegisterIdentity tx (TDIP replication)"
+            "Submitted RegisterIdentity tx (TDIP D5 replication)"
         );
         Ok(hash_str)
     }
@@ -4797,12 +4797,12 @@ impl TenzroNode {
         let mut network_config = self.config.network.clone();
         network_config.data_dir = Some(self.config.data_dir.clone());
 
-        // bind the libp2p Identify protocol_version to our chain-id, so we
+        // D1d: bind the libp2p Identify protocol_version to our chain-id, so we
         // advertise `tenzro/<chain_id>/<version>`. The peering gate in
         // tenzro-network parses this chain-id segment and fail-closed
         // disconnects any peer on a different chain — the mechanism that keeps
         // distinct chains from silently meshing over a shared discovery
-        // substrate and re-forming the solo-chain fork. Default chain_id
+        // substrate and re-forming the solo-chain fork (D1). Default chain_id
         // 1337 matches the local/dev genesis fallback used elsewhere.
         let chain_id = self
             .config
@@ -6964,9 +6964,18 @@ impl TenzroNode {
             .clone()
             .zip(self.self_provider_address())
             .map(|(signer, provider)| crate::moe::MoeReceiptIdentity { signer, provider });
-        let moe_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = Arc::new(
-            crate::moe::MoeIrohDispatcher::new(Arc::clone(&self.moe_runtime), moe_receipt_identity),
-        );
+        // `moe/execute` is a compute surface, so the dispatcher is gated
+        // through the same credential admission as inference. Both
+        // `api_key_manager` and `admission_gate` are initialized in
+        // `init_storage`, which runs before this (`init_ai_infrastructure`),
+        // so they are available here.
+        let moe_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> =
+            Arc::new(crate::moe::MoeIrohDispatcher::new(
+                Arc::clone(&self.moe_runtime),
+                moe_receipt_identity,
+                self.api_key_manager.clone(),
+                Arc::clone(&self.admission_gate),
+            ));
 
         // Inference-over-iroh: same trampoline pattern as A2A. The real
         // dispatcher (`crate::infer::IrohInferDispatcher`) needs
@@ -12454,7 +12463,7 @@ impl TenzroNode {
                     .as_ref()
                     .map(|g| g.chain_id)
                     .unwrap_or(1337);
-                // mirror the chain-aware Identify protocol_version on the
+                // D1d: mirror the chain-aware Identify protocol_version on the
                 // status plane (`tenzro/<chain_id>/<version>`) so status-driven
                 // peer tracking sees the same chain-scoped identifier as the
                 // libp2p Identify peering gate.

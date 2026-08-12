@@ -102,6 +102,7 @@ mod tests {
                 owner_did: "did:tenzro:human:abc".to_string(),
             },
             pricing: crate::pricing::DatabasePricing::free(),
+            access: tenzro_types::resource_access::ResourceAccess::Private,
             confidential: None,
         }
     }

@@ -4473,7 +4473,7 @@ impl EventLoop {
                         // Identities — mirror the consensus-decided DID record
                         // into the local IdentityRegistry read model so an
                         // identity created on any node resolves on all nodes
-                        // (TDIP). The VM already enforced DID uniqueness and
+                        // (TDIP D5). The VM already enforced DID uniqueness and
                         // persisted the `identity:<did>` marker; this only
                         // records it into the resolve path.
                         self.process_identity_logs(&result, block_height).await;
@@ -6134,7 +6134,7 @@ impl EventLoop {
     }
 
     /// Mirror VM-emitted `IdentityRegister` logs into the local
-    /// [`IdentityRegistry`] (TDIP).
+    /// [`IdentityRegistry`] (TDIP D5).
     ///
     /// DID uniqueness was already decided by `execute_identity_register`
     /// against consensus state — every node re-ran the same handler over the
@@ -6712,7 +6712,7 @@ impl EventLoop {
             // Identity registration is dispatched by the node's system key on
             // the identity's behalf; there is no payer delegation scope to
             // enforce here (DID uniqueness is enforced in-VM). Skip the
-            // delegation/spending-policy pre-check (TDIP).
+            // delegation/spending-policy pre-check (TDIP D5).
             tenzro_types::TransactionType::RegisterIdentity { .. } => return Ok(()),
         };
 
@@ -7639,7 +7639,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         } => {
             // Serialize the shared `RegisterIdentityPayload` directly so the
             // JSON body is byte-identical to what the VM decoder and node-side
-            // registry mirror both expect (TDIP). One struct, one shape.
+            // registry mirror both expect (TDIP D5). One struct, one shape.
             let payload = tenzro_types::identity::RegisterIdentityPayload {
                 did: did.clone(),
                 identity_type: identity_type.clone(),

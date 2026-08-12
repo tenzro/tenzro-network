@@ -1625,7 +1625,7 @@ impl HotStuff2Engine {
     /// `on_proposal` rejecting a too-high proposal, by `on_timeout` observing a
     /// higher finalized height, or by `note_behind_hint` from the gossip-defer
     /// path. It is compared against our current view height. The sync-before-
-    /// propose guard consults this so a leader that has fallen behind
+    /// propose guard (D1c) consults this so a leader that has fallen behind
     /// holds its proposal instead of forking a fresh block off a stale parent
     /// — the behaviour that let a lagging replica start a divergent solo chain.
     fn is_behind_hinted(&self) -> bool {
@@ -1899,7 +1899,7 @@ impl HotStuff2Engine {
             return false;
         }
 
-        // IDLE VIEW-CHURN BACK-OFF: a bare view timeout on an idle,
+        // IDLE VIEW-CHURN BACK-OFF (D1c): a bare view timeout on an idle,
         // caught-up chain only rotates leaders pointlessly — every rotation
         // broadcasts a timeout and burns a view with no block to show for it,
         // and each new leader immediately re-hits empty-block suppression. Do
@@ -2863,12 +2863,12 @@ impl HotStuff2Engine {
                 if is_leader && !self.is_draining() {
                     // Leader proposes a block
                     if state.proposed_block.is_none() {
-                        // SYNC-BEFORE-PROPOSE: if a behind-tip hint
+                        // SYNC-BEFORE-PROPOSE (D1c): if a behind-tip hint
                         // observes a height above ours, the network has
                         // finalized blocks we don't hold. Proposing now would
                         // build a fresh block on our stale parent — a fork off
                         // the real chain, which is exactly how a lagging replica
-                        // spun up a divergent solo chain. Hold the view
+                        // spun up a divergent solo chain (D1). Hold the view
                         // (we keep voting and timing out) until block-sync
                         // closes the gap and the hint no longer leads our
                         // height; only then do we resume proposing.

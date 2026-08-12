@@ -252,8 +252,8 @@ impl Default for GenerationConfig {
 /// stages are omitted entirely when unset rather than passed a neutral value,
 /// so a request that does not ask for them samples exactly as it did before
 /// those knobs existed.
-fn build_sampler_chain(config: &GenerationConfig) -> LlamaSampler {
-    build_sampler_chain_with_grammar(config, None)
+fn build_sampler_chain(config: &GenerationConfig, n_vocab: i32) -> LlamaSampler {
+    build_sampler_chain_with_grammar(config, None, n_vocab)
 }
 
 /// [`build_sampler_chain`] with an optional grammar stage in front.
@@ -268,12 +268,14 @@ fn build_sampler_chain(config: &GenerationConfig) -> LlamaSampler {
 fn build_sampler_chain_with_grammar(
     config: &GenerationConfig,
     grammar: Option<LlamaSampler>,
+    n_vocab: i32,
 ) -> LlamaSampler {
     let mut stages = Vec::new();
     if let Some(g) = grammar {
         stages.push(g);
     }
     stages.push(LlamaSampler::penalties(
+        n_vocab,
         config.repeat_last_n as i32,
         config.repeat_penalty,
         config.frequency_penalty,
@@ -1304,6 +1306,8 @@ impl ModelRuntime {
                 .map(|n| n.get() as i32)
                 .unwrap_or(4),
             media_marker: std::ffi::CString::new(mtmd_default_marker()).ok()?,
+            image_min_tokens: -1,
+            image_max_tokens: -1,
         };
 
         match MtmdContext::init_from_file(path_str, model, &params) {
@@ -1911,78 +1915,128 @@ impl ModelRuntime {
             m
         };
 
-        let inner = if let Some(engine) = external {
+        // The serial path renders through the model's own template with
+        // automatic per-model format selection and parses the reply with the
+        // same format (`parsed`). Every other backend keeps the preamble path
+        // and leaves `parsed` `None`, so their replies go through the
+        // home-grown parsers below unchanged.
+        let (inner, parsed): (InferenceResult, Option<String>) = if let Some(engine) = external {
             // A remote engine is given the tool schemas over its own wire
             // format; the preamble is all this side controls.
-            engine.chat(&preamble_messages(), &config).await?
+            (engine.chat(&preamble_messages(), &config).await?, None)
         } else {
             match entry
                 .as_ref()
                 .expect("local entry present when not external")
                 .as_ref()
             {
-                LoadedEntry::Batched(engine) => {
+                LoadedEntry::Batched(engine) => (
                     Self::run_batched(
                         engine,
                         BatchPrompt::Chat(preamble_messages()),
                         &config,
                         None,
                     )
-                    .await?
-                }
+                    .await?,
+                    None,
+                ),
                 LoadedEntry::Serial(model_mutex) => {
                     let model_mutex = model_mutex.clone();
                     let config = config.clone();
                     let messages = messages.clone();
                     let tools = tools.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let loaded = model_mutex.blocking_lock();
-                        match crate::tool_grammar::native_tool_prompt(
-                            &loaded.model,
-                            &messages,
-                            &tools,
-                        ) {
-                            Some((prompt, grammar)) => {
-                                // Stop sequences the template asks for are
-                                // additive to the caller's own.
-                                let config = match grammar.as_ref() {
-                                    Some(g) if !g.additional_stops.is_empty() => {
-                                        let mut c = config.clone();
-                                        c.stop.extend(g.additional_stops.iter().cloned());
-                                        c
-                                    }
-                                    _ => config,
-                                };
-                                Self::generate_sync_with_grammar(
-                                    &loaded,
-                                    &prompt,
-                                    &config,
-                                    grammar.as_ref(),
-                                )
+                    let enable_thinking =
+                        crate::catalog::resolve_enable_thinking(model_id, Some(config.max_tokens));
+                    tokio::task::spawn_blocking(
+                        move || -> Result<(InferenceResult, Option<String>)> {
+                            let loaded = model_mutex.blocking_lock();
+                            match crate::tool_grammar::native_chat_prompt(
+                                &loaded.model,
+                                &messages,
+                                &tools,
+                                enable_thinking,
+                            ) {
+                                Some(nc) => {
+                                    // Stop sequences the template asks for are
+                                    // additive to the caller's own.
+                                    let mut config = config;
+                                    config
+                                        .stop
+                                        .extend(nc.render.additional_stops.iter().cloned());
+                                    let inner = Self::generate_sync_with_grammar(
+                                        &loaded,
+                                        &nc.prompt,
+                                        &config,
+                                        nc.grammar.as_ref(),
+                                    )?;
+                                    // Parse the reply with the same format the
+                                    // prompt was rendered in. Held locally and
+                                    // never sent across an await.
+                                    let parsed = nc
+                                        .render
+                                        .parse_response_oaicompat(&inner.text, false)
+                                        .ok();
+                                    Ok((inner, parsed))
+                                }
+                                None => {
+                                    let mut messages = messages;
+                                    inject_tools_preamble(&mut messages, &tools);
+                                    let prompt = render_chat_prompt(&loaded.model, &messages)?;
+                                    let inner = Self::generate_sync(&loaded, &prompt, &config)?;
+                                    Ok((inner, None))
+                                }
                             }
-                            None => {
-                                let mut messages = messages;
-                                inject_tools_preamble(&mut messages, &tools);
-                                let prompt = render_chat_prompt(&loaded.model, &messages)?;
-                                Self::generate_sync(&loaded, &prompt, &config)
-                            }
-                        }
-                    })
+                        },
+                    )
                     .await
                     .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??
                 }
             }
         };
 
-        // Parse tool-call markers from the raw output.
-        let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
-        // `StopStream` already classified the reasoning span as the tokens
-        // decoded, so `inner.thinking` is normally the answer. The second split
-        // is for text that reached us without passing through it — an external
-        // engine's reply, or a model that emitted a nested block — and is a
-        // no-op on already-clean text.
-        let (clean_text, split_thinking) = split_reasoning(&clean_text);
-        let thinking = inner.thinking.clone().or(split_thinking);
+        // muse-glimmer emits the harmony/onyx channel format (`to=self` /
+        // `to=user` / `to=<tool>` segments), not `<think>` + a generic tool-call
+        // dialect. Parse its raw output with the dedicated parser so reasoning
+        // collapses into `thinking`, the `to=user` answer becomes `text`, and
+        // each `to=<tool>` segment becomes a real tool call with parsed args —
+        // instead of leaking the whole marker string through as content. Every
+        // other model stays on the path below, unchanged.
+        let (clean_text, thinking, tool_calls) = if crate::muse_harmony::is_muse_harmony_model(
+            model_id,
+        ) {
+            let mp = crate::muse_harmony::parse_muse_harmony(&inner.text);
+            // Keep a reasoning span the StopStream may already have classified;
+            // otherwise take the parser's collapsed `to=self` thinking.
+            let thinking = inner.thinking.clone().or(mp.thinking);
+            (mp.content, thinking, mp.tool_calls)
+        } else {
+            // Prefer the format-matched oaicompat parse when the native path ran
+            // and its JSON is readable; otherwise fall back to the home-grown
+            // parsers, which is what keeps qwen/gemma/deepseek/glm and the
+            // preamble path unchanged.
+            match parsed.as_deref().and_then(parse_oaicompat_reply) {
+                Some((content, reasoning, calls)) => {
+                    // `StopStream` may already have classified a reasoning span
+                    // for a `<think>` model; keep it, else take the format
+                    // parser's `reasoning_content`.
+                    let thinking = inner.thinking.clone().or(reasoning);
+                    (content, thinking, calls)
+                }
+                None => {
+                    // Parse tool-call markers from the raw output.
+                    let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
+                    // `StopStream` already classified the reasoning span as the
+                    // tokens decoded, so `inner.thinking` is normally the answer.
+                    // The second split is for text that reached us without
+                    // passing through it — an external engine's reply, or a
+                    // model that emitted a nested block — and is a no-op on
+                    // already-clean text.
+                    let (clean_text, split_thinking) = split_reasoning(&clean_text);
+                    let thinking = inner.thinking.clone().or(split_thinking);
+                    (clean_text, thinking, tool_calls)
+                }
+            }
+        };
 
         // A tool call outranks the engine's own cause: the turn ends because
         // control passes to the caller's tool, whatever halted decoding.
@@ -2066,19 +2120,94 @@ impl ModelRuntime {
                 };
                 let messages = messages.to_vec();
                 let config = config.clone();
-                let handle = tokio::task::spawn_blocking(move || {
+                // muse-glimmer streams the harmony/onyx channel format, whose
+                // markers the incremental `<think>` splitter cannot parse
+                // token-by-token. For muse we buffer the whole generation instead
+                // of streaming raw tokens (see the `is_muse` branch below).
+                let is_muse = crate::muse_harmony::is_muse_harmony_model(model_id);
+                let enable_thinking =
+                    crate::catalog::resolve_enable_thinking(model_id, Some(config.max_tokens));
+                let handle = tokio::task::spawn_blocking(move || -> Result<InferenceResult> {
                     let loaded = model_mutex.blocking_lock();
                     let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
-                    let prompt = render_chat_prompt(&loaded.model, &messages)?;
-                    Self::generate_sync_streaming(
-                        &loaded,
-                        drafter_guard.as_deref(),
-                        &prompt,
-                        &config,
-                        Some(&token_tx),
-                        // Plain chat streaming carries no tools.
-                        None,
-                    )
+                    // Render through the model's own template with automatic
+                    // per-model format selection so a non-ChatML model (muse,
+                    // gpt-oss) streams from its trained prompt. No tools on this
+                    // path. Tokens still stream raw to the channel as today; the
+                    // aggregated raw text is parsed once at the end so the FINAL
+                    // result carries clean content/reasoning.
+                    match crate::tool_grammar::native_chat_prompt(
+                        &loaded.model,
+                        &messages,
+                        &[],
+                        enable_thinking,
+                    ) {
+                        Some(nc) => {
+                            let mut config = config;
+                            config.stop.extend(nc.render.additional_stops.iter().cloned());
+                            if is_muse {
+                                // Harmony can't be split incrementally, so run the
+                                // generation with NO token channel (nothing raw
+                                // leaks), parse the buffered text, and emit only
+                                // the parsed user-facing content as the stream.
+                                // The reasoning is carried on the returned result's
+                                // `thinking` (collapsed, never streamed as
+                                // content). Tool-call stream events for muse go
+                                // through the tool-aware Anthropic path
+                                // (`generate_chat_with_tools`), which already emits
+                                // real tool_use blocks; per-channel incremental
+                                // harmony streaming here is a follow-up.
+                                let mut inner = Self::generate_sync_streaming(
+                                    &loaded,
+                                    drafter_guard.as_deref(),
+                                    &nc.prompt,
+                                    &config,
+                                    // No raw token streaming for muse.
+                                    None,
+                                    None,
+                                )?;
+                                let mp =
+                                    crate::muse_harmony::parse_muse_harmony(&inner.text);
+                                if !mp.content.is_empty() {
+                                    // Best-effort: a hung-up receiver means the
+                                    // client is gone; the result still returns.
+                                    let _ = token_tx.blocking_send(mp.content.clone());
+                                }
+                                inner.text = mp.content;
+                                inner.thinking = inner.thinking.clone().or(mp.thinking);
+                                return Ok(inner);
+                            }
+                            let mut inner = Self::generate_sync_streaming(
+                                &loaded,
+                                drafter_guard.as_deref(),
+                                &nc.prompt,
+                                &config,
+                                Some(&token_tx),
+                                // Plain chat streaming carries no tools.
+                                None,
+                            )?;
+                            if let Ok(json) = nc.render.parse_response_oaicompat(&inner.text, false)
+                                && let Some((content, reasoning, _tool_calls)) =
+                                    parse_oaicompat_reply(&json)
+                            {
+                                inner.text = content;
+                                inner.thinking = inner.thinking.clone().or(reasoning);
+                            }
+                            Ok(inner)
+                        }
+                        None => {
+                            let prompt = render_chat_prompt(&loaded.model, &messages)?;
+                            Self::generate_sync_streaming(
+                                &loaded,
+                                drafter_guard.as_deref(),
+                                &prompt,
+                                &config,
+                                Some(&token_tx),
+                                // Plain chat streaming carries no tools.
+                                None,
+                            )
+                        }
+                    }
                 });
                 handle
                     .await
@@ -2151,19 +2280,71 @@ impl ModelRuntime {
                     let mut messages = messages.to_vec();
                     let media = media.to_vec();
                     let config = config.clone();
-                    inject_tools_preamble(&mut messages, tools);
+                    let tools = tools.to_vec();
+                    // Markers are needed by both render paths, so place them
+                    // before the native/preamble split. The preamble, in
+                    // contrast, is only for the fallback and is injected there.
                     Self::place_media_markers(&mut messages, media.len())?;
-                    let inner = tokio::task::spawn_blocking(move || {
-                        let loaded = model_mutex.blocking_lock();
-                        let prompt = render_chat_prompt(&loaded.model, &messages)?;
-                        Self::generate_sync_multimodal(&loaded, &prompt, &media, &config)
-                    })
-                    .await
-                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??;
+                    let enable_thinking =
+                        crate::catalog::resolve_enable_thinking(model_id, Some(config.max_tokens));
+                    let (inner, parsed): (InferenceResult, Option<String>) =
+                        tokio::task::spawn_blocking(
+                            move || -> Result<(InferenceResult, Option<String>)> {
+                                let loaded = model_mutex.blocking_lock();
+                                match crate::tool_grammar::native_chat_prompt(
+                                    &loaded.model,
+                                    &messages,
+                                    &tools,
+                                    enable_thinking,
+                                ) {
+                                    Some(nc) => {
+                                        // The multimodal prefill path carries no
+                                        // grammar (see generate_sync_multimodal),
+                                        // but the native render still gives the
+                                        // model its trained prompt and the format
+                                        // to parse the reply back with.
+                                        let mut config = config;
+                                        config
+                                            .stop
+                                            .extend(nc.render.additional_stops.iter().cloned());
+                                        let inner = Self::generate_sync_multimodal(
+                                            &loaded, &nc.prompt, &media, &config,
+                                        )?;
+                                        let parsed = nc
+                                            .render
+                                            .parse_response_oaicompat(&inner.text, false)
+                                            .ok();
+                                        Ok((inner, parsed))
+                                    }
+                                    None => {
+                                        let mut messages = messages;
+                                        inject_tools_preamble(&mut messages, &tools);
+                                        let prompt =
+                                            render_chat_prompt(&loaded.model, &messages)?;
+                                        let inner = Self::generate_sync_multimodal(
+                                            &loaded, &prompt, &media, &config,
+                                        )?;
+                                        Ok((inner, None))
+                                    }
+                                }
+                            },
+                        )
+                        .await
+                        .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??;
 
-                    let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
-                    let (clean_text, split_thinking) = split_reasoning(&clean_text);
-                    let thinking = inner.thinking.clone().or(split_thinking);
+                    let (clean_text, thinking, tool_calls) =
+                        match parsed.as_deref().and_then(parse_oaicompat_reply) {
+                            Some((content, reasoning, calls)) => {
+                                let thinking = inner.thinking.clone().or(reasoning);
+                                (content, thinking, calls)
+                            }
+                            None => {
+                                let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
+                                let (clean_text, split_thinking) = split_reasoning(&clean_text);
+                                let thinking = inner.thinking.clone().or(split_thinking);
+                                (clean_text, thinking, tool_calls)
+                            }
+                        };
                     let stop_reason = if !tool_calls.is_empty() {
                         "tool_use".to_string()
                     } else {
@@ -2485,6 +2666,7 @@ impl ModelRuntime {
         let mut sampler = build_sampler_chain_with_grammar(
             config,
             tool_grammar.and_then(|g| g.sampler(&loaded.model)),
+            loaded.model.n_vocab(),
         );
 
         let mut n_cur = n_past;
@@ -2665,7 +2847,7 @@ impl ModelRuntime {
         // attachment, rather than letting tokenize fail on the whole batch.
         let mut bitmaps = Vec::with_capacity(media.len());
         for (i, bytes) in media.iter().enumerate() {
-            let bitmap = MtmdBitmap::from_buffer(projector, bytes).map_err(|e| {
+            let bitmap = MtmdBitmap::from_buffer(projector, bytes, false).map_err(|e| {
                 ModelError::InferenceError(format!("attachment {} could not be decoded: {}", i, e))
             })?;
             let (kind, supported) = if bitmap.is_audio() {
@@ -2845,7 +3027,7 @@ impl ModelRuntime {
 
         // Same chain as the single-token path. The drafter only PROPOSES
         // tokens; the target's sampler decides which are kept.
-        let mut sampler = build_sampler_chain(config);
+        let mut sampler = build_sampler_chain(config, loaded.model.n_vocab());
 
         let mut n_cur = tokens_list.len() as i32;
         let mut output_tokens: u32 = 0;
@@ -3119,6 +3301,78 @@ fn warm_prompt_bytes(messages: &[ChatMessage]) -> Vec<u8> {
 /// Apply the model's chat template to a message list, producing the flat
 /// prompt string the serial generation path decodes. Mirrors the batched
 /// scheduler's `render_prompt` so both serving modes template identically.
+/// Parse an oaicompat assistant-message JSON — as produced by
+/// [`llama_cpp_2::model::ChatTemplateResult::parse_response_oaicompat`] — into
+/// `(content, reasoning, tool_calls)`.
+///
+/// The shape is
+/// `{"role":"assistant","content":"…","reasoning_content":"…"?,"tool_calls":[{"id"?,"type":"function","function":{"name","arguments":"<json string>"}}]?}`.
+/// `content` is always present (empty string when the model produced none);
+/// `reasoning_content` and `tool_calls` are omitted when empty. `arguments` is
+/// a JSON *string*, which we parse into a value for [`ToolCall::input`]. The id
+/// is synthesized when the model didn't supply one, matching how
+/// [`extract_tool_calls`] does it.
+///
+/// Returns `None` only when the outer JSON cannot be read at all, so the caller
+/// falls back to the home-grown parsers.
+fn parse_oaicompat_reply(json: &str) -> Option<(String, Option<String>, Vec<ToolCall>)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let reasoning = v
+        .get("reasoning_content")
+        .and_then(|r| r.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let mut tool_calls = Vec::new();
+    if let Some(arr) = v.get("tool_calls").and_then(|t| t.as_array()) {
+        for tc in arr {
+            let func = tc.get("function");
+            let name = func
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // A call with no name is not actionable; skip rather than emit it.
+            if name.is_empty() {
+                continue;
+            }
+            // `arguments` is a JSON string. Parse it to a value; an absent or
+            // unparseable arguments string becomes an empty object rather than
+            // dropping the call.
+            let input = func
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+            let id = tc
+                .get("id")
+                .and_then(|i| i.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("toolu_{}", uuid::Uuid::new_v4().simple()));
+            tool_calls.push(ToolCall { id, name, input });
+        }
+    }
+
+    // If the format-specific oaicompat parse produced neither content nor tool
+    // calls, treat it as no-result so the caller falls back to the proven
+    // home-grown parser (extract_tool_calls + split_reasoning). This is the
+    // safety net that keeps qwen/gemma/deepseek/glm working even when the
+    // auto-detected format parser yields nothing for their output.
+    if content.trim().is_empty() && tool_calls.is_empty() {
+        return None;
+    }
+
+    Some((content, reasoning, tool_calls))
+}
+
 fn render_chat_prompt(model: &LlamaModel, messages: &[ChatMessage]) -> Result<String> {
     let llama_messages: Vec<LlamaChatMessage> = messages
         .iter()

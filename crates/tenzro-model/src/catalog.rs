@@ -351,7 +351,7 @@ impl ServingProfile {
             // user prompt at idx 0). Override is wired in
             // tenzro-inference sidecar.rs TEMPLATE_OVERRIDES — the
             // catalog only carries the sampler profile.
-            "qwen3.5" | "qwen3.6" => Self {
+            "qwen3.5" | "qwen3.6" | "qwen3.8" => Self {
                 temperature: 1.0,
                 top_p: 0.95,
                 top_k: 20,
@@ -476,6 +476,21 @@ impl ServingProfile {
                 jinja_required: true,
                 reasoning_default: false,
             },
+            // Nemotron 3.5 Lightning: NVIDIA publishes a distinct reasoning
+            // sampler row for the Lightning MoE — temp 0.6 / top_p 0.95 /
+            // top_k 0 / min_p 0.01 — lower and tighter than the generic
+            // "nemotron" chat row (temp 1.0 / top_p 1.0), which loops for
+            // this hybrid Mamba-2 + Attention reasoner. Kept as its own arm
+            // so the generic nemotron chat defaults never bleed onto it.
+            "nemotron-lightning" => Self {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.01,
+                presence_penalty: 0.0,
+                jinja_required: true,
+                reasoning_default: true,
+            },
             // SmolLM and anything unlisted: neutral chat defaults.
             _ => Self::default(),
         }
@@ -585,6 +600,18 @@ impl ReasoningPolicy {
                 thinking_safe_min_b: 4.0,
                 thinking_min_budget_tokens: 16_384,
             },
+            // Qwen 3.8: the open A95B flagship is thinking-ONLY — its chat
+            // template emits a `<think>` block on every turn and there is no
+            // non-thinking mode to fall back to, so `Always` rather than the
+            // Qwen 3.5/3.6 size-gated `Auto`. Requires the larger 32K budget
+            // the model card recommends for its reasoning traces; safe-min is
+            // moot under `Always` (kept 0.0).
+            "qwen3.8" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Always,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 32_768,
+            },
             // Qwen-AgentWorld: thinking on by default — the card states the
             // model reasons about environment state transitions inside
             // `<think>` before emitting the predicted observation, so it is
@@ -687,6 +714,15 @@ impl ReasoningPolicy {
                 thinking_safe_min_b: 4.0,
                 thinking_min_budget_tokens: 16_384,
             },
+            // Nemotron 3.5 Lightning: hybrid think+instruct MoE. Thinking is a
+            // toggle (not unconditional like Qwen 3.8), so Auto with the same
+            // 4B safe-min / 16K budget floor as the Nemotron Nano reasoners.
+            "nemotron-lightning" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 4.0,
+                thinking_min_budget_tokens: 16_384,
+            },
             // Phi-N-reasoning variants: thinking-mode only when the id
             // carries a -reasoning suffix; the catalog's family for
             // those is "phi-reasoning". Plain "phi" is instruct.
@@ -733,7 +769,7 @@ impl TemplateFix {
     /// <https://github.com/ggml-org/llama.cpp/issues/13178>.
     pub fn for_family(family: &str) -> Self {
         match family {
-            "qwen3.5" | "qwen3.6" => Self::Vendored {
+            "qwen3.5" | "qwen3.6" | "qwen3.8" => Self::Vendored {
                 filename: "qwen3.5-3.6-froggeric-v20.jinja".to_string(),
             },
             _ => Self::None,
@@ -774,6 +810,75 @@ pub fn parse_params_active_b(parameters: &str) -> f32 {
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .unwrap_or(trimmed.len());
     trimmed[..num_end].parse::<f32>().unwrap_or(0.0)
+}
+
+/// Total (not active) parameter count in billions, parsed from the catalog
+/// `parameters` display string. The reasoning size-gate keys on TOTAL params:
+/// an MoE such as `qwen3.6-35b-a3b` is a capable reasoner at 35B total even
+/// though only 3B are active per token, so gating on the active width (3B <
+/// the 4B safe-min) would wrongly disable its thinking. Reuses
+/// [`parse_parameter_count`], which reads the leading magnitude
+/// ("35B (MoE, 3B active)" -> 35e9, "0.8B" -> 8e8).
+pub fn parse_params_total_b(parameters: &str) -> f32 {
+    parse_parameter_count(parameters).map_or(0.0, |c| c as f32 / 1e9)
+}
+
+/// Resolve whether the served chat template for `model_id` should render with
+/// thinking enabled, from the entry's [`ReasoningPolicy`].
+///
+/// * A family without the hybrid toggle (instruct-only, and channel-format
+///   reasoners like muse-glimmer whose thinking is intrinsic to the output
+///   format rather than a template variable) -> `true`, preserving the
+///   pre-policy default; `enable_thinking` is a no-op for those templates.
+/// * `Never` -> `false`; `Always` -> `true`.
+/// * `Auto` -> thinking-ON iff TOTAL params >= `thinking_safe_min_b` AND the
+///   caller's `budget_tokens` (when supplied) >= `thinking_min_budget_tokens`.
+///   This is the Qwen 3.5/3.6 Small-series carve-out: `qwen3.5-0.8b` (0.8B <
+///   4B) renders thinking-OFF and answers directly, while `qwen3.6-35b-a3b`
+///   (35B >= 4B) keeps thinking. The budget half of the gate guards a capable
+///   reasoner given too small a `max_tokens` to both think and answer (the
+///   documented failure mode: the whole budget is spent inside `<think>` and
+///   the model emits empty content).
+///
+/// `budget_tokens` is the caller's max output-token budget. `None` means
+/// "unbounded / unknown" and passes the budget half of the gate, so an
+/// engine-level resolve with no per-request budget behaves exactly as before.
+///
+/// Operators can force a served model onto the non-thinking path without a
+/// rebuild via the `TENZRO_NOTHINK_MODELS` env var (comma-separated model ids):
+/// a match returns `false` before any policy lookup.
+///
+/// An unknown `model_id` returns `true` (the unchanged default).
+pub fn resolve_enable_thinking(model_id: &str, budget_tokens: Option<u32>) -> bool {
+    // Operator escape hatch first: a comma-separated id list forces those
+    // models onto the non-thinking path with no rebuild. Empty/whitespace
+    // entries are ignored so a trailing comma is harmless.
+    if let Ok(list) = std::env::var("TENZRO_NOTHINK_MODELS") {
+        if list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .any(|id| id == model_id)
+        {
+            return false;
+        }
+    }
+    let Some(entry) = get_model_by_id(model_id) else {
+        return true;
+    };
+    let p = entry.reasoning;
+    if !p.supports_thinking {
+        return true;
+    }
+    match p.default_mode {
+        ReasoningMode::Never => false,
+        ReasoningMode::Always => true,
+        ReasoningMode::Auto => {
+            let big_enough = parse_params_total_b(&entry.parameters) >= p.thinking_safe_min_b;
+            let budget_ok = budget_tokens.map_or(true, |b| b >= p.thinking_min_budget_tokens);
+            big_enough && budget_ok
+        }
+    }
 }
 
 /// Model architecture — informational only.
@@ -4009,6 +4114,54 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         download_filename: String::new(),
     });
 
+    // Qwen 3.8 flagship MoE — 2.4T total / 95B active, thinking-only. 256K
+    // native context, extensible to ~1M. Reuses the qwen35moe architecture
+    // (informational — the engine auto-detects arch from GGUF metadata; the
+    // b10375 engine implements qwen35moe). Multi-node MoE-sharded serving
+    // ONLY: ~397GB at UD-Q1_0 across 10 shards (first shard is the llama.cpp
+    // load entry). Carries a built-in single MTP layer for self-speculative
+    // decoding (DraftMtp, like nemotron-3-ultra), so no paired drafter GGUF.
+    //
+    // LICENSE — HUMAN REVIEW REQUIRED. Upstream tags this "qwen3.8-max", a
+    // NON-STANDARD custom license — NOT Apache 2.0, unlike the rest of the
+    // Qwen 3.5/3.6 family. Could not confirm it is permissive (the string
+    // "qwen3.8-max" suggests Qwen-Max-style restricted terms). Left to map to
+    // the default Permissive tier via `license_tier_for`'s else-branch so no
+    // false license claim is asserted here, but the redistribution /
+    // commercial terms MUST be verified before this entry is relied upon; add
+    // a `license_tier_for` arm (likely CommercialCustom + a stable id) once
+    // the actual terms are confirmed.
+    catalog.push(HfModelEntry {
+        id: "qwen3.8-2.4t-a95b".into(),
+        name: "Qwen 3.8 2.4T-A95B (MoE)".into(),
+        family: "qwen3.8".into(),
+        hf_repo: "unsloth/Qwen3.8-2.4T-A95B-GGUF".into(),
+        hf_filename: "UD-Q1_0/Qwen3.8-2.4T-A95B-UD-Q1_0-00001-of-00010.gguf".into(),
+        parameters: "2.4T (MoE, 95B active)".into(),
+        architecture: ModelArchitecture::Qwen35Moe,
+        context_length: 262144,
+        quantization: "UD-Q1_0".into(),
+        size_bytes: 397_000_000_000,
+        min_ram_gb: 450,
+        license: "qwen3.8-max".into(),
+        description: "Qwen 3.8 flagship MoE — 2.4T total, 95B active per token, thinking-only. 256K native context extensible to ~1M. Multi-node MoE-sharded serving only (10-shard UD-Q1_0 GGUF; first shard is the load entry). Built-in single MTP layer for self-speculative decoding.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+        moe: Some(MoeShape {
+            num_experts: 512,
+            experts_per_token: 10,
+            shared_experts: 1,
+            params_per_expert_x10: None,
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: true, default_mode: ReasoningMode::Always, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 32_768 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
     // ── Gemma 3 (Google, ungated via unsloth GGUF) ─────────────────────
     catalog.push(HfModelEntry {
         id: "gemma3-270m".into(),
@@ -5076,6 +5229,50 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             default_mode: ReasoningMode::Auto,
             thinking_safe_min_b: 0.0,
             thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // NVIDIA Nemotron 3.5 Lightning 30B-A3B — hybrid Mamba-2 + Attention MoE,
+    // 30B total / 3B active, single-node serving (~25GB at UD-Q4_K_XL, single
+    // file). Thinking + instruct, 256K native context extensible to ~1M.
+    // Reuses the Llama architecture enum for display (informational — the
+    // b10375 engine implements nemotron_h_moe and auto-detects it from GGUF).
+    // OpenMDW-1.1 is a permissive open-weights license (maps to the Permissive
+    // tier). The GGUF may or may not carry the MTP head, so no DraftMtp is
+    // declared — left as MtpKind::None until confirmed served.
+    catalog.push(HfModelEntry {
+        id: "nemotron-3.5-lightning-30b-a3b".into(),
+        name: "NVIDIA Nemotron 3.5 Lightning 30B-A3B (MoE)".into(),
+        family: "nemotron-lightning".into(),
+        hf_repo: "unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF".into(),
+        hf_filename: "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-Q4_K_XL.gguf".into(),
+        parameters: "30B (MoE, 3B active)".into(),
+        architecture: ModelArchitecture::Llama,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 25_500_000_000,
+        min_ram_gb: 32,
+        license: "OpenMDW-1.1".into(),
+        description: "NVIDIA Nemotron 3.5 Lightning — 30B total / 3B active hybrid Mamba-2 + Attention MoE. Thinking + instruct, 256K native context extensible to ~1M. Single-file GGUF, single-node serving.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 6,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy {
+            supports_thinking: true,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 4.0,
+            thinking_min_budget_tokens: 16_384,
         },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
@@ -6824,6 +7021,7 @@ pub fn get_model_by_id(id: &str) -> Option<HfModelEntry> {
 pub fn moe_safetensors_repo(model_id: &str) -> Option<&'static str> {
     match model_id {
         "qwen3-30b-a3b" => Some("Qwen/Qwen3-30B-A3B"),
+        "qwen3.8-2.4t-a95b" => Some("Qwen/Qwen3.8-2.4T-A95B"),
         "deepseek-v3-0324" => Some("deepseek-ai/DeepSeek-V3-0324"),
         "deepseek-v4-flash" => Some("deepseek-ai/DeepSeek-V4-Flash"),
         "deepseek-v4-pro" => Some("deepseek-ai/DeepSeek-V4-Pro"),
@@ -6930,6 +7128,73 @@ mod tests {
         };
         assert_eq!(count("qwen3.5-0.8b"), Some(800_000_000));
         assert_eq!(count("qwen3.6-35b-a3b-mtp"), Some(35_000_000_000));
+    }
+
+    /// The reported regression: qwen3.5-0.8b (the ladder's fast L0 rung)
+    /// must render thinking-OFF and answer directly, while the strong
+    /// reasoners keep thinking. The gate keys on TOTAL params, so the 35B-A3B
+    /// MoE (3B active) is NOT caught by the 4B small-series floor.
+    #[test]
+    fn thinking_off_for_small_qwen_but_on_for_capable_reasoners() {
+        assert!(!resolve_enable_thinking("qwen3.5-0.8b", None));
+        assert!(!resolve_enable_thinking("qwen3.5-2b", None));
+        assert!(resolve_enable_thinking("qwen3.6-35b-a3b-mtp", None));
+        assert!(resolve_enable_thinking("qwen3.6-35b-a3b", None));
+        // muse-glimmer reasons via harmony channels, not the template toggle:
+        // supports_thinking=false -> leave the flag at its default (true).
+        assert!(resolve_enable_thinking("muse-glimmer-30b", None));
+        // Unknown id -> unchanged default.
+        assert!(resolve_enable_thinking("does-not-exist", None));
+    }
+
+    /// Serialises env-var access across the two tests that mutate
+    /// `TENZRO_NOTHINK_MODELS`, so a set in one can't leak into the other's
+    /// observation (Rust runs tests in the same process on many threads).
+    static NOTHINK_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The operator escape hatch: `TENZRO_NOTHINK_MODELS` forces a normally
+    /// thinking-on model onto the non-thinking path with no rebuild, and the
+    /// override wins before any policy lookup.
+    #[test]
+    fn env_override_forces_thinking_off() {
+        let _guard = NOTHINK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Baseline: this MoE reasons by default.
+        assert!(resolve_enable_thinking("qwen3.6-35b-a3b", None));
+        // SAFETY: single-threaded within the lock; no other test reads/writes
+        // this var without holding the same lock.
+        unsafe {
+            std::env::set_var("TENZRO_NOTHINK_MODELS", " other-id , qwen3.6-35b-a3b ,");
+        }
+        // Trimmed, non-empty match -> forced off even for a large reasoner.
+        assert!(!resolve_enable_thinking("qwen3.6-35b-a3b", None));
+        // A model not on the list is unaffected by the override.
+        assert!(resolve_enable_thinking("muse-glimmer-30b", None));
+        unsafe {
+            std::env::remove_var("TENZRO_NOTHINK_MODELS");
+        }
+        // Cleared -> back to the policy default.
+        assert!(resolve_enable_thinking("qwen3.6-35b-a3b", None));
+    }
+
+    /// The budget half of the Auto gate: a capable reasoner given too small a
+    /// `max_tokens` to both think and answer renders thinking-OFF, while a
+    /// generous budget keeps it on. qwen3.6 carries `thinking_min_budget_tokens
+    /// == 16_384`.
+    #[test]
+    fn budget_gate_forces_thinking_off_when_tiny() {
+        let _guard = NOTHINK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Make sure a leaked override from another test can't confound this.
+        unsafe {
+            std::env::remove_var("TENZRO_NOTHINK_MODELS");
+        }
+        // Tiny budget (< 16_384) -> off despite the model being big enough.
+        assert!(!resolve_enable_thinking("qwen3.6-35b-a3b", Some(512)));
+        // Generous budget (>= 16_384) -> on.
+        assert!(resolve_enable_thinking("qwen3.6-35b-a3b", Some(32_768)));
+        // Exactly at the floor -> on (the gate is `>=`).
+        assert!(resolve_enable_thinking("qwen3.6-35b-a3b", Some(16_384)));
+        // muse-glimmer is supports_thinking=false, so the budget never applies.
+        assert!(resolve_enable_thinking("muse-glimmer-30b", Some(1)));
     }
 
     #[test]

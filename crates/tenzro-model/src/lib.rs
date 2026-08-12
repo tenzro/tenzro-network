@@ -128,6 +128,7 @@ pub mod lifecycle;
 pub mod load;
 pub mod memory_budget;
 pub mod meta_router;
+pub mod muse_harmony;
 pub mod model_hash;
 pub mod moe_compute;
 #[cfg(all(feature = "moe-gpu", feature = "moe-cuda"))]

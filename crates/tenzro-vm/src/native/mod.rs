@@ -165,7 +165,7 @@ pub const SELECTOR_NODE_ALIAS_CLAIM: [u8; 4] = [0x01, 0x00, 0x00, 0x50];
 pub const SELECTOR_NODE_ALIAS_BIND: [u8; 4] = [0x01, 0x00, 0x00, 0x51];
 pub const SELECTOR_NODE_ALIAS_RELEASE: [u8; 4] = [0x01, 0x00, 0x00, 0x52];
 
-// Identity registration (TDIP) — replicate a DID + its public record into
+// Identity registration (TDIP D5) — replicate a DID + its public record into
 // consensus state so an identity created on one node resolves on every node.
 // Same rationale as node aliases: a registry held in one node's memory would
 // mean whoever you asked decides who owns a DID. Ordered by consensus, every
@@ -247,7 +247,7 @@ const GAS_NODE_ALIAS_RELEASE: u64 = 25_000;
 
 // Registering a DID consumes a globally unique name out of the DID namespace
 // and writes a record every node must carry, so it is priced with the
-// claim-class ops rather than the cheaper binds (TDIP).
+// claim-class ops rather than the cheaper binds (TDIP D5).
 const GAS_IDENTITY_REGISTER: u64 = 100_000;
 
 // Maximum size of an inline workflow JSON payload. Workflows with payloads
@@ -3274,7 +3274,7 @@ impl NativeExecutor {
     }
 
     /// `RegisterIdentity` — land a DID + its public record into consensus
-    /// state (TDIP). Mirrors [`Self::execute_node_alias_claim`]: the
+    /// state (TDIP D5). Mirrors [`Self::execute_node_alias_claim`]: the
     /// record lives under `SYSTEM_ADDRESS` at `identity:<did>`, DID
     /// uniqueness is enforced against that consensus state so every node
     /// reaches the same verdict on the same ordered transactions, and the
@@ -4269,7 +4269,7 @@ fn node_alias_storage_key(name: &str) -> Vec<u8> {
 /// Consensus-state key a registered identity record lives under, within
 /// `SYSTEM_ADDRESS` storage. The `identity:` prefix keeps the DID namespace
 /// distinct from node aliases and human `@usernames` by construction, and the
-/// DID is globally unique so the key doubles as the uniqueness guard (TDIP).
+/// DID is globally unique so the key doubles as the uniqueness guard (TDIP D5).
 fn identity_storage_key(did: &str) -> Vec<u8> {
     format!("identity:{did}").into_bytes()
 }
@@ -5410,7 +5410,7 @@ mod tests {
         );
     }
 
-    // ---- RegisterIdentity (TDIP) ----------------------------------------
+    // ---- RegisterIdentity (TDIP D5) ----------------------------------------
 
     fn make_identity_register_data(did: &str, controller: &[u8]) -> Vec<u8> {
         let payload = tenzro_types::identity::RegisterIdentityPayload {

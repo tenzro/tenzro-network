@@ -41,6 +41,34 @@ impl Default for PaymentGateConfig {
     }
 }
 
+/// Access decision for an inference request, returned by an
+/// [`InferenceAdmission`] before the payment gate runs.
+///
+/// The gate consults this first so that pre-paid (subscription) and
+/// pre-authorized (rental) credentials skip payment entirely, open
+/// on-demand models fall through to the x402 challenge, and gated or
+/// private models are refused *without* issuing a pay-per-call challenge.
+#[derive(Debug, Clone)]
+pub enum InferenceAccess {
+    /// A valid pre-paid (subscription) or pre-authorized (rental) credential — skip payment entirely.
+    Allow,
+    /// No pre-paid credential; the model is open on-demand (or operator-enabled fallback) — proceed with x402.
+    NeedPayment,
+    /// Refuse without issuing an x402 challenge (gated model without credential, or private/unknown). Carries HTTP status + message.
+    Refuse(u16, String),
+}
+
+/// Decides inference access from request headers + the requested model,
+/// independently of the payment mechanism.
+///
+/// Implemented in `tenzro-node` (which knows about api keys, the admission
+/// gate, and served-model visibility); kept as a trait here so
+/// `tenzro-payments` does not depend on `tenzro-node`.
+pub trait InferenceAdmission: Send + Sync {
+    /// Decide access for an inference request. `model_id` is the parsed `model` field of the chat body (None if unparseable).
+    fn decide(&self, headers: &axum::http::HeaderMap, model_id: Option<&str>) -> InferenceAccess;
+}
+
 /// Payment gate middleware state
 ///
 /// Attach this to Axum router state to enable payment-gated endpoints.
@@ -54,6 +82,10 @@ pub struct PaymentGateMiddleware {
     pub challenge_store: ChallengeStore,
     /// Optional identity binder for payer validation (delegation scopes, active status)
     identity_binder: Option<Arc<IdentityPaymentBinder>>,
+    /// Optional inference admission authorizer. When set, `/chat` requests are
+    /// first classified into pre-paid/on-demand/refused before the payment
+    /// gate runs (see [`InferenceAdmission`]).
+    inference_admission: Option<Arc<dyn InferenceAdmission>>,
 }
 
 impl PaymentGateMiddleware {
@@ -68,6 +100,7 @@ impl PaymentGateMiddleware {
             config,
             challenge_store,
             identity_binder: None,
+            inference_admission: None,
         }
     }
 
@@ -77,6 +110,17 @@ impl PaymentGateMiddleware {
     /// that the payment amount/protocol/chain are within the payer's delegation scope.
     pub fn with_identity_binder(mut self, binder: Arc<IdentityPaymentBinder>) -> Self {
         self.identity_binder = Some(binder);
+        self
+    }
+
+    /// Attach an inference admission authorizer.
+    ///
+    /// When set, `/chat` requests are classified by the authorizer before the
+    /// payment gate runs: pre-paid/pre-authorized credentials bypass payment,
+    /// open on-demand models fall through to the x402 challenge, and gated or
+    /// private models are refused without a pay-per-call challenge.
+    pub fn with_inference_admission(mut self, a: Arc<dyn InferenceAdmission>) -> Self {
+        self.inference_admission = Some(a);
         self
     }
 
@@ -101,13 +145,70 @@ impl PaymentGateMiddleware {
 /// If credential is present, verifies it and forwards request on success.
 pub async fn payment_gate_handler(
     State(middleware): State<PaymentGateMiddleware>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, PaymentGateError> {
     let uri = request.uri().clone();
     let resource = uri.path();
 
     debug!("Payment gate checking resource: {}", resource);
+
+    // Credential-aware pre-check for the inference surface. When an
+    // `InferenceAdmission` authorizer is wired, `/chat` requests are first
+    // classified: pre-paid (subscription) and pre-authorized (rental)
+    // credentials bypass payment; open on-demand models fall through to the
+    // x402 challenge below; gated/private/unknown models are refused without
+    // issuing a pay-per-call challenge.
+    if let Some(ref auth) = middleware.inference_admission
+        && matches!(
+            request.uri().path(),
+            "/chat" | "/v1/chat/completions" | "/chat-stream" | "/api/paid/chat/completions"
+        )
+    {
+        let (parts, body) = request.into_parts();
+        let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
+            .await
+            .map_err(|e| PaymentGateError::InvalidCredential(format!("body read: {e}")))?;
+
+        // Chat bodies name the model as `model` (OpenAI) or `model_id` (the
+        // rich `/chat-stream` shape); accept either.
+        #[derive(serde::Deserialize)]
+        struct ModelOnly {
+            model: Option<String>,
+            model_id: Option<String>,
+        }
+        let model = serde_json::from_slice::<ModelOnly>(&bytes)
+            .ok()
+            .and_then(|m| m.model.or(m.model_id));
+
+        match auth.decide(&parts.headers, model.as_deref()) {
+            InferenceAccess::Allow => {
+                let req = axum::extract::Request::from_parts(parts, Body::from(bytes));
+                return Ok(next.run(req).await);
+            }
+            InferenceAccess::Refuse(status, msg) => {
+                let body = serde_json::json!({
+                    "error": {
+                        "message": msg,
+                        "type": "insufficient_credential",
+                        "code": "credential_required",
+                    }
+                })
+                .to_string();
+                let status = StatusCode::from_u16(status).unwrap_or(StatusCode::PAYMENT_REQUIRED);
+                let resp = Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap_or_else(|_| StatusCode::PAYMENT_REQUIRED.into_response());
+                return Ok(resp);
+            }
+            InferenceAccess::NeedPayment => {
+                // Fall through to the existing x402 payment logic below.
+                request = axum::extract::Request::from_parts(parts, Body::from(bytes));
+            }
+        }
+    }
 
     // Check for payment credential in headers
     let credential_header = request

@@ -1951,21 +1951,6 @@ pub async fn chat_completion(
         sse::{Event, Sse},
     };
 
-    // Check if inference router is available
-    let router = match &state.inference_router {
-        Some(r) => r.clone(),
-        None => {
-            let error = serde_json::json!({
-                "error": {
-                    "message": "Inference router not available",
-                    "type": "service_unavailable",
-                    "code": "router_not_configured"
-                }
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error)).into_response();
-        }
-    };
-
     // Validate inputs at API boundary (MEDIUM #115)
     use tenzro_types::validation;
     if let Err(e) =
@@ -2006,6 +1991,54 @@ pub async fn chat_completion(
         let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "invalid_temperature" }});
         return (StatusCode::BAD_REQUEST, Json(error)).into_response();
     }
+
+    // LOCAL FAST-PATH: if this node serves the requested model in-process,
+    // run the completion through the same engine path `/v1/chat/completions`
+    // uses (model runtime `generate_chat` / `generate_chat_stream`), bypassing
+    // the marketplace router. The router raises `NoProvidersAvailable` for a
+    // locally-served model because the ProviderManager is only populated from
+    // `is_network()`-filtered gossip announcements — a `Gated` in-process model
+    // has no provider entry anywhere, not even on the node serving it. The
+    // in-process path returns an OpenAI-compatible response (streaming and
+    // non-streaming) whose structure is a superset of what this handler
+    // otherwise builds. Network/remote models fall through to the router below.
+    if let Some(node) = &state.node
+        && node.served_models.contains_key(&request.model)
+    {
+        let messages = request
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>();
+        let oai = crate::rpc::OpenAIChatRequest::from_web_chat(
+            request.model.clone(),
+            messages,
+            request.stream.unwrap_or(true),
+            request.max_tokens.map(|t| t as u32),
+            request.temperature,
+        );
+        return crate::rpc::openai_chat_completions_inner(
+            node.clone(),
+            axum::http::HeaderMap::new(),
+            oai,
+        )
+        .await;
+    }
+
+    // Non-local model: route through the marketplace to a network provider.
+    let router = match &state.inference_router {
+        Some(r) => r.clone(),
+        None => {
+            let error = serde_json::json!({
+                "error": {
+                    "message": "Inference router not available",
+                    "type": "service_unavailable",
+                    "code": "router_not_configured"
+                }
+            });
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(error)).into_response();
+        }
+    };
 
     // Generate unique chat completion ID
     let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());

@@ -597,7 +597,7 @@ impl AuthEngine {
             .clamp(1, self.cfg.max_ttl_secs);
 
         // 4. Delegation chain. A parent that carries no AAP delegation claim
-        // is not implicitly a root — it is rejected. There is 
+        // is not implicitly a root — it is rejected. There is no legacy
         // "missing delegation ⇒ root" path.
         let parent_delegation = parent_claims.aap_delegation.clone().ok_or_else(|| {
             AuthError::DelegationViolation(

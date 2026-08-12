@@ -28,10 +28,12 @@
 
 use std::sync::Arc;
 
+use std::net::SocketAddr;
+
 use axum::{
     Json,
     body::Body,
-    extract::{Multipart, Path, Query, State},
+    extract::{ConnectInfo, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -40,6 +42,7 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::api_key::ApiKeyScope;
+use crate::resource_authz::{Authorized, authorize_resource};
 use crate::files_api::{
     FileDeletion, FileObject, FilePurpose, UploadRejection, file_id_for, object_id_from,
     validate_upload,
@@ -115,61 +118,46 @@ struct FileList {
 
 /// Resolve the calling tenant's DID, or produce the refusal to return.
 ///
-/// The API key is the credential; its `subject` is the identity. A key with no
-/// subject is an operator-internal key — usable for operating the node, but it
-/// names no tenant, so it cannot own a file. Saying so explicitly is better
-/// than falling back to some node-wide bucket that every such key would share.
-fn tenant_or_refusal(node: &Arc<TenzroNode>, headers: &HeaderMap) -> Result<String, Response> {
-    let manager = node.api_key_manager().ok_or_else(|| {
-        error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no_api_keys",
-            "This node has no API-key manager, so it cannot attribute a file to a tenant. \
-             /v1/files is unavailable until the operator enables API keys.",
-        )
-    })?;
-
-    let presented = headers
-        .get("x-tenzro-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            error_response(
-                StatusCode::UNAUTHORIZED,
-                "missing_api_key",
-                "Missing X-Tenzro-Api-Key. Every file has an owner, so /v1/files has no \
-                 unauthenticated path — including for reads.",
-            )
-        })?;
-
-    let record = manager.lookup(presented).ok_or_else(|| {
-        error_response(
-            StatusCode::UNAUTHORIZED,
-            "invalid_api_key",
-            "The presented API key is unknown or revoked.",
-        )
-    })?;
-
-    if !record.scopes.contains(&ApiKeyScope::Storage) {
-        return Err(error_response(
-            StatusCode::FORBIDDEN,
-            "insufficient_scope",
-            "This API key does not carry the 'storage' scope.",
-        ));
-    }
-
-    record
-        .subject
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
+/// The tenant is derived from *how* the request cleared the operator's node-wide
+/// storage serving mode ([`crate::config::NodeConfig::storage_access`]), via the
+/// shared [`authorize_resource`] precedence:
+///
+/// - **Gated / scoped key** — the key's `subject` is the identity. A key with no
+///   subject is an operator-internal key: usable for operating the node, but it
+///   names no tenant, so it cannot own a file. Saying so explicitly is better
+///   than falling back to a node-wide bucket every such key would share.
+/// - **Open / x402** — the payer DID from the settled credential owns the file;
+///   payment is the attribution.
+/// - **Private / loopback** — an on-node caller acts as the node operator, so
+///   the file is attributed to the operator's DID.
+async fn tenant_or_refusal(
+    node: &Arc<TenzroNode>,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> Result<String, Response> {
+    let access = node.config().storage_access;
+    match authorize_resource(node, headers, peer, access, ApiKeyScope::Storage).await? {
+        Authorized::Key { subject, .. } => subject.ok_or_else(|| {
             error_response(
                 StatusCode::FORBIDDEN,
                 "no_subject",
                 "This API key names no subject, so it cannot own a file. Reissue the key with a \
-             subject DID.",
+                 subject DID.",
             )
-        })
+        }),
+        Authorized::Payment { payer_did } => Ok(payer_did),
+        Authorized::Loopback => Ok(loopback_tenant(node)),
+    }
+}
+
+/// The tenant an on-node (loopback) caller of a `Private` storage surface acts
+/// as: the node operator. Named explicitly here rather than invented per call
+/// site so every on-box upload/read attributes to one stable owner.
+fn loopback_tenant(node: &Arc<TenzroNode>) -> String {
+    node.config()
+        .operator_did
+        .clone()
+        .unwrap_or_else(|| "did:tenzro:node:local".to_string())
 }
 
 /// The storage runtime, or the refusal explaining why this node has none.
@@ -207,10 +195,11 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
 /// anything wrong, and several HTTP libraries do exactly that.
 async fn handle_files_upload(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let tenant = match tenant_or_refusal(&node, &headers) {
+    let tenant = match tenant_or_refusal(&node, &headers, Some(peer)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -366,10 +355,11 @@ async fn handle_files_upload(
 /// `GET /v1/files` — the caller's own files.
 async fn handle_files_list(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let tenant = match tenant_or_refusal(&node, &headers) {
+    let tenant = match tenant_or_refusal(&node, &headers, Some(peer)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -407,10 +397,11 @@ fn owned_or_refusal(
 /// `GET /v1/files/:file_id` — one record.
 async fn handle_files_retrieve(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(file_id): Path<String>,
 ) -> Response {
-    let tenant = match tenant_or_refusal(&node, &headers) {
+    let tenant = match tenant_or_refusal(&node, &headers, Some(peer)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -423,10 +414,11 @@ async fn handle_files_retrieve(
 /// `GET /v1/files/:file_id/content` — the bytes, rebuilt from shards.
 async fn handle_files_content(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(file_id): Path<String>,
 ) -> Response {
-    let tenant = match tenant_or_refusal(&node, &headers) {
+    let tenant = match tenant_or_refusal(&node, &headers, Some(peer)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -482,10 +474,11 @@ async fn handle_files_content(
 /// `DELETE /v1/files/:file_id` — unlink the reference.
 async fn handle_files_delete(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(file_id): Path<String>,
 ) -> Response {
-    let tenant = match tenant_or_refusal(&node, &headers) {
+    let tenant = match tenant_or_refusal(&node, &headers, Some(peer)).await {
         Ok(t) => t,
         Err(r) => return r,
     };

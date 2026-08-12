@@ -23,6 +23,7 @@ use bytes::Bytes;
 use serde_json::{Value, json};
 
 use tenzro_iroh::{IrohError, IrohResult, JsonRpcDispatcher};
+use tenzro_payments::middleware::InferenceAccess;
 
 use crate::node::TenzroNode;
 use crate::rpc::{EmbeddedAuth, dispatch_embedded};
@@ -76,10 +77,64 @@ impl JsonRpcDispatcher for IrohInferDispatcher {
             }
         };
 
-        // Peer calls carry no operator/tenant credentials — inference is an
-        // unauthenticated read surface. The embedded dispatcher applies its
-        // own gates; `tenzro_chat` needs none.
-        let response = dispatch_embedded(&self.node, payload, EmbeddedAuth::default()).await;
+        // The inference methods (`tenzro_chat` / `tenzro_chatCompletion`) are
+        // credential-gated exactly like the HTTP `/chat` path: a peer dialing
+        // this ALPN must present the same subscription api-key / rental
+        // service-key to reach a `Gated` model. Other methods pass through
+        // unchanged as an unauthenticated read surface.
+        let method = payload.get("method").and_then(|m| m.as_str());
+        let is_inference =
+            matches!(method, Some("tenzro_chat") | Some("tenzro_chatCompletion"));
+
+        let mut auth = EmbeddedAuth::default();
+
+        if is_inference {
+            // Credentials + model id ride in the JSON-RPC frame (fixed client
+            // contract): top-level `api_key` / `service_key`, model at
+            // `params.model` (or `params.model_id`).
+            let api_key = payload.get("api_key").and_then(|v| v.as_str());
+            let service_key = payload.get("service_key").and_then(|v| v.as_str());
+            let model = payload
+                .get("params")
+                .and_then(|p| p.get("model").or_else(|| p.get("model_id")))
+                .and_then(|v| v.as_str());
+
+            // Run the SAME admission policy as the HTTP gate
+            // (`NodeInferenceAdmission`), reading the credential from the frame.
+            let admission = crate::inference_admission::NodeInferenceAdmission {
+                node: self.node.clone(),
+                gated_on_demand_fallback: self.node.config().payments.gated_on_demand_fallback,
+            };
+            match admission.decide_creds(api_key, service_key, model) {
+                // Allow: pre-paid/pre-authorized credential. NeedPayment: open
+                // `Network` model. x402-over-overlay is not implemented yet, so
+                // open models are served without payment over the overlay for
+                // now; only the gated-credential gate is enforced here.
+                InferenceAccess::Allow | InferenceAccess::NeedPayment => {}
+                // Refuse: gated model without a valid credential, or
+                // private/unknown model. Return a JSON-RPC error frame.
+                InferenceAccess::Refuse(_status, msg) => {
+                    let id = payload.get("id").cloned().unwrap_or(Value::Null);
+                    let body = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32001, "message": msg },
+                    });
+                    return Ok(Bytes::from(
+                        serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec()),
+                    ));
+                }
+            }
+
+            // Thread the api-key into EmbeddedAuth so downstream scope gates in
+            // the embedded pipeline also see the credential.
+            auth = EmbeddedAuth {
+                api_key: api_key.map(|s| s.to_string()),
+                ..EmbeddedAuth::default()
+            };
+        }
+
+        let response = dispatch_embedded(&self.node, payload, auth).await;
 
         serde_json::to_vec(&response)
             .map(Bytes::from)

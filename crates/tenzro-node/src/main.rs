@@ -109,16 +109,17 @@ struct Cli {
     #[arg(long, value_name = "FORMAT", default_value = "text")]
     log_format: String,
 
-    /// RPC listen address. Defaults to `0.0.0.0:8545` so that a freshly
-    /// launched validator participates in the open RPC layer alongside its
-    /// consensus role. Override with `--rpc-addr 127.0.0.1:8545` for a
-    /// loopback-only node (typical for provider/TEE roles operated behind
-    /// a trusted controller).
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:8545")]
+    /// RPC listen address. Defaults to `127.0.0.1:8545` (loopback) so that
+    /// off-box HTTP access is opt-in and fail-closed: a freshly launched node
+    /// exposes its RPC only to the local host and a trusted controller.
+    /// Operators that want the node to participate in the open off-box RPC
+    /// layer pass `--rpc-addr 0.0.0.0:8545` explicitly.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8545")]
     rpc_addr: String,
 
-    /// Web API listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:8080")]
+    /// Web API listen address. Defaults to `127.0.0.1:8080` (loopback);
+    /// expose off-box explicitly with `--web-addr 0.0.0.0:8080`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
     web_addr: String,
 
     /// Path to genesis configuration file
@@ -141,36 +142,44 @@ struct Cli {
     #[arg(long)]
     solo: bool,
 
-    /// MCP server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3001")]
+    /// MCP server listen address. Defaults to loopback (`127.0.0.1:3001`);
+    /// expose off-box explicitly with `--mcp-addr 0.0.0.0:3001`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3001")]
     mcp_addr: String,
 
-    /// A2A protocol server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3002")]
+    /// A2A protocol server listen address. Loopback by default; expose
+    /// off-box explicitly with `--a2a-addr 0.0.0.0:3002`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3002")]
     a2a_addr: String,
 
-    /// Solana MCP server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3003")]
+    /// Solana MCP server listen address. Loopback by default; expose off-box
+    /// explicitly with `--solana-mcp-addr 0.0.0.0:3003`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3003")]
     solana_mcp_addr: String,
 
-    /// Ethereum MCP server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3004")]
+    /// Ethereum MCP server listen address. Loopback by default; expose
+    /// off-box explicitly with `--ethereum-mcp-addr 0.0.0.0:3004`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3004")]
     ethereum_mcp_addr: String,
 
-    /// Canton MCP server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3005")]
+    /// Canton MCP server listen address. Loopback by default; expose off-box
+    /// explicitly with `--canton-mcp-addr 0.0.0.0:3005`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3005")]
     canton_mcp_addr: String,
 
-    /// LayerZero MCP server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3006")]
+    /// LayerZero MCP server listen address. Loopback by default; expose
+    /// off-box explicitly with `--layerzero-mcp-addr 0.0.0.0:3006`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3006")]
     layerzero_mcp_addr: String,
 
-    /// Chainlink MCP server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3007")]
+    /// Chainlink MCP server listen address. Loopback by default; expose
+    /// off-box explicitly with `--chainlink-mcp-addr 0.0.0.0:3007`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3007")]
     chainlink_mcp_addr: String,
 
-    /// LI.FI MCP server listen address
-    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:3008")]
+    /// LI.FI MCP server listen address. Loopback by default; expose off-box
+    /// explicitly with `--lifi-mcp-addr 0.0.0.0:3008`.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3008")]
     lifi_mcp_addr: String,
 
     /// External (publicly-routable) RPC endpoint URL advertised to peers.
@@ -839,6 +848,16 @@ async fn main() -> Result<()> {
         if let Some(ref binder) = identity_binder {
             rpc_gate = rpc_gate.with_identity_binder(binder.clone());
         }
+        // Same credential-aware authorizer as the Web API: subscription
+        // (X-Tenzro-Api-Key) and rental (x-tenzro-service-key) credentials
+        // bypass x402 on the RPC inference routes (/v1/chat/completions,
+        // /chat-stream), and gated models refuse without a credential rather
+        // than issuing a pay-per-call challenge.
+        let rpc_admission = Arc::new(tenzro_node::inference_admission::NodeInferenceAdmission {
+            node: node_arc.clone(),
+            gated_on_demand_fallback: payments.gated_on_demand_fallback,
+        });
+        rpc_gate = rpc_gate.with_inference_admission(rpc_admission);
         info!(
             recipient = %payments.recipient,
             amount = %payments.amount,
@@ -946,6 +965,11 @@ async fn main() -> Result<()> {
             if let Some(ref binder) = identity_binder {
                 middleware = middleware.with_identity_binder(binder.clone());
             }
+            let admission = Arc::new(tenzro_node::inference_admission::NodeInferenceAdmission {
+                node: node_arc.clone(),
+                gated_on_demand_fallback: payments.gated_on_demand_fallback,
+            });
+            middleware = middleware.with_inference_admission(admission);
             let setup =
                 web::server::PaymentGateSetup::new(middleware, payments.paid_routes.clone());
             info!(
@@ -963,6 +987,37 @@ async fn main() -> Result<()> {
                  HTTP 402 middleware will not be wired"
             );
         }
+    }
+
+    // In-node public HTTPS edge. An `edge`-role node (or one with
+    // `hosting.edge_enabled`) that configured an ACME contact terminates public
+    // TLS itself and fronts hosted sites — including NAT'd origins reached over
+    // the overlay — replacing the external-Caddy assumption. Certificates are
+    // minted on demand (TLS-ALPN-01) only for hostnames the node is allowed to
+    // serve.
+    #[cfg(feature = "edge-tls")]
+    if (config.roles.serves_edge() || config.hosting.edge_enabled)
+        && let Some(email) = config.hosting.acme_contact_email.clone()
+    {
+        let cache_dir = config
+            .hosting
+            .acme_cache_dir
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.data_dir.join("acme"));
+        let settings = web::edge_tls::EdgeTlsSettings {
+            https_addr: config.hosting.https_addr.clone(),
+            contact_email: email,
+            cache_dir,
+            staging: config.hosting.acme_staging,
+            app_domain: config.hosting.app_domain.clone(),
+        };
+        info!(
+            https_addr = %config.hosting.https_addr,
+            staging = config.hosting.acme_staging,
+            "In-node public HTTPS edge enabled (on-demand ACME / Let's Encrypt)"
+        );
+        web_server = web_server.with_edge_tls(settings);
     }
 
     let web_shutdown_rx = shutdown_tx.subscribe();

@@ -306,9 +306,9 @@ impl Sequence {
     }
 }
 
-fn build_sampler(config: &GenerationConfig) -> LlamaSampler {
+fn build_sampler(config: &GenerationConfig, n_vocab: i32) -> LlamaSampler {
     LlamaSampler::chain_simple([
-        LlamaSampler::penalties(config.repeat_last_n as i32, config.repeat_penalty, 0.0, 0.0),
+        LlamaSampler::penalties(n_vocab, config.repeat_last_n as i32, config.repeat_penalty, 0.0, 0.0),
         LlamaSampler::temp(config.temperature as f32),
         LlamaSampler::top_p(config.top_p as f32, 1),
         LlamaSampler::dist(config.seed as u32),
@@ -342,6 +342,15 @@ fn scheduler_loop(
 
     let ctx_size = ctx.n_ctx() as i32;
 
+    // Resolved once per engine: constant for the model this scheduler serves.
+    // Small qwen3.5/3.6 (e.g. the ladder's L0 rung qwen3.5-0.8b) render
+    // thinking-OFF so they answer directly; everything else keeps its default.
+    // Engine-level resolve: this scheduler is shared across requests, so no
+    // single request's budget applies here. `None` = unbounded, matching the
+    // pre-budget-gate behaviour (the budget half of the gate threads through
+    // the per-request serial paths in `runtime.rs`).
+    let enable_thinking = crate::catalog::resolve_enable_thinking(model_id, None);
+
     info!(
         "batch engine for {} online: {} slots, ctx={}",
         model_id,
@@ -365,7 +374,7 @@ fn scheduler_loop(
         // non-blocking.
         if active == 0 {
             match rx.recv_timeout(IDLE_POLL) {
-                Ok(req) => admit(&model, ctx_size, &mut slots, req),
+                Ok(req) => admit(&model, ctx_size, &mut slots, req, enable_thinking),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -373,7 +382,7 @@ fn scheduler_loop(
         // Fill any remaining free slots without blocking.
         while slots.iter().any(|s| s.is_none()) {
             match rx.try_recv() {
-                Ok(req) => admit(&model, ctx_size, &mut slots, req),
+                Ok(req) => admit(&model, ctx_size, &mut slots, req, enable_thinking),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
@@ -533,7 +542,13 @@ fn finalize_and_free(
 /// Tokenize an admitted request into the first free slot and stage its prompt
 /// for prefill. Prefill decode happens on the scheduler thread (the only holder
 /// of the `LlamaContext`); `admit` only tokenizes and records the prompt.
-fn admit(model: &LlamaModel, ctx_size: i32, slots: &mut [Option<Sequence>], req: BatchRequest) {
+fn admit(
+    model: &LlamaModel,
+    ctx_size: i32,
+    slots: &mut [Option<Sequence>],
+    req: BatchRequest,
+    enable_thinking: bool,
+) {
     let Some(slot_idx) = slots.iter().position(|s| s.is_none()) else {
         // No free slot — reject rather than block. Caller sheds load.
         let _ = req.result_tx.send(Err(ModelError::QueueFull {
@@ -548,7 +563,7 @@ fn admit(model: &LlamaModel, ctx_size: i32, slots: &mut [Option<Sequence>], req:
     // Render the prompt to a final string. Chat messages go through the model's
     // GGUF chat template (per-architecture: Gemma `<start_of_turn>`, Qwen
     // `<|im_start|>`, ...) with the generation prompt appended.
-    let prompt = match render_prompt(model, &req.prompt) {
+    let prompt = match render_prompt(model, &req.prompt, enable_thinking) {
         Ok(p) => p,
         Err(e) => {
             let _ = req.result_tx.send(Err(e));
@@ -586,7 +601,7 @@ fn admit(model: &LlamaModel, ctx_size: i32, slots: &mut [Option<Sequence>], req:
 
     slots[slot_idx] = Some(Sequence {
         seq_id,
-        sampler: build_sampler(&req.config),
+        sampler: build_sampler(&req.config, model.n_vocab()),
         token_tx: req.token_tx,
         result_tx: Some(req.result_tx),
         decoder: encoding_rs::UTF_8.new_decoder(),
@@ -603,10 +618,27 @@ fn admit(model: &LlamaModel, ctx_size: i32, slots: &mut [Option<Sequence>], req:
 }
 
 /// Render a [`BatchPrompt`] to the final prompt string fed to the tokenizer.
-fn render_prompt(model: &LlamaModel, prompt: &BatchPrompt) -> Result<String> {
+fn render_prompt(
+    model: &LlamaModel,
+    prompt: &BatchPrompt,
+    enable_thinking: bool,
+) -> Result<String> {
     match prompt {
         BatchPrompt::Raw(s) => Ok(s.clone()),
         BatchPrompt::Chat(messages) => {
+            // First choice: the model's own template with automatic per-model
+            // format selection (llama.cpp `common_chat`). This is what a
+            // non-ChatML model (muse-glimmer, gpt-oss) needs — the plain
+            // `apply_chat_template` below falls back to ChatML for anything it
+            // does not recognize. No tools on the batched path. Falls through
+            // to the existing template + ChatML path when there is no usable
+            // template.
+            if let Some(nc) =
+                crate::tool_grammar::native_chat_prompt(model, messages, &[], enable_thinking)
+            {
+                return Ok(nc.prompt);
+            }
+
             let llama_messages: Vec<LlamaChatMessage> = messages
                 .iter()
                 .map(|m| {

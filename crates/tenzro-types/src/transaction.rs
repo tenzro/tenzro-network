@@ -28,7 +28,7 @@ pub const MAX_TX_DATA_SIZE: usize = 131_072;
 /// (FIPS 204, exactly 1952 bytes) and is **mandatory**. Tenzro Network does
 /// not support classical-only transactions — the field has no `Option`
 /// wrapper and no `serde(default)`. Decoders reject any payload that omits
-/// or mis-sizes this field. There is  fallback: a classical-only
+/// or mis-sizes this field. There is no legacy fallback: a classical-only
 /// transaction cannot be constructed in this codebase and cannot be parsed
 /// from any external source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,7 +577,7 @@ pub enum TransactionType {
         /// New 32-byte SHA-256 commitment to the attestation document.
         tee_attestation_hash: Option<[u8; 32]>,
     },
-    /// Register an identity (DID) into replicated consensus state (TDIP).
+    /// Register an identity (DID) into replicated consensus state (TDIP D5).
     ///
     /// Identities were historically written **local-only** by each RPC
     /// registration handler, so a DID created on node A never resolved on

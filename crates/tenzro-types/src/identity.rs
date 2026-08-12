@@ -110,7 +110,7 @@ impl std::fmt::Display for IdentityType {
     }
 }
 
-/// Wire payload for a `RegisterIdentity` native transaction (TDIP).
+/// Wire payload for a `RegisterIdentity` native transaction (TDIP D5).
 ///
 /// Carries the **replicable** portion of an identity record — the DID, its
 /// public keys, wallet bindings, and display metadata — so an identity

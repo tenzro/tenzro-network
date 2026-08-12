@@ -902,6 +902,16 @@ pub struct PaymentsConfig {
     /// backends resolve through the remote CDP verifier.
     #[serde(default)]
     pub x402_facilitator: Option<X402FacilitatorConfig>,
+
+    /// Operator opt-in: allow x402 pay-per-call on `Gated` models presented
+    /// without a subscription/rental credential.
+    ///
+    /// A `Gated` model normally refuses off-node callers that lack a
+    /// pre-agreed credential (api key or service key) rather than offering a
+    /// pay-per-call challenge. Setting this to `true` lets the operator also
+    /// accept on-demand x402 payment for gated models. Defaults to `false`.
+    #[serde(default)]
+    pub gated_on_demand_fallback: bool,
 }
 
 /// Operator config for self-hosted x402 (EIP-3009 / Permit2) facilitation.
@@ -974,6 +984,7 @@ impl Default for PaymentsConfig {
             stripe_api_base: None,
             tempo_stablecoins: std::collections::HashMap::new(),
             x402_facilitator: None,
+            gated_on_demand_fallback: false,
         }
     }
 }
@@ -999,6 +1010,9 @@ pub struct EffectivePayments {
     pub protocol: String,
     /// Web paths gated behind payment.
     pub paid_routes: Vec<String>,
+    /// Operator opt-in: allow x402 pay-per-call on `Gated` models presented
+    /// without a subscription/rental credential.
+    pub gated_on_demand_fallback: bool,
 }
 
 impl PaymentsConfig {
@@ -1052,6 +1066,7 @@ impl PaymentsConfig {
             asset: self.default_asset.clone(),
             protocol: self.default_protocol.clone(),
             paid_routes,
+            gated_on_demand_fallback: self.gated_on_demand_fallback,
         }
     }
 }
@@ -1078,6 +1093,7 @@ impl std::fmt::Debug for PaymentsConfig {
             .field("stripe_api_base", &self.stripe_api_base)
             .field("tempo_stablecoins", &self.tempo_stablecoins)
             .field("x402_facilitator", &self.x402_facilitator)
+            .field("gated_on_demand_fallback", &self.gated_on_demand_fallback)
             .finish()
     }
 }
@@ -2017,6 +2033,25 @@ pub struct NodeConfig {
     /// than publishing a rate the operator never quoted.
     #[serde(default)]
     pub listing_tnzo_usd_micro: Option<u64>,
+
+    /// The operator's node-wide *serving mode* for the `/v1/files` object-storage
+    /// surface — the storage counterpart to a database's per-record
+    /// [`tenzro_types::resource_access::ResourceAccess`]. Storage objects have no
+    /// per-object record to hang a policy on, so the mode is set once for the
+    /// whole surface:
+    ///
+    /// - `Open { price_per_request }` — any caller may use `/v1/files` by
+    ///   settling an x402 payment per request; no API key required.
+    /// - `Gated` — only callers holding a `storage`-scoped API key (the prior
+    ///   behaviour).
+    /// - `Private` — `/v1/files` is refused unless the request is loopback.
+    ///
+    /// A valid `storage`-scoped API key always works regardless of this setting
+    /// (it is the operator's per-caller override). Defaults to `Private`
+    /// (fail-closed): a keyless off-box request is refused until the operator
+    /// opts into `Open` or `Gated`.
+    #[serde(default)]
+    pub storage_access: tenzro_types::resource_access::ResourceAccess,
 }
 
 /// Application-hosting edge configuration.
@@ -2026,7 +2061,7 @@ pub struct NodeConfig {
 /// protocol. The node reports whatever the operator configured so onboarding
 /// records (auto subdomains, custom-domain CNAME targets) name the operator's
 /// edge rather than any single canonical host.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostingConfig {
     /// The domain this operator's edge serves deployed sites under. When set,
     /// auto-assigned site subdomains are `<name>-<hash>.<app_domain>` and a
@@ -2052,6 +2087,64 @@ pub struct HostingConfig {
     /// operator hosts for free — the most competitive bid.
     #[serde(default, with = "u128_as_string")]
     pub price_per_hour: u128,
+
+    /// Address the in-node public HTTPS edge binds for TLS termination when this
+    /// node holds the `edge` role (or `edge_enabled` is set). Defaults to
+    /// `0.0.0.0:443`. The plain-HTTP Web API on `NodeConfig::web_addr` is
+    /// unaffected: this is an *additional* listener that terminates public TLS
+    /// itself and hands each request to the same axum router (so host→site
+    /// routing, overlay forwarding and the site registry are all reused).
+    #[serde(default = "default_https_addr")]
+    pub https_addr: String,
+
+    /// ACME account contact email used to register with Let's Encrypt and to
+    /// receive certificate-expiry notices. The in-node HTTPS edge activates only
+    /// when this is set — without a contact the node cannot open an ACME account,
+    /// so it stays HTTP-only even with the `edge` role. Stored without the
+    /// `mailto:` prefix (the edge adds it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_contact_email: Option<String>,
+
+    /// Directory where issued certificates and the ACME account key are cached so
+    /// restarts reuse certs rather than re-ordering them (repeated ordering
+    /// quickly exhausts Let's Encrypt rate limits). `None` (the default) resolves
+    /// to `<data_dir>/acme`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_cache_dir: Option<String>,
+
+    /// Use the Let's Encrypt *staging* directory instead of production. Staging
+    /// issues untrusted certificates but has far higher rate limits, so leave it
+    /// `true` while testing edge issuance and set it `false` (the default) for
+    /// real, browser-trusted certificates.
+    #[serde(default)]
+    pub acme_staging: bool,
+
+    /// Force-enable the in-node HTTPS edge even when the node's role set does not
+    /// include `edge`. The edge normally derives from the `edge` role; this is an
+    /// explicit opt-in for operators who front sites without advertising the
+    /// role. Still requires `acme_contact_email`. Default `false`.
+    #[serde(default)]
+    pub edge_enabled: bool,
+}
+
+fn default_https_addr() -> String {
+    "0.0.0.0:443".to_string()
+}
+
+impl Default for HostingConfig {
+    fn default() -> Self {
+        Self {
+            app_domain: None,
+            edge_ipv4: None,
+            edge_ipv6: None,
+            price_per_hour: 0,
+            https_addr: default_https_addr(),
+            acme_contact_email: None,
+            acme_cache_dir: None,
+            acme_staging: false,
+            edge_enabled: false,
+        }
+    }
 }
 
 /// Rates the provider runtimes spawn with.
@@ -2303,6 +2396,7 @@ impl NodeConfig {
             provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
+            storage_access: tenzro_types::resource_access::ResourceAccess::Private,
         }
     }
 
@@ -2361,6 +2455,7 @@ impl NodeConfig {
             provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
+            storage_access: tenzro_types::resource_access::ResourceAccess::Private,
         }
     }
 
@@ -2419,6 +2514,7 @@ impl NodeConfig {
             provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
+            storage_access: tenzro_types::resource_access::ResourceAccess::Private,
         }
     }
 
@@ -2477,6 +2573,7 @@ impl NodeConfig {
             provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
+            storage_access: tenzro_types::resource_access::ResourceAccess::Private,
         }
     }
 

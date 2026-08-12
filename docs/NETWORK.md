@@ -170,6 +170,64 @@ A new node finds the network through a multi-source bootstrap path:
 
 The result is permissionless joining: a node with the binary, the genesis, and a DNS name (or one explicit peer) becomes a network participant without any operator-side allowlisting.
 
+### Kademlia mode and overlay-network reachability
+
+DHT discovery is only *decentralized* — torrent-style, where any node finds any
+other through the routing table rather than a hand-maintained peer list — when
+reachable nodes run Kademlia in **Server** mode. A **Client**-mode node queries
+the DHT but is not advertised in it, so its peers can find *it* only if they
+already hold its address. If every node is a Client, discovery collapses to the
+boot-node set: spokes reach the boot node but never each other (a **star**), with
+the boot node a single point of connectivity.
+
+Mode is chosen from reachability (§3): a node starts Server only with a
+confirmed-reachable external address (validator class, `enable_relay`), otherwise
+Client, and promotes Client→Server once AutoNAT reports sustained `Direct`.
+
+**Overlay/VPN caveat.** On an overlay network (e.g. Tailscale/WireGuard) every
+node *is* directly reachable at its stable overlay address, but AutoNAT's
+dial-back probe often cannot certify `Direct` through the overlay, so nodes never
+promote and stay Client → the DHT never meshes → star. Two operational fixes:
+
+1. **Multi-boot mesh (any binary, config only).** Give each node *all* the other
+   validators in `--boot-nodes`, not just one. Every node then dials every other
+   directly — a full mesh independent of DHT/AutoNAT — and the boot list doubles
+   as redundant bootstrap entry points (no single entry can partition a joiner).
+   Best for a known, fixed validator set.
+2. **Force Server mode for known-reachable nodes.** A node with a stable,
+   operator-declared external address on an overlay is reachable by definition;
+   run it in Server mode (`enable_relay=true` for the validator class) so it
+   DHT-advertises and the routing table meshes the network decentrally — the path
+   for permissionless joiners that are not in anyone's boot list.
+
+Prefer (2) for a growing permissionless network; (1) is the immediate, foolproof
+mesh for a fixed backbone and composes with (2).
+
+### Resilience: node drop and restart
+
+The network tolerates any single node dropping or restarting with no operator
+action:
+
+- **Consensus** is HotStuff-2 with a 2f+1 quorum, so with N validators the chain
+  keeps finalizing through up to f simultaneous failures; a dropped validator's
+  slot is simply not counted until it returns.
+- **Auto-restart.** Each node runs under `systemd` with `Restart=always` +
+  `RestartSec=5` and `WantedBy=multi-user.target`, so it comes back after a crash
+  *and* after a host reboot.
+- **Persistent identity + state.** The libp2p key (`p2p_key`), the TPM-sealed
+  key material, the consensus store, and the block DB live under the data dir and
+  survive restarts and binary upgrades. Because the peer ID is derived from the
+  persisted key, a restarted node keeps the *same* identity, so multi-boot mesh
+  entries and DHT records for it stay valid — the mesh reconnects on its own.
+- **Re-sync + re-mesh.** On restart a node re-dials its boot nodes, re-runs the
+  periodic Kademlia bootstrap (every 60 s), and block-syncs from tip. A node that
+  fell behind while down catches up on the next block via the behind-hint →
+  block-sync path (§5).
+
+Binary upgrades follow the same contract: swap the binary and restart the unit —
+never wipe the data dir — and the node rejoins with its identity, wallets, and
+chain state intact.
+
 ### mDNS local discovery and `LocalPeerSet`
 
 The four sources above find peers across the WAN. On the local segment a node also runs libp2p mDNS inside `TenzroBehaviour`, so machines on the same LAN find each other with zero configuration — no boot node, no DNS, no DHT round. This is the discovery substrate for two local-network features: forming a LAN cluster that jointly serves an oversized model (see AI.md §3.5), and preferring a local provider when one is present.

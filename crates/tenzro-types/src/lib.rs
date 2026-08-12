@@ -62,6 +62,7 @@ pub mod principal_chain;
 pub mod provenance;
 pub mod reserve;
 pub mod resource;
+pub mod resource_access;
 pub mod runtime;
 pub mod saga;
 pub mod settlement;

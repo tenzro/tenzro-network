@@ -1874,7 +1874,7 @@ struct EventLoopState {
     /// Our own chain-id, parsed once at startup from `config.protocol_version`
     /// (`tenzro/<chain_id>/<semver>`). Consulted by the Identify `Received`
     /// handler to fail-closed-disconnect any peer whose advertised chain-id is
-    /// absent or differs from ours — the cross-chain peering gate that
+    /// absent or differs from ours — the cross-chain peering gate (D1d) that
     /// stops nodes on distinct chains from meshing over a shared discovery
     /// substrate. `None` only if our own protocol_version is legacy-form, in
     /// which case the gate is disabled (we cannot assert a chain to compare).
@@ -3582,13 +3582,13 @@ async fn handle_swarm_event(state: &mut EventLoopState, event: SwarmEvent<Tenzro
                     info.agent_version
                 );
 
-                // Cross-chain peering gate, fail-closed. Our advertised
+                // Cross-chain peering gate (D1d), fail-closed. Our advertised
                 // protocol_version carries the chain-id as
                 // `tenzro/<chain_id>/<semver>`. A peer whose advertised
                 // chain-id is absent (legacy build) or differs from ours is on
                 // a different chain and must NOT be admitted — cross-chain
                 // gossip over a shared discovery substrate is what let nodes
-                // silently fork solo chains. Only the chain-id segment is
+                // silently fork solo chains (D1). Only the chain-id segment is
                 // compared, so peers on differing node *versions* of the same
                 // chain still mesh. Skipped only if our own protocol_version is
                 // legacy-form (`local_chain_id == None`): with no chain to

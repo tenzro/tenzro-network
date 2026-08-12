@@ -24,11 +24,12 @@
 //! would hand every tenant every other tenant's databases, since the policy
 //! check downstream trusts that field to have been authenticated.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -36,6 +37,7 @@ use serde_json::{Value, json};
 
 use crate::api_key::ApiKeyScope;
 use crate::node::TenzroNode;
+use crate::resource_authz::{Authorized, authorize_resource};
 
 /// Router for the whole `/v1/databases` surface.
 pub fn database_routes() -> axum::Router<Arc<TenzroNode>> {
@@ -158,14 +160,48 @@ async fn dispatch(node: &Arc<TenzroNode>, method: &str, params: Value, api_key: 
         return error_response(StatusCode::FORBIDDEN, "refused", &e.message);
     }
     let response = crate::rpc::handle_request(node, request, &auth_ctx, Some(api_key), None).await;
+    // The JSON-RPC codes the database handlers use are mapped onto the statuses
+    // an HTTP client acts on (retry, fix the request, or stop) in
+    // `project_rpc_response`; anything unrecognised is a server fault rather
+    // than a client one, because guessing "bad request" for an error we did not
+    // anticipate blames the caller for our gap.
+    project_rpc_response(response)
+}
+
+/// Dispatch into the JSON-RPC layer *without* the tenant API-key gate.
+///
+/// The twin of [`dispatch`] for requests that cleared the resource's serving
+/// mode by payment (`Open`) or by being on-node (`Private`/loopback) rather than
+/// by a key. [`dispatch`] runs [`crate::rpc::gate_api_key`], which refuses a
+/// keyless database method — correct for the Gated path, wrong once the operator
+/// has declared the resource Open or a loopback caller reached a Private one.
+/// The gate is therefore skipped here and the request runs keyless: the
+/// downstream handlers still enforce the database's own `access_policy` (the
+/// *who* layer) against the `caller_did` this layer set, and `enforce_database_scope`
+/// with no key is a no-op, so nothing else is loosened.
+async fn dispatch_open(node: &Arc<TenzroNode>, method: &str, params: Value) -> Response {
+    let request = crate::rpc::JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: method.to_string(),
+        params: Some(params),
+        id: json!(1),
+    };
+    let auth_ctx = crate::rpc::AuthContext::from_mcp(
+        None,
+        None,
+        "POST".to_string(),
+        format!("http://{}/", node.config().rpc_addr),
+    );
+    let response = crate::rpc::handle_request(node, request, &auth_ctx, None, None).await;
+    project_rpc_response(response)
+}
+
+/// Project a JSON-RPC response onto HTTP, shared by [`dispatch`] and
+/// [`dispatch_open`].
+fn project_rpc_response(response: crate::rpc::JsonRpcResponse) -> Response {
     match (response.result, response.error) {
         (Some(result), _) => (StatusCode::OK, Json(result)).into_response(),
         (None, Some(e)) => {
-            // The JSON-RPC codes the database handlers use, mapped onto the
-            // statuses an HTTP client acts on: retry, fix the request, or
-            // stop. Anything unrecognised is a server fault rather than a
-            // client one, because guessing "bad request" for an error we did
-            // not anticipate blames the caller for our gap.
             let status = match e.code {
                 -32001 => StatusCode::FORBIDDEN,
                 -32004 => StatusCode::UNAUTHORIZED,
@@ -181,6 +217,102 @@ async fn dispatch(node: &Arc<TenzroNode>, method: &str, params: Value, api_key: 
             "empty_response",
             "The node returned neither a result nor an error.",
         ),
+    }
+}
+
+/// How a request to an existing database cleared its serving mode, plus the
+/// caller DID the request is attributed to. Produced by [`authorize_db`].
+enum DbAuth {
+    /// A valid `database`-scoped API key. Continues through [`dispatch`] so the
+    /// existing key gate + scope + access-policy path runs unchanged.
+    Keyed {
+        /// The key's subject DID, adjudicated as the caller.
+        caller_did: String,
+        /// The raw API key.
+        key: String,
+    },
+    /// Cleared by x402 payment (`Open`) or by being on-node (`Private`/loopback).
+    /// Dispatched keyless via [`dispatch_open`].
+    Keyless {
+        /// The caller DID: the payer for `Open`, the database owner for loopback.
+        caller_did: String,
+    },
+}
+
+impl DbAuth {
+    fn caller_did(&self) -> &str {
+        match self {
+            DbAuth::Keyed { caller_did, .. } | DbAuth::Keyless { caller_did } => caller_did,
+        }
+    }
+}
+
+/// Authorize a request against an existing database's operator-set serving mode.
+///
+/// Looks the database up to read its per-record
+/// [`tenzro_database::DatabaseDescriptor::access`], then runs the shared
+/// [`authorize_resource`] precedence (valid key → x402 for `Open` → refuse for
+/// `Gated`/no-key → loopback for `Private`). The returned [`DbAuth`] carries the
+/// caller DID and how to dispatch.
+async fn authorize_db(
+    node: &Arc<TenzroNode>,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    database_id: &str,
+) -> Result<DbAuth, Response> {
+    let registry = node.database_registry().ok_or_else(|| {
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_database_registry",
+            "This node has no database registry, so it serves no managed databases.",
+        )
+    })?;
+    let desc = registry.get_database(database_id).map_err(|_| {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "no_such_database",
+            &format!("No database '{database_id}'."),
+        )
+    })?;
+
+    match authorize_resource(node, headers, peer, desc.access, ApiKeyScope::Database).await? {
+        Authorized::Key { key, subject } => {
+            let caller_did = subject.ok_or_else(|| {
+                error_response(
+                    StatusCode::FORBIDDEN,
+                    "no_subject",
+                    "This API key names no subject, so there is no caller DID to adjudicate \
+                     against. Reissue the key with a subject DID.",
+                )
+            })?;
+            Ok(DbAuth::Keyed { caller_did, key })
+        }
+        // The payer owns the request under the operator's Open policy.
+        Authorized::Payment { payer_did } => Ok(DbAuth::Keyless {
+            caller_did: payer_did,
+        }),
+        // An on-node caller of a Private database acts as its owner.
+        Authorized::Loopback => Ok(DbAuth::Keyless {
+            caller_did: desc.access_policy.owner_did().to_string(),
+        }),
+    }
+}
+
+/// Run an existing-database method with the identity and dispatch path chosen by
+/// [`authorize_db`]. `body` is the caller's request body (if any); `id` is
+/// injected as `database_id`; `caller_did` is set from the authorization.
+async fn dispatch_db(
+    node: &Arc<TenzroNode>,
+    auth: DbAuth,
+    method: &str,
+    body: Option<Value>,
+    id: &str,
+) -> Response {
+    let mut params = with_caller(body, auth.caller_did(), false);
+    params["database_id"] = json!(id);
+    match auth {
+        DbAuth::Keyed { key, .. } => dispatch(node, method, params, &key).await,
+        DbAuth::Keyless { .. } => dispatch_open(node, method, params).await,
     }
 }
 
@@ -303,105 +435,123 @@ async fn handle_list_databases(
 /// `GET /v1/databases/{id}`
 async fn handle_get(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let (did, key) = match tenant_or_refusal(&node, &headers) {
-        Ok(t) => t,
+    let auth = match authorize_db(&node, &headers, Some(peer), &id).await {
+        Ok(a) => a,
         Err(r) => return r,
     };
-    let params = with_caller(Some(json!({ "database_id": id })), &did, false);
-    dispatch(&node, "tenzro_getDatabase", params, &key).await
+    dispatch_db(&node, auth, "tenzro_getDatabase", None, &id).await
 }
 
 /// `DELETE /v1/databases/{id}`
 async fn handle_drop(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let (did, key) = match tenant_or_refusal(&node, &headers) {
-        Ok(t) => t,
+    let auth = match authorize_db(&node, &headers, Some(peer), &id).await {
+        Ok(a) => a,
         Err(r) => return r,
     };
-    let params = with_caller(Some(json!({ "database_id": id })), &did, false);
-    dispatch(&node, "tenzro_dropDatabase", params, &key).await
+    dispatch_db(&node, auth, "tenzro_dropDatabase", None, &id).await
 }
 
 /// `GET /v1/databases/{id}/partitions`
 async fn handle_partitions(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let (did, key) = match tenant_or_refusal(&node, &headers) {
-        Ok(t) => t,
+    let auth = match authorize_db(&node, &headers, Some(peer), &id).await {
+        Ok(a) => a,
         Err(r) => return r,
     };
-    let params = with_caller(Some(json!({ "database_id": id })), &did, false);
-    dispatch(&node, "tenzro_listDatabasePartitions", params, &key).await
+    dispatch_db(&node, auth, "tenzro_listDatabasePartitions", None, &id).await
 }
 
 /// `POST /v1/databases/{id}/query`
 async fn handle_query(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Response {
-    let (did, key) = match tenant_or_refusal(&node, &headers) {
-        Ok(t) => t,
+    let auth = match authorize_db(&node, &headers, Some(peer), &id).await {
+        Ok(a) => a,
         Err(r) => return r,
     };
-    let mut params = with_caller(body.map(|Json(v)| v), &did, false);
-    params["database_id"] = json!(id);
-    dispatch(&node, "tenzro_databaseQuery", params, &key).await
+    dispatch_db(
+        &node,
+        auth,
+        "tenzro_databaseQuery",
+        body.map(|Json(v)| v),
+        &id,
+    )
+    .await
 }
 
 /// `POST /v1/databases/{id}/rescale`
 async fn handle_rescale(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Response {
-    let (did, key) = match tenant_or_refusal(&node, &headers) {
-        Ok(t) => t,
+    let auth = match authorize_db(&node, &headers, Some(peer), &id).await {
+        Ok(a) => a,
         Err(r) => return r,
     };
-    let mut params = with_caller(body.map(|Json(v)| v), &did, false);
-    params["database_id"] = json!(id);
-    dispatch(&node, "tenzro_rescaleDatabase", params, &key).await
+    dispatch_db(
+        &node,
+        auth,
+        "tenzro_rescaleDatabase",
+        body.map(|Json(v)| v),
+        &id,
+    )
+    .await
 }
 
 /// `POST /v1/databases/{id}/connections`
 async fn handle_connection(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Response {
-    let (did, key) = match tenant_or_refusal(&node, &headers) {
-        Ok(t) => t,
+    let auth = match authorize_db(&node, &headers, Some(peer), &id).await {
+        Ok(a) => a,
         Err(r) => return r,
     };
-    let mut params = with_caller(body.map(|Json(v)| v), &did, false);
-    params["database_id"] = json!(id);
-    dispatch(&node, "tenzro_issueDatabaseConnection", params, &key).await
+    dispatch_db(
+        &node,
+        auth,
+        "tenzro_issueDatabaseConnection",
+        body.map(|Json(v)| v),
+        &id,
+    )
+    .await
 }
 
 /// `GET /v1/databases/{id}/usage`
 async fn handle_usage(
     State(node): State<Arc<TenzroNode>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let (did, key) = match tenant_or_refusal(&node, &headers) {
-        Ok(t) => t,
+    let auth = match authorize_db(&node, &headers, Some(peer), &id).await {
+        Ok(a) => a,
         Err(r) => return r,
     };
-    let params = with_caller(Some(json!({ "database_id": id })), &did, false);
-    dispatch(&node, "tenzro_databaseUsage", params, &key).await
+    dispatch_db(&node, auth, "tenzro_databaseUsage", None, &id).await
 }
 
 #[cfg(test)]

@@ -500,7 +500,7 @@ pub enum IdentityData {
 
 /// A signable wallet bound to an identity beyond its primary wallet.
 ///
-/// an identity may hold more than one MPC wallet so a lost or corrupt
+/// D2b: an identity may hold more than one MPC wallet so a lost or corrupt
 /// wallet is a degraded state, not a full lockout. The primary wallet still
 /// lives directly on [`TenzroIdentity`] (`wallet_id` / `wallet_address` and
 /// the two verifying keys); each *additional* wallet an identity accrues via

@@ -171,7 +171,7 @@ pub struct IdentityRegistry {
     seen_credential_ids: DashSet<String>,
     /// Username → DID mapping for on-chain username uniqueness
     usernames: DashMap<String, String>,
-    /// DID → *additional* MPC wallets bound to that identity.
+    /// DID → *additional* MPC wallets bound to that identity (D2b).
     ///
     /// The primary wallet lives on the identity record itself
     /// (`TenzroIdentity::wallet_id` / `wallet_address`); this index holds every
@@ -405,7 +405,7 @@ impl IdentityRegistry {
             }
         }
 
-        // Hydrate DID → additional-wallet mappings from storage. Keys are
+        // Hydrate DID → additional-wallet mappings from storage (D2b). Keys are
         // `wallets:<did>`; each value is a bincode `Vec<WalletRef>`.
         let wallet_index = DashMap::new();
         match storage.get_keys_with_prefix(CF_IDENTITIES, b"wallets:") {
@@ -1653,7 +1653,7 @@ impl IdentityRegistry {
         Ok(self.resolve(did)?.wallet_id)
     }
 
-    /// Write-through persist the additional-wallet set for `did`.
+    /// Write-through persist the additional-wallet set for `did` (D2b).
     fn persist_wallet_index(&self, did: &str, wallets: &[WalletRef]) {
         if let Some(ref store) = self.storage {
             let key = format!("wallets:{}", did);
@@ -1670,7 +1670,7 @@ impl IdentityRegistry {
         }
     }
 
-    /// Binds an *additional* MPC wallet to an already-registered identity.
+    /// Binds an *additional* MPC wallet to an already-registered identity (D2b).
     ///
     /// The identity keeps its existing primary (`wallet_id` / `wallet_address`);
     /// `wallet` is appended to the identity's additional-wallet set so a lost or
@@ -1732,7 +1732,7 @@ impl IdentityRegistry {
     }
 
     /// Returns every wallet an identity owns, primary first, then additional
-    /// wallets in bind order. Fail-closed: errors if `did` is unknown.
+    /// wallets in bind order (D2b). Fail-closed: errors if `did` is unknown.
     pub fn wallets_for_did(&self, did: &str) -> Result<Vec<WalletRef>> {
         let identity = self.resolve(did)?;
         let mut wallets = vec![WalletRef {
@@ -1747,7 +1747,7 @@ impl IdentityRegistry {
         Ok(wallets)
     }
 
-    /// `from`-aware wallet resolution for the auth-mediated signing path.
+    /// `from`-aware wallet resolution for the auth-mediated signing path (D2b).
     ///
     /// * `from == None` → the identity's **primary** wallet id.
     /// * `from == Some(addr)` → the wallet id (primary or additional) whose
@@ -1781,7 +1781,7 @@ impl IdentityRegistry {
         )))
     }
 
-    /// Promotes an already-bound wallet to be the identity's primary.
+    /// Promotes an already-bound wallet to be the identity's primary (D2b).
     ///
     /// The current primary is demoted into the additional-wallet set and the
     /// named `wallet_id` — which must already be owned by `did` — becomes the
@@ -2917,7 +2917,7 @@ impl IdentityRegistry {
     }
 
     /// Mirror a `RegisterIdentity` record decoded from an `IdentityRegister`
-    /// consensus log into the local read model (TDIP).
+    /// consensus log into the local read model (TDIP D5).
     ///
     /// This is what makes an identity created on ANY node resolve on ALL
     /// nodes: the VM already enforced DID uniqueness against consensus state
@@ -3015,7 +3015,7 @@ impl IdentityRegistry {
 
         self.persist_identity(&payload.did, &identity);
         self.identities.insert(payload.did.clone(), identity);
-        info!(did = %payload.did, "Mirrored replicated identity from consensus (TDIP)");
+        info!(did = %payload.did, "Mirrored replicated identity from consensus (TDIP D5)");
         Ok(true)
     }
 
@@ -4630,7 +4630,7 @@ mod tests {
         assert_eq!(pc.controller_bond_aggregate, Some(amount));
     }
 
-    // ----- multiple wallets per identity + from-aware resolution -----
+    // ----- D2b: multiple wallets per identity + from-aware resolution -----
 
     /// Builds a distinct additional wallet reference for tests.
     fn test_wallet_ref(wallet_id: &str, addr_seed: u8) -> WalletRef {
@@ -4820,7 +4820,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_from_chain_lands_replicated_identity() {
         // Mirrors what a node does when it observes an `IdentityRegister`
-        // consensus log for a DID it has never seen (TDIP): the identity
+        // consensus log for a DID it has never seen (TDIP D5): the identity
         // becomes resolvable locally.
         let registry = IdentityRegistry::new();
         let did = "did:tenzro:human:remote1";

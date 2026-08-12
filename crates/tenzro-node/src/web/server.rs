@@ -291,6 +291,11 @@ pub struct WebServer {
     /// When `Some`, paid routes are wrapped with the payment gate middleware.
     /// When `None`, all routes are unprotected (legacy behaviour).
     payment_gate: Option<PaymentGateSetup>,
+    /// When `Some`, an additional public HTTPS listener is bound that terminates
+    /// TLS in-process (on-demand ACME) and serves the same axum app. Wired by
+    /// `main.rs` for `edge`-role nodes with an ACME contact configured.
+    #[cfg(feature = "edge-tls")]
+    edge_tls: Option<super::edge_tls::EdgeTlsSettings>,
 }
 
 impl WebServer {
@@ -299,6 +304,8 @@ impl WebServer {
             listen_addr,
             state: Arc::new(WebState::new()),
             payment_gate: None,
+            #[cfg(feature = "edge-tls")]
+            edge_tls: None,
         }
     }
 
@@ -312,6 +319,16 @@ impl WebServer {
     /// no valid `Payment-Credential`/`Authorization` header is present.
     pub fn with_payment_gate(mut self, setup: PaymentGateSetup) -> Self {
         self.payment_gate = Some(setup);
+        self
+    }
+
+    /// Enable the in-node public HTTPS edge. When set (and the web state carries
+    /// a node handle), `start_with_shutdown` additionally binds an HTTPS listener
+    /// on `settings.https_addr` that terminates TLS with on-demand ACME and
+    /// serves the same axum router as the plain-HTTP listener.
+    #[cfg(feature = "edge-tls")]
+    pub fn with_edge_tls(mut self, settings: super::edge_tls::EdgeTlsSettings) -> Self {
+        self.edge_tls = Some(settings);
         self
     }
 
@@ -368,6 +385,25 @@ impl WebServer {
                 crate::ip_rate_limit::IpRateLimiter::new(10, 50),
                 crate::ip_rate_limit::ip_rate_limit,
             ));
+
+        // Public HTTPS edge: an additional TLS listener that serves the SAME
+        // fully-layered `app` (host→site routing, overlay forward and all). The
+        // plain-HTTP listener on `web_addr` below stays for internal callers and
+        // overlay forwarding.
+        #[cfg(feature = "edge-tls")]
+        if let (Some(settings), Some(node)) =
+            (self.edge_tls.clone(), self.state.node.clone())
+        {
+            let edge_app = app.clone();
+            let edge_shutdown = shutdown_rx.resubscribe();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    super::edge_tls::serve(edge_app, node, settings, edge_shutdown).await
+                {
+                    tracing::error!("Edge HTTPS server error: {e}");
+                }
+            });
+        }
 
         let listener = tokio::net::TcpListener::bind(&self.listen_addr).await?;
         if let Some(gate) = self.payment_gate.as_ref() {

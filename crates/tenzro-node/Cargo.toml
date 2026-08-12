@@ -89,6 +89,16 @@ sysinfo = "0.31"
 prometheus-client = { workspace = true }
 rustls = { workspace = true }
 aws-lc-rs = { workspace = true }
+# In-node public HTTPS edge (feature `edge-tls`, src/web/edge_tls.rs). rustls-acme
+# 0.15 is on-demand ACME (TLS-ALPN-01) over rustls 0.23 (via futures-rustls 0.26)
+# — same rustls major as the workspace, so no duplicate rustls. Its default
+# `aws-lc-rs` feature matches the workspace-wide rustls CryptoProvider; `tokio`
+# adds the tokio integration. axum-server 0.8 (rustls 0.23 / tokio-rustls 0.26,
+# provider supplied by us) serves the axum app over the ACME-driven TLS config.
+rustls-acme = { version = "0.15.4", features = ["tokio"], optional = true }
+axum-server = { version = "0.8", default-features = false, features = [
+  "tls-rustls-no-provider",
+], optional = true }
 frost-ed25519 = { workspace = true }
 frost-secp256k1 = { workspace = true }
 ed25519-dalek = { workspace = true }
@@ -112,7 +122,19 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 
 [features]
-default = ["cluster-serving", "visa-tap", "mastercard-agent-pay", "wasi-skills"]
+default = [
+  "cluster-serving",
+  "visa-tap",
+  "mastercard-agent-pay",
+  "wasi-skills",
+  "edge-tls",
+]
+# In-node public HTTPS edge (src/web/edge_tls.rs). An `edge`-role node terminates
+# public TLS itself with rustls and mints Let's Encrypt certificates on demand
+# (TLS-ALPN-01), gated to hostnames it is allowed to serve, then hands requests
+# to the same axum router as the plain-HTTP Web API. Enabled by default so a
+# stock node build can front hosted sites without an external proxy (Caddy/nginx).
+edge-tls = ["dep:rustls-acme", "dep:axum-server"]
 # LAN layer-pipeline cluster serving. Forwards to tenzro-model, which links
 # the ggml RPC backend and builds the rpc-server sidecar used to splice a
 # member's layer range into a head node's pipeline. Enabled by default — it

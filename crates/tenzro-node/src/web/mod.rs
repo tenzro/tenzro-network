@@ -1,5 +1,7 @@
 //! Web Verification API — HTTP/REST endpoints for browser/external verification
 
+#[cfg(feature = "edge-tls")]
+pub mod edge_tls;
 pub mod error;
 pub mod handlers;
 pub mod oauth;

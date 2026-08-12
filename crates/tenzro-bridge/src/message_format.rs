@@ -470,7 +470,7 @@ pub fn verify_inner_message(
     }
     // Every inbound TenzroMessage must carry a valid signature. An unsigned
     // message (signature.is_none() ⇒ verify_signature() == Ok(false)) is
-    // rejected — there is  unsigned-message path.
+    // rejected — there is no legacy unsigned-message path.
     if !message.verify_signature().unwrap_or(false) {
         return Err(BridgeError::InvalidParameter(
             "inbound TenzroMessage is unsigned or its signature failed verification".into(),

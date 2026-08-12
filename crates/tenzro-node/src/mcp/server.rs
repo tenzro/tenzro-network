@@ -4715,6 +4715,138 @@ pub struct TenzroMcpServer {
     node: Arc<TenzroNode>,
     web_state: Arc<WebState>,
     _tool_router: ToolRouter<TenzroMcpServer>,
+    /// When true, this server instance is serving the raw iroh MCP transport
+    /// (`tenzro/mcp` ALPN), which carries NO credential and NO verified peer
+    /// identity — the axum-only `bearer_auth_check` / `ServiceSurface::Mcp`
+    /// gate does not apply. In that mode `call_tool`/`list_tools` are
+    /// restricted, fail-closed, to the read-only tool allowlist
+    /// ([`IROH_READONLY_TOOLS`]); every state-changing / admin / operator /
+    /// compute / key-management tool — and `chat_completion` — is refused.
+    /// `false` on the HTTP MCP path, which behaves exactly as before.
+    iroh_readonly: bool,
+}
+
+/// Tools permitted over the unauthenticated iroh MCP transport
+/// (`tenzro/mcp`). This is an ALLOWLIST — anything not listed is refused
+/// (fail-closed), so the worst case of an omission is a read-only tool
+/// being unavailable over iroh (still reachable over the gated HTTP MCP
+/// path), never an unintended exposure.
+///
+/// Membership rule: pure reads / queries / stateless computations only. It
+/// deliberately excludes everything that mutates node, chain, provider,
+/// stake, model, site/app, or wallet state; executes compute
+/// (`chat_completion`, `*_embed`, `forecast`, `detect`, `segment`,
+/// `transcribe`, `moe_forward`, agent runs); manages or exposes
+/// keys/wallets/passkeys/api-keys; or reads user file/database contents.
+///
+/// `chat_completion` is intentionally NOT listed: gated inference already
+/// has the properly-credential-gated `tenzro/infer` ALPN, so exposing it
+/// here would only re-open an ungated inference bypass. See the module
+/// note in `mcp/iroh_transport.rs`.
+const IROH_READONLY_TOOLS: &[&str] = &[
+    // ── Network / chain / node reads ──
+    "get_node_status", "get_node_did_document", "get_network_stats", "get_block",
+    "get_block_range", "get_fee_market", "get_transaction", "get_svm_cross_vm_program_info",
+    "get_validator_state", "list_validators", "list_active_validators", "get_router_metrics",
+    "get_provenance", "get_economic_policy", "local_peers", "node_reachability", "node_profile",
+    "cluster_plan", "list_snapshots", "get_snapshot_manifest", "get_snapshot_chunk", "get_events",
+    "settlement_networks", "get_interaction", "wallet_readiness",
+    // ── Balances / tokens (public reads) ──
+    "get_balance", "token_balance", "get_token_balance", "total_supply", "get_token_info",
+    "list_tokens", "get_nft_info", "list_nft_collections",
+    // ── Models / providers (catalog + status reads) ──
+    "list_models", "list_model_endpoints", "list_provider_capacity", "list_providers",
+    "get_model_hash", "list_model_hashes", "get_sealed_model", "list_sealed_models",
+    "model_recipient_key", "get_download_progress", "get_provider_stats", "get_compute_bond",
+    "get_provider_schedule", "get_provider_pricing", "discover_models", "discover_agents",
+    "route_difficulty_stats",
+    // ── MoE (planning + status reads; execute/load/prepare excluded) ──
+    "moe_shard_map", "moe_plan_dispatch", "moe_replication_policy", "moe_catalog_shape",
+    "moe_expert_status", "moe_prepare_status",
+    // ── Multi-modal (catalog + loaded-model listings; execute/load excluded) ──
+    "list_forecast_models", "list_forecast_catalog", "list_vision_models", "list_vision_catalog",
+    "list_text_embedding_models", "list_text_embedding_catalog", "list_segmentation_models",
+    "list_segmentation_catalog", "list_text_segmentation_models", "list_text_segmentation_catalog",
+    "list_detection_models", "list_detection_catalog", "list_audio_models", "list_audio_catalog",
+    "list_video_models", "list_video_catalog",
+    // ── Governance reads ──
+    "list_proposals", "get_voting_power",
+    // ── Tasks / agents / templates / capabilities (reads) ──
+    "list_tasks", "get_task", "list_agent_templates", "get_agent_template",
+    "search_agent_templates", "get_agent_template_stats", "list_capabilities",
+    "get_capability_attestations", "get_agent_capability_attestations",
+    "find_best_agent_for_capability", "get_swarm_status", "get_agent_bond",
+    "get_agent_daily_spend", "list_agent_jwks", "get_agent_jwk",
+    // ── Identity reads ──
+    "resolve_did", "resolve_username",
+    // ── Payments / fees / bridge quotes (reads + pure quotes) ──
+    "list_payment_protocols", "list_x402_schemes", "x402_protocol_info",
+    "x402_discover_resources", "x402_verify_offer", "x402_payment_id", "get_fee_route",
+    "list_fee_routes", "compute_fee_route_payouts", "quote_bridge_fee_in_tnzo",
+    "list_bridge_sponsorship_pools", "get_bridge_routes", "list_bridge_adapters", "bridge_quote",
+    "prepaid_balance",
+    // ── Workflow / settlement / escrow reads ──
+    "get_workflow", "list_workflows_by_creator", "list_workflows_by_participant",
+    "list_workflows_by_status", "get_workflow_lifecycle", "get_workflow_saga",
+    "get_workflow_receipt", "list_workflow_receipts", "get_workflow_operational_metrics",
+    "get_obligation", "get_approval_gate", "get_approval_request", "get_privacy_domain",
+    "list_privacy_domains_for_did", "get_capital_intent", "get_reserve", "dvp_get_saga",
+    "dvp_list_sagas_by_creator", "netting_get_batch", "netting_list_batches", "get_dispute",
+    "list_disputes_by_channel", "get_escrow", "list_escrows_by_payer", "list_escrows_by_payee",
+    "get_approval", "list_pending_approvals",
+    // ── Verification / pure-compute helpers (no state, no key material) ──
+    "verify_zk_proof", "get_zk_attestation", "verify_vrf_proof", "verify_signature",
+    "verify_did_envelope", "verify_tee_attestation", "detect_tee", "list_tee_providers",
+    "get_inference_commitment", "get_inference_challenge", "list_inference_challenges",
+    "list_zk_circuits", "hash_sha256", "hash_keccak256", "caip2", "caip10", "caip19",
+    "encode_function", "decode_result", "eip7702_protocol_info", "eip7702_signing_hash",
+    "eip7702_build_designator", "eip7702_parse_designator", "ap2_protocol_info", "ivms101_hash",
+    "permit2_domain_separator", "permit2_digest", "permit2_nonce_used",
+    "signed_agent_card_canonical_hash", "attested_clock_now", "wormhole_chain_id",
+    "wormhole_parse_vaa_id", "wormhole_ntt_list_chains",
+    // ── Cross-chain read/quote helpers (send/dispatch/pay excluded) ──
+    "erc7683_get_order", "erc7683_list_orders", "erc7683_get_fill", "erc7683_list_fills",
+    "ccip_get_fee", "ccip_supported_chains", "ccip_supported_tokens", "ccip_lanes",
+    "ccip_token_pool", "ccip_rate_limits", "ccip_track", "hyperlane_list_chains",
+    "hyperlane_quote_dispatch", "hyperlane_get_message", "axelar_list_chains",
+    "axelar_get_message", "babylon_get_finality_provider", "babylon_list_finality_providers",
+    "babylon_total_stake_for_provider", "babylon_list_delegations", "cct_list_pools",
+    "cct_get_pool", "urwa_is_kill_switched", "urwa_get_frozen_tokens",
+    // ── ERC-8004 pure ABI encoders/decoders (stateless) ──
+    "erc8004_encode_register", "erc8004_encode_register_with_uri",
+    "erc8004_encode_register_with_metadata", "erc8004_encode_get_agent",
+    "erc8004_decode_get_agent", "erc8004_encode_set_agent_uri", "erc8004_encode_set_agent_wallet",
+    "erc8004_encode_set_metadata", "erc8004_encode_get_metadata", "erc8004_decode_get_metadata",
+    "erc8004_encode_get_agent_uri", "erc8004_encode_get_agent_wallet", "erc8004_encode_feedback",
+    "erc8004_encode_get_feedback", "erc8004_encode_get_feedback_count",
+    "erc8004_encode_revoke_feedback", "erc8004_encode_append_response",
+    "erc8004_encode_is_feedback_revoked", "erc8004_encode_get_feedback_responses",
+    "erc8004_encode_validation_request", "erc8004_encode_validation_response",
+    "erc8004_encode_get_validation",
+    // ── Canton / DA / training / media / seed / burn / SLA (reads) ──
+    "list_canton_domains", "list_daml_contracts", "da_list_challenges", "da_availability",
+    "da_committee", "da_list_blobs", "training_list_runs", "training_get_run",
+    "training_get_receipt", "training_get_sealed_manifest", "media_gen_list_catalog",
+    "media_gen_quote", "media_gen_list_jobs", "media_gen_get_job", "media_gen_list_workers",
+    "media_gen_get_receipt", "get_trainer_daemon_status", "list_bound_devices",
+    "seed_agent_get_earmark", "seed_agent_get_charter", "seed_agent_list_charters",
+    "seed_agent_list", "seed_agent_get_network_activity", "adaptive_burn_get_config",
+    "adaptive_burn_get_metrics", "adaptive_burn_get_recommendation", "adaptive_burn_list_proposals",
+    "sla_list_outstanding_probes", "sla_get_params",
+    // ── Secure-mint / stable-asset reads ──
+    "get_secure_mint_policy", "secure_mint_check", "get_stable_asset",
+    // ── Sites / functions / machines / apps / leases / compute / storage (reads) ──
+    "site_get", "list_sites", "site_get_alias", "list_site_aliases", "site_get_placement",
+    "list_site_placements", "site_get_domain", "list_site_domains", "function_get",
+    "list_functions", "machine_get", "list_machines", "machine_status", "list_leases",
+    "get_leases_for_app", "get_app", "list_apps", "compute_get_rental", "compute_status",
+    "storage_get_deal", "storage_status",
+];
+
+/// Whether `tool` may be invoked over the unauthenticated iroh MCP
+/// transport. Fail-closed: unknown tool → not permitted.
+fn iroh_tool_allowed(tool: &str) -> bool {
+    IROH_READONLY_TOOLS.contains(&tool)
 }
 
 impl std::fmt::Debug for TenzroMcpServer {
@@ -5896,6 +6028,22 @@ impl TenzroMcpServer {
             node,
             web_state,
             _tool_router: Self::tool_router(),
+            iroh_readonly: false,
+        }
+    }
+
+    /// Construct a server for the raw iroh MCP transport (`tenzro/mcp`
+    /// ALPN). That transport carries no credential and no verified peer
+    /// identity, so this instance is locked to the read-only tool allowlist
+    /// ([`IROH_READONLY_TOOLS`]): state-changing / admin / operator / compute
+    /// / key-management tools and `chat_completion` are refused. The HTTP MCP
+    /// path continues to use [`new`](Self::new) and is unaffected.
+    pub fn new_iroh(node: Arc<TenzroNode>, web_state: Arc<WebState>) -> Self {
+        Self {
+            node,
+            web_state,
+            _tool_router: Self::tool_router(),
+            iroh_readonly: true,
         }
     }
 
@@ -21025,6 +21173,55 @@ fn parse_modality(s: &str) -> std::result::Result<tenzro_types::model::ModelModa
 
 #[tool_handler]
 impl ServerHandler for TenzroMcpServer {
+    // Hand-written `call_tool` / `list_tools`. The `#[tool_handler]` macro
+    // only generates these when absent (it checks `has_method`), so defining
+    // them here lets us enforce the iroh read-only allowlist at the single
+    // dispatch chokepoint without touching any individual tool. On the HTTP
+    // path (`iroh_readonly == false`) both methods behave exactly as the
+    // macro-generated versions: same `Self::tool_router()` dispatch, same
+    // `list_all()` result — no HTTP MCP behavior change.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::result::Result<rmcp::model::CallToolResult, ErrorData> {
+        if self.iroh_readonly && !iroh_tool_allowed(request.name.as_ref()) {
+            // Fail-closed: over the unauthenticated iroh transport, anything
+            // outside the read-only allowlist is refused rather than executed.
+            return Err(ErrorData {
+                code: ErrorCode::INVALID_REQUEST,
+                message: Cow::from(format!(
+                    "tool '{}' is not authorized over the iroh MCP transport \
+                     (read-only tools only; use the credential-gated HTTP MCP \
+                     endpoint or, for inference, the tenzro/infer ALPN)",
+                    request.name
+                )),
+                data: None,
+            });
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_router().call(tcc).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::result::Result<rmcp::model::ListToolsResult, ErrorData> {
+        let mut tools = Self::tool_router().list_all();
+        if self.iroh_readonly {
+            // Advertise only the tools that can actually be invoked over this
+            // transport, so clients never see (and never call) a tool that
+            // would be refused.
+            tools.retain(|t| iroh_tool_allowed(t.name.as_ref()));
+        }
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.protocol_version = ProtocolVersion::V_2025_11_25;

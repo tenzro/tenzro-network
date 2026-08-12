@@ -107,6 +107,14 @@ pub struct DatabaseDescriptor {
     /// `tenzro_databaseQuery` on it via the payment gateway; the owner always
     /// queries free.
     pub pricing: DatabasePricing,
+    /// The operator's *serving mode* for this database — the axis orthogonal to
+    /// [`Self::access_policy`]. `access_policy` says *who* may read/administer;
+    /// `access` says whether the database is exposed off the box at all and on
+    /// what terms: `Open` (x402 pay-per-request, no key), `Gated` (scoped API
+    /// key), or `Private` (loopback-only). Defaults to `Private` (fail-closed)
+    /// for records written before this field existed.
+    #[serde(default)]
+    pub access: tenzro_types::resource_access::ResourceAccess,
     /// Opt-in encryption-at-rest for the network tier: when set, holders store
     /// ciphertext and the data key is wrapped once per authorized DID. `None`
     /// for plaintext databases (all local/LAN databases and network databases
@@ -814,6 +822,7 @@ mod tests {
             engine_config: serde_json::json!({}),
             access_policy: AccessPolicy::owner_only("did:tenzro:human:test-owner"),
             pricing: DatabasePricing::free(),
+            access: tenzro_types::resource_access::ResourceAccess::Private,
             confidential: None,
         }
     }

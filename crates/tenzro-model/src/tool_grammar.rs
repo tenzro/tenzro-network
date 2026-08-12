@@ -60,6 +60,7 @@
 
 use llama_cpp_2::model::{AddBos, GrammarTrigger, GrammarTriggerType};
 use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
+use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use tracing::{debug, warn};
@@ -113,13 +114,182 @@ impl ToolGrammar {
     }
 }
 
+/// A chat prompt rendered through the model's own template, plus everything
+/// needed to parse the reply back in the *same* format.
+///
+/// [`native_chat_prompt`] returns this so a caller can both render and parse
+/// with the format llama.cpp's `common_chat` auto-selected for the model —
+/// which is how a non-ChatML agentic model (muse-glimmer, gpt-oss) gets its
+/// trained prompt and has its `<|start|>assistant to=…` / ATEM output read
+/// correctly rather than fed and parsed as ChatML.
+pub(crate) struct NativeChat {
+    /// The prompt to feed the tokenizer.
+    pub(crate) prompt: String,
+    /// Tool grammar, present only when tools were supplied and one could be
+    /// armed. Always `None` for a tool-free render.
+    pub(crate) grammar: Option<ToolGrammar>,
+    /// The full render. Carries `chat_format` / `parser` / `generation_prompt`
+    /// / `additional_stops`, which [`llama_cpp_2::model::ChatTemplateResult::parse_response_oaicompat`]
+    /// needs to parse the reply with the matching format.
+    pub(crate) render: llama_cpp_2::model::ChatTemplateResult,
+}
+
+/// Render `messages` (and any `tools`) through the model's OWN chat template,
+/// with automatic per-model format selection (llama.cpp `common_chat`), and
+/// return the full render so the caller can parse the reply with the matching
+/// format. Tools are optional.
+///
+/// `None` means this model has no usable template and the caller should fall
+/// back to the preamble/ChatML path. That covers a missing template and the
+/// empty render that some templates produce instead of erroring. A grammar is
+/// derived only when `tools` is non-empty and the template's tool branch
+/// yields one that can be armed lazily.
+pub(crate) fn native_chat_prompt(
+    model: &LlamaModel,
+    messages: &[ChatMessage],
+    tools: &[ToolDefinition],
+    enable_thinking: bool,
+) -> Option<NativeChat> {
+    let template = model.chat_template(None).ok()?;
+
+    let tools_json = if tools.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&openai_tool_array(tools)).ok()?)
+    };
+
+    // Thinking-ON is the default for every thinking-capable family (qwen3.6,
+    // gpt-oss, ...) and every instruct-only / channel-format model (muse-glimmer
+    // reasons via harmony channels, not this template toggle). It renders
+    // through the tool-aware path, whose C++ wrapper leaves `enable_thinking` at
+    // the template default (true) — byte-identical to the pre-fix behaviour, so
+    // nothing here regresses those models.
+    //
+    // Thinking-OFF is resolved by `catalog::resolve_enable_thinking` only for
+    // the small Qwen 3.5/3.6 sizes (the documented thinking-loop carve-out,
+    // e.g. qwen3.5-0.8b). Those go through the oaicompat params render — the one
+    // path that threads `enable_thinking` into the template — so the qwen35
+    // template emits its pre-closed empty `<think></think>` block and the model
+    // answers directly. Both paths return the same `ChatTemplateResult`.
+    let render = if enable_thinking {
+        let chat: Vec<LlamaChatMessage> = messages
+            .iter()
+            .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
+            .collect::<std::result::Result<_, _>>()
+            .ok()?;
+        model
+            .apply_chat_template_with_tools_oaicompat(
+                &template,
+                &chat,
+                tools_json.as_deref(),
+                None,
+                true,
+            )
+            .map_err(|e| debug!("native chat template unavailable: {e}"))
+            .ok()?
+    } else {
+        let messages_json = serde_json::to_string(
+            &messages
+                .iter()
+                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+                .collect::<Vec<_>>(),
+        )
+        .ok()?;
+        // Mirror the tool-aware wrapper's fixed inputs (use_jinja + add_bos, the
+        // double-BOS fix; generation prompt on) so the only difference from the
+        // thinking-ON render is `enable_thinking = false`.
+        let params = OpenAIChatTemplateParams {
+            messages_json: &messages_json,
+            tools_json: tools_json.as_deref(),
+            tool_choice: None,
+            json_schema: None,
+            grammar: None,
+            reasoning_format: None,
+            chat_template_kwargs: None,
+            add_generation_prompt: true,
+            use_jinja: true,
+            parallel_tool_calls: false,
+            enable_thinking: false,
+            add_bos: true,
+            add_eos: false,
+            parse_tool_calls: tools_json.is_some(),
+        };
+        model
+            .apply_chat_template_oaicompat(&template, &params)
+            .map_err(|e| debug!("native chat template (thinking-off) unavailable: {e}"))
+            .ok()?
+    };
+
+    // A template that ignores the request renders nothing rather than erroring.
+    // Either way there is nothing here the preamble path does not do better.
+    if render.prompt.trim().is_empty() {
+        debug!("native chat template rendered empty; falling back to the preamble");
+        return None;
+    }
+
+    // Grammar only when tools were supplied. Clone the fields the block
+    // consumes (`grammar`, `additional_stops`) and only BORROW the triggers, so
+    // `render` stays whole to move into `NativeChat` for the parse side.
+    let grammar = if tools.is_empty() {
+        None
+    } else {
+        render.grammar.clone().and_then(|g| {
+            if g.trim().is_empty() {
+                return None;
+            }
+            if !grammar_enabled() {
+                debug!("tool grammar available but disabled; see TENZRO_TOOL_GRAMMAR");
+                return None;
+            }
+            // A non-lazy grammar would force every reply into a tool call, so a
+            // grammar we cannot arm is a grammar we decline. Serving the turn
+            // unconstrained is the same deal every model without a tool template
+            // already gets; forcing it would be worse than not constraining it.
+            if !render.grammar_lazy {
+                warn!("tool grammar is not lazy — declining it rather than forcing every reply to call a tool");
+                return None;
+            }
+            let tokens = resolve_trigger_tokens(model, &render.grammar_triggers).or_else(|| {
+                warn!(
+                    "tool grammar triggers could not be resolved to tokens; serving unconstrained \
+                     and relying on output parsing"
+                );
+                None
+            })?;
+
+            Some(ToolGrammar {
+                grammar: g,
+                trigger_tokens: tokens,
+                additional_stops: render.additional_stops.clone(),
+            })
+        })
+    };
+
+    debug!(
+        "native chat template: prompt {} bytes, grammar {}, chat_format {}",
+        render.prompt.len(),
+        grammar.as_ref().map_or("none", |_| "present"),
+        render.chat_format,
+    );
+
+    Some(NativeChat {
+        prompt: render.prompt.clone(),
+        grammar,
+        render,
+    })
+}
+
 /// Render `messages` and `tools` through the model's own chat template,
 /// returning the prompt and any grammar the template's tool branch implies.
 ///
-/// `None` means this model has no usable tool template and the caller should
-/// fall back to the preamble path. That covers a missing template, a template
-/// that ignores the tool array, and the empty render that some templates
-/// produce instead of erroring.
+/// A thin wrapper over [`native_chat_prompt`] kept for callers that only want
+/// the tool-aware `(prompt, grammar)` pair. `None` when there are no tools or
+/// the model has no usable tool template, so the caller falls back to the
+/// preamble path.
+// Retained as the `(prompt, grammar)`-only entry point now that the serial
+// runtime paths call `native_chat_prompt` directly for the parse side; kept per
+// the design so a caller wanting just the tool-aware pair has one.
+#[allow(dead_code)]
 pub(crate) fn native_tool_prompt(
     model: &LlamaModel,
     messages: &[ChatMessage],
@@ -128,67 +298,8 @@ pub(crate) fn native_tool_prompt(
     if tools.is_empty() {
         return None;
     }
-
-    let template = model.chat_template(None).ok()?;
-
-    let chat: Vec<LlamaChatMessage> = messages
-        .iter()
-        .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
-        .collect::<std::result::Result<_, _>>()
-        .ok()?;
-
-    let tools_json = serde_json::to_string(&openai_tool_array(tools)).ok()?;
-
-    let rendered = model
-        .apply_chat_template_with_tools_oaicompat(&template, &chat, Some(&tools_json), None, true)
-        .map_err(|e| debug!("tool-aware chat template unavailable: {e}"))
-        .ok()?;
-
-    // A template without a tool branch renders the conversation and ignores
-    // the array. Some render nothing at all rather than erroring. Either way
-    // there is nothing here the preamble path does not do better.
-    if rendered.prompt.trim().is_empty() {
-        debug!("tool-aware chat template rendered empty; falling back to the preamble");
-        return None;
-    }
-
-    let grammar = rendered.grammar.and_then(|g| {
-        if g.trim().is_empty() {
-            return None;
-        }
-        if !grammar_enabled() {
-            debug!("tool grammar available but disabled; see TENZRO_TOOL_GRAMMAR");
-            return None;
-        }
-        // A non-lazy grammar would force every reply into a tool call, so a
-        // grammar we cannot arm is a grammar we decline. Serving the turn
-        // unconstrained is the same deal every model without a tool template
-        // already gets; forcing it would be worse than not constraining it.
-        if !rendered.grammar_lazy {
-            warn!("tool grammar is not lazy — declining it rather than forcing every reply to call a tool");
-            return None;
-        }
-        let tokens = resolve_trigger_tokens(model, &rendered.grammar_triggers).or_else(|| {
-            warn!(
-                "tool grammar triggers could not be resolved to tokens; serving unconstrained \
-                 and relying on output parsing"
-            );
-            None
-        })?;
-
-        Some(ToolGrammar {
-            grammar: g,
-            trigger_tokens: tokens,
-            additional_stops: rendered.additional_stops,
-        })
-    });
-
-    debug!(
-        "native tool template: prompt {} bytes, grammar {}",
-        rendered.prompt.len(),
-        grammar.as_ref().map_or("none", |_| "present"),
-    );
-    Some((rendered.prompt, grammar))
+    let nc = native_chat_prompt(model, messages, tools, true)?;
+    Some((nc.prompt, nc.grammar))
 }
 
 /// Whether to attach the derived grammar to the sampler. Off unless
@@ -329,6 +440,125 @@ fn openai_tool_array(tools: &[ToolDefinition]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End-to-end render proof for the thinking regression on the real
+    /// qwen3.5-0.8b template. Loads the GGUF on CPU (no GPU contention with a
+    /// live node) and drives BOTH branches of `native_chat_prompt`:
+    ///
+    /// * thinking-ON (what muse-glimmer / qwen3.6 resolve to) leaves the
+    ///   `<think>` block open for the model to reason into;
+    /// * thinking-OFF (what the size-gate assigns qwen3.5-0.8b) emits a
+    ///   pre-closed empty `<think></think>`, so the model answers directly.
+    ///
+    /// Combined with `catalog::resolve_enable_thinking`, this is the served
+    /// batched render path (scheduler_loop -> render_prompt -> here).
+    #[test]
+    #[ignore = "loads ~/.tenzro/models/qwen3.5-0.8b.gguf"]
+    fn qwen35_08b_renders_thinking_off_but_open_when_asked() {
+        use llama_cpp_2::llama_backend::LlamaBackend;
+        use llama_cpp_2::model::params::LlamaModelParams;
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
+            .join(".tenzro/models/qwen3.5-0.8b.gguf");
+        if !path.exists() {
+            eprintln!("skip: {} missing", path.display());
+            return;
+        }
+
+        // The size-gate assigns this model thinking-OFF (0.8B < the 4B floor).
+        assert!(!crate::catalog::resolve_enable_thinking("qwen3.5-0.8b", None));
+
+        let backend = LlamaBackend::init().expect("backend");
+        let model = LlamaModel::load_from_file(&backend, &path, &LlamaModelParams::default())
+            .expect("load qwen3.5-0.8b");
+        let msgs = vec![ChatMessage {
+            role: "user".into(),
+            content: "Do you know javascript?".into(),
+        }];
+
+        let on = native_chat_prompt(&model, &msgs, &[], true).expect("render thinking-on");
+        let off = native_chat_prompt(&model, &msgs, &[], false).expect("render thinking-off");
+
+        let on_tail = &on.prompt[on.prompt.len().saturating_sub(48)..];
+        let off_tail = &off.prompt[off.prompt.len().saturating_sub(48)..];
+        eprintln!("thinking-ON  tail: {on_tail:?}");
+        eprintln!("thinking-OFF tail: {off_tail:?}");
+
+        // Thinking-ON opens the block for the model to continue reasoning into.
+        assert!(
+            on.prompt.trim_end().ends_with("<think>"),
+            "thinking-ON should leave <think> open; tail={on_tail:?}"
+        );
+        // Thinking-OFF pre-closes an empty block, so no reasoning is generated.
+        assert!(
+            off.prompt.contains("<think>\n\n</think>"),
+            "thinking-OFF should pre-close <think></think>; tail={off_tail:?}"
+        );
+        assert!(
+            !off.prompt.trim_end().ends_with("<think>"),
+            "thinking-OFF must not leave <think> open; tail={off_tail:?}"
+        );
+    }
+
+
+    /// Full end-to-end proof through the real batched serving path: load
+    /// qwen3.5-0.8b into `ModelRuntime` (the Batched engine — its production
+    /// path, since it has no MTP drafter or projector) and generate. The
+    /// scheduler resolves `enable_thinking` from the catalog (-> false here) and
+    /// renders accordingly, so the reply is a direct answer with no reasoning.
+    #[test]
+    #[ignore = "loads and runs qwen3.5-0.8b end-to-end"]
+    fn qwen35_08b_answers_without_thinking_end_to_end() {
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
+            .join(".tenzro/models/qwen3.5-0.8b.gguf");
+        if !path.exists() {
+            eprintln!("skip: {} missing", path.display());
+            return;
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio rt");
+        rt.block_on(async {
+            let runtime = crate::runtime::ModelRuntime::new();
+            runtime
+                .load_model("qwen3.5-0.8b", &path)
+                .await
+                .expect("load qwen3.5-0.8b");
+            let msgs = vec![ChatMessage {
+                role: "user".into(),
+                content: "Do you know javascript? Answer in one sentence.".into(),
+            }];
+            let cfg = crate::runtime::GenerationConfig {
+                max_tokens: 80,
+                temperature: 0.6,
+                ..Default::default()
+            };
+            let res = runtime
+                .generate_chat("qwen3.5-0.8b", &msgs, &cfg)
+                .await
+                .expect("generate");
+            eprintln!("TEXT: {:?}", res.text);
+            eprintln!("THINKING: {:?}", res.thinking);
+            assert!(!res.text.trim().is_empty(), "answer must be non-empty");
+            assert!(
+                !res.text.contains("<think>") && !res.text.contains("</think>"),
+                "answer must not carry raw think tags: {:?}",
+                res.text
+            );
+            assert!(
+                !res.text.contains("Thinking Process"),
+                "answer must not carry a reasoning preamble: {:?}",
+                res.text
+            );
+            assert!(
+                res.thinking.as_deref().map_or(true, |t| t.trim().is_empty()),
+                "thinking-OFF should yield no reasoning span, got: {:?}",
+                res.thinking
+            );
+        });
+    }
 
     #[test]
     fn tool_array_is_openai_shaped() {

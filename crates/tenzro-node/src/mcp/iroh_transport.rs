@@ -71,7 +71,14 @@ impl McpStreamHandler for IrohMcpHandler {
         // JSON-RPC messages. iroh's `RecvStream` / `SendStream` already
         // implement `tokio::io::AsyncRead` / `AsyncWrite` (via noq, iroh's
         // quinn fork) — no adapter shim needed.
-        let server = TenzroMcpServer::new(self.node.clone(), self.web_state.clone());
+        // Read-only mode: this bi-stream has no credential and no verified
+        // peer identity (the axum `bearer_auth_check` / `ServiceSurface::Mcp`
+        // gate is HTTP-only and cannot apply here). `new_iroh` locks the
+        // session to the read-only tool allowlist — every state-changing /
+        // admin / operator / compute / key-management tool, and
+        // `chat_completion`, is refused over iroh. Gated inference remains
+        // available via the credential-gated `tenzro/infer` ALPN.
+        let server = TenzroMcpServer::new_iroh(self.node.clone(), self.web_state.clone());
 
         // `ServiceExt::serve(transport)` runs the rmcp Initialize handshake,
         // then awaits inbound `tools/call` etc. concurrently with whatever

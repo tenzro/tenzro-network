@@ -146,6 +146,13 @@ fn attach_execution_receipt(
 pub struct MoeIrohDispatcher {
     runtime: Arc<MoeExpertRuntime>,
     identity: Option<MoeReceiptIdentity>,
+    /// Subscription api-key manager, used to admit `moe/execute` callers.
+    /// `None` on nodes without an api-key manager — the api-key credential
+    /// path is then unavailable and `moe/execute` falls through to refuse.
+    api_key_manager: Option<Arc<crate::api_key::ApiKeyManager>>,
+    /// Rental service-key admission gate. When disabled, the service-key
+    /// credential path is unavailable and `moe/execute` refuses.
+    admission_gate: Arc<crate::admission::NodeAdmissionGate>,
 }
 
 impl std::fmt::Debug for MoeIrohDispatcher {
@@ -157,9 +164,67 @@ impl std::fmt::Debug for MoeIrohDispatcher {
 impl MoeIrohDispatcher {
     /// Wrap the shared expert runtime for iroh-side dispatch. `identity`
     /// signs execution receipts; `None` serves without receipts (remote
-    /// routers reject those responses).
-    pub fn new(runtime: Arc<MoeExpertRuntime>, identity: Option<MoeReceiptIdentity>) -> Self {
-        Self { runtime, identity }
+    /// routers reject those responses). `api_key_manager` + `admission_gate`
+    /// are the credential admission the `moe/execute` compute surface is
+    /// gated through (fail-closed: no valid credential → refuse).
+    pub fn new(
+        runtime: Arc<MoeExpertRuntime>,
+        identity: Option<MoeReceiptIdentity>,
+        api_key_manager: Option<Arc<crate::api_key::ApiKeyManager>>,
+        admission_gate: Arc<crate::admission::NodeAdmissionGate>,
+    ) -> Self {
+        Self {
+            runtime,
+            identity,
+            api_key_manager,
+            admission_gate,
+        }
+    }
+
+    /// Credential admission for the `moe/execute` compute surface, mirroring
+    /// the shape of `inference_admission::NodeInferenceAdmission::decide_creds`
+    /// (steps 1 and 2) and `infer.rs`'s iroh gating: a valid inference-scoped
+    /// subscription api-key, or a rental service-key admitted on the WebApi
+    /// surface. There is no model-visibility fallback here — raw expert
+    /// execution is never an open on-demand surface. Fail-closed: absent or
+    /// invalid credential → `Err`, and the caller refuses without executing.
+    fn authorize_execute(
+        &self,
+        api_key: Option<&str>,
+        service_key: Option<&str>,
+    ) -> Result<(), String> {
+        // 1. Subscription api-key — must carry the Inference scope and be
+        //    within its rate limit.
+        if let Some(v) = api_key
+            && let Some(mgr) = self.api_key_manager.as_ref()
+            && let Some(rec) = mgr.lookup(v)
+            && rec.has_scope(crate::api_key::ApiKeyScope::Inference)
+        {
+            if mgr.check_rate_limit(&rec).is_err() {
+                return Err("api key rate limit exceeded".into());
+            }
+            return Ok(());
+        }
+
+        // 2. Rental service-key — admitted on the WebApi surface, only when
+        //    the admission gate is enabled.
+        if let Some(v) = service_key {
+            let gate = &self.admission_gate;
+            if gate.is_enabled()
+                && matches!(
+                    gate.admit(tenzro_auth::ServiceSurface::WebApi, "/moe/execute", Some(v)),
+                    tenzro_auth::Admission::Allow
+                )
+            {
+                return Ok(());
+            }
+        }
+
+        // Fail-closed: no valid credential presented.
+        Err(
+            "moe/execute is gated; provide a valid inference api_key or service_key in the request frame"
+                .into(),
+        )
     }
 
     fn handle(&self, method: &str, params: Option<Value>, id: Value) -> Value {
@@ -225,10 +290,27 @@ impl JsonRpcDispatcher for MoeIrohDispatcher {
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let params = req.get("params").cloned();
 
+        // Gate the compute surface. `moe/execute` runs expert-FFN matmuls on
+        // this node's hardware, so an unauthenticated peer could otherwise
+        // burn its GPU/CPU for free. Credentials ride at the top level of the
+        // JSON-RPC frame (same client contract as `tenzro/infer`): `api_key`
+        // / `service_key`. `moe/status` stays an unauthenticated read surface.
+        if method == MOE_METHOD_EXECUTE {
+            let api_key = req.get("api_key").and_then(|v| v.as_str());
+            let service_key = req.get("service_key").and_then(|v| v.as_str());
+            if let Err(msg) = self.authorize_execute(api_key, service_key) {
+                let body = serde_json::to_vec(&error_envelope(id, -32001, msg))
+                    .map_err(|e| IrohError::Backend(format!("encode auth-error: {e}")))?;
+                return Ok(Bytes::from(body));
+            }
+        }
+
         // Expert-FFN matmuls are CPU-bound; keep them off the QUIC driver.
         let this = MoeIrohDispatcher {
             runtime: Arc::clone(&self.runtime),
             identity: self.identity.clone(),
+            api_key_manager: self.api_key_manager.clone(),
+            admission_gate: Arc::clone(&self.admission_gate),
         };
         let method_owned = method.to_string();
         let resp = tokio::task::spawn_blocking(move || this.handle(&method_owned, params, id))

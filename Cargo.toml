@@ -425,7 +425,7 @@ ciborium = "0.2"
 hf-hub = { version = "0.4", features = ["tokio"] }
 
 # llama.cpp bindings (replaces candle — proper Metal/CUDA GPU support)
-llama-cpp-2 = "0.1.147"
+llama-cpp-2 = "0.1.154"
 
 # ONNX Runtime — for non-LLM modalities (timeseries forecasting, vision encoders).
 # 2.0 line is the active 2026 standard; auto-downloads the ONNX Runtime binary on
