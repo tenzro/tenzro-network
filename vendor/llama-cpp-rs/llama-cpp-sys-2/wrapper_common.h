@@ -31,12 +31,6 @@ struct llama_rs_chat_template_result {
     size_t additional_stops_count;
 };
 
-enum llama_rs_params_fit_status {
-    LLAMA_RS_PARAMS_FIT_STATUS_SUCCESS = 0,
-    LLAMA_RS_PARAMS_FIT_STATUS_FAILURE = 1,
-    LLAMA_RS_PARAMS_FIT_STATUS_ERROR = 2,
-};
-
 #include "wrapper_utils.h"
 
 #ifdef __cplusplus
@@ -73,7 +67,9 @@ struct llama_sampler * llama_rs_sampler_init_grammar_lazy_patterns(
 
 llama_rs_status llama_rs_sampler_accept(struct llama_sampler * sampler, llama_token token);
 
-enum llama_rs_params_fit_status llama_rs_params_fit(
+// Fit model/context params to device memory (wraps llama.cpp's common_fit_params).
+// Returns common_params_fit_status as an int: 0 = success, 1 = failure, 2 = error.
+int llama_rs_fit_params(
     const char * path_model,
     struct llama_model_params * mparams,
     struct llama_context_params * cparams,
@@ -117,8 +113,9 @@ llama_rs_status llama_rs_mtp_speculative_accept(
     struct llama_rs_mtp_speculative * spec,
     uint16_t n_accepted);
 
-void llama_rs_chat_template_result_free(struct llama_rs_chat_template_result * result);
 void llama_rs_string_free(char * ptr);
+
+void llama_rs_chat_template_result_free(struct llama_rs_chat_template_result * result);
 
 #ifdef __cplusplus
 }

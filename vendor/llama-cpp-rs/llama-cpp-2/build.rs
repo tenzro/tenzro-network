@@ -9,3 +9,4 @@ fn main() {
         println!("cargo:rpc_server_bin={}", bin);
     }
 }
+

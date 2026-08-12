@@ -133,7 +133,6 @@ pub enum LlamaContextType {
     Unknown(llama_cpp_sys_2::llama_context_type),
 }
 
-/// Create a `LlamaContextType` from a raw `llama_context_type`.
 impl From<llama_cpp_sys_2::llama_context_type> for LlamaContextType {
     fn from(value: llama_cpp_sys_2::llama_context_type) -> Self {
         match value {
@@ -144,7 +143,6 @@ impl From<llama_cpp_sys_2::llama_context_type> for LlamaContextType {
     }
 }
 
-/// Create a raw `llama_context_type` from a `LlamaContextType`.
 impl From<LlamaContextType> for llama_cpp_sys_2::llama_context_type {
     fn from(value: LlamaContextType) -> Self {
         match value {

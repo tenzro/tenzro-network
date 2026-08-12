@@ -46,6 +46,9 @@ pub enum MtpSpeculativeError {
 }
 
 /// RAII owner for a same-model MTP speculative context.
+///
+/// This wrapper currently binds llama.cpp's speculative state to sequence 0.
+/// Batches passed to [`Self::process`] must therefore contain only sequence 0.
 #[derive(Debug)]
 pub struct MtpSpeculative<'model> {
     raw: NonNull<llama_cpp_sys_2::llama_rs_mtp_speculative>,
@@ -126,6 +129,8 @@ impl<'model> MtpSpeculative<'model> {
     }
 
     /// Process a batch that was just decoded by the target context.
+    ///
+    /// The batch must contain token input for sequence 0 only.
     ///
     /// # Errors
     ///
@@ -208,6 +213,6 @@ fn status_to_result(status: llama_cpp_sys_2::llama_rs_status) -> Result<(), MtpS
     if status_is_ok(status) {
         Ok(())
     } else {
-        Err(MtpSpeculativeError::Status(status))
+        Err(MtpSpeculativeError::Status(status as i32))
     }
 }

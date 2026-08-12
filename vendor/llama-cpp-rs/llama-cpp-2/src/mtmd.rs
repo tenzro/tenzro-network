@@ -63,6 +63,8 @@ impl From<llama_cpp_sys_2::mtmd_input_chunk_type> for MtmdInputChunkType {
 ///     print_timings: true,
 ///     n_threads: 4,
 ///     media_marker: CString::new(mtmd_default_marker()).unwrap(),
+///     image_min_tokens: -1,
+///     image_max_tokens: -1,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -75,6 +77,15 @@ pub struct MtmdContextParams {
     pub n_threads: i32,
     /// Media marker string used to identify media positions in text
     pub media_marker: CString,
+    /// Minimum number of tokens used to represent an image.
+    /// Controls the visual token budget lower bound. Use -1 for the model default.
+    /// Gemma 4 supported budgets: 70, 140, 280, 560, 1120.
+    pub image_min_tokens: i32,
+    /// Maximum number of tokens used to represent an image.
+    /// Controls the visual token budget upper bound. Use -1 for the model default.
+    /// Lower values reduce memory and compute at the cost of visual detail.
+    /// Gemma 4 supported budgets: 70, 140, 280, 560, 1120.
+    pub image_max_tokens: i32,
 }
 
 impl Default for MtmdContextParams {
@@ -91,12 +102,16 @@ impl From<&MtmdContextParams> for llama_cpp_sys_2::mtmd_context_params {
             print_timings,
             n_threads,
             media_marker,
+            image_min_tokens,
+            image_max_tokens,
         } = params;
 
         context.use_gpu = *use_gpu;
         context.print_timings = *print_timings;
         context.n_threads = *n_threads;
         context.media_marker = media_marker.as_ptr();
+        context.image_min_tokens = *image_min_tokens;
+        context.image_max_tokens = *image_max_tokens;
 
         context
     }
@@ -109,6 +124,8 @@ impl From<llama_cpp_sys_2::mtmd_context_params> for MtmdContextParams {
             print_timings: params.print_timings,
             n_threads: params.n_threads,
             media_marker: unsafe { CStr::from_ptr(params.media_marker) }.to_owned(),
+            image_min_tokens: params.image_min_tokens,
+            image_max_tokens: params.image_max_tokens,
         }
     }
 }
@@ -274,6 +291,7 @@ impl MtmdContext {
         let text_cstring = CString::new(text.text)?;
         let input_text = llama_cpp_sys_2::mtmd_input_text {
             text: text_cstring.as_ptr(),
+            text_len: text_cstring.as_bytes().len(),
             add_special: text.add_special,
             parse_special: text.parse_special,
         };
@@ -440,6 +458,9 @@ impl MtmdBitmap {
     ///
     /// * `ctx` - MTMD context for processing
     /// * `path` - Path to the image or audio file
+    /// * `placeholder` - If `true`, build a data-less bitmap (dimensions/length only, with no
+    ///   decoded pixels or audio samples) — useful for counting tokens without loading the media.
+    ///   If `false`, decode and load the actual data.
     ///
     /// # Returns
     ///
@@ -451,16 +472,25 @@ impl MtmdBitmap {
     /// * `NullResult` - File could not be loaded or processed
     ///
     /// This function is thread-safe.
-    pub fn from_file(ctx: &MtmdContext, path: &str) -> Result<Self, MtmdBitmapError> {
+    pub fn from_file(
+        ctx: &MtmdContext,
+        path: &str,
+        placeholder: bool,
+    ) -> Result<Self, MtmdBitmapError> {
         let path_cstr = CString::new(path)?;
-        let bitmap = unsafe {
+        // This helper now returns a wrapper struct (bitmap + an optional video
+        // decoding context) instead of a bare pointer. `video_ctx` is only set
+        // when MTMD_VIDEO is enabled at compile time; this crate does not build
+        // with it on, so it is always null here and only the bitmap matters.
+        let wrapper = unsafe {
             llama_cpp_sys_2::mtmd_helper_bitmap_init_from_file(
                 ctx.context.as_ptr(),
                 path_cstr.as_ptr(),
+                placeholder,
             )
         };
 
-        let bitmap = NonNull::new(bitmap).ok_or(MtmdBitmapError::NullResult)?;
+        let bitmap = NonNull::new(wrapper.bitmap).ok_or(MtmdBitmapError::NullResult)?;
         Ok(Self { bitmap })
     }
 
@@ -476,6 +506,9 @@ impl MtmdBitmap {
     ///
     /// * `ctx` - MTMD context for processing
     /// * `data` - Buffer containing the file data
+    /// * `placeholder` - If `true`, build a data-less bitmap (dimensions/length only, with no
+    ///   decoded pixels or audio samples) — useful for counting tokens without loading the media.
+    ///   If `false`, decode and load the actual data.
     ///
     /// # Returns
     ///
@@ -486,16 +519,23 @@ impl MtmdBitmap {
     /// * `NullResult` - Buffer could not be processed
     ///
     /// This function is thread-safe.
-    pub fn from_buffer(ctx: &MtmdContext, data: &[u8]) -> Result<Self, MtmdBitmapError> {
-        let bitmap = unsafe {
+    pub fn from_buffer(
+        ctx: &MtmdContext,
+        data: &[u8],
+        placeholder: bool,
+    ) -> Result<Self, MtmdBitmapError> {
+        // See the comment in `from_file`: this returns a wrapper struct now, and
+        // `video_ctx` is always null since MTMD_VIDEO is not enabled in this build.
+        let wrapper = unsafe {
             llama_cpp_sys_2::mtmd_helper_bitmap_init_from_buf(
                 ctx.context.as_ptr(),
                 data.as_ptr(),
                 data.len(),
+                placeholder,
             )
         };
 
-        let bitmap = NonNull::new(bitmap).ok_or(MtmdBitmapError::NullResult)?;
+        let bitmap = NonNull::new(wrapper.bitmap).ok_or(MtmdBitmapError::NullResult)?;
         Ok(Self { bitmap })
     }
 

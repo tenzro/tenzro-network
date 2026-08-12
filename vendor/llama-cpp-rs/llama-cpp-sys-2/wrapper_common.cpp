@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <vector>
 
+#include "llama.cpp/common/common.h"
 #include "llama.cpp/common/fit.h"
 #include "llama.cpp/common/json-schema-to-grammar.h"
 #include "llama.cpp/common/speculative.h"
@@ -87,40 +88,6 @@ extern "C" void llama_rs_string_free(char * ptr) {
     if (ptr) {
         std::free(ptr);
     }
-}
-
-extern "C" enum llama_rs_params_fit_status llama_rs_params_fit(
-    const char * path_model,
-    struct llama_model_params * mparams,
-    struct llama_context_params * cparams,
-    float * tensor_split,
-    struct llama_model_tensor_buft_override * tensor_buft_overrides,
-    size_t * margins,
-    uint32_t n_ctx_min,
-    enum ggml_log_level log_level) {
-    const auto status = common_fit_params(
-        path_model,
-        mparams,
-        cparams,
-        tensor_split,
-        tensor_buft_overrides,
-        margins,
-        n_ctx_min,
-        log_level);
-
-    switch (status) {
-    case COMMON_PARAMS_FIT_STATUS_SUCCESS:
-        return LLAMA_RS_PARAMS_FIT_STATUS_SUCCESS;
-    case COMMON_PARAMS_FIT_STATUS_FAILURE:
-        return LLAMA_RS_PARAMS_FIT_STATUS_FAILURE;
-    case COMMON_PARAMS_FIT_STATUS_ERROR:
-    default:
-        return LLAMA_RS_PARAMS_FIT_STATUS_ERROR;
-    }
-}
-
-extern "C" void llama_rs_memory_breakdown_print(const struct llama_context * ctx) {
-    common_memory_breakdown_print(ctx);
 }
 
 extern "C" struct llama_sampler * llama_rs_sampler_init_grammar(
@@ -205,6 +172,32 @@ extern "C" llama_rs_status llama_rs_sampler_accept(struct llama_sampler * sample
     }
 }
 
+// Thin pass-through to llama.cpp's common_fit_params (a C++ symbol in libcommon).
+// Returns common_params_fit_status as an int: 0 = success, 1 = failure, 2 = error.
+extern "C" int llama_rs_fit_params(
+    const char * path_model,
+    struct llama_model_params * mparams,
+    struct llama_context_params * cparams,
+    float * tensor_split,
+    struct llama_model_tensor_buft_override * tensor_buft_overrides,
+    size_t * margins,
+    uint32_t n_ctx_min,
+    enum ggml_log_level log_level) {
+    return static_cast<int>(common_fit_params(
+        path_model,
+        mparams,
+        cparams,
+        tensor_split,
+        tensor_buft_overrides,
+        margins,
+        n_ctx_min,
+        log_level));
+}
+
+extern "C" void llama_rs_memory_breakdown_print(const struct llama_context * ctx) {
+    common_memory_breakdown_print(ctx);
+}
+
 struct llama_rs_mtp_speculative {
     common_params_speculative params;
     common_speculative * spec = nullptr;
@@ -214,13 +207,16 @@ struct llama_rs_mtp_speculative {
     bool draft_pending = false;
 };
 
+static constexpr llama_seq_id LLAMA_RS_MTP_SEQ_ID = 0;
+
 static bool llama_rs_mtp_batch_compatible(const struct llama_batch & batch) {
     if (batch.n_tokens <= 0 || !batch.token || batch.embd || !batch.pos || !batch.n_seq_id ||
         !batch.seq_id) {
         return false;
     }
     for (int32_t k = 0; k < batch.n_tokens; ++k) {
-        if (batch.n_seq_id[k] != 1 || !batch.seq_id[k]) {
+        if (batch.n_seq_id[k] != 1 || !batch.seq_id[k] ||
+            batch.seq_id[k][0] != LLAMA_RS_MTP_SEQ_ID) {
             return false;
         }
     }
@@ -291,7 +287,7 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_begin(
         llama_rs_assign_tokens(spec->prompt, prompt_tokens, prompt_tokens_count);
         spec->last_draft_len = 0;
         spec->draft_pending = false;
-        common_speculative_begin(spec->spec, 0, spec->prompt);
+        common_speculative_begin(spec->spec, LLAMA_RS_MTP_SEQ_ID, spec->prompt);
         return LLAMA_RS_STATUS_OK;
     } catch (...) {
         return LLAMA_RS_STATUS_EXCEPTION;
@@ -339,7 +335,7 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_draft(
         spec->draft.clear();
         spec->last_draft_len = 0;
 
-        auto & params = common_speculative_get_draft_params(spec->spec, 0);
+        auto & params = common_speculative_get_draft_params(spec->spec, LLAMA_RS_MTP_SEQ_ID);
         params = {
             true,
             spec->params.draft.n_max,
@@ -380,7 +376,7 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_accept(
     }
 
     try {
-        common_speculative_accept(spec->spec, 0, n_accepted);
+        common_speculative_accept(spec->spec, LLAMA_RS_MTP_SEQ_ID, n_accepted);
         spec->last_draft_len = 0;
         spec->draft_pending = false;
         return LLAMA_RS_STATUS_OK;

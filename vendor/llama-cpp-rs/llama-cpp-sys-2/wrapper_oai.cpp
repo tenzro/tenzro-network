@@ -57,7 +57,7 @@ static bool ends_with(const std::string & value, const std::string & suffix) {
 static bool detect_thinking_forced_open(const common_chat_params & params) {
     return params.supports_thinking
         && !params.thinking_start_tag.empty()
-        && !params.thinking_end_tag.empty()
+        && !params.thinking_end_tags.empty()
         && ends_with(params.generation_prompt, params.thinking_start_tag);
 }
 
@@ -305,6 +305,14 @@ extern "C" llama_rs_status llama_rs_apply_chat_template_with_tools_oaicompat(
         common_chat_templates_inputs inputs;
         inputs.add_generation_prompt = add_generation_prompt;
         inputs.use_jinja = true;
+        // Chat templates emit the model's bos_token at the start of the render.
+        // Every tenzro generation path tokenizes the returned prompt with
+        // AddBos::Always, which prepends the bos token again — a double-BOS that
+        // degrades output (qwen renders empty, muse degenerates/loops). Setting
+        // add_bos here makes common_chat strip the leading bos from the rendered
+        // string so the tokenizer adds exactly one. (The core llama_chat_apply_template
+        // path never emitted a bos, which is why only this jinja path regressed.)
+        inputs.add_bos = true;
 
         inputs.messages.reserve(message_count);
         for (size_t i = 0; i < message_count; ++i) {

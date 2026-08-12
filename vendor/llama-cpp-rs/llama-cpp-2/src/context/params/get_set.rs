@@ -130,6 +130,9 @@ impl LlamaContextParams {
     }
 
     /// Set the number of recurrent-state rollback snapshots per sequence.
+    ///
+    /// MTP speculative decoding uses this on the target context so llama.cpp can
+    /// roll recurrent state back after partially accepted drafts.
     #[must_use]
     pub fn with_n_rs_seq(mut self, n_rs_seq: u32) -> Self {
         self.context_params.n_rs_seq = n_rs_seq;
