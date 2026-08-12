@@ -148,3 +148,4 @@ sdk/
 # Marketing / campaign content — never published to GitHub
 marketing/
 vendor/erc8004-evm/
+docs/security/
