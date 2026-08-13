@@ -10805,16 +10805,46 @@ async fn handle_machine_deploy(
         name.as_bytes(),
     )
     .await?;
-    let artifact_caid = params
-        .get("artifact_caid")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message:
-                "Missing artifact_caid (upload the microVM image via tenzro_iroh_publishBlob first)"
-                    .to_string(),
-            data: None,
-        })?;
+    // Two ways to supply the microVM image:
+    //   * `build`: an app *build context* (app-context blob + base + run spec) —
+    //     the node assembles the bootable `rootfs.ext4` ROOTLESSLY via the
+    //     machine-builder, publishes it, and uses its CAID. Full-stack deploy v1.
+    //   * `artifact_caid`: a pre-built bootable rootfs blob (the original path).
+    let built = match params.get("build") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let req: crate::machine_build::MachineBuildRequest = serde_json::from_value(v.clone())
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("malformed build: {e}"),
+                    data: None,
+                })?;
+            let result = crate::machine_build::build_and_publish(node, &req)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("machine rootfs build failed: {e}"),
+                    data: None,
+                })?;
+            Some(result)
+        }
+    };
+    let artifact_caid: String = match &built {
+        Some(r) => r.rootfs_caid.clone(),
+        None => params
+            .get("artifact_caid")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message:
+                    "Missing artifact_caid (upload the microVM image via tenzro_iroh_publishBlob \
+                     first) or a `build` object (app-context + base + run spec)"
+                        .to_string(),
+                data: None,
+            })?,
+    };
+    let artifact_caid = artifact_caid.as_str();
     let internal_port = params
         .get("internal_port")
         .and_then(|v| v.as_u64())
@@ -10910,6 +10940,16 @@ async fn handle_machine_deploy(
     let mut out = machine_deployment_to_json(&deployment);
     if let Value::Object(ref mut map) = out {
         map.insert("placement".to_string(), serde_json::json!(placement));
+        if let Some(r) = &built {
+            map.insert(
+                "build".to_string(),
+                serde_json::json!({
+                    "rootfs_caid": r.rootfs_caid,
+                    "build_hash": r.build_hash,
+                    "size_bytes": r.size_bytes,
+                }),
+            );
+        }
     }
     Ok(out)
 }

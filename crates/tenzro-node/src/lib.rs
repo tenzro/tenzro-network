@@ -127,6 +127,7 @@ pub mod keygen;
 pub mod lane_resolver;
 pub mod lifecycle_state_bridge;
 pub mod liveness;
+pub mod machine_build;
 pub mod machines;
 pub mod mandate_store;
 pub mod mcp;

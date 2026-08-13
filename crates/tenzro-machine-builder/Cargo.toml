@@ -1,0 +1,40 @@
+[package]
+name = "tenzro-machine-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Rootless OCI-base -> ext4 rootfs builder for Tenzro machine-class (Firecracker) deploys"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+# Single-sources the `run.json` shape the guest init reads, so the builder can
+# never write a spec the guest can't parse.
+tenzro-initagent = { workspace = true }
+
+# OCI base pull + layer unpack. Off by default: the core staging + ext4 build
+# needs none of it (bases can be supplied as a pre-unpacked directory), and
+# `oci-client` is a heavy, network-facing dependency that is only required when
+# the node actually pulls a base image from a registry.
+oci-client = { version = "0.15", optional = true, default-features = false, features = ["rustls-tls"] }
+tokio = { workspace = true, optional = true }
+tar = { version = "0.4", optional = true }
+flate2 = { workspace = true, optional = true }
+
+[features]
+default = []
+# tar(.gz) unpacking — used to unpack a delivered app-context archive and, when
+# `oci` is on, image layers. Lightweight (tar + flate2), no network stack.
+archive = ["dep:tar", "dep:flate2"]
+# Pull an OCI base by pinned digest from a trusted registry and unpack its
+# layers. Requires network + the `oci-client` stack (pulls in `archive`).
+oci = ["dep:oci-client", "dep:tokio", "archive"]
+
+[dev-dependencies]
+tempfile = "3"

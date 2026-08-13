@@ -31,6 +31,8 @@ members = [
   "crates/tenzro-storage-provider",
   "crates/tenzro-database",
   "crates/tenzro-wasm",
+  "crates/tenzro-initagent",
+  "crates/tenzro-machine-builder",
   "crates/tenzro-node",
   "crates/tenzro-cli",
   "tools/genkeys",
@@ -101,6 +103,8 @@ tenzro-cluster = { path = "crates/tenzro-cluster", version = "0.1.0" }
 tenzro-storage-provider = { path = "crates/tenzro-storage-provider", version = "0.1.0" }
 tenzro-database = { path = "crates/tenzro-database", version = "0.1.0" }
 tenzro-wasm = { path = "crates/tenzro-wasm", version = "0.1.0" }
+tenzro-initagent = { path = "crates/tenzro-initagent", version = "0.1.0" }
+tenzro-machine-builder = { path = "crates/tenzro-machine-builder", version = "0.1.0" }
 tenzro-identity = { path = "crates/tenzro-identity", version = "0.1.0" }
 tenzro-payments = { path = "crates/tenzro-payments", version = "0.1.0" }
 tenzro-agent-kit = { path = "crates/tenzro-agent-kit", version = "0.1.0" }

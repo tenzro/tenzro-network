@@ -39,6 +39,12 @@ tenzro-bridge = { workspace = true }
 tenzro-events = { workspace = true }
 tenzro-agent-kit = { workspace = true }
 tenzro-iroh = { workspace = true }
+# Machine-class rootfs.ext4 builder (OCI base -> ext4, rootless). Optional: only
+# linked when the `machine-builder` feature is on, so the default node build does
+# not pull in the builder / archive stack.
+tenzro-machine-builder = { workspace = true, optional = true }
+# Working directory for the rootfs builder (feature `machine-builder`).
+tempfile = { version = "3", optional = true }
 tenzro-wasm = { workspace = true, optional = true }
 tenzro-auth = { workspace = true }
 tenzro-workflow = { workspace = true }
@@ -180,6 +186,17 @@ wasi-skills = ["dep:tenzro-wasm"]
 # get / remove RPCs work) but never runs a microVM — ingress answers a machine
 # request with 501.
 firecracker = []
+# Enable the machine-class rootfs.ext4 builder: `tenzro_machineDeploy` can accept
+# a `build` object (app-context blob + base + run spec), assemble a bootable
+# `rootfs.ext4` ROOTLESSLY via e2fsprogs `mke2fs -d`, publish it as an iroh blob,
+# and deploy that. Requires e2fsprogs (mke2fs/e2fsck/resize2fs) on the node.
+# Without this feature the `build` path returns an honest "not compiled in"
+# notice and a prebuilt `artifact_caid` still deploys as before.
+machine-builder = ["dep:tenzro-machine-builder", "tenzro-machine-builder/archive", "dep:tempfile"]
+# Additionally allow pulling OCI bases by pinned digest from a trusted registry
+# at build time (heavier: links oci-client). Without it, bases must be supplied
+# as a pre-unpacked directory on the node.
+machine-builder-oci = ["machine-builder", "tenzro-machine-builder/oci"]
 # Embed Anza's solana-svm for real SBF program execution in the SVM VM. Off by
 # default; forwards to tenzro-vm. Without it the SVM SBF path returns
 # VmError::SvmFullFeatureRequired.

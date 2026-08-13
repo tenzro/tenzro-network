@@ -1,0 +1,53 @@
+[package]
+name = "tenzro-initagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Tenzro machine-class guest init: static PID1 + supervisor that boots an app inside a Firecracker microVM (MMDS env, sealed_env unseal, run.json exec, /health)"
+
+# The guest init is meant to ship as a single fully-static binary so it can be
+# the microVM's `init=/sbin/tenzro-initagent` with no libc/interpreter present
+# in the rootfs. Build it for musl explicitly — the workspace's default glibc
+# targets still compile it fine for host unit tests, so nothing here forces
+# musl on the whole workspace:
+#
+#   rustup target add x86_64-unknown-linux-musl
+#   cargo build -p tenzro-initagent --release --target x86_64-unknown-linux-musl
+#
+# The resulting `target/x86_64-unknown-linux-musl/release/tenzro-initagent` is
+# what `tenzro-machine-builder` stages at `/sbin/tenzro-initagent` in the rootfs.
+# (aarch64-unknown-linux-musl for arm64 nodes.)
+
+[lib]
+name = "tenzro_initagent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tenzro-initagent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Envelope-crypto primitives, kept byte-identical to
+# `tenzro_crypto::encryption` (X25519 ephemeral-static -> HKDF-SHA256 salted
+# with the (ephemeral, recipient) transcript -> AES-256-GCM). Pulled in
+# directly (not via tenzro-crypto) so the static guest binary stays lean — it
+# does not need BLS / post-quantum / FROST, only the sealing envelope.
+x25519-dalek = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = "0.12"
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+# Proves wire-compatibility: an envelope produced by the node's real crypto
+# (`tenzro_crypto::encryption::envelope_encrypt`) must decrypt with the guest's
+# reimplemented `crypto::envelope_decrypt`.
+tenzro-crypto = { workspace = true }
+tempfile = "3"
