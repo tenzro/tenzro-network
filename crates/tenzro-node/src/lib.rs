@@ -199,7 +199,7 @@ pub mod x402_idempotency_store;
 // `EconomicsConfig` is the type of a public `NodeConfig` field, so it has to
 // be nameable by anyone constructing a config — otherwise the field can be
 // read but never set from outside the crate.
-pub use config::{EconomicsConfig, NodeConfig};
+pub use config::{DeployConfig, EconomicsConfig, NodeConfig};
 pub use error::{NodeError, Result};
 pub use handle::{NodeHandle, spawn_in_background, spawn_in_background_with_unlocker};
 pub use health::{HealthMonitor, HealthStatus, OverallHealth, SubsystemStatus};

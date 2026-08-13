@@ -387,8 +387,15 @@ path, which sends the same value as `X-Canton-Network`. An explicit
 
 ## How developers request a key
 
-Issuance is per-operator: there is no public mint endpoint on any
-Tenzro node. To request a key:
+Issuance is per-operator: by default there is no public mint endpoint on
+any Tenzro node. One narrow exception exists — an operator may opt in to a
+delegated **deploy-mint** path (`tenzro_deployMintKey`) that lets an
+already-authenticated caller mint its *own* narrowly-scoped app key for a
+one-click deploy, without the operator's admin token. It is off unless the
+operator turns it on and is bounded on every axis; see
+[Delegated self-service: `tenzro_deployMintKey`](#delegated-self-service-tenzro_deploymintkey).
+
+Absent that opt-in, to request a key:
 
 1. Identify which operator runs the node you want to use (e.g. Tenzro
    Labs for `rpc.tenzro.xyz`; a particular validator or
@@ -496,6 +503,109 @@ revoking one key never affects another.
 This RPC refuses to revoke `operator_protected` keys and returns
 `-32004` with `data.class = "operator_protected"`. To rotate one of
 those, update the operator secret store and restart the node.
+
+## Delegated self-service: `tenzro_deployMintKey`
+
+`tenzro_createApiKey` is admin-gated: only the operator, holding
+`X-Tenzro-Admin-Token`, can mint a key. That is the right default, but it
+blocks one legitimate flow — a **one-click deploy** that needs to provision
+its app's own scoped credential (a database connection, storage, inference)
+as part of the deploy, without shipping the operator's admin token to the
+deploy client.
+
+`tenzro_deployMintKey` is a hardened, opt-in front door to the *same*
+minting primitive `tenzro_createApiKey` uses. It mints a narrowly-scoped
+app key **without** the admin token, but only under strict,
+operator-controlled conditions. It is **additive** — the admin-gated path
+is unchanged — and **fail-closed** at every step.
+
+### Enabling it (operator)
+
+Off by default. A node only serves this RPC when the operator opts in:
+
+```toml
+[deploy]
+allow_self_service_mint = true      # default false — the master switch
+max_mints_per_hour           = 20   # per authenticated caller DID
+max_active_keys_per_subject  = 32   # simultaneously-active deploy keys per subject
+max_key_ttl_secs             = 3600 # hard TTL ceiling + default (1h)
+```
+
+With `allow_self_service_mint = false` (or absent), every call to
+`tenzro_deployMintKey` is refused with `-32004`, exactly as the admin gate
+refuses a missing token. There is no self-service mint path until the
+operator turns it on.
+
+### The guardrails
+
+Each check fails closed; an uncertain request is refused, not narrowed:
+
+1. **Disabled by default.** Refused unless `deploy.allow_self_service_mint`
+   is `true`.
+2. **Authenticated caller only.** The caller must present an active
+   `X-Tenzro-Api-Key` carrying a `subject` DID (the existing auth path used
+   by `tenzro_listMyApiKeys` / `tenzro_revokeMyApiKey`). Anonymous, unknown,
+   revoked, or subject-less keys are refused. No new trust path is
+   introduced.
+3. **Subject-pinned.** The minted key's `subject` is *derived* from the
+   authenticated caller's own subject DID. A caller may omit `subject`, but
+   supplying one that names any other DID is refused (`-32004`) — a caller
+   cannot mint a key for another tenant.
+4. **Narrowly scoped + resource-bounded.** Only `inference`, `storage`, and
+   `database` scopes are mintable. Any privileged scope (`canton`, `evm`,
+   `svm`, `tee`, `bridge`, `chainlink`, `issuer`) is refused (`-32602`) —
+   those remain behind the admin-gated `tenzro_createApiKey`. A
+   `database`-scoped deploy key **must** name its `allowed_databases`; an
+   unrestricted database key is not mintable this way. Every Canton / party
+   / command delegation field is forced empty and no Canton network is
+   bound, so this path can never mint a Canton-authorized or party-acting
+   key. The class is always `subject`.
+5. **Rate-limited + bounded.** Mints are limited per caller DID
+   (`max_mints_per_hour`, `-32005` with `retry_after_ms` when tripped) and
+   per subject by an active-key ceiling (`max_active_keys_per_subject`).
+6. **Short-lived.** Every minted key carries a `valid_until`. The TTL
+   defaults to `max_key_ttl_secs`; a shorter caller-requested `ttl_secs` is
+   honoured, a longer one is clamped down. The key expires on its own even
+   if never revoked.
+
+Every successful mint emits one audit log line on the `tenzro::deploy_mint`
+target: caller DID, minted `key_id`, scopes, resource ids, and `valid_until`.
+
+### Request
+
+```bash
+curl -s -X POST https://rpc.tenzro.xyz \
+  -H "content-type: application/json" \
+  -H "X-Tenzro-Api-Key: $CALLER_KEY" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tenzro_deployMintKey",
+    "params": {
+      "label": "myapp",
+      "scopes": ["database", "storage", "inference"],
+      "allowed_databases": ["myapp-db"],
+      "allowed_models": ["gpt-oss"],
+      "ttl_secs": 3600
+    }
+  }'
+```
+
+Params:
+
+| Field               | Type             | Required | Notes                                                                                                       |
+|---------------------|------------------|----------|-------------------------------------------------------------------------------------------------------------|
+| `scopes`            | array of strings | yes      | Subset of `inference` / `storage` / `database`. Any other value → `-32602`.                                  |
+| `allowed_databases` | array of strings | yes if `database` scope | The `database_id`(s) this key may reach. A `database`-scoped key with none → `-32602`.        |
+| `allowed_sites`     | array of strings | no       | `site_id`(s) this key may act on.                                                                            |
+| `allowed_models`    | array of strings | no       | Model ids this key may call for inference.                                                                   |
+| `ttl_secs`          | integer          | no       | Requested lifetime. Clamped to `max_key_ttl_secs`; defaults to it when omitted.                              |
+| `label`             | string           | no       | App tag for operator legibility; stored as `deploy-mint:<label>`.                                            |
+| `subject`           | string           | no       | If present, must equal your own subject DID (subject-pinning). Otherwise derived from the presented key.     |
+
+Response mirrors `tenzro_createApiKey`: `key` (shown once), `key_id`,
+`subject` (your own DID), `scopes`, `class` (`subject`), `allowed_databases`
+/ `allowed_sites` / `allowed_models`, and `valid_until`.
 
 ## Developer: managing your own keys
 
@@ -660,6 +770,12 @@ tenzro admin api-key revoke --key-id a1b2c3d4e5f60718
 | `-32004` | `Unauthorized: this API key authorizes no Canton network; ask the operator to reissue it naming canton_networks` | Canton-scoped RPC with a key whose `canton_networks` is empty                                |
 | `-32004` | `Unauthorized: this API key does not authorize Canton network '...' (authorized: ...)`               | Explicit `canton_network` outside what the key authorizes                                               |
 | `-32005` | `Rate limit exceeded: tier '...' allows N requests per minute; retry after M ms`                     | Key over its per-minute budget. `data` carries `retry_after_ms`, `requests_per_minute`, `tier`.          |
+| `-32004` | `self-service deploy-mint is disabled on this node (operator must set deploy.allow_self_service_mint = true)` | `tenzro_deployMintKey` called on a node that has not opted in                                    |
+| `-32004` | `deploy-mint is subject-pinned; the minted key's subject must be your own DID`                       | `tenzro_deployMintKey` `subject` param named a different DID than the caller's                          |
+| `-32004` | `deploy-mint refused: subject already holds N active deploy keys (max M)`                            | Per-subject active deploy-key ceiling reached                                                          |
+| `-32005` | `deploy-mint rate limit exceeded: N mints per hour; retry after M ms`                                | Per-caller-DID deploy-mint budget exhausted. `data` carries `retry_after_ms`, `mints_per_hour`.         |
+| `-32602` | `scope '...' is not mintable via deploy-mint (allowed: inference \| storage \| database)`            | `tenzro_deployMintKey` asked for a privileged/unknown scope                                            |
+| `-32602` | `a database-scoped deploy key must name allowed_databases ...`                                       | `tenzro_deployMintKey` requested `database` scope with no `allowed_databases`                          |
 | `-32602` | `Unknown scope: ...`                                                                                 | `createApiKey` called with a scope the node doesn't know                                               |
 | `-32602` | `Unknown tier: ... (expected free \| standard \| priority)`                                          | `createApiKey` called with an unknown `tier`                                                            |
 | `-32602` | `Unknown canton network: ... (expected devnet \| mainnet)`                                           | `createApiKey` called with an unknown entry in `canton_networks`                                        |

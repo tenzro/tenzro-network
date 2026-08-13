@@ -926,6 +926,14 @@ pub struct ApiKeyManager {
     /// fresh window, which is the correct trade for a budget knob
     /// whose purpose is shedding sustained load.
     rate: RwLock<std::collections::HashMap<String, Vec<i64>>>,
+    /// Sliding-window mint timestamps (ms) per caller *DID*, for the
+    /// self-service deploy-mint rate limit (`tenzro_deployMintKey`).
+    ///
+    /// Keyed by the authenticated caller's subject DID rather than a
+    /// key_id: the limit bounds how fast one identity can mint new
+    /// deploy keys, independent of which key it presented. In-memory
+    /// only for the same reason as `rate`.
+    deploy_mint_rate: RwLock<std::collections::HashMap<String, Vec<i64>>>,
 }
 
 impl std::fmt::Debug for ApiKeyManager {
@@ -944,6 +952,7 @@ impl ApiKeyManager {
             storage,
             cache: RwLock::new(std::collections::HashMap::new()),
             rate: RwLock::new(std::collections::HashMap::new()),
+            deploy_mint_rate: RwLock::new(std::collections::HashMap::new()),
         };
         mgr.hydrate()?;
         Ok(Arc::new(mgr))
@@ -980,6 +989,62 @@ impl ApiKeyManager {
     /// key's window does not linger in memory.
     pub fn forget_rate_limit(&self, key_id: &str) {
         self.rate.write().remove(key_id);
+    }
+
+    /// Marker prefix on the label of every self-service deploy-minted
+    /// key. Lets the active-count guardrail distinguish deploy-minted
+    /// keys from operator-issued ones for the same subject, without a
+    /// new persisted field. Not security-relevant on its own — the
+    /// subject match is what bounds ownership — it only scopes the
+    /// per-subject count to the delegated path.
+    pub const DEPLOY_MINT_LABEL_PREFIX: &'static str = "deploy-mint:";
+
+    /// Records one deploy-mint against `caller_did`'s sliding one-hour
+    /// window and reports whether it fits inside `max_per_hour`.
+    ///
+    /// Returns `Ok(())` when the mint is admitted (and counts it), or
+    /// `Err((limit, retry_after_ms))` when the window is full, so the
+    /// RPC layer can tell the caller both the ceiling it hit and when a
+    /// slot frees. A `max_per_hour` of 0 refuses unconditionally —
+    /// fail-closed, matching a config that opted the feature on but set
+    /// no budget.
+    pub fn check_deploy_mint_rate(
+        &self,
+        caller_did: &str,
+        max_per_hour: u32,
+    ) -> std::result::Result<(), (u32, i64)> {
+        const WINDOW_MS: i64 = 3_600_000;
+        let now = chrono::Utc::now().timestamp_millis();
+        let cutoff = now - WINDOW_MS;
+
+        let mut rate = self.deploy_mint_rate.write();
+        let hits = rate.entry(caller_did.to_string()).or_default();
+        hits.retain(|t| *t > cutoff);
+
+        if hits.len() as u32 >= max_per_hour {
+            let retry_after_ms = hits.first().map(|t| (*t + WINDOW_MS) - now).unwrap_or(0);
+            return Err((max_per_hour, retry_after_ms.max(0)));
+        }
+        hits.push(now);
+        Ok(())
+    }
+
+    /// Counts the currently-active deploy-minted keys owned by
+    /// `subject`. Used by the per-subject active-key ceiling: a key is
+    /// deploy-minted when its label carries [`Self::DEPLOY_MINT_LABEL_PREFIX`]
+    /// and its subject matches. Only active (non-revoked, unexpired)
+    /// records count — an expired key frees a slot without an explicit
+    /// revoke.
+    pub fn count_active_deploy_keys_for_subject(&self, subject: &str) -> usize {
+        self.cache
+            .read()
+            .values()
+            .filter(|r| {
+                r.subject.as_deref() == Some(subject)
+                    && r.label.starts_with(Self::DEPLOY_MINT_LABEL_PREFIX)
+                    && r.is_active()
+            })
+            .count()
     }
 
     /// Loads all existing records from `CF_API_KEYS` into the cache.
@@ -1779,6 +1844,89 @@ mod tests {
     #[test]
     fn admin_token_rejects_empty_presented_against_real_secret() {
         assert!(!verify_admin_token("", "s3cret-token-value"));
+    }
+
+    #[test]
+    fn deploy_mint_rate_trips_at_the_ceiling() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        let did = "did:tenzro:machine:deployer";
+        // First three admitted at a ceiling of 3.
+        for _ in 0..3 {
+            assert!(mgr.check_deploy_mint_rate(did, 3).is_ok());
+        }
+        // Fourth in the same window is refused, and reports the ceiling.
+        let err = mgr.check_deploy_mint_rate(did, 3).unwrap_err();
+        assert_eq!(err.0, 3);
+        // A different DID has its own independent window.
+        assert!(mgr.check_deploy_mint_rate("did:tenzro:machine:other", 3).is_ok());
+    }
+
+    #[test]
+    fn deploy_mint_rate_zero_budget_refuses_unconditionally() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        // Fail-closed: opted-on but no budget configured admits nothing.
+        assert!(
+            mgr.check_deploy_mint_rate("did:tenzro:machine:x", 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn count_active_deploy_keys_only_counts_marked_active_subject_keys() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        let subject = "did:tenzro:machine:appowner";
+
+        // A deploy-minted key (label carries the marker prefix).
+        mgr.issue(
+            Some(subject.to_string()),
+            format!("{}myapp", ApiKeyManager::DEPLOY_MINT_LABEL_PREFIX),
+            vec![ApiKeyScope::Database],
+            KeyClass::Subject,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(mgr.count_active_deploy_keys_for_subject(subject), 1);
+
+        // An ordinary operator-issued key for the same subject is NOT
+        // counted — only deploy-minted keys count against the ceiling.
+        mgr.issue(
+            Some(subject.to_string()),
+            "operator-issued",
+            vec![ApiKeyScope::Database],
+            KeyClass::Subject,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(mgr.count_active_deploy_keys_for_subject(subject), 1);
+
+        // A deploy key for a different subject does not count either.
+        mgr.issue(
+            Some("did:tenzro:machine:other".to_string()),
+            format!("{}otherapp", ApiKeyManager::DEPLOY_MINT_LABEL_PREFIX),
+            vec![ApiKeyScope::Database],
+            KeyClass::Subject,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(mgr.count_active_deploy_keys_for_subject(subject), 1);
+
+        // Revoking the deploy key frees the slot.
+        let list = mgr.list_by_subject(subject);
+        let deploy_key = list
+            .iter()
+            .find(|r| r.label.starts_with(ApiKeyManager::DEPLOY_MINT_LABEL_PREFIX))
+            .unwrap();
+        mgr.revoke_by_id_admin(&deploy_key.key_id).unwrap();
+        assert_eq!(mgr.count_active_deploy_keys_for_subject(subject), 0);
     }
 
     #[test]

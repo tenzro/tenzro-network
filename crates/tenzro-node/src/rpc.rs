@@ -3177,6 +3177,10 @@ async fn dispatch_request(
         // API key management — subject (X-Tenzro-Api-Key authenticated)
         "tenzro_revokeMyApiKey" => handle_revoke_my_api_key(node, request.params, api_key).await,
         "tenzro_listMyApiKeys" => handle_list_my_api_keys(node, api_key).await,
+        // Delegated, opt-in self-service deploy-mint. Non-admin, but
+        // subject-pinned + scope-bounded + rate-limited; self-authorizes
+        // from the presented X-Tenzro-Api-Key like the two arms above.
+        "tenzro_deployMintKey" => handle_deploy_mint_key(node, request.params, api_key).await,
 
         // MCP plugin host — operator (admin-token-gated) credential vault + subprocess control
         "tenzro_storeMcpSecret" => {
@@ -44837,6 +44841,301 @@ async fn handle_list_my_api_keys(
         .collect();
 
     Ok(serde_json::json!({ "keys": records, "subject": caller_subject }))
+}
+
+/// `tenzro_deployMintKey` — opt-in, delegated, non-admin mint of a
+/// narrowly-scoped app credential for one-click deploy (Phase D gap 1).
+///
+/// This is a hardened, constrained front door to the same minting
+/// primitive the admin-gated `tenzro_createApiKey` uses
+/// ([`ApiKeyManager::issue_with_delegation`]). It lets a deploy provision
+/// an app's key without the operator's admin token, but only under strict,
+/// operator-controlled conditions. The admin path is unchanged; this is
+/// purely additive.
+///
+/// Every branch is fail-closed. In order:
+///
+/// 1. **Disabled by default.** Refused unless the operator has set
+///    `deploy.allow_self_service_mint = true`. A node that never opted in
+///    behaves exactly as before.
+/// 2. **Authenticated caller only.** The caller must present an active
+///    `X-Tenzro-Api-Key` carrying a subject DID — the existing auth path,
+///    no new anonymous trust. Anonymous / unknown / revoked / subject-less
+///    keys are refused.
+/// 3. **Subject-pinned.** The minted key's `subject` is *derived* from the
+///    caller's own subject DID. A caller-supplied `subject` naming any
+///    other DID is refused — no minting for another tenant.
+/// 4. **Narrowly scoped + resource-bounded.** Only `inference`, `storage`
+///    and `database` scopes are mintable; any privileged scope is refused.
+///    A `database`-scoped key must name the `allowed_databases` it may
+///    reach. Every Canton / party / command delegation field is forced
+///    empty and no Canton network is bound, so this path can never mint a
+///    Canton-authorized or party-acting key. Class is forced to `Subject`.
+/// 5. **Rate-limited + bounded.** Per-caller-DID mints/hour and a
+///    per-subject active-key ceiling, both from config. Short TTL by
+///    default, hard-capped by config.
+/// 6. **Audited.** One `tenzro::deploy_mint` log line per mint.
+async fn handle_deploy_mint_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use crate::api_key::{AgentDelegation, ApiKeyManager, ApiKeyScope, ApiKeyTier, KeyClass};
+
+    // ── Guardrail 1: disabled by default ──────────────────────────────
+    // Fail-closed. Until the operator opts in, refuse exactly as the admin
+    // gate refuses a missing token — there is no self-service mint path.
+    let deploy_cfg = node.config().deploy.clone();
+    if !deploy_cfg.allow_self_service_mint {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: self-service deploy-mint is disabled on this node \
+                      (operator must set deploy.allow_self_service_mint = true)"
+                .to_string(),
+            data: None,
+        });
+    }
+
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager is not initialized".to_string(),
+        data: None,
+    })?;
+
+    // ── Guardrail 2: authenticated caller only ────────────────────────
+    // Reuse the presented-key auth path (same as revokeMyApiKey /
+    // listMyApiKeys). No new trust path is invented.
+    let presented = api_key.ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: missing X-Tenzro-Api-Key header".to_string(),
+        data: None,
+    })?;
+    let caller = mgr.lookup(presented).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: API key is unknown or revoked".to_string(),
+        data: None,
+    })?;
+
+    // ── Guardrail 3: subject pinning ──────────────────────────────────
+    // The minted key's subject is derived from the caller's own subject.
+    let caller_subject = caller.subject.clone().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: presented key has no subject; deploy-mint is subject-pinned"
+            .to_string(),
+        data: None,
+    })?;
+    let params = params.unwrap_or_else(|| serde_json::json!({}));
+    // A caller may omit `subject` (it is derived) but must not name a
+    // different one — that would be minting for another tenant.
+    if let Some(requested) = params.get("subject").and_then(|v| v.as_str())
+        && requested != caller_subject
+    {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: deploy-mint is subject-pinned; the minted key's subject \
+                      must be your own DID (omit `subject` or set it to your own)"
+                .to_string(),
+            data: None,
+        });
+    }
+
+    // ── Guardrail 4: narrowly-scoped only ─────────────────────────────
+    let scopes_raw = params
+        .get("scopes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'scopes' (array; allowed: inference | storage | database)"
+                .to_string(),
+            data: None,
+        })?;
+    let mut scopes: Vec<ApiKeyScope> = Vec::new();
+    for v in scopes_raw {
+        let s = v.as_str().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "scopes entries must be strings".to_string(),
+            data: None,
+        })?;
+        // Allow-list of mintable scopes. Any other scope — including the
+        // privileged canton / evm / svm / tee / bridge / chainlink /
+        // issuer set — is refused. There is no privileged-scope path here;
+        // those remain behind the admin-gated tenzro_createApiKey.
+        let scope = match s {
+            "inference" => ApiKeyScope::Inference,
+            "storage" => ApiKeyScope::Storage,
+            "database" => ApiKeyScope::Database,
+            other => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "scope '{}' is not mintable via deploy-mint (allowed: inference | \
+                         storage | database); privileged scopes require the admin-gated \
+                         tenzro_createApiKey",
+                        other
+                    ),
+                    data: None,
+                });
+            }
+        };
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    if scopes.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "at least one scope required (inference | storage | database)".to_string(),
+            data: None,
+        });
+    }
+
+    // ── Guardrail 4 (cont.): resource-bounding ────────────────────────
+    // Only the deploy-relevant resource allow-lists are honoured. Every
+    // Canton / party / command delegation field is left at its empty
+    // default regardless of what the caller sent (they are not read here),
+    // and no Canton network is bound.
+    let str_array = |key: &str| -> Vec<String> {
+        params
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let allowed_databases = str_array("allowed_databases");
+    let allowed_sites = str_array("allowed_sites");
+    let allowed_models = str_array("allowed_models");
+    // A database-scoped deploy key must be bound to the specific
+    // database(s) provisioned in this deploy — never unrestricted, which
+    // would reach every database this node's owner holds.
+    if scopes.contains(&ApiKeyScope::Database) && allowed_databases.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "a database-scoped deploy key must name allowed_databases (the \
+                      database_id(s) provisioned in this deploy); an unrestricted database \
+                      key is not mintable via deploy-mint"
+                .to_string(),
+            data: None,
+        });
+    }
+
+    // ── Guardrail 5a: per-subject active-key ceiling ──────────────────
+    let active = mgr.count_active_deploy_keys_for_subject(&caller_subject);
+    if active >= deploy_cfg.max_active_keys_per_subject {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "deploy-mint refused: subject already holds {} active deploy keys (max {}); \
+                 revoke one or let it expire",
+                active, deploy_cfg.max_active_keys_per_subject
+            ),
+            data: None,
+        });
+    }
+
+    // ── Guardrail 5b: per-caller-DID rate limit ───────────────────────
+    // 429 semantics encoded as -32005 + retry_after_ms, matching the
+    // per-key tier limiter so one SDK backoff path covers both.
+    if let Err((limit, retry_after_ms)) =
+        mgr.check_deploy_mint_rate(&caller_subject, deploy_cfg.max_mints_per_hour)
+    {
+        return Err(JsonRpcError {
+            code: -32005,
+            message: format!(
+                "deploy-mint rate limit exceeded: {} mints per hour; retry after {} ms",
+                limit, retry_after_ms
+            ),
+            data: Some(serde_json::json!({
+                "retry_after_ms": retry_after_ms,
+                "mints_per_hour": limit,
+            })),
+        });
+    }
+
+    // ── Bounded TTL ───────────────────────────────────────────────────
+    // Default to the config ceiling; honour a shorter caller-requested
+    // TTL, clamp a longer one down. Every deploy key expires on its own
+    // even if never revoked.
+    let now = chrono::Utc::now().timestamp();
+    let ttl_secs = match params.get("ttl_secs").and_then(|v| v.as_i64()) {
+        Some(t) if t > 0 => t.min(deploy_cfg.max_key_ttl_secs),
+        _ => deploy_cfg.max_key_ttl_secs,
+    };
+    let valid_until = now.saturating_add(ttl_secs);
+
+    // Label carries the deploy-mint marker (used by the per-subject active
+    // count) plus an optional caller app tag for operator legibility.
+    let app_tag = params
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("app");
+    let label = format!("{}{}", ApiKeyManager::DEPLOY_MINT_LABEL_PREFIX, app_tag);
+
+    // ── Guardrail 6: reuse the shared minting primitive ───────────────
+    // Class forced to Subject (never operator_*): the key is
+    // subject-revokable and carries no operator authority. All Canton
+    // provisioning args are None. Delegation is only the bounded resource
+    // allow-lists + the forced TTL, at the Standard tier.
+    let delegation = AgentDelegation {
+        allowed_databases: allowed_databases.clone(),
+        allowed_sites: allowed_sites.clone(),
+        allowed_models: allowed_models.clone(),
+        valid_until: Some(valid_until),
+        tier: ApiKeyTier::Standard,
+        ..AgentDelegation::default()
+    };
+    let issued = mgr
+        .issue_with_delegation(
+            Some(caller_subject.clone()),
+            label.clone(),
+            scopes.clone(),
+            KeyClass::Subject,
+            None,
+            None,
+            None,
+            None,
+            delegation,
+        )
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("deploy-mint issue: {}", e),
+            data: None,
+        })?;
+
+    // ── Audit ─────────────────────────────────────────────────────────
+    let scope_strs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
+    tracing::info!(
+        target: "tenzro::deploy_mint",
+        caller_did = %caller_subject,
+        key_id = %issued.record.key_id,
+        scopes = ?scope_strs,
+        allowed_databases = ?allowed_databases,
+        allowed_sites = ?allowed_sites,
+        allowed_models = ?allowed_models,
+        valid_until = valid_until,
+        "self-service deploy-mint issued a subject-pinned scoped app key"
+    );
+
+    Ok(serde_json::json!({
+        "key": issued.key,
+        "key_id": issued.record.key_id,
+        "subject": issued.record.subject,
+        "label": issued.record.label,
+        "scopes": scope_strs,
+        "class": issued.record.class.as_str(),
+        "tier": issued.record.tier.as_str(),
+        "allowed_databases": issued.record.allowed_databases,
+        "allowed_sites": issued.record.allowed_sites,
+        "allowed_models": issued.record.allowed_models,
+        "valid_until": issued.record.valid_until,
+        "created_at": issued.record.created_at,
+        "note": "Save the `key` field now — it is shown only once. This key is subject-pinned, \
+                 scope-bounded, and expires at `valid_until`.",
+    }))
 }
 
 // ── Staking & Provider handlers ────────────────────────────────────

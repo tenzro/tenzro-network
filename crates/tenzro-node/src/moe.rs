@@ -2177,7 +2177,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatcher_rejects_unknown_method() {
-        let d = MoeIrohDispatcher::new(Arc::new(MoeExpertRuntime::new()), None);
+        let d = MoeIrohDispatcher::new(
+            Arc::new(MoeExpertRuntime::new()),
+            None,
+            None,
+            Arc::new(crate::admission::NodeAdmissionGate::load(None, &[], None)),
+        );
         let req = json!({ "jsonrpc": "2.0", "method": "moe/nope", "id": 7 });
         let resp = d
             .dispatch(Bytes::from(serde_json::to_vec(&req).unwrap()))
@@ -2190,7 +2195,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatcher_parse_error_is_envelope_not_transport_error() {
-        let d = MoeIrohDispatcher::new(Arc::new(MoeExpertRuntime::new()), None);
+        let d = MoeIrohDispatcher::new(
+            Arc::new(MoeExpertRuntime::new()),
+            None,
+            None,
+            Arc::new(crate::admission::NodeAdmissionGate::load(None, &[], None)),
+        );
         let resp = d.dispatch(Bytes::from_static(b"not json")).await.unwrap();
         let v: Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(v["error"]["code"], -32700);
@@ -2198,7 +2208,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatcher_execute_unloaded_expert_is_model_error() {
-        let d = MoeIrohDispatcher::new(Arc::new(MoeExpertRuntime::new()), None);
+        let d = MoeIrohDispatcher::new(
+            Arc::new(MoeExpertRuntime::new()),
+            None,
+            None,
+            Arc::new(crate::admission::NodeAdmissionGate::load(None, &[], None)),
+        );
         let req = json!({
             "jsonrpc": "2.0",
             "method": MOE_METHOD_EXECUTE,
@@ -2222,7 +2237,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatcher_status_reports_empty_runtime() {
-        let d = MoeIrohDispatcher::new(Arc::new(MoeExpertRuntime::new()), None);
+        let d = MoeIrohDispatcher::new(
+            Arc::new(MoeExpertRuntime::new()),
+            None,
+            None,
+            Arc::new(crate::admission::NodeAdmissionGate::load(None, &[], None)),
+        );
         let req = json!({ "jsonrpc": "2.0", "method": MOE_METHOD_STATUS, "id": 2 });
         let resp = d
             .dispatch(Bytes::from(serde_json::to_vec(&req).unwrap()))

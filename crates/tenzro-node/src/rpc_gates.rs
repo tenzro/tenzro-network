@@ -344,6 +344,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_deleteFile",
     "tenzro_deleteWebhook",
     "tenzro_deployContract",
+    "tenzro_deployMintKey",
     "tenzro_deregisterAgent",
     "tenzro_deriveKey",
     "tenzro_detect",

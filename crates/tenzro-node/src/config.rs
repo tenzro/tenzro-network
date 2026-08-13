@@ -2052,6 +2052,84 @@ pub struct NodeConfig {
     /// opts into `Open` or `Gated`.
     #[serde(default)]
     pub storage_access: tenzro_types::resource_access::ResourceAccess,
+
+    /// Opt-in guardrails for the delegated self-service deploy-mint path
+    /// (`tenzro_deployMintKey`). Off by default: until the operator sets
+    /// `deploy.allow_self_service_mint = true`, every call to that RPC is
+    /// refused exactly as the admin gate refuses a missing token, so a
+    /// one-click deploy cannot provision an app credential without the
+    /// operator's admin token unless the operator has explicitly enabled
+    /// it. See [`DeployConfig`] for the bounds that cap what an
+    /// authenticated caller may mint for its own subject once enabled.
+    #[serde(default)]
+    pub deploy: DeployConfig,
+}
+
+/// Opt-in configuration for `tenzro_deployMintKey` — the delegated,
+/// non-admin path a one-click deploy uses to provision an app's
+/// narrowly-scoped credential without the operator's admin token.
+///
+/// Every field is fail-closed. The feature is disabled unless the
+/// operator turns it on, and once on the bounds here cap what a single
+/// authenticated caller can mint *for its own subject* — the RPC never
+/// lets a caller mint for another subject, grant privileged scopes, or
+/// exceed these rate / count / TTL ceilings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployConfig {
+    /// Master switch. When `false` (the default) `tenzro_deployMintKey`
+    /// refuses every call — there is no self-service mint path at all
+    /// until the operator opts in. Turning it on does not weaken the
+    /// admin-gated `tenzro_createApiKey`; it adds a separate, tightly
+    /// bounded front door.
+    #[serde(default)]
+    pub allow_self_service_mint: bool,
+
+    /// Maximum deploy-mints a single authenticated caller DID may perform
+    /// per rolling hour. In-memory only (like the per-key rate limiter);
+    /// a restart hands a fresh window, which is the correct trade for a
+    /// knob whose only purpose is shedding sustained abuse.
+    #[serde(default = "default_deploy_max_mints_per_hour")]
+    pub max_mints_per_hour: u32,
+
+    /// Maximum simultaneously-active deploy-minted keys a single subject
+    /// may hold. A mint that would exceed this is refused until the
+    /// caller revokes one or lets one expire — bounding blast radius and
+    /// key-store growth from a compromised or buggy deploy client.
+    #[serde(default = "default_deploy_max_active_keys_per_subject")]
+    pub max_active_keys_per_subject: usize,
+
+    /// Hard ceiling (seconds) on a minted key's lifetime, and the default
+    /// TTL when the caller does not request a shorter one. A
+    /// caller-requested TTL longer than this is clamped down; a shorter
+    /// one is honoured. Every deploy-minted key therefore expires on its
+    /// own even if never revoked.
+    #[serde(default = "default_deploy_max_key_ttl_secs")]
+    pub max_key_ttl_secs: i64,
+}
+
+fn default_deploy_max_mints_per_hour() -> u32 {
+    20
+}
+
+fn default_deploy_max_active_keys_per_subject() -> usize {
+    32
+}
+
+fn default_deploy_max_key_ttl_secs() -> i64 {
+    3600
+}
+
+impl Default for DeployConfig {
+    fn default() -> Self {
+        Self {
+            // Fail-closed: the delegated mint path is unreachable until an
+            // operator explicitly turns it on.
+            allow_self_service_mint: false,
+            max_mints_per_hour: default_deploy_max_mints_per_hour(),
+            max_active_keys_per_subject: default_deploy_max_active_keys_per_subject(),
+            max_key_ttl_secs: default_deploy_max_key_ttl_secs(),
+        }
+    }
 }
 
 /// Application-hosting edge configuration.
@@ -2397,6 +2475,7 @@ impl NodeConfig {
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
             storage_access: tenzro_types::resource_access::ResourceAccess::Private,
+            deploy: DeployConfig::default(),
         }
     }
 
@@ -2456,6 +2535,7 @@ impl NodeConfig {
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
             storage_access: tenzro_types::resource_access::ResourceAccess::Private,
+            deploy: DeployConfig::default(),
         }
     }
 
@@ -2515,6 +2595,7 @@ impl NodeConfig {
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
             storage_access: tenzro_types::resource_access::ResourceAccess::Private,
+            deploy: DeployConfig::default(),
         }
     }
 
@@ -2574,6 +2655,7 @@ impl NodeConfig {
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
             storage_access: tenzro_types::resource_access::ResourceAccess::Private,
+            deploy: DeployConfig::default(),
         }
     }
 
