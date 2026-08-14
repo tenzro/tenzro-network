@@ -53,6 +53,13 @@ fn refresh_catalog_fields(mut model: ModelInfo) -> ModelInfo {
     let fresh = entry.to_model_info(model.provider);
     model.parameters.parameter_count = fresh.parameters.parameter_count;
     model.parameters.context_window = fresh.parameters.context_window;
+    // Capability tags are a catalog-owned fact (set by capabilities_for_family
+    // in to_model_info) and are load-bearing for tiering: a substantial sub-30B
+    // model reaches the strong tier only via its code/reasoning tag. A row
+    // hydrated before this field existed stores an empty set, which would tier
+    // it Cheap forever and drop it from strong-tier competition — the same
+    // shadowing failure parameter_count had. Re-derive it here.
+    model.parameters.capabilities = fresh.parameters.capabilities;
     model
 }
 

@@ -703,6 +703,10 @@ struct LoadedDrafter {
     /// Context length to use for the draft model's context. Same
     /// catalog-aware cap as the target.
     context_length: u32,
+    /// Speculative algorithm for this drafter: 0 = draft-mtp, 1 = draft-dflash.
+    /// Inferred from the drafter GGUF filename (`dflash-*` → DFlash) so no extra
+    /// catalog threading is needed.
+    spec_type: i32,
 }
 
 unsafe impl Send for LoadedDrafter {}
@@ -759,6 +763,14 @@ pub struct ModelRuntime {
     /// discovery call must not queue behind an in-flight generation holding the
     /// model mutex.
     media_capable: Arc<dashmap::DashSet<String>>,
+    /// Per-model-id load lock, held across the whole load so concurrent loads
+    /// of the same model coalesce into one. Without it the `is_loaded` check
+    /// and the map insert straddle a multi-second GPU load, so two serve
+    /// requests (or a serve racing the startup reconcile) each launch a full
+    /// CUDA load of the same model — two contexts contend for the one GPU and
+    /// wedge it. The second caller waits here, then finds the model loaded and
+    /// returns. Keyed by `model_id`; the entry is a bare mutex, never removed.
+    load_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     backend: Arc<LlamaBackend>,
     hardware: HardwareInfo,
 }
@@ -809,9 +821,21 @@ impl ModelRuntime {
             inflight: Arc::new(DashMap::new()),
             warm_prefixes: Arc::new(DashMap::new()),
             media_capable: Arc::new(dashmap::DashSet::new()),
+            load_locks: Arc::new(DashMap::new()),
             backend,
             hardware,
         }
+    }
+
+    /// The per-model-id load lock, created on first use. Held across a load so
+    /// concurrent loads of the same model serialize and coalesce (see the
+    /// `load_locks` field). Cloned out of the map so the guard is not held
+    /// while awaiting the lock.
+    fn load_lock(&self, model_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.load_locks
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Record that `model_id` just served `prompt`, folding its prefix runs
@@ -1058,6 +1082,18 @@ impl ModelRuntime {
             return Ok(());
         }
 
+        // Single-flight: serialize concurrent loads of this same model so only
+        // one GPU load ever runs. A second caller that raced past the check
+        // above blocks here, then the re-check below finds the model loaded and
+        // returns — without this, both would load a full CUDA context of the
+        // same model and wedge the GPU.
+        let load_lock = self.load_lock(model_id);
+        let _load_guard = load_lock.lock().await;
+        if self.is_loaded(model_id) {
+            info!("Model {} already loaded (coalesced)", model_id);
+            return Ok(());
+        }
+
         // Admission control: refuse to load a model that won't fit in memory
         // rather than let llama.cpp OOM-kill the process mid-load. Uses the
         // GGUF file size (≈ resident weight footprint) plus a headroom margin
@@ -1189,6 +1225,15 @@ impl ModelRuntime {
     ) -> Result<()> {
         if self.is_loaded(model_id) {
             info!("Model {} already loaded", model_id);
+            return Ok(());
+        }
+        // Single-flight: coalesce concurrent loads of this model (see
+        // `load_model_with_context`). Prevents a duplicate clustered load
+        // launching a second context that contends for the GPU.
+        let load_lock = self.load_lock(model_id);
+        let _load_guard = load_lock.lock().await;
+        if self.is_loaded(model_id) {
+            info!("Model {} already loaded (coalesced)", model_id);
             return Ok(());
         }
         if device_indices.is_empty() {
@@ -1521,6 +1566,18 @@ impl ModelRuntime {
         let gguf_path_owned = drafter_gguf_path.to_path_buf();
         let target_id_owned = target_model_id.to_string();
         let backend = self.backend.clone();
+        // DFlash drafters ship as `dflash-*.gguf`; MTP heads as `mtp-*.gguf`.
+        // The filename is the reliable signal for which speculative algorithm to
+        // request from llama.cpp's common_speculative.
+        let spec_type: i32 = if gguf_path_owned
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains("dflash"))
+        {
+            1
+        } else {
+            0
+        };
 
         let loaded = tokio::task::spawn_blocking(move || {
             let n_gpu_layers = Self::gpu_layer_budget(&gguf_path_owned, file_len);
@@ -1541,6 +1598,7 @@ impl ModelRuntime {
                 model,
                 backend,
                 context_length: effective_ctx,
+                spec_type,
             })
         })
         .await
@@ -1783,11 +1841,30 @@ impl ModelRuntime {
             }
             LoadedEntry::Serial(model_mutex) => {
                 let model_mutex = model_mutex.clone();
+                // Speculative decoding on the raw-completion path too: default
+                // draft_n from the catalog when a drafter is loaded.
+                let mut config = config.clone();
+                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                    config.draft_n = crate::catalog::get_model_by_id(model_id)
+                        .and_then(|e| e.mtp_default_draft_n);
+                }
+                let drafter_mutex = if config.draft_n.is_some() {
+                    self.loaded_drafters.get(model_id).map(|d| d.value().clone())
+                } else {
+                    None
+                };
                 let prompt = prompt.to_string();
-                let config = config.clone();
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
-                    Self::generate_sync(&loaded, &prompt, &config)
+                    let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
+                    Self::generate_sync_streaming(
+                        &loaded,
+                        drafter_guard.as_deref(),
+                        &prompt,
+                        &config,
+                        None,
+                        None,
+                    )
                 });
                 handle
                     .await
@@ -1837,12 +1914,34 @@ impl ModelRuntime {
             }
             LoadedEntry::Serial(model_mutex) => {
                 let model_mutex = model_mutex.clone();
+                // Wire speculative decoding into the non-streaming path too:
+                // default draft_n from the catalog when omitted but a drafter is
+                // loaded, look it up, and pass it to the drafter-aware sync call.
+                // Without this, generate_chat always ran plain decode (drafter =
+                // None), so DFlash could never engage for non-streaming requests.
+                let mut config = config.clone();
+                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                    config.draft_n = crate::catalog::get_model_by_id(model_id)
+                        .and_then(|e| e.mtp_default_draft_n);
+                }
+                let drafter_mutex = if config.draft_n.is_some() {
+                    self.loaded_drafters.get(model_id).map(|d| d.value().clone())
+                } else {
+                    None
+                };
                 let messages = messages.to_vec();
-                let config = config.clone();
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
+                    let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
                     let prompt = render_chat_prompt(&loaded.model, &messages)?;
-                    Self::generate_sync(&loaded, &prompt, &config)
+                    Self::generate_sync_streaming(
+                        &loaded,
+                        drafter_guard.as_deref(),
+                        &prompt,
+                        &config,
+                        None,
+                        None,
+                    )
                 });
                 handle
                     .await
@@ -1942,7 +2041,20 @@ impl ModelRuntime {
                 ),
                 LoadedEntry::Serial(model_mutex) => {
                     let model_mutex = model_mutex.clone();
-                    let config = config.clone();
+                    let mut config = config.clone();
+                    // Engage speculative decoding on the tool path too. The grammar
+                    // guard inside generate_sync_streaming still suppresses the
+                    // drafter for grammar-constrained turns (which must not
+                    // speculate), so this only speeds up the unconstrained ones.
+                    if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                        config.draft_n = crate::catalog::get_model_by_id(model_id)
+                            .and_then(|e| e.mtp_default_draft_n);
+                    }
+                    let drafter_mutex = if config.draft_n.is_some() {
+                        self.loaded_drafters.get(model_id).map(|d| d.value().clone())
+                    } else {
+                        None
+                    };
                     let messages = messages.clone();
                     let tools = tools.clone();
                     let enable_thinking =
@@ -1950,6 +2062,7 @@ impl ModelRuntime {
                     tokio::task::spawn_blocking(
                         move || -> Result<(InferenceResult, Option<String>)> {
                             let loaded = model_mutex.blocking_lock();
+                            let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
                             match crate::tool_grammar::native_chat_prompt(
                                 &loaded.model,
                                 &messages,
@@ -1963,10 +2076,12 @@ impl ModelRuntime {
                                     config
                                         .stop
                                         .extend(nc.render.additional_stops.iter().cloned());
-                                    let inner = Self::generate_sync_with_grammar(
+                                    let inner = Self::generate_sync_streaming(
                                         &loaded,
+                                        drafter_guard.as_deref(),
                                         &nc.prompt,
                                         &config,
+                                        None,
                                         nc.grammar.as_ref(),
                                     )?;
                                     // Parse the reply with the same format the
@@ -1982,7 +2097,14 @@ impl ModelRuntime {
                                     let mut messages = messages;
                                     inject_tools_preamble(&mut messages, &tools);
                                     let prompt = render_chat_prompt(&loaded.model, &messages)?;
-                                    let inner = Self::generate_sync(&loaded, &prompt, &config)?;
+                                    let inner = Self::generate_sync_streaming(
+                                        &loaded,
+                                        drafter_guard.as_deref(),
+                                        &prompt,
+                                        &config,
+                                        None,
+                                        None,
+                                    )?;
                                     Ok((inner, None))
                                 }
                             }
@@ -2109,8 +2231,15 @@ impl ModelRuntime {
             }
             LoadedEntry::Serial(model_mutex) => {
                 let model_mutex = model_mutex.clone();
-                // Look up the drafter only when the caller asked for speculative
-                // decoding. Avoids holding an extra lock on the happy path.
+                // Default the draft count from the catalog when the caller
+                // omitted it and this target has a loaded drafter, so speculative
+                // decoding engages without the request having to set draft_n.
+                let mut config = config.clone();
+                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                    config.draft_n = crate::catalog::get_model_by_id(model_id)
+                        .and_then(|e| e.mtp_default_draft_n);
+                }
+                // Look up the drafter only when speculative decoding is in play.
                 let drafter_mutex = if config.draft_n.is_some() {
                     self.loaded_drafters
                         .get(model_id)
@@ -2119,7 +2248,6 @@ impl ModelRuntime {
                     None
                 };
                 let messages = messages.to_vec();
-                let config = config.clone();
                 // muse-glimmer streams the harmony/onyx channel format, whose
                 // markers the incremental `<think>` splitter cannot parse
                 // token-by-token. For muse we buffer the whole generation instead
@@ -2425,6 +2553,14 @@ impl ModelRuntime {
             }
             LoadedEntry::Serial(model_mutex) => {
                 let model_mutex = model_mutex.clone();
+                // Default draft count from the catalog when omitted but a drafter
+                // is loaded, so speculative decoding actually engages (see
+                // generate_chat_stream for the rationale).
+                let mut config = config.clone();
+                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                    config.draft_n = crate::catalog::get_model_by_id(model_id)
+                        .and_then(|e| e.mtp_default_draft_n);
+                }
                 let drafter_mutex = if config.draft_n.is_some() {
                     self.loaded_drafters
                         .get(model_id)
@@ -2433,7 +2569,6 @@ impl ModelRuntime {
                     None
                 };
                 let prompt = prompt.to_string();
-                let config = config.clone();
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
                     let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
@@ -2502,31 +2637,11 @@ impl ModelRuntime {
         Ok((tokens.len() - 1 - (start - batch.n_tokens() as usize)) as i32)
     }
 
-    /// Synchronous text generation using llama.cpp.
-    ///
-    /// Convenience wrapper for callers that don't have a drafter ref
-    /// in scope. Falls through to `generate_sync_streaming` with
-    /// `drafter = None` and `token_tx = None`.
-    fn generate_sync(
-        loaded: &LoadedModel,
-        prompt: &str,
-        config: &GenerationConfig,
-    ) -> Result<InferenceResult> {
-        Self::generate_sync_streaming(loaded, None, prompt, config, None, None)
-    }
-
-    /// [`Self::generate_sync`] with sampling constrained to a tool grammar.
-    ///
-    /// Used by the tool-aware path when the model's own template supplied one;
-    /// everything else calls [`Self::generate_sync`] and is unaffected.
-    fn generate_sync_with_grammar(
-        loaded: &LoadedModel,
-        prompt: &str,
-        config: &GenerationConfig,
-        grammar: Option<&crate::tool_grammar::ToolGrammar>,
-    ) -> Result<InferenceResult> {
-        Self::generate_sync_streaming(loaded, None, prompt, config, None, grammar)
-    }
+    // `generate_sync` / `generate_sync_with_grammar` were thin drafter=None
+    // wrappers around `generate_sync_streaming`. Every serial caller now looks up
+    // its loaded drafter and calls `generate_sync_streaming` directly (so
+    // speculative decoding engages on the non-streaming paths too), leaving those
+    // wrappers unused — removed.
 
     /// Core synchronous generation loop, optionally streaming each
     /// token and optionally running speculative decoding when an MTP
@@ -2967,12 +3082,16 @@ impl ModelRuntime {
         let n_ctx_draft = NonZeroU32::new(drafter.context_length)
             .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
 
-        // Build target + draft contexts.
+        // Build target + draft contexts. The target holds recurrent-state
+        // rollback slots (`n_rs_seq = draft n_max`) to undo rejected draft
+        // tokens; the draft context keeps the default 0.
         let target_ctx = loaded
             .model
             .new_context(
                 &loaded.backend,
-                LlamaContextParams::default().with_n_ctx(Some(n_ctx_target)),
+                LlamaContextParams::default()
+                    .with_n_ctx(Some(n_ctx_target))
+                    .with_n_rs_seq(u32::from(draft_n)),
             )
             .map_err(|e| {
                 ModelError::Other(format!(
@@ -2980,11 +3099,17 @@ impl ModelRuntime {
                     e
                 ))
             })?;
+        // The draft context references the target context via `ctx_other` (the
+        // draft reads the target's token embeddings / lm_head through it).
+        // `target_ctx` is created above; both contexts then move into
+        // `MtpSpeculative`. The underlying contexts are heap-allocated, so the
+        // pointer stays valid across the move.
         let draft_ctx = drafter
             .model
-            .new_context(
+            .new_context_with_ctx_other(
                 &drafter.backend,
                 LlamaContextParams::default().with_n_ctx(Some(n_ctx_draft)),
+                &target_ctx,
             )
             .map_err(|e| {
                 ModelError::Other(format!(
@@ -3003,256 +3128,185 @@ impl ModelRuntime {
                 n_max: draft_n as i32,
                 n_min: 0,
                 p_min: 0.0,
+                spec_type: drafter.spec_type,
             },
         )
         .map_err(|e| ModelError::MtpUnavailable {
             reason: format!("MtpSpeculative init failed: {}", e),
         })?;
 
-        // Begin a new generation with the prompt tokens.
-        spec.begin(&tokens_list)
-            .map_err(|e| ModelError::MtpUnavailable {
-                reason: format!("MtpSpeculative begin failed: {}", e),
-            })?;
+        // Verify batch: id_last + up to draft_n block candidates.
+        let mut batch = LlamaBatch::new((draft_n as usize) + 1, 1);
 
-        // Prefill the target context with the prompt, in `n_batch`-sized
-        // decode calls.
-        let prompt_logits_row = Self::prefill_in_batches(spec.target_context_mut(), &tokens_list)?;
-
-        // Reused by every speculative step below, which carries at most
-        // `draft_n` candidates — or one token when the drafter declines. The
-        // prompt no longer sizes this batch: it is prefilled separately, in
-        // `n_batch`-sized calls.
-        let mut batch = LlamaBatch::new((draft_n as usize).max(1), 1);
-
-        // Same chain as the single-token path. The drafter only PROPOSES
-        // tokens; the target's sampler decides which are kept.
+        // The drafter only PROPOSES tokens; the target's sampler decides.
         let mut sampler = build_sampler_chain(config, loaded.model.n_vocab());
-
-        let mut n_cur = tokens_list.len() as i32;
         let mut output_tokens: u32 = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut stream = StopStream::new(config.stop.clone());
         let max_pos =
             (n_ctx_target.get() as i32).min(input_tokens as i32 + config.max_tokens as i32);
 
-        // Seed `id_last` by sampling one token from the target. The
-        // drafter conditions its draft on this token.
-        let mut id_last = sampler.sample(spec.target_context_mut(), prompt_logits_row);
-        sampler.accept(id_last);
-
-        // Emit the seed token.
-        if loaded.model.is_eog_token(id_last) {
-            let (text, thinking) = stream.finish_parts(token_tx);
-            return Ok(InferenceResult {
-                text,
-                thinking,
-                input_tokens,
-                output_tokens,
-                generation_time_ms: start.elapsed().as_millis() as u64,
-                tokens_per_second: 0.0,
-                stop_reason: StopReason::Eos,
-                commitment: None,
-            });
-        }
-        let mut seed_open = true;
-        match loaded
-            .model
-            .token_to_piece(id_last, &mut decoder, true, None)
+        // DFlash/MTP prefill: decode the prompt EXCEPT its last token, and after
+        // EVERY target ubatch call `spec.process()` so the draft context mirrors
+        // the prompt. `process()` reads the target's per-layer features from the
+        // *most recent* decode and injects them into the draft KV; skipping it
+        // leaves the drafter blind (`ctx_dft pos_max=-1`) and drafts collapse.
+        // The last prompt token is kept as `id_last` — added first in every
+        // verify batch, never decoded during prefill. Mirrors llama.cpp's
+        // examples/speculative-simple + tools/server.
+        let (id_last_ref, prefill_toks) = tokens_list
+            .split_last()
+            .ok_or_else(|| ModelError::InferenceError("empty prompt".into()))?;
+        let mut id_last = *id_last_ref;
+        let n_batch = (spec.target_context_mut().n_batch() as usize).max(1);
         {
-            Ok(piece) => {
-                // Receiver dropped, or the seed token already completed a stop
-                // sequence — either way there is nothing further to generate.
-                seed_open = stream.push(&piece, token_tx) && !stream.hit_stop();
+            let cap = n_batch.min(prefill_toks.len().max(1));
+            let mut pbatch = LlamaBatch::new(cap, 1);
+            let mut s = 0usize;
+            while s < prefill_toks.len() {
+                let e = (s + n_batch).min(prefill_toks.len());
+                pbatch.clear();
+                for (off, tok) in prefill_toks[s..e].iter().enumerate() {
+                    pbatch
+                        .add(*tok, (s + off) as i32, &[0], false)
+                        .map_err(|err| ModelError::Other(format!("Batch add failed: {}", err)))?;
+                }
+                spec.target_context_mut()
+                    .decode(&mut pbatch)
+                    .map_err(|err| ModelError::Other(format!("Prompt decode failed: {}", err)))?;
+                spec.process(&pbatch)
+                    .map_err(|err| ModelError::MtpUnavailable {
+                        reason: format!("MtpSpeculative prefill process failed: {}", err),
+                    })?;
+                s = e;
             }
-            Err(e) => warn!("Failed to decode seed token {}: {}", id_last.0, e),
-        }
-        output_tokens += 1;
-        n_cur += 1;
-        if !seed_open {
-            let stop_reason =
-                StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
-            let (text, thinking) = stream.finish_parts(token_tx);
-            return Ok(InferenceResult {
-                text,
-                thinking,
-                input_tokens,
-                output_tokens,
-                generation_time_ms: start.elapsed().as_millis() as u64,
-                tokens_per_second: 0.0,
-                stop_reason,
-                commitment: None,
-            });
         }
 
-        // Speculative loop.
+        // Position id_last occupies in each verify batch. After prefilling
+        // prompt[..last] at positions 0..N-2, that's N-1.
+        let mut n_past = prefill_toks.len() as i32;
+
+        // Optional: validates the draft context saw the prefill. Pass the
+        // prefilled tokens (not the full prompt): the draft has seen exactly
+        // prompt[..last]; id_last is injected on the first verify. Passing the
+        // full prompt would spuriously warn pos_max < N-1 by one.
+        spec.begin(prefill_toks)
+            .map_err(|e| ModelError::MtpUnavailable {
+                reason: format!("MtpSpeculative begin failed: {}", e),
+            })?;
+
+        // Running token sequence the drafter conditions on (already ends with
+        // id_last, since id_last is the last prompt token).
         let mut prompt_so_far: Vec<llama_cpp_2::token::LlamaToken> = tokens_list.clone();
-        prompt_so_far.push(id_last);
 
-        while n_cur < max_pos && !loaded.model.is_eog_token(id_last) {
-            // 1. Ask the drafter for candidates.
-            let drafts = match spec.draft(n_cur, id_last, &prompt_so_far) {
+        // Speculative loop. Each iteration verifies a whole DFlash block in ONE
+        // target decode: batch = [id_last, draft0, draft1, …] with logits at
+        // every position, then accepts the longest prefix whose target sample
+        // matches the draft, plus one guaranteed bonus token.
+        'genloop: while n_past < max_pos && !loaded.model.is_eog_token(id_last) {
+            // 1. Ask the drafter for a block of candidates (may be empty).
+            let drafts = match spec.draft(n_past, id_last, &prompt_so_far) {
                 Ok(d) => d,
                 Err(e) => {
                     warn!(
-                        "Speculative draft failed at n_past={}: {} — falling back to single-token sample",
-                        n_cur, e
+                        "Speculative draft failed at n_past={}: {} — verifying id_last only",
+                        n_past, e
                     );
                     Vec::new()
                 }
             };
 
-            if drafts.is_empty() {
-                // No draft produced — fall back to a single-token
-                // sample on the target. This keeps the loop making
-                // progress when the drafter refuses (low confidence,
-                // edge of context, etc.).
-                batch.clear();
-                batch
-                    .add(id_last, n_cur, &[0], true)
-                    .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
-                spec.target_context_mut()
-                    .decode(&mut batch)
-                    .map_err(|e| ModelError::Other(format!("Decode failed: {}", e)))?;
-                let next = sampler.sample(spec.target_context_mut(), batch.n_tokens() - 1);
-                sampler.accept(next);
-                if loaded.model.is_eog_token(next) {
-                    break;
-                }
-                let mut open = true;
-                if let Ok(piece) = loaded.model.token_to_piece(next, &mut decoder, true, None) {
-                    open = stream.push(&piece, token_tx) && !stream.hit_stop();
-                }
-                output_tokens += 1;
-                n_cur += 1;
-                if !open {
-                    break;
-                }
-                prompt_so_far.push(next);
-                id_last = next;
-                continue;
-            }
-
-            // 2. Batch-decode the draft candidates on the target.
-            //    We add `id_last` first at position n_cur-1 so the
-            //    target has a logit slot for the FIRST draft slot.
-            //    Actually llama.cpp's pattern: we decoded id_last in
-            //    the previous turn, so its logits sit at the last
-            //    slot. For each draft token we add it to the batch
-            //    and ask the target to produce logits at THAT slot
-            //    so we can decide accept/reject by comparing the
-            //    target's sample with the draft.
+            // 2. Verify batch: id_last FIRST (batch is never empty → no
+            //    `n_tokens == 0` decode error), then the drafts. Logits at every
+            //    position so the sampler can walk the whole block in one decode.
             batch.clear();
+            batch
+                .add(id_last, n_past, &[0], true)
+                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
             for (i, draft_tok) in drafts.iter().enumerate() {
-                let pos = n_cur + i as i32;
                 batch
-                    .add(*draft_tok, pos, &[0], true)
+                    .add(*draft_tok, n_past + 1 + i as i32, &[0], true)
                     .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
             }
             spec.target_context_mut().decode(&mut batch).map_err(|e| {
                 ModelError::Other(format!("Target speculative decode failed: {}", e))
             })?;
 
-            // 3. Accept / reject by comparing target samples to drafts.
+            // 3. Drop the draft context's speculative block (positions >= n_past)
+            //    before re-processing, so re-injecting verified features doesn't
+            //    collide with occupied KV slots.
+            let _ = spec
+                .draft_context_mut()
+                .kv_cache_seq_rm(0, Some(n_past as u32), None);
+
+            // 4. Re-seed the draft context from this decode for the next block.
+            spec.process(&batch).map_err(|e| ModelError::MtpUnavailable {
+                reason: format!("MtpSpeculative process failed: {}", e),
+            })?;
+
+            // 4. Accept the longest matching prefix. Sample at batch index 0
+            //    (id_last's slot → the token after id_last); if it equals
+            //    draft[0], accept and sample index 1 (draft[0]'s slot), and so
+            //    on. The final sample is the target's own bonus token. Every
+            //    sampled token is a NEW output token.
             let mut n_accepted: u16 = 0;
-            for (i, draft_tok) in drafts.iter().enumerate() {
-                let logit_idx = i as i32;
-                let target_sample = sampler.sample(spec.target_context_mut(), logit_idx);
-                sampler.accept(target_sample);
-                if target_sample == *draft_tok {
+            let mut idx: i32 = 0;
+            let mut stop_now = false;
+            loop {
+                let sampled = sampler.sample(spec.target_context_mut(), idx);
+                sampler.accept(sampled);
+                id_last = sampled;
+                prompt_so_far.push(sampled);
+                if loaded.model.is_eog_token(sampled) {
+                    stop_now = true;
+                    break;
+                }
+                output_tokens += 1;
+                if let Ok(piece) = loaded.model.token_to_piece(sampled, &mut decoder, true, None) {
+                    if !(stream.push(&piece, token_tx) && !stream.hit_stop()) {
+                        stop_now = true;
+                    }
+                }
+                let matched = (idx as usize) < drafts.len() && sampled == drafts[idx as usize];
+                if matched {
                     n_accepted += 1;
-                    id_last = target_sample;
-                    prompt_so_far.push(target_sample);
-                    if loaded.model.is_eog_token(target_sample) {
+                    idx += 1;
+                    if stop_now || output_tokens >= config.max_tokens {
                         break;
-                    }
-                    let mut open = true;
-                    if let Ok(piece) =
-                        loaded
-                            .model
-                            .token_to_piece(target_sample, &mut decoder, true, None)
-                    {
-                        open = stream.push(&piece, token_tx) && !stream.hit_stop();
-                    }
-                    output_tokens += 1;
-                    if !open {
-                        // Receiver dropped, or a stop sequence completed.
-                        spec.accept(n_accepted)
-                            .map_err(|e| ModelError::MtpUnavailable {
-                                reason: format!("MtpSpeculative accept failed: {}", e),
-                            })?;
-                        let stop_reason = StopReason::from_loop(
-                            stream.hit_stop(),
-                            output_tokens,
-                            config.max_tokens,
-                        );
-                        let (text, thinking) = stream.finish_parts(token_tx);
-                        return Ok(InferenceResult {
-                            text,
-                            thinking,
-                            input_tokens,
-                            output_tokens,
-                            generation_time_ms: start.elapsed().as_millis() as u64,
-                            tokens_per_second: 0.0,
-                            stop_reason,
-                            commitment: None,
-                        });
                     }
                 } else {
-                    // First rejection — keep the target's sample as
-                    // the next id_last and stop accepting drafts.
-                    id_last = target_sample;
-                    prompt_so_far.push(target_sample);
-                    if loaded.model.is_eog_token(target_sample) {
-                        break;
-                    }
-                    let mut open = true;
-                    if let Ok(piece) =
-                        loaded
-                            .model
-                            .token_to_piece(target_sample, &mut decoder, true, None)
-                    {
-                        open = stream.push(&piece, token_tx) && !stream.hit_stop();
-                    }
-                    output_tokens += 1;
-                    if !open {
-                        spec.accept(n_accepted)
-                            .map_err(|e| ModelError::MtpUnavailable {
-                                reason: format!("MtpSpeculative accept failed: {}", e),
-                            })?;
-                        let stop_reason = StopReason::from_loop(
-                            stream.hit_stop(),
-                            output_tokens,
-                            config.max_tokens,
-                        );
-                        let (text, thinking) = stream.finish_parts(token_tx);
-                        return Ok(InferenceResult {
-                            text,
-                            thinking,
-                            input_tokens,
-                            output_tokens,
-                            generation_time_ms: start.elapsed().as_millis() as u64,
-                            tokens_per_second: 0.0,
-                            stop_reason,
-                            commitment: None,
-                        });
-                    }
+                    // Mismatch or ran out of drafts → this sampled token is the
+                    // bonus token; stop accepting this block.
                     break;
                 }
             }
 
-            // 4. Tell the drafter how many were accepted so it can
-            //    advance its own KV cache.
-            spec.accept(n_accepted)
-                .map_err(|e| ModelError::MtpUnavailable {
-                    reason: format!("MtpSpeculative accept failed: {}", e),
-                })?;
+            // 5. Tell the drafter how many drafts were accepted — only when it
+            //    actually produced a pending draft (the wrapper rejects an
+            //    accept call with no pending draft).
+            if !drafts.is_empty() {
+                spec.accept(n_accepted)
+                    .map_err(|e| ModelError::MtpUnavailable {
+                        reason: format!("MtpSpeculative accept failed: {}", e),
+                    })?;
+            }
 
-            // 5. Advance n_cur by accepted + 1 (the extra sampled token).
-            n_cur += n_accepted as i32 + 1;
+            // 6. Advance: id_last held old n_past, followed by n_accepted accepted
+            //    drafts. The bonus token is decoded as id_last next iteration.
+            n_past += 1 + n_accepted as i32;
 
-            if loaded.model.is_eog_token(id_last) {
-                break;
+            // 7. Trim rejected-draft KV from BOTH contexts. muse's dense arch
+            //    can't use n_rs_seq recurrent rollback, so explicit seq_rm is the
+            //    rollback mechanism: everything at >= n_past is a rejected draft.
+            let _ = spec
+                .target_context_mut()
+                .kv_cache_seq_rm(0, Some(n_past as u32), None);
+            let _ = spec
+                .draft_context_mut()
+                .kv_cache_seq_rm(0, Some(n_past as u32), None);
+
+            if stop_now {
+                break 'genloop;
             }
         }
 
@@ -4174,6 +4228,67 @@ mod tests {
         };
         assert_eq!(msg.role, "user");
         assert_eq!(msg.content, "Hello");
+    }
+
+    /// Single-flight load coalescing: the primitive that prevents a duplicate
+    /// GPU load of the same model (the TOCTOU race that wedged the GPU). Two
+    /// guarantees: (1) all callers for one model id share the SAME load lock,
+    /// so a second load waits on the first rather than running concurrently;
+    /// (2) distinct model ids get distinct locks, so loading model A never
+    /// blocks loading model B.
+    #[test]
+    fn load_lock_is_shared_per_id_and_distinct_across_ids() {
+        let rt = ModelRuntime::new();
+        let a1 = rt.load_lock("model-a");
+        let a2 = rt.load_lock("model-a");
+        let b = rt.load_lock("model-b");
+        assert!(
+            Arc::ptr_eq(&a1, &a2),
+            "same model id must return the same load lock (callers coalesce)"
+        );
+        assert!(
+            !Arc::ptr_eq(&a1, &b),
+            "different model ids must have independent load locks"
+        );
+    }
+
+    /// The load lock must serialize concurrent loads of one model: at most one
+    /// task is ever inside the critical section (the "load"). That is exactly
+    /// what stops two serve requests from both launching a full CUDA context of
+    /// the same model.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_loads_of_one_model_serialize() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let rt = Arc::new(ModelRuntime::new());
+        let in_section = Arc::new(AtomicUsize::new(0));
+        let max_in_section = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let rt = rt.clone();
+            let in_section = in_section.clone();
+            let max_in_section = max_in_section.clone();
+            handles.push(tokio::spawn(async move {
+                // Same code path the real load takes: fetch the per-id lock and
+                // hold it across the (here simulated) load.
+                let lock = rt.load_lock("contended-model");
+                let _guard = lock.lock().await;
+                let cur = in_section.fetch_add(1, Ordering::SeqCst) + 1;
+                max_in_section.fetch_max(cur, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                in_section.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(
+            max_in_section.load(Ordering::SeqCst),
+            1,
+            "concurrent loads of the same model must serialize (never two at once)"
+        );
     }
 
     #[test]

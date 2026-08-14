@@ -33765,7 +33765,7 @@ async fn handle_chat_simple(
             .get("draft_n")
             .and_then(|v| v.as_u64())
             .and_then(|n| u8::try_from(n).ok())
-            .filter(|n| (1..=6).contains(n)),
+            .filter(|n| (1..=16).contains(n)),
         commitment_k: verifiable.then_some(tenzro_model::DEFAULT_COMMITMENT_K),
         ..GenerationConfig::default()
     };
@@ -34362,7 +34362,7 @@ async fn handle_chat_rich(
             .get("draft_n")
             .and_then(|v| v.as_u64())
             .and_then(|n| u8::try_from(n).ok())
-            .filter(|n| (1..=6).contains(n)),
+            .filter(|n| (1..=16).contains(n)),
         commitment_k: verifiable.then_some(tenzro_model::DEFAULT_COMMITMENT_K),
         ..GenerationConfig::default()
     };
@@ -39051,7 +39051,7 @@ pub(crate) async fn openai_chat_completions_inner(
             // Pin the generator so a dropped stream can be re-prefilled by a
             // different provider from the same distribution.
             seed: request.seed.unwrap_or(42),
-            draft_n: request.draft_n.filter(|n| (1..=6).contains(n)),
+            draft_n: request.draft_n.filter(|n| (1..=16).contains(n)),
             // Commitments require the buffered single-token path — the SSE
             // token channel cannot carry one, so streaming requests skip it.
             commitment_k: (!stream_requested && request.verifiable.unwrap_or(false))
@@ -40667,7 +40667,7 @@ pub async fn handle_chat_stream_rich(
             .get("draft_n")
             .and_then(|v| v.as_u64())
             .and_then(|n| u8::try_from(n).ok())
-            .filter(|n| (1..=6).contains(n)),
+            .filter(|n| (1..=16).contains(n)),
         ..GenerationConfig::default()
     };
     apply_sampling_params(&mut config, &params);

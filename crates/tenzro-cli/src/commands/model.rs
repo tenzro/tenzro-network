@@ -319,6 +319,7 @@ impl ModelInfoCmd {
                     println!();
                     let flavour = match m.mtp_kind {
                         tenzro_model::catalog::MtpKind::DraftMtp => "MTP (joint draft head)",
+                        tenzro_model::catalog::MtpKind::DraftDflash => "DFlash (block-diffusion self-draft)",
                         tenzro_model::catalog::MtpKind::Generic => "Generic (two-model)",
                         tenzro_model::catalog::MtpKind::None => "None",
                     };

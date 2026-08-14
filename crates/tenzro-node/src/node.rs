@@ -7559,6 +7559,33 @@ impl TenzroNode {
             meta = meta.with_network_catalog(Arc::new(
                 crate::network_catalog::GossipNetworkCatalog::new(self.network_models.clone()),
             ));
+            // Operator task→model overrides (Cortex primitive): the operator
+            // pins which served model handles which kind of task; unpinned use
+            // cases keep intelligent (benchmark + measured) selection. Two
+            // channels, both optional: the `[cortex] task_models` config table,
+            // and the `TENZRO_TASK_MODELS` env var (a JSON object, e.g.
+            // `{"code":"qwen3.8-27b","reasoning":"muse-glimmer-30b"}`) for
+            // env-configured deployments that pass no config file. The env
+            // entries are merged over the config table.
+            let mut task_models = self.config.cortex.task_models.clone();
+            if let Ok(raw) = std::env::var("TENZRO_TASK_MODELS") {
+                let raw = raw.trim();
+                if !raw.is_empty() {
+                    match serde_json::from_str::<std::collections::HashMap<String, String>>(raw) {
+                        Ok(env_map) => task_models.extend(env_map),
+                        Err(e) => warn!(
+                            "TENZRO_TASK_MODELS is not a valid JSON object of use_case->model_id; ignoring: {e}"
+                        ),
+                    }
+                }
+            }
+            if !task_models.is_empty() {
+                let mut pairs: Vec<String> =
+                    task_models.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                pairs.sort();
+                info!("Cortex task-model overrides active: {}", pairs.join(", "));
+            }
+            meta = meta.with_routing_preferences(task_models);
             self.meta_router = Some(Arc::new(meta));
             info!("Meta-router (intent → model) initialized with {clusters} difficulty cluster(s)");
         }
@@ -15971,7 +15998,7 @@ impl TenzroNode {
             }
         };
 
-        let max_concurrent = match profile {
+        let mem_max_concurrent = match profile {
             Some(profile) => {
                 let gpu_vram = profile
                     .gpus
@@ -15990,10 +16017,28 @@ impl TenzroNode {
             // rather than a timing window: serve one at a time until it works.
             None => 1,
         };
+        // Cap the advertised/admitted concurrency at the serving path's REAL
+        // concurrent capacity, not just what memory allows. A model that loads
+        // a multimodal projector or an MTP drafter is served on the single-
+        // mutex serial path (one decode at a time); everything else is served
+        // through the continuous-batching engine with `max_slots` KV sequence
+        // slots. Advertising the memory estimate (up to 32) for a serial model
+        // admits a flood that then piles behind one mutex — each a full
+        // generation — which presents as a stall/wedge under load. Admitting
+        // real capacity sheds the surplus with a fast "retry later" instead.
+        let is_serial = entry.mmproj.is_some() || entry.mtp_kind != tenzro_model::MtpKind::None;
+        let capacity_cap = if is_serial {
+            1
+        } else {
+            tenzro_model::max_slots() as u32
+        };
+        let max_concurrent = mem_max_concurrent.min(capacity_cap).max(1);
         info!(
             model_id = %model_id,
             max_concurrent,
-            "Registered per-model concurrency cap",
+            mem_max_concurrent,
+            serving_path = if is_serial { "serial" } else { "batched" },
+            "Registered per-model concurrency cap (real serving capacity)",
         );
         self.load_tracker.register_model(model_id, max_concurrent);
     }

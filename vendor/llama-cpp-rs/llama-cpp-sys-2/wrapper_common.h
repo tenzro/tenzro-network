@@ -81,12 +81,17 @@ int llama_rs_fit_params(
 
 void llama_rs_memory_breakdown_print(const struct llama_context * ctx);
 
+// spec_type selects the speculative draft algorithm: 0 = draft-mtp (jointly
+// trained MTP head, the default), 1 = draft-dflash (block-diffusion DFlash
+// drafter, e.g. Muse-Glimmer's dflash-*.gguf). Both run through the same
+// common_speculative machinery.
 struct llama_rs_mtp_speculative * llama_rs_mtp_speculative_init(
     struct llama_context * ctx_tgt,
     struct llama_context * ctx_dft,
     int32_t n_max,
     int32_t n_min,
-    float p_min);
+    float p_min,
+    int32_t spec_type);
 
 void llama_rs_mtp_speculative_free(struct llama_rs_mtp_speculative * spec);
 

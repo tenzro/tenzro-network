@@ -16,6 +16,9 @@ pub struct MtpSpeculativeParams {
     pub n_min: i32,
     /// Minimum draft probability accepted by llama.cpp's MTP drafter.
     pub p_min: f32,
+    /// Speculative draft algorithm: 0 = draft-mtp (default), 1 = draft-dflash
+    /// (block-diffusion DFlash drafter, e.g. Muse-Glimmer's dflash-*.gguf).
+    pub spec_type: i32,
 }
 
 impl Default for MtpSpeculativeParams {
@@ -24,6 +27,7 @@ impl Default for MtpSpeculativeParams {
             n_max: 3,
             n_min: 0,
             p_min: 0.0,
+            spec_type: 0,
         }
     }
 }
@@ -83,6 +87,7 @@ impl<'model> MtpSpeculative<'model> {
                 params.n_max,
                 params.n_min,
                 params.p_min,
+                params.spec_type,
             )
         };
         let raw = NonNull::new(raw).ok_or(MtpSpeculativeError::InitFailed)?;

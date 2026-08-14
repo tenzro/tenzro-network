@@ -84,7 +84,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
   "jsonrpc": "2.0",
   "method": "tenzro_chat",
   "params": {
-    "model": "qwen3-8b",
+    "model": "qwen3.8-27b",
     "message": "What is the capital of France?",
     "max_tokens": 256,
     "temperature": 0.7,
@@ -130,7 +130,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
   "id": 1,
   "result": {
     "output": "The capital of France is Paris.",
-    "model_id": "qwen3-8b",
+    "model_id": "qwen3.8-27b",
     "input_tokens": 8,
     "output_tokens": 7,
     "generation_time_ms": 142,
@@ -154,7 +154,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
     },
     "tenzro_contentProvenance": {
       "content_hash": "0x...",
-      "model_id": "qwen3-8b",
+      "model_id": "qwen3.8-27b",
       "provider": "0x...",
       "signed_at": 1780000000000,
       "assertion": "ai-generated",
@@ -240,7 +240,7 @@ Data-residency rules (GDPR transfers, sectoral regulation, sovereign-deployment 
 {
   "request_hash": "0x...",
   "response_hash": "0x...",
-  "model_id": "qwen3-8b",
+  "model_id": "qwen3.8-27b",
   "provider": "0x...",
   "jurisdiction": {
     "country": "DE",
@@ -276,7 +276,7 @@ For multi-turn conversations, system prompts, tool calls, vision input, and stru
   "jsonrpc": "2.0",
   "method": "tenzro_chat",
   "params": {
-    "model": "qwen3-8b",
+    "model": "qwen3.8-27b",
     "system": "You are a TNZO trading agent. Use tools when prices are needed.",
     "messages": [
       {"role": "user", "content": "What is TNZO trading at?"},
@@ -391,7 +391,7 @@ Tool names must match `^[a-zA-Z0-9_-]{1,64}$`.
   "id": 1,
   "result": {
     "id": "msg_01H8ZQ...",
-    "model": "qwen3-8b",
+    "model": "qwen3.8-27b",
     "role": "assistant",
     "content": [
       {"type": "thinking", "thinking": "Price came back as 0.42 USD."},
@@ -483,7 +483,7 @@ Modeled on Anthropic's Messages streaming format.
 
 ```
 event: message_start
-data: {"id": "msg_01...", "model": "qwen3-8b", "role": "assistant", "content": [], "usage": {"input_tokens": 142, "output_tokens": 0}}
+data: {"id": "msg_01...", "model": "qwen3.8-27b", "role": "assistant", "content": [], "usage": {"input_tokens": 142, "output_tokens": 0}}
 
 event: content_block_start
 data: {"index": 0, "content_block": {"type": "thinking", "thinking": ""}}
@@ -639,7 +639,7 @@ A message `content` is either a bare string or an array of typed parts. Both sha
 
 ```json
 {
-  "model": "qwen3-8b",
+  "model": "qwen3.8-27b",
   "messages": [
     {
       "role": "user",
@@ -666,7 +666,7 @@ Multiple `text` parts are newline-joined when flattened for a text-only runtime.
 
 ```json
 {
-  "model": "qwen3-8b",
+  "model": "qwen3.8-27b",
   "models": ["qwen3-4b", "gemma4-e4b"],
   "provider": { "ignore": ["0x9c1d…"] },
   "messages": [{ "role": "user", "content": "Hello" }]
@@ -696,7 +696,7 @@ Each entry in `GET /v1/models` carries the OpenAI core fields plus the serving c
   "object": "model",
   "created": 1780560000,
   "owned_by": "0x4b2c…",
-  "model_id": "qwen3-8b",
+  "model_id": "qwen3.8-27b",
   "model_name": "Qwen 3 8B",
   "location": "local",
   "status": "online",
@@ -762,7 +762,7 @@ Prompt and completion bodies are never written to disk. SSE chunks live in an in
 Every stream ends with a `finish_reason` chunk that also carries `usage` and the billing extensions, so a caller learns what it was billed without opting into anything:
 
 ```json
-{"id": "chatcmpl-…", "object": "chat.completion.chunk", "created": 1780560000, "model": "qwen3-8b",
+{"id": "chatcmpl-…", "object": "chat.completion.chunk", "created": 1780560000, "model": "qwen3.8-27b",
  "choices": [{"index": 0, "delta": {}, "finish_reason": "stop", "native_finish_reason": "stop_sequence"}],
  "usage": {"prompt_tokens": 12, "completion_tokens": 48, "total_tokens": 60},
  "cost_wei": "156000000000000", "generation_time_ms": 2140, "tokens_per_second": 22.4}
@@ -785,7 +785,7 @@ On a network model the serving peer's own spelling passes through verbatim, so a
 Setting `stream_options: {"include_usage": true}` appends the OpenAI empty-`choices` usage chunk after it, repeating the same numbers in the shape OpenAI SDKs look for:
 
 ```json
-{"id": "chatcmpl-…", "object": "chat.completion.chunk", "created": 1780560000, "model": "qwen3-8b",
+{"id": "chatcmpl-…", "object": "chat.completion.chunk", "created": 1780560000, "model": "qwen3.8-27b",
  "choices": [],
  "usage": {"prompt_tokens": 12, "completion_tokens": 48, "total_tokens": 60},
  "cost_wei": "156000000000000", "generation_time_ms": 2140, "tokens_per_second": 22.4}
@@ -808,7 +808,7 @@ GET /v1/generation?id=chatcmpl-9f3c8a1e-…
 ```json
 {
   "id": "chatcmpl-9f3c8a1e-…",
-  "model": "qwen3-8b",
+  "model": "qwen3.8-27b",
   "provider": "0x8f2b…",
   "input_tokens": 12,
   "output_tokens": 48,
@@ -865,7 +865,7 @@ It returns the same object, and answers `-32004` where the HTTP route answers 40
 
 ```json
 {"jsonrpc": "2.0", "id": 1, "method": "tenzro_listInferenceUsage",
- "params": {"model_id": "qwen3-8b"}}
+ "params": {"model_id": "qwen3.8-27b"}}
 ```
 
 This is the stored shape rather than the reshaped one, and it differs from `tenzro_getGeneration` in three ways: every dimension is present whether or not the call consumed it, durations stay in milliseconds (`audio_ms` / `video_ms`, not whole seconds), and `provider_id` is the address as an array of 32 bytes rather than a hex string. A rollup carries its dimensions under `total_units`, and names its money field for its side of the trade — `total_cost` on a model or global rollup, `total_revenue` on a provider's.
@@ -907,7 +907,7 @@ The response object carries the Responses fields plus the same Tenzro extensions
   "object": "response",
   "created_at": 1780560000,
   "status": "completed",
-  "model": "qwen3-8b",
+  "model": "qwen3.8-27b",
   "output": [{
     "id": "msg_9f3c…",
     "type": "message",
@@ -1436,7 +1436,7 @@ Response:
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "model_id": "qwen3-8b",
+    "model_id": "qwen3.8-27b",
     "tier": "cheap",
     "estimated_cost": "336000000000000",
     "fallback_chain": ["qwen3-14b", "deepseek-v3"],
@@ -1511,7 +1511,7 @@ In practice this method carries `escalated` — the outcome only the caller know
   "jsonrpc": "2.0",
   "method": "tenzro_recordRouteOutcome",
   "params": {
-    "model_id": "qwen3-8b",
+    "model_id": "qwen3.8-27b",
     "cluster": 7,
     "outcome": "escalated"
   },
@@ -1531,7 +1531,7 @@ In practice this method carries `escalated` — the outcome only the caller know
   "id": 1,
   "result": {
     "retained": true,
-    "model_id": "qwen3-8b",
+    "model_id": "qwen3.8-27b",
     "cluster": 7,
     "outcome": "escalated"
   }
@@ -1558,7 +1558,7 @@ Centroids are not returned — they are high-dimensional vectors of no use to a 
 {
   "jsonrpc": "2.0",
   "method": "tenzro_routeDifficultyStats",
-  "params": { "model_id": "qwen3-8b" },
+  "params": { "model_id": "qwen3.8-27b" },
   "id": 1
 }
 ```
@@ -1579,7 +1579,7 @@ Centroids are not returned — they are high-dimensional vectors of no use to a 
       { "cluster": 0, "prompts": 412 },
       { "cluster": 7, "prompts": 96 }
     ],
-    "model_id": "qwen3-8b",
+    "model_id": "qwen3.8-27b",
     "model_clusters": [
       {
         "cluster": 7,

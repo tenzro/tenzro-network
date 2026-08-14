@@ -193,6 +193,9 @@ pub enum MtpKind {
     Generic,
     /// Jointly-trained Multi-Token-Prediction head (`--spec-type draft-mtp`).
     DraftMtp,
+    /// Block-diffusion DFlash drafter (`--spec-type draft-dflash`), e.g.
+    /// Muse-Glimmer's companion `dflash-*.gguf`. Self-speculative ~2x decode.
+    DraftDflash,
 }
 
 /// Per-model serving configuration — the sampler defaults, chat-template
@@ -769,7 +772,13 @@ impl TemplateFix {
     /// <https://github.com/ggml-org/llama.cpp/issues/13178>.
     pub fn for_family(family: &str) -> Self {
         match family {
-            "qwen3.5" | "qwen3.6" | "qwen3.8" => Self::Vendored {
+            // Only Qwen 3.5 / 3.6 ship the known-bad embedded template that
+            // froggeric v20 fixes. Qwen 3.8 is a distinct architecture
+            // (hybrid Gated-DeltaNet, vision, reasoning_effort levels) with
+            // its own chat template — it uses its embedded `--jinja` template,
+            // not the 3.5/3.6 override. Add a 3.8-specific override only if a
+            // prompt-drop bug is confirmed on its own template.
+            "qwen3.5" | "qwen3.6" => Self::Vendored {
                 filename: "qwen3.5-3.6-froggeric-v20.jinja".to_string(),
             },
             _ => Self::None,
@@ -3397,8 +3406,7 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
         //
         // *Footprint.* 144 GB at bf16 for the text-to-video path — transformer
         // 66.3, Qwen3-VL-32B text encoder 66.7, video VAE 10.4, audio VAE 0.6 —
-        // so `min_vram_gb` refuses on anything smaller, including a 121 GB
-        // GB10. Third-party GGUFs exist but quantize the FL2VA
+        // so `min_vram_gb` refuses on anything smaller, including a 121 GB unified-memory box. Third-party GGUFs exist but quantize the FL2VA
         // (first-and-last-frame) task bundle rather than the base
         // text-to-video transformer, so they do not serve this entry's kind.
         //
@@ -6046,8 +6054,11 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Qwen 3.6 35B-A3B MoE with built-in Multi-Token-Prediction head. Single-file MTP GGUF — no separate drafter needed. Unsloth: 240 t/s on RTX 6000.".into(),
         drafter_id: None,
-        mtp_kind: MtpKind::DraftMtp,
-        mtp_default_draft_n: Some(2),
+        // MTP speculative decoding is disabled here; the base MoE serves fast
+        // without it. Re-enable (MtpKind::DraftMtp + mtp_default_draft_n) once
+        // the spec path is validated on the target hardware.
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
         moe: Some(MoeShape {
             num_experts: 256,
             experts_per_token: 8,
@@ -6058,6 +6069,36 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         serving: ServingProfile::default(),
         mmproj: None,
         reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // ── Qwen3.8-27B (dense, multimodal, MTP-trained) ─────────────────
+    // Declares llama.cpp arch qwen35 (fork-supported). Single-file GGUF +
+    // vision projector. MTP speculative kept off until the spec path is
+    // validated on the target GPU; base dense serves without it.
+    catalog.push(HfModelEntry {
+        id: "qwen3.8-27b".into(),
+        name: "Qwen 3.8 27B".into(),
+        family: "qwen3.8".into(),
+        hf_repo: "unsloth/Qwen3.8-27B-GGUF".into(),
+        hf_filename: "Qwen3.8-27B-UD-Q4_K_XL.gguf".into(),
+        parameters: "27B (dense)".into(),
+        architecture: ModelArchitecture::Qwen35,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 18_000_000_000,
+        min_ram_gb: 24,
+        license: "Apache 2.0".into(),
+        description: "Qwen 3.8 27B dense, multimodal, MTP-trained. Strong agentic/competitive coding (SWE-Bench Pro, LiveCodeBench). Hybrid Gated-DeltaNet + attention, 262K context.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec { filename: "mmproj-BF16.gguf".into() }),
+        reasoning: ReasoningPolicy { supports_thinking: true, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 8_192 },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
@@ -6784,16 +6825,52 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 16_756_681_056,
         min_ram_gb: 24,
         license: "Apache 2.0".into(),
-        description: "Multimodal (text + image) 30B dense causal transformer with a frozen ViT-G/14 perception encoder (mmproj-kquant.gguf), 128K context. K-Quant build sized to fit 24GB VRAM; the repo also ships a DFlash speculative-decoding drafter (dflash-kquant.gguf) and a larger dynamic-quant variant.".into(),
-        drafter_id: None,
-        mtp_kind: MtpKind::None,
-        mtp_default_draft_n: None,
+        description: "Multimodal (text + image) 30B dense causal transformer with a frozen ViT-G/14 perception encoder (mmproj-kquant.gguf), 128K context. K-Quant build sized to fit 24GB VRAM; paired with its DFlash speculative-decoding drafter (dflash-kquant.gguf) for ~2x decode.".into(),
+        drafter_id: Some("muse-glimmer-30b-dflash".into()),
+        mtp_kind: MtpKind::DraftDflash,
+        // DFlash is block-diffusion (block size 16): draft a full block.
+        // n_max = block size minus the target's own token.
+        mtp_default_draft_n: Some(15),
         moe: None,
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: Some(MmprojSpec {
             filename: "mmproj-kquant.gguf".into(),
         }),
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // DFlash block-diffusion speculative drafter that ships alongside
+    // Muse-Glimmer-30B (same repo). Referenced by the target's `drafter_id`;
+    // `--spec-type draft-dflash` is selected from the `dflash-` filename.
+    catalog.push(HfModelEntry {
+        id: "muse-glimmer-30b-dflash".into(),
+        name: "Muse Glimmer 30B DFlash Drafter".into(),
+        family: "muse-glimmer".into(),
+        hf_repo: "meta-models/Muse-Glimmer-30B-GGUF".into(),
+        hf_filename: "dflash-kquant.gguf".into(),
+        parameters: "DFlash drafter".into(),
+        architecture: ModelArchitecture::Llama,
+        context_length: 131072,
+        quantization: "Q4_K".into(),
+        size_bytes: 2_000_000_000,
+        min_ram_gb: 4,
+        license: "Apache 2.0".into(),
+        description: "DFlash block-diffusion speculative drafter for Muse-Glimmer-30B. Pair via `--spec-type draft-dflash` for ~2x decode.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: false,
+        serving: ServingProfile::default(),
+        mmproj: None,
         reasoning: ReasoningPolicy {
             supports_thinking: false,
             default_mode: ReasoningMode::Auto,
@@ -6904,6 +6981,12 @@ impl HfModelEntry {
         // locally-served model looked size-less and no model could satisfy
         // `quality_floor=strong`.
         info.parameters.parameter_count = parse_parameter_count(&self.parameters);
+        // Capability tags. The router's tier check admits a substantial
+        // (>=7B) model to the strong tier when it is trained for code or
+        // reasoning, even below the raw 30B size floor. Family-keyed so the
+        // claim is a curated publisher fact, not a per-id guess; families not
+        // listed return no tags and tier purely on size, unchanged.
+        info.parameters.capabilities = capabilities_for_family(&self.family);
         if let Some(shape) = self.moe {
             info = info.with_moe(shape.to_metadata());
         }
@@ -7009,6 +7092,61 @@ pub fn custom_license_id(license: &str) -> Option<String> {
 /// Look up a model by its internal ID.
 pub fn get_model_by_id(id: &str) -> Option<HfModelEntry> {
     get_model_catalog().into_iter().find(|m| m.id == id)
+}
+
+/// Capability tags for a model `family`, used by the router's tier check to
+/// admit a substantial sub-30B model trained for code/reasoning to the strong
+/// tier. This is the single place the tag claim lives (mirrors the
+/// `for_family` profile pattern). A family not listed returns no tags, so its
+/// tier is decided by size alone — behaviour is unchanged for every family
+/// except those enumerated here.
+pub fn capabilities_for_family(family: &str) -> Vec<String> {
+    match family {
+        // Qwen 3.8: dense flagship trained for agentic/competitive coding and
+        // reasoning (27B, below the raw size floor but a strong-tier model).
+        "qwen3.8" => vec!["code".into(), "reasoning".into(), "vision".into()],
+        // Muse-Glimmer: already strong-tier by size; tags made explicit so
+        // capability-based selection can see its coding/reasoning/tool profile.
+        "muse-glimmer" => vec![
+            "reasoning".into(),
+            "code".into(),
+            "tools".into(),
+            "vision".into(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Published-benchmark capability prior for a model, in `[0.0, 1.0]`, used to
+/// bootstrap model selection at cold start — before the measured
+/// per-cluster difficulty path has any observations for a prompt. Every value
+/// is a model author's result on a public benchmark; this is only a starting
+/// prior, superseded by measured difficulty as soon as a cluster is observed.
+/// Returns `None` when a family has no comparable published score for the use
+/// case, in which case cost (then measurement) decides — so an unknown model
+/// is never penalised, only ranked by the evidence that exists.
+///
+/// Each use case maps to the canonical public benchmark for that skill, and a
+/// family scores only on benchmarks its authors actually report:
+/// - `code` → SWE-Bench Pro (agentic/repo-level software engineering).
+/// - `reasoning` → AIME (competition math / multi-step reasoning).
+/// - `research` → GPQA Diamond (graduate-level knowledge synthesis).
+///
+/// A family that does not report the use case's benchmark returns `None` for
+/// that cell rather than a guessed figure — so the split is: coding →
+/// qwen3.8 (SWE-Bench Pro 61.7 vs muse 51.2), competition-math reasoning →
+/// muse (AIME 94.7; qwen3.8 does not publish AIME), knowledge research →
+/// qwen3.8 (GPQA Diamond 89.2). Measurement supersedes all of this per cluster.
+pub fn capability_prior(model_id: &str, use_case: &str) -> Option<f32> {
+    let family = get_model_by_id(model_id)?.family;
+    let score = match (family.as_str(), use_case) {
+        ("qwen3.8", "code") => 61.7,
+        ("muse-glimmer", "code") => 51.2,
+        ("muse-glimmer", "reasoning") => 94.7,
+        ("qwen3.8", "research") => 89.2,
+        _ => return None,
+    };
+    Some(score / 100.0)
 }
 
 /// HuggingFace repository holding the original (unquantized)
