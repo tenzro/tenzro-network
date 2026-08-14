@@ -75,7 +75,7 @@ const MAX_SLOTS_DEFAULT: usize = 32;
 /// few hundred tokens and decode fails with `NoKvCacheSlot` before it can
 /// admit even a short prompt. An operator serving a handful of callers buys
 /// back that context by asking for fewer slots.
-fn max_slots() -> usize {
+pub fn max_slots() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
         std::env::var("TENZRO_MAX_SLOTS")

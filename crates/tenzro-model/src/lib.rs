@@ -170,7 +170,7 @@ pub use audio_runtime::{
     AudioRuntime, MoonshineTranscriber, TranscribeConfig, TranscribeResult, Transcriber,
     TranscriptSegment, WhisperFamily, WhisperTranscriber,
 };
-pub use batching::{BatchEngine, BatchRequest};
+pub use batching::{BatchEngine, BatchRequest, max_slots};
 pub use catalog::{
     HfModelEntry, LicenseTier, MediaGenExpertPair, MediaGenModelEntry, ModelArchitecture, MoeShape,
     MtpKind, OnnxAudioEntry, OnnxDetectionEntry, OnnxForecastEntry, OnnxSegmentationEntry,

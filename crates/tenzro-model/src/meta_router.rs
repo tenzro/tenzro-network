@@ -63,6 +63,7 @@ use tenzro_types::model::{InferenceRequest, ModelInfo, ModelModality, ModelStatu
 use tenzro_types::primitives::Address;
 use tracing::debug;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The task a caller wants a model for. Maps to a modality and biases quality
@@ -399,6 +400,11 @@ pub struct MetaRouter {
     difficulty: Option<Arc<DifficultyIndex>>,
     embedder: Option<Arc<dyn PromptEmbedder>>,
     network_catalog: Option<Arc<dyn NetworkCatalog>>,
+    /// Operator task→model overrides (use-case string → model id). A Cortex
+    /// primitive: the operator pins which served model handles which kind of
+    /// task. Applied only when the named model is an available candidate for
+    /// the request; otherwise intelligent selection stands.
+    task_models: HashMap<String, String>,
 }
 
 impl MetaRouter {
@@ -419,7 +425,20 @@ impl MetaRouter {
             difficulty: None,
             embedder: None,
             network_catalog: None,
+            task_models: HashMap::new(),
         }
+    }
+
+    /// Attaches operator task→model overrides (a Cortex primitive): a map from
+    /// use-case string (`code`, `reasoning`, …) to the model id the operator
+    /// wants that kind of task served by. An override wins outright when the
+    /// named model survives filtering for the request; use cases not listed —
+    /// and overrides naming a model that is unavailable or unaffordable — fall
+    /// back to intelligent (benchmark prior + measured difficulty) selection.
+    #[must_use]
+    pub fn with_routing_preferences(mut self, task_models: HashMap<String, String>) -> Self {
+        self.task_models = task_models;
+        self
     }
 
     /// Attaches the live [`NetworkCatalog`]. Without it, selection sees only this
@@ -643,8 +662,36 @@ impl MetaRouter {
                 if candidates.iter().any(|c| c.tier == target) {
                     candidates.retain(|c| c.tier == target);
                 }
-                candidates.sort_by_key(cost_key);
+                // Benchmark prior: within the target tier, a model with a
+                // higher published capability score for this use case outranks
+                // a cheaper one at cold start. Cost orders candidates with no
+                // prior and breaks ties — so when no candidate has a prior this
+                // is exactly the previous cheapest-first behaviour. The measured
+                // path above supersedes this the moment a cluster is observed.
+                let uc = intent.use_case.as_str();
+                candidates.sort_by(|a, b| {
+                    let pa = crate::catalog::capability_prior(&a.model.model_id, uc)
+                        .unwrap_or(-1.0);
+                    let pb = crate::catalog::capability_prior(&b.model.model_id, uc)
+                        .unwrap_or(-1.0);
+                    pb.total_cmp(&pa)
+                        .then_with(|| cost_key(a).cmp(&cost_key(b)))
+                });
             }
+        }
+
+        // 5b. Operator override (Cortex primitive). If this node's operator
+        // pinned a model for this use case and it survived filtering, it wins
+        // outright — moved to the front while the intelligent ordering above
+        // still decides the fallback chain behind it. An override naming an
+        // unavailable/unaffordable model simply does not match any candidate,
+        // so selection falls through to the intelligent winner.
+        if let Some(pinned) = self.task_models.get(intent.use_case.as_str())
+            && let Some(pos) = candidates.iter().position(|c| &c.model.model_id == pinned)
+            && pos != 0
+        {
+            let chosen = candidates.remove(pos);
+            candidates.insert(0, chosen);
         }
 
         let best = &candidates[0];
@@ -994,6 +1041,71 @@ mod tests {
             mr.route(&intent),
             Err(ModelError::NoProvidersAvailable(_))
         ));
+    }
+
+    /// Two strong models; the cheaper one wins by default. The operator's
+    /// task→model override for `code` pins the pricier one, and it wins
+    /// outright — the Cortex primitive.
+    #[test]
+    fn operator_override_pins_the_task_model() {
+        let (registry, usage, router) = router_stack();
+        registry
+            .register_model(model("alpha", 35_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("beta", 35_000_000_000, 8192, 10, 10))
+            .unwrap();
+        let intent = RouteIntent::new(UseCase::Code, Budget::None).with_tokens(64, 64);
+
+        // Default: cheapest strong model.
+        let mr = MetaRouter::new(registry.clone(), usage.clone(), router.clone());
+        assert_eq!(mr.route(&intent).unwrap().model_id, "alpha");
+
+        // Override code → beta: beta wins despite costing more, and alpha
+        // remains in the fallback chain.
+        let mr = MetaRouter::new(registry, usage, router)
+            .with_routing_preferences(HashMap::from([("code".to_string(), "beta".to_string())]));
+        let d = mr.route(&intent).unwrap();
+        assert_eq!(d.model_id, "beta");
+        assert!(d.fallback_chain.iter().any(|f| f == "alpha"));
+    }
+
+    /// An override naming a model that is not an available candidate is
+    /// ignored — selection falls back to the intelligent winner.
+    #[test]
+    fn operator_override_ignored_when_model_unavailable() {
+        let (registry, usage, router) = router_stack();
+        registry
+            .register_model(model("alpha", 35_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("beta", 35_000_000_000, 8192, 10, 10))
+            .unwrap();
+        let mr = MetaRouter::new(registry, usage, router).with_routing_preferences(HashMap::from([
+            ("code".to_string(), "ghost".to_string()),
+        ]));
+        let intent = RouteIntent::new(UseCase::Code, Budget::None).with_tokens(64, 64);
+        assert_eq!(mr.route(&intent).unwrap().model_id, "alpha");
+    }
+
+    /// An override applies only to its named use case; other use cases keep
+    /// intelligent selection.
+    #[test]
+    fn operator_override_only_affects_named_use_case() {
+        let (registry, usage, router) = router_stack();
+        registry
+            .register_model(model("alpha", 35_000_000_000, 8192, 1, 1))
+            .unwrap();
+        registry
+            .register_model(model("beta", 35_000_000_000, 8192, 10, 10))
+            .unwrap();
+        let mr = MetaRouter::new(registry, usage, router)
+            .with_routing_preferences(HashMap::from([("code".to_string(), "beta".to_string())]));
+        // Code is pinned to beta; chat is not, so it keeps the cheaper winner.
+        let code = RouteIntent::new(UseCase::Code, Budget::None).with_tokens(64, 64);
+        let chat = RouteIntent::new(UseCase::Chat, Budget::None).with_tokens(64, 64);
+        assert_eq!(mr.route(&code).unwrap().model_id, "beta");
+        assert_eq!(mr.route(&chat).unwrap().model_id, "alpha");
     }
 
     #[test]

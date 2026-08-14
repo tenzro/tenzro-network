@@ -238,6 +238,17 @@ pub struct CortexConfig {
     /// Worker specifications to auto-register at startup.
     #[serde(default)]
     pub workers: Vec<CortexWorkerConfig>,
+
+    /// Operator overrides mapping a task's use case (`code`, `reasoning`,
+    /// `research`, `chat`, `summarize`, `extract`, `embed`) to a preferred
+    /// model id. When a request's use case is listed here and that model is an
+    /// available candidate for the request, the router selects it outright;
+    /// otherwise it falls back to intelligent (benchmark prior + measured
+    /// difficulty) selection. This lets an operator pin, e.g.,
+    /// `code = "qwen3.8-27b"`, `reasoning = "muse-glimmer-30b"`, as they please
+    /// — without disabling automatic routing for the use cases they leave out.
+    #[serde(default)]
+    pub task_models: std::collections::HashMap<String, String>,
 }
 
 /// A single Cortex worker specification.

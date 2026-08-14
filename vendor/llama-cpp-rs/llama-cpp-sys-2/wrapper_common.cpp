@@ -239,14 +239,18 @@ extern "C" struct llama_rs_mtp_speculative * llama_rs_mtp_speculative_init(
     struct llama_context * ctx_dft,
     int32_t n_max,
     int32_t n_min,
-    float p_min) {
+    float p_min,
+    int32_t spec_type) {
     if (!ctx_tgt || !ctx_dft || n_max <= 0 || n_min < 0 || n_min > n_max) {
         return nullptr;
     }
 
     try {
         auto wrapper = std::make_unique<llama_rs_mtp_speculative>();
-        wrapper->params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+        // 1 = DFlash block-diffusion drafter; anything else = MTP head (default).
+        wrapper->params.types = { spec_type == 1
+            ? COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH
+            : COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
         wrapper->params.draft.ctx_tgt = ctx_tgt;
         wrapper->params.draft.ctx_dft = ctx_dft;
         wrapper->params.draft.n_max = n_max;
