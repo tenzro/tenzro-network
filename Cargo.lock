@@ -15450,7 +15450,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -15485,7 +15485,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-agent-kit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15513,7 +15513,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -15543,7 +15543,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -15583,7 +15583,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -15622,7 +15622,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-cluster"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "sha2 0.10.9",
@@ -15630,7 +15630,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-consensus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -15657,7 +15657,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-cortex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -15678,7 +15678,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -15713,7 +15713,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-database"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -15730,7 +15730,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-device-key"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "hex",
  "rand 0.8.5",
@@ -15745,7 +15745,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-events"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -15784,7 +15784,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-identity"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -15820,7 +15820,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-initagent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "hex",
@@ -15836,7 +15836,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-iroh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15869,7 +15869,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-machine-builder"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "hex",
@@ -15887,7 +15887,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-media-gen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -15905,7 +15905,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -15956,7 +15956,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-network"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -15989,7 +15989,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -16087,7 +16087,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-payments"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -16134,7 +16134,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-settlement"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -16162,7 +16162,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -16190,7 +16190,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-storage-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -16215,7 +16215,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-tee"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -16260,7 +16260,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-token"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -16283,7 +16283,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-training"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -16307,7 +16307,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-types"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bs58",
  "bytes",
@@ -16324,7 +16324,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-vm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ark-bn254 0.4.0",
  "ark-ec 0.4.2",
@@ -16395,7 +16395,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-wallet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -16424,7 +16424,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16448,7 +16448,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-workflow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",
@@ -16471,7 +16471,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-zk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode 1.3.3",

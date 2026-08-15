@@ -54,7 +54,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/tenzro/tenzro-network"
@@ -78,41 +78,41 @@ result_large_err = "allow"
 # local path so `cargo publish` resolves to crates.io while in-tree
 # builds keep using the local source. Bump versions in lockstep across
 # the workspace when cutting a coordinated release.
-tenzro-types = { path = "crates/tenzro-types", version = "0.1.1" }
-tenzro-crypto = { path = "crates/tenzro-crypto", version = "0.1.0" }
-tenzro-tee = { path = "crates/tenzro-tee", version = "0.1.0" }
-tenzro-zk = { path = "crates/tenzro-zk", version = "0.1.0" }
-tenzro-network = { path = "crates/tenzro-network", version = "0.1.0" }
-tenzro-storage = { path = "crates/tenzro-storage", version = "0.1.0" }
-tenzro-wallet = { path = "crates/tenzro-wallet", version = "0.1.0" }
+tenzro-types = { path = "crates/tenzro-types", version = "0.2.0" }
+tenzro-crypto = { path = "crates/tenzro-crypto", version = "0.2.0" }
+tenzro-tee = { path = "crates/tenzro-tee", version = "0.2.0" }
+tenzro-zk = { path = "crates/tenzro-zk", version = "0.2.0" }
+tenzro-network = { path = "crates/tenzro-network", version = "0.2.0" }
+tenzro-storage = { path = "crates/tenzro-storage", version = "0.2.0" }
+tenzro-wallet = { path = "crates/tenzro-wallet", version = "0.2.0" }
 tenzro-keystore-unlock = { path = "crates/tenzro-keystore-unlock", version = "0.1.0" }
-tenzro-device-key = { path = "crates/tenzro-device-key", version = "0.1.0" }
-tenzro-consensus = { path = "crates/tenzro-consensus", version = "0.1.0" }
-tenzro-vm = { path = "crates/tenzro-vm", version = "0.1.0" }
-tenzro-token = { path = "crates/tenzro-token", version = "0.1.0" }
-tenzro-agent = { path = "crates/tenzro-agent", version = "0.1.0" }
-tenzro-model = { path = "crates/tenzro-model", version = "0.1.0" }
-tenzro-settlement = { path = "crates/tenzro-settlement", version = "0.1.0" }
-tenzro-bridge = { path = "crates/tenzro-bridge", version = "0.1.0" }
-tenzro-events = { path = "crates/tenzro-events", version = "0.1.0" }
-tenzro-cortex = { path = "crates/tenzro-cortex", version = "0.1.0" }
-tenzro-training = { path = "crates/tenzro-training", version = "0.1.0" }
-tenzro-media-gen = { path = "crates/tenzro-media-gen", version = "0.1.0" }
-tenzro-iroh = { path = "crates/tenzro-iroh", version = "0.1.0" }
-tenzro-cluster = { path = "crates/tenzro-cluster", version = "0.1.0" }
-tenzro-storage-provider = { path = "crates/tenzro-storage-provider", version = "0.1.0" }
-tenzro-database = { path = "crates/tenzro-database", version = "0.1.0" }
-tenzro-wasm = { path = "crates/tenzro-wasm", version = "0.1.0" }
-tenzro-initagent = { path = "crates/tenzro-initagent", version = "0.1.0" }
-tenzro-machine-builder = { path = "crates/tenzro-machine-builder", version = "0.1.0" }
-tenzro-identity = { path = "crates/tenzro-identity", version = "0.1.0" }
-tenzro-payments = { path = "crates/tenzro-payments", version = "0.1.0" }
-tenzro-agent-kit = { path = "crates/tenzro-agent-kit", version = "0.1.0" }
-tenzro-auth = { path = "crates/tenzro-auth", version = "0.1.0" }
-tenzro-workflow = { path = "crates/tenzro-workflow", version = "0.1.0" }
-tenzro-node = { path = "crates/tenzro-node", version = "0.1.0" }
-tenzro-cli = { path = "crates/tenzro-cli", version = "0.1.0" }
-tenzro-sdk = { path = "sdk/tenzro-sdk", version = "0.6.1" }
+tenzro-device-key = { path = "crates/tenzro-device-key", version = "0.2.0" }
+tenzro-consensus = { path = "crates/tenzro-consensus", version = "0.2.0" }
+tenzro-vm = { path = "crates/tenzro-vm", version = "0.2.0" }
+tenzro-token = { path = "crates/tenzro-token", version = "0.2.0" }
+tenzro-agent = { path = "crates/tenzro-agent", version = "0.2.0" }
+tenzro-model = { path = "crates/tenzro-model", version = "0.2.0" }
+tenzro-settlement = { path = "crates/tenzro-settlement", version = "0.2.0" }
+tenzro-bridge = { path = "crates/tenzro-bridge", version = "0.2.0" }
+tenzro-events = { path = "crates/tenzro-events", version = "0.2.0" }
+tenzro-cortex = { path = "crates/tenzro-cortex", version = "0.2.0" }
+tenzro-training = { path = "crates/tenzro-training", version = "0.2.0" }
+tenzro-media-gen = { path = "crates/tenzro-media-gen", version = "0.2.0" }
+tenzro-iroh = { path = "crates/tenzro-iroh", version = "0.2.0" }
+tenzro-cluster = { path = "crates/tenzro-cluster", version = "0.2.0" }
+tenzro-storage-provider = { path = "crates/tenzro-storage-provider", version = "0.2.0" }
+tenzro-database = { path = "crates/tenzro-database", version = "0.2.0" }
+tenzro-wasm = { path = "crates/tenzro-wasm", version = "0.2.0" }
+tenzro-initagent = { path = "crates/tenzro-initagent", version = "0.2.0" }
+tenzro-machine-builder = { path = "crates/tenzro-machine-builder", version = "0.2.0" }
+tenzro-identity = { path = "crates/tenzro-identity", version = "0.2.0" }
+tenzro-payments = { path = "crates/tenzro-payments", version = "0.2.0" }
+tenzro-agent-kit = { path = "crates/tenzro-agent-kit", version = "0.2.0" }
+tenzro-auth = { path = "crates/tenzro-auth", version = "0.2.0" }
+tenzro-workflow = { path = "crates/tenzro-workflow", version = "0.2.0" }
+tenzro-node = { path = "crates/tenzro-node", version = "0.2.0" }
+tenzro-cli = { path = "crates/tenzro-cli", version = "0.2.0" }
+tenzro-sdk = { path = "sdk/tenzro-sdk", version = "0.7.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
