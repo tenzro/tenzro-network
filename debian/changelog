@@ -1,0 +1,6 @@
+tenzro-network (0.2.0-1) unstable; urgency=medium
+
+  * Initial packaging: node as a system service with its identity in
+    /var/lib/tenzro rather than a home directory.
+
+ -- Tenzro <eng@tenzro.com>  Fri, 15 Aug 2026 12:00:00 +0000

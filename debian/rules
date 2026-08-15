@@ -1,0 +1,44 @@
+#!/usr/bin/make -f
+#
+# The node links llama.cpp and aws-lc, both of which build C and C++ through
+# cmake. Two settings are not optional and were learned by the build failing
+# without them:
+#
+#   CC/CXX=clang    llama-cpp-sys-2 passes clang-specific flags
+#   GGML_NATIVE=OFF ggml defaults to -march=native, which pins the binary to
+#                   whatever CPU the build landed on. A package is meant to be
+#                   installable on machines the builder has never seen.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo_home
+export CC = clang
+export CXX = clang++
+export CMAKE_ARGS = -DGGML_NATIVE=OFF
+
+ifneq ($(wildcard $(CURDIR)/vendor/.),)
+export CARGO_NET_OFFLINE = true
+endif
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --locked --target-dir=$(CURDIR)/target -p tenzro-node \
+		--features tenzro-node/wasi-skills,tenzro-node/firecracker
+
+# The tests need a chain to talk to. That is an integration environment, not a
+# build machine.
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -D -m755 target/release/tenzro-node debian/tenzro-node/usr/bin/tenzro-node
+	install -D -m644 deploy/sysusers/tenzro.conf \
+		debian/tenzro-node/usr/lib/sysusers.d/tenzro.conf
+	# A template, not configuration. The copy in /etc is the machine's and is
+	# created on first install only — dh_installsystemd and dpkg between them
+	# will never overwrite it afterwards.
+	install -D -m644 deploy/config/node.env \
+		debian/tenzro-node/usr/share/tenzro/node.env
+
+override_dh_installsystemd:
+	dh_installsystemd --name=tenzro-node
