@@ -2441,17 +2441,30 @@ impl ModelRuntime {
                         .await
                         .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??;
 
+                    // muse-glimmer carries an mmproj, so vision-capable requests
+                    // reach this multimodal path — but it still emits the
+                    // harmony/onyx channel format, not `<think>` + a generic
+                    // tool dialect. Parse it with the dedicated parser here too
+                    // (mirroring generate_chat_with_tools), otherwise the raw
+                    // `to=self`/`<|message|>`/`<|eom|>` markers leak through as
+                    // content. Every other model stays on the generic path.
                     let (clean_text, thinking, tool_calls) =
-                        match parsed.as_deref().and_then(parse_oaicompat_reply) {
-                            Some((content, reasoning, calls)) => {
-                                let thinking = inner.thinking.clone().or(reasoning);
-                                (content, thinking, calls)
-                            }
-                            None => {
-                                let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
-                                let (clean_text, split_thinking) = split_reasoning(&clean_text);
-                                let thinking = inner.thinking.clone().or(split_thinking);
-                                (clean_text, thinking, tool_calls)
+                        if crate::muse_harmony::is_muse_harmony_model(model_id) {
+                            let mp = crate::muse_harmony::parse_muse_harmony(&inner.text);
+                            let thinking = inner.thinking.clone().or(mp.thinking);
+                            (mp.content, thinking, mp.tool_calls)
+                        } else {
+                            match parsed.as_deref().and_then(parse_oaicompat_reply) {
+                                Some((content, reasoning, calls)) => {
+                                    let thinking = inner.thinking.clone().or(reasoning);
+                                    (content, thinking, calls)
+                                }
+                                None => {
+                                    let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
+                                    let (clean_text, split_thinking) = split_reasoning(&clean_text);
+                                    let thinking = inner.thinking.clone().or(split_thinking);
+                                    (clean_text, thinking, tool_calls)
+                                }
                             }
                         };
                     let stop_reason = if !tool_calls.is_empty() {
