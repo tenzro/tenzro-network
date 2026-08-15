@@ -155,15 +155,15 @@ gated node can still publish models to the network.
 # who pays. No service key, no prior relationship, even if this node's
 # service-key gate is on: a peer that found the offer over gossip has no way
 # to obtain a key, so requiring one would make the offer a lie.
-tenzro model serve --model-id timesfm-2.5-200m
+tenzro model serve timesfm-2.5-200m
 
 # Gated — servable to callers holding an API key whose policy you pre-agreed,
 # and NOT announced. Your counterparties already know it is there; gossiping
 # it would advertise capacity to callers who cannot use it.
-tenzro model serve --model-id partner-model --gated
+tenzro model serve partner-model --gated
 
 # Private — never announced, never served off-node.
-tenzro model serve --model-id house-model --private
+tenzro model serve house-model --private
 ```
 
 `--gated` and `--private` are mutually exclusive; omitting both publishes.
