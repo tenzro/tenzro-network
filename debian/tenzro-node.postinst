@@ -1,0 +1,15 @@
+#!/bin/sh
+# Seed the machine's configuration on first install and never afterwards.
+#
+# /etc/tenzro/node.env is the operator's. dpkg conffile handling would ask
+# before replacing it, but this file is not a conffile — it is created from a
+# template so that an upgrade cannot even offer to replace it, and so an
+# operator's boot nodes and addresses are never a merge conflict.
+set -e
+if [ "$1" = "configure" ] && [ ! -e /etc/tenzro/node.env ]; then
+    mkdir -p /etc/tenzro
+    cp /usr/share/tenzro/node.env /etc/tenzro/node.env
+    chmod 0644 /etc/tenzro/node.env
+fi
+#DEBHELPER#
+exit 0

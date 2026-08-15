@@ -1,0 +1,24 @@
+Source: tenzro-network
+Section: net
+Priority: optional
+Maintainer: Tenzro <eng@tenzro.com>
+Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.85), cmake, make,
+ clang, libclang-dev, pkg-config, libssl-dev, protobuf-compiler
+Standards-Version: 4.7.0
+Homepage: https://github.com/tenzro/tenzro-network
+Rules-Requires-Root: no
+
+Package: tenzro-node
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, systemd, ca-certificates
+Description: Tenzro network node
+ A full node on the Tenzro network: validator, and optionally a provider of
+ compute, storage or database capacity to the network.
+ .
+ Runs as a system account with its identity and wallets under /var/lib/tenzro.
+ Those are the machine's participation in the chain and no reinstall
+ regenerates them, so they are state that an upgrade never touches.
+ .
+ Installs configured for nothing in particular and starts anyway: a node with
+ no boot peers is alone rather than broken, and reports that rather than
+ refusing to run.

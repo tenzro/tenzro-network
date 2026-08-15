@@ -1,0 +1,52 @@
+[Unit]
+Description=Tenzro network node
+Documentation=https://github.com/tenzro/tenzro-network
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tenzro
+Group=tenzro
+
+# State, not a home directory. The node's identity and wallets live here and
+# no reinstall regenerates them, so this is the one path an upgrade must never
+# touch.
+StateDirectory=tenzro
+StateDirectoryMode=0750
+ConfigurationDirectory=tenzro
+WorkingDirectory=/var/lib/tenzro
+
+# Every flag that used to be spelled out on the command line. A unit whose
+# ExecStart is four hundred characters of boot nodes and addresses cannot be
+# read, cannot be diffed, and cannot be changed without editing a unit file —
+# which is configuration living in the wrong place.
+EnvironmentFile=-/etc/tenzro/node.env
+ExecStart=/usr/bin/tenzro-node \
+  --roles ${TENZRO_ROLES} \
+  --data-dir /var/lib/tenzro \
+  --genesis /var/lib/tenzro/genesis.toml \
+  --boot-nodes ${TENZRO_BOOT_NODES} \
+  --external-p2p-addr ${TENZRO_EXTERNAL_P2P_ADDR} \
+  --rpc-addr ${TENZRO_RPC_ADDR} \
+  --web-addr ${TENZRO_WEB_ADDR} \
+  --accept-license ${TENZRO_LICENSE} \
+  --log-level ${TENZRO_LOG_LEVEL}
+
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# Denied outright. Nothing here belongs in a home directory, and the identities
+# that used to live in one are state now.
+ProtectHome=yes
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
