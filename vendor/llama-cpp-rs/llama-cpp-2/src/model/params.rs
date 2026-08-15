@@ -517,6 +517,25 @@ impl LlamaModelParams {
         self
     }
 
+    /// Load the model's Multi-Token-Prediction (MTP / NextN) head, when the GGUF
+    /// carries one (`blk.<n>.nextn.*`).
+    ///
+    /// Off by default: the head is skipped so a node's boot memory does not carry
+    /// weights it will not use. Turn it on for a model served with inline
+    /// self-speculative decoding (`--spec-type draft-mtp`), so the nextn tensors
+    /// load into the graph instead of being reported "unused" and ignored.
+    #[must_use]
+    pub fn with_load_mtp(mut self, load_mtp: bool) -> Self {
+        self.params.load_mtp = load_mtp;
+        self
+    }
+
+    /// Whether the MTP / NextN head will be loaded (see [`Self::with_load_mtp`]).
+    #[must_use]
+    pub fn load_mtp(&self) -> bool {
+        self.params.load_mtp
+    }
+
     /// sets the main GPU
     ///
     /// To enable this option, you must set `split_mode` to `LlamaSplitMode::None` to enable single GPU mode.

@@ -504,6 +504,10 @@ pub struct EventLoop {
     /// actually sees gossip-discovered providers with their advertised
     /// `HardwareCapabilities`. `None` on nodes with no router (light clients).
     provider_manager: Option<Arc<tenzro_model::ProviderManager>>,
+    /// This node's own provider address. Heartbeated every tick so the
+    /// local-served-models provider entry stays healthy for intent dispatch
+    /// (chatByIntent) — local serving has no gossip heartbeat of its own.
+    local_provider_address: Option<Address>,
     /// Provider announcement broadcast context. When `Some`, the periodic
     /// `provider_heartbeat` tick rebuilds a `ProviderAnnouncementMessage`
     /// from the current `served_models` / `provider_pricing` / hardware
@@ -804,6 +808,7 @@ impl EventLoop {
             network_providers: None,
             local_peers: None,
             provider_manager: None,
+            local_provider_address: None,
             provider_announcement_ctx: None,
             announce_signer: None,
             model_runtime: None,
@@ -1139,8 +1144,10 @@ impl EventLoop {
     pub fn with_provider_manager(
         mut self,
         provider_manager: Arc<tenzro_model::ProviderManager>,
+        local_provider_address: Option<Address>,
     ) -> Self {
         self.provider_manager = Some(provider_manager);
+        self.local_provider_address = local_provider_address;
         self
     }
 
@@ -1881,6 +1888,18 @@ impl EventLoop {
                                 evicted,
                             );
                         }
+                    }
+
+                    // 1b. Keep THIS node's own provider entry healthy so intent
+                    // dispatch (chatByIntent) keeps routing to locally-served
+                    // models. Independent of network advertisement — local
+                    // serving works even when AI is private, and the entry
+                    // otherwise goes stale (no gossip heartbeat of its own) and
+                    // is dropped by the router's health filter.
+                    if let (Some(pm), Some(addr)) =
+                        (&self.provider_manager, &self.local_provider_address)
+                    {
+                        let _ = pm.heartbeat(addr);
                     }
 
                     // 2. Re-announce locally served models via gossipsub.

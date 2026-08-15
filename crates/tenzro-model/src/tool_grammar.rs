@@ -77,8 +77,6 @@ pub(crate) struct ToolGrammar {
     /// triggers could not be resolved to tokens is declined outright, see
     /// [`resolve_trigger_tokens`].
     trigger_tokens: Vec<LlamaToken>,
-    /// Stop sequences the template asks for on top of the caller's own.
-    pub(crate) additional_stops: Vec<String>,
 }
 
 impl ToolGrammar {
@@ -260,7 +258,6 @@ pub(crate) fn native_chat_prompt(
             Some(ToolGrammar {
                 grammar: g,
                 trigger_tokens: tokens,
-                additional_stops: render.additional_stops.clone(),
             })
         })
     };

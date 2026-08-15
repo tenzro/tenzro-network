@@ -11927,7 +11927,8 @@ impl TenzroNode {
         // their advertised HardwareCapabilities. Absent on nodes with no
         // router (light clients that never route inference).
         if let Some(ref pm) = self.provider_manager {
-            event_loop = event_loop.with_provider_manager(pm.clone());
+            event_loop = event_loop
+                .with_provider_manager(pm.clone(), self.local_validator_address().copied());
         }
 
         // Wire the node's Ed25519 announce signer, loaded once in step 6b.
@@ -16272,6 +16273,47 @@ impl TenzroNode {
                 "Model registry reconcile complete: reloaded={} cleared_models={} cleared_services={}",
                 reloaded, cleared_models, cleared_services,
             );
+        }
+
+        // Register THIS node as a provider for its locally-served models in the
+        // inference router, so intent-based competition dispatch
+        // (tenzro_chatByIntent / `inference route --message`) can route to the
+        // local models — not just direct tenzro_chat. Without this a
+        // local/single-node deploy resolves the model (discovery) but hits
+        // "no healthy provider" at dispatch. One provider entry (this node's
+        // address) carries every served model; upserted so repeat reconciles
+        // refresh the list.
+        if let (Some(pm), Some(local_addr)) =
+            (self.provider_manager.as_ref(), self.local_validator_address())
+        {
+            let served: Vec<String> =
+                self.served_models.iter().map(|e| e.key().clone()).collect();
+            if !served.is_empty() {
+                let local_addr = *local_addr;
+                let mut provider =
+                    tenzro_types::model::InferenceProvider::new(local_addr, "local".to_string());
+                provider.status = tenzro_types::model::ProviderStatus::Active;
+                provider.models = served;
+                provider.endpoint_url = Some("http://127.0.0.1:8545/v1".to_string());
+                let res = if pm.get_provider(&local_addr).is_ok() {
+                    pm.update_provider(provider)
+                } else {
+                    pm.register_provider(provider, false)
+                };
+                match res {
+                    Ok(()) => {
+                        // Mark healthy now — a provider is only returned by
+                        // get_active_providers_for_model if it has a recent
+                        // heartbeat. Local serving has no gossip heartbeat, so we
+                        // beat it here (and again in the 60s announce loop) to
+                        // keep it inside the 5-minute freshness window.
+                        let _ = pm.heartbeat(&local_addr);
+                    }
+                    Err(e) => {
+                        warn!("Failed to register local node as inference provider: {}", e);
+                    }
+                }
+            }
         }
 
         (reloaded, cleared_models, cleared_services)

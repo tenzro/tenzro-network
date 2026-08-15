@@ -1218,8 +1218,13 @@ fn main() {
                 println!("cargo:rpc_server_bin={}", path.display());
                 debug_log!("rpc-server binary: {}", path.display());
             }
-            None => println!(
-                "cargo:warning=rpc feature enabled but rpc-server binary not found under {}",
+            // The rpc *backend* is linked either way; only the optional
+            // standalone `rpc-server` tool binary is absent (this cmake config
+            // does not build it). That is not an error for consumers that use
+            // the backend directly, so this is a debug note, not a warning.
+            None => debug_log!(
+                "rpc feature enabled but standalone rpc-server binary not found under {} \
+                 (rpc backend is still linked)",
                 build_dir.display()
             ),
         }

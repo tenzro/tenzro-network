@@ -760,6 +760,31 @@ async fn main() -> Result<()> {
         });
     }
 
+    // GPU-wedge watchdog (validator-safe): every 60s, flag any model whose
+    // in-flight work has been continuous for >10 min — the signature of a wedged
+    // decode that #46/#55 could not catch. Log-only: it never force-kills a
+    // kernel or touches consensus; the loud WARN is the operator signal and the
+    // router already steers away from an unhealthy provider.
+    {
+        let wd_node = node_arc.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            let deadline = std::time::Duration::from_secs(600);
+            loop {
+                tick.tick().await;
+                if let Some(rt) = wd_node.model_runtime_arc() {
+                    for (model_id, age) in rt.stalled_inflight(deadline) {
+                        warn!(
+                            %model_id,
+                            age_s = age.as_secs(),
+                            "GPU-wedge watchdog: model in-flight with no completion past deadline — suspected stall (routing steers away; no force-kill)"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     let mut rpc_server = RpcServer::new(node_arc.clone(), config.rpc_addr.clone());
 
     // Wire HTTP 402 payment gate into RPC server for /v1/chat/completions

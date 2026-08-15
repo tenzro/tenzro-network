@@ -51,7 +51,6 @@ use llama_cpp_2::mtmd::{
     MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker,
 };
 use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::speculative::{MtpSpeculative, MtpSpeculativeParams};
 use llama_cpp_2::token::LlamaToken;
 
 /// Hardware backend information detected at runtime
@@ -178,93 +177,19 @@ impl HardwareInfo {
     }
 }
 
-/// Configuration for text generation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GenerationConfig {
-    pub temperature: f64,
-    pub top_p: f64,
-    pub max_tokens: u32,
-    pub repeat_penalty: f32,
-    pub repeat_last_n: usize,
-    pub seed: u64,
-    /// Top-k truncation. `None` leaves the candidate set untruncated by rank,
-    /// which is what the nucleus (`top_p`) stage alone does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<u32>,
-    /// Minimum-probability floor relative to the most likely token. `None`
-    /// disables the stage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_p: Option<f64>,
-    /// Per-occurrence logit penalty. `0.0` disables it.
-    #[serde(default)]
-    pub frequency_penalty: f32,
-    /// Flat logit penalty for any token already present. `0.0` disables it.
-    #[serde(default)]
-    pub presence_penalty: f32,
-    /// Stop sequences. Generation halts as soon as the decoded text ends with
-    /// one of these, and the matched suffix is trimmed from the returned text
-    /// so the caller never sees the delimiter.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stop: Vec<String>,
-    /// Optional speculative-decoding draft count (1..=6). When `Some(n)`,
-    /// the runtime is asked to use the target model's paired drafter
-    /// (`HfModelEntry.drafter_id` + `mtp_kind`) and propose `n` tokens
-    /// per verification round (llama.cpp `--spec-draft-n-max`). When
-    /// `None`, the runtime falls back to single-token autoregressive
-    /// sampling. The drafter must be loaded alongside the target;
-    /// otherwise the runtime returns `ModelError::MtpUnavailable`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft_n: Option<u8>,
-    /// Optional TOPLOC commitment width (1..=64). When `Some(k)`, the
-    /// autoregressive path records the top-k raw logits for every
-    /// generated token and returns the commitment blob on
-    /// [`InferenceResult::commitment`]. Only the single-token sampling
-    /// path produces commitments — speculative decoding, external
-    /// engines, and the batch engine leave it `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commitment_k: Option<u8>,
-}
+// GenerationConfig lives in praecise-runtime (engine owns the generation types;
+// Praecise↔tenzro boundary). Re-exported for `crate::…` + the public surface.
+pub use praecise_runtime::GenerationConfig;
 
-impl Default for GenerationConfig {
-    fn default() -> Self {
-        Self {
-            temperature: 0.7,
-            top_p: 0.9,
-            max_tokens: 512,
-            repeat_penalty: 1.1,
-            repeat_last_n: 64,
-            seed: 42,
-            top_k: None,
-            min_p: None,
-            frequency_penalty: 0.0,
-            presence_penalty: 0.0,
-            stop: Vec::new(),
-            draft_n: None,
-            commitment_k: None,
-        }
-    }
-}
-
-/// Assemble the llama.cpp sampler chain for a request.
+/// Assemble the llama.cpp sampler chain for a request, with an optional grammar
+/// stage in front.
 ///
 /// Stage order mirrors llama.cpp's own default (penalties before truncation,
-/// truncation before the distribution draw). The optional `top_k` and `min_p`
-/// stages are omitted entirely when unset rather than passed a neutral value,
-/// so a request that does not ask for them samples exactly as it did before
-/// those knobs existed.
-fn build_sampler_chain(config: &GenerationConfig, n_vocab: i32) -> LlamaSampler {
-    build_sampler_chain_with_grammar(config, None, n_vocab)
-}
-
-/// [`build_sampler_chain`] with an optional grammar stage in front.
-///
-/// The grammar goes first so it masks the tokens that would spell a malformed
-/// tool call before any truncation or temperature stage sees the
-/// distribution — constraining after a truncation stage has already discarded
-/// candidates can leave nothing legal to draw from.
-///
-/// `None` reproduces [`build_sampler_chain`] exactly, which is what every
-/// non-tool path passes.
+/// truncation before the distribution draw); optional `top_k`/`min_p` are
+/// omitted entirely when unset. The grammar, when present, goes first so it
+/// masks tokens that would spell a malformed tool call before any truncation or
+/// temperature stage sees the distribution. `None` omits the grammar stage,
+/// which is what every non-tool path passes.
 fn build_sampler_chain_with_grammar(
     config: &GenerationConfig,
     grammar: Option<LlamaSampler>,
@@ -479,79 +404,10 @@ impl StopStream {
     }
 }
 
-/// Why generation stopped, as the engine observed it.
-///
-/// A configured stop sequence is trimmed out of the returned text, so a caller
-/// inspecting only [`InferenceResult::text`] cannot tell `StopSequence` from
-/// `Eos`. This field is how that distinction reaches the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    /// The model emitted an end-of-generation token.
-    Eos,
-    /// The token budget in [`GenerationConfig::max_tokens`] was exhausted.
-    Length,
-    /// Decoded text ended with one of [`GenerationConfig::stop`].
-    StopSequence,
-}
-
-impl StopReason {
-    /// Termination cause for a loop that ran to completion: a stop sequence
-    /// wins over an exhausted budget, since the sequence is what halted
-    /// decoding.
-    fn from_loop(hit_stop: bool, output_tokens: u32, max_tokens: u32) -> Self {
-        if hit_stop {
-            Self::StopSequence
-        } else if output_tokens >= max_tokens {
-            Self::Length
-        } else {
-            Self::Eos
-        }
-    }
-
-    /// Wire spelling, matching the serde representation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Eos => "eos",
-            Self::Length => "length",
-            Self::StopSequence => "stop_sequence",
-        }
-    }
-}
-
-/// Result from running inference
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InferenceResult {
-    /// What the caller is meant to see. Reasoning spans are already removed —
-    /// [`StopStream`] classifies them as the tokens decode, so a caller never
-    /// has to strip `<think>` itself and a streamed turn never emits one.
-    pub text: String,
-    /// The model's reasoning, when it produced any. Separate from [`Self::text`]
-    /// so a surface can render, collapse or drop it; concatenating the two is
-    /// what put bare `</think>` in front of users.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub generation_time_ms: u64,
-    pub tokens_per_second: f64,
-    /// Engine-observed termination cause, reported beside the token counts
-    /// because the text alone cannot distinguish a trimmed stop sequence from
-    /// an end-of-generation token.
-    pub stop_reason: StopReason,
-    /// TOPLOC commitment blob, present when the request set
-    /// [`GenerationConfig::commitment_k`] and the single-token
-    /// autoregressive path served it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commitment: Option<crate::toploc::InferenceCommitment>,
-}
-
-/// A chat message with role and content (for chat template formatting)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
+// StopReason, InferenceResult and ChatMessage live in praecise-runtime — the
+// engine owns the generation types (Praecise↔tenzro boundary rule). Re-exported
+// so `crate::…` paths and the public `tenzro_model::` surface stay unchanged.
+pub use praecise_runtime::{ChatMessage, InferenceResult, StopReason};
 
 /// Tool definition passed into [`ModelRuntime::generate_chat_with_tools`].
 ///
@@ -662,6 +518,29 @@ struct LoadedModel {
     backend: Arc<LlamaBackend>,
     /// Configured context length from catalog (capped at MAX_CONTEXT_LENGTH)
     context_length: u32,
+    /// Speculative-decode type for a model whose MTP draft head is trained
+    /// *into this same GGUF* (inline / self-speculative — `drafter_id: None`,
+    /// `mtp_kind` set). `Some(0)` = draft-mtp, `Some(1)` = draft-dflash; `None`
+    /// when the model has no inline head (it either uses a separate drafter or
+    /// no speculation). The draft context is built from this model's own
+    /// weights, so self-spec adds a context, never a second weight load.
+    inline_mtp_spec_type: Option<i32>,
+}
+
+/// Speculative type for a model whose MTP head is inline (trained into its own
+/// GGUF), or `None` when it has a separate drafter or no MTP. `0` = draft-mtp,
+/// `1` = draft-dflash, matching [`LoadedDrafter::spec_type`].
+fn inline_mtp_spec_type(model_id: &str) -> Option<i32> {
+    let entry = get_model_by_id(model_id)?;
+    // A declared drafter means the separate-drafter path, not inline.
+    if entry.drafter_id.is_some() {
+        return None;
+    }
+    match entry.mtp_kind {
+        MtpKind::DraftMtp => Some(0),
+        MtpKind::DraftDflash => Some(1),
+        MtpKind::Generic | MtpKind::None => None,
+    }
 }
 
 // SAFETY: LlamaModel is Send + Sync per llama-cpp-2 docs.
@@ -751,6 +630,10 @@ pub struct ModelRuntime {
     /// model mutex. Gates admission at [`MAX_INFLIGHT_PER_MODEL`] so an
     /// overloaded model sheds load instead of queueing unboundedly.
     inflight: Arc<DashMap<String, Arc<AtomicUsize>>>,
+    /// When each model's in-flight count last rose from 0. Lets the watchdog
+    /// spot a request stuck far past any plausible decode time (a wedged
+    /// kernel). Set on the 0→1 transition, cleared on the →0 transition.
+    inflight_since: Arc<DashMap<String, std::time::Instant>>,
     /// Radix-tree summary of the prompt prefixes each loaded model currently
     /// holds warm in its KV cache, built from recently-served prompts. The
     /// node projects this onto the provider announcement's
@@ -780,11 +663,32 @@ pub struct ModelRuntime {
 /// cancelled (client disconnect).
 struct InflightGuard {
     counter: Arc<AtomicUsize>,
+    model_id: String,
+    inflight_since: Arc<DashMap<String, std::time::Instant>>,
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::SeqCst);
+        // fetch_sub returns the prior value; `1` means this was the last
+        // in-flight request, so the model is idle again — clear its start stamp.
+        if self.counter.fetch_sub(1, Ordering::SeqCst) <= 1 {
+            self.inflight_since.remove(&self.model_id);
+        }
+    }
+}
+
+/// Flips its flag to `true` when dropped. Held across a serial decode's
+/// `spawn_blocking` await: if the awaiting task is cancelled (client
+/// disconnect) before the blocking decode returns, the guard drops and the
+/// decode loop observes the flag and stops. Dropping the `JoinHandle` alone
+/// does not stop a blocking task, so this is how in-flight GPU work is released
+/// on cancellation of a non-streaming serial request (the batched scheduler
+/// and the streaming path already detect this via `result_tx`/`token_tx`).
+struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -819,6 +723,7 @@ impl ModelRuntime {
             loaded_drafters: Arc::new(DashMap::new()),
             external_engines: Arc::new(DashMap::new()),
             inflight: Arc::new(DashMap::new()),
+            inflight_since: Arc::new(DashMap::new()),
             warm_prefixes: Arc::new(DashMap::new()),
             media_capable: Arc::new(dashmap::DashSet::new()),
             load_locks: Arc::new(DashMap::new()),
@@ -914,7 +819,32 @@ impl ModelRuntime {
                 max: MAX_INFLIGHT_PER_MODEL,
             });
         }
-        Ok(InflightGuard { counter })
+        // Stamp the 0→1 transition so the watchdog can measure how long this
+        // model has been continuously busy (a stuck kernel never returns to 0).
+        if prior == 0 {
+            self.inflight_since
+                .insert(model_id.to_string(), std::time::Instant::now());
+        }
+        Ok(InflightGuard {
+            counter,
+            model_id: model_id.to_string(),
+            inflight_since: self.inflight_since.clone(),
+        })
+    }
+
+    /// Models whose in-flight work has been continuous for longer than
+    /// `deadline` — i.e. a request that never returned to zero, the signature of
+    /// a wedged decode. Read by the node's watchdog, which only logs and steers
+    /// routing away; it never force-kills (validator-safe).
+    pub fn stalled_inflight(&self, deadline: std::time::Duration) -> Vec<(String, std::time::Duration)> {
+        let now = std::time::Instant::now();
+        self.inflight_since
+            .iter()
+            .filter_map(|e| {
+                let age = now.saturating_duration_since(*e.value());
+                (age >= deadline).then(|| (e.key().clone(), age))
+            })
+            .collect()
     }
 
     /// Get detected hardware information for this runtime.
@@ -1117,7 +1047,14 @@ impl ModelRuntime {
             // model fits (or the pool is unified / undetected), a proportional
             // layer count when it doesn't.
             let n_gpu_layers = Self::gpu_layer_budget(&gguf_path_owned, file_len);
-            let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
+            // Load the inline MTP/NextN head when this model self-speculates
+            // (catalog `mtp_kind` set, no separate drafter). Without it the
+            // `blk.<n>.nextn.*` tensors are skipped as "unused" and the self-spec
+            // draft fails (status -3); off otherwise so boot memory does not
+            // carry a head the model will not use.
+            let model_params = LlamaModelParams::default()
+                .with_n_gpu_layers(n_gpu_layers)
+                .with_load_mtp(inline_mtp_spec_type(&model_id_owned).is_some());
 
             let model = LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params)
                 .map_err(|e| {
@@ -1157,6 +1094,7 @@ impl ModelRuntime {
                 model,
                 backend,
                 context_length: effective_ctx,
+                inline_mtp_spec_type: inline_mtp_spec_type(&model_id_owned),
             })
         })
         .await
@@ -1258,6 +1196,7 @@ impl ModelRuntime {
         let loaded = tokio::task::spawn_blocking(move || {
             let model_params = LlamaModelParams::default()
                 .with_n_gpu_layers(1000)
+                .with_load_mtp(inline_mtp_spec_type(&model_id_owned).is_some())
                 .with_split_mode(LlamaSplitMode::Layer)
                 .with_devices(&device_indices)
                 .map_err(|e| {
@@ -1303,6 +1242,7 @@ impl ModelRuntime {
                 model,
                 backend,
                 context_length: effective_ctx,
+                inline_mtp_spec_type: inline_mtp_spec_type(&model_id_owned),
             })
         })
         .await
@@ -1844,7 +1784,10 @@ impl ModelRuntime {
                 // Speculative decoding on the raw-completion path too: default
                 // draft_n from the catalog when a drafter is loaded.
                 let mut config = config.clone();
-                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                if config.draft_n.is_none()
+                    && (self.loaded_drafters.contains_key(model_id)
+                        || inline_mtp_spec_type(model_id).is_some())
+                {
                     config.draft_n = crate::catalog::get_model_by_id(model_id)
                         .and_then(|e| e.mtp_default_draft_n);
                 }
@@ -1854,6 +1797,9 @@ impl ModelRuntime {
                     None
                 };
                 let prompt = prompt.to_string();
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancel_blocking = cancel.clone();
+                let _cancel_guard = CancelOnDrop(cancel);
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
                     let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
@@ -1864,6 +1810,7 @@ impl ModelRuntime {
                         &config,
                         None,
                         None,
+                        Some(&cancel_blocking),
                     )
                 });
                 handle
@@ -1920,7 +1867,10 @@ impl ModelRuntime {
                 // Without this, generate_chat always ran plain decode (drafter =
                 // None), so DFlash could never engage for non-streaming requests.
                 let mut config = config.clone();
-                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                if config.draft_n.is_none()
+                    && (self.loaded_drafters.contains_key(model_id)
+                        || inline_mtp_spec_type(model_id).is_some())
+                {
                     config.draft_n = crate::catalog::get_model_by_id(model_id)
                         .and_then(|e| e.mtp_default_draft_n);
                 }
@@ -1930,6 +1880,9 @@ impl ModelRuntime {
                     None
                 };
                 let messages = messages.to_vec();
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancel_blocking = cancel.clone();
+                let _cancel_guard = CancelOnDrop(cancel);
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
                     let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
@@ -1941,6 +1894,7 @@ impl ModelRuntime {
                         &config,
                         None,
                         None,
+                        Some(&cancel_blocking),
                     )
                 });
                 handle
@@ -2046,7 +2000,10 @@ impl ModelRuntime {
                     // guard inside generate_sync_streaming still suppresses the
                     // drafter for grammar-constrained turns (which must not
                     // speculate), so this only speeds up the unconstrained ones.
-                    if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                    if config.draft_n.is_none()
+                    && (self.loaded_drafters.contains_key(model_id)
+                        || inline_mtp_spec_type(model_id).is_some())
+                {
                         config.draft_n = crate::catalog::get_model_by_id(model_id)
                             .and_then(|e| e.mtp_default_draft_n);
                     }
@@ -2059,7 +2016,10 @@ impl ModelRuntime {
                     let tools = tools.clone();
                     let enable_thinking =
                         crate::catalog::resolve_enable_thinking(model_id, Some(config.max_tokens));
-                    tokio::task::spawn_blocking(
+                    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let cancel_blocking = cancel.clone();
+                    let _cancel_guard = CancelOnDrop(cancel);
+                    let handle = tokio::task::spawn_blocking(
                         move || -> Result<(InferenceResult, Option<String>)> {
                             let loaded = model_mutex.blocking_lock();
                             let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
@@ -2083,6 +2043,7 @@ impl ModelRuntime {
                                         &config,
                                         None,
                                         nc.grammar.as_ref(),
+                                        Some(&cancel_blocking),
                                     )?;
                                     // Parse the reply with the same format the
                                     // prompt was rendered in. Held locally and
@@ -2104,14 +2065,16 @@ impl ModelRuntime {
                                         &config,
                                         None,
                                         None,
+                                        Some(&cancel_blocking),
                                     )?;
                                     Ok((inner, None))
                                 }
                             }
                         },
-                    )
-                    .await
-                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??
+                    );
+                    handle
+                        .await
+                        .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??
                 }
             }
         };
@@ -2235,7 +2198,10 @@ impl ModelRuntime {
                 // omitted it and this target has a loaded drafter, so speculative
                 // decoding engages without the request having to set draft_n.
                 let mut config = config.clone();
-                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                if config.draft_n.is_none()
+                    && (self.loaded_drafters.contains_key(model_id)
+                        || inline_mtp_spec_type(model_id).is_some())
+                {
                     config.draft_n = crate::catalog::get_model_by_id(model_id)
                         .and_then(|e| e.mtp_default_draft_n);
                 }
@@ -2255,6 +2221,12 @@ impl ModelRuntime {
                 let is_muse = crate::muse_harmony::is_muse_harmony_model(model_id);
                 let enable_thinking =
                     crate::catalog::resolve_enable_thinking(model_id, Some(config.max_tokens));
+                // Streaming callers self-cancel via `token_tx` closing, but the
+                // muse branch buffers with NO token channel, so it needs the
+                // explicit flag to stop decoding when the client disconnects.
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancel_blocking = cancel.clone();
+                let _cancel_guard = CancelOnDrop(cancel);
                 let handle = tokio::task::spawn_blocking(move || -> Result<InferenceResult> {
                     let loaded = model_mutex.blocking_lock();
                     let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
@@ -2293,6 +2265,7 @@ impl ModelRuntime {
                                     // No raw token streaming for muse.
                                     None,
                                     None,
+                                    Some(&cancel_blocking),
                                 )?;
                                 let mp =
                                     crate::muse_harmony::parse_muse_harmony(&inner.text);
@@ -2313,6 +2286,7 @@ impl ModelRuntime {
                                 Some(&token_tx),
                                 // Plain chat streaming carries no tools.
                                 None,
+                                Some(&cancel_blocking),
                             )?;
                             if let Ok(json) = nc.render.parse_response_oaicompat(&inner.text, false)
                                 && let Some((content, reasoning, _tool_calls)) =
@@ -2333,6 +2307,7 @@ impl ModelRuntime {
                                 Some(&token_tx),
                                 // Plain chat streaming carries no tools.
                                 None,
+                                Some(&cancel_blocking),
                             )
                         }
                     }
@@ -2415,7 +2390,10 @@ impl ModelRuntime {
                     Self::place_media_markers(&mut messages, media.len())?;
                     let enable_thinking =
                         crate::catalog::resolve_enable_thinking(model_id, Some(config.max_tokens));
-                    let (inner, parsed): (InferenceResult, Option<String>) =
+                    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let cancel_blocking = cancel.clone();
+                    let _cancel_guard = CancelOnDrop(cancel);
+                    let handle =
                         tokio::task::spawn_blocking(
                             move || -> Result<(InferenceResult, Option<String>)> {
                                 let loaded = model_mutex.blocking_lock();
@@ -2437,6 +2415,7 @@ impl ModelRuntime {
                                             .extend(nc.render.additional_stops.iter().cloned());
                                         let inner = Self::generate_sync_multimodal(
                                             &loaded, &nc.prompt, &media, &config,
+                                            Some(&cancel_blocking),
                                         )?;
                                         let parsed = nc
                                             .render
@@ -2451,12 +2430,14 @@ impl ModelRuntime {
                                             render_chat_prompt(&loaded.model, &messages)?;
                                         let inner = Self::generate_sync_multimodal(
                                             &loaded, &prompt, &media, &config,
+                                            Some(&cancel_blocking),
                                         )?;
                                         Ok((inner, None))
                                     }
                                 }
                             },
-                        )
+                        );
+                    let (inner, parsed): (InferenceResult, Option<String>) = handle
                         .await
                         .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??;
 
@@ -2557,7 +2538,10 @@ impl ModelRuntime {
                 // is loaded, so speculative decoding actually engages (see
                 // generate_chat_stream for the rationale).
                 let mut config = config.clone();
-                if config.draft_n.is_none() && self.loaded_drafters.contains_key(model_id) {
+                if config.draft_n.is_none()
+                    && (self.loaded_drafters.contains_key(model_id)
+                        || inline_mtp_spec_type(model_id).is_some())
+                {
                     config.draft_n = crate::catalog::get_model_by_id(model_id)
                         .and_then(|e| e.mtp_default_draft_n);
                 }
@@ -2579,6 +2563,9 @@ impl ModelRuntime {
                         &config,
                         Some(&token_tx),
                         // Plain chat streaming carries no tools.
+                        None,
+                        // Streaming path: the closing `token_tx` above already
+                        // signals client-gone, so no separate cancel flag.
                         None,
                     )
                 });
@@ -2653,6 +2640,7 @@ impl ModelRuntime {
         config: &GenerationConfig,
         token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
         tool_grammar: Option<&crate::tool_grammar::ToolGrammar>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<InferenceResult> {
         // MTP / speculative-decoding seam. When the caller passes
         // `draft_n: Some(n)`:
@@ -2662,10 +2650,10 @@ impl ModelRuntime {
         //     reason that tells the caller to load the drafter first
         //     (or unset draft_n for single-token sampling).
         //
-        // The binding comes from the vendored `llama-cpp-rs` branch
-        // `mtp-speculative-decoding` (DINOZYAVIER/llama-cpp-rs PR
-        // #1027). When upstream merges, drop the [patch.crates-io]
-        // block at the workspace root and this seam stays unchanged.
+        // The binding comes from the vendored `llama-cpp-rs` MTP
+        // speculative-decoding support. When upstream gains it, drop the
+        // [patch.crates-io] block at the workspace root and this seam stays
+        // unchanged.
         // A tool grammar outranks speculative decoding. The drafter proposes
         // tokens the target then accepts or rejects, and the acceptance test
         // does not consult the grammar — a draft could carry the sequence past
@@ -2676,18 +2664,64 @@ impl ModelRuntime {
         if tool_grammar.is_some() && config.draft_n.is_some() {
             debug!("tool grammar present — running this turn without the MTP drafter");
         } else if let Some(n) = config.draft_n {
-            let Some(drafter) = drafter else {
+            if let Some(drafter) = drafter {
+                // Separate-drafter speculative decoding: a paired sidecar GGUF.
+                return Self::generate_speculative(
+                    loaded,
+                    &drafter.model,
+                    &drafter.backend,
+                    drafter.context_length,
+                    drafter.spec_type,
+                    prompt,
+                    config,
+                    token_tx,
+                    n,
+                    cancel,
+                );
+            } else if let Some(spec_type) = loaded.inline_mtp_spec_type {
+                // Inline (self-speculative) MTP: the draft head is trained into
+                // the target's own GGUF, so the draft context is built from the
+                // target model/backend — no separate drafter, no second load.
+                //
+                // Unlike the proven separate-drafter path, inline self-spec is
+                // model/fork-specific, so a setup failure must NOT fail the
+                // request: `MtpSpeculative` init happens before any token is
+                // emitted, so on error we fall through to standard single-token
+                // decoding (correctness preserved, just no speedup).
+                match Self::generate_speculative(
+                    loaded,
+                    &loaded.model,
+                    &loaded.backend,
+                    loaded.context_length,
+                    spec_type,
+                    prompt,
+                    config,
+                    token_tx,
+                    n,
+                    cancel,
+                ) {
+                    Ok(result) => return Ok(result),
+                    Err(e) => {
+                        warn!(
+                            "inline MTP self-speculation unavailable on this build \
+                             ({e}); serving with standard decoding",
+                        );
+                        // fall through to standard decode below
+                    }
+                }
+            } else {
                 return Err(ModelError::MtpUnavailable {
                     reason: format!(
-                        "draft_n={} requested but no MTP drafter is loaded for this target. \
-                         Call ModelRuntime::load_drafter(target_id, drafter.gguf) before \
-                         submitting speculative requests, or unset draft_n to use \
-                         single-token sampling.",
+                        "draft_n={} requested but this target has neither a loaded MTP drafter \
+                         nor an inline MTP head. Pair a drafter (catalog `drafter_id` + \
+                         `load_drafter`), serve a model with an inline head (`mtp_kind` set, \
+                         `drafter_id: None`), or unset draft_n for single-token sampling.",
                         n,
                     ),
                 });
-            };
-            return Self::generate_speculative(loaded, drafter, prompt, config, token_tx, n);
+            }
+            // Reachable only when inline self-spec fell through above: continue
+            // to standard single-token decoding below.
         }
 
         let start = Instant::now();
@@ -2736,6 +2770,7 @@ impl ModelRuntime {
             Some(first_logits),
             start,
             tool_grammar,
+            cancel,
         )
     }
 
@@ -2768,6 +2803,7 @@ impl ModelRuntime {
         first_logits: Option<i32>,
         start: Instant,
         tool_grammar: Option<&crate::tool_grammar::ToolGrammar>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<InferenceResult> {
         let n_ctx_val = ctx.n_ctx() as i32;
         let total_needed = n_past + config.max_tokens as i32;
@@ -2806,6 +2842,24 @@ impl ModelRuntime {
         let max_pos = n_ctx_val.min(n_past + config.max_tokens as i32);
 
         while n_cur < max_pos {
+            // Client-gone check. Two independent signals, either of which stops
+            // the loop before the next decode so we never generate into a dead
+            // request and pin the GPU:
+            //   - streaming: the caller dropped its `token_tx` receiver;
+            //   - non-streaming (and streaming too): `cancel` is flipped by the
+            //     `CancelOnDrop` guard on the awaiting task, which fires when the
+            //     client disconnects and the serial `spawn_blocking` future is
+            //     dropped (dropping a `JoinHandle` does NOT stop the blocking
+            //     task, so the flag is how the decode learns the caller is gone).
+            // Breaking returns early; the per-request context is dropped by the
+            // caller, freeing its KV/VRAM. Mirrors the batched scheduler's
+            // `result_tx.is_closed()` sweep in `batching.rs`.
+            if token_tx.is_some_and(|tx| tx.is_closed())
+                || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                break;
+            }
+
             let step_top_k = commitment_k
                 .zip(logits_row)
                 .map(|(k, row)| crate::toploc::top_k_from_logits(ctx.get_logits_ith(row), k));
@@ -2948,6 +3002,7 @@ impl ModelRuntime {
         prompt: &str,
         media: &[Vec<u8>],
         config: &GenerationConfig,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<InferenceResult> {
         let start = Instant::now();
 
@@ -3029,6 +3084,7 @@ impl ModelRuntime {
             start,
             // The multimodal prefill path does not carry a tool grammar.
             None,
+            cancel,
         )
     }
 
@@ -3055,281 +3111,44 @@ impl ModelRuntime {
     /// Generation stops on EOG or `max_tokens`. Errors surface as
     /// `ModelError::MtpUnavailable` so the caller can degrade to
     /// single-token sampling by unsetting `draft_n`.
+    // The draft model/backend are passed explicitly (not a `&LoadedDrafter`) so
+    // this one path serves both modes: a *separate* drafter GGUF, and *inline*
+    // self-speculation where the draft head is trained into the target's own
+    // GGUF — there the caller passes the target's `model`/`backend`, so the
+    // draft context is built from the target weights with no second load.
+    #[allow(clippy::too_many_arguments)]
     fn generate_speculative(
         loaded: &LoadedModel,
-        drafter: &LoadedDrafter,
+        draft_model: &LlamaModel,
+        draft_backend: &LlamaBackend,
+        draft_context_length: u32,
+        draft_spec_type: i32,
         prompt: &str,
         config: &GenerationConfig,
         token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
         draft_n: u8,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<InferenceResult> {
-        let start = Instant::now();
-
-        // Tokenize prompt
-        let tokens_list = loaded
-            .model
-            .str_to_token(prompt, AddBos::Always)
-            .map_err(|e| ModelError::Other(format!("Tokenization failed: {}", e)))?;
-        if tokens_list.is_empty() {
-            return Err(ModelError::InferenceError(
-                "prompt tokenized to zero tokens".to_string(),
-            ));
-        }
-        let input_tokens = tokens_list.len() as u32;
-
-        let n_ctx_target = NonZeroU32::new(loaded.context_length)
-            .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
-        let n_ctx_draft = NonZeroU32::new(drafter.context_length)
-            .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
-
-        // Build target + draft contexts. The target holds recurrent-state
-        // rollback slots (`n_rs_seq = draft n_max`) to undo rejected draft
-        // tokens; the draft context keeps the default 0.
-        let target_ctx = loaded
-            .model
-            .new_context(
-                &loaded.backend,
-                LlamaContextParams::default()
-                    .with_n_ctx(Some(n_ctx_target))
-                    .with_n_rs_seq(u32::from(draft_n)),
-            )
-            .map_err(|e| {
-                ModelError::Other(format!(
-                    "Failed to create target context for speculative decoding: {}",
-                    e
-                ))
-            })?;
-        // The draft context references the target context via `ctx_other` (the
-        // draft reads the target's token embeddings / lm_head through it).
-        // `target_ctx` is created above; both contexts then move into
-        // `MtpSpeculative`. The underlying contexts are heap-allocated, so the
-        // pointer stays valid across the move.
-        let draft_ctx = drafter
-            .model
-            .new_context_with_ctx_other(
-                &drafter.backend,
-                LlamaContextParams::default().with_n_ctx(Some(n_ctx_draft)),
-                &target_ctx,
-            )
-            .map_err(|e| {
-                ModelError::Other(format!(
-                    "Failed to create draft context for speculative decoding: {}",
-                    e
-                ))
-            })?;
-
-        // Build the MTP speculative helper. `n_max` caps draft length;
-        // Unsloth's recommendation is 2 to start, callers may pass
-        // 1..=6.
-        let mut spec = MtpSpeculative::new(
-            target_ctx,
-            draft_ctx,
-            MtpSpeculativeParams {
-                n_max: draft_n as i32,
-                n_min: 0,
-                p_min: 0.0,
-                spec_type: drafter.spec_type,
-            },
+        // Delegates to the Praecise engine, which OWNS speculative decode
+        // (separate-drafter DFlash + inline MTP self-spec, including the
+        // ctx_type=MTP nextn-head path). tenzro selects the handles by policy;
+        // the engine runs the draft loop. Keeps all acceleration on Praecise's
+        // side of the boundary (no engine code in the consumer).
+        praecise_runtime::generate_speculative(
+            &loaded.model,
+            &loaded.backend,
+            loaded.context_length,
+            draft_model,
+            draft_backend,
+            draft_context_length,
+            draft_spec_type,
+            prompt,
+            config,
+            token_tx,
+            draft_n,
+            cancel,
         )
-        .map_err(|e| ModelError::MtpUnavailable {
-            reason: format!("MtpSpeculative init failed: {}", e),
-        })?;
-
-        // Verify batch: id_last + up to draft_n block candidates.
-        let mut batch = LlamaBatch::new((draft_n as usize) + 1, 1);
-
-        // The drafter only PROPOSES tokens; the target's sampler decides.
-        let mut sampler = build_sampler_chain(config, loaded.model.n_vocab());
-        let mut output_tokens: u32 = 0;
-        let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut stream = StopStream::new(config.stop.clone());
-        let max_pos =
-            (n_ctx_target.get() as i32).min(input_tokens as i32 + config.max_tokens as i32);
-
-        // DFlash/MTP prefill: decode the prompt EXCEPT its last token, and after
-        // EVERY target ubatch call `spec.process()` so the draft context mirrors
-        // the prompt. `process()` reads the target's per-layer features from the
-        // *most recent* decode and injects them into the draft KV; skipping it
-        // leaves the drafter blind (`ctx_dft pos_max=-1`) and drafts collapse.
-        // The last prompt token is kept as `id_last` — added first in every
-        // verify batch, never decoded during prefill. Mirrors llama.cpp's
-        // examples/speculative-simple + tools/server.
-        let (id_last_ref, prefill_toks) = tokens_list
-            .split_last()
-            .ok_or_else(|| ModelError::InferenceError("empty prompt".into()))?;
-        let mut id_last = *id_last_ref;
-        let n_batch = (spec.target_context_mut().n_batch() as usize).max(1);
-        {
-            let cap = n_batch.min(prefill_toks.len().max(1));
-            let mut pbatch = LlamaBatch::new(cap, 1);
-            let mut s = 0usize;
-            while s < prefill_toks.len() {
-                let e = (s + n_batch).min(prefill_toks.len());
-                pbatch.clear();
-                for (off, tok) in prefill_toks[s..e].iter().enumerate() {
-                    pbatch
-                        .add(*tok, (s + off) as i32, &[0], false)
-                        .map_err(|err| ModelError::Other(format!("Batch add failed: {}", err)))?;
-                }
-                spec.target_context_mut()
-                    .decode(&mut pbatch)
-                    .map_err(|err| ModelError::Other(format!("Prompt decode failed: {}", err)))?;
-                spec.process(&pbatch)
-                    .map_err(|err| ModelError::MtpUnavailable {
-                        reason: format!("MtpSpeculative prefill process failed: {}", err),
-                    })?;
-                s = e;
-            }
-        }
-
-        // Position id_last occupies in each verify batch. After prefilling
-        // prompt[..last] at positions 0..N-2, that's N-1.
-        let mut n_past = prefill_toks.len() as i32;
-
-        // Optional: validates the draft context saw the prefill. Pass the
-        // prefilled tokens (not the full prompt): the draft has seen exactly
-        // prompt[..last]; id_last is injected on the first verify. Passing the
-        // full prompt would spuriously warn pos_max < N-1 by one.
-        spec.begin(prefill_toks)
-            .map_err(|e| ModelError::MtpUnavailable {
-                reason: format!("MtpSpeculative begin failed: {}", e),
-            })?;
-
-        // Running token sequence the drafter conditions on (already ends with
-        // id_last, since id_last is the last prompt token).
-        let mut prompt_so_far: Vec<llama_cpp_2::token::LlamaToken> = tokens_list.clone();
-
-        // Speculative loop. Each iteration verifies a whole DFlash block in ONE
-        // target decode: batch = [id_last, draft0, draft1, …] with logits at
-        // every position, then accepts the longest prefix whose target sample
-        // matches the draft, plus one guaranteed bonus token.
-        'genloop: while n_past < max_pos && !loaded.model.is_eog_token(id_last) {
-            // 1. Ask the drafter for a block of candidates (may be empty).
-            let drafts = match spec.draft(n_past, id_last, &prompt_so_far) {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!(
-                        "Speculative draft failed at n_past={}: {} — verifying id_last only",
-                        n_past, e
-                    );
-                    Vec::new()
-                }
-            };
-
-            // 2. Verify batch: id_last FIRST (batch is never empty → no
-            //    `n_tokens == 0` decode error), then the drafts. Logits at every
-            //    position so the sampler can walk the whole block in one decode.
-            batch.clear();
-            batch
-                .add(id_last, n_past, &[0], true)
-                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
-            for (i, draft_tok) in drafts.iter().enumerate() {
-                batch
-                    .add(*draft_tok, n_past + 1 + i as i32, &[0], true)
-                    .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
-            }
-            spec.target_context_mut().decode(&mut batch).map_err(|e| {
-                ModelError::Other(format!("Target speculative decode failed: {}", e))
-            })?;
-
-            // 3. Drop the draft context's speculative block (positions >= n_past)
-            //    before re-processing, so re-injecting verified features doesn't
-            //    collide with occupied KV slots.
-            let _ = spec
-                .draft_context_mut()
-                .kv_cache_seq_rm(0, Some(n_past as u32), None);
-
-            // 4. Re-seed the draft context from this decode for the next block.
-            spec.process(&batch).map_err(|e| ModelError::MtpUnavailable {
-                reason: format!("MtpSpeculative process failed: {}", e),
-            })?;
-
-            // 4. Accept the longest matching prefix. Sample at batch index 0
-            //    (id_last's slot → the token after id_last); if it equals
-            //    draft[0], accept and sample index 1 (draft[0]'s slot), and so
-            //    on. The final sample is the target's own bonus token. Every
-            //    sampled token is a NEW output token.
-            let mut n_accepted: u16 = 0;
-            let mut idx: i32 = 0;
-            let mut stop_now = false;
-            loop {
-                let sampled = sampler.sample(spec.target_context_mut(), idx);
-                sampler.accept(sampled);
-                id_last = sampled;
-                prompt_so_far.push(sampled);
-                if loaded.model.is_eog_token(sampled) {
-                    stop_now = true;
-                    break;
-                }
-                output_tokens += 1;
-                if let Ok(piece) = loaded.model.token_to_piece(sampled, &mut decoder, true, None) {
-                    if !(stream.push(&piece, token_tx) && !stream.hit_stop()) {
-                        stop_now = true;
-                    }
-                }
-                let matched = (idx as usize) < drafts.len() && sampled == drafts[idx as usize];
-                if matched {
-                    n_accepted += 1;
-                    idx += 1;
-                    if stop_now || output_tokens >= config.max_tokens {
-                        break;
-                    }
-                } else {
-                    // Mismatch or ran out of drafts → this sampled token is the
-                    // bonus token; stop accepting this block.
-                    break;
-                }
-            }
-
-            // 5. Tell the drafter how many drafts were accepted — only when it
-            //    actually produced a pending draft (the wrapper rejects an
-            //    accept call with no pending draft).
-            if !drafts.is_empty() {
-                spec.accept(n_accepted)
-                    .map_err(|e| ModelError::MtpUnavailable {
-                        reason: format!("MtpSpeculative accept failed: {}", e),
-                    })?;
-            }
-
-            // 6. Advance: id_last held old n_past, followed by n_accepted accepted
-            //    drafts. The bonus token is decoded as id_last next iteration.
-            n_past += 1 + n_accepted as i32;
-
-            // 7. Trim rejected-draft KV from BOTH contexts. muse's dense arch
-            //    can't use n_rs_seq recurrent rollback, so explicit seq_rm is the
-            //    rollback mechanism: everything at >= n_past is a rejected draft.
-            let _ = spec
-                .target_context_mut()
-                .kv_cache_seq_rm(0, Some(n_past as u32), None);
-            let _ = spec
-                .draft_context_mut()
-                .kv_cache_seq_rm(0, Some(n_past as u32), None);
-
-            if stop_now {
-                break 'genloop;
-            }
-        }
-
-        let elapsed = start.elapsed();
-        let generation_time_ms = elapsed.as_millis() as u64;
-        let tokens_per_second = if generation_time_ms > 0 {
-            (output_tokens as f64) / (generation_time_ms as f64 / 1000.0)
-        } else {
-            0.0
-        };
-        let stop_reason =
-            StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
-        let (text, thinking) = stream.finish_parts(token_tx);
-        Ok(InferenceResult {
-            text,
-            thinking,
-            input_tokens,
-            output_tokens,
-            generation_time_ms,
-            tokens_per_second,
-            stop_reason,
-            commitment: None,
-        })
+        .map_err(|e| ModelError::MtpUnavailable { reason: e.to_string() })
     }
 }
 

@@ -5109,10 +5109,18 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
             ("not_started".to_string(), 0.0)
         };
 
-        // Check if serving locally
-        let is_serving = node.model_runtime.as_ref()
-            .map(|rt| rt.is_loaded(&entry.id))
-            .unwrap_or(false);
+        // Check if serving locally. A served model counts as local whether or
+        // not its weights are warm: with lazy loading the weights only page in
+        // on first use, so `is_loaded` is false for a served-but-cold model —
+        // yet the node still serves it (the endpoint is online and the first
+        // request warms it). Keying off `served_models` (not just `is_loaded`)
+        // stops a served model from being mislabeled "downloadable".
+        let is_serving = node.served_models.contains_key(&entry.id)
+            || node
+                .model_runtime
+                .as_ref()
+                .map(|rt| rt.is_loaded(&entry.id))
+                .unwrap_or(false);
 
         // Check if available on network — only count endpoints seen in last 5 minutes
         let now_secs = std::time::SystemTime::now()
@@ -33696,9 +33704,13 @@ async fn handle_chat_simple(
     // The pinned offer is gone from the announcement set and it was not this
     // node's own. Fail rather than silently serving a different provider's
     // offer at a price the consumer never agreed to — the caller can re-route.
+    // Exception: if THIS node serves the model locally, fall through to local
+    // serving (the `is_local` path below) instead of erroring — a stale network
+    // offer must not shadow a model this node can serve itself.
     if let Some(pin) = pinned_provider
         && service.is_none()
         && node.operator_payee() != Some(pin)
+        && !node.served_models.contains_key(model_query)
     {
         return Err(JsonRpcError {
             code: -32004,
@@ -34290,9 +34302,11 @@ async fn handle_chat_rich(
     }
 
     // The pinned offer left the announcement set and was not this node's own.
+    // Fall through to local serving if this node serves the model itself.
     if let Some(pin) = pinned_provider
         && service.is_none()
         && node.operator_payee() != Some(pin)
+        && !node.served_models.contains_key(model_query)
     {
         return Err(JsonRpcError {
             code: -32004,
