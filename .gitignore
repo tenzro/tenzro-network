@@ -149,3 +149,7 @@ sdk/
 marketing/
 vendor/erc8004-evm/
 docs/security/
+
+# Build artifacts. The distribution publishes the .deb to GCS with its
+# checksum (see the Cloud Build config), so a copy here only bloats clones.
+*.deb
