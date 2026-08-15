@@ -11231,6 +11231,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "praecise-runtime"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "hex",
+ "llama-cpp-2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "prefix-trie"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15914,6 +15929,7 @@ dependencies = [
  "ort",
  "parking_lot 0.12.5",
  "pollster",
+ "praecise-runtime",
  "rand 0.8.5",
  "realfft",
  "reqwest 0.12.28",

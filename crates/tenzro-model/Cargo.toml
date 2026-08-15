@@ -38,6 +38,7 @@ hf-hub = { workspace = true }
 # Metal auto-links on macOS ARM64 (no feature flag needed)
 # Other backends enabled via feature flags below
 llama-cpp-2 = { workspace = true }
+praecise-runtime = { path = "../../vendor/llama-cpp-rs/praecise-runtime", features = ["bundled-llama"] }
 
 # Unicode decoding for llama.cpp token_to_piece
 encoding_rs = "0.8"

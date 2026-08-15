@@ -1,3 +1,8 @@
+//! Build script for `llama-cpp-2`: re-exports paths published by the
+//! `llama-cpp-sys-2` native build (the ggml backends directory and, under the
+//! `rpc` feature, the `rpc-server` binary) as compile-time env vars for
+//! dependent crates.
+
 fn main() {
     if let Ok(dir) = std::env::var("DEP_LLAMA_BACKENDS_DIR") {
         println!("cargo:rustc-env=GGML_BACKENDS_DIR={}", dir);

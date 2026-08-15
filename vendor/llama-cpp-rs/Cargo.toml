@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "llama-cpp-sys-2",
   "llama-cpp-2",
+  "praecise-runtime",
   "examples/embeddings",
   "examples/simple",
   "examples/reranker",

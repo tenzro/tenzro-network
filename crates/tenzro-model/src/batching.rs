@@ -367,6 +367,26 @@ fn scheduler_loop(
             break;
         }
 
+        // Cancellation sweep: free any slot whose client is gone before doing
+        // more GPU work for it. A dropped result receiver (non-streaming) or a
+        // dropped stream receiver (streaming) both close `result_tx`, so this
+        // one check covers both — and catches non-streaming cancellation, which
+        // the per-token `stream.push` drop check cannot see. Without it, a
+        // killed client's request keeps decoding to completion and pins the GPU.
+        // Mark-and-sweep style: we free the slot's KV and drop it; the next
+        // `llama_decode` simply won't include its rows. (Matches the release()
+        // pattern in llama.cpp's server + TGI's `response_tx.is_closed()`.)
+        for slot_idx in 0..slots.len() {
+            let client_gone = slots[slot_idx]
+                .as_ref()
+                .and_then(|s| s.result_tx.as_ref())
+                .is_some_and(tokio::sync::oneshot::Sender::is_closed);
+            if client_gone && let Some(seq) = slots[slot_idx].take() {
+                let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
+                // Client is gone: nothing to send; dropping `seq` frees the slot.
+            }
+        }
+
         let active = slots.iter().filter(|s| s.is_some()).count();
 
         // Admit new requests into free slots. When idle, block (bounded) on the

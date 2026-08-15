@@ -13,7 +13,7 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
-use llama_cpp_2::model::{AddBos, Special};
+use llama_cpp_2::model::AddBos;
 use llama_cpp_2::sampling::LlamaSampler;
 use std::io::Write;
 

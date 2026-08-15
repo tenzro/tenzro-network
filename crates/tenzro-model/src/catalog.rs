@@ -5870,7 +5870,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         // Intentionally no drafter: `qwen3.5-0.8b` would be vocab-matched, but the
         // 3B-active-path MoE makes the speculative verify cost outweigh the draft
         // savings on consumer GPUs (RTX 3090: net-negative throughput). Re-evaluate
-        // when a smaller MoE-aware drafter exists or llama.cpp PR #22673 (native MTP) merges.
+        // when a smaller MoE-aware drafter exists or upstream native MTP support lands.
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
@@ -6091,9 +6091,15 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 24,
         license: "Apache 2.0".into(),
         description: "Qwen 3.8 27B dense, multimodal, MTP-trained. Strong agentic/competitive coding (SWE-Bench Pro, LiveCodeBench). Hybrid Gated-DeltaNet + attention, 262K context.".into(),
+        // Inline (self-speculative) MTP: the next-token-prediction head is
+        // trained into this GGUF itself (blk.<n>.nextn.*), so there is no
+        // separate drafter to pair — `drafter_id` stays None and the runtime
+        // builds the draft context from the target model's own weights.
         drafter_id: None,
-        mtp_kind: MtpKind::None,
-        mtp_default_draft_n: None,
+        mtp_kind: MtpKind::DraftMtp,
+        // Unsloth's starting point for MTP is a short draft; 2 keeps acceptance
+        // high on the coding turns this model is routed for.
+        mtp_default_draft_n: Some(2),
         moe: None,
         promotable: true,
         serving: ServingProfile::default(),
