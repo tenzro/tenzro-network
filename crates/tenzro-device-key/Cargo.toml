@@ -2,7 +2,7 @@
 name = "tenzro-device-key"
 # Own version (overrides the workspace 0.1.0): the Secure-Enclave key now
 # persists in the legacy file keychain, fixing cross-restart wallet unlock.
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -31,7 +31,7 @@ tenzro-keystore-unlock = { path = "../tenzro-keystore-unlock", version = "0.1.0"
 # ML-DSA-65 (FIPS-204) keygen/sign for the post-quantum companion key that
 # rides alongside the Secure Enclave P-256 passkey. The seed is sealed at rest
 # by ECIES-wrapping it to the SE key (same primitive as `SecureEnclaveUnlocker`).
-tenzro-crypto = { path = "../tenzro-crypto", version = "0.1.0", optional = true }
+tenzro-crypto = { path = "../tenzro-crypto", version = "0.2.0", optional = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }
