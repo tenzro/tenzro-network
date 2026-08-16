@@ -168,10 +168,22 @@ pub fn generate_and_persist_keyset(data_dir: &Path, force: bool) -> Result<Valid
         }
     }
 
-    let keypair = KeyPair::generate(KeyType::Ed25519)
+    // Derived from this machine's TPM where there is one, so a node that loses
+    // its data directory comes back as itself rather than as a stranger. Each
+    // key gets its own purpose label, so one of them leaking says nothing about
+    // the others.
+    //
+    // Every one of these is reloaded from bytes on a normal start, which is why
+    // deriving the bytes is the whole change: the key types already accept a
+    // seed, and nothing downstream can tell where it came from.
+    let keypair = KeyPair::from_bytes(KeyType::Ed25519, &fresh_secret("validator-ed25519"))
         .map_err(|e| NodeError::Other(format!("Ed25519 keygen: {}", e)))?;
-    let pq = MlDsaSigningKey::generate();
-    let bls = BlsKeyPair::generate().map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?;
+    let pq = MlDsaSigningKey::from_seed(&fresh_secret("validator-ml-dsa"))
+        .map_err(|e| NodeError::Other(format!("ML-DSA keygen: {}", e)))?;
+    let bls = BlsKeyPair::from_secret_key(
+        BlsSecretKey::from_bytes(&fresh_secret("validator-bls"))
+            .map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?,
+    );
 
     write_secret(&ed_path, &keypair.to_bytes())?;
     write_secret(&pq_path, pq.seed_bytes())?;
@@ -276,13 +288,15 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
         return Ok(buf);
     }
 
-    // Silent-generate path. Fresh secp256k1 key, persisted at 0o600.
-    // `SecretKey::random` is deprecated in k256 0.14-rc; use the `Generate`
-    // trait (re-exported from `elliptic_curve`). `SysRng: TryCryptoRng` is
-    // lifted to `CryptoRng` via `UnwrapErr`.
-    use ::k256::elliptic_curve::Generate;
-    use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
-    let sk: SecretKey = SecretKey::generate_from_rng(&mut UnwrapErr(SysRng));
+    // Establish the key, persisted at 0o600 (or sealed where there is a chip).
+    //
+    // Derived rather than drawn from the system random source, so a wiped data
+    // directory does not change which on-chain account this node speaks as.
+    // That was `SecretKey::generate_from_rng`, which needed the `Generate`
+    // trait and a `SysRng` lifted through `UnwrapErr`; deriving needs neither,
+    // which is why those imports went with it.
+    let sk: SecretKey = SecretKey::from_slice(&fresh_secret("erc8004-system"))
+        .map_err(|e| NodeError::Other(format!("secp256k1 keygen: {}", e)))?;
     let bytes = sk.to_bytes();
     write_secret(&key_path, &bytes)?;
     let mut out = [0u8; 32];
@@ -328,16 +342,69 @@ pub fn load_or_generate_model_recipient_key(data_dir: &Path) -> Result<[u8; 32]>
         return Ok(buf);
     }
 
-    let mut buf = [0u8; 32];
-    use rand::RngCore;
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    let buf = fresh_secret("model-recipient-x25519");
     write_secret(&key_path, &buf)?;
     tracing::info!(
         target: "tenzro::keygen",
         path = %key_path.display(),
-        "generated fresh sealed-model X25519 recipient key"
+        "established the sealed-model X25519 recipient key"
     );
     Ok(buf)
+}
+
+/// Fresh key material for a purpose, derived from this machine's TPM where it
+/// can be, and drawn from the system random source where it cannot.
+///
+/// This is the difference between an identity a machine keeps and one it merely
+/// stores. Sealing protects a random key well — the blob is worthless on
+/// another machine — but it does not survive the blob going away, and deleting
+/// a data directory is something any administrator, any reinstall and any
+/// misfired `rm` can do. The node then comes back as somebody new and
+/// everything that knew it has to be told again.
+///
+/// Derived material has no such failure. The TPM recomputes it from a hierarchy
+/// seed that never leaves the chip, so a wiped disk, a fresh install or an empty
+/// data directory all return the same identity. The only thing that changes it
+/// is an administrator clearing the TPM from firmware, which is exactly who
+/// should be able to retire a machine.
+///
+/// Falling back to randomness on a machine with no chip is deliberate and is
+/// said out loud: refusing would make every TPM-less VM unusable, and staying
+/// quiet would let an operator believe in a guarantee they do not have.
+fn fresh_secret(purpose: &str) -> [u8; 32] {
+    if tenzro_tee::tpm_derive::derivation_available() {
+        match tenzro_tee::tpm_derive::derive_secret(purpose) {
+            Ok(bytes) => {
+                tracing::info!(
+                    target: "tenzro::keygen",
+                    purpose,
+                    "derived key material from the TPM; this identity survives a wiped data directory"
+                );
+                return *bytes;
+            }
+            // Reported rather than swallowed. A node that silently fell back to
+            // randomness here would look identical to one that derived, right
+            // up until somebody cleared the directory and it came back a
+            // stranger.
+            Err(e) => tracing::warn!(
+                target: "tenzro::keygen",
+                purpose,
+                error = %e,
+                "could not derive from the TPM; falling back to random key material, \
+                 which will NOT survive the data directory being cleared"
+            ),
+        }
+    } else {
+        tracing::warn!(
+            target: "tenzro::keygen",
+            purpose,
+            "no TPM available to derive from; this identity lives only in the data directory"
+        );
+    }
+    let mut buf = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    buf
 }
 
 /// Directory holding the TPM-sealed form of the secret at `path`.
@@ -718,6 +785,55 @@ mod tests {
             Err(other) => panic!("expected KeyMissing, got {:?}", other),
             Ok(_) => panic!("expected error, got Ok"),
         }
+    }
+
+    #[test]
+    fn a_wiped_data_directory_returns_the_same_identity() {
+        // The whole point of deriving rather than generating. Establish a
+        // keyset, destroy every trace of it — the case an operator creates with
+        // one `rm -rf`, and the case that used to cost a machine its name — and
+        // establish it again. On a machine that can derive, the second keyset is
+        // the first one.
+        //
+        // On a machine with no chip this asserts nothing and says so, rather
+        // than failing: a developer laptop must still be able to run the suite,
+        // and a test that passed there by accident would be worse than one that
+        // skips honestly.
+        if !tenzro_tee::tpm_derive::derivation_available() {
+            eprintln!("no TPM on this host; the recovery guarantee is not exercised here");
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let first = generate_and_persist_keyset(d.path(), true).unwrap();
+        let before = first.keypair.to_bytes();
+
+        for entry in std::fs::read_dir(d.path()).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p).unwrap();
+            } else {
+                std::fs::remove_file(&p).unwrap();
+            }
+        }
+        // The process cache would otherwise answer for the chip and prove
+        // nothing about recovery.
+        tenzro_tee::tpm_derive::forget_cached_root();
+
+        let second = generate_and_persist_keyset(d.path(), true).unwrap();
+        assert_eq!(
+            before,
+            second.keypair.to_bytes(),
+            "a wiped data directory must not change who this machine is"
+        );
+        assert_eq!(
+            first.pq.seed_bytes(),
+            second.pq.seed_bytes(),
+            "and not for any one of its keys"
+        );
+        assert_eq!(
+            first.bls.secret_key().to_bytes(),
+            second.bls.secret_key().to_bytes()
+        );
     }
 
     #[test]
