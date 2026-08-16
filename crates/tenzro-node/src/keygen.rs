@@ -168,22 +168,52 @@ pub fn generate_and_persist_keyset(data_dir: &Path, force: bool) -> Result<Valid
         }
     }
 
-    // Derived from this machine's TPM where there is one, so a node that loses
-    // its data directory comes back as itself rather than as a stranger. Each
-    // key gets its own purpose label, so one of them leaking says nothing about
-    // the others.
+    // Derivation and rotation pull in opposite directions, and the difference
+    // is what `force` now means.
     //
-    // Every one of these is reloaded from bytes on a normal start, which is why
-    // deriving the bytes is the whole change: the key types already accept a
-    // seed, and nothing downstream can tell where it came from.
-    let keypair = KeyPair::from_bytes(KeyType::Ed25519, &fresh_secret("validator-ed25519"))
+    // An identity derived from the chip cannot be lost — that is the point —
+    // and for the same reason it cannot be rotated, because deriving again
+    // returns the same key. So rotation draws fresh random material instead:
+    // an operator rotating a key is saying the old one must stop working, and
+    // recovering it from the chip afterwards would undo exactly that.
+    //
+    // The cost is stated rather than hidden. A rotated key lives only in the
+    // data directory, so it has the old failure mode back: lose the directory
+    // and the machine returns as its *derived* self, which is the identity
+    // before the rotation. An operator who rotates has to keep the directory,
+    // or rotate again.
+    //
+    // Each key gets its own purpose label, so one of them leaking says nothing
+    // about the others. Every one is reloaded from bytes on a normal start,
+    // which is why deriving the bytes is the whole change: the key types
+    // already accept a seed and nothing downstream can tell where it came from.
+    let material = |purpose: &str| -> [u8; 32] {
+        if force {
+            tracing::warn!(
+                target: "tenzro::keygen",
+                purpose,
+                "rotating to fresh random key material; a rotated key is NOT recoverable \
+                 from the TPM and lives only in the data directory"
+            );
+            let mut buf = [0u8; 32];
+            use rand::RngCore;
+            rand::rngs::OsRng.fill_bytes(&mut buf);
+            buf
+        } else {
+            fresh_secret(purpose)
+        }
+    };
+    let keypair = KeyPair::from_bytes(KeyType::Ed25519, &material("validator-ed25519"))
         .map_err(|e| NodeError::Other(format!("Ed25519 keygen: {}", e)))?;
-    let pq = MlDsaSigningKey::from_seed(&fresh_secret("validator-ml-dsa"))
+    let pq = MlDsaSigningKey::from_seed(&material("validator-ml-dsa"))
         .map_err(|e| NodeError::Other(format!("ML-DSA keygen: {}", e)))?;
-    let bls = BlsKeyPair::from_secret_key(
-        BlsSecretKey::from_bytes(&fresh_secret("validator-bls"))
-            .map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?,
-    );
+    // Through KeyGen rather than `from_bytes`: a BLS12-381 scalar must be
+    // below the curve order, so raw bytes are rejected as a bad encoding a good
+    // fraction of the time. Feeding them as input key material is what turns
+    // arbitrary bytes into a valid key, and it is the same path the random one
+    // takes.
+    let bls = BlsKeyPair::from_ikm(&material("validator-bls"))
+        .map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?;
 
     write_secret(&ed_path, &keypair.to_bytes())?;
     write_secret(&pq_path, pq.seed_bytes())?;
@@ -295,8 +325,22 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
     // That was `SecretKey::generate_from_rng`, which needed the `Generate`
     // trait and a `SysRng` lifted through `UnwrapErr`; deriving needs neither,
     // which is why those imports went with it.
-    let sk: SecretKey = SecretKey::from_slice(&fresh_secret("erc8004-system"))
-        .map_err(|e| NodeError::Other(format!("secp256k1 keygen: {}", e)))?;
+    // A secp256k1 scalar must also be in range, and derived bytes are not
+    // guaranteed to be. Deriving again under a numbered label keeps this
+    // deterministic — the same machine walks the same short sequence — where a
+    // retry with fresh randomness would not be recoverable at all.
+    let sk: SecretKey = (0u8..8)
+        .find_map(|attempt| {
+            let purpose = if attempt == 0 {
+                "erc8004-system".to_string()
+            } else {
+                format!("erc8004-system/{attempt}")
+            };
+            SecretKey::from_slice(&fresh_secret(&purpose)).ok()
+        })
+        .ok_or_else(|| {
+            NodeError::Other("could not derive a valid secp256k1 scalar".to_string())
+        })?;
     let bytes = sk.to_bytes();
     write_secret(&key_path, &bytes)?;
     let mut out = [0u8; 32];
@@ -804,7 +848,9 @@ mod tests {
             return;
         }
         let d = tempfile::tempdir().unwrap();
-        let first = generate_and_persist_keyset(d.path(), true).unwrap();
+        // Not `force`: that means rotate, which deliberately draws random
+        // material. This is the recovery path — nothing there to overwrite.
+        let first = generate_and_persist_keyset(d.path(), false).unwrap();
         let before = first.keypair.to_bytes();
 
         for entry in std::fs::read_dir(d.path()).unwrap() {
@@ -819,7 +865,7 @@ mod tests {
         // nothing about recovery.
         tenzro_tee::tpm_derive::forget_cached_root();
 
-        let second = generate_and_persist_keyset(d.path(), true).unwrap();
+        let second = generate_and_persist_keyset(d.path(), false).unwrap();
         assert_eq!(
             before,
             second.keypair.to_bytes(),
