@@ -3456,6 +3456,94 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             // remaining step before this entry is servable.
             config_repo: None,
         },
+        // LTX-2.5 22B **dev** — the full, trainable DiT from the same repo.
+        //
+        // The distilled entry above and this one are two different
+        // transformers inside `Lightricks/LTX-2.5`, not two repos:
+        // `ltx-2.5-22b-dev-transformer-bf16.safetensors` (42.0 GB) beside
+        // `ltx-2.5-22b-distilled-transformer-bf16.safetensors` (42.0 GB).
+        // Cataloguing only the distilled one made the full model unreachable
+        // through the registry, which is the gap this entry closes.
+        //
+        // *Why it is not just a flag on the distilled entry.* The distilled
+        // checkpoint is a fixed 8-step, CFG=1 schedule — raising either fights
+        // the distillation. Dev is classifier-free guided and takes an ordinary
+        // step count, so the two cannot share defaults. They are also not
+        // interchangeable for training: **only dev is trainable**, so LoRAs and
+        // IC-LoRAs (including `ltx-2.5-22b-distilled-lora-450-bf16`, which
+        // gives dev a distilled-speed mode without a second checkpoint) attach
+        // here and nowhere else.
+        //
+        // *Defaults* are the pinned `diffusers` 0.39 `LTX2Pipeline.__call__`
+        // signature — 40 steps, guidance 4.0, 121 frames at 24 fps — read from
+        // the installed package rather than guessed, because the model card
+        // states a schedule only for the distilled variant.
+        //
+        // *Footprint.* `size_bytes` is the repo total, identical to the
+        // distilled entry because it is the same repo and the fetch is not
+        // file-selective. `min_vram_gb` is the bf16 serving set measured from
+        // the HF sibling list — transformer 42.0 + Gemma4-12B text encoder
+        // 26.3 + video VAE 1.5 + audio VAE 0.4 + duration head 0.004 + spatial
+        // and temporal upsamplers 1.3 = 71.4 GB — rounded up for latents and
+        // activations. Note this is a floor for the bf16 path; `--quantization
+        // fp8-cast` roughly halves the transformer at load time without
+        // touching the checkpoint, which keeps it trainable.
+        //
+        // *Why there is no NVFP4 dev variant to point at.* Lightricks ships
+        // NVFP4 for the **distilled** transformer only — there is no
+        // `dev-transformer-nvfp4` in the repo — so the quantized path is
+        // attached to the branch this entry deliberately is not. It would also
+        // defeat the purpose: a prequantized 4-bit checkpoint is not a training
+        // target, and dev exists here precisely because it is the trainable one.
+        //
+        // Be careful reading NVIDIA's "20% faster, 40% memory savings" for
+        // LTX-2.5 as a property of the number format. That figure is NVFP4
+        // *plus FastVideo* — NVFP4-aware DiT kernels, Sliding Tile Attention and
+        // TeaCache step caching — on the distilled path. Weight-only NVFP4 with
+        // no such kernels measures ~33% smaller and ~6% *slower* on GB10, because
+        // video diffusion is compute-bound rather than bandwidth-bound and the
+        // unpack has nothing to amortise against. The kernels are the speedup,
+        // not the format.
+        //
+        // *Unverified.* Never run here. `Text2Video` only, on the same
+        // discipline as 2.3 and the distilled entry: the card documents
+        // image-to-video and audio modes, but a worker advertising a kind it
+        // has never served gets jobs accepted and then fails them.
+        MediaGenModelEntry {
+            id: "ltx-2.5-22b-dev".to_string(),
+            name: "LTX-2.5 22B Dev (bf16)".to_string(),
+            family: "ltx2".to_string(),
+            hf_repo: "Lightricks/LTX-2.5".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "LTX2Pipeline".to_string(),
+            kinds: vec![Text2Video],
+            default_width: 768,
+            default_height: 512,
+            max_resolution: 1280,
+            default_steps: 40,
+            default_guidance_scale: 4.0,
+            default_num_frames: Some(121),
+            default_fps: Some(24),
+            parameters: "22B".to_string(),
+            size_bytes: 200_900_000_000,
+            min_vram_gb: 80,
+            distilled: false,
+            latent_upsampler: Some("latent_upsampler".to_string()),
+            license: "LTX-2.x Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: true,
+            description: "LTX-2.5 22B dev text-to-video, the full trainable \
+                          transformer with a synchronized audio branch. \
+                          Unverified: catalogued from the model card and the \
+                          pinned diffusers signature, never run here."
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: Some("LTX2VideoTransformer3DModel".to_string()),
+            config_repo: None,
+        },
         // MiniMax-Music3, text-to-music. The first audio entry in the
         // catalog, and the reason `MediaGenKind::Text2Audio` exists.
         //
@@ -8342,6 +8430,11 @@ mod tests {
                 // installed one — so the worker converts them once into a
                 // local snapshot named by `config_repo`.
                 "ltx-2.3-22b-distilled-gguf",
+                // The full trainable transformer from the LTX-2.5 repo.
+                // Separate entry because dev and distilled cannot share
+                // defaults (40 steps / CFG 4.0 vs a fixed 8-step, CFG 1.0
+                // schedule) and only dev accepts LoRAs.
+                "ltx-2.5-22b-dev",
                 // LTX-2.5, from the upstream bf16 weights rather than a
                 // third-party GGUF. Listed but not yet verified to run.
                 "ltx-2.5-22b-distilled",
