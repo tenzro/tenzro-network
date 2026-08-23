@@ -51,6 +51,9 @@ exclude = [
   # at the end of this file.
   "vendor/dkls23-core",
   "vendor/dkls23-secp256k1",
+  # Vendored lance-linalg 6.0.0 with its AVX-512 cfg corrected. Wired via
+  # [patch.crates-io] at the end of this file.
+  "vendor/lance-linalg",
 ]
 
 [workspace.package]
@@ -519,6 +522,28 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# Same optimization level, built to be *built* fast rather than to run fastest.
+#
+# `release` pins `codegen-units = 1` under thin LTO, which makes the final crate
+# a single serial LLVM pass: `tenzro-node` spends ~15 minutes there on a 32-vCPU
+# builder with 31 cores idle, and no larger machine shortens it because nothing
+# about that pass is parallel. Dependency caching does not help either — the
+# workspace crate recompiles on every source change by definition.
+#
+# Splitting into 16 units and dropping LTO gives that pass back its parallelism.
+# The tradeoff is real but narrow here: cross-crate inlining is what is lost, and
+# the server nodes this profile exists for spend their time in RPC, gossip and
+# routing rather than in a hot numeric loop. The GPU work that would care lives
+# in llama.cpp/ggml, compiled by cmake as its own C++ unit and untouched by a
+# Rust codegen setting.
+#
+# Use for server-node deploys; keep `release` for anything latency-critical, and
+# for the Spark's own cuda build.
+[profile.release-deploy]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 [profile.dev]
 opt-level = 0
 debug = true
@@ -531,6 +556,23 @@ debug = true
 # merges (or ships an equivalent API), drop the patch and bump the
 # `llama-cpp-2` constraint above.
 [patch.crates-io]
+# lance-linalg 6.0.0 emits `cfg(kernel_support="avx512")` from three
+# independent C builds, and `build_f16_with_flags` returns Ok(()) *without
+# compiling anything* when the `fp16kernels` feature is off. The cfg is set,
+# the Rust side compiles its AVX-512 branch, and the C definition never
+# exists — the link dies on `sum_4bit_dist_table_32bytes_batch_avx512`.
+#
+# The vendored copy emits the cfg only when all three kernels actually built,
+# replaces a `-march=native` that cannot describe an x86_64 target from an
+# aarch64 build host, and adds the `rerun-if-changed=build.rs` upstream omits
+# (declaring rerun-if-changed narrows the default set, so edits to build.rs
+# were silently ignored).
+#
+# Dropping the cfg costs nothing here: the AVX-512 path is runtime-dispatched
+# behind `is_x86_feature_detected!`, and the deployment targets are Broadwell
+# Xeons with no AVX-512 at all, so the AVX2 path is what would run regardless.
+lance-linalg = { path = "vendor/lance-linalg" }
+
 llama-cpp-2 = { path = "vendor/llama-cpp-rs/llama-cpp-2" }
 llama-cpp-sys-2 = { path = "vendor/llama-cpp-rs/llama-cpp-sys-2" }
 

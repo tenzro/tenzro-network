@@ -862,8 +862,8 @@ pub fn resolve_enable_thinking(model_id: &str, budget_tokens: Option<u32>) -> bo
     // Operator escape hatch first: a comma-separated id list forces those
     // models onto the non-thinking path with no rebuild. Empty/whitespace
     // entries are ignored so a trailing comma is harmless.
-    if let Ok(list) = std::env::var("TENZRO_NOTHINK_MODELS") {
-        if list
+    if let Ok(list) = std::env::var("TENZRO_NOTHINK_MODELS")
+        && list
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -871,7 +871,6 @@ pub fn resolve_enable_thinking(model_id: &str, budget_tokens: Option<u32>) -> bo
         {
             return false;
         }
-    }
     let Some(entry) = get_model_by_id(model_id) else {
         return true;
     };
@@ -884,7 +883,7 @@ pub fn resolve_enable_thinking(model_id: &str, budget_tokens: Option<u32>) -> bo
         ReasoningMode::Always => true,
         ReasoningMode::Auto => {
             let big_enough = parse_params_total_b(&entry.parameters) >= p.thinking_safe_min_b;
-            let budget_ok = budget_tokens.map_or(true, |b| b >= p.thinking_min_budget_tokens);
+            let budget_ok = budget_tokens.is_none_or(|b| b >= p.thinking_min_budget_tokens);
             big_enough && budget_ok
         }
     }
@@ -2746,7 +2745,9 @@ pub struct MediaGenModelEntry {
 /// non-Apache FLUX.2 line was gated, which was wrong for `dev-NVFP4` and
 /// `klein-9b-kv-fp8`.
 pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
-    use tenzro_types::MediaGenKind::{Image2Image, Image2Video, Image23d, Text2Image, Text2Video};
+    use tenzro_types::MediaGenKind::{
+        Image2Image, Image2Video, Image23d, Text2Audio, Text2Image, Text2Video,
+    };
 
     vec![
         // ── Qwen-Image (Apache-2.0, Alibaba Qwen) ──
@@ -3374,6 +3375,162 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             gguf_file: Some("ltx-2.3-22b-distilled-1.1-UD-Q5_K_M.gguf".to_string()),
             transformer_class: Some("LTX2VideoTransformer3DModel".to_string()),
             config_repo: Some("~/.tenzro/models/ltx-2.3/diffusers".to_string()),
+        },
+        // LTX-2.5 22B, the successor to the 2.3 entry above.
+        //
+        // Registered from the official Lightricks weights rather than a GGUF.
+        // The 2.3 entry pins `unsloth/LTX-2.3-GGUF`; there is no `unsloth`
+        // build of 2.5, and the third-party quantisations that do exist come
+        // from accounts with no track record here. Pinning production at one
+        // of those is a supply-chain decision, not a registry edit, so this
+        // entry names the upstream bf16 checkpoint and leaves `gguf_repo`
+        // empty until a build worth trusting appears.
+        //
+        // **No run has been verified.** The specifications below are read from
+        // the model card, not measured: 22B, `num_frames % 8 == 1`, width and
+        // height divisible by 32, and a Gemma4 12B text encoder alongside
+        // separate video and audio VAEs. `size_bytes` and `min_vram_gb` are
+        // estimates from the bf16 transformer plus that encoder, and should be
+        // replaced with measurements before anyone prices against them.
+        //
+        // *Kinds.* Only `Text2Video` is declared. The card also documents
+        // image-to-video and multishot generation, but the 2.3 entry withheld
+        // `Image2Video` for exactly this reason — declaring a kind the worker
+        // has never run is how a job gets accepted and then fails.
+        //
+        // *Licence.* The LTX-2.x Community License is free only for entities
+        // under $10M annual revenue and requires a paid agreement above that,
+        // so it is `CommercialCustom` rather than permissive: an operator has
+        // to check their own position before serving it.
+        MediaGenModelEntry {
+            id: "ltx-2.5-22b-distilled".to_string(),
+            name: "LTX-2.5 22B Distilled (bf16)".to_string(),
+            family: "ltx2".to_string(),
+            hf_repo: "Lightricks/LTX-2.5".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "LTX2Pipeline".to_string(),
+            kinds: vec![Text2Video],
+            default_width: 768,
+            default_height: 512,
+            max_resolution: 1280,
+            default_steps: 8,
+            // Distilled schedule, unguided — same reasoning as 2.3: the
+            // reference sigmas were tuned without classifier-free guidance and
+            // a scale above 1.0 fights the distillation.
+            default_guidance_scale: 1.0,
+            // 121 satisfies `num_frames % 8 == 1`, which the card requires.
+            default_num_frames: Some(121),
+            default_fps: Some(24),
+            parameters: "22B".to_string(),
+            // Measured from the HF sibling list, not estimated: the repo
+            // carries the bf16 transformer, the dev variant, ComfyUI int8 and
+            // NVFP4 builds, the Gemma4 12B text encoder, both VAEs, LoRAs and
+            // the upsampler. An earlier guess of 48 GB was out by 318%, which
+            // is precisely what the memory budget must not admit against.
+            size_bytes: 200_900_000_000,
+            // The serving footprint of one bf16 variant, not the repo total
+            // above — a different quantity, from the model card.
+            min_vram_gb: 48,
+            distilled: true,
+            latent_upsampler: Some("latent_upsampler".to_string()),
+            license: "LTX-2.x Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            // HuggingFace reports `gated: "auto"`. An operator must accept the
+            // licence on the hub before the weights will download at all, so
+            // recording this as ungated would have the worker fail at fetch
+            // time with an auth error that looks like a broken repo.
+            gated: true,
+            description: "LTX-2.5 22B distilled text-to-video with a \
+                          synchronized audio branch. Unverified: catalogued \
+                          from the model card, never run here."
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: Some("LTX2VideoTransformer3DModel".to_string()),
+            // The repo has no `model_index.json`, so plain
+            // `from_pretrained` cannot construct it — the same situation the
+            // 2.3 entry solves by converting once into a local snapshot. That
+            // conversion has not been done for 2.5, which is the concrete
+            // remaining step before this entry is servable.
+            config_repo: None,
+        },
+        // MiniMax-Music3, text-to-music. The first audio entry in the
+        // catalog, and the reason `MediaGenKind::Text2Audio` exists.
+        //
+        // **No run has been verified.** Everything below is read from the
+        // model card. What was checked directly is the thing that blocked the
+        // sibling H3 entry: `ModularPipeline` imports fine from the diffusers
+        // 0.39.0 this worker actually has installed, and Music3 loads through
+        // the *generic* class — `ModularPipeline.from_pretrained(...)` — not
+        // through a bespoke `MiniMaxH3ModularPipeline`. So the "absent from
+        // diffusers 0.39" note on H3 does not apply here, and may itself be
+        // stale.
+        //
+        // *Dimensions.* Width, height and frames are meaningless for a
+        // waveform. They are set to the struct's smallest legal values rather
+        // than to something plausible-looking, so that anything pricing or
+        // scheduling on them is obviously wrong rather than quietly wrong;
+        // `pixel_steps` routes audio to `audio_frame_steps` and never reads
+        // them. Length comes from `MediaGenParams::audio_duration_secs`.
+        //
+        // *Card figures.* 2B parameters, 32 kHz 16-bit stereo, up to five
+        // minutes, prompt capped at 5,000 tokens and output at 9,000 acoustic
+        // frames. 24 GB VRAM standard, ~22 GB with CPU offload, and as low as
+        // 8 GB with layer-by-layer streaming — `min_vram_gb` records the
+        // standard path, since an operator advertising this should not be
+        // promising the degraded one.
+        MediaGenModelEntry {
+            id: "minimax-music3".to_string(),
+            name: "MiniMax-Music3 2B (text-to-music)".to_string(),
+            family: "minimax-music".to_string(),
+            hf_repo: "MiniMaxAI/MiniMax-Music3".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            // Generic Modular Diffusers entry point, not a family-specific
+            // class. Invoked through blocks rather than one `pipe(**kwargs)`
+            // call, so the worker needs a `FamilyAdapter` for it.
+            pipeline_class: "ModularPipeline".to_string(),
+            kinds: vec![Text2Audio],
+            // Not pixels. See the note above.
+            default_width: 1,
+            default_height: 1,
+            max_resolution: 1,
+            default_steps: 30,
+            default_guidance_scale: 1.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "2B".to_string(),
+            // Measured from the HF sibling list. The card's "2B params" is the
+            // transformer alone; the repo total includes the text encoder and
+            // audio VAE, and an earlier guess of 6 GB was out by 856%.
+            size_bytes: 57_400_000_000,
+            // Serving footprint from the card (24 GB standard, ~22 GB with CPU
+            // offload, 8 GB with layer streaming) — not the repo total above.
+            // The standard path is recorded because an operator advertising
+            // this should not be promising the degraded one.
+            min_vram_gb: 24,
+            distilled: false,
+            latent_upsampler: None,
+            license: "Creative Commons (see repo LICENSE)".to_string(),
+            license_tier: LicenseTier::Attribution,
+            expert_pair: None,
+            gated: false,
+            description: "MiniMax-Music3 2B text-to-music: 32 kHz stereo, up \
+                          to five minutes, prompt plus optional lyrics. \
+                          Unverified: catalogued from the model card, never \
+                          run here."
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            // No `model_index.json` in the repo. That is expected for a
+            // Modular Diffusers pipeline, which is assembled from blocks
+            // rather than described by a single index — but it does mean the
+            // catalog's usual "loadable by from_pretrained" check cannot
+            // vouch for this entry, and only an actual run will.
+            config_repo: None,
         },
         // MiniMax H3 (Hailuo 3.0), the open-weight H3-Base module.
         //
@@ -4340,7 +4497,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         architecture: ModelArchitecture::Gemma4,
         context_length: 131072,
         quantization: "BF16".into(),
-        size_bytes: 200_000_000,
+        // Measured from the server: `content-length` and `x-linked-size` both report
+        // 97,817,664. The previous 200_000_000 was an estimate that made every correct
+        // download of this entry log a size-mismatch warning.
+        size_bytes: 97_817_664,
         min_ram_gb: 1,
         license: "Gemma License".into(),
         description: "Google's jointly-trained Multi-Token Prediction head for Gemma 4 E2B. Pair with the E2B target via `--spec-type draft-mtp`.".into(),
@@ -6099,11 +6259,72 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         // Unsloth's starting point for MTP is a short draft; 2 keeps acceptance
         // high on the coding turns this model is routed for.
-        mtp_default_draft_n: Some(2),
+        // Measured on GB10, three samples per depth against a 320-token
+        // generation: off 19.8, n=2 19.7, n=3 21.3, n=4 22.2, n=5 22.0,
+        // n=6 21.5 tok/s. The inherited default of 2 was indistinguishable
+        // from speculation switched off — the draft was too short to amortise
+        // a weight read — and past 4 the extra drafted tokens are rejected
+        // more often than they save.
+        mtp_default_draft_n: Some(4),
         moe: None,
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: Some(MmprojSpec { filename: "mmproj-BF16.gguf".into() }),
+        reasoning: ReasoningPolicy { supports_thinking: true, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 8_192 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // Qwen 3.8 27B at 3-bit, as its OWN id rather than a second build hiding
+    // behind `qwen3.8-27b`.
+    //
+    // Two nodes serving different quantisations under one id cannot be told
+    // apart by a caller, and they are not interchangeable: measured on the same
+    // prompt, UD-Q4_K_XL/NVFP4 on a GB10 (273 GB/s unified) gives 19.6 tok/s,
+    // while UD-Q3_K_XL on an RTX 5070 Ti (896 GB/s) gives 62.0 tok/s — 3.2x, at
+    // 93% of the bandwidth ceiling, because decode is bandwidth-bound and this
+    // build reads 13.44 GB per token instead of 17.57 GB. A client asking for
+    // "qwen3.8-27b" and silently getting either one would see a 3x swing in
+    // speed and an unmeasured difference in quality.
+    //
+    // 13.44 GB is also what makes it fit a 16 GB consumer card at all, which is
+    // the whole point: it is the build that can live on a fast local GPU.
+    //
+    // No mmproj: text-only, so no projector is ever loaded.
+    //
+    // `mtp_kind` is NOT decorative — `runtime.rs` reads it to pick the serving
+    // path: `wants_drafter || has_projector` takes the Serial single-context
+    // path, everything else goes to the continuous-batching engine. Declaring
+    // `None` here put this entry on the batching path, which reserves recurrent
+    // state per slot, and qwen3.8 is hybrid Gated-DeltaNet: it asked for a
+    // 5,020,581,888-byte rs cache on top of 13.44 GB of weights and died with
+    // "failed to allocate CUDA0 buffer" on a 16 GB card — while the identical
+    // weights under the 4-bit entry served fine. DraftMtp is both correct and
+    // what makes it fit: `drafter_id: None` means the MTP head is inline in
+    // this GGUF (blk.<n>.nextn.*), so there is no separate drafter to pair.
+    catalog.push(HfModelEntry {
+        id: "qwen3.8-27b-q3".into(),
+        name: "Qwen 3.8 27B (3-bit)".into(),
+        family: "qwen3.8".into(),
+        hf_repo: "unsloth/Qwen3.8-27B-GGUF".into(),
+        hf_filename: "Qwen3.8-27B-UD-Q3_K_XL.gguf".into(),
+        parameters: "27B (dense)".into(),
+        architecture: ModelArchitecture::Qwen35,
+        // The card cannot hold a 262144-token KV cache beside these weights;
+        // the operator caps it with TENZRO_MAX_CONTEXT.
+        context_length: 262144,
+        quantization: "UD-Q3_K_XL".into(),
+        size_bytes: 13_440_000_000,
+        min_ram_gb: 18,
+        license: "Apache 2.0".into(),
+        description: "Qwen 3.8 27B dense at 3-bit, sized to fit a 16 GB consumer GPU. Measured 62.0 tok/s on an RTX 5070 Ti against 19.6 tok/s for the 4-bit build on a GB10 — decode is bandwidth-bound, and this build reads 13.44 GB per token.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(4),
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
         reasoning: ReasoningPolicy { supports_thinking: true, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 8_192 },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
@@ -6874,7 +7095,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
-        promotable: false,
+        // Downloadable from the same repo as its target (verified 200 on
+        // dflash-kquant.gguf), so it belongs in the user-facing catalog like
+        // every other drafter. It was the only one gated out.
+        promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
         reasoning: ReasoningPolicy {
@@ -8118,6 +8342,9 @@ mod tests {
                 // installed one — so the worker converts them once into a
                 // local snapshot named by `config_repo`.
                 "ltx-2.3-22b-distilled-gguf",
+                // LTX-2.5, from the upstream bf16 weights rather than a
+                // third-party GGUF. Listed but not yet verified to run.
+                "ltx-2.5-22b-distilled",
                 // The one entry here that is listed *without* being servable.
                 // `MiniMaxH3ModularPipeline` is absent from the pinned
                 // diffusers 0.39, so the worker cannot build it at all; it is
@@ -8129,6 +8356,10 @@ mod tests {
                 // `min_vram_gb` floor and `--accept-license
                 // minimax-h3-community`. See the entry's own comment.
                 "minimax-h3",
+                // Text-to-music, and the first audio entry here. Listed but
+                // not yet verified to run: see the entry for what was and
+                // was not checked.
+                "minimax-music3",
                 "qwen-image",
                 "qwen-image-edit",
                 "qwen-image-flash",

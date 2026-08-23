@@ -179,3 +179,14 @@ pub enum ModelError {
     #[error("{0}")]
     Other(String),
 }
+
+/// The engine's errors, in this crate's taxonomy.
+///
+/// praecise owns inference; tenzro-model consumes it. This is the seam, and it
+/// is deliberately the *only* thing tenzro-model needs in order to stop
+/// carrying its own copy of the batching engine.
+impl From<praecise_runtime::Error> for ModelError {
+    fn from(e: praecise_runtime::Error) -> Self {
+        ModelError::Other(e.to_string())
+    }
+}

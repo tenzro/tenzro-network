@@ -19,7 +19,7 @@
 //!
 //! The TDIP identity record carries an Ed25519 public key, but that is the
 //! identity-signing key — NOT the libp2p p2p key. The libp2p `Keypair` is
-//! generated independently by `tenzro_network::service::load_or_generate_keypair`
+//! generated independently by `tenzro_network::service::node_identity_keypair`
 //! and persisted under the node's data directory; nothing in the workspace
 //! today binds the two by construction (a deliberate choice — rotating one
 //! must not rotate the other). So the `MpcDidResolver` cannot derive a

@@ -268,11 +268,34 @@ async fn authorize_db(
         )
     })?;
     let desc = registry.get_database(database_id).map_err(|_| {
-        error_response(
-            StatusCode::NOT_FOUND,
-            "no_such_database",
-            &format!("No database '{database_id}'."),
-        )
+        // Whether this database exists is itself privileged. Returning 404
+        // here to anyone who asks, while an existing database answers 401,
+        // lets an unauthenticated caller enumerate the node's databases by
+        // status code alone.
+        //
+        // The lookup cannot move below authorization — that needs
+        // `desc.access`, this database's own policy — so the distinction is
+        // withheld instead. A caller holding a key with the Database scope
+        // has already earned a truthful answer and still gets 404. Everyone
+        // else gets the same 401 they would get for a database that does
+        // exist.
+        let holds_scoped_key = presented_key(headers)
+            .and_then(|k| node.api_key_manager().and_then(|m| m.lookup(&k)))
+            .is_some_and(|record| record.has_scope(ApiKeyScope::Database));
+
+        if holds_scoped_key {
+            error_response(
+                StatusCode::NOT_FOUND,
+                "no_such_database",
+                &format!("No database '{database_id}'."),
+            )
+        } else {
+            error_response(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "This route needs an API key carrying the `database` scope.",
+            )
+        }
     })?;
 
     match authorize_resource(node, headers, peer, desc.access, ApiKeyScope::Database).await? {

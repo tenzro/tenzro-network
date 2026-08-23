@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 /// Global singleton for the llama.cpp backend — can only be initialized once per process.
 static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 
-use crate::batching::{BatchEngine, BatchPrompt, BatchRequest};
+use praecise_runtime::batching::{BatchEngine, BatchPrompt, BatchRequest};
 use crate::catalog::{MtpKind, get_model_by_id};
 use crate::error::{ModelError, Result};
 use crate::external_engine::ExternalEngine;
@@ -221,6 +221,41 @@ fn build_sampler_chain_with_grammar(
 /// Byte length of the longest stop sequence that `text` ends with, or `None`
 /// when no stop sequence matched. The caller truncates by that many bytes so
 /// the delimiter never reaches the client.
+/*
+ * Chat-template terminators never belong in user-visible content.
+ *
+ * Generation stops on an EOG token or on a matched stop STRING. A terminator that is neither --
+ * `<|im_end|>` on the gemma4 GGUFs is one -- falls between both guards and renders into the reply.
+ * Measured on gemma4-e2b: `4<|im_end|>` where every other model answered `4`.
+ *
+ * These are template markers, not content. No legitimate reply contains them, so adding them to
+ * every request's stop set cannot remove anything a caller wanted. They are ADDED to the caller's
+ * own stops, never replacing them.
+ *
+ * This lives at the point where the StopStream is built rather than at any one entry point:
+ * `generate_sync_streaming` has eight callers, and an earlier attempt that patched only the
+ * batched path left the node's own chat-completion path -- the one `tenzro chat` actually uses --
+ * still leaking the terminator.
+ */
+const TEMPLATE_TERMINATORS: &[&str] = &[
+    "<|im_end|>",
+    "<end_of_turn>",
+    "<|eot_id|>",
+    "<|end|>",
+    "<|endoftext|>",
+];
+
+/// The caller's stop strings plus the template terminators above, deduplicated.
+fn stops_with_terminators(stop: &[String]) -> Vec<String> {
+    let mut out = stop.to_vec();
+    for t in TEMPLATE_TERMINATORS {
+        if !out.iter().any(|s| s == t) {
+            out.push((*t).to_string());
+        }
+    }
+    out
+}
+
 fn matched_stop_len(text: &str, stop: &[String]) -> Option<usize> {
     stop.iter()
         .filter(|s| !s.is_empty() && text.ends_with(s.as_str()))
@@ -527,6 +562,38 @@ struct LoadedModel {
     inline_mtp_spec_type: Option<i32>,
 }
 
+/// Whether to memory-map model weights at load.
+///
+/// Off by default on unified-memory machines. On a discrete-GPU box mmap lets
+/// the loader page weights straight from the file into GPU memory, which is
+/// why llama.cpp defaults it on. On the DGX Spark's GB10 there is no such
+/// transfer — CPU and GPU share one LPDDR5x pool — and mapping the file adds a
+/// page-fault path over memory the GPU is going to read directly. Reported by
+/// NVIDIA's own DGX Spark guidance and the HuggingFace community as a real
+/// regression rather than a wash.
+///
+/// `TENZRO_USE_MMAP=1` forces it back on, so the effect can be measured on a
+/// given machine instead of assumed.
+fn use_mmap_for_weights() -> bool {
+    match std::env::var("TENZRO_USE_MMAP").ok().as_deref() {
+        Some("1") | Some("true") => true,
+        Some(_) => false,
+        // Unified memory means the GPU reads the same pages the loader wrote;
+        // there is nothing for the mapping to save.
+        None => !is_unified_memory(),
+    }
+}
+
+/// Whether the GPU shares its memory with the host.
+///
+/// Detected from the backend's device list rather than a model name, so a
+/// Spark, a Jetson and an integrated GPU all take the same path.
+fn is_unified_memory() -> bool {
+    llama_cpp_2::list_llama_ggml_backend_devices()
+        .iter()
+        .any(|d| matches!(d.device_type, llama_cpp_2::LlamaBackendDeviceType::IntegratedGpu))
+}
+
 /// Speculative type for a model whose MTP head is inline (trained into its own
 /// GGUF), or `None` when it has a separate drafter or no MTP. `0` = draft-mtp,
 /// `1` = draft-dflash, matching [`LoadedDrafter::spec_type`].
@@ -717,6 +784,29 @@ impl ModelRuntime {
             hardware.cpu_arch,
             hardware.compiled_backends.join(", "),
         );
+
+        /*
+         * A GPU we found and cannot use is worth more than one INFO line.
+         *
+         * This is the state a node lands in when it was built without an accelerator feature on a
+         * machine that has an accelerator: `has_gpu` is true, the backend list is CPU-only, and
+         * every layer is then assigned to the CPU. Nothing downstream reports it. The model loads,
+         * RPC answers, `tenzro model serve` succeeds, capacity is advertised, and inference is
+         * simply slow — with nothing anywhere connecting that to a missing backend.
+         *
+         * It is not an error, because a CPU-only node on a GPU box is a legitimate thing to run
+         * deliberately. It is a warning that names the fix, because the alternative is an operator
+         * discovering it from a throughput number weeks later.
+         */
+        if has_gpu && !hardware.compiled_backends.iter().any(|b| b != "cpu") {
+            warn!(
+                "GPU DETECTED BUT NOT USABLE — this binary was compiled with CPU support only, so \
+                 every layer will run on the CPU. Rebuild with an accelerator feature, e.g. \
+                 `cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/cuda`. \
+                 Do NOT set CMAKE_CUDA_ARCHITECTURES or CUDAARCHS: ggml selects the architecture \
+                 list itself, and setting one silently produces this exact CPU-only build.",
+            );
+        }
 
         Self {
             loaded_models: Arc::new(DashMap::new()),
@@ -926,6 +1016,117 @@ impl ModelRuntime {
             .ok()
     }
 
+    /// The longest context whose KV cache still fits the GPU this node actually has.
+    ///
+    /// `operator_context_cap` above documents the failure: a 131072-token catalog entry asks for a
+    /// KV cache larger than a consumer card's whole VRAM, and the load dies on device allocation.
+    /// It said "unset means trust the catalog", and trusting it is exactly what fails. Measured
+    /// here: a 2.49 GB phi4-mini declaring 128000 tokens asked for a **16 GiB** KV cache on a
+    /// 16 GiB card and refused to serve, while its weights would have fitted six times over.
+    ///
+    /// A shorter window is what the operator wanted in every such case: a model serving 8k of
+    /// context is useful, one that will not load is not. The operator cap still wins when set;
+    /// this only replaces "trust the catalog" with "trust the card".
+    ///
+    /// The estimate is deliberately an UPPER bound on bytes-per-token — two caches, every layer,
+    /// full embedding width, 2 bytes per element. Grouped-query attention makes the real figure
+    /// smaller, so erring here costs context and never a failed load. `None` when no VRAM was
+    /// detected, leaving unified-memory and CPU-only hosts exactly as they were.
+    fn vram_context_cap(n_layer: u32, n_embd: u32) -> Option<u32> {
+        let hw = Self::local_hardware();
+        if !hw.detected
+            || hw.vram_gb == 0
+            || hw.interconnect == tenzro_types::Interconnect::UnifiedMemory
+        {
+            return None;
+        }
+        let bytes_per_token =
+            2u64 * u64::from(n_layer) * u64::from(n_embd) * Self::kv_bytes_per_element();
+        if bytes_per_token == 0 {
+            return None;
+        }
+        // Weights, activations and compute buffers share the card, so the KV cache gets a share
+        // rather than the lot. A third leaves room for a model roughly its own size beside it.
+        let kv_budget = (u64::from(hw.vram_gb) * 1_073_741_824) / 3;
+        let cap = (kv_budget / bytes_per_token).min(u64::from(u32::MAX)) as u32;
+        Some(cap.max(2048))
+    }
+
+    /// KV cache element type, from `TENZRO_KV_CACHE_TYPE`. Defaults to `q8_0`.
+    ///
+    /// The KV cache is stored at f16 unless told otherwise, and on a consumer card it is the
+    /// allocation that decides whether a long-context model serves at all: a 2.49 GB phi4-mini
+    /// declaring 128000 tokens asked for a 16 GiB cache on a 16 GiB card and failed to load.
+    /// `q8_0` halves that for, in llama.cpp's own perplexity numbers, a change in the fifth
+    /// decimal place — 5.96000 to 5.96004 on a 7B. Practically lossless, and it doubles the
+    /// context that fits.
+    ///
+    /// `q4_0` is offered and NOT the default. The cost is asymmetric — roughly 0.4% perplexity on
+    /// the K cache against ~1.4% on V — so an operator who wants it should choose it knowingly
+    /// rather than inherit it.
+    ///
+    /// K and V are set to the SAME type deliberately. Mismatched types miss the fused
+    /// flash-attention kernel, and a quantized cache without that kernel is dequantized on every
+    /// attention step, which is slower than not quantizing at all.
+    fn kv_cache_type() -> llama_cpp_2::context::params::KvCacheType {
+        use llama_cpp_2::context::params::KvCacheType;
+        match std::env::var("TENZRO_KV_CACHE_TYPE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "f16" | "fp16" => KvCacheType::F16,
+            "bf16" => KvCacheType::BF16,
+            "q4_0" | "q4" => KvCacheType::Q4_0,
+            // Unset or unrecognised: the lossless-in-practice default.
+            _ => KvCacheType::Q8_0,
+        }
+    }
+
+    /// Bytes per token of KV cache for the configured cache type.
+    ///
+    /// Used by [`vram_context_cap`] so the context ceiling reflects the cache actually being
+    /// allocated. Quantizing without telling the ceiling about it would leave the node serving a
+    /// context half as long as it could.
+    fn kv_bytes_per_element() -> u64 {
+        use llama_cpp_2::context::params::KvCacheType;
+        match Self::kv_cache_type() {
+            KvCacheType::F16 | KvCacheType::BF16 => 2,
+            KvCacheType::Q8_0 => 1,
+            // q4_0 is 4 bits plus a per-block scale; 1 byte per element is the safe over-estimate.
+            _ => 1,
+        }
+    }
+
+    /// Context params with the KV cache and attention kernel this host should actually use.
+    ///
+    /// Every context was built as `LlamaContextParams::default().with_n_ctx(..)`, which leaves the
+    /// KV cache at f16 and the attention policy at llama.cpp's default. On a consumer card the KV
+    /// cache is what decides whether a long-context model serves at all, and f16 is twice the size
+    /// it needs to be for, in llama.cpp's published perplexity numbers, a difference in the fifth
+    /// decimal place.
+    ///
+    /// Flash attention is requested EXPLICITLY whenever the cache is quantized, not left on `auto`.
+    /// Without the fused kernel a quantized cache is dequantized on every attention step, which is
+    /// slower than never quantizing — so the two settings are chosen together or not at all. K and
+    /// V take the same type for the same reason: mismatched types miss the fused path.
+    fn tuned_context_params(n_ctx: u32) -> LlamaContextParams {
+        use llama_cpp_2::context::params::KvCacheType;
+        let kv = Self::kv_cache_type();
+        let quantized = !matches!(kv, KvCacheType::F16 | KvCacheType::BF16);
+        let policy = if quantized {
+            llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED
+        } else {
+            llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO
+        };
+        LlamaContextParams::default()
+            .with_n_ctx(std::num::NonZeroU32::new(n_ctx))
+            .with_type_k(kv)
+            .with_type_v(kv)
+            .with_flash_attention_policy(policy)
+    }
+
     /// Number of transformer layers to offload to the GPU for a model of
     /// the given on-disk size.
     ///
@@ -943,6 +1144,21 @@ impl ModelRuntime {
     ///   layers that fit ride the GPU and the remainder stays in system RAM
     ///   instead of the load failing on device allocation.
     fn gpu_layer_budget(gguf_path: &Path, file_len: u64) -> u32 {
+        // Operator escape hatch, because the headroom below is sized for a
+        // full-context KV cache and an operator who has capped the context
+        // knows better. Measured: qwen3.8-27b UD-Q3_K_XL (12.52 GiB) on a 16 GB
+        // RTX 5070 Ti with TENZRO_MAX_CONTEXT=4096 allocates a 16 MiB KV cache,
+        // yet 12.52 x 1.29 = 16.15 GiB "needed" beat the 15 GiB detected VRAM
+        // and stranded 5 of 66 layers (1401 MiB) in system RAM. Every token then
+        // crossed the CPU boundary and decode fell to 10.3 tok/s — slower than
+        // the same model on a GB10 at NVFP4 (19.4 tok/s) despite the card having
+        // 3.3x the memory bandwidth. Set TENZRO_GPU_LAYERS=1000 to force full
+        // offload; the load still fails loudly on device allocation if it truly
+        // does not fit, which is the honest failure mode.
+        if let Ok(v) = std::env::var("TENZRO_GPU_LAYERS")
+            && let Ok(n) = v.trim().parse::<u32>() {
+                return n;
+            }
         let hw = Self::local_hardware();
         if !hw.detected || hw.interconnect == tenzro_types::Interconnect::UnifiedMemory {
             return 1000;
@@ -1054,6 +1270,7 @@ impl ModelRuntime {
             // carry a head the model will not use.
             let model_params = LlamaModelParams::default()
                 .with_n_gpu_layers(n_gpu_layers)
+                .with_use_mmap(use_mmap_for_weights())
                 .with_load_mtp(inline_mtp_spec_type(&model_id_owned).is_some());
 
             let model = LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params)
@@ -1073,8 +1290,26 @@ impl ModelRuntime {
                 Some(requested) => trained_ctx.min(requested).min(MAX_CONTEXT_LENGTH),
                 None => trained_ctx.min(DEFAULT_CONTEXT_LENGTH),
             };
-            let effective_ctx = Self::operator_context_cap()
-                .map_or(effective_ctx, |cap| effective_ctx.min(cap.max(1)));
+            // The operator ceiling wins outright. With none set, the CARD's ceiling applies:
+            // "trust the catalog" is what turned a servable model into a failed allocation.
+            let effective_ctx = match Self::operator_context_cap() {
+                Some(cap) => effective_ctx.min(cap.max(1)),
+                None => {
+                    let vram_cap =
+                        Self::vram_context_cap(model.n_layer() as u32, model.n_embd() as u32);
+                    match vram_cap {
+                        Some(cap) if cap < effective_ctx => {
+                            warn!(
+                                "{}: context reduced {} -> {} so the KV cache fits detected VRAM. \
+                                 Set TENZRO_MAX_CONTEXT to choose this yourself.",
+                                model_id_owned, effective_ctx, cap
+                            );
+                            cap
+                        }
+                        _ => effective_ctx,
+                    }
+                }
+            };
 
             info!(
                 "Model {} loaded: {} params, {} layers, trained_context={}, effective_context={}",
@@ -1128,7 +1363,45 @@ impl ModelRuntime {
                 context_length,
                 ..
             } = loaded;
-            let engine = BatchEngine::spawn(model_id.to_string(), model, backend, context_length)?;
+            // Policy is decided here and handed to the engine, rather than the
+            // engine reaching back into the catalog. Resolved once per load: it
+            // is a function of the model id, so a per-request lookup only
+            // repeated the same answer.
+            /*
+         * Resolved once per load, with NO budget — and that is a real gap, not a shortcut.
+         *
+         * `resolve_enable_thinking` takes a token budget precisely because a capable reasoner given
+         * too small a `max_tokens` spends the whole allowance inside `<think>` and returns empty
+         * content. The other three call sites pass `Some(config.max_tokens)`. This one cannot: the
+         * batch engine renders the chat template once at load and shares it across every request in
+         * the batch, so there is no single request budget to consult here.
+         *
+         * The size half of the gate still applies. The budget half cannot, so when thinking ends up
+         * ON for a batched model the operator is told once, at load, rather than discovering it
+         * from empty replies under a small `max_tokens`.
+         */
+        let enable_thinking = crate::catalog::resolve_enable_thinking(model_id, None);
+        if enable_thinking {
+            let min = get_model_by_id(model_id)
+                .map(|e| e.reasoning.thinking_min_budget_tokens)
+                .unwrap_or(0);
+            if min > 0 {
+                warn!(
+                    "{model_id} is served through the batch engine with thinking ON. The \
+                     per-request budget gate cannot apply on this path, so a request with \
+                     max_tokens below {min} may spend its whole allowance inside <think> and \
+                     return empty content. Set TENZRO_NOTHINK_MODELS={model_id} to force the \
+                     non-thinking path, or raise max_tokens above {min}."
+                );
+            }
+        }
+            let engine = BatchEngine::spawn(
+                model_id.to_string(),
+                model,
+                backend,
+                context_length,
+                enable_thinking,
+            )?;
             LoadedEntry::Batched(engine)
         };
 
@@ -1196,6 +1469,7 @@ impl ModelRuntime {
         let loaded = tokio::task::spawn_blocking(move || {
             let model_params = LlamaModelParams::default()
                 .with_n_gpu_layers(1000)
+                .with_use_mmap(use_mmap_for_weights())
                 .with_load_mtp(inline_mtp_spec_type(&model_id_owned).is_some())
                 .with_split_mode(LlamaSplitMode::Layer)
                 .with_devices(&device_indices)
@@ -1579,6 +1853,89 @@ impl ModelRuntime {
         self.loaded_drafters.contains_key(target_model_id)
     }
 
+    /// Whether `model_id` can be decoded speculatively on this node — either
+    /// from a separately-loaded drafter or from an MTP head inside its own
+    /// GGUF.
+    ///
+    /// Both arms matter. `loaded_drafters` alone is unsound in *both*
+    /// directions: an inline-MTP model speculates without ever appearing there
+    /// (so testing the map alone reports a false negative and the node is
+    /// filtered out of speculative routing forever), while a drafter loaded
+    /// for one model says nothing about a different one.
+    pub fn can_speculate(&self, model_id: &str) -> bool {
+        self.loaded_drafters.contains_key(model_id) || inline_mtp_spec_type(model_id).is_some()
+    }
+
+    /// Whether *any* of `model_ids` can be decoded speculatively here.
+    ///
+    /// The provider announcement carries a single node-wide `mtp_enabled`, so
+    /// this is the value it must report — but it has to be computed over the
+    /// models actually being announced, not over every drafter in memory.
+    /// `mtp_enabled` is a **hard filter** on the consumer side
+    /// ([`crate::routing::InferenceRouter::select_provider`] retains only
+    /// MTP-capable providers when a caller asks for speculation), and the
+    /// serving side answers a request for a non-speculative model with a hard
+    /// `MtpUnavailable` error — so advertising node-wide capability that a
+    /// given model cannot honour converts a routing preference into a failed
+    /// request.
+    ///
+    /// Read live on each announcement tick (like the warm-prefix summary)
+    /// rather than captured at startup: drafters load asynchronously after
+    /// their GGUF downloads, so a boot snapshot advertises `false` forever and
+    /// the speculative path stays unreachable network-wide.
+    pub fn any_can_speculate(&self, model_ids: &[String]) -> bool {
+        model_ids.iter().any(|m| self.can_speculate(m))
+    }
+
+    /// Observed serving state of the external engines backing `model_ids`,
+    /// scraped from their Prometheus endpoints.
+    ///
+    /// This is the only way the node learns what an external engine is doing.
+    /// `generate_chat` and `generate_chat_stream` hand the request straight to
+    /// the engine and return *before* `acquire_inflight`, so `LoadTracker`
+    /// counts nothing for these models — the node cannot otherwise tell a
+    /// saturated engine from an idle one.
+    ///
+    /// Returns `None` when no announced model is served by an external engine,
+    /// or when every scrape failed. `None` means **unknown**, never a
+    /// synthesised zero: zero in-flight requests is the most attractive value
+    /// a provider can publish, so a failed scrape must not fabricate it.
+    pub async fn observed_engine_metrics(
+        &self,
+        model_ids: &[String],
+    ) -> Option<crate::external_engine::EngineMetrics> {
+        // One endpoint commonly serves several announced models, and its
+        // counters are endpoint-wide. Scraping once per model would multiply
+        // the load the node reports by the number of models sharing it, so
+        // deduplicate by base URL before scraping.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let engines: Vec<_> = model_ids
+            .iter()
+            .filter_map(|m| self.external_engines.get(m).map(|e| e.value().clone()))
+            .filter(|e| seen.insert(e.base_url().to_string()))
+            .collect();
+        if engines.is_empty() {
+            return None;
+        }
+        let mut acc: Option<crate::external_engine::EngineMetrics> = None;
+        for engine in engines {
+            if let Some(m) = engine.scrape_metrics().await {
+                acc = Some(match acc {
+                    None => m,
+                    Some(a) => crate::external_engine::EngineMetrics {
+                        running: a.running.saturating_add(m.running),
+                        waiting: a.waiting.saturating_add(m.waiting),
+                        prefix_cache_queries: a
+                            .prefix_cache_queries
+                            .saturating_add(m.prefix_cache_queries),
+                        prefix_cache_hits: a.prefix_cache_hits.saturating_add(m.prefix_cache_hits),
+                    },
+                });
+            }
+        }
+        acc
+    }
+
     /// Re-execute a committed inference as a single prefill and compare
     /// the recomputed logits against the commitment (TOPLOC check).
     ///
@@ -1665,7 +2022,7 @@ impl ModelRuntime {
             )));
         }
 
-        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+        let ctx_params = Self::tuned_context_params(n_ctx.get());
         let mut ctx = loaded
             .model
             .new_context(&loaded.backend, ctx_params)
@@ -1741,6 +2098,7 @@ impl ModelRuntime {
         result_rx
             .await
             .map_err(|_| ModelError::Other("batch engine dropped the request".into()))?
+            .map_err(ModelError::from)
     }
 
     /// Generate text from a raw prompt string.
@@ -1762,6 +2120,7 @@ impl ModelRuntime {
             let messages = [ChatMessage {
                 role: "user".to_string(),
                 content: prompt.to_string(),
+                ..Default::default()
             }];
             return engine.chat(&messages, config).await;
         }
@@ -1973,10 +2332,37 @@ impl ModelRuntime {
         // same format (`parsed`). Every other backend keeps the preamble path
         // and leaves `parsed` `None`, so their replies go through the
         // home-grown parsers below unchanged.
+        // Tool calls the engine itself parsed, when it did. Kept beside
+        // `parsed` rather than folded into it: `parsed` names a *format* to
+        // re-read the text with, whereas these are already structured and want
+        // no re-reading at all.
+        let mut engine_calls: Vec<ToolCall> = Vec::new();
         let (inner, parsed): (InferenceResult, Option<String>) = if let Some(engine) = external {
-            // A remote engine is given the tool schemas over its own wire
-            // format; the preamble is all this side controls.
-            (engine.chat(&preamble_messages(), &config).await?, None)
+            // Hand the remote engine the schemas and let its own tool parser do
+            // the extraction. Sending only the preamble left it free-writing
+            // calls into prose for the parsers below to recover, which fails
+            // often enough at ordinary temperatures to stall an agent loop.
+            //
+            // An engine started without a tool parser returns none, and this
+            // falls through to exactly the previous behaviour.
+            // The prose preamble is deliberately NOT injected here. Sending
+            // both it and the native `tools` array put every schema in the
+            // request twice, in two dialects that disagree: the preamble
+            // teaches `{"name": ..., "input": {...}}` while the engine's own
+            // chat template renders the Qwen/Hermes form, which keys arguments
+            // as `arguments`. A model that followed our preamble emitted a
+            // `<tool_call>` block the engine's parser could match but not
+            // read, so it returned no structured calls and the turn fell back
+            // to prose parsing — the native path buying nothing on exactly the
+            // turns it was added for. Worse, a parser that defaults a missing
+            // key rather than raising produced a correctly-named call with
+            // every argument silently dropped.
+            //
+            // The engine's template is the authority on its own model's
+            // format, so it gets the schemas and nothing else does.
+            let (res, calls) = engine.chat_with_tools(&messages, &tools, &config).await?;
+            engine_calls = calls;
+            (res, None)
         } else {
             match entry
                 .as_ref()
@@ -2086,14 +2472,32 @@ impl ModelRuntime {
         // each `to=<tool>` segment becomes a real tool call with parsed args —
         // instead of leaking the whole marker string through as content. Every
         // other model stays on the path below, unchanged.
-        let (clean_text, thinking, tool_calls) = if crate::muse_harmony::is_muse_harmony_model(
+        let (clean_text, thinking, tool_calls) = if !engine_calls.is_empty()
+            && !crate::muse_harmony::is_muse_harmony_model(model_id)
+        {
+            // The engine parsed the calls itself, using a parser written for
+            // this model's own format, so the branches below have nothing left
+            // to work out — with one exception, which is why this arm is
+            // guarded.
+            //
+            // A harmony-format model keys on `model_id`, not on backend, so
+            // nothing stops one being registered behind vLLM. Its output
+            // carries `<|start|>assistant to=user<|message|>` segments that a
+            // generic tool parser does not strip, and taking this arm would
+            // leak those markers into `text` and put its `to=self` reasoning
+            // in `content` instead of `thinking`. The harmony parser runs
+            // instead and recovers the calls itself.
+            (
+                inner.text.clone(),
+                inner.thinking.clone(),
+                std::mem::take(&mut engine_calls),
+            )
+        } else if crate::muse_harmony::is_muse_harmony_model(
             model_id,
         ) {
-            let mp = crate::muse_harmony::parse_muse_harmony(&inner.text);
             // Keep a reasoning span the StopStream may already have classified;
             // otherwise take the parser's collapsed `to=self` thinking.
-            let thinking = inner.thinking.clone().or(mp.thinking);
-            (mp.content, thinking, mp.tool_calls)
+            parse_muse_reply(&inner.text, inner.thinking.clone())
         } else {
             // Prefer the format-matched oaicompat parse when the native path ran
             // and its JSON is readable; otherwise fall back to the home-grown
@@ -2104,8 +2508,35 @@ impl ModelRuntime {
                     // `StopStream` may already have classified a reasoning span
                     // for a `<think>` model; keep it, else take the format
                     // parser's `reasoning_content`.
-                    let thinking = inner.thinking.clone().or(reasoning);
-                    (content, thinking, calls)
+                    // Empty is absent. A classifier that ran but found nothing
+                    // yields `Some("")`, which would satisfy the match below and
+                    // leave an inline `<think>` in the content untouched.
+                    let thinking = inner
+                        .thinking
+                        .clone()
+                        .or(reasoning)
+                        .filter(|t| !t.trim().is_empty());
+                    // ...and if neither produced one, the content may still
+                    // carry the block inline. Measured on qwen3.8-27b asked to
+                    // call a tool: `content` came back as the bare, unclosed
+                    // string "<think>\n\n\n" with no `reasoning_content`,
+                    // because the model opened the block and went straight to
+                    // the tool call. This branch returned it verbatim, so the
+                    // tag leaked into the answer and the turn produced no
+                    // thinking block at all — the client had nothing to show.
+                    // `split_reasoning` already handles the unclosed case; it
+                    // simply was never reached on this path.
+                    //
+                    // The split runs either way. Keeping the classifier's
+                    // reasoning is not the same as trusting the content beside
+                    // it: measured after the first fix, a tool-calling turn
+                    // came back with a proper thinking block AND a leftover
+                    // "<think>\n\n\n" text block, because this branch
+                    // returned `content` untouched whenever thinking arrived
+                    // from somewhere else. Whichever source wins, the answer
+                    // channel must not carry the tag.
+                    let (content, split) = split_reasoning(&content);
+                    (content, thinking.or(split), calls)
                 }
                 None => {
                     // Parse tool-call markers from the raw output.
@@ -2269,12 +2700,14 @@ impl ModelRuntime {
                                 )?;
                                 let mp =
                                     crate::muse_harmony::parse_muse_harmony(&inner.text);
-                                if !mp.content.is_empty() {
+                                let content =
+                                    muse_content_or_raw(&mp.content, &inner.text).to_string();
+                                if !content.is_empty() {
                                     // Best-effort: a hung-up receiver means the
                                     // client is gone; the result still returns.
-                                    let _ = token_tx.blocking_send(mp.content.clone());
+                                    let _ = token_tx.blocking_send(content.clone());
                                 }
-                                inner.text = mp.content;
+                                inner.text = content;
                                 inner.thinking = inner.thinking.clone().or(mp.thinking);
                                 return Ok(inner);
                             }
@@ -2450,9 +2883,7 @@ impl ModelRuntime {
                     // content. Every other model stays on the generic path.
                     let (clean_text, thinking, tool_calls) =
                         if crate::muse_harmony::is_muse_harmony_model(model_id) {
-                            let mp = crate::muse_harmony::parse_muse_harmony(&inner.text);
-                            let thinking = inner.thinking.clone().or(mp.thinking);
-                            (mp.content, thinking, mp.tool_calls)
+                            parse_muse_reply(&inner.text, inner.thinking.clone())
                         } else {
                             match parsed.as_deref().and_then(parse_oaicompat_reply) {
                                 Some((content, reasoning, calls)) => {
@@ -2522,6 +2953,7 @@ impl ModelRuntime {
             let messages = [ChatMessage {
                 role: "user".to_string(),
                 content: prompt.to_string(),
+                ..Default::default()
             }];
             return engine.chat_stream(&messages, config, token_tx).await;
         }
@@ -2761,7 +3193,7 @@ impl ModelRuntime {
             .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
 
         // Create a fresh context for this generation
-        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+        let ctx_params = Self::tuned_context_params(n_ctx.get());
         let mut ctx = loaded
             .model
             .new_context(&loaded.backend, ctx_params)
@@ -2836,7 +3268,7 @@ impl ModelRuntime {
         let mut n_cur = n_past;
         let mut output_tokens: u32 = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut stream = StopStream::new(config.stop.clone());
+        let mut stream = StopStream::new(stops_with_terminators(&config.stop));
         let mut batch = LlamaBatch::new(1, 1);
 
         // Row the current step reads logits from. `None` means "not readable",
@@ -3070,7 +3502,7 @@ impl ModelRuntime {
 
         let n_ctx = NonZeroU32::new(loaded.context_length)
             .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
-        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+        let ctx_params = Self::tuned_context_params(n_ctx.get());
         let mut ctx = loaded
             .model
             .new_context(&loaded.backend, ctx_params)
@@ -3364,6 +3796,7 @@ fn inject_tools_preamble(messages: &mut Vec<ChatMessage>, tools: &[ToolDefinitio
             ChatMessage {
                 role: "system".to_string(),
                 content: preamble,
+                ..Default::default()
             },
         ),
     }
@@ -3415,6 +3848,51 @@ pub(crate) fn split_reasoning(raw: &str) -> (String, Option<String>) {
     }
 }
 
+#[cfg(test)]
+mod inline_reasoning_tests {
+    use super::split_reasoning;
+
+    /// The shape qwen3.8 actually returns when it opens a thinking block and
+    /// goes straight to a tool call: an unclosed `<think>` and nothing else.
+    /// Left unsplit it leaks the tag into the answer and yields no thinking
+    /// block, which is what a user sees as "no context".
+    #[test]
+    fn an_unclosed_think_block_is_reasoning_not_answer() {
+        let (text, thinking) = split_reasoning("<think>\n\n\n");
+        assert_eq!(text, "", "the bare tag must not survive into the answer");
+        assert_eq!(thinking, None, "whitespace-only reasoning is not a thought");
+    }
+
+    #[test]
+    fn an_unclosed_think_block_keeps_its_content() {
+        let (text, thinking) = split_reasoning("<think>weighing options");
+        assert_eq!(text, "");
+        assert_eq!(thinking.as_deref(), Some("weighing options"));
+    }
+
+    /// The residual after the first fix: reasoning arrived from the stream
+    /// classifier, so the content beside it was returned untouched — and that
+    /// content still carried the opening tag. A turn came back with a correct
+    /// thinking block *and* a "<think>" text block, measured against a live
+    /// node on 2026-08-18.
+    #[test]
+    fn a_classified_reasoning_span_still_strips_the_tag_from_the_answer() {
+        // What the classifier produced, and what came back beside it.
+        let classified = Some("weighing the options".to_string());
+        let (text, split) = split_reasoning("<think>\n\n\n");
+        let thinking = classified.or(split);
+        assert_eq!(text, "", "the answer channel must not carry the tag");
+        assert_eq!(thinking.as_deref(), Some("weighing the options"));
+    }
+
+    #[test]
+    fn a_well_formed_block_splits_both_ways() {
+        let (text, thinking) = split_reasoning("<think>hmm</think>the answer");
+        assert_eq!(text, "the answer");
+        assert_eq!(thinking.as_deref(), Some("hmm"));
+    }
+}
+
 fn non_empty(s: String) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
@@ -3430,6 +3908,66 @@ fn non_empty(s: String) -> Option<String> {
 /// - `[TOOL_CALLS] [{json}, ...]` — Mistral/Mixtral function-calling
 /// - Bare top-level JSON object with `{"name":..., "input":...}` — fallback
 ///   (only consumed if it spans the entire trimmed output).
+///
+/// Parse a muse-glimmer reply: harmony first, then the dialects every other
+/// model uses.
+///
+/// muse emits the harmony/onyx channel format unprompted, so that is tried
+/// first. But it has no trained tool dialect of its own, and from the second
+/// turn of an agent run onward its context contains its OWN previous calls
+/// rendered back as `<tool_use …>` — so it copies that instead. The harmony
+/// parser finds no segments, returns the whole thing as content, and the call
+/// reaches the caller as prose: the run stops mid-loop while reporting success,
+/// which is what capped muse agent runs at two steps.
+///
+/// `extract_tool_calls` already reads that dialect for every other model. The
+/// gap was only that this path never reached it.
+/// Which text to trust after a harmony parse: harmony's content when it produced
+/// any, otherwise the raw reply.
+///
+/// `parse_muse_harmony` returns EMPTY content for a reply that carries no
+/// harmony markers. Taking that at face value hands the caller a blank answer —
+/// a failed request from where they sit, with no error to explain it.
+fn muse_content_or_raw<'a>(parsed: &'a str, raw: &'a str) -> &'a str {
+    if parsed.trim().is_empty() {
+        raw
+    } else {
+        parsed
+    }
+}
+
+fn parse_muse_reply(
+    raw: &str,
+    prior_thinking: Option<String>,
+) -> (String, Option<String>, Vec<ToolCall>) {
+    let mp = crate::muse_harmony::parse_muse_harmony(raw);
+    let thinking = prior_thinking.or(mp.thinking);
+    if !mp.tool_calls.is_empty() {
+        return (mp.content, thinking, mp.tool_calls);
+    }
+    // Harmony parsed no call. It also yields EMPTY content for a reply carrying
+    // no harmony markers at all — so reading its output here would discard the
+    // whole turn, tool call or not, and hand the caller a blank answer. Fall
+    // back to the raw text in that case, and only then to what harmony left.
+    let source = muse_content_or_raw(&mp.content, raw);
+
+    // muse also emits its ATEM markup bare, with no harmony header, in which
+    // case the tool name sits in the `invoke` tag rather than a `to=` segment.
+    //
+    // Read this from the RAW reply, not from what harmony left: harmony strips
+    // the `<atem:…>` OPENING tags as markers on its way through, so its output
+    // carries only the closers. The name lives in the opening tag, so parsing
+    // that residue finds nothing and the call is lost — which is exactly how
+    // the loop kept ending a step early with `</atem:invoke>` as its text.
+    let (clean, calls) = crate::muse_harmony::parse_bare_atem(raw);
+    if !calls.is_empty() {
+        return (clean, thinking, calls);
+    }
+
+    let (clean, calls) = extract_tool_calls(source);
+    (clean, thinking, calls)
+}
+
 pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
     let mut calls: Vec<ToolCall> = Vec::new();
     let mut text = raw.to_string();
@@ -4045,6 +4583,96 @@ fn find_balanced_close(text: &str, start: usize, open: char, close: char) -> Opt
 mod tests {
     use super::*;
 
+    /// muse-glimmer has no trained tool dialect, so from the second turn of an
+    /// agent run it copies the `<tool_use …>` form its own history shows it.
+    /// Harmony parsing finds nothing there; without a fallback the call came
+    /// back as prose and the run stopped mid-loop while reporting success.
+    #[test]
+    fn muse_falls_back_to_the_shared_dialect_when_harmony_finds_nothing() {
+        let raw = r#"<tool_use id="toolu_a1" name="list_dir">{"path":"./src"}</tool_use>"#;
+        let (text, _thinking, calls) = parse_muse_reply(raw, None);
+        assert_eq!(calls.len(), 1, "the loop must not stall on a readable call");
+        assert_eq!(calls[0].name, "list_dir");
+        assert_eq!(calls[0].input["path"], "./src");
+        assert!(!text.contains("tool_use"), "the marker must not leak as content");
+    }
+
+    /// The fallback must not cost muse its native format when it does use it.
+    /// A muse reply with no harmony markers must still reach the user. Handing
+    /// back harmony's empty content is a blank answer with no error attached,
+    /// which is a failed request from where the user sits.
+    #[test]
+    fn a_muse_reply_without_harmony_markers_is_not_blanked() {
+        let raw = "Plain answer with no channel markers at all.";
+        assert_eq!(muse_content_or_raw("", raw), raw);
+        assert_eq!(muse_content_or_raw("   ", raw), raw);
+        assert_eq!(muse_content_or_raw("parsed", raw), "parsed");
+
+        let (text, _thinking, calls) = parse_muse_reply(raw, None);
+        assert!(calls.is_empty());
+        assert!(text.contains("Plain answer"), "the turn must not be discarded");
+    }
+
+    /// Mid-loop muse emits its ATEM markup bare, with no harmony header, and
+    /// then the tool name is in the `invoke` tag. Unparsed it reached the caller
+    /// as prose and the run ended a step early while reporting success.
+    #[test]
+    fn bare_atem_markup_is_read_as_a_call() {
+        let raw = concat!(
+            "<atem:function_calls><atem:invoke name=\"list_dir\">",
+            "<atem:parameter name=\"path\">./src</atem:parameter>",
+            "</atem:invoke></atem:function_calls>"
+        );
+        let (text, _thinking, calls) = parse_muse_reply(raw, None);
+        assert_eq!(calls.len(), 1, "the loop must not stall on bare ATEM");
+        assert_eq!(calls[0].name, "list_dir");
+        assert_eq!(calls[0].input["path"], "./src");
+        assert!(!text.contains("atem:"), "markup must not surface as text");
+    }
+
+    /// The shape observed on the node: harmony consumed the opening markers and
+    /// left only closers, so parsing its output found no `invoke` tag and the
+    /// call was lost. Parsing the raw reply keeps it.
+    #[test]
+    fn bare_atem_survives_harmony_stripping_the_openers() {
+        let raw = concat!(
+            "<atem:function_calls><atem:invoke name=\"list_dir\">",
+            "<atem:parameter name=\"path\">{\"path\":\".\"}</atem:parameter>",
+            "</atem:invoke></atem:function_calls>"
+        );
+        let (text, _thinking, calls) = parse_muse_reply(raw, None);
+        assert_eq!(calls.len(), 1, "the call must survive harmony's marker strip");
+        assert_eq!(calls[0].name, "list_dir");
+        assert!(
+            !text.contains("atem:"),
+            "no ATEM residue may reach the user as text; got {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn truncated_bare_atem_invents_no_call() {
+        let raw = "<atem:function_calls><atem:invoke name=\"list_dir\"><atem:parameter";
+        let (_text, _thinking, calls) = parse_muse_reply(raw, None);
+        assert!(calls.is_empty(), "half a call is not a call");
+    }
+
+    #[test]
+    fn muse_harmony_still_wins_when_present() {
+        let raw = "to=list_dir<|message|>{\"path\":\"./src\"}<|eom|>";
+        let (_text, _thinking, calls) = parse_muse_reply(raw, None);
+        assert_eq!(calls.len(), 1, "harmony is still parsed first");
+        assert_eq!(calls[0].name, "list_dir");
+    }
+
+    /// An ordinary answer stays an ordinary answer.
+    #[test]
+    fn muse_plain_answer_yields_no_call() {
+        let (text, _thinking, calls) = parse_muse_reply("to=user<|message|>Hello there.<|eot|>", None);
+        assert!(calls.is_empty());
+        assert!(text.contains("Hello there."));
+    }
+
     #[test]
     fn test_generation_config_default() {
         let config = GenerationConfig::default();
@@ -4057,7 +4685,8 @@ mod tests {
         let msg = ChatMessage {
             role: "user".to_string(),
             content: "Hello".to_string(),
-        };
+                ..Default::default()
+            };
         assert_eq!(msg.role, "user");
         assert_eq!(msg.content, "Hello");
     }
@@ -4129,10 +4758,12 @@ mod tests {
             ChatMessage {
                 role: "system".to_string(),
                 content: "be terse".to_string(),
+                ..Default::default()
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: "hi".to_string(),
+                ..Default::default()
             },
         ];
         let rendered = render_chatml_prompt(&messages);

@@ -1210,7 +1210,13 @@ mod tests {
     #[tokio::test]
     async fn test_blockchain_bound_mode_surfaces_gas_fee() {
         // Attach a real TDIP registry → fee should be reported on the agent.
-        let registry = Arc::new(IdentityRegistry::new());
+        // Wire a binder explicitly. `IdentityRegistry::new()` only
+        // auto-wires one under tenzro-identity's own `cfg(test)`, which is
+        // off when that crate is built as a dependency of this one — so
+        // without this the registry refuses to provision a signable wallet.
+        let registry = Arc::new(IdentityRegistry::with_wallet_binder(Arc::new(
+            tenzro_identity::WalletBinder::new().expect("in-process wallet binder"),
+        )));
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry.clone())
@@ -1256,7 +1262,13 @@ mod tests {
     async fn test_gas_policy_pay_up_to_rejects_oversized_fee() {
         // Budget of 1 wei is far below the registry fee (5 TNZO) → must
         // reject with `InsufficientGas` and refuse to persist the agent.
-        let registry = Arc::new(IdentityRegistry::new());
+        // Wire a binder explicitly. `IdentityRegistry::new()` only
+        // auto-wires one under tenzro-identity's own `cfg(test)`, which is
+        // off when that crate is built as a dependency of this one — so
+        // without this the registry refuses to provision a signable wallet.
+        let registry = Arc::new(IdentityRegistry::with_wallet_binder(Arc::new(
+            tenzro_identity::WalletBinder::new().expect("in-process wallet binder"),
+        )));
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry)
@@ -1301,7 +1313,13 @@ mod tests {
     #[tokio::test]
     async fn test_gas_policy_pay_up_to_accepts_sufficient_budget() {
         // Generous budget (1000 TNZO) covers the 5 TNZO registration fee.
-        let registry = Arc::new(IdentityRegistry::new());
+        // Wire a binder explicitly. `IdentityRegistry::new()` only
+        // auto-wires one under tenzro-identity's own `cfg(test)`, which is
+        // off when that crate is built as a dependency of this one — so
+        // without this the registry refuses to provision a signable wallet.
+        let registry = Arc::new(IdentityRegistry::with_wallet_binder(Arc::new(
+            tenzro_identity::WalletBinder::new().expect("in-process wallet binder"),
+        )));
         let big_budget: u128 = 1_000 * 1_000_000_000_000_000_000;
         let manager = AgentIdentityManager::new()
             .unwrap()
@@ -1334,7 +1352,13 @@ mod tests {
     async fn test_per_call_gas_policy_overrides_default() {
         // Manager default = AcceptAny, but per-call PayUpTo(1) should be
         // honoured and reject the binding.
-        let registry = Arc::new(IdentityRegistry::new());
+        // Wire a binder explicitly. `IdentityRegistry::new()` only
+        // auto-wires one under tenzro-identity's own `cfg(test)`, which is
+        // off when that crate is built as a dependency of this one — so
+        // without this the registry refuses to provision a signable wallet.
+        let registry = Arc::new(IdentityRegistry::with_wallet_binder(Arc::new(
+            tenzro_identity::WalletBinder::new().expect("in-process wallet binder"),
+        )));
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry)

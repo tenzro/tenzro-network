@@ -93,6 +93,7 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_enrollTeeKey",
     "tenzro_evictMcpSubprocess",
     "tenzro_exportConfig",
+    "tenzro_faucetTransfer",
     "tenzro_forgetIdentity",
     "tenzro_forgetMcpSecret",
     "tenzro_forgetServiceKey",
@@ -170,6 +171,8 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_urwaClearKillSwitch",
     "tenzro_urwaSetFrozenTokens",
     "tenzro_urwaTriggerKillSwitch",
+    "tenzro_validatorPublicKeys",
+    "tenzro_validatorSelfStake",
     "tenzro_whitelistAddress",
 ];
 /// Methods any caller may reach without the operator admin token.
@@ -1077,6 +1080,35 @@ pub fn gate_class(method: &str) -> Option<GateClass> {
 
 #[cfg(test)]
 mod tests {
+    /// The two faucet methods spend the same account and must not share a
+    /// gate. `tenzro_faucet` is open because it is bounded by the grant size
+    /// and the cooldown; `tenzro_faucetTransfer` skips both, so the operator
+    /// token is the only thing standing between a caller and the premine.
+    #[test]
+    fn the_unbounded_faucet_method_is_admin_only() {
+        assert_eq!(
+            gate_class("tenzro_faucetTransfer"),
+            Some(GateClass::Admin),
+            "an uncapped transfer from the genesis account must require the \
+             operator token"
+        );
+        assert_eq!(gate_class("tenzro_faucet"), Some(GateClass::Open));
+        assert!(requires_admin_token("tenzro_faucetTransfer"));
+        assert!(!requires_admin_token("tenzro_faucet"));
+    }
+
+    /// Signing with the node's own sealed validator keyset is an operator
+    /// action: it spends the node's balance and moves its consensus weight.
+    /// Open would let any caller drain the validator into its own stake.
+    #[test]
+    fn signing_with_the_sealed_validator_keyset_is_admin_only() {
+        assert_eq!(
+            gate_class("tenzro_validatorSelfStake"),
+            Some(GateClass::Admin)
+        );
+        assert!(requires_admin_token("tenzro_validatorSelfStake"));
+    }
+
     #[test]
     fn the_registry_is_the_whole_method_surface() {
         // Both tables are sorted and disjoint (pinned by the tests below), so

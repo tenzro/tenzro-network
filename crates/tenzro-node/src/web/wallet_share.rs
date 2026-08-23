@@ -88,7 +88,6 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dashmap::DashMap;
-use ed25519_dalek::{Signature as EdSignature, SigningKey as EdSigningKey, Verifier, VerifyingKey};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -100,6 +99,13 @@ use super::oauth::{full_request_uri, validate_wallet_auth};
 /// Capability action enforced on every `/wallet/share/*` request.
 const REQUIRED_ACTION: &str = "wallet.share.unwrap";
 
+/// Capability required to enrol a passkey credential.
+///
+/// Distinct from the unwrap action on purpose: enrolling a credential decides
+/// *who* may later unwrap, so a token that can only unwrap must not be able to
+/// add a new key that can.
+const REGISTER_ACTION: &str = "wallet.passkey.register";
+
 /// Domain-separation tag for the deterministic AES-256-GCM wrapping
 /// key (testnet stub). Distinct from every other `tenzro/wallet/*` tag
 /// so the wrapping key cannot collide with an FROST/ML-DSA seed.
@@ -110,10 +116,6 @@ const WRAP_KEY_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/wrap-key";
 /// material itself never equals its own wrapping key.
 const SHARE_PLAINTEXT_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/plaintext";
 
-/// Domain-separation tag for the deterministic credential public key
-/// (testnet stub). Production passkey registry replaces this with a
-/// real lookup keyed by `credential_id`.
-const CREDENTIAL_KEY_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/cred-key";
 
 /// Domain-separation tag for the per-assertion pepper KDF.
 const PEPPER_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/pepper";
@@ -402,21 +404,8 @@ pub(crate) fn provisioning_salt(credential_id: &str, surface_key: &str) -> Vec<u
     derive_salt(credential_id, surface_key)
 }
 
-/// Deterministic Ed25519 verifying key for the testnet `credential_id`
-/// stub. Production swaps this for a passkey-registry lookup.
-fn derive_credential_verifying_key(credential_id: &str) -> Result<VerifyingKey, WalletApiError> {
-    let mut hasher = Sha256::new();
-    hasher.update(CREDENTIAL_KEY_DOMAIN_TAG);
-    hasher.update(credential_id.as_bytes());
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&hasher.finalize());
-    // SigningKey::from_bytes always succeeds for any 32-byte seed.
-    let signing_key = EdSigningKey::from_bytes(&seed);
-    Ok(signing_key.verifying_key())
-}
-
 // ---------------------------------------------------------------------------
-// WebAuthn-style assertion verification (testnet stub)
+// WebAuthn assertion verification
 // ---------------------------------------------------------------------------
 
 /// Minimal `clientDataJSON` shape we need to parse. The full WebAuthn
@@ -434,6 +423,7 @@ struct ClientData {
 /// nonce. On success returns the raw signature bytes (used as pepper
 /// input).
 fn verify_assertion(
+    registry: &super::passkey_registry::PasskeyRegistry,
     credential_id: &str,
     expected_nonce_b64: &str,
     assertion: &PasskeyAssertion,
@@ -485,18 +475,39 @@ fn verify_assertion(
     let cd_hash = Sha256::digest(&client_data);
     preimage.extend_from_slice(&cd_hash);
 
-    // Verify the Ed25519 signature.
-    let vk = derive_credential_verifying_key(credential_id)?;
-    let mut sig_arr = [0u8; 64];
-    sig_arr.copy_from_slice(&signature_bytes);
-    let sig = EdSignature::from_bytes(&sig_arr);
-    vk.verify(&preimage, &sig).map_err(|_| {
-        wallet_error(
-            StatusCode::UNAUTHORIZED,
-            "assertion_signature_invalid",
-            "ed25519 webauthn signature does not verify against the credential public key",
+    // Verify against the key the authenticator actually registered, and check
+    // the rest of what WebAuthn requires: the relying party the assertion was
+    // made for, the origin that asked for it, user presence and verification,
+    // and signature-counter monotonicity. Each of those is a distinct
+    // protection, and the stub this replaces performed none of them.
+    registry
+        .verify_and_bump(
+            credential_id,
+            &auth_data,
+            &client_data,
+            &preimage,
+            &signature_bytes,
         )
-    })?;
+        .map_err(|e| {
+            use super::passkey_registry::PasskeyError;
+            let (status, code) = match e {
+                PasskeyError::UnknownCredential(_) => {
+                    (StatusCode::UNAUTHORIZED, "credential_not_registered")
+                }
+                PasskeyError::RpIdMismatch { .. } => (StatusCode::UNAUTHORIZED, "rp_id_mismatch"),
+                PasskeyError::OriginMismatch { .. } => {
+                    (StatusCode::UNAUTHORIZED, "origin_mismatch")
+                }
+                PasskeyError::UserNotPresent => (StatusCode::UNAUTHORIZED, "user_not_present"),
+                PasskeyError::UserNotVerified => (StatusCode::UNAUTHORIZED, "user_not_verified"),
+                PasskeyError::CounterReplay { .. } => (StatusCode::UNAUTHORIZED, "assertion_replay"),
+                PasskeyError::BadSignature => {
+                    (StatusCode::UNAUTHORIZED, "assertion_signature_invalid")
+                }
+                _ => (StatusCode::BAD_REQUEST, "assertion_invalid"),
+            };
+            wallet_error(status, code, &e.to_string())
+        })?;
 
     Ok(signature_bytes)
 }
@@ -544,6 +555,133 @@ pub async fn envelope_handler(
 }
 
 /// `POST /wallet/share/escrow/challenge`
+/// Enrolment request for a passkey credential.
+///
+/// The public key is the one the authenticator produced at registration —
+/// taken from the WebAuthn attestation by the client. Registration is the only
+/// moment this node learns it; every later assertion is checked against what is
+/// stored here.
+#[derive(Debug, Deserialize)]
+pub struct PasskeyRegisterRequest {
+    /// Authenticator-chosen credential id, as it will appear in assertions.
+    pub credential_id: String,
+    /// Raw public key: 32 bytes for Ed25519, or the 64-byte `(x, y)` pair for
+    /// ES256. Base64url, no padding.
+    pub public_key_b64: String,
+    /// `"ed25519"` (COSE -8) or `"es256"` (COSE -7).
+    pub algorithm: String,
+    /// Relying-party id the credential was created for.
+    pub rp_id: String,
+    /// Exact origin permitted to present this credential.
+    pub origin: String,
+    /// Whether assertions must carry the User Verified flag. Defaults to true:
+    /// what this credential guards is a wallet share, so a stolen unlocked
+    /// device should not be enough.
+    #[serde(default = "default_require_uv")]
+    pub require_user_verification: bool,
+}
+
+fn default_require_uv() -> bool {
+    true
+}
+
+/// What was enrolled.
+#[derive(Debug, Serialize)]
+pub struct PasskeyRegisterResponse {
+    /// The credential id now on file.
+    pub credential_id: String,
+    /// Number of credentials this node holds.
+    pub registered_count: usize,
+}
+
+/// `POST /wallet/passkey/register` — enrol a passkey credential.
+///
+/// Without this there is no way to register a credential at all, and every
+/// unwrap would fail as unknown. It exists because verification stopped
+/// *deriving* the credential key from the credential id — a public identifier,
+/// so anyone who had seen one could reconstruct the signing half and mint
+/// assertions that verified.
+///
+/// A credential id may be enrolled once. Re-registering is refused rather than
+/// overwritten: silently replacing the key a share is escrowed against is the
+/// same attack by another route.
+pub async fn passkey_register_handler(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(body): Json<PasskeyRegisterRequest>,
+) -> Response {
+    use super::passkey_registry::{CoseAlgorithm, PasskeyCredential};
+
+    let full_uri = full_request_uri(&headers, "/wallet/passkey/register");
+    if let Err(resp) =
+        validate_wallet_auth(&state, &headers, "POST", &full_uri, REGISTER_ACTION).await
+    {
+        return resp;
+    }
+
+    let algorithm = match body.algorithm.to_ascii_lowercase().as_str() {
+        "ed25519" | "eddsa" => CoseAlgorithm::Ed25519,
+        "es256" | "p256" => CoseAlgorithm::Es256,
+        other => {
+            return wallet_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_algorithm",
+                &format!("algorithm must be ed25519 or es256, got {other}"),
+            )
+            .into_response();
+        }
+    };
+
+    let public_key = match parse_b64("public_key_b64", &body.public_key_b64) {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+
+    if body.rp_id.trim().is_empty() || body.origin.trim().is_empty() {
+        return wallet_error(
+            StatusCode::BAD_REQUEST,
+            "missing_binding",
+            "rp_id and origin are required — without them an assertion made for \
+             another site would be accepted here",
+        )
+        .into_response();
+    }
+
+    let credential = PasskeyCredential {
+        credential_id: body.credential_id.clone(),
+        public_key,
+        algorithm,
+        rp_id: body.rp_id,
+        origin: body.origin,
+        // Starts at zero: many platform authenticators never keep a counter,
+        // and a stored zero disables the replay check rather than locking the
+        // credential out. The first assertion that reports a real counter
+        // begins enforcing monotonicity.
+        sign_count: 0,
+        require_user_verification: body.require_user_verification,
+        created_at: now_ms() / 1000,
+    };
+
+    match state.passkey_registry.register(credential) {
+        Ok(()) => Json(PasskeyRegisterResponse {
+            credential_id: body.credential_id,
+            registered_count: state.passkey_registry.len(),
+        })
+        .into_response(),
+        Err(e) => {
+            use super::passkey_registry::PasskeyError;
+            let (status, code) = match e {
+                PasskeyError::DuplicateCredential(_) => {
+                    (StatusCode::CONFLICT, "credential_already_registered")
+                }
+                PasskeyError::BadKeyLength { .. } => (StatusCode::BAD_REQUEST, "bad_key_length"),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, "registration_failed"),
+            };
+            wallet_error(status, code, &e.to_string()).into_response()
+        }
+    }
+}
+
 pub async fn challenge_handler(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -618,7 +756,12 @@ pub async fn unwrap_handler(
 
     // Verify the WebAuthn assertion.
     let signature_bytes =
-        match verify_assertion(&body.credential_id, &body.nonce_b64, &body.assertion) {
+        match verify_assertion(
+            &state.passkey_registry,
+            &body.credential_id,
+            &body.nonce_b64,
+            &body.assertion,
+        ) {
             Ok(s) => s,
             Err(e) => return e.into_response(),
         };
@@ -717,46 +860,78 @@ mod tests {
         );
     }
 
-    /// Full roundtrip: deterministic credential signing key
-    /// signs a webauthn-shaped payload, the verifier accepts, and the
-    /// derived pepper is reproducible.
+    // ---- assertion verification ------------------------------------------
+
+    use ed25519_dalek::SigningKey as EdSigningKey;
+
+    const TEST_RP_ID: &str = "wallet.tenzro.xyz";
+    const TEST_ORIGIN: &str = "https://wallet.tenzro.xyz";
+
+    fn test_registry(
+        credential_id: &str,
+        sk: &EdSigningKey,
+        counter: u32,
+    ) -> super::super::passkey_registry::PasskeyRegistry {
+        use super::super::passkey_registry::{CoseAlgorithm, PasskeyCredential, PasskeyRegistry};
+        let reg = PasskeyRegistry::new();
+        reg.register(PasskeyCredential {
+            credential_id: credential_id.to_string(),
+            public_key: sk.verifying_key().as_bytes().to_vec(),
+            algorithm: CoseAlgorithm::Ed25519,
+            rp_id: TEST_RP_ID.to_string(),
+            origin: TEST_ORIGIN.to_string(),
+            sign_count: counter,
+            require_user_verification: false,
+            created_at: 1_700_000_000,
+        })
+        .expect("registering a well-formed credential");
+        reg
+    }
+
+    /// `rpIdHash(32) || flags(1) || signCount(4)`, with user presence set.
+    fn test_auth_data(rp_id: &str, counter: u32) -> Vec<u8> {
+        let mut out = Sha256::digest(rp_id.as_bytes()).to_vec();
+        out.push(0x01); // UP
+        out.extend_from_slice(&counter.to_be_bytes());
+        out
+    }
+
+    fn signed_assertion(sk: &EdSigningKey, auth_data: &[u8], cd_bytes: &[u8]) -> PasskeyAssertion {
+        use ed25519_dalek::Signer;
+        let mut preimage = Vec::with_capacity(auth_data.len() + 32);
+        preimage.extend_from_slice(auth_data);
+        preimage.extend_from_slice(&Sha256::digest(cd_bytes));
+        let sig = sk.sign(&preimage);
+        PasskeyAssertion {
+            authenticator_data_b64: URL_SAFE_NO_PAD.encode(auth_data),
+            client_data_json_b64: URL_SAFE_NO_PAD.encode(cd_bytes),
+            signature_b64: URL_SAFE_NO_PAD.encode(sig.to_bytes()),
+        }
+    }
+
+    fn client_data(challenge_b64: &str, origin: &str) -> Vec<u8> {
+        format!(
+            r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"{origin}"}}"#
+        )
+        .into_bytes()
+    }
+
+    /// Full roundtrip: a registered credential signs a webauthn-shaped payload,
+    /// the verifier accepts, and the derived pepper is reproducible.
     #[test]
     fn webauthn_roundtrip_verifies_and_derives_pepper() {
         let credential_id = "cred-passkey-X";
         let nonce_bytes = [0xABu8; 32];
         let nonce_b64 = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
-        // Build a valid clientDataJSON.
-        let cd = format!(
-            r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://wallet.tenzro.xyz"}}"#,
-            nonce_b64
-        );
-        let cd_bytes = cd.as_bytes().to_vec();
-        // Authenticator data: 37-byte minimum (rpIdHash[32] || flags[1] || counter[4]).
-        let mut auth_data = vec![0u8; 37];
-        auth_data[32] = 0x01; // UP flag
+        let sk = EdSigningKey::from_bytes(&[7u8; 32]);
+        let reg = test_registry(credential_id, &sk, 0);
 
-        // Sign as the credential's signing key.
-        let mut hasher = Sha256::new();
-        hasher.update(CREDENTIAL_KEY_DOMAIN_TAG);
-        hasher.update(credential_id.as_bytes());
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&hasher.finalize());
-        let sk = EdSigningKey::from_bytes(&seed);
+        let cd_bytes = client_data(&nonce_b64, TEST_ORIGIN);
+        let auth_data = test_auth_data(TEST_RP_ID, 1);
+        let assertion = signed_assertion(&sk, &auth_data, &cd_bytes);
 
-        let mut preimage = Vec::with_capacity(auth_data.len() + 32);
-        preimage.extend_from_slice(&auth_data);
-        preimage.extend_from_slice(&Sha256::digest(&cd_bytes));
-        use ed25519_dalek::Signer;
-        let sig = sk.sign(&preimage);
-
-        let assertion = PasskeyAssertion {
-            authenticator_data_b64: URL_SAFE_NO_PAD.encode(&auth_data),
-            client_data_json_b64: URL_SAFE_NO_PAD.encode(&cd_bytes),
-            signature_b64: URL_SAFE_NO_PAD.encode(sig.to_bytes()),
-        };
-
-        let sig_bytes = verify_assertion(credential_id, &nonce_b64, &assertion)
+        let sig_bytes = verify_assertion(&reg, credential_id, &nonce_b64, &assertion)
             .expect("valid assertion must verify");
         assert_eq!(sig_bytes.len(), 64);
 
@@ -767,87 +942,122 @@ mod tests {
         assert_eq!(p1.len(), 32);
     }
 
-    /// A clientDataJSON whose `challenge` does not match the escrowed
-    /// nonce must be rejected — without this check a replayed
-    /// assertion against a stale challenge would unwrap the share.
+    /// A clientDataJSON whose `challenge` does not match the escrowed nonce
+    /// must be rejected — without this check a replayed assertion against a
+    /// stale challenge would unwrap the share.
     #[test]
     fn challenge_mismatch_is_rejected() {
         let credential_id = "cred-passkey-X";
         let real_nonce_b64 = URL_SAFE_NO_PAD.encode([0x11u8; 32]);
         let stale_nonce_b64 = URL_SAFE_NO_PAD.encode([0x22u8; 32]);
 
-        let cd = format!(
-            r#"{{"type":"webauthn.get","challenge":"{}","origin":"x"}}"#,
-            stale_nonce_b64,
-        );
-        let cd_bytes = cd.as_bytes().to_vec();
-        let auth_data = vec![0u8; 37];
+        let sk = EdSigningKey::from_bytes(&[7u8; 32]);
+        let reg = test_registry(credential_id, &sk, 0);
 
-        // Sign with the right key but the wrong embedded challenge.
-        let mut hasher = Sha256::new();
-        hasher.update(CREDENTIAL_KEY_DOMAIN_TAG);
-        hasher.update(credential_id.as_bytes());
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&hasher.finalize());
-        let sk = EdSigningKey::from_bytes(&seed);
-        let mut preimage = Vec::with_capacity(auth_data.len() + 32);
-        preimage.extend_from_slice(&auth_data);
-        preimage.extend_from_slice(&Sha256::digest(&cd_bytes));
-        use ed25519_dalek::Signer;
-        let sig = sk.sign(&preimage);
+        // Signed correctly, but over the wrong embedded challenge.
+        let cd_bytes = client_data(&stale_nonce_b64, TEST_ORIGIN);
+        let auth_data = test_auth_data(TEST_RP_ID, 1);
+        let assertion = signed_assertion(&sk, &auth_data, &cd_bytes);
 
-        let assertion = PasskeyAssertion {
-            authenticator_data_b64: URL_SAFE_NO_PAD.encode(&auth_data),
-            client_data_json_b64: URL_SAFE_NO_PAD.encode(&cd_bytes),
-            signature_b64: URL_SAFE_NO_PAD.encode(sig.to_bytes()),
-        };
-
-        // Caller asserts the nonce is `real_nonce_b64` but the inner
-        // clientDataJSON.challenge says `stale_nonce_b64` — must be
-        // rejected.
-        let result = verify_assertion(credential_id, &real_nonce_b64, &assertion);
-        assert!(result.is_err());
+        assert!(verify_assertion(&reg, credential_id, &real_nonce_b64, &assertion).is_err());
     }
 
-    /// A signature produced by a *different* credential's key over a
-    /// genuine `(nonce, type=webauthn.get)` clientDataJSON must still
-    /// fail — the verifier is keyed on `credential_id`, not on the
-    /// embedded challenge alone.
+    /// A signature produced by a *different* credential's key over a genuine
+    /// clientDataJSON must still fail — verification is keyed on the registered
+    /// credential, not on the embedded challenge alone.
     #[test]
     fn wrong_credential_signature_is_rejected() {
         let target_cred = "cred-target";
-        let attacker_cred = "cred-attacker";
         let nonce_b64 = URL_SAFE_NO_PAD.encode([0x33u8; 32]);
 
-        let cd = format!(
-            r#"{{"type":"webauthn.get","challenge":"{}","origin":"x"}}"#,
-            nonce_b64,
-        );
-        let cd_bytes = cd.as_bytes().to_vec();
-        let auth_data = vec![0u8; 37];
+        let owner = EdSigningKey::from_bytes(&[7u8; 32]);
+        let attacker = EdSigningKey::from_bytes(&[9u8; 32]);
+        let reg = test_registry(target_cred, &owner, 0);
 
-        // Sign with the *attacker's* key.
+        let cd_bytes = client_data(&nonce_b64, TEST_ORIGIN);
+        let auth_data = test_auth_data(TEST_RP_ID, 1);
+        let assertion = signed_assertion(&attacker, &auth_data, &cd_bytes);
+
+        assert!(verify_assertion(&reg, target_cred, &nonce_b64, &assertion).is_err());
+    }
+
+    /// The hole this replaced: the verifying key used to be derived from the
+    /// credential id, which is public and echoed in every assertion. Anyone who
+    /// had seen one could reconstruct the signing half.
+    #[test]
+    fn a_key_derived_from_the_credential_id_no_longer_unwraps_a_share() {
+        let credential_id = "cred-passkey-X";
+        let nonce_b64 = URL_SAFE_NO_PAD.encode([0x44u8; 32]);
+
+        let real = EdSigningKey::from_bytes(&[7u8; 32]);
+        let reg = test_registry(credential_id, &real, 0);
+
+        // Exactly the old derivation, domain tag included verbatim, so this
+        // reproduces the historical attack rather than merely some derived key.
         let mut hasher = Sha256::new();
-        hasher.update(CREDENTIAL_KEY_DOMAIN_TAG);
-        hasher.update(attacker_cred.as_bytes());
+        hasher.update(b"tenzro/wallet/share/cred-key");
+        hasher.update(credential_id.as_bytes());
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&hasher.finalize());
-        let sk = EdSigningKey::from_bytes(&seed);
-        let mut preimage = Vec::with_capacity(auth_data.len() + 32);
-        preimage.extend_from_slice(&auth_data);
-        preimage.extend_from_slice(&Sha256::digest(&cd_bytes));
-        use ed25519_dalek::Signer;
-        let sig = sk.sign(&preimage);
+        let forged = EdSigningKey::from_bytes(&seed);
 
-        let assertion = PasskeyAssertion {
-            authenticator_data_b64: URL_SAFE_NO_PAD.encode(&auth_data),
-            client_data_json_b64: URL_SAFE_NO_PAD.encode(&cd_bytes),
-            signature_b64: URL_SAFE_NO_PAD.encode(sig.to_bytes()),
-        };
+        let cd_bytes = client_data(&nonce_b64, TEST_ORIGIN);
+        let auth_data = test_auth_data(TEST_RP_ID, 1);
+        let assertion = signed_assertion(&forged, &auth_data, &cd_bytes);
 
-        // Verify against the *target* credential — must fail.
-        let result = verify_assertion(target_cred, &nonce_b64, &assertion);
-        assert!(result.is_err());
+        assert!(
+            verify_assertion(&reg, credential_id, &nonce_b64, &assertion).is_err(),
+            "a key derived from the public credential id must not unwrap a share"
+        );
+    }
+
+    /// An unregistered credential cannot unwrap anything, however well-formed
+    /// the assertion is.
+    #[test]
+    fn an_unregistered_credential_is_rejected() {
+        let nonce_b64 = URL_SAFE_NO_PAD.encode([0x55u8; 32]);
+        let sk = EdSigningKey::from_bytes(&[7u8; 32]);
+        let reg = test_registry("cred-known", &sk, 0);
+
+        let cd_bytes = client_data(&nonce_b64, TEST_ORIGIN);
+        let auth_data = test_auth_data(TEST_RP_ID, 1);
+        let assertion = signed_assertion(&sk, &auth_data, &cd_bytes);
+
+        assert!(verify_assertion(&reg, "cred-unknown", &nonce_b64, &assertion).is_err());
+    }
+
+    /// An assertion made for another relying party must not unwrap a share here.
+    #[test]
+    fn an_assertion_for_another_relying_party_is_rejected() {
+        let credential_id = "cred-passkey-X";
+        let nonce_b64 = URL_SAFE_NO_PAD.encode([0x66u8; 32]);
+        let sk = EdSigningKey::from_bytes(&[7u8; 32]);
+        let reg = test_registry(credential_id, &sk, 0);
+
+        let cd_bytes = client_data(&nonce_b64, TEST_ORIGIN);
+        let auth_data = test_auth_data("evil.example", 1);
+        let assertion = signed_assertion(&sk, &auth_data, &cd_bytes);
+
+        assert!(verify_assertion(&reg, credential_id, &nonce_b64, &assertion).is_err());
+    }
+
+    /// Replaying a whole assertion must fail on the signature counter.
+    #[test]
+    fn a_replayed_assertion_is_rejected() {
+        let credential_id = "cred-passkey-X";
+        let nonce_b64 = URL_SAFE_NO_PAD.encode([0x77u8; 32]);
+        let sk = EdSigningKey::from_bytes(&[7u8; 32]);
+        let reg = test_registry(credential_id, &sk, 0);
+
+        let cd_bytes = client_data(&nonce_b64, TEST_ORIGIN);
+        let auth_data = test_auth_data(TEST_RP_ID, 5);
+        let assertion = signed_assertion(&sk, &auth_data, &cd_bytes);
+
+        assert!(verify_assertion(&reg, credential_id, &nonce_b64, &assertion).is_ok());
+        assert!(
+            verify_assertion(&reg, credential_id, &nonce_b64, &assertion).is_err(),
+            "the same assertion must not unwrap a share twice"
+        );
     }
 
     /// Escrow sweep evicts strictly past-due entries.

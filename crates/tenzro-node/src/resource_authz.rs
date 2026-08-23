@@ -191,8 +191,8 @@ pub async fn authorize_resource(
     required_scope: ApiKeyScope,
 ) -> Result<Authorized, Response> {
     // 1. A valid scoped API key wins in every mode — the operator's override.
-    if let Some(key) = presented_key(headers) {
-        if let Some(mgr) = node.api_key_manager()
+    if let Some(key) = presented_key(headers)
+        && let Some(mgr) = node.api_key_manager()
             && let Some(record) = mgr.lookup(&key)
             && record.has_scope(required_scope)
         {
@@ -205,7 +205,6 @@ pub async fn authorize_resource(
         // not a valid credential, so it does not take the Gated path; fall
         // through to the resource's mode. For a Gated resource that lands on the
         // refusal below; for an Open one, payment can still authorize.
-    }
 
     // 2..4. Decide by the resource's own mode.
     match access {

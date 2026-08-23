@@ -610,6 +610,23 @@ async fn handle_rpc_post(
             match serde_json::from_value::<JsonRpcRequest>(item.clone()) {
                 Ok(request) => {
                     debug!("RPC batch request: {}", request.method);
+                    if let Some(err) = inference_admission_refusal(
+                        &node,
+                        &request,
+                        api_key.as_deref(),
+                        service_key.as_deref(),
+                    ) {
+                        responses.push(
+                            serde_json::to_value(JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: request.id.clone(),
+                                result: None,
+                                error: Some(err),
+                            })
+                            .unwrap_or(Value::Null),
+                        );
+                        continue;
+                    }
                     if let Some(reason) =
                         service_key_refusal(&node, &request, service_key.as_deref())
                     {
@@ -681,6 +698,25 @@ async fn handle_rpc_post(
     match serde_json::from_value::<JsonRpcRequest>(payload) {
         Ok(request) => {
             debug!("RPC request: {}", request.method);
+            if let Some(err) = inference_admission_refusal(
+                &node,
+                &request,
+                api_key.as_deref(),
+                service_key.as_deref(),
+            ) {
+                return (
+                    StatusCode::OK,
+                    Json(
+                        serde_json::to_value(JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: request.id.clone(),
+                            result: None,
+                            error: Some(err),
+                        })
+                        .unwrap_or(Value::Null),
+                    ),
+                );
+            }
             if let Some(reason) = service_key_refusal(&node, &request, service_key.as_deref()) {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -1161,6 +1197,45 @@ pub(crate) fn service_key_refusal(
             }
             Some(reason)
         }
+    }
+}
+
+/// Model admission for JSON-RPC, keyed on the caller's API key.
+///
+/// Service keys gate scoped raw resources on the machine — databases, files,
+/// sites. Reaching a *model* is a different question, and an API key is what
+/// answers it. The HTTP `/chat` surface has always run this policy through
+/// `NodeInferenceAdmission`, and the overlay frame path runs the same one in
+/// `infer`, but JSON-RPC dispatched inference straight to its handler. So a
+/// `Gated` model — one the operator published to hold a pre-agreed credential
+/// and to nobody else — was served to anyone who could reach the port, and its
+/// visibility was enforced on one transport while being silently ignored on
+/// another. A model is gated or it is not; which transport asked cannot be the
+/// thing that decides.
+///
+/// `None` for anything that is not an inference method, so every other call
+/// keeps the gating it already had.
+pub(crate) fn inference_admission_refusal(
+    node: &Arc<TenzroNode>,
+    request: &JsonRpcRequest,
+    api_key: Option<&str>,
+    service_key: Option<&str>,
+) -> Option<JsonRpcError> {
+    let model = public_inference_target(request)?;
+    let admission = crate::inference_admission::NodeInferenceAdmission {
+        node: node.clone(),
+        gated_on_demand_fallback: node.config().payments.gated_on_demand_fallback,
+    };
+    match admission.decide_creds(api_key, service_key, Some(model.as_str())) {
+        // A credential that already covers it, or an open `Network` model.
+        tenzro_payments::middleware::InferenceAccess::Allow
+        | tenzro_payments::middleware::InferenceAccess::NeedPayment => None,
+        // Gated without a credential, or private/unknown.
+        tenzro_payments::middleware::InferenceAccess::Refuse(_status, msg) => Some(JsonRpcError {
+            code: -32001,
+            message: msg,
+            data: None,
+        }),
     }
 }
 
@@ -2336,6 +2411,9 @@ async fn dispatch_request(
         "tenzro_swapToken" => handle_swap_token(node, request.params).await,
         "tenzro_agentPayForInference" => handle_agent_payment_pipeline(node, request.params).await,
         "tenzro_faucet" | "tenzro_requestFaucet" => handle_faucet(node, request.params).await,
+        "tenzro_faucetTransfer" => handle_faucet_transfer(node, request.params).await,
+        "tenzro_validatorPublicKeys" => handle_validator_public_keys(node).await,
+        "tenzro_validatorSelfStake" => handle_validator_self_stake(node, request.params).await,
         "tenzro_faucetInfo" => handle_faucet_info(node).await,
 
         // Agent memory tier (Phase B): Lance vector + Tantivy BM25 + DA archive.
@@ -4830,6 +4908,91 @@ pub(crate) async fn handle_get_transaction(
     Ok(Value::Null)
 }
 
+/// Rejects a block parameter this node cannot honour.
+///
+/// Only the current tip is servable: balances and nonces are read from live
+/// state, and no per-block history is retained. Callers asking for an older
+/// block were previously handed current state with no indication of the
+/// substitution, which turns "I cannot answer" into a confidently wrong
+/// answer — the failure mode that makes a caller's whole reconstruction wrong
+/// and gives them nothing to notice it by.
+///
+/// `None` and the usual tags are accepted. A numeric height is accepted only
+/// when it is the tip.
+fn reject_unservable_block_tag(
+    node: &Arc<TenzroNode>,
+    block: Option<&Value>,
+) -> std::result::Result<(), JsonRpcError> {
+    let Some(tag) = block.and_then(|v| v.as_str()) else {
+        return Ok(()); // absent, or not a string — treat as latest
+    };
+    if matches!(tag, "latest" | "pending" | "safe" | "finalized" | "earliest") {
+        // `earliest` is genesis, which is servable only in the sense that it
+        // is refused below when it differs from the tip; accept the tag here
+        // and let the height check decide.
+        if tag != "earliest" {
+            return Ok(());
+        }
+    }
+
+    let requested = tag
+        .strip_prefix("0x")
+        .and_then(|h| u64::from_str_radix(h, 16).ok());
+    let tip = node.chain_tip_height();
+
+    match requested {
+        Some(h) if h >= tip => Ok(()),
+        _ => Err(JsonRpcError {
+            code: -32001,
+            message: format!(
+                "Historical state is not retained by this node: block '{tag}' was \
+                 requested but only the current tip ({tip}) can be served. Earlier \
+                 versions answered this with current state, which is why the \
+                 request is refused rather than approximated."
+            ),
+            data: None,
+        }),
+    }
+}
+
+/// This node's own validator public keys, formatted for a genesis file.
+///
+/// The three keys a founding validator entry needs, from the keyset sealed to
+/// this machine. There is no other way to get the ML-DSA verifying key: the
+/// registry reports only its length, and the sealed private half never leaves
+/// the TPM.
+///
+/// Public halves only. The consensus and BLS keys already appear in the
+/// registry and on every block this node signs; nothing secret is read here.
+async fn handle_validator_public_keys(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let data_dir = &node.config().data_dir;
+
+    let keypair = crate::keygen::load_validator_keypair(data_dir).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("validator consensus key unavailable: {e}"),
+        data: None,
+    })?;
+    let pq = crate::keygen::load_validator_pq_key(data_dir).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("validator ML-DSA key unavailable: {e}"),
+        data: None,
+    })?;
+    let bls = crate::keygen::load_validator_bls_key(data_dir).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("validator BLS key unavailable: {e}"),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "public_key": format!("0x{}", hex::encode(keypair.public_key().as_bytes())),
+        "pq_public_key": format!("0x{}", hex::encode(pq.verifying_key_bytes())),
+        "bls_public_key": format!("0x{}", hex::encode(bls.public_key().to_bytes())),
+        "note": "public halves only; paste into a [[validators]] entry in genesis.toml",
+    }))
+}
+
 pub(crate) async fn handle_get_balance(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -4859,6 +5022,10 @@ pub(crate) async fn handle_get_balance(
                 data: None,
             })?
     };
+
+    // A block parameter this node cannot honour is refused, not silently
+    // answered with current state.
+    reject_unservable_block_tag(node, params.as_array().and_then(|a| a.get(1)))?;
 
     let address = parse_address(addr_str)?;
 
@@ -7506,9 +7673,10 @@ async fn handle_send_agent_message(
             message = message.with_hybrid_signature(classical, pq);
         }
         (None, None) => {
-            // Both absent — let the router reject if signing is enabled. This
-            // keeps the legacy unsigned path working for tests/dev configs
-            // where `enable_signing == false`.
+            // Both absent — the router rejects it. Signature verification is
+            // unconditional, so an unsigned message is refused rather than
+            // delivered; this arm exists only so the mixed-mode case below
+            // stays distinguishable from the fully-unsigned one.
         }
         _ => {
             return Err(JsonRpcError {
@@ -8458,22 +8626,187 @@ async fn handle_faucet_info(node: &Arc<TenzroNode>) -> std::result::Result<Value
         _ => 0,
     };
 
-    // Also read legacy sentinel address balance for diagnostics.
-    let legacy_addr_hex: Option<String> = match storage.get("metadata", b"genesis_faucet_address") {
-        Ok(Some(bytes)) => String::from_utf8(bytes).ok(),
-        _ => None,
-    };
-
     Ok(serde_json::json!({
         "address": format!("0x{}", address_hex),
         "balance_wei": balance.to_string(),
-        "legacy_genesis_pointer": legacy_addr_hex.map(|h| format!("0x{}", h)),
     }))
 }
 
+/// Raise this validator's self-stake, signed by its TPM-sealed keyset.
+///
+/// A machine identity's wallet is watch-only — its signer is the sealed
+/// validator keyset — so `tenzro_signAndSendTransaction` cannot sign for the
+/// validator address, and the pre-signed CLI route wants the secret in a
+/// password keystore, which is not a custody this network allows. The key is
+/// already here and already sealed to this machine's TPM, so the signing
+/// happens in place.
+///
+/// Submitted through `eth_sendRawTransaction`, which re-verifies both
+/// signature legs and that the signing key derives `from` — the same checks
+/// an external caller would face. Nothing about the key leaves this function.
+async fn handle_validator_self_stake(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(Value::Null);
+
+    // Accept a decimal string as well as a number: one TNZO is 10^18 wei, so
+    // any realistic stake overflows a JSON u64.
+    let additional: u128 = match params.get("additional") {
+        Some(v) if v.is_u64() => v.as_u64().unwrap_or(0) as u128,
+        Some(v) if v.is_string() => {
+            v.as_str().unwrap_or("").parse::<u128>().map_err(|_| JsonRpcError {
+                code: -32602,
+                message: "additional must be a u128 amount in wei".to_string(),
+                data: None,
+            })?
+        }
+        _ => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "Missing 'additional' (wei; u64 number or decimal string)".to_string(),
+                data: None,
+            });
+        }
+    };
+    if additional == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "additional must be greater than zero".to_string(),
+            data: None,
+        });
+    }
+
+    let signer = crate::tpm_validator_wallet_signer::TpmValidatorWalletSigner::from_data_dir(
+        &node.config().data_dir,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!(
+            "This machine cannot sign for its validator address: {}. The sealed validator \
+             keyset is the only key that may raise this validator's stake.",
+            e
+        ),
+        data: None,
+    })?;
+
+    use tenzro_wallet::signing::HybridSigner as _;
+    let from_bytes = signer.classical_public_key();
+
+    // The derived 20-byte address, not the raw public key.
+    //
+    // `eth_sendRawTransaction` accepts either as `from` — both bind to this
+    // keypair, so both prove control — but only the derived form is the
+    // validator. It is what the registry lists, what `IncreaseValidatorStake`
+    // authorises against, and where the balance is. Signing from the
+    // raw-pubkey form produces a perfectly valid transaction on an empty
+    // account that is not registered as anything.
+    let public_key = tenzro_crypto::PublicKey::new(
+        tenzro_crypto::KeyType::Ed25519,
+        from_bytes.clone(),
+    );
+    let derived = public_key.to_address();
+    let mut slot = [0u8; 32];
+    slot[..20].copy_from_slice(derived.as_bytes());
+    let from_address = tenzro_types::primitives::Address::new(slot);
+    let from_hex = format!("0x{}", hex::encode(slot));
+
+    // Same nonce source every other client uses, so a stake raise cannot
+    // collide with a transaction built against the RPC's view.
+    let nonce_value = handle_get_nonce(node, Some(serde_json::json!({ "address": from_hex })))
+        .await?;
+    let nonce = u64::from_str_radix(
+        nonce_value.as_str().unwrap_or("0x0").trim_start_matches("0x"),
+        16,
+    )
+    .unwrap_or(0);
+
+    let chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+
+    // Above the open-lane fee floor: a pre-signed transaction cannot be
+    // re-priced server-side, so it has to be signed over a price that clears.
+    const GAS_LIMIT: u64 = 100_000;
+    const GAS_PRICE: u64 = 5_000_000_000;
+
+    let pq_vk = signer.pq_verifying_key();
+    let tx = tenzro_types::transaction::Transaction::new(
+        tenzro_types::primitives::ChainId::from(chain_id),
+        from_address,
+        from_address,
+        tenzro_types::primitives::Nonce::from(nonce),
+        tenzro_types::transaction::TransactionType::IncreaseValidatorStake { additional },
+        GAS_LIMIT,
+        GAS_PRICE,
+        pq_vk.clone(),
+    );
+
+    let hash = tx.hash();
+    let sig = signer.sign_hybrid(hash.as_bytes()).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Validator keyset signing failed: {}", e),
+        data: None,
+    })?;
+
+    // The timestamp is echoed so the node's recomputed hash matches the one
+    // just signed, bit for bit.
+    handle_send_raw_transaction(
+        node,
+        Some(serde_json::json!({
+            "from": from_hex,
+            "to": from_hex,
+            "value": "0",
+            "gas_limit": GAS_LIMIT,
+            "gas_price": GAS_PRICE,
+            "nonce": nonce,
+            "chain_id": chain_id,
+            "timestamp": tx.timestamp.0,
+            "tx_type": { "IncreaseValidatorStake": { "additional": additional.to_string() } },
+            "public_key": hex::encode(&from_bytes),
+            "signature": hex::encode(&sig.classical),
+            "pq_public_key": hex::encode(&pq_vk),
+            "pq_signature": hex::encode(&sig.pq),
+        })),
+    )
+    .await
+}
+
+/// Public faucet: one `amount_per_request` grant, behind the cooldown.
 async fn handle_faucet(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    handle_faucet_dispense(node, params, false).await
+}
+
+/// Operator transfer from the same account, for any amount, with no cooldown.
+///
+/// Classified `Admin`, so it carries the operator token. The two limits it
+/// skips are operator policy for public callers — a grant size and a
+/// per-address rate limit — not custody boundaries, and the operator is the
+/// party that set them. What it deliberately does *not* do is hand the key
+/// out: the signing happens here, against the same persisted keys
+/// `handle_faucet` uses, so no second copy of the premine key comes into
+/// existence.
+async fn handle_faucet_transfer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    handle_faucet_dispense(node, params, true).await
+}
+
+/// Shared body. `operator` selects between the two policies above; everything
+/// else — key loading, transaction construction, both signature legs,
+/// mempool admission — is identical, and identical because it is the same
+/// code rather than a copy that can drift.
+async fn handle_faucet_dispense(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    operator: bool,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -8507,18 +8840,27 @@ async fn handle_faucet(
     );
     let max_faucet_wei: u128 = grant_tnzo * 1_000_000_000_000_000_000u128;
     let default_faucet_wei: u128 = max_faucet_wei;
+    // The operator asked for a specific figure and holds the token that says
+    // it may. Clamping it to the public grant would silently send 10,000 TNZO
+    // when 10,000,000 was requested — the failure mode that makes a rebalance
+    // look done and leave the set unchanged.
+    let cap = |requested: u128| {
+        if operator {
+            requested
+        } else {
+            requested.min(max_faucet_wei)
+        }
+    };
     let amount_wei: u128 = match params.get("amount_wei") {
         Some(v) => {
             if let Some(n) = v.as_u64() {
-                (n as u128).min(max_faucet_wei)
+                cap(n as u128)
             } else if let Some(s) = v.as_str() {
-                s.parse::<u128>()
-                    .map_err(|_| JsonRpcError {
-                        code: -32602,
-                        message: format!("Invalid amount_wei: '{}' is not a valid u128", s),
-                        data: None,
-                    })?
-                    .min(max_faucet_wei)
+                cap(s.parse::<u128>().map_err(|_| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid amount_wei: '{}' is not a valid u128", s),
+                    data: None,
+                })?)
             } else {
                 return Err(JsonRpcError {
                     code: -32602,
@@ -8527,8 +8869,22 @@ async fn handle_faucet(
                 });
             }
         }
+        None if operator => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "amount_wei is required for tenzro_faucetTransfer".to_string(),
+                data: None,
+            });
+        }
         None => default_faucet_wei,
     };
+    if operator && amount_wei == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "amount_wei must be greater than zero".to_string(),
+            data: None,
+        });
+    }
 
     // Parse recipient address
     let to_addr = parse_address(address_str).map_err(|_| JsonRpcError {
@@ -8554,7 +8910,7 @@ async fn handle_faucet(
         .as_ref()
         .and_then(|g| g.faucet.as_ref().map(|f| f.cooldown_seconds as i64))
         .unwrap_or(86400);
-    if cooldown_secs > 0 {
+    if cooldown_secs > 0 && !operator {
         let now_ts = chrono::Utc::now().timestamp();
         let addr_key_lower = address_str
             .strip_prefix("0x")
@@ -8880,18 +9236,26 @@ async fn handle_faucet(
         }
     })?;
 
-    // Advance the nonce only after successful enqueue so concurrent retries
-    // don't skip a slot.
-    if let Some(ws) = &wallet_service {
-        use tenzro_wallet::WalletService;
-        let _ = ws.next_nonce(&faucet_addr);
-    }
+    // The nonce was already advanced where it was assigned above:
+    // `next_nonce` both returns the slot and reserves it. A second advance
+    // here burned one nonce per request, leaving the counter permanently one
+    // ahead of chain state after every dispense — so the request following
+    // any successful one failed with `Invalid nonce: expected N, got N+1`,
+    // and only the STALL_SECS rewind in `rebase_nonce` recovered it. That is
+    // the "faucet works exactly once" symptom, and why retrying promptly
+    // made it look permanently broken.
+    //
+    // Advancing after enqueue would be right if assignment peeked rather than
+    // reserved (`peek_nonce` exists and does not increment), but reserving at
+    // assignment is what gives two concurrent requests distinct nonces —
+    // peeking would hand both the same one. So the reservation stays where it
+    // is and this second advance is the one removed.
 
     // Persist cooldown timestamp under the same `faucet_request:<addr>` key
     // namespace as the web `/api/faucet` handler. Written only after the tx
     // has been admitted + enqueued so a failed request doesn't lock out the
     // address. Persisted (not in-memory) so it survives node restart.
-    if cooldown_secs > 0 {
+    if cooldown_secs > 0 && !operator {
         let now_ts = chrono::Utc::now().timestamp();
         let addr_key_lower = address_str
             .strip_prefix("0x")
@@ -19362,6 +19726,18 @@ pub(crate) async fn handle_register_identity(
     // custody key and must not be echoed back.
     let sealed_path = node.tee_provider().is_some() && node.wallet_service().is_some();
 
+    // Whether the identity this call registers ended up bound to key material
+    // the hardware holds, rather than to the throwaway keypair generated above.
+    //
+    // This used to be inferred from `sealed_path` alone, which stopped being
+    // true when the TPM-rooted machine path landed: a host with a TPM and no
+    // TEE now binds its machine identity to its own sealed validator keyset and
+    // is every bit as self-custodial, while `tee_provider()` is `None`. On that
+    // host the generated secret was still echoed back, telling the caller they
+    // held a key that controls nothing. Set at each self-custody site instead
+    // of guessed from the hardware probe.
+    let mut hardware_custody = false;
+
     // Branch on identity_type. Each branch calls the appropriate registry
     // method so the resulting DID prefix (human/machine/autonomous) matches
     // the requested type.
@@ -19374,6 +19750,7 @@ pub(crate) async fn handle_register_identity(
             // (no TEE provider), humans keep the server-custodial
             // `register_human_with_fee` path, a permanent supported tier.
             if sealed_path {
+                hardware_custody = true;
                 let did = tenzro_identity::TenzroDid::new_human();
                 let did_string = did.to_string();
 
@@ -19505,8 +19882,10 @@ pub(crate) async fn handle_register_identity(
             // provision a watch-only wallet whose public identity mirrors the
             // sealed keys, and bind the sealed signer. The node never holds
             // the machine's signing secret — no FROST-share reconstruction.
-            // Off-hardware (no TEE provider) falls back to the FROST path.
+            // Off-hardware (no TEE provider) it binds the TPM-sealed validator
+            // keyset instead — also self-custodial, see the `else` arm.
             if sealed_path {
+                hardware_custody = true;
                 // A machine identity has to name a machine. Derive the DID
                 // from the per-unit hardware root so the same physical box
                 // re-registers as itself, and fold that root into the
@@ -19656,12 +20035,135 @@ pub(crate) async fn handle_register_identity(
                         })),
                     });
                 }
-                let anchor = tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: hardware_identity.root_hex(),
-                    sources: hardware_identity.sources().to_vec(),
+                // The machine holds a hardware root but no TEE — a TPM, a
+                // secure element, fused SoC identity. Its wallet is its own
+                // TPM-rooted validator keyset, not a freshly minted one.
+                //
+                // This used to call `register_autonomous_machine_with_fee`,
+                // which provisions a wallet through the binder. That left the
+                // identity hardware-anchored and its wallet anchored to
+                // nothing: `public_keys[0]` came from the RPC (or, with no
+                // `public_key` param, from a keypair generated here whose
+                // private half is handed back to the caller), and the wallet
+                // was independently minted with no relationship to either the
+                // key beside it or the hardware root just verified. A machine
+                // that answers for itself cannot have a wallet somebody else
+                // holds the key to.
+                //
+                // The wallet is watch-only: the signer is bound to the sealed
+                // keyset and no FROST shares are reconstructed here, matching
+                // the TEE branch above and the passkey path for humans.
+                let signer = std::sync::Arc::new(
+                    crate::tpm_validator_wallet_signer::TpmValidatorWalletSigner::from_data_dir(
+                        &node.config().data_dir,
+                    )
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!(
+                            "This machine cannot bind a wallet to its own hardware root: {}. Its \
+                             validator keyset is what a machine identity's wallet is made of, so \
+                             registration is refused rather than falling back to a minted wallet \
+                             the hardware does not control.",
+                            e
+                        ),
+                        data: None,
+                    })?,
+                );
+
+                // A caller may not name the key its identity binds to. The
+                // passkey path is safe because the WebAuthn ceremony proves
+                // possession, and the TEE path because the attestation commits
+                // to the sealed handle; the equivalent here is that the bytes
+                // came from this machine's TPM. Someone who could supply them
+                // could bind their identity to any address they liked,
+                // including a funded one they do not control — so a supplied
+                // key that is not this machine's is refused outright rather
+                // than silently ignored.
+                if params.get("public_key").is_some()
+                    && public_key_bytes != signer.validator_public_key()
+                {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: "An autonomous machine identity binds to this machine's own \
+                                  TPM-rooted validator key. Remove `public_key`, or supply this \
+                                  machine's actual validator public key."
+                            .to_string(),
+                        data: None,
+                    });
+                }
+
+                // Bound to this machine's own sealed keys, so the generated
+                // keypair is vestigial and must not be echoed as if it were
+                // the identity's key.
+                hardware_custody = true;
+
+                let bls_verifying_key = signer.bls_verifying_key();
+                let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "No wallet service is running, so this machine's identity cannot be \
+                              bound to a wallet"
+                        .to_string(),
+                    data: None,
+                })?;
+                let wallet = wallet_service
+                    .provision_watch_only_wallet(
+                        signer.clone(),
+                        tenzro_crypto::KeyType::Ed25519,
+                        bls_verifying_key,
+                    )
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Watch-only wallet provisioning failed: {}", e),
+                        data: None,
+                    })?;
+
+                let mut addr_bytes = [0u8; 32];
+                let src = wallet.address.as_bytes();
+                let len = src.len().min(32);
+                addr_bytes[..len].copy_from_slice(&src[..len]);
+
+                let binding = tenzro_identity::WalletBinding {
+                    wallet_id: wallet.wallet_id.to_string(),
+                    address: tenzro_types::primitives::Address::new(addr_bytes),
+                    public_key: wallet.public_key.to_bytes(),
+                    key_type: "Ed25519".to_string(),
+                    pq_verifying_key: wallet.pq_verifying_key_bytes(),
+                    bls_verifying_key: wallet.bls_verifying_key_bytes().to_vec(),
                 };
+
+                // Derived from the hardware root, so the same machine
+                // re-registers as the same DID instead of minting a new
+                // identity each time — the same choice the TEE branch makes.
+                let did = tenzro_identity::TenzroDid::from_hardware_root(&hardware_identity.root());
+
+                // The anchor is recorded, not merely checked: a verifier
+                // resolving this DID later has to be able to see *why* a
+                // machine with no controller was admitted, without trusting
+                // that the check ran.
+                let mut identity_metadata = std::collections::HashMap::new();
+                identity_metadata
+                    .insert("machine_anchor".to_string(), "hardware_rooted".to_string());
+                identity_metadata.insert(
+                    "hardware_root".to_string(),
+                    hardware_identity.root_hex(),
+                );
+                identity_metadata.insert(
+                    "hardware_root_sources".to_string(),
+                    hardware_identity.sources().join(","),
+                );
+                identity_metadata.insert(
+                    "wallet_custody".to_string(),
+                    "tpm_sealed_validator_keyset".to_string(),
+                );
+
                 registry
-                    .register_autonomous_machine_with_fee(public_key_bytes, capabilities, anchor)
+                    .register_autonomous_machine_with_binding(
+                        did,
+                        binding,
+                        capabilities,
+                        identity_metadata,
+                    )
                     .await
                     .map_err(|e| JsonRpcError {
                         code: -32000,
@@ -19715,10 +20217,23 @@ pub(crate) async fn handle_register_identity(
     // Phase B Thread 3 / B.3.5 (#164) — install a `DelegationScopeValidator`
     // per newly-registered machine identity so every UserOperation signed by
     // its smart account is gated by the on-chain validator module. Humans
-    // don't get one (no DelegationScope to enforce). The validator's inner
-    // authenticator is a `NoOpValidator` placeholder that accepts any
-    // non-empty signature — the AA pipeline lands a real Ed25519 / WebAuthn /
-    // FROST authenticator in #165, alongside the EVM EntryPoint route.
+    // don't get one (no DelegationScope to enforce).
+    //
+    // The inner authenticator verifies the machine's own Ed25519 identity key.
+    // It used to be `NoOpValidator`, whose own documentation says it is "not
+    // intended for production use": it accepts any signature at all so long as
+    // the bytes are non-empty. That left the delegation scope enforced and the
+    // signature unchecked, so anyone who knew a machine's account address could
+    // submit operations as that machine and sign them with a single zero byte —
+    // bounded only by the machine's spending scope rather than by possession of
+    // its key. The scope check made it look guarded while the thing a scope is
+    // meant to qualify, that the request came from the owner, was never
+    // established.
+    //
+    // `public_keys[0]` is the machine's Ed25519 verifying key, and since the
+    // hardware-binding work that key is its TPM-sealed validator key rather
+    // than one the registering caller supplied — so the only party who can move
+    // the account is the machine itself.
     if matches!(
         identity_type.as_str(),
         "machine" | "autonomous" | "autonomous_machine"
@@ -19732,8 +20247,46 @@ pub(crate) async fn handle_register_identity(
 
             let dsv_address =
                 crate::delegation_scope_oracle::delegation_scope_validator_module_address();
-            let inner: std::sync::Arc<dyn tenzro_vm::aa_validators::IValidator> =
-                std::sync::Arc::new(tenzro_vm::aa_validators::NoOpValidator::new(dsv_address));
+
+            // Bind the account to the identity's own verifying key. A machine
+            // with no usable key is refused an AA validator rather than given
+            // a permissive one: an account that authorizes nothing is a
+            // recoverable state, an account that authorizes everything is not.
+            let identity_key = identity
+                .public_keys
+                .first()
+                .filter(|k| k.key_type.eq_ignore_ascii_case("Ed25519"))
+                .map(|k| k.public_key.clone());
+
+            let inner: Option<std::sync::Arc<dyn tenzro_vm::aa_validators::IValidator>> =
+                match identity_key {
+                    Some(key) => {
+                        let v = tenzro_vm::aa_identity_key_validator::IdentityKeyValidator::new(
+                            dsv_address,
+                        );
+                        match v.install_for(evm_account.to_vec(), &key) {
+                            Ok(()) => Some(std::sync::Arc::new(v)),
+                            Err(e) => {
+                                warn!(
+                                    did = %identity.did_string(),
+                                    error = %e,
+                                    "identity key is unusable as an AA authenticator; no \
+                                     validator installed"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        warn!(
+                            did = %identity.did_string(),
+                            "identity has no Ed25519 key; no AA validator installed"
+                        );
+                        None
+                    }
+                };
+
+            if let Some(inner) = inner {
             let dsv = std::sync::Arc::new(
                 tenzro_vm::aa_delegation_validator::DelegationScopeValidator::new(
                     dsv_address,
@@ -19771,6 +20324,7 @@ pub(crate) async fn handle_register_identity(
                         "DelegationScopeValidator install failed"
                     );
                 }
+                }
             }
         }
     }
@@ -19781,11 +20335,11 @@ pub(crate) async fn handle_register_identity(
         "status": format!("{}", identity.status),
     });
 
-    // On the sealed (self-custody) path the auto-generated keypair is not the
-    // identity's custody key — the signing secret lives in the enclave and the
+    // On any self-custody path the auto-generated keypair is not the identity's
+    // custody key — the signing secret lives in the enclave or the TPM and the
     // wallet is watch-only. Echoing the generated secret would mislead the
     // caller into treating it as their key, so it is withheld.
-    if !sealed_path && let Some(sk) = private_key_hex {
+    if !hardware_custody && let Some(sk) = private_key_hex {
         result["private_key"] = serde_json::json!(sk);
     }
 
@@ -26790,6 +27344,102 @@ async fn handle_cluster_preview(
     }))
 }
 
+/// Build the durable `served:{model_id}` record, preserving whatever an
+/// earlier write put there.
+///
+/// Split out from [`record_served_model`] so the one rule that matters can be
+/// tested without standing up a node: **fields this function does not know
+/// about must survive**. An externally-served model's record carries the
+/// binding that makes it reachable — `engine`, `base_url`, `upstream_model`,
+/// `api_key` — written by the external-engine serve path. This function is
+/// also reached from a re-serve where only visibility changes, and replacing
+/// the record there drops the binding. The loss is silent until the next
+/// restart, when the node finds no engine, falls through to the local weights,
+/// and serves the same model an order of magnitude slower: measured at 2.0s
+/// per request through vLLM against 28.2s locally, with a concurrency cap of 1
+/// instead of 16.
+///
+/// A non-object or unparseable `existing` is discarded rather than merged
+/// into — there is nothing to preserve in it, and carrying it forward would
+/// keep whatever corrupted it.
+fn merge_served_record(
+    existing: Option<serde_json::Value>,
+    model_id: &str,
+    visibility: tenzro_types::model::ModelVisibility,
+) -> serde_json::Value {
+    let mut record = existing
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let obj = record
+        .as_object_mut()
+        .expect("filtered to an object above");
+    obj.insert("model_id".into(), serde_json::json!(model_id));
+    obj.insert(
+        "served_at".into(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    obj.insert("visibility".into(), serde_json::json!(visibility.as_str()));
+    record
+}
+
+/// Record a model as served, in memory and on disk.
+///
+/// Both halves or neither. The `already_serving` path used to do only the
+/// first and return early, so publishing a model that happened to be loaded
+/// reported `success: true` and vanished at the next restart — the node
+/// silently stopped announcing a model the operator believed was published.
+/// Keeping the pair in one function is what stops that recurring.
+fn record_served_model(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    visibility: tenzro_types::model::ModelVisibility,
+) {
+    node.served_models
+        .insert(model_id.to_string(), visibility);
+
+    let Some(storage) = node.storage() else {
+        // No storage backend: in-memory only, and it will not survive a
+        // restart. Say so rather than letting it look durable.
+        tracing::warn!(
+            model_id = %model_id,
+            "served model registered in memory only — no storage backend to persist it"
+        );
+        return;
+    };
+
+    // Merge into whatever is already stored under this key rather than
+    // replacing it.
+    //
+    // An externally-served model's record carries the binding that makes it
+    // reachable — `engine`, `base_url`, `upstream_model`, `api_key` — and this
+    // function is also reached from the re-serve path, where only visibility is
+    // changing. Writing a fresh record there drops those fields, and the loss
+    // is silent until the next restart: the node comes back with no engine
+    // binding, falls through to the local weights, and serves the same model
+    // an order of magnitude slower at a fraction of the concurrency. Measured
+    // on the way in: 2.0s per request through vLLM, 28.2s through the local
+    // path, and a concurrency cap of 1 instead of 16.
+    let key = format!("served:{}", model_id);
+    let existing = storage
+        .get(CF_MODELS, key.as_bytes())
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let record = merge_served_record(existing, model_id, visibility);
+    match serde_json::to_vec(&record) {
+        Ok(bytes) => {
+            if let Err(e) = storage.put(CF_MODELS, key.as_bytes(), &bytes) {
+                tracing::warn!(model_id = %model_id, error = %e, "Failed to persist served model to RocksDB");
+            } else {
+                tracing::info!(model_id = %model_id, visibility = %visibility.as_str(), "Persisted served model to RocksDB CF_MODELS");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(model_id = %model_id, error = %e, "Failed to encode served-model record");
+        }
+    }
+}
+
 async fn handle_serve_model(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -26841,7 +27491,9 @@ async fn handle_serve_model(
     // model has stopped being advertised while peers are still routing to it.
     if model_runtime.is_loaded(model_id) {
         let visibility = parse_visibility_param(&params)?;
-        node.served_models.insert(model_id.to_string(), visibility);
+        // Persist as well as register. Returning early with only the in-memory
+        // half is what made a published model disappear on restart.
+        record_served_model(node, model_id, visibility);
         return Ok(serde_json::json!({
             "success": true,
             "model_id": model_id,
@@ -27130,6 +27782,19 @@ async fn handle_serve_model(
             });
         }
 
+        // Give the load tracker an entry before returning. Without one it
+        // reports a limit of zero for this model and the admission check sheds
+        // every request as `at-capacity`, so a healthy engine serves nothing.
+        //
+        // The slot budget is the right admission number here, and the
+        // in-process cap below deliberately is not: it pins an mmproj/MTP model
+        // to one because those decode behind a single mutex, whereas an
+        // external engine batches continuously on its own. Applying it would
+        // serialize exactly the models worth putting behind vLLM. Anything past
+        // the budget is the upstream scheduler's to queue.
+        node.load_tracker
+            .register_model(model_id, tenzro_model::max_slots() as u32);
+
         tracing::info!(
             model_id = %model_id,
             engine = %engine_kind_str,
@@ -27313,26 +27978,8 @@ async fn handle_serve_model(
         })?,
     };
 
-    // Mark model as served
-    node.served_models.insert(model_id.to_string(), visibility);
-
-    // Persist to RocksDB CF_MODELS so served state survives restart
-    if let Some(storage) = node.storage() {
-        let record = serde_json::json!({
-            "model_id": model_id,
-            "served_at": chrono::Utc::now().to_rfc3339(),
-            "visibility": visibility.as_str(),
-        });
-        if let Ok(bytes) = serde_json::to_vec(&record) {
-            let put_result =
-                storage.put(CF_MODELS, format!("served:{}", model_id).as_bytes(), &bytes);
-            if let Err(e) = put_result {
-                tracing::warn!(model_id = %model_id, error = %e, "Failed to persist served model to RocksDB");
-            } else {
-                tracing::info!(model_id = %model_id, "Persisted served model to RocksDB CF_MODELS");
-            }
-        }
-    }
+    // Mark model as served, in memory and on disk.
+    record_served_model(node, model_id, visibility);
 
     // Estimate max concurrent requests based on hardware.
     //
@@ -27412,6 +28059,27 @@ async fn handle_serve_model(
             }
             None => 1,
         },
+    };
+    // Cap at the serving path's REAL concurrency, exactly as the boot path
+    // does (see `node.rs`, "Registered per-model concurrency cap"). A model
+    // carrying a multimodal projector or an MTP drafter is served on the
+    // single-mutex serial path and can only ever decode one at a time.
+    //
+    // Without this the two paths disagree: a model registered at boot as 1 was
+    // silently re-registered as 32 by `tenzro model serve`, which is the flood
+    // the boot path exists to prevent — requests admitted far past real
+    // capacity, piling behind one mutex, and the autotuner reporting goodput
+    // under its floor while "0% of slots are in use".
+    let max_concurrent = {
+        let is_serial = tenzro_model::catalog::get_model_by_id(model_id)
+            .map(|e| e.mmproj.is_some() || e.mtp_kind != tenzro_model::MtpKind::None)
+            .unwrap_or(false);
+        let capacity_cap = if is_serial {
+            1
+        } else {
+            tenzro_model::max_slots() as u32
+        };
+        max_concurrent.min(capacity_cap).max(1)
     };
     node.load_tracker.register_model(model_id, max_concurrent);
 
@@ -31508,6 +32176,22 @@ async fn handle_unpin_model(
     Ok(serde_json::json!({ "model_id": model_id, "pinned": false }))
 }
 
+/// What a request costs when its size is not known at admission time.
+///
+/// The cost model is calibrated per thousand tokens, so a caller that cannot
+/// cheaply measure its prompt is charged as one nominal request rather than as
+/// free — under-declaring would let unbounded work through the deadline check.
+const NOMINAL_REQUEST_TOKENS: u64 = 1_000;
+
+/// A rough token count for admission: bytes over four.
+///
+/// Deliberately crude. Admission needs to tell a twenty-token prompt from a
+/// hundred-thousand-token turn, and tokenising the prompt properly would mean
+/// loading the model's tokenizer before deciding whether to admit it at all.
+fn est_tokens_of(text: &str) -> u64 {
+    (text.len() as u64 / 4).max(1)
+}
+
 /// Admit an inference request through the node's three bounds, or return the
 /// JSON-RPC error that tells the caller what to do instead.
 ///
@@ -31522,11 +32206,12 @@ async fn admit_local_inference(
     node: &Arc<TenzroNode>,
     model_id: &str,
     batch_size: usize,
+    est_tokens: u64,
 ) -> std::result::Result<Box<crate::serving_admission::ServingPermit>, JsonRpcError> {
     use crate::serving_admission::{
         Decision, admit_inference, classify, refusal_rpc_error, warming_rpc_error,
     };
-    match admit_inference(node, model_id, classify(batch_size), None, 0).await {
+    match admit_inference(node, model_id, classify(batch_size), None, 0, est_tokens).await {
         Decision::Proceed(permit) => Ok(permit),
         Decision::Warming(status) => Err(warming_rpc_error(&status)),
         Decision::Refused(refusal) => Err(refusal_rpc_error(&refusal)),
@@ -31567,7 +32252,10 @@ pub(crate) async fn handle_chat(
 /// Fields: `use_case` (required, one of `chat`/`code`/`reasoning`/`summarize`/
 /// `extract`/`embed`), `budget` (optional u128 per-request cap in smallest TNZO
 /// unit; absent means no per-request cap), `optimize` (optional f32 in
-/// `[0.0, 1.0]`, cost↔quality knob), `quality_floor` (optional `cheap`/
+/// `[0.0, 1.0]`, cost↔quality knob), `locality` (optional `any`/`local_only`;
+/// `local_only` refuses any candidate this node does not serve itself, and
+/// fails rather than falling back to the network), `quality_floor` (optional
+/// `cheap`/
 /// `strong`), `est_input_tokens` / `est_output_tokens` (optional u64 cost-
 /// estimation inputs), `payer_did` (optional; enables the per-DID budget gate),
 /// `prompt` (optional; places the request in a difficulty cluster). When
@@ -31625,6 +32313,31 @@ fn parse_route_intent(
         intent = intent.with_optimize(o as f32);
     }
 
+    // `locality`: "any" (default) or "local_only".
+    //
+    // The one constraint an application needs to promise its users that their
+    // prompts never leave their own machine. `budget` was the only thing
+    // standing in for it — a zero cap happens to exclude paid remote offers —
+    // but that is a cost constraint doing a privacy constraint's job, and a
+    // free provider satisfies it while still receiving the prompt.
+    //
+    // An unrecognised value is an error rather than a fallback to `any`: a
+    // caller who misspells this must not silently get the permissive behaviour
+    // they were trying to opt out of.
+    if let Some(loc_str) = params.get("locality").and_then(|v| v.as_str()) {
+        match loc_str {
+            "any" => {}
+            "local_only" => intent.locality = tenzro_model::meta_router::Locality::LocalOnly,
+            other => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Unknown locality '{other}' (expected any|local_only)"),
+                    data: None,
+                });
+            }
+        }
+    }
+
     if let Some(floor_str) = params.get("quality_floor").and_then(|v| v.as_str()) {
         let floor = match floor_str.trim().to_lowercase().as_str() {
             "cheap" => QualityTier::Cheap,
@@ -31660,7 +32373,55 @@ fn parse_route_intent(
         intent = intent.with_prompt(prompt);
     }
 
+    if let Some(prefix) = extract_affinity_prefix(params) {
+        intent = intent.with_affinity_prefix(prefix);
+    }
+
     Ok(intent)
+}
+
+/// Pulls the bytes used for cache-affinity matching.
+///
+/// This deliberately differs from [`extract_route_prompt`], which returns only
+/// the last user turn. The two answer different questions — clustering wants
+/// the turn being asked, affinity wants the shared prefix — and conflating
+/// them made affinity permanently score zero, because the rolling hash is
+/// position dependent from byte 0.
+///
+/// **This must reproduce, byte for byte, what a serving node records as warm.**
+/// That is `warm_prompt_bytes(chat_messages)` — the contents joined by `\n` —
+/// over the `chat_messages` the chat handlers build, which is *not* simply the
+/// `messages` array:
+///
+/// - the `system` param is a **separate** field and is **prepended** as its own
+///   message, so it occupies run 0. Omitting it shifts every run and guarantees
+///   a zero match — and the system prompt is usually the largest shared prefix
+///   in the conversation, i.e. the entire point of the feature.
+/// - message content is flattened with [`render_blocks_as_text`], which renders
+///   thinking and tool blocks with markup, not just the `text` fields.
+///
+/// Any divergence here silently returns every match to zero rather than failing
+/// loudly, so both facts are reproduced by calling the same helpers the chat
+/// path calls rather than by re-deriving them.
+fn extract_affinity_prefix(params: &Value) -> Option<String> {
+    let system: Option<tenzro_types::model::SystemPrompt> = params
+        .get("system")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let messages: Vec<tenzro_types::model::RichChatMessage> = params
+        .get("messages")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let mut parts: Vec<String> = Vec::with_capacity(messages.len() + 1);
+    if let Some(sys) = &system {
+        parts.push(sys.as_text());
+    }
+    for m in &messages {
+        parts.push(render_blocks_as_text(&m.content));
+    }
+
+    let joined = parts.join("\n");
+    (!joined.trim().is_empty()).then_some(joined)
 }
 
 /// Pulls the text used for difficulty clustering out of the params: an explicit
@@ -33800,7 +34561,7 @@ async fn handle_chat_simple(
         // attainability, warm/cold state (warming in the background rather
         // than on this socket), and the memory ledger. Held for the whole
         // response so the model cannot be evicted mid-generation.
-        let _serving_permit = admit_local_inference(node, &model_id, 1).await?;
+        let _serving_permit = admit_local_inference(node, &model_id, 1, est_tokens_of(message)).await?;
         // Serving weights load lazily on first use.
         let _ = node.ensure_local_model_loaded(&model_id).await;
         if !model_runtime.is_loaded(&model_id) {
@@ -33831,7 +34592,8 @@ async fn handle_chat_simple(
         let chat_messages = vec![ModelChatMessage {
             role: "user".to_string(),
             content: message.to_string(),
-        }];
+                ..Default::default()
+            }];
 
         let result = model_runtime
             .generate_chat(&model_id, &chat_messages, &config)
@@ -34408,7 +35170,7 @@ async fn handle_chat_rich(
         // attainability, warm/cold state (warming in the background rather
         // than on this socket), and the memory ledger. Held for the whole
         // response so the model cannot be evicted mid-generation.
-        let _serving_permit = admit_local_inference(node, &model_id, 1).await?;
+        let _serving_permit = admit_local_inference(node, &model_id, 1, est_tokens_of(&request_input_text)).await?;
         // Serving weights load lazily on first use.
         let _ = node.ensure_local_model_loaded(&model_id).await;
         if !model_runtime.is_loaded(&model_id) {
@@ -34432,21 +35194,113 @@ async fn handle_chat_rich(
         // separately is what let a refusal here be recorded upstream as a
         // successful completion.
 
-        // Flatten rich messages into the existing ChatMessage format the
-        // runtime accepts. Tool-use, tool-result, and thinking blocks are
-        // stringified into the message text for now — the model still sees
-        // them, just as inline annotations rather than structured blocks.
+        // Carry tool history as STRUCTURE, not as text.
+        //
+        // Stringifying tool blocks into the message body taught the model a
+        // dialect it then imitated: shown `<tool_use …>` XML it emitted
+        // `<tool_use …>` XML, and shown prose it emitted prose — measured both
+        // ways on muse-glimmer, which has no trained tool dialect of its own and
+        // copies whatever its history shows it. Its template renders tool turns
+        // natively (`<|start|>assistant to=NAME<|message|>` + ATEM markup, and
+        // `<|start|>tool NAME<|message|><tool_output …>`) but only when the
+        // messages carry `tool_calls` and a `tool` role, so flattening meant it
+        // never once saw its own format and degraded within three turns.
+        //
+        // Templates without tool branches are unaffected: they render `content`
+        // exactly as before, and the extra fields serialise away when absent.
         let mut chat_messages: Vec<ModelChatMessage> = Vec::new();
         if let Some(sys) = &system {
             chat_messages.push(ModelChatMessage {
                 role: "system".to_string(),
                 content: sys.as_text(),
+                ..Default::default()
             });
         }
+        // A result names the call it answers by id; the template wants the tool
+        // NAME, so remember what each id was called.
+        let mut tool_name_by_id: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for m in &messages {
+            let blocks = m.content.as_blocks();
+
+            let tool_uses: Vec<&ContentBlock> = blocks
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                .collect();
+            let tool_results: Vec<&ContentBlock> = blocks
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                .collect();
+
+            if !tool_uses.is_empty() {
+                let calls: Vec<serde_json::Value> = tool_uses
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, name, input } => {
+                            tool_name_by_id.insert(id.clone(), name.clone());
+                            Some(serde_json::json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": input.to_string(),
+                                },
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                chat_messages.push(ModelChatMessage {
+                    role: m.role.clone(),
+                    // Any prose the turn carried alongside its calls.
+                    content: render_text_blocks_only(&blocks),
+                    tool_calls: Some(serde_json::Value::Array(calls)),
+                    ..Default::default()
+                });
+                continue;
+            }
+
+            if !tool_results.is_empty() {
+                // One `tool` turn per result, which is the shape templates index
+                // by name and call id.
+                for b in &tool_results {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = b
+                    {
+                        let body = match content {
+                            tenzro_types::model::ToolResultContent::Text(t) => t.clone(),
+                            tenzro_types::model::ToolResultContent::Blocks(bs) => {
+                                render_text_blocks_only(bs)
+                            }
+                        };
+                        chat_messages.push(ModelChatMessage {
+                            role: "tool".to_string(),
+                            content: body,
+                            name: tool_name_by_id.get(tool_use_id).cloned(),
+                            tool_call_id: Some(tool_use_id.clone()),
+                            ..Default::default()
+                        });
+                    }
+                }
+                // Any prose the same turn carried stays a turn of its own.
+                let text = render_text_blocks_only(&blocks);
+                if !text.trim().is_empty() {
+                    chat_messages.push(ModelChatMessage {
+                        role: m.role.clone(),
+                        content: text,
+                        ..Default::default()
+                    });
+                }
+                continue;
+            }
+
             chat_messages.push(ModelChatMessage {
                 role: m.role.clone(),
                 content: render_blocks_as_text(&m.content),
+                ..Default::default()
             });
         }
 
@@ -34482,8 +35336,13 @@ async fn handle_chat_rich(
         // sees schemas and structured tool calls come back out of the output.
         // Neither present falls through to plain chat generation. All three
         // exercise real llama.cpp inference.
+        // `thinking` rides along because the tool path is the one that produces
+        // it: with tools present the chat template opens a reasoning block, and
+        // dropping the field here is what left a bare "<think>" in the answer
+        // and no thinking block for any client to show.
         let (
             response_text,
+            reasoning_text,
             extracted_tool_calls,
             input_tokens,
             output_tokens,
@@ -34516,6 +35375,7 @@ async fn handle_chat_rich(
             })?;
             (
                 r.text,
+                r.thinking.clone(),
                 r.tool_calls,
                 r.input_tokens,
                 r.output_tokens,
@@ -34542,6 +35402,9 @@ async fn handle_chat_rich(
             };
             (
                 r.text,
+                // Plain chat: the model layer already split the block, so this
+                // is the reasoning if the model produced any.
+                r.thinking.clone(),
                 Vec::new(),
                 r.input_tokens,
                 r.output_tokens,
@@ -34603,6 +35466,18 @@ async fn handle_chat_rich(
         // Build content blocks: any free text (non-empty after stripping
         // tool-call markers) plus each extracted ToolUse in emission order.
         let mut content: Vec<ContentBlock> = Vec::new();
+        // Reasoning leads, as its own block rather than a prefix on the text, so
+        // a client can render or collapse it. Concatenating the two is what
+        // leaks bare `<think>` tags into terminals.
+        if let Some(thinking) = reasoning_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            content.push(ContentBlock::Thinking {
+                thinking: thinking.to_string(),
+            });
+        }
         if !response_text.trim().is_empty() {
             content.push(ContentBlock::Text {
                 text: response_text,
@@ -34856,6 +35731,24 @@ fn map_stop_reason(s: &str) -> tenzro_types::model::StopReason {
     }
 }
 
+/// Just the prose of a turn — its text blocks, joined.
+///
+/// The companion to [`render_blocks_as_text`], for the paths that carry tool
+/// blocks as structure instead of stringifying them. Thinking blocks are left
+/// out on purpose: a template that wants reasoning back takes it in its own
+/// field, and pasting it into the body is how it leaks into the answer.
+fn render_text_blocks_only(blocks: &[tenzro_types::model::ContentBlock]) -> String {
+    use tenzro_types::model::ContentBlock;
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Render a `MessageContent` value (string or block array) as a flat
 /// text string suitable for chat templates that don't yet understand
 /// content blocks. Tool-use and tool-result blocks are inlined as
@@ -35060,7 +35953,7 @@ async fn handle_list_providers(node: &Arc<TenzroNode>) -> std::result::Result<Va
         result.push(serde_json::json!({
             "peer_id": self_peer_id,
             "provider_address": "0x0000000000000000000000000000000000000000",
-            "provider_type": "llm",
+            "provider_type": tenzro_network::message::PROVIDER_TYPE_AI,
             "served_models": served,
             "capabilities": ["inference"],
             "rpc_endpoint": "",
@@ -36509,7 +37402,7 @@ async fn handle_openai_speech(
         use crate::serving_admission::{
             Decision, admit_inference, classify, refusal_http_response, warming_http_response,
         };
-        match admit_inference(&node, &model, classify(1), None, 0).await {
+        match admit_inference(&node, &model, classify(1), None, 0, NOMINAL_REQUEST_TOKENS).await {
             Decision::Proceed(permit) => permit,
             Decision::Warming(status) => return warming_http_response(&status),
             Decision::Refused(refusal) => return refusal_http_response(&refusal),
@@ -37747,6 +38640,8 @@ async fn handle_openai_images_generations(
         // Pixel kinds only: the OpenAI-compatible image surface has no
         // 3D job shape, so there is no voxel grid to describe.
         voxel_resolution: None,
+        // Pixel kind: no audio duration to describe.
+        audio_duration_secs: None,
         seed: request.seed,
         input_image_hash: None,
         metadata: std::collections::HashMap::new(),
@@ -38200,6 +39095,8 @@ async fn handle_openai_images_edits(
         guidance_scale,
         // Pixel kind: no voxel grid to describe.
         voxel_resolution: None,
+        // Pixel kind: no audio duration to describe.
+        audio_duration_secs: None,
         seed,
         input_image_hash: Some(input_image_hash),
         metadata,
@@ -38515,6 +39412,8 @@ async fn handle_openai_videos_create(
         guidance_scale,
         // Pixel kind: no voxel grid to describe.
         voxel_resolution: None,
+        // Pixel kind: no audio duration to describe.
+        audio_duration_secs: None,
         seed,
         input_image_hash,
         metadata: std::collections::HashMap::new(),
@@ -38972,7 +39871,7 @@ pub(crate) async fn openai_chat_completions_inner(
             use crate::serving_admission::{
                 Decision, admit_inference, classify, refusal_http_response, warming_http_response,
             };
-            match admit_inference(&node, &model_id, classify(1), None, 0).await {
+            match admit_inference(&node, &model_id, classify(1), None, 0, NOMINAL_REQUEST_TOKENS).await {
                 Decision::Proceed(permit) => permit,
                 Decision::Warming(status) => return warming_http_response(&status),
                 Decision::Refused(refusal) => return refusal_http_response(&refusal),
@@ -39082,6 +39981,7 @@ pub(crate) async fn openai_chat_completions_inner(
             .map(|m| ModelChatMessage {
                 role: m.role.clone(),
                 content: m.content.as_text(),
+                ..Default::default()
             })
             .collect();
 
@@ -40598,7 +41498,7 @@ pub async fn handle_chat_stream_rich(
         use crate::serving_admission::{
             Decision, admit_inference, classify, refusal_http_response, warming_http_response,
         };
-        match admit_inference(&node, &model_id, classify(1), None, 0).await {
+        match admit_inference(&node, &model_id, classify(1), None, 0, NOMINAL_REQUEST_TOKENS).await {
             Decision::Proceed(permit) => permit,
             Decision::Warming(status) => return warming_http_response(&status),
             Decision::Refused(refusal) => return refusal_http_response(&refusal),
@@ -40692,13 +41592,15 @@ pub async fn handle_chat_stream_rich(
         chat_messages.push(ModelChatMessage {
             role: "system".to_string(),
             content: sys.as_text(),
-        });
+                ..Default::default()
+            });
     }
     for m in &messages {
         chat_messages.push(ModelChatMessage {
             role: m.role.clone(),
             content: render_blocks_as_text(&m.content),
-        });
+                ..Default::default()
+            });
     }
 
     // Attachment bytes, in the marker order the flattening above produced.
@@ -42135,15 +43037,37 @@ async fn handle_submit_daml_command(
     // we fail-fast before the upstream call and produce a structured
     // error the caller can recover from.
     //
-    // Keys with no delegation restrictions (the legacy unrestricted
-    // case) skip this gate entirely; Canton's AuthService remains the
-    // sole authority. This preserves backward compatibility with the
-    // Stage-1 single-tenant key path.
-    // `record` was resolved above when we authorized the actAs party,
-    // so it is in scope here. The party check is now upstream — this
-    // block only enforces the per-key template / command / mandate /
-    // amount caps.
+    // A key that declares no scope at all is refused. Every check below
+    // short-circuits on `is_empty()`, so such a key used to pass through all
+    // of them and reach Canton unexamined — the key whose owner had set the
+    // fewest permissions was the one with no Tenzro-side limit.
+    //
+    // An empty scope means nothing was delegated, not that everything was.
+    // Canton's AuthService still enforces CanActAs upstream; this is the
+    // check this node owns, and it was skipped precisely where the caller
+    // had declared the least.
+    //
+    // `record` was resolved above when we authorized the actAs party, so it
+    // is in scope here. The party check is upstream — this block enforces the
+    // per-key template / command / mandate / amount caps.
     {
+        if record.can_act_as_parties.is_empty()
+            && record.allowed_templates.is_empty()
+            && record.allowed_commands.is_empty()
+            && record.requires_mandate_for.is_empty()
+            && record.max_per_command_amulet.is_none()
+        {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: "Agent delegation: this api key declares no delegated scope, so \
+                          nothing authorizes it to submit. Set at least one of \
+                          can_act_as_parties, allowed_templates, allowed_commands, \
+                          requires_mandate_for or max_per_command_amulet on the key."
+                    .to_string(),
+                data: None,
+            });
+        }
+
         // Template check — every submitDamlCommand carries a template_id.
         if !record.allowed_templates.is_empty() && !record.allows_template(&template_id) {
             return Err(JsonRpcError {
@@ -45234,19 +46158,40 @@ async fn handle_stake(
         data: None,
     })?;
 
-    // Use the node's own address as the staker, and capture the identity for
-    // potential pending-validator enqueue below.
-    let (staker_address, identity_for_validator) = if let Some(registry) = node.identity_registry()
-    {
-        let all = registry.list_all();
-        if let Some((_, identity)) = all.first() {
-            (identity.wallet_address, Some(identity.clone()))
-        } else {
-            (Address::default(), None)
-        }
-    } else {
-        (Address::default(), None)
-    };
+    // The staker is the node's operator payee — the same address every other
+    // subsystem bonds and settles against.
+    //
+    // This previously took `registry.list_all().first()`, which is not the
+    // node's address: the registry holds every identity the node knows, so on
+    // a machine with tenants it returned whichever one happened to sort first
+    // and bonded real value to a stranger's wallet. With an empty registry it
+    // fell back to `Address::default()` and staked to the zero address. Both
+    // returned `status: Active` with a transaction hash, and both produced a
+    // stake that settlement could never see — `open_deal` reads
+    // `available_stake(operator_payee)` and got 0 while the ledger showed the
+    // bond posted somewhere else entirely.
+    //
+    // Refuse rather than guess. A stake credited to the wrong address is not a
+    // degraded outcome, it is value committed where the operator cannot
+    // recover or use it.
+    let staker_address = node.operator_payee().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "cannot determine this node's payee address to stake against; \
+                  provision an operator identity or set `operator_did` before staking"
+            .to_string(),
+        data: None,
+    })?;
+
+    // The identity is still wanted for the pending-validator enqueue below,
+    // but only when it is *this node's* — matched by wallet, not by position
+    // in the registry.
+    let identity_for_validator = node.identity_registry().and_then(|registry| {
+        registry
+            .list_all()
+            .into_iter()
+            .map(|(_, identity)| identity)
+            .find(|identity| identity.wallet_address == staker_address)
+    });
 
     staking
         .stake_with_capacity(staker_address, amount, provider_type, capacity)
@@ -45364,22 +46309,19 @@ async fn handle_unstake(
         data: None,
     })?;
 
-    // Find the staker address from identity registry
-    let staker_address = if let Some(registry) = node.identity_registry() {
-        let all = registry.list_all();
-        if let Some((_, identity)) = all.first() {
-            identity.wallet_address
-        } else {
-            return Err(JsonRpcError {
-                code: -32000,
-                message: "No identity found — cannot determine staker address".to_string(),
-                data: None,
-            });
-        }
+    // Same resolution as `handle_stake`, or the two disagree about whose stake
+    // this is. They did: staking refused with "Already have an active stake"
+    // while unstaking refused with "Stake not found for address" — seconds
+    // apart, on one node, because each picked a different wallet out of the
+    // registry. A stake you cannot unstake is locked collateral.
+    let staker_address = if let Some(payee) = node.operator_payee() {
+        payee
     } else {
         return Err(JsonRpcError {
             code: -32000,
-            message: "Identity registry not initialized".to_string(),
+            message: "cannot determine this node's payee address to unstake from; \
+                      provision an operator identity or set `operator_did`"
+                .to_string(),
             data: None,
         });
     };
@@ -45465,17 +46407,20 @@ async fn handle_register_provider(
     let provider_type = parse_provider_type(&params)?;
     let capacity = parse_stake_capacity(&params, provider_type)?;
 
-    // Get provider address from identity
-    let provider_address = if let Some(registry) = node.identity_registry() {
-        let all = registry.list_all();
-        if let Some((_, identity)) = all.first() {
-            identity.wallet_address
-        } else {
-            Address::default()
-        }
-    } else {
-        Address::default()
-    };
+    // The provider is this node's operator payee — the address the bond is
+    // posted against and the one settlement reads back.
+    //
+    // Not `registry.list_all().first()`: the registry holds every identity the
+    // node knows, so on a machine with tenants that returns whichever sorted
+    // first, and on an empty registry it returned the zero address. Either way
+    // the bond lands somewhere settlement never looks.
+    let provider_address = node.operator_payee().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "cannot determine this node's payee address to bond against; \
+                  provision an operator identity or set `operator_did`"
+            .to_string(),
+        data: None,
+    })?;
 
     // ComputeBond admission gate. Every service role requires an active
     // compute bond at or above its rung on the stake ladder — the bond a
@@ -53200,11 +54145,23 @@ async fn handle_register_tool(
         .and_then(|v| v.as_str())
         .unwrap_or("1.0.0")
         .to_string();
-    let tool_type = params
-        .get("tool_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("mcp")
-        .to_string();
+    // Absent means `mcp` — the documented default, and unambiguous. Present
+    // but unrecognised is refused here: storing it would only defer the
+    // failure to invoke time, where it used to surface as an unknown mode.
+    let transport = match params.get("transport").and_then(|v| v.as_str()) {
+        None => tenzro_types::ToolTransportMode::Mcp,
+        Some(s) => serde_json::from_value::<tenzro_types::ToolTransportMode>(
+            serde_json::Value::String(s.to_string()),
+        )
+        .map_err(|_| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "unknown transport '{}'; expected one of mcp, mcp-stdio, api, native",
+                s
+            ),
+            data: None,
+        })?,
+    };
     let endpoint = params
         .get("endpoint")
         .and_then(|v| v.as_str())
@@ -53239,7 +54196,7 @@ async fn handle_register_tool(
     let mut tool = tenzro_types::ToolDefinition::new(
         name,
         version,
-        tool_type,
+        transport,
         endpoint,
         description,
         category,
@@ -53318,10 +54275,10 @@ async fn handle_register_tool(
     }
     // stdio transport requires spawn_spec; reject at registration
     // time so an unusable tool never lands in the registry.
-    if tool.tool_type == "mcp-stdio" && tool.spawn_spec.is_none() {
+    if tool.transport == tenzro_types::ToolTransportMode::McpStdio && tool.spawn_spec.is_none() {
         return Err(JsonRpcError {
             code: -32602,
-            message: "tool_type 'mcp-stdio' requires spawn_spec (command + args)".to_string(),
+            message: "transport 'mcp-stdio' requires spawn_spec (command + args)".to_string(),
             data: None,
         });
     }
@@ -53356,7 +54313,7 @@ async fn handle_register_tool(
     tracing::info!(
         tool_id = %tool.tool_id,
         name = %tool.name,
-        transport = %tool.tool_type,
+        transport = ?tool.transport,
         price_per_call = tool.price_per_call,
         upstream_auth = tool.upstream_auth.is_some(),
         spawn_spec = tool.spawn_spec.is_some(),
@@ -53391,8 +54348,8 @@ async fn handle_list_tools(
             && let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes)
         {
             // Apply filters
-            if let Some(ref tt) = filter.tool_type
-                && &tool.tool_type != tt
+            if let Some(tt) = filter.transport
+                && tool.transport != tt
             {
                 continue;
             }
@@ -53455,8 +54412,8 @@ async fn handle_search_tools(
             && let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes)
         {
             // Type/category/status/creator filters
-            if let Some(ref tt) = filter.tool_type
-                && &tool.tool_type != tt
+            if let Some(tt) = filter.transport
+                && tool.transport != tt
             {
                 continue;
             }
@@ -53669,7 +54626,7 @@ pub(crate) async fn handle_use_tool(
     let output = if let Some(builtin) = crate::builtin_dispatch::builtin_target(&tool.endpoint) {
         crate::builtin_dispatch::dispatch_tool(&node, builtin, tool_name, &tool_params, api_key)
             .await?
-    } else if tool.tool_type == "native" {
+    } else if tool.transport == tenzro_types::ToolTransportMode::Native {
         serde_json::json!({
             "type": "native",
             "tool_id": tool_id,
@@ -53849,11 +54806,20 @@ async fn handle_update_tool(
                     .and_then(|v| v.as_str())
                     .unwrap_or("1.0.0")
                     .to_string(),
-                params
-                    .get("tool_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("mcp")
-                    .to_string(),
+                match params.get("transport").and_then(|v| v.as_str()) {
+                    None => tenzro_types::ToolTransportMode::Mcp,
+                    Some(s) => serde_json::from_value::<tenzro_types::ToolTransportMode>(
+                        serde_json::Value::String(s.to_string()),
+                    )
+                    .map_err(|_| JsonRpcError {
+                        code: -32602,
+                        message: format!(
+                            "unknown transport '{}'; expected one of mcp, mcp-stdio, api, native",
+                            s
+                        ),
+                        data: None,
+                    })?,
+                },
                 endpoint,
                 params
                     .get("description")
@@ -53907,8 +54873,18 @@ async fn handle_update_tool(
     if let Some(v) = params.get("version").and_then(|v| v.as_str()) {
         tool.version = v.to_string();
     }
-    if let Some(v) = params.get("tool_type").and_then(|v| v.as_str()) {
-        tool.tool_type = v.to_string();
+    if let Some(v) = params.get("transport").and_then(|v| v.as_str()) {
+        tool.transport = serde_json::from_value::<tenzro_types::ToolTransportMode>(
+            serde_json::Value::String(v.to_string()),
+        )
+        .map_err(|_| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "unknown transport '{}'; expected one of mcp, mcp-stdio, api, native",
+                v
+            ),
+            data: None,
+        })?;
     }
     if let Some(v) = params.get("endpoint").and_then(|v| v.as_str()) {
         tool.endpoint = v.to_string();
@@ -55669,7 +56645,9 @@ async fn handle_list_resources(
                             price_per_call: t.price_per_call,
                             is_available: matches!(t.status, tenzro_types::ToolStatus::Active),
                             last_seen_at: t.last_seen_at,
-                            subtype: Some(t.tool_type),
+                            subtype: serde_json::to_value(t.transport)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_string)),
                             reputation: None,
                         })
                 }
@@ -57434,7 +58412,7 @@ async fn handle_agent_payment_pipeline(
         // attainability, warm/cold state (warming in the background rather
         // than on this socket), and the memory ledger. Held for the whole
         // response so the model cannot be evicted mid-generation.
-        let _serving_permit = admit_local_inference(node, &model_id, 1).await?;
+        let _serving_permit = admit_local_inference(node, &model_id, 1, est_tokens_of(message)).await?;
         // Serving weights load lazily on first use.
         let _ = node.ensure_local_model_loaded(&model_id).await;
         if !model_runtime.is_loaded(&model_id) {
@@ -57457,7 +58435,8 @@ async fn handle_agent_payment_pipeline(
         let chat_messages = vec![ModelChatMessage {
             role: "user".to_string(),
             content: message.to_string(),
-        }];
+                ..Default::default()
+            }];
 
         let result = model_runtime
             .generate_chat(&model_id, &chat_messages, &config)
@@ -57557,15 +58536,21 @@ async fn handle_agent_payment_pipeline(
     let protocol_fee_wei = cost_wei * protocol_fee_bps / 10_000;
     let provider_payment_wei = cost_wei.saturating_sub(protocol_fee_wei);
 
-    // Resolve provider address (this node's identity)
-    let provider_addr = {
-        let all = identity_registry.list_all();
-        if let Some((_, identity)) = all.first() {
-            identity.wallet_address
-        } else {
-            Address::default()
-        }
-    };
+    // The provider being paid is this node's operator payee.
+    //
+    // This is a credit, so getting it wrong moves real value: the previous
+    // `list_all().first()` paid whichever identity sorted first — on a
+    // multi-tenant node, a stranger — and an empty registry paid
+    // `Address::default()`, which burns it. Refusing is the safe direction:
+    // an unpaid request can be retried, a misdirected payment cannot be
+    // recalled.
+    let provider_addr = node.operator_payee().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "cannot determine this node's payee address to credit; \
+                  provision an operator identity or set `operator_did`"
+            .to_string(),
+        data: None,
+    })?;
 
     // Debit agent, credit provider + treasury
     let mut payment_success = false;
@@ -64804,8 +65789,15 @@ fn unwrap_params(params: Option<Value>) -> std::result::Result<Value, JsonRpcErr
 /// — never with a caller-supplied private key.
 ///
 /// `Unauthenticated` means the request did not present any auth headers.
-/// Caller should fall back to the legacy private-key path with a
-/// deprecation warning. This branch will be removed once #55 lands.
+/// Every signing handler refuses it — the caller-supplied `private_key`
+/// parameter it used to fall back to no longer exists. The variant is still
+/// distinct from `AuthError` because the two warrant different messages:
+/// "authenticate" versus "your credentials were rejected".
+///
+/// One caller, `enforce_resource_invocation_authority`, deliberately treats
+/// it as a pass — with no bearer there is no controller whose spending leash
+/// could be consulted, which is what keeps the resource registry
+/// permissionless. That is a decision about that gate, not a general licence.
 ///
 /// `AuthError` means the request *did* present auth headers but they
 /// failed validation (bad JWT, replay, scope violation, …). Caller
@@ -65020,6 +66012,8 @@ async fn resolve_auth_to_wallet_from(
 /// not just raw UserOps from the bundler path.
 fn tx_type_selector(tx_type: &TransactionType) -> [u8; 4] {
     let name = match tx_type {
+        TransactionType::GovernanceVeto { .. } => "governance_veto",
+        TransactionType::GovernancePause { .. } => "governance_pause",
         TransactionType::Transfer { .. } => "Transfer",
         TransactionType::ContractDeploy { .. } => "ContractDeploy",
         TransactionType::ContractCall { .. } => "ContractCall",
@@ -65031,6 +66025,9 @@ fn tx_type_selector(tx_type: &TransactionType) -> [u8; 4] {
         TransactionType::ProviderUnstake { .. } => "ProviderUnstake",
         TransactionType::GovernancePropose { .. } => "GovernancePropose",
         TransactionType::GovernanceVote { .. } => "GovernanceVote",
+        TransactionType::GovernanceExecute { .. } => "GovernanceExecute",
+        TransactionType::IncreaseValidatorStake { .. } => "IncreaseValidatorStake",
+        TransactionType::TreasuryDeposit { .. } => "TreasuryDeposit",
         TransactionType::BridgeTransfer { .. } => "BridgeTransfer",
         TransactionType::CreateEscrow { .. } => "CreateEscrow",
         TransactionType::ReleaseEscrow { .. } => "ReleaseEscrow",
@@ -65286,6 +66283,9 @@ fn enforce_typed_tx_spend_ceilings(
     // `tenzro_types::transaction::TransactionType`; variants without an
     // `amount` field bind value to 0 (operation gate still fires).
     let (operation, value) = match &tx.tx_type {
+        // Guardian powers move no value; they only stop things.
+        TransactionType::GovernanceVeto { .. } => ("governance_veto", 0u128),
+        TransactionType::GovernancePause { .. } => ("governance_pause", 0u128),
         tenzro_types::TransactionType::Transfer { amount } => ("transfer", *amount),
         tenzro_types::TransactionType::ContractCall { .. } => ("contract_call", 0u128),
         tenzro_types::TransactionType::ContractDeploy { .. } => ("contract_deploy", 0u128),
@@ -65300,6 +66300,13 @@ fn enforce_typed_tx_spend_ceilings(
         tenzro_types::TransactionType::BridgeTransfer { amount, .. } => ("bridge", *amount),
         tenzro_types::TransactionType::GovernancePropose { .. } => ("governance_propose", 0u128),
         tenzro_types::TransactionType::GovernanceVote { .. } => ("governance_vote", 0u128),
+        tenzro_types::TransactionType::GovernanceExecute { .. } => ("governance_execute", 0u128),
+        tenzro_types::TransactionType::IncreaseValidatorStake { additional } => {
+            ("increase_validator_stake", *additional)
+        }
+        tenzro_types::TransactionType::TreasuryDeposit { amount } => {
+            ("treasury_deposit", *amount)
+        }
         tenzro_types::TransactionType::PostAgentBond { amount, .. } => ("post_bond", *amount),
         tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => {
             ("increase_bond", *amount)
@@ -65446,9 +66453,78 @@ fn intent_for_transaction(
                 resource_id: None,
             },
         ),
-        // Other tx-types (governance, contract, agent, …) are not yet
-        // mapped onto AuthorityAction. Return None so the auth engine
-        // skips scope checking for now — JWT/DPoP validation still runs.
+        // Governance. These move the treasury and change the validator set, so
+        // they are exactly the operations a delegated token should have to be
+        // scoped for. They previously fell into the catch-all below and were
+        // scope-checked not at all.
+        TransactionType::GovernancePropose { .. }
+        | TransactionType::GovernanceVote { .. }
+        | TransactionType::GovernanceExecute { .. } => (
+            AuthorityAction::Vote,
+            ResourceConstraint {
+                asset: None,
+                amount: None,
+                counterparty: None,
+                resource_id: None,
+            },
+        ),
+
+        // Staking. Bonding and unbonding move value and change consensus
+        // weight; `RegisterValidator` commits a self-stake outright.
+        TransactionType::ProviderStake { amount, .. }
+        | TransactionType::ProviderUnstake { amount, .. } => {
+            (AuthorityAction::Stake, constraint_for(*amount))
+        }
+        TransactionType::IncreaseValidatorStake { additional } => {
+            (AuthorityAction::Stake, constraint_for(*additional))
+        }
+        TransactionType::TreasuryDeposit { amount } => {
+            (AuthorityAction::Transfer, constraint_for(*amount))
+        }
+        TransactionType::RegisterValidator { .. } | TransactionType::ExitValidator => (
+            AuthorityAction::Stake,
+            ResourceConstraint {
+                asset: None,
+                amount: None,
+                counterparty: None,
+                resource_id: None,
+            },
+        ),
+
+        // Identity. Registering a DID binds a wallet to it, so a token that may
+        // not create identities must not be able to create one by this route.
+        TransactionType::RegisterIdentity { .. } => (
+            AuthorityAction::RegisterIdentity,
+            ResourceConstraint {
+                asset: None,
+                amount: None,
+                counterparty: None,
+                resource_id: None,
+            },
+        ),
+
+        // Contract execution — arbitrary state change, and the reason the
+        // `Contract` action exists.
+        TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => (
+            AuthorityAction::Contract,
+            ResourceConstraint {
+                asset: None,
+                amount: None,
+                counterparty: Some(tx.to),
+                resource_id: None,
+            },
+        ),
+
+        // Anything still unmapped returns None, so the engine skips scope
+        // checking while JWT/DPoP validation still runs.
+        //
+        // This is a deliberately narrow hole and it should keep shrinking. It
+        // used to swallow governance, staking, identity and contract calls —
+        // every value-moving and authority-changing transaction the chain has
+        // — because they had no mapping, so a token scoped to read-only
+        // operations could submit them. A new `TransactionType` lands here by
+        // default, which means adding one silently widens what an existing
+        // token can do; map it rather than relying on this arm.
         _ => return None,
     };
 
@@ -66750,7 +67826,9 @@ async fn handle_generate_keypair(
     Ok(serde_json::json!({
         "public_key": format!("0x{}", keypair.public_key().to_hex()),
         "private_key": format!("0x{}", keypair.secret_key().to_hex()),
-        "address": format!("0x{}", keypair.address().to_hex()),
+        // `Address::to_hex()` already carries the 0x prefix, unlike `PublicKey`/
+        // `SecretKey::to_hex()` above, which return bare hex.
+        "address": keypair.address().to_hex(),
         "key_type": key_type_str,
     }))
 }
@@ -71430,6 +72508,101 @@ mod tee_custody_gate_tests {
 }
 
 #[cfg(test)]
+mod affinity_prefix_tests {
+    use super::{extract_affinity_prefix, extract_route_prompt, render_blocks_as_text};
+    use serde_json::json;
+    use tenzro_types::model::{RichChatMessage, SystemPrompt};
+
+    /// Rebuild exactly what the chat handlers hand the runtime, then join it
+    /// the way `ModelRuntime::warm_prompt_bytes` does. This is the byte string
+    /// a serving node records as warm, so it is what the router must hash.
+    ///
+    /// Deliberately reconstructed from the same helpers rather than hardcoded:
+    /// a hardcoded expectation would keep passing if `render_blocks_as_text`
+    /// changed, which is one of the two ways these sides silently drifted apart.
+    fn what_the_provider_warms(params: &serde_json::Value) -> String {
+        let system: Option<SystemPrompt> = params
+            .get("system")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let messages: Vec<RichChatMessage> = params
+            .get("messages")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let mut contents: Vec<String> = Vec::new();
+        if let Some(sys) = &system {
+            contents.push(sys.as_text());
+        }
+        for m in &messages {
+            contents.push(render_blocks_as_text(&m.content));
+        }
+        contents.join("\n")
+    }
+
+    /// The router's affinity bytes must equal the provider's warm bytes. Any
+    /// divergence silently scores every match zero instead of failing, which
+    /// is exactly how this stayed broken through two separate fixes: first the
+    /// router hashed only the last user turn, then it hashed the messages
+    /// array while the provider prepends the `system` param as its own turn.
+    #[test]
+    fn affinity_bytes_match_what_the_provider_warms() {
+        let params = json!({
+            "system": "You are a careful assistant. Cite sources.",
+            "messages": [
+                { "role": "user", "content": "explain rolling hashes" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "recall FNV" },
+                    { "type": "text", "text": "A rolling hash chains state." }
+                ]},
+                { "role": "user", "content": "now compare to a radix tree" }
+            ]
+        });
+
+        let router = extract_affinity_prefix(&params).expect("affinity prefix");
+        assert_eq!(router, what_the_provider_warms(&params));
+
+        // The system prompt must be present and first — it is usually the
+        // largest shared prefix, and the rolling hash is position dependent,
+        // so losing it from run 0 shifts every subsequent run.
+        assert!(router.starts_with("You are a careful assistant."), "{router}");
+
+        // Block markup must survive: rendering only `text` fields would drop
+        // the thinking block and change the byte stream.
+        assert!(router.contains("<thinking>recall FNV</thinking>"), "{router}");
+    }
+
+    /// The clustering prompt and the affinity prefix answer different
+    /// questions and must not be conflated — conflating them is the original
+    /// bug, and this pins them apart.
+    #[test]
+    fn clustering_prompt_is_not_the_affinity_prefix() {
+        let params = json!({
+            "system": "sys",
+            "messages": [
+                { "role": "user", "content": "first turn" },
+                { "role": "user", "content": "latest turn" }
+            ]
+        });
+        assert_eq!(extract_route_prompt(&params).as_deref(), Some("latest turn"));
+        assert_eq!(
+            extract_affinity_prefix(&params).as_deref(),
+            Some("sys\nfirst turn\nlatest turn")
+        );
+    }
+
+    /// A request with no conversation contributes no affinity key rather than
+    /// an empty-string one, so selection falls back instead of matching noise.
+    #[test]
+    fn absent_conversation_yields_no_prefix() {
+        assert_eq!(extract_affinity_prefix(&json!({})), None);
+        assert_eq!(
+            extract_affinity_prefix(&json!({"messages": [{"role":"user","content":"   "}]})),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod requester_address_tests {
     use super::{parse_address, parse_requester_address};
 
@@ -71471,5 +72644,170 @@ mod requester_address_tests {
     #[test]
     fn a_bad_checksum_is_still_refused() {
         assert!(parse_requester_address("0x3d0291c0FC59EdA83f2D9f5f00A09e12f3f6a067").is_err());
+    }
+}
+
+#[cfg(test)]
+mod authority_scope_tests {
+    use super::intent_for_transaction;
+    use tenzro_types::primitives::{Address, ChainId, Nonce};
+    use tenzro_types::transaction::{Transaction, TransactionType};
+
+    fn tx(tx_type: TransactionType) -> Transaction {
+        Transaction::new(
+            ChainId::from(1),
+            Address::default(),
+            Address::default(),
+            Nonce::from(1),
+            tx_type,
+            21_000,
+            100,
+            vec![0u8; 1952],
+        )
+    }
+
+    /// Every transaction that moves value or changes authority must be
+    /// scope-checkable.
+    ///
+    /// Unmapped types return `None`, which tells the auth engine to skip scope
+    /// checking entirely — so a token scoped to read-only operations could
+    /// submit them. Governance, staking, identity registration and contract
+    /// calls all fell into that hole: a treasury grant, a validator
+    /// registration, and arbitrary contract execution were unscoped.
+    #[test]
+    fn value_moving_and_authority_changing_transactions_are_scope_checked() {
+        let cases = vec![
+            (
+                "governance propose",
+                TransactionType::GovernancePropose {
+                    proposal: vec![1, 2, 3],
+                },
+            ),
+            (
+                "governance vote",
+                TransactionType::GovernanceVote {
+                    proposal_id: "a".repeat(64),
+                    vote: true,
+                },
+            ),
+            (
+                "governance execute",
+                TransactionType::GovernanceExecute {
+                    proposal_id: "a".repeat(64),
+                },
+            ),
+            (
+                "provider stake",
+                TransactionType::ProviderStake {
+                    amount: 1_000,
+                    provider_type: "ai".to_string(),
+                },
+            ),
+            (
+                "contract call",
+                TransactionType::ContractCall {
+                    function: "f".to_string(),
+                    args: vec![],
+                },
+            ),
+        ];
+
+        for (label, tx_type) in cases {
+            assert!(
+                intent_for_transaction(&tx(tx_type), None).is_some(),
+                "{label} must map to an AuthorityAction, or it bypasses scope checking"
+            );
+        }
+    }
+
+    /// A plain transfer still maps, so the mapping was not broken while being
+    /// extended.
+    #[test]
+    fn a_transfer_still_carries_its_amount_and_counterparty() {
+        let request = intent_for_transaction(&tx(TransactionType::Transfer { amount: 500 }), None)
+            .expect("a transfer must be scope-checkable");
+        assert_eq!(request.constraint.amount, Some(500));
+        assert!(request.constraint.asset.is_some());
+    }
+}
+
+#[cfg(test)]
+mod served_record_tests {
+    use super::merge_served_record;
+    use tenzro_types::model::ModelVisibility;
+
+    /// The regression this function exists to prevent.
+    ///
+    /// A re-serve that only changes visibility must not drop the external
+    /// engine binding. When it did, the node restarted with no engine, fell
+    /// back to local weights, and served the same model at 28.2s per request
+    /// instead of 2.0s — with a concurrency cap of 1 instead of 16.
+    #[test]
+    fn a_visibility_change_preserves_an_external_engine_binding() {
+        let existing = serde_json::json!({
+            "model_id": "qwen3.8-27b",
+            "served_at": "2026-08-20T00:00:00Z",
+            "engine": "vllm",
+            "base_url": "http://127.0.0.1:8000",
+            "upstream_model": "Qwen/Qwen3.8-27B-FP8",
+            "api_key": "secret-token",
+            "visibility": "private",
+        });
+
+        let merged =
+            merge_served_record(Some(existing), "qwen3.8-27b", ModelVisibility::Network);
+
+        // The binding survives, whole.
+        assert_eq!(merged["engine"], "vllm");
+        assert_eq!(merged["base_url"], "http://127.0.0.1:8000");
+        assert_eq!(merged["upstream_model"], "Qwen/Qwen3.8-27B-FP8");
+        assert_eq!(merged["api_key"], "secret-token");
+        // And the thing the caller actually asked to change did change.
+        assert_eq!(merged["visibility"], "network");
+    }
+
+    /// Fields this function has never heard of must survive too, or every
+    /// future addition to the record becomes a fresh instance of this bug.
+    #[test]
+    fn unknown_fields_are_carried_forward() {
+        let existing = serde_json::json!({
+            "model_id": "m",
+            "some_future_field": {"nested": [1, 2, 3]},
+        });
+        let merged = merge_served_record(Some(existing), "m", ModelVisibility::Network);
+        assert_eq!(merged["some_future_field"]["nested"][2], 3);
+    }
+
+    /// A first serve has nothing to merge into and still produces a complete
+    /// record.
+    #[test]
+    fn a_first_serve_writes_a_complete_record() {
+        let merged = merge_served_record(None, "m", ModelVisibility::Gated);
+        assert_eq!(merged["model_id"], "m");
+        assert_eq!(merged["visibility"], "gated");
+        assert!(merged["served_at"].is_string());
+    }
+
+    /// Corruption is discarded rather than merged into. Carrying a non-object
+    /// forward would preserve whatever damaged it.
+    #[test]
+    fn a_corrupt_record_is_replaced_not_merged() {
+        for junk in [
+            serde_json::json!("a string"),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!(null),
+        ] {
+            let merged = merge_served_record(Some(junk), "m", ModelVisibility::Network);
+            assert_eq!(merged["model_id"], "m");
+            assert_eq!(merged["visibility"], "network");
+        }
+    }
+
+    /// Visibility is authoritative from the caller, never inherited.
+    #[test]
+    fn the_new_visibility_always_wins() {
+        let existing = serde_json::json!({"visibility": "network"});
+        let merged = merge_served_record(Some(existing), "m", ModelVisibility::Private);
+        assert_eq!(merged["visibility"], "private");
     }
 }

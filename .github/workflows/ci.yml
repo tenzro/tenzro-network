@@ -18,6 +18,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # prost-build shells out to `protoc` and fails the whole job without it
+      # ("Could not find `protoc`"), which is why Check has been red on every
+      # PR while Test/Clippy sat SKIPPED behind it. libclang is needed for the
+      # bindgen-based crates, matching what the test job already installs.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev
       - name: Check compilation
         run: cargo check --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion
 
@@ -32,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev
+          sudo apt-get install -y protobuf-compiler libclang-dev
       - name: Run tests
         run: cargo test --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion -- --nocapture
 
@@ -55,7 +63,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev
+          sudo apt-get install -y protobuf-compiler libclang-dev
       - name: Consensus cluster simulations
         run: cargo test -p tenzro-consensus --test tail_fork_regression -- --ignored --nocapture
       - name: Model catalog resolves on HuggingFace
@@ -72,7 +80,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev
+          sudo apt-get install -y protobuf-compiler libclang-dev
       - name: Check bench compilation
         run: cargo check --workspace --exclude tenzro-desktop --benches
 
@@ -127,6 +135,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev
       - name: Run clippy
         run: cargo clippy --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion -- -D warnings
 

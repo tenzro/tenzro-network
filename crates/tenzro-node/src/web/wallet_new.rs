@@ -65,7 +65,7 @@ use sha2::{Digest, Sha256};
 
 use super::error::WalletApiError;
 use super::handlers::WebState;
-use super::wallet_frost::{ProvisionScheme, provision_split};
+use super::wallet_frost::{ProvisionScheme, ml_dsa_custody_key, provision_split};
 use super::wallet_share::{provisioning_salt, wrap_share_bytes};
 
 use tenzro_storage::{CF_VALIDATOR_MODULES, KvStore};
@@ -94,7 +94,25 @@ const EVM_SURFACE: &str = "evm-on-tenzro";
 pub(crate) struct StartRequest {
     /// `human` | `controlled-machine` | `autonomous-machine`.
     kind: String,
+    /// What the calling application calls this wallet.
+    ///
+    /// Lands in two places that matter: the identity record on the ledger, and
+    /// the name the platform passkey picker shows when the credential is
+    /// created. This node is shared, so hardcoding one product name labelled
+    /// every wallet "Tenzro Wallet" whichever application had created it — and
+    /// someone holding wallets from two applications saw two identical rows in
+    /// the picker with nothing to choose between them.
+    ///
+    /// Not a place for anything about the person. The identity record is
+    /// on-ledger and its display name is readable by anyone, so this is capped
+    /// and is meant to name the product, not its owner.
+    #[serde(default)]
+    display_name: Option<String>,
 }
+
+/// Longest accepted `display_name`. Room for "Some Product wallet", short
+/// enough that the field cannot quietly become a data channel.
+const MAX_DISPLAY_NAME: usize = 64;
 
 #[derive(Debug, Serialize)]
 struct StartReply {
@@ -557,9 +575,30 @@ pub(crate) async fn start_handler(
     rand::thread_rng().fill_bytes(&mut challenge);
     // The user handle is the DID's uuid bytes — a stable, non-PII handle.
     let user_handle = did.id.as_bytes().to_vec();
-    let user_display_name = match req.kind.as_str() {
-        "human" => "Tenzro Wallet".to_string(),
-        _ => "Tenzro Agent".to_string(),
+    let user_display_name = match req.display_name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => {
+            if name.chars().count() > MAX_DISPLAY_NAME {
+                return Err(bad_request(
+                    "display_name_too_long",
+                    format!("display_name exceeds {MAX_DISPLAY_NAME} characters"),
+                ));
+            }
+            // Control characters would corrupt the picker's rendering and any
+            // log line that carries this through.
+            if name.chars().any(char::is_control) {
+                return Err(bad_request(
+                    "display_name_control_chars",
+                    "display_name must not contain control characters",
+                ));
+            }
+            name.to_string()
+        }
+        // Unchanged when a caller sends nothing, so existing clients keep the
+        // name they have always had.
+        _ => match req.kind.as_str() {
+            "human" => "Tenzro Wallet".to_string(),
+            _ => "Tenzro Agent".to_string(),
+        },
     };
 
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -625,7 +664,13 @@ pub(crate) async fn finalize_handler(
     let (pubkey_x, pubkey_y) = extract_p256_xy_from_attestation(&attestation)?;
 
     // 2. Node-TEE ML-DSA-65 leg for the hybrid custody record.
-    let ml_dsa = tenzro_crypto::pq::MlDsaSigningKey::generate();
+    // Derived from the DID, not generated. See `ml_dsa_custody_seed`: the old
+    // call generated a keypair, kept the verifying key, and dropped the signing
+    // key at end of scope — leaving every account with a PQ key nobody could
+    // sign with, and a validator that demands a PQ signature on every
+    // authorization. Deriving it means the node can reproduce it whenever it
+    // needs to, and there is no stored secret to leak or lose.
+    let ml_dsa = ml_dsa_custody_key(&rec.did)?;
     let ml_dsa_vk = ml_dsa.verifying_key_bytes().to_vec();
     let account_key =
         tenzro_vm::aa_webauthn_validator::WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk)

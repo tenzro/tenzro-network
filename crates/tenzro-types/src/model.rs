@@ -1005,7 +1005,11 @@ pub struct JurisdictionClaim {
     pub blocs: Vec<String>,
     /// SHA-256 of the TEE attestation report the claim is bound to.
     /// `None` for non-TEE nodes: the claim is then operator-asserted only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // NOT `skip_serializing_if` — this rides the bincode gossip announcement
+    // inside `AdvertisedCapacity.jurisdiction`. Dormant only because that
+    // field is `None` today; the first operator to declare a jurisdiction
+    // would have desynchronised every announcement they sent.
+    #[serde(default)]
     pub attestation_hash: Option<Hash>,
     /// When the operator declared (or last re-attested) this claim.
     pub declared_at: Timestamp,
@@ -1611,7 +1615,15 @@ pub struct ProviderCapacity {
     /// `None` means undeclared — the provider is excluded from any request
     /// that pins a jurisdiction (fail-closed; sovereignty never degrades
     /// silently).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // NOT `skip_serializing_if`. This rides the gossip announcement, which is
+    // bincode — a non-self-describing format with no field names on the wire.
+    // A skipped field is simply absent while the decoder still reads one at
+    // that position, so every following byte shifts. As the last field of
+    // `AdvertisedCapacity`, omitting this one-byte `None` discriminant
+    // desynchronised the entire `ProviderAnnouncementMessage` and surfaced
+    // downstream as "tag for enum is not valid, found 64" — which took
+    // provider discovery to zero on every node of the network at once.
+    #[serde(default)]
     pub jurisdiction: Option<JurisdictionClaim>,
 }
 
@@ -1659,7 +1671,15 @@ pub struct AdvertisedCapacity {
     /// Declared serving jurisdiction. Must ride the announcement so
     /// discovery consumers can rank providers for jurisdiction-pinned
     /// requests without a direct round-trip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // NOT `skip_serializing_if`. This rides the gossip announcement, which is
+    // bincode — a non-self-describing format with no field names on the wire.
+    // A skipped field is simply absent while the decoder still reads one at
+    // that position, so every following byte shifts. As the last field of
+    // `AdvertisedCapacity`, omitting this one-byte `None` discriminant
+    // desynchronised the entire `ProviderAnnouncementMessage` and surfaced
+    // downstream as "tag for enum is not valid, found 64" — which took
+    // provider discovery to zero on every node of the network at once.
+    #[serde(default)]
     pub jurisdiction: Option<JurisdictionClaim>,
 }
 
@@ -1841,7 +1861,11 @@ pub struct PrefixCacheSummary {
     /// Radix-tree nodes, each a hashed run of prompt tokens the provider
     /// holds warm. Ordering is root-first; a child extends its parent's
     /// prefix. Empty means the provider advertises no warm prefixes.
-    #[serde(default)]
+    ///
+    /// Validated on deserialization — see [`sanitize_prefix_nodes`]. This
+    /// field arrives inside a gossiped announcement, and a signature proves
+    /// only *who* published it, never that it is true.
+    #[serde(default, deserialize_with = "deserialize_prefix_nodes")]
     pub nodes: Vec<PrefixCacheNode>,
     /// Total tokens across all advertised warm prefixes. Router peers use
     /// this only as a coarse tie-breaker (a provider holding more warm
@@ -1854,6 +1878,54 @@ pub struct PrefixCacheSummary {
 /// One node in a provider's [`PrefixCacheSummary`] radix tree: a hashed run
 /// of consecutive prompt tokens the provider holds warm, addressed relative
 /// to its parent.
+/// Hard ceiling on the nodes a peer may advertise in one warm-prefix tree.
+///
+/// Matches the bound the honest producer already applies to its own summary,
+/// so a well-behaved node is never truncated. The consumer needs its own copy
+/// of the limit because the producer's is not enforceable across the wire.
+pub const MAX_ADVERTISED_PREFIX_NODES: usize = 256;
+
+/// Accept an advertised warm-prefix tree only if it obeys the invariants an
+/// honest producer maintains; otherwise treat the peer as advertising nothing.
+///
+/// Three things are checked, each closing a way a peer profits by lying:
+///
+/// - **Size.** Nothing on the wire bounds `nodes`, and roughly 61,000 fit in
+///   one gossip frame. [`PrefixCacheSummary::longest_match_len`] rescans the
+///   whole vector for every run of the incoming prompt, so an oversized tree
+///   makes each routing decision O(nodes x runs) — a stall reachable by any
+///   peer, on a code path that runs inline on a worker thread.
+/// - **`run_len`.** The producer only ever emits [`PREFIX_RUN_BYTES`]. A peer
+///   declaring `u32::MAX` on a single node scores a saturated match and beats
+///   every honest provider in the routing tie-break while holding no cache at
+///   all. Since the value is a constant, anything else is a forgery.
+/// - **`parent` bounds.** An index past the end is meaningless; it cannot
+///   panic (the walk compares parents by value and never indexes with one)
+///   but it marks a tree no honest producer builds.
+///
+/// Rejection is all-or-nothing rather than per-node: `parent` refers to a
+/// position in this vector, so dropping any node would silently reparent the
+/// ones after it. An empty summary is exactly the honest "nothing warm here"
+/// state, which is the right thing to believe about a peer sending garbage.
+fn sanitize_prefix_nodes(nodes: Vec<PrefixCacheNode>) -> Vec<PrefixCacheNode> {
+    let len = nodes.len();
+    let sane = len <= MAX_ADVERTISED_PREFIX_NODES
+        && nodes.iter().all(|n| {
+            n.run_len == PREFIX_RUN_BYTES as u32
+                && n.parent.is_none_or(|p| (p as usize) < len)
+        });
+    if sane { nodes } else { Vec::new() }
+}
+
+fn deserialize_prefix_nodes<'de, D>(d: D) -> std::result::Result<Vec<PrefixCacheNode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(sanitize_prefix_nodes(Vec::<PrefixCacheNode>::deserialize(
+        d,
+    )?))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefixCacheNode {
     /// Index of the parent node in [`PrefixCacheSummary::nodes`]. `None`

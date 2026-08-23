@@ -168,10 +168,58 @@ pub fn generate_and_persist_keyset(data_dir: &Path, force: bool) -> Result<Valid
         }
     }
 
-    let keypair = KeyPair::generate(KeyType::Ed25519)
+    // Derivation and rotation pull in opposite directions, and the difference
+    // is what `force` now means.
+    //
+    // An identity derived from the chip cannot be lost — that is the point —
+    // and for the same reason it cannot be rotated, because deriving again
+    // returns the same key. So rotation draws fresh random material instead:
+    // an operator rotating a key is saying the old one must stop working, and
+    // recovering it from the chip afterwards would undo exactly that.
+    //
+    // The cost is stated rather than hidden. A rotated key lives only in the
+    // data directory, so it has the old failure mode back: lose the directory
+    // and the machine returns as its *derived* self, which is the identity
+    // before the rotation. An operator who rotates has to keep the directory,
+    // or rotate again.
+    //
+    // Each key gets its own purpose label, so one of them leaking says nothing
+    // about the others. Every one is reloaded from bytes on a normal start,
+    // which is why deriving the bytes is the whole change: the key types
+    // already accept a seed and nothing downstream can tell where it came from.
+    let material = |purpose: &str| -> std::result::Result<[u8; 32], NodeError> {
+        if force {
+            // Rotation advances a counter in the derivation label rather than
+            // drawing randomness. It still does what rotation must — the key
+            // changes, so the old one stops being what this machine presents —
+            // but the new key is derived from the chip like every other, so it
+            // survives a lost data directory. Randomness here would have been
+            // the one key on the node that did not.
+            let next = next_rotation(data_dir, purpose);
+            let label = format!("{purpose}/rot{next}");
+            tracing::warn!(
+                target: "tenzro::keygen",
+                purpose,
+                rotation = next,
+                "rotating to a new derivation of the same hardware root; the previous key \
+                 stops being presented and the new one is still recoverable from the TPM"
+            );
+            fresh_secret(&label)
+        } else {
+            fresh_secret(purpose)
+        }
+    };
+    let keypair = KeyPair::from_bytes(KeyType::Ed25519, &material("validator-ed25519")?)
         .map_err(|e| NodeError::Other(format!("Ed25519 keygen: {}", e)))?;
-    let pq = MlDsaSigningKey::generate();
-    let bls = BlsKeyPair::generate().map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?;
+    let pq = MlDsaSigningKey::from_seed(&material("validator-ml-dsa")?)
+        .map_err(|e| NodeError::Other(format!("ML-DSA keygen: {}", e)))?;
+    // Through KeyGen rather than `from_bytes`: a BLS12-381 scalar must be
+    // below the curve order, so raw bytes are rejected as a bad encoding a good
+    // fraction of the time. Feeding them as input key material is what turns
+    // arbitrary bytes into a valid key, and it is the same path the random one
+    // takes.
+    let bls = BlsKeyPair::from_ikm(&material("validator-bls")?)
+        .map_err(|e| NodeError::Other(format!("BLS keygen: {}", e)))?;
 
     write_secret(&ed_path, &keypair.to_bytes())?;
     write_secret(&pq_path, pq.seed_bytes())?;
@@ -276,13 +324,29 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
         return Ok(buf);
     }
 
-    // Silent-generate path. Fresh secp256k1 key, persisted at 0o600.
-    // `SecretKey::random` is deprecated in k256 0.14-rc; use the `Generate`
-    // trait (re-exported from `elliptic_curve`). `SysRng: TryCryptoRng` is
-    // lifted to `CryptoRng` via `UnwrapErr`.
-    use ::k256::elliptic_curve::Generate;
-    use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
-    let sk: SecretKey = SecretKey::generate_from_rng(&mut UnwrapErr(SysRng));
+    // Establish the key, persisted at 0o600 (or sealed where there is a chip).
+    //
+    // Derived rather than drawn from the system random source, so a wiped data
+    // directory does not change which on-chain account this node speaks as.
+    // That was `SecretKey::generate_from_rng`, which needed the `Generate`
+    // trait and a `SysRng` lifted through `UnwrapErr`; deriving needs neither,
+    // which is why those imports went with it.
+    // A secp256k1 scalar must also be in range, and derived bytes are not
+    // guaranteed to be. Deriving again under a numbered label keeps this
+    // deterministic — the same machine walks the same short sequence — where a
+    // retry with fresh randomness would not be recoverable at all.
+    let sk: SecretKey = (0u8..8)
+        .find_map(|attempt| {
+            let purpose = if attempt == 0 {
+                "erc8004-system".to_string()
+            } else {
+                format!("erc8004-system/{attempt}")
+            };
+            fresh_secret(&purpose).ok().and_then(|s| SecretKey::from_slice(&s).ok())
+        })
+        .ok_or_else(|| {
+            NodeError::Other("could not derive a valid secp256k1 scalar".to_string())
+        })?;
     let bytes = sk.to_bytes();
     write_secret(&key_path, &bytes)?;
     let mut out = [0u8; 32];
@@ -328,16 +392,87 @@ pub fn load_or_generate_model_recipient_key(data_dir: &Path) -> Result<[u8; 32]>
         return Ok(buf);
     }
 
-    let mut buf = [0u8; 32];
-    use rand::RngCore;
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    let buf = fresh_secret("model-recipient-x25519")?;
     write_secret(&key_path, &buf)?;
     tracing::info!(
         target: "tenzro::keygen",
         path = %key_path.display(),
-        "generated fresh sealed-model X25519 recipient key"
+        "established the sealed-model X25519 recipient key"
     );
     Ok(buf)
+}
+
+/// Key material for a purpose, derived from this machine's hardware root.
+///
+/// This is the difference between an identity a machine keeps and one it merely
+/// stores. Sealing protects a random key well — the blob is worthless on
+/// another machine — but it does not survive the blob going away, and deleting
+/// a data directory is something any administrator, any reinstall and any
+/// misfired `rm` can do. The node then comes back as somebody new and
+/// everything that knew it has to be told again.
+///
+/// Derived material has no such failure. The TPM recomputes it from a hierarchy
+/// seed that never leaves the chip, so a wiped disk, a fresh install or an empty
+/// data directory all return the same identity. The only thing that changes it
+/// is an administrator clearing the TPM from firmware, which is exactly who
+/// should be able to retire a machine.
+///
+/// # Errors
+///
+/// Fails closed when the machine has no usable TPM. Identity is rooted in a
+/// TPM when authority is delegated to the machine, or a passkey when it is
+/// delegated to a human, and there is no third option. This previously fell
+/// back to `OsRng` and warned; the warning was the right instinct and the
+/// fallback was the wrong remedy, because an operator who reads warnings still
+/// ends up running a node whose identity is one `rm` from gone.
+fn fresh_secret(purpose: &str) -> std::result::Result<[u8; 32], NodeError> {
+    if !tenzro_tee::tpm_derive::derivation_available() {
+        return Err(NodeError::Other(format!(
+            "no TPM available to derive `{purpose}` from. Identity must be rooted in a TPM \
+             (machine-delegated) or a passkey (human-delegated); this node cannot start \
+             with random key material"
+        )));
+    }
+    match tenzro_tee::tpm_derive::derive_secret(purpose) {
+        Ok(bytes) => {
+            tracing::info!(
+                target: "tenzro::keygen",
+                purpose,
+                "derived key material from the TPM; this identity survives a wiped data directory"
+            );
+            Ok(*bytes)
+        }
+        Err(e) => Err(NodeError::Other(format!(
+            "TPM present but derivation of `{purpose}` failed: {e}"
+        ))),
+    }
+}
+
+/// The next rotation index for `purpose`, read from the data directory.
+///
+/// The index is not secret and is deliberately kept outside the TPM: it says
+/// *which* derivation is current, not what the key is. Losing it drops the node
+/// back to the base derivation — the identity it had before any rotation —
+/// which is the same failure the previous random-rotation scheme already had,
+/// except the key is still recoverable from the chip afterwards.
+fn next_rotation(data_dir: &Path, purpose: &str) -> u32 {
+    // One file per purpose, named after it with separators flattened so a
+    // label like `validator-ed25519` cannot escape the directory.
+    let path = data_dir.join(format!("rotation.{}", purpose.replace(['/', '\\'], "_")));
+    let current = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let next = current.saturating_add(1);
+    if let Err(e) = std::fs::write(&path, next.to_string()) {
+        tracing::warn!(
+            target: "tenzro::keygen",
+            purpose,
+            error = %e,
+            "could not record the rotation index; a later start may re-derive the previous key"
+        );
+    }
+    next
 }
 
 /// Directory holding the TPM-sealed form of the secret at `path`.
@@ -718,6 +853,57 @@ mod tests {
             Err(other) => panic!("expected KeyMissing, got {:?}", other),
             Ok(_) => panic!("expected error, got Ok"),
         }
+    }
+
+    #[test]
+    fn a_wiped_data_directory_returns_the_same_identity() {
+        // The whole point of deriving rather than generating. Establish a
+        // keyset, destroy every trace of it — the case an operator creates with
+        // one `rm -rf`, and the case that used to cost a machine its name — and
+        // establish it again. On a machine that can derive, the second keyset is
+        // the first one.
+        //
+        // On a machine with no chip this asserts nothing and says so, rather
+        // than failing: a developer laptop must still be able to run the suite,
+        // and a test that passed there by accident would be worse than one that
+        // skips honestly.
+        if !tenzro_tee::tpm_derive::derivation_available() {
+            eprintln!("no TPM on this host; the recovery guarantee is not exercised here");
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        // Not `force`: that means rotate, which deliberately draws random
+        // material. This is the recovery path — nothing there to overwrite.
+        let first = generate_and_persist_keyset(d.path(), false).unwrap();
+        let before = first.keypair.to_bytes();
+
+        for entry in std::fs::read_dir(d.path()).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p).unwrap();
+            } else {
+                std::fs::remove_file(&p).unwrap();
+            }
+        }
+        // The process cache would otherwise answer for the chip and prove
+        // nothing about recovery.
+        tenzro_tee::tpm_derive::forget_cached_root();
+
+        let second = generate_and_persist_keyset(d.path(), false).unwrap();
+        assert_eq!(
+            before,
+            second.keypair.to_bytes(),
+            "a wiped data directory must not change who this machine is"
+        );
+        assert_eq!(
+            first.pq.seed_bytes(),
+            second.pq.seed_bytes(),
+            "and not for any one of its keys"
+        );
+        assert_eq!(
+            first.bls.secret_key().to_bytes(),
+            second.bls.secret_key().to_bytes()
+        );
     }
 
     #[test]

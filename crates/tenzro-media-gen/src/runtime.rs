@@ -917,6 +917,7 @@ mod tests {
             steps: 30,
             guidance_scale: 4.5,
             voxel_resolution: None,
+            audio_duration_secs: None,
             seed: Some(42),
             input_image_hash: if kind.requires_input_image() {
                 Some(Hash::new([7u8; 32]))

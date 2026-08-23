@@ -138,7 +138,7 @@ The plugin host lets operators run custom and third-party MCPs (Stripe MCP, Plai
 
 ### Transport modes
 
-| `tool_type` | When to use | Required fields |
+| `transport` | When to use | Required fields |
 |---|---|---|
 | `mcp` | Hosted remote MCP over JSON-RPC 2.0 Streamable HTTP | `endpoint` |
 | `mcp-stdio` | Local MCP subprocess (npm package, executable) | `spawn_spec` |
@@ -195,7 +195,7 @@ Three flavours below. All take TNZO `price_per_call` (atto-TNZO) and a `creator_
   "params": {
     "name": "anthropic-context-mcp",
     "version": "1.0.0",
-    "tool_type": "mcp",
+    "transport": "mcp",
     "endpoint": "https://mcp.anthropic.com/v1",
     "description": "Anthropic-hosted context MCP",
     "category": "ai",
@@ -221,7 +221,7 @@ Three flavours below. All take TNZO `price_per_call` (atto-TNZO) and a `creator_
   "params": {
     "name": "stripe-mcp",
     "version": "1.0.0",
-    "tool_type": "mcp-stdio",
+    "transport": "mcp-stdio",
     "endpoint": "stripe-mcp-local",
     "description": "Stripe MCP — payment intents, customers, charges",
     "category": "payments",
@@ -258,7 +258,7 @@ The subprocess is spawned on first use, kept alive across calls, and auto-respaw
   "params": {
     "name": "bloomberg-prices",
     "version": "1.0.0",
-    "tool_type": "api",
+    "transport": "api",
     "endpoint": "https://bloomberg.example.com/api/prices",
     "category": "finance",
     "capabilities": ["prices", "us-equities"],

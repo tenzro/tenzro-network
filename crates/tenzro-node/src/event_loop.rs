@@ -55,6 +55,13 @@ use crate::metrics::MetricsCollector;
 /// `Arc<DashMap>` so additions / withdrawals propagate without a node restart.
 #[derive(Clone, Debug)]
 pub struct ProviderAnnouncementContext {
+    /// This node's data directory.
+    ///
+    /// Carried so the announcement can be bound to the node's peer identity:
+    /// the libp2p key is re-derived from the hardware root plus this path,
+    /// which is cheaper than plumbing the keypair out of the network service
+    /// and is only possible because identity is derived rather than stored.
+    pub data_dir: std::path::PathBuf,
     /// `tenzro_types::HardwareCapabilities::detect()` evaluated once at startup.
     pub hardware: tenzro_types::HardwareCapabilities,
     /// Operator-declared geography (`NodeConfig::geography`). `None` means
@@ -63,7 +70,7 @@ pub struct ProviderAnnouncementContext {
     /// Provider wallet address (hex-encoded with `0x` prefix or empty if
     /// the node has no provisioned identity yet).
     pub provider_address: String,
-    /// Provider class string (`"llm"`, `"tee"`, `"general"`).
+    /// Provider class string (`"ai"`, `"tee"`, `"storage"`, `"general"`, ...).
     pub provider_type: String,
     /// Capability labels (e.g. `"inference"`, `"tee-attestation"`).
     pub capabilities: Vec<String>,
@@ -1605,10 +1612,25 @@ impl EventLoop {
                 .consensus
                 .as_ref()
                 .map(|c| c.epoch_manager().current_validator_set().len());
+            // 2f+1 where f = (n-1)/3, equivalently n - f: a quorum of the
+            // whole set, counting this node.
+            //
+            // What we can observe is peers, and this node is not its own peer,
+            // so the most `wait_for_connected_validators` can ever return is
+            // n - 1. Comparing a set-wide quorum against a peer-only count
+            // made the wait unsatisfiable for every set larger than one: at
+            // n = 3 it asked for three connected validators out of a possible
+            // two, and the loop has no give-up path, so it retried while the
+            // chain stopped producing blocks. The `solo_validator_set`
+            // short-circuit below is the only reason this was survivable
+            // until the set grew past one.
+            //
+            // So subtract the node itself: it needs quorum - 1 peers, being
+            // the remaining member of that quorum.
             let admitted_threshold = if let Some(n) = validator_set_len {
-                // 2f+1 where f = (n-1)/3. Equivalent to n - f.
                 let f = (n.saturating_sub(1)) / 3;
-                n.saturating_sub(f).max(1)
+                let quorum = n.saturating_sub(f).max(1);
+                quorum.saturating_sub(1)
             } else {
                 1
             };
@@ -2197,6 +2219,59 @@ impl EventLoop {
                         let mut capacity = capacity;
                         if let Some(ref rt) = self.model_runtime {
                             capacity.prefix_cache = rt.merged_warm_prefix_summary();
+                            // Speculative capability is read live for the same
+                            // reason the warm-prefix summary is: drafters load
+                            // asynchronously (the GGUF may still be
+                            // downloading when the node starts announcing), so
+                            // a startup snapshot pins `mtp_enabled` to false
+                            // permanently and no consumer can ever route
+                            // speculative work here. Advertising it is what
+                            // makes the capability usable without the operator
+                            // configuring anything.
+                            //
+                            // Computed over `served` — the models actually on
+                            // this announcement — not over every drafter in
+                            // memory. Consumers treat `mtp_enabled` as a hard
+                            // filter and the serving path answers a
+                            // non-speculative model with `MtpUnavailable`, so
+                            // a node-wide claim covering a model that cannot
+                            // honour it turns a preference into a failed
+                            // request.
+                            capacity.mtp_enabled = rt.any_can_speculate(&served);
+
+                            // Observed serving state for externally-served
+                            // models. Two fields depend on it, and both were
+                            // previously published as comfortable fictions:
+                            //
+                            // `active_requests` was never written from live
+                            // state anywhere — the only assignment copies it
+                            // from an incoming peer announcement — so every
+                            // node advertised 0 forever. Consumers read that
+                            // as "idle", which is the most attractive value
+                            // there is, so the whole load-awareness gate was
+                            // decorative.
+                            //
+                            // The warm-prefix summary is only worth
+                            // advertising if the engine can actually reuse a
+                            // prefix. A live vLLM serving a hybrid
+                            // Gated-DeltaNet model registers
+                            // `vllm:prefix_cache_queries_total` and leaves it
+                            // at 0, because vLLM disables prefix caching for
+                            // that architecture. Advertising warmth we cannot
+                            // deliver attracts exactly the long prompts we are
+                            // worst at, pays the full prefill anyway, and
+                            // displaces a provider that would genuinely have
+                            // saved it.
+                            //
+                            // A failed scrape returns `None` and both fields
+                            // keep their existing values rather than being
+                            // reset to a flattering zero.
+                            if let Some(observed) = rt.observed_engine_metrics(&served).await {
+                                capacity.active_requests = observed.active_requests();
+                                if !observed.prefix_cache_is_real() {
+                                    capacity.prefix_cache = Default::default();
+                                }
+                            }
                         }
 
                         let mut ann = tenzro_network::ProviderAnnouncementMessage {
@@ -2218,7 +2293,16 @@ impl EventLoop {
                                 reachability: network.reachability().tier().as_str().to_string(),
                                 ..Default::default()
                             },
-                            trust_profile: tenzro_types::TrustProfile::default(),
+                            trust_profile: tenzro_types::TrustProfile {
+                                // Report the root this node actually started
+                                // with. Left empty if identity has not been
+                                // derived, which consumers read as the weakest
+                                // tier rather than the strongest.
+                                identity_root: tenzro_network::service::identity_root()
+                                    .map(|r| r.as_str().to_string())
+                                    .unwrap_or_default(),
+                                ..Default::default()
+                            },
                             worker_roles: Vec::new(),
                             hardware: ctx.hardware.clone(),
                             capacity,
@@ -2227,6 +2311,11 @@ impl EventLoop {
                             cluster_profile: ctx.cluster_profile.clone(),
                             pubkey: Vec::new(),
                             signature: Vec::new(),
+                            // Filled by sign_bound_pq below.
+                            libp2p_pubkey: Vec::new(),
+                            peer_binding_sig: Vec::new(),
+                            pq_pubkey: Vec::new(),
+                            pq_signature: Vec::new(),
                         };
                         // Strip the capabilities the operator has made private
                         // before signing, rather than suppressing the whole
@@ -2279,7 +2368,36 @@ impl EventLoop {
                                 continue;
                             }
                         }
-                        if let Err(e) = ann.sign(signer.as_ref()) {
+                        // Bind the announce key to this node's peer identity.
+                        // Without it the signature proves only that somebody
+                        // signed the struct, not that they own the `peer_id`
+                        // inside it — which is what let a peer publish another
+                        // node's `peer_id` and inherit its advertised
+                        // capability.
+                        let bound = tenzro_network::node_identity_keypair(&Some(
+                            ctx.data_dir.clone(),
+                        ))
+                        .map_err(|e| e.to_string())
+                        .and_then(|kp| {
+                            // Derive the PQ announcement key from the identity
+                            // rather than generating one, so it is the same key
+                            // every boot and can eventually be pinned. A node
+                            // whose identity cannot yield one still announces —
+                            // the leg is additive, and refusing to announce over
+                            // a signature nothing yet checks would take the node
+                            // off the network for no gain.
+                            match tenzro_network::pq_announce::pq_identity_key(&kp) {
+                                Ok(pq) => ann.sign_bound_pq(signer.as_ref(), &kp, &pq),
+                                Err(e) => {
+                                    warn!(
+                                        error = %e,
+                                        "announcing without a post-quantum leg"
+                                    );
+                                    ann.sign_bound(signer.as_ref(), &kp)
+                                }
+                            }
+                        });
+                        if let Err(e) = bound {
                             warn!(error = %e, "Skipping provider announcement: signing failed");
                             continue;
                         }
@@ -2867,6 +2985,28 @@ impl EventLoop {
                             }
                         }
                         NodeEvent::ProviderAnnouncement(ann) => {
+                            // A present-but-wrong binding is a forgery attempt
+                            // and is dropped. An absent binding is merely
+                            // unproven — a node predating this — so it is
+                            // still accepted, and logged once so the tail of
+                            // unbound peers is visible rather than silent.
+                            match ann.verify_peer_binding() {
+                                Ok(true) => {}
+                                Ok(false) => debug!(
+                                    peer_id = %ann.peer_id,
+                                    "Provider announcement carries no peer binding; \
+                                     accepting as unproven"
+                                ),
+                                Err(e) => {
+                                    warn!(
+                                        peer_id = %ann.peer_id,
+                                        error = %e,
+                                        "Rejecting provider announcement (peer binding invalid \
+                                         — this announcement claims a peer_id its key does not own)"
+                                    );
+                                    continue;
+                                }
+                            }
                             if let Err(e) = ann.verify() {
                                 warn!(
                                     peer_id = %ann.peer_id,
@@ -4035,10 +4175,9 @@ impl EventLoop {
         // needs more than one transition), staging the registry plan before
         // each. Gated by `should_transition`, so this is strictly forward
         // catch-up, never historical replay.
-        while consensus.epoch_manager().should_transition(block.height()) {
-            if let Some(registry) = self.validator_registry.as_ref() {
-                Self::stage_registry_epoch_plan(&consensus.epoch_manager(), registry);
-            }
+        // Staging happens inside `transition_epoch_if_due` now, for every
+        // path including the engine's own, so it is not repeated here.
+        while consensus.is_transition_due(block.height()) {
             let transitioned = consensus
                 .transition_epoch_if_due(block.height())
                 .map_err(|e| {
@@ -4155,10 +4294,16 @@ impl EventLoop {
     /// Stages the validator-registry transition plan for the next epoch onto
     /// the `EpochManager` pending queues (`add_pending_validator` /
     /// `remove_pending_validator`). The HotStuff-2 engine drains those queues
-    /// inside `transition_epoch`. Idempotent within an epoch window. Called
-    /// from the live finalize hook (one block before the boundary) and the
-    /// block-sync import path (at the boundary block itself).
-    fn stage_registry_epoch_plan(
+    /// inside `transition_epoch`.
+    ///
+    /// Called from exactly one place: the engine, immediately before it
+    /// crosses a boundary, through [`tenzro_consensus::hotstuff2::EpochPlanStager`].
+    /// It used to be called from three, one of which ran a block early and
+    /// two of which ran just before their own `transition_epoch_if_due` — and
+    /// the engine's own finalize path called it from nowhere, which is how a
+    /// transition came to roll the epoch while advancing nobody.
+
+    pub(crate) fn stage_registry_epoch_plan(
         em: &Arc<tenzro_consensus::EpochManager>,
         registry: &Arc<tenzro_token::ValidatorRegistry>,
     ) {
@@ -4171,44 +4316,115 @@ impl EventLoop {
             "Computed registry epoch transition plan"
         );
 
-        // Effective activations → ValidatorInfo upsert into pending.
-        for addr in &plan.effective_activations {
-            let entry = match registry.get(addr) {
-                Some(e) => e,
-                None => {
-                    warn!(
-                        address = %addr,
-                        "Registry returned activation for unknown entry; skipping"
-                    );
-                    continue;
-                }
-            };
-            if entry.consensus_pubkey.len() != 32 {
-                warn!(
-                    address = %addr,
-                    len = entry.consensus_pubkey.len(),
-                    "Skipping activation: consensus pubkey not 32 bytes"
-                );
-                continue;
-            }
-            let pk = tenzro_crypto::PublicKey::new(
-                tenzro_crypto::KeyType::Ed25519,
-                entry.consensus_pubkey.clone(),
-            );
-            let info = tenzro_consensus::validator::ValidatorInfo::new(
-                entry.address,
-                pk,
-                entry.pq_pubkey.clone(),
-                entry.bls_pubkey.clone(),
-                entry.self_stake,
-            );
-            em.add_pending_validator(info);
-        }
-
+        // Exits first: a validator that has left must not be re-seated by the
+        // reconcile below on the strength of a stale registry row.
         // Effective exits → drop from active set in next epoch.
         for addr in &plan.effective_exits {
             em.remove_pending_validator(addr);
         }
+
+        // Reconcile the seated set against the registry.
+        //
+        // This used to stage `plan.effective_activations` — the validators
+        // that changed state at this boundary — which is correct only if
+        // every boundary is observed exactly once. Two ways of missing one
+        // have already turned up: the engine crossed boundaries without
+        // staging at all, and a transition that opened its gate but refused
+        // to commit re-ran the plan on every block, promoting Candidate to
+        // PendingActive to Active without seating anyone. After that the
+        // validators are Active, so they never change state again, so they
+        // never appear in a plan again, so nothing would ever seat them.
+        //
+        // Stating the desired set instead of replaying the changes makes a
+        // missed boundary something the next one repairs. `transition_epoch`
+        // upserts onto continuing members in its phase 2 and does not charge
+        // that against the entrant churn budget — a stake update is not churn
+        // — and genuinely new entrants are still capped there as before.
+        //
+        // Entries that already match are skipped, so the common boundary
+        // where nothing moved stages nothing.
+        let live_set = em.current_validator_set();
+        for entry in registry.list_active() {
+            let power = Self::consensus_voting_power(entry.self_stake);
+            let seated = live_set.get_by_address(&entry.address);
+            if seated.map(|v| v.stake) == Some(power) {
+                continue;
+            }
+            if entry.consensus_pubkey.len() != 32 {
+                warn!(
+                    address = %entry.address,
+                    len = entry.consensus_pubkey.len(),
+                    "Skipping stake restage: consensus pubkey not 32 bytes"
+                );
+                continue;
+            }
+            debug!(
+                address = %entry.address,
+                seated = seated.map(|v| v.stake),
+                staking = power,
+                registry_wei = entry.self_stake,
+                "Staging Active validator whose seated power does not match the registry"
+            );
+            let pk = tenzro_crypto::PublicKey::new(
+                tenzro_crypto::KeyType::Ed25519,
+                entry.consensus_pubkey.clone(),
+            );
+            em.add_pending_validator(tenzro_consensus::validator::ValidatorInfo::new(
+                entry.address,
+                pk,
+                entry.pq_pubkey.clone(),
+                entry.bls_pubkey.clone(),
+                power,
+            ));
+        }
+    }
+
+    /// Converts a registry stake (wei) into consensus voting power (whole TNZO).
+    ///
+    /// The two sides of this seam have always disagreed about the unit. The
+    /// registry holds wei — `MIN_VALIDATOR_STAKE` is `10_000 * ONE_TNZO` — while
+    /// the genesis validator set was seeded with whole TNZO, and
+    /// `ValidatorInfo::voting_power()` returns whatever it was given. Copying
+    /// one into the other unconverted gives a staged validator 10^18 times the
+    /// weight of a seated one.
+    ///
+    /// Whole TNZO is the direction of travel, not wei. Scaling the set the
+    /// other way was tried on this chain and broke it: a commit-QC records the
+    /// voting power it was formed under and is verified against the epoch
+    /// snapshot, so restating the genesis set in wei made every historical QC
+    /// unverifiable. Whole TNZO is what epoch 0 committed to.
+    ///
+    /// A non-zero stake never rounds to zero voting power — that would seat a
+    /// validator that cannot vote, which reads as a silent exclusion. It cannot
+    /// arise below the 10,000 TNZO floor anyway; the clamp is here so it cannot
+    /// arise at all.
+    fn consensus_voting_power(self_stake_wei: u128) -> u128 {
+        const ONE_TNZO: u128 = 1_000_000_000_000_000_000;
+        match self_stake_wei {
+            0 => 0,
+            wei => (wei / ONE_TNZO).max(1),
+        }
+    }
+
+    /// Debits a sender for gas already burned by a reverted transaction.
+    ///
+    /// Applied after the revert, deliberately: the journal restores everything
+    /// the transaction touched, and the fee must not be among it. Saturating,
+    /// because a sender whose balance was reverted below the fee still owes
+    /// what it can pay rather than wrapping into a fortune.
+    fn charge_gas_fee(
+        state: &mut tenzro_vm::StateAdapter,
+        from: &[u8],
+        gas_used: u64,
+        gas_price: u128,
+    ) {
+        use tenzro_vm::traits::VmState;
+        let fee = gas_price.saturating_mul(gas_used as u128);
+        if fee == 0 {
+            return;
+        }
+        let balance = state.get_balance(from);
+        state.set_balance(from, balance.saturating_sub(fee));
     }
 
     /// Moves this block's gas fees onto the ledger.
@@ -4384,11 +4600,71 @@ impl EventLoop {
             );
 
             // Acquire state adapter lock for VM execution (tokio::Mutex, safe to hold across .await)
+            //
+            // Each transaction runs inside its own undo log, so one that fails
+            // leaves nothing behind. Without this a transaction could debit a
+            // sender and then fail, and the debit stood: the funds left the
+            // account, the matching credit was never made, and the receipt
+            // said nothing had happened.
+            //
+            // The journal is opened and resolved under the same lock as the
+            // execution it wraps, so no other writer can interleave between a
+            // mutation and its undo entry.
             let result = {
                 let mut state_adapter = self.state_adapter.lock().await;
-                self.vm_runtime
+                state_adapter.begin_transaction();
+                let outcome = self
+                    .vm_runtime
                     .execute_transaction(&vm_tx, &mut *state_adapter)
-                    .await
+                    .await;
+                match &outcome {
+                    // Reverted: undo this transaction's writes and nothing
+                    // else, then charge for the gas it burned. The nonce is
+                    // outside the journal by construction, so it still
+                    // advances and the transaction cannot be replayed.
+                    //
+                    // The fee is re-applied *after* the revert, which is the
+                    // only place the journal cannot undo it. Without this a
+                    // failing transaction is free — the cheapest way to take
+                    // block space is work that cannot succeed — and the books
+                    // stop balancing, because block-scope fee settlement
+                    // credits the treasury from counters that do not know this
+                    // transaction was reverted.
+                    Ok(r) if !r.success => {
+                        state_adapter.revert_transaction();
+                        Self::charge_gas_fee(
+                            &mut state_adapter,
+                            &vm_tx.from,
+                            r.gas_used,
+                            vm_tx.gas_price,
+                        );
+                    }
+                    // Execution never produced a result, so there is no
+                    // gas_used to charge against and nothing partial to keep.
+                    Err(_) => state_adapter.revert_transaction(),
+                    Ok(_) => {
+                        // Conservation check, read before the journal is
+                        // consumed. A successful transaction must move value,
+                        // not manufacture or destroy it. Mint and burn paths
+                        // are legitimate, so this reports rather than refuses
+                        // — the point is that an imbalance becomes a loud
+                        // attributable line instead of an account quietly
+                        // short ten million.
+                        if let Some(delta) = state_adapter.journal_balance_delta()
+                            && delta != 0
+                        {
+                            error!(
+                                tx_hash = %tx_hash,
+                                delta,
+                                from = %hex::encode(&vm_tx.from),
+                                "Value not conserved by transaction: balances \
+                                 changed by a net non-zero amount"
+                            );
+                        }
+                        state_adapter.commit_transaction()
+                    }
+                }
+                outcome
             };
 
             match result {
@@ -4549,6 +4825,41 @@ impl EventLoop {
                         error = %e,
                         "Transaction execution failed"
                     );
+
+                    // Drop it from the mempool when it can never succeed.
+                    //
+                    // Only *finalized* transactions were evicted, so one that
+                    // fails execution stayed pending and was proposed again in
+                    // the next block, and the next. Two stale faucet grants
+                    // were observed retrying 81 and 76 times in three minutes:
+                    //
+                    //     Invalid nonce: expected 1, got 0
+                    //     Invalid nonce: expected 12, got 6
+                    //
+                    // A nonce below the account's current value can never be
+                    // satisfied — nonces only advance — so retrying is pure
+                    // waste that crowds out real traffic and never converges.
+                    //
+                    // Deliberately narrow: only a *stale* nonce is terminal. A
+                    // nonce ahead of the account is a gap, and its predecessor
+                    // may still arrive, so it stays. Insufficient balance stays
+                    // too — the account can be topped up.
+                    if matches!(
+                        e,
+                        tenzro_vm::VmError::InvalidNonce { expected, got } if got < expected
+                    ) && let Some(consensus) = &self.consensus
+                    {
+                        consensus.mempool().remove_transaction(&tx_hash);
+                        // And from the batch store, which holds its own copy.
+                        // The ordering path sources proposals from the
+                        // certified prefix, so a mempool-only eviction was
+                        // undone by the next proposal every time.
+                        consensus.mark_transaction_terminal(tx_hash);
+                        debug!(
+                            tx_hash = %tx_hash,
+                            "Evicted a transaction whose nonce is permanently spent"
+                        );
+                    }
                     // Record an explicit failure receipt so downstream callers
                     // get a deterministic answer rather than a missing-record
                     // null. EVM convention for execution errors is to charge
@@ -4853,19 +5164,12 @@ impl EventLoop {
         // the boundary itself, at the moment it imports the boundary block —
         // a forward catch-up that mirrors this live hook one boundary at a
         // time, in order.
-        if !from_sync
-            && self.consensus_participant
-            && let (Some(consensus), Some(registry)) =
-                (self.consensus.as_ref(), self.validator_registry.as_ref())
-        {
-            let em = consensus.epoch_manager();
-            // Will the *next* block trigger transition? Use block_height + 1
-            // so we set up the plan before HotStuff-2 finalizes its own.
-            let next_height = tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
-            if em.should_transition(next_height) {
-                Self::stage_registry_epoch_plan(&em, registry);
-            }
-        }
+        // The plan used to be staged here, one block ahead of the boundary,
+        // so it was queued before HotStuff-2 crossed on its own. The engine
+        // stages for itself now, on every path, so this is gone — and it
+        // could not have served the elapsed bound regardless, because it asks
+        // about `block_height + 1`, a block that does not exist yet and
+        // therefore carries no timestamp to measure the epoch against.
 
         // Follower finalized-height advance: a node that verifies but does not
         // vote never runs the engine's finalize path, so once it is at the tip
@@ -4892,11 +5196,7 @@ impl EventLoop {
         // Live path never fails finalization on a transition error — warn and
         // retry on the next block.
         if !from_sync && let Some(consensus) = self.consensus.as_ref() {
-            let em = consensus.epoch_manager();
-            while em.should_transition(block_height) {
-                if let Some(registry) = self.validator_registry.as_ref() {
-                    Self::stage_registry_epoch_plan(&em, registry);
-                }
+            while consensus.is_transition_due(block_height) {
                 match consensus.transition_epoch_if_due(block_height) {
                     Ok(true) => continue,
                     Ok(false) => break,
@@ -4930,9 +5230,8 @@ impl EventLoop {
                 self.token.as_ref(),
             )
         {
-            let em = consensus.epoch_manager();
             let next_height = tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
-            if em.should_transition(next_height) {
+            if consensus.is_transition_due(next_height) {
                 use tenzro_token::adaptive_burn::{
                     BurnBreakdown, EmissionBreakdown, SupplyMetricsSnapshot,
                 };
@@ -5100,7 +5399,7 @@ impl EventLoop {
             }
 
             let next_height = tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
-            if em.should_transition(next_height) {
+            if consensus.is_transition_due(next_height) {
                 // Settled provider usage only — the tracker records real
                 // routed inference, never self-reported capacity.
                 if let Some(tracker) = self.usage_tracker.as_ref() {
@@ -6266,6 +6565,41 @@ impl EventLoop {
             };
 
             match topic {
+                b"ValidatorStakeIncreased" => {
+                    // Layout: from(32) || additional_le(16) || new_total_le(16)
+                    if log.data.len() < 64 {
+                        warn!(
+                            len = log.data.len(),
+                            "Malformed ValidatorStakeIncreased log; skipping"
+                        );
+                        continue;
+                    }
+                    let mut addr_bytes = [0u8; 32];
+                    addr_bytes.copy_from_slice(&log.data[..32]);
+                    let address = tenzro_types::primitives::Address::new(addr_bytes);
+                    let mut add_bytes = [0u8; 16];
+                    add_bytes.copy_from_slice(&log.data[32..48]);
+                    let additional = u128::from_le_bytes(add_bytes);
+
+                    match registry.increase_self_stake(&address, additional) {
+                        Ok(total) => info!(
+                            validator = %address,
+                            additional,
+                            total,
+                            "Validator self-stake increased"
+                        ),
+                        // Non-fatal: the VM already moved the funds and is the
+                        // source of truth. A registry that rejects the mirror is
+                        // out of step with chain state and says so, rather than
+                        // failing the block that already committed.
+                        Err(e) => warn!(
+                            validator = %address,
+                            error = %e,
+                            "ValidatorRegistry rejected increase_self_stake; \
+                             registry is out of step with chain state"
+                        ),
+                    }
+                }
                 b"ValidatorRegister" => {
                     let parsed = match decode_validator_register_log(&log.data) {
                         Some(v) => v,
@@ -6680,6 +7014,9 @@ impl EventLoop {
             tenzro_types::TransactionType::ModelInference { .. } => ("model_inference", 0),
             tenzro_types::TransactionType::ProviderStake { amount, .. } => ("stake", *amount),
             tenzro_types::TransactionType::ProviderUnstake { .. } => ("unstake", 0),
+            // Guardian powers move no value; they only stop things.
+            tenzro_types::TransactionType::GovernanceVeto { .. } => ("governance_veto", 0),
+            tenzro_types::TransactionType::GovernancePause { .. } => ("governance_pause", 0),
             tenzro_types::TransactionType::CreateEscrow { amount, .. } => {
                 ("create_escrow", *amount)
             }
@@ -6688,6 +7025,15 @@ impl EventLoop {
             tenzro_types::TransactionType::BridgeTransfer { amount, .. } => ("bridge", *amount),
             tenzro_types::TransactionType::GovernancePropose { .. } => ("governance_propose", 0),
             tenzro_types::TransactionType::GovernanceVote { .. } => ("governance_vote", 0),
+            tenzro_types::TransactionType::GovernanceExecute { .. } => {
+                ("governance_execute", 0)
+            }
+            tenzro_types::TransactionType::IncreaseValidatorStake { additional } => {
+                ("increase_validator_stake", *additional)
+            }
+            tenzro_types::TransactionType::TreasuryDeposit { amount } => {
+                ("treasury_deposit", *amount)
+            }
             tenzro_types::TransactionType::PostAgentBond { amount, .. } => ("post_bond", *amount),
             tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => {
                 ("increase_bond", *amount)
@@ -7168,7 +7514,10 @@ fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
 fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
     use tenzro_vm::native::{
         SELECTOR_ESCROW_CREATE, SELECTOR_ESCROW_REFUND, SELECTOR_ESCROW_RELEASE,
-        SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL, SELECTOR_INCREASE_AGENT_BOND,
+        SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL, SELECTOR_GOVERNANCE_EXECUTE,
+        SELECTOR_INCREASE_VALIDATOR_STAKE, SELECTOR_TREASURY_DEPOSIT,
+        SELECTOR_GOVERNANCE_PAUSE, SELECTOR_GOVERNANCE_PROPOSE, SELECTOR_GOVERNANCE_VETO,
+        SELECTOR_GOVERNANCE_VOTE, SELECTOR_INCREASE_AGENT_BOND,
         SELECTOR_INCREASE_COMPUTE_BOND, SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE,
         SELECTOR_IDENTITY_REGISTER, SELECTOR_KILLSWITCH_TERMINATE, SELECTOR_NODE_ALIAS_BIND,
         SELECTOR_NODE_ALIAS_CLAIM,
@@ -7678,6 +8027,59 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             (0, data, VmType::Tenzro)
         }
         // All other Tenzro-native transaction types (agents, models, staking, TEE)
+        TransactionType::TreasuryDeposit { amount } => {
+            let mut data = SELECTOR_TREASURY_DEPOSIT.to_vec();
+            data.extend_from_slice(&amount.to_le_bytes());
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::IncreaseValidatorStake { additional } => {
+            let mut data = SELECTOR_INCREASE_VALIDATOR_STAKE.to_vec();
+            data.extend_from_slice(&additional.to_le_bytes());
+            (0, data, VmType::Tenzro)
+        }
+
+        // Governance. These three had no arm at all and fell through to the
+        // catch-all below, which produces empty data — so the transaction
+        // reached the VM carrying no selector and never dispatched to a
+        // governance handler. The handlers existed; nothing could reach them.
+        TransactionType::GovernancePropose { proposal } => {
+            let mut data = SELECTOR_GOVERNANCE_PROPOSE.to_vec();
+            data.extend_from_slice(proposal);
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::GovernanceVote { proposal_id, vote } => {
+            let mut data = SELECTOR_GOVERNANCE_VOTE.to_vec();
+            // A malformed id yields an empty body rather than a truncated one,
+            // so the VM refuses it outright instead of voting on whichever
+            // proposal the short bytes happened to name.
+            match hex::decode(proposal_id) {
+                Ok(id) if id.len() == 32 => {
+                    data.extend_from_slice(&id);
+                    data.push(u8::from(*vote));
+                }
+                _ => data.clear(),
+            }
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::GovernanceVeto { proposal_id } => {
+            let mut data = SELECTOR_GOVERNANCE_VETO.to_vec();
+            // Carried as text, matching how the veto handler reads it back.
+            data.extend_from_slice(proposal_id.as_bytes());
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::GovernancePause { paused } => {
+            let mut data = SELECTOR_GOVERNANCE_PAUSE.to_vec();
+            data.push(u8::from(*paused));
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::GovernanceExecute { proposal_id } => {
+            let mut data = SELECTOR_GOVERNANCE_EXECUTE.to_vec();
+            match hex::decode(proposal_id) {
+                Ok(id) if id.len() == 32 => data.extend_from_slice(&id),
+                _ => data.clear(),
+            }
+            (0, data, VmType::Tenzro)
+        }
         _ => (0, Vec::new(), VmType::Tenzro),
     };
 
@@ -7709,6 +8111,194 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
     vm_tx.signing_digest = Some(signed_tx.transaction.hash().as_bytes().to_vec());
 
     vm_tx
+}
+
+#[cfg(test)]
+mod epoch_staging_reconcile_tests {
+    use super::EventLoop;
+    use std::sync::Arc;
+    use tenzro_consensus::epoch_manager::EpochManager;
+    use tenzro_consensus::validator::ValidatorInfo;
+    use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
+    use tenzro_crypto::{KeyPair, KeyType};
+    use tenzro_token::validator_registry::ValidatorRegistry;
+    use tenzro_types::primitives::{Address, BlockHeight};
+
+    const ONE_TNZO: u128 = 1_000_000_000_000_000_000;
+
+    fn keys(seed: u8) -> (Address, KeyPair, Vec<u8>, Vec<u8>) {
+        (
+            Address::new([seed; 32]),
+            KeyPair::generate(KeyType::Ed25519).expect("keypair"),
+            vec![0u8; ML_DSA_65_VK_LEN],
+            vec![0u8; 48],
+        )
+    }
+
+    /// A validator that is Active in the registry but absent from the seated
+    /// set must be staged.
+    ///
+    /// This is the state the live chain reached: repeated staging without a
+    /// committing transition walked two candidates all the way to Active while
+    /// the consensus set still held one validator. Their promotions are behind
+    /// them, so an event-driven scheme has nothing left to replay and they
+    /// would have stayed unseated permanently.
+    #[tokio::test]
+    async fn an_active_validator_missing_from_the_set_is_staged() {
+        let (seated_addr, seated_kp, pq, bls) = keys(0x01);
+        let (missing_addr, missing_kp, mpq, mbls) = keys(0x02);
+
+        // The seated set holds one validator, in whole TNZO.
+        let em = Arc::new(
+            EpochManager::new(
+                vec![ValidatorInfo::new(
+                    seated_addr,
+                    seated_kp.public_key().clone(),
+                    pq.clone(),
+                    bls.clone(),
+                    10_000_000,
+                )],
+                100,
+            )
+            .expect("epoch manager"),
+        );
+
+        // The registry holds both, Active, in wei.
+        let registry = Arc::new(ValidatorRegistry::new());
+        registry
+            .seed_genesis_active(
+                seated_addr,
+                seated_kp.public_key().as_bytes().to_vec(),
+                pq,
+                bls,
+                seated_addr,
+                10_000_000 * ONE_TNZO,
+                String::new(),
+            )
+            .expect("seed seated");
+        registry
+            .seed_genesis_active(
+                missing_addr,
+                missing_kp.public_key().as_bytes().to_vec(),
+                mpq,
+                mbls,
+                missing_addr,
+                10_000 * ONE_TNZO,
+                String::new(),
+            )
+            .expect("seed missing");
+
+        assert_eq!(registry.list_active().len(), 2);
+        assert!(
+            registry
+                .compute_epoch_transition(1)
+                .effective_activations
+                .is_empty(),
+            "both are already Active, so no plan mentions them — which is the \
+             whole problem"
+        );
+
+        EventLoop::stage_registry_epoch_plan(&em, &registry);
+
+        let next = em
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .expect("transition")
+            .expect("a due transition returns the new set");
+
+        assert_eq!(next.len(), 2, "the missing validator was never staged");
+        assert_eq!(
+            next.get_by_address(&missing_addr).map(|v| v.stake),
+            Some(10_000),
+            "staged in whole TNZO, not the registry's wei"
+        );
+        assert_eq!(
+            next.get_by_address(&seated_addr).map(|v| v.stake),
+            Some(10_000_000),
+            "the already-correct validator must not be disturbed"
+        );
+    }
+
+    /// When everything already agrees, staging must queue nothing — otherwise
+    /// every boundary would churn the set for no reason.
+    #[tokio::test]
+    async fn a_set_that_already_matches_stages_nothing() {
+        let (addr, kp, pq, bls) = keys(0x03);
+        let em = Arc::new(
+            EpochManager::new(
+                vec![ValidatorInfo::new(
+                    addr,
+                    kp.public_key().clone(),
+                    pq.clone(),
+                    bls.clone(),
+                    10_000_000,
+                )],
+                100,
+            )
+            .expect("epoch manager"),
+        );
+        let registry = Arc::new(ValidatorRegistry::new());
+        registry
+            .seed_genesis_active(
+                addr,
+                kp.public_key().as_bytes().to_vec(),
+                pq,
+                bls,
+                addr,
+                10_000_000 * ONE_TNZO,
+                String::new(),
+            )
+            .expect("seed");
+
+        EventLoop::stage_registry_epoch_plan(&em, &registry);
+
+        let next = em
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .expect("transition")
+            .expect("set");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next.get_by_address(&addr).map(|v| v.stake), Some(10_000_000));
+    }
+}
+
+#[cfg(test)]
+mod validator_power_unit_tests {
+    use super::EventLoop;
+
+    const ONE_TNZO: u128 = 1_000_000_000_000_000_000;
+
+    /// The genesis validator is seated with 10,000,000 and the registry holds
+    /// 10^25 for it. They are the same stake, and staging must not report the
+    /// difference as a change — which is exactly what was observed live:
+    /// `seated=10000000 registry=10000000000000000000000000`.
+    #[test]
+    fn the_registry_and_the_seated_set_agree_after_conversion() {
+        let seated: u128 = 10_000_000;
+        let registry_wei: u128 = 10_000_000 * ONE_TNZO;
+        assert_eq!(
+            EventLoop::consensus_voting_power(registry_wei),
+            seated,
+            "the same stake must convert to the power already seated"
+        );
+    }
+
+    /// The validator-set floor, in the unit the set actually uses.
+    #[test]
+    fn the_minimum_stake_converts_to_its_whole_tnzo_figure() {
+        assert_eq!(
+            EventLoop::consensus_voting_power(10_000 * ONE_TNZO),
+            10_000
+        );
+    }
+
+    /// A validator with stake must never be seated unable to vote. Below the
+    /// 10,000 TNZO floor this cannot arise, but rounding a real stake to zero
+    /// power would be a silent exclusion rather than a visible rejection.
+    #[test]
+    fn a_non_zero_stake_never_rounds_to_no_voting_power() {
+        assert_eq!(EventLoop::consensus_voting_power(1), 1);
+        assert_eq!(EventLoop::consensus_voting_power(ONE_TNZO - 1), 1);
+        assert_eq!(EventLoop::consensus_voting_power(0), 0);
+    }
 }
 
 #[cfg(test)]

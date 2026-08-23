@@ -560,6 +560,13 @@ impl WebServer {
             // wrapped FROST share is fetched via `envelope`; unwrap
             // requires a fresh WebAuthn assertion bound to a
             // server-issued single-use nonce.
+            // Enrol a passkey credential. Assertions are checked against the
+            // key the authenticator registered here; nothing is derived from
+            // the credential id, which is public.
+            .route(
+                "/wallet/passkey/register",
+                post(wallet_share::passkey_register_handler),
+            )
             .route(
                 "/wallet/share/envelope",
                 get(wallet_share::envelope_handler),

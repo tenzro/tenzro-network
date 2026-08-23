@@ -55,30 +55,50 @@ const SEALED_PRIV: &str = "sealed.priv";
 /// to a machine that had been re-provisioned, and its existing blobs — which
 /// are bound to the object, not the handle — would become unloadable.
 ///
-/// It must live in the **storage/owner** persistent range,
-/// `0x81000000`-`0x8100FFFF`, because the parent is created with
-/// `tpm2_createprimary -C o`. Within that range this is an arbitrary but
-/// deliberate offset: clear of the conventional SRK at `0x81000001` and of the
-/// low handles platform firmware and Windows provision when they take
-/// ownership. It is a *default*, not an assumption — see
-/// [`TENZRO_TPM_PARENT_HANDLE_ENV`] for hosts where it collides.
+/// It lives in the **endorsement** persistent range, `0x81010000`-`0x8101FFFF`,
+/// because the parent is created with `tpm2_createprimary -C e`.
 ///
-/// It used to be `0x81010001`, which is not an owner-hierarchy handle at all:
-/// `0x81010000`-`0x8101FFFF` is the *endorsement* range, and `0x81010001`
-/// specifically is the conventional RSA Endorsement Key handle (see
-/// tpm2_createek(1)). On any TPM with a provisioned EK — every Windows machine,
-/// and most others by convention — that handle is already the EK, an
-/// `adminWithPolicy` object with no authValue, so `tpm2_create -C 0x81010001`
-/// fails with `0x12F authValue or authPolicy is not available`.
-const DEFAULT_PARENT_HANDLE: &str = "0x81000100";
+/// # Why the endorsement hierarchy and not the owner hierarchy
+///
+/// A primary key is re-derived from its hierarchy's *seed*, so which seed the
+/// parent hangs off decides how long a sealed blob stays readable.
+///
+/// `TPM2_Clear` regenerates the Storage Primary Seed. Every owner-hierarchy
+/// primary is then a different key with the same template, the sealed blobs
+/// under it can never be loaded again, and the key material is gone — there is
+/// no recovery, because not being recoverable is the entire point of sealing.
+/// `TPM2_Clear` is not exotic: BIOS "Clear TPM", an OS reprovision, and some
+/// firmware updates all issue it. For a node whose identity and wallet are that
+/// key, an owner-rooted parent means a routine firmware update can permanently
+/// destroy the machine's identity.
+///
+/// The Endorsement Primary Seed survives `TPM2_Clear` — that is why EK
+/// certificates remain valid across one. Rooting the parent there makes the
+/// sealed key durable against the clear, which is the property a long-lived
+/// machine identity needs. TCG names this shape in the TPM 2.0 Keys for Device
+/// Identity and Attestation guidance, "Recoverable IDevID" (§7.2.4): a primary
+/// re-derivable from the EPS under a fixed template.
+///
+/// # Why not `0x81010001`
+///
+/// This is a *new primary* in the endorsement hierarchy, not the EK. The EK
+/// itself cannot be a sealing parent: `0x81010001` is the conventional RSA EK
+/// handle (see tpm2_createek(1)) and `0x81010002` the ECC P-256 EK, and an EK is
+/// an `adminWithPolicy` object with no authValue, so `tpm2_create -C 0x81010001`
+/// fails with `0x12F authValue or authPolicy is not available`. The default sits
+/// clear of the whole conventional EK block (`0x81010001`-`0x8101000C` in the
+/// TCG EK Credential Profile) for that reason. It is a *default*, not an
+/// assumption — see [`TENZRO_TPM_PARENT_HANDLE_ENV`] for hosts where it
+/// collides.
+const DEFAULT_PARENT_HANDLE: &str = "0x81010020";
 
 /// Environment override for the sealing parent's persistent handle.
 ///
-/// The default cannot be right everywhere: the owner range is shared with
-/// firmware, other products, and site provisioning, so on some hosts it will be
+/// The default cannot be right everywhere: the endorsement range is shared with
+/// the EK block, firmware, and site provisioning, so on some hosts it will be
 /// occupied by something that is not ours. Rather than evict a stranger's key
 /// or silently wander to another handle, the module refuses and the operator
-/// points it somewhere free. Must be in `0x81000000`-`0x8100FFFF`.
+/// points it somewhere free. Must be in `0x81010000`-`0x8101FFFF`.
 const TENZRO_TPM_PARENT_HANDLE_ENV: &str = "TENZRO_TPM_PARENT_HANDLE";
 
 /// Persistent handle the sealing parent lives at, honouring the override.
@@ -175,13 +195,20 @@ fn ensure_parent() -> Result<()> {
             "persistent handle {handle} is already occupied by an object this node cannot use as \
              a sealing parent — it is not a userWithAuth restricted decryption key. Refusing to \
              evict it, because it belongs to another subsystem. Either clear it deliberately with \
-             `tpm2_evictcontrol -C o -c {handle}` if it really is stale, or point this node at a \
-             free handle in the owner range with {TENZRO_TPM_PARENT_HANDLE_ENV}."
+             `tpm2_evictcontrol -C o -c {handle}` if it really is stale — evict always takes \
+             owner auth, whichever hierarchy the object was derived under — or point this node \
+             at a free handle in the endorsement range with {TENZRO_TPM_PARENT_HANDLE_ENV}."
         )));
     }
-    // A primary in the owner hierarchy is deterministically re-derivable from
-    // the TPM's own seed, so this reconstructs the *same* parent after a
-    // clear-and-recreate — the sealed blobs stay unsealable by anything else.
+    // A primary is deterministically re-derivable from its hierarchy's seed, so
+    // this reconstructs the *same* parent after the handle is evicted and
+    // recreated — the sealed blobs stay unsealable by anything else.
+    //
+    // Rooted in the endorsement hierarchy specifically, so the derivation also
+    // survives `TPM2_Clear`: that command regenerates the Storage Primary Seed
+    // but not the Endorsement Primary Seed. An owner-rooted parent would come
+    // back as a *different* key after a BIOS "Clear TPM" and every blob under
+    // it would be permanently unreadable.
     let ctx = tempfile::Builder::new()
         .prefix("tenzro-tpm-parent")
         .tempfile()
@@ -190,7 +217,7 @@ fn ensure_parent() -> Result<()> {
 
     run(
         "tpm2_createprimary",
-        &["-C", "o", "-g", "sha256", "-G", "ecc", "-c", &ctx_path],
+        &["-C", "e", "-g", "sha256", "-G", "ecc", "-c", &ctx_path],
         None,
     )?;
 
@@ -429,25 +456,42 @@ mod tests {
     }
 
     #[test]
-    fn the_sealing_parent_lives_in_the_owner_range() {
-        // The bug this guards against cost a silent failure on every TPM host:
-        // the parent is created with `tpm2_createprimary -C o`, so its
-        // persistent handle must be in the storage/owner range
-        // 0x81000000-0x8100FFFF. The previous value, 0x81010001, was in the
-        // *endorsement* range and is by convention the RSA Endorsement Key —
-        // an adminWithPolicy object no authValue can use as a parent.
+    fn the_sealing_parent_lives_in_the_endorsement_range() {
+        // The parent is created with `tpm2_createprimary -C e`, so its
+        // persistent handle must be in the endorsement range
+        // 0x81010000-0x8101FFFF; a handle outside it cannot be persisted.
         //
         // Hardware-independent on purpose: a host with no TPM must still catch
         // a handle moved back into the wrong hierarchy.
         let handle = handle_value(DEFAULT_PARENT_HANDLE);
         assert!(
-            (0x8100_0000..=0x8100_FFFF).contains(&handle),
-            "{DEFAULT_PARENT_HANDLE} is not in the owner-hierarchy persistent range \
-             0x81000000-0x8100FFFF; a parent created with `-C o` cannot be persisted outside it"
+            (0x8101_0000..=0x8101_FFFF).contains(&handle),
+            "{DEFAULT_PARENT_HANDLE} is not in the endorsement-hierarchy persistent range \
+             0x81010000-0x8101FFFF; a parent created with `-C e` cannot be persisted outside it"
         );
-        assert_ne!(
-            handle, 0x8100_0001,
-            "0x81000001 is the conventional SRK handle and belongs to the platform, not to us"
+        assert!(
+            !(0x8101_0001..=0x8101_000C).contains(&handle),
+            "0x81010001-0x8101000C is the conventional EK block in the TCG EK Credential \
+             Profile; an EK is adminWithPolicy with no authValue and cannot be a sealing parent"
+        );
+    }
+
+    /// The owner hierarchy must not creep back in.
+    ///
+    /// `TPM2_Clear` regenerates the Storage Primary Seed but not the
+    /// Endorsement Primary Seed, so an owner-rooted parent silently becomes a
+    /// different key after a BIOS "Clear TPM" and every blob sealed under it is
+    /// permanently unreadable. On a node whose identity and wallet *are* the
+    /// sealed key, that is unrecoverable destruction of the machine's identity,
+    /// and it presents as a working TPM that simply cannot unseal — so nothing
+    /// downstream would attribute it to the hierarchy.
+    #[test]
+    fn the_sealing_parent_is_not_owner_rooted() {
+        let handle = handle_value(DEFAULT_PARENT_HANDLE);
+        assert!(
+            !(0x8100_0000..=0x8100_FFFF).contains(&handle),
+            "{DEFAULT_PARENT_HANDLE} is in the owner range, whose seed TPM2_Clear regenerates; \
+             a key sealed under it does not survive a BIOS TPM clear"
         );
     }
 

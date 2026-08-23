@@ -103,101 +103,366 @@ fn maybe_promote_kad_to_server(state: &mut EventLoopState) {
     }
 }
 
-/// Loads a persistent Ed25519 keypair from disk, or generates and saves a new one.
+/// The node's network identity, derived from this machine's hardware root.
 ///
-/// The keypair is stored as a protobuf-encoded file at `{data_dir}/p2p_key`.
-/// This ensures the node has a stable PeerId across restarts.
+/// The Ed25519 seed comes from the TPM, so the `PeerId` is a deterministic
+/// function of the chip: it is the same after a reinstall, a wiped data
+/// directory, or a misfired `rm`, and only clearing the TPM from firmware
+/// retires it. That is the whole point — a key generated at random and saved
+/// to `{data_dir}/p2p_key` gave neither persistence nor non-transferability,
+/// and the node came back a stranger the first time that file went missing.
 ///
-/// Idempotent: the first call generates and persists the key; later calls
-/// (including the node computing its local PeerId before network start to
-/// sign a PeerId↔validator-identity binding) load the same key.
-pub fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identity::Keypair> {
-    let Some(dir) = data_dir else {
-        tracing::warn!(
-            "No data_dir configured — generating ephemeral keypair (peer ID will change on restart)"
-        );
-        return Ok(libp2p::identity::Keypair::generate_ed25519());
+/// It also closes a gap that was worse than the durability one. The node's
+/// announcement signing key was already TPM-derived while the `PeerId` was
+/// not, so a node carried two identities with two unrelated roots. Nothing
+/// bound the `peer_id` in a gossiped announcement to the key that signed it,
+/// and a peer could publish an announcement naming another node's `peer_id`
+/// and inherit the capability that node had advertised. Both now descend from
+/// the same secret, so the binding is arithmetic rather than assertion.
+///
+/// The seed is derived on every start and never written to disk. Persisting
+/// it would recreate exactly the file this change exists to stop depending
+/// on, and would put a TPM-derived secret somewhere the TPM cannot protect.
+///
+/// # Errors
+///
+/// Fails closed when no hardware root is available. Identity is rooted in a
+/// TPM when authority is delegated to the machine, or a passkey when it is
+/// delegated to a human, and there is no third option — so a machine without
+/// a TPM needs a passkey, not a random key and a warning in the log.
+pub fn node_identity_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identity::Keypair> {
+    // `data_dir` is read only by the passkey-delegation path below, when no
+    // TPM is present. Identity itself never comes from disk.
+
+    if !tenzro_tee::tpm_derive::derivation_available() {
+        // No chip, so authority cannot be delegated to the machine. The only
+        // other root this system accepts is a human's, which means a passkey
+        // delegation sitting in the data directory. Anything else — including
+        // quietly generating a key — is the unrooted material this design
+        // exists to forbid, so the alternative to a delegation is not starting.
+        let Some(dir) = data_dir.as_ref() else {
+            return Err(crate::error::NetworkError::NoHardwareRoot(
+                "this machine exposes no usable TPM and has no data directory, so there is \
+                 nowhere to hold a passkey delegation either".to_string(),
+            ));
+        };
+        return passkey_delegated_keypair(dir);
+    }
+
+    // The derivation label carries the node's data directory, because one chip
+    // may host more than one node. A constant label would give every node on a
+    // machine the same seed and therefore the same PeerId — two nodes claiming
+    // one identity on the same network, which is worse than the random keys
+    // this replaced.
+    //
+    // The *path* discriminates, not the directory's contents, so the durability
+    // property survives intact: empty the directory and the identity returns.
+    // Moving a node to a different path gives it a different identity, which is
+    // the honest reading — that is a different node.
+    let label = match data_dir.as_ref() {
+        Some(home) => format!("{LIBP2P_IDENTITY_PURPOSE}/{}", home.display()),
+        None => {
+            // A node with no data directory has nowhere to keep a stable
+            // discriminator, so its identity cannot persist — that is inherent
+            // to being ephemeral, not a policy choice. What it must still not
+            // do is invent random key material: the seed stays chip-derived,
+            // and only the discriminator is per-process. Probes, tests and
+            // one-shot dial utilities live here; a serving node does not.
+            let n = EPHEMERAL_IDENTITY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                "no data directory configured — deriving an EPHEMERAL identity from the TPM. \
+                 It is hardware-rooted but will not survive this process. Configure a data \
+                 directory for any node that must keep its PeerId."
+            );
+            format!("{LIBP2P_IDENTITY_PURPOSE}/ephemeral/{}/{n}", std::process::id())
+        }
     };
 
-    let key_path = dir.join("p2p_key");
+    let seed = tenzro_tee::tpm_derive::derive_secret(&label)
+        .map_err(|e| crate::error::NetworkError::NoHardwareRoot(e.to_string()))?;
 
-    // Try to load existing key
-    if key_path.exists() {
-        match std::fs::read(&key_path) {
-            Ok(bytes) => match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
-                Ok(keypair) => {
-                    tracing::info!("Loaded persistent keypair from {}", key_path.display());
-                    return Ok(keypair);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to decode keypair from {}: {} — generating new one",
-                        key_path.display(),
-                        e
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to read keypair file {}: {} — generating new one",
-                    key_path.display(),
-                    e
-                );
-            }
-        }
-    }
+    // `ed25519_from_bytes` takes the seed by mutable reference and zeroes it,
+    // so hand it a copy rather than the `Zeroizing` original.
+    let mut material = *seed;
+    let keypair = libp2p::identity::Keypair::ed25519_from_bytes(&mut material).map_err(|e| {
+        crate::error::NetworkError::NoHardwareRoot(format!(
+            "TPM-derived seed did not yield an Ed25519 key: {e}"
+        ))
+    })?;
 
-    // Generate new keypair and save it
-    let keypair = libp2p::identity::Keypair::generate_ed25519();
-
-    // Ensure parent directory exists
-    if let Some(parent) = key_path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        tracing::warn!(
-            "Failed to create directory {}: {} — keypair will be ephemeral",
-            parent.display(),
-            e
-        );
-        return Ok(keypair);
-    }
-
-    match keypair.to_protobuf_encoding() {
-        Ok(bytes) => {
-            match std::fs::write(&key_path, &bytes) {
-                Ok(()) => {
-                    tracing::info!("Generated and saved new keypair to {}", key_path.display());
-                    // Restrict file permissions on Unix
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        if let Err(e) = std::fs::set_permissions(
-                            &key_path,
-                            std::fs::Permissions::from_mode(0o600),
-                        ) {
-                            tracing::warn!("Failed to set keypair file permissions: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to write keypair to {}: {} — keypair will be ephemeral",
-                        key_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to encode keypair: {} — keypair will be ephemeral",
-                e
-            );
-        }
-    }
-
+    let _ = IDENTITY_ROOT.set(IdentityRoot::Tpm);
+    tracing::info!(
+        peer_id = %libp2p::PeerId::from(keypair.public()),
+        "derived the node identity from the TPM; it survives a wiped data directory"
+    );
     Ok(keypair)
 }
+
+/// What rooted this process's node identity.
+///
+/// Recorded because the two roots are not equivalent and downstream consumers
+/// price them differently. Deriving it a second time by re-probing for a TPM
+/// would answer "what is available now" rather than "what was actually used",
+/// and those diverge exactly when it matters — a machine whose TPM appeared
+/// after a delegated start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityRoot {
+    /// Derived from this machine's TPM. Cannot be copied off the host.
+    Tpm,
+    /// A key the machine generated and holds on disk, authorised by a human's
+    /// passkey until a recorded expiry.
+    PasskeyDelegated,
+}
+
+impl IdentityRoot {
+    /// The wire form carried in `TrustProfile::identity_root`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tpm => "tpm",
+            Self::PasskeyDelegated => "passkey-delegated",
+        }
+    }
+}
+
+static IDENTITY_ROOT: std::sync::OnceLock<IdentityRoot> = std::sync::OnceLock::new();
+
+/// What rooted this node's identity, or `None` before one has been derived.
+///
+/// Process-wide because a process runs as one node. `None` is honest rather
+/// than a default: a caller that reaches this before identity derivation should
+/// report nothing, not guess the stronger tier.
+pub fn identity_root() -> Option<IdentityRoot> {
+    IDENTITY_ROOT.get().copied()
+}
+
+/// File holding the passkey's authorisation of this node's key.
+pub const DELEGATION_FILE: &str = "passkey_delegation.json";
+
+/// File holding the Ed25519 seed that delegation authorises.
+pub const DELEGATED_SEED_FILE: &str = "node_key";
+
+/// Mint the node key a passkey will authorise, or return the existing one.
+///
+/// Idempotent on purpose. Enrolment is a two-step ceremony with a human in the
+/// middle, and the operator will re-run the first step — after a typo, a
+/// browser that lost the tab, a passkey prompt they dismissed. Minting a fresh
+/// key each time would silently invalidate a delegation they had already
+/// collected, and the failure would surface later as a node that will not
+/// start.
+///
+/// Returns the Ed25519 public key the delegation must commit to.
+///
+/// # Errors
+///
+/// Refuses to overwrite an existing key. Rotating identity is a deliberate act
+/// with consequences for every peer that has seen this node, so it is not
+/// something an enrolment command does as a side effect — delete the key
+/// explicitly if that is what you mean.
+pub fn mint_delegated_node_key(dir: &std::path::Path) -> Result<[u8; 32]> {
+    use crate::error::NetworkError::NoHardwareRoot;
+
+    let seed_path = dir.join(DELEGATED_SEED_FILE);
+    if seed_path.exists() {
+        return delegated_node_pubkey(dir);
+    }
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| NoHardwareRoot(format!("cannot create {}: {e}", dir.display())))?;
+
+    // Take the seed from a freshly generated libp2p key rather than reaching
+    // for an RNG directly, so this uses exactly the same generator the rest of
+    // the identity stack does.
+    let fresh = libp2p::identity::Keypair::generate_ed25519();
+    let ed = fresh
+        .clone()
+        .try_into_ed25519()
+        .map_err(|e| NoHardwareRoot(format!("generated key was not Ed25519: {e}")))?;
+    let seed = ed.secret();
+
+    // Create with owner-only permissions from the start. Writing first and
+    // chmod-ing after would leave the key world-readable for the width of that
+    // window, which is exactly the check `passkey_delegated_keypair` refuses on.
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&seed_path)
+            .map_err(|e| NoHardwareRoot(format!("cannot create {}: {e}", seed_path.display())))?;
+        f.write_all(seed.as_ref())
+            .map_err(|e| NoHardwareRoot(format!("cannot write {}: {e}", seed_path.display())))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&seed_path, seed.as_ref())
+            .map_err(|e| NoHardwareRoot(format!("cannot write {}: {e}", seed_path.display())))?;
+    }
+
+    delegated_node_pubkey(dir)
+}
+
+/// The Ed25519 public key of the on-disk delegated node key.
+pub fn delegated_node_pubkey(dir: &std::path::Path) -> Result<[u8; 32]> {
+    use crate::error::NetworkError::NoHardwareRoot;
+
+    let seed_path = dir.join(DELEGATED_SEED_FILE);
+    let seed = std::fs::read(&seed_path)
+        .map_err(|e| NoHardwareRoot(format!("cannot read {}: {e}", seed_path.display())))?;
+    let mut material: [u8; 32] = seed.as_slice().try_into().map_err(|_| {
+        NoHardwareRoot(format!(
+            "node key at {} is {} bytes, expected 32",
+            seed_path.display(),
+            seed.len()
+        ))
+    })?;
+    let kp = libp2p::identity::Keypair::ed25519_from_bytes(&mut material)
+        .map_err(|e| NoHardwareRoot(format!("node key did not yield an Ed25519 key: {e}")))?;
+    Ok(kp
+        .public()
+        .try_into_ed25519()
+        .map_err(|e| NoHardwareRoot(format!("node key is not Ed25519: {e}")))?
+        .to_bytes())
+}
+
+/// Write a delegation, after checking it actually starts this node.
+///
+/// Verification happens here rather than at first boot alone, so a bad
+/// enrolment fails while the human is still present to redo the ceremony. A
+/// delegation that only fails at 03:00 on restart is the worst possible time
+/// to learn the passkey signed the wrong challenge.
+pub fn install_delegation(
+    dir: &std::path::Path,
+    delegation: &crate::node_delegation::NodeDelegation,
+) -> Result<()> {
+    use crate::error::NetworkError::NoHardwareRoot;
+
+    let public = delegated_node_pubkey(dir)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| NoHardwareRoot(format!("system clock is before the epoch: {e}")))?
+        .as_secs() as i64;
+    delegation.verify(&public, &dir.display().to_string(), now)?;
+
+    let path = dir.join(DELEGATION_FILE);
+    let body = serde_json::to_vec_pretty(delegation)
+        .map_err(|e| NoHardwareRoot(format!("cannot serialise the delegation: {e}")))?;
+    std::fs::write(&path, body)
+        .map_err(|e| NoHardwareRoot(format!("cannot write {}: {e}", path.display())))?;
+    Ok(())
+}
+
+/// Load the identity of a node whose authority comes from a human.
+///
+/// Unlike the TPM path this reads key material from disk, because a machine
+/// with no secure element has nowhere else to put it. That is the whole
+/// trade-off, and it is why the delegation expires: the seed is protected by
+/// filesystem permissions rather than by hardware, so the authorisation over it
+/// is time-boxed and must be renewed by a present human.
+///
+/// The seed is never generated here. A key this function invented would be one
+/// no human ever saw, so a missing seed is an un-enrolled node, not a node that
+/// needs a key.
+fn passkey_delegated_keypair(dir: &std::path::Path) -> Result<libp2p::identity::Keypair> {
+    use crate::error::NetworkError::NoHardwareRoot;
+
+    let delegation_path = dir.join(DELEGATION_FILE);
+    let seed_path = dir.join(DELEGATED_SEED_FILE);
+
+    let raw = std::fs::read(&delegation_path).map_err(|e| {
+        NoHardwareRoot(format!(
+            "this machine exposes no usable TPM, so it needs a passkey delegation at {} — \
+             could not read it: {e}",
+            delegation_path.display()
+        ))
+    })?;
+    let delegation: crate::node_delegation::NodeDelegation = serde_json::from_slice(&raw)
+        .map_err(|e| {
+            NoHardwareRoot(format!(
+                "passkey delegation at {} is not readable as one: {e}",
+                delegation_path.display()
+            ))
+        })?;
+
+    let seed = std::fs::read(&seed_path).map_err(|e| {
+        NoHardwareRoot(format!(
+            "passkey delegation present but the node key it authorises is missing at {} \
+             ({e}); re-enrol rather than generating a key no human authorised",
+            seed_path.display()
+        ))
+    })?;
+    let mut material: [u8; 32] = seed.as_slice().try_into().map_err(|_| {
+        NoHardwareRoot(format!(
+            "node key at {} is {} bytes, expected 32",
+            seed_path.display(),
+            seed.len()
+        ))
+    })?;
+
+    // The seed's only protection is the filesystem, so a readable-by-anyone
+    // key file means the delegation is authorising a secret the machine is
+    // already giving away. Refuse rather than warn.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&seed_path)
+            .map_err(|e| NoHardwareRoot(format!("cannot stat {}: {e}", seed_path.display())))?
+            .permissions()
+            .mode()
+            & 0o077;
+        if mode != 0 {
+            return Err(NoHardwareRoot(format!(
+                "node key at {} is accessible beyond its owner (mode bits {mode:03o}); \
+                 chmod 600 it — a delegation cannot protect a secret the filesystem shares",
+                seed_path.display()
+            )));
+        }
+    }
+
+    let keypair = libp2p::identity::Keypair::ed25519_from_bytes(&mut material)
+        .map_err(|e| NoHardwareRoot(format!("node key did not yield an Ed25519 key: {e}")))?;
+
+    let public = keypair
+        .public()
+        .try_into_ed25519()
+        .map_err(|e| NoHardwareRoot(format!("node key is not Ed25519: {e}")))?
+        .to_bytes();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| NoHardwareRoot(format!("system clock is before the epoch: {e}")))?
+        .as_secs() as i64;
+
+    delegation.verify(&public, &dir.display().to_string(), now)?;
+
+    let _ = IDENTITY_ROOT.set(IdentityRoot::PasskeyDelegated);
+    tracing::info!(
+        peer_id = %libp2p::PeerId::from(keypair.public()),
+        not_after = delegation.not_after,
+        "no TPM on this machine; identity is authorised by a passkey delegation. \
+         It expires — re-enrol before then or the node will refuse to start."
+    );
+    Ok(keypair)
+}
+
+/// Derivation purpose for the libp2p identity.
+///
+/// Domain-separated from every other key the node derives, so the network
+/// identity and, say, a wallet key are different secrets from the same root.
+/// Changing this string changes the `PeerId` of every node, which is a
+/// deliberate act and never an incidental one.
+const LIBP2P_IDENTITY_PURPOSE: &str = "libp2p-identity";
+
+/// Distinguishes ephemeral identities within one process.
+///
+/// Several services without a data directory would otherwise derive the same
+/// label and therefore the same `PeerId` — two nodes claiming one identity,
+/// which is exactly the collision the data-directory discriminator prevents
+/// for persistent nodes.
+static EPHEMERAL_IDENTITY_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Returns true only if `addr` contains an IP that other nodes can actually
 /// reach. Rejects:
@@ -1930,8 +2195,19 @@ async fn run_event_loop(
     reachability: Arc<crate::reachability::ReachabilityTracker>,
     local_peers: Arc<crate::reachability::LocalPeerSet>,
 ) -> Result<()> {
-    // Load or generate keypair (persistent for stable peer IDs)
-    let local_key = load_or_generate_keypair(&config.data_dir)?;
+    // Derive the node identity on a blocking thread. `TPM2_CreatePrimary` for
+    // the RSA-2048 template measures ~4.4s on this class of chip, and holding a
+    // tokio worker for that long starves every other task on it — including,
+    // when several nodes start together, the other nodes' event loops. The cost
+    // is paid once per process and cached, but it must not be paid on a worker.
+    let identity_dir = config.data_dir.clone();
+    let local_key = tokio::task::spawn_blocking(move || node_identity_keypair(&identity_dir))
+        .await
+        .map_err(|e| {
+            crate::error::NetworkError::NoHardwareRoot(format!(
+                "identity derivation task failed: {e}"
+            ))
+        })??;
     let local_peer_id = PeerId::from(local_key.public());
 
     tracing::info!("Local peer ID: {}", local_peer_id);
@@ -4817,6 +5093,153 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
 
 #[cfg(test)]
 mod tests {
+    /// End-to-end cover for the passkey path: a real enrolment written to a
+    /// real directory, loaded back through the real loader.
+    mod passkey_delegation {
+        use crate::node_delegation::{NodeDelegation, delegation_challenge_b64url};
+        use crate::service::{DELEGATED_SEED_FILE, DELEGATION_FILE, passkey_delegated_keypair};
+
+        /// A private scratch directory. Avoids a `tempfile` dev-dependency for
+        /// four tests; the counter keeps concurrent test threads apart.
+        fn scratch(tag: &str) -> std::path::PathBuf {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("tenzro-deleg-{}-{tag}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn now_unix() -> i64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+        }
+
+        /// Perform an enrolment: mint a node seed, have a passkey sign a
+        /// delegation over the key it yields, and write both to `dir` exactly
+        /// as an enrolment tool would.
+        fn enrol_into(dir: &std::path::Path, scope: &str, not_after: i64, mode: u32) {
+            let seed = [3u8; 32];
+            let mut material = seed;
+            let kp = libp2p::identity::Keypair::ed25519_from_bytes(&mut material).unwrap();
+            let node_pubkey = kp.public().try_into_ed25519().unwrap().to_bytes();
+
+            let passkey = tenzro_crypto::p256::P256KeyPair::generate();
+            let challenge = delegation_challenge_b64url(&node_pubkey, scope, not_after);
+            let cdj = format!(
+                r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"https://keys.tenzro.xyz","crossOrigin":false}}"#
+            )
+            .into_bytes();
+            let mut auth_data = vec![0u8; 32];
+            auth_data.push(0x01 | tenzro_crypto::webauthn::AUTH_DATA_FLAG_UV);
+            auth_data.extend_from_slice(&0u32.to_be_bytes());
+            let signer = tenzro_crypto::p256::P256Signer::from_keypair(&passkey);
+            let sig = signer
+                .sign_prehash(&tenzro_crypto::webauthn::webauthn_signed_hash(&auth_data, &cdj));
+
+            let delegation = NodeDelegation {
+                node_pubkey: node_pubkey.to_vec(),
+                credential_id: b"cred-1".to_vec(),
+                passkey_pubkey_xy: passkey.public_key_bytes().to_vec(),
+                not_after,
+                issued_at: now_unix(),
+                scope: scope.to_string(),
+                relying_party: "https://keys.tenzro.xyz".to_string(),
+                relying_party_is_rp_id: false,
+                authenticator_data: auth_data,
+                client_data_json: cdj,
+                signature: sig.as_bytes().to_vec(),
+            };
+
+            std::fs::write(
+                dir.join(DELEGATION_FILE),
+                serde_json::to_vec(&delegation).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(dir.join(DELEGATED_SEED_FILE), seed).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(
+                    dir.join(DELEGATED_SEED_FILE),
+                    std::fs::Permissions::from_mode(mode),
+                )
+                .unwrap();
+            }
+            let _ = mode;
+        }
+
+        /// An enrolled TPM-less node starts, and starts as the same PeerId
+        /// every time — the durability property the TPM path provides by
+        /// derivation, this path provides by storage.
+        #[test]
+        fn an_enrolled_node_loads_and_is_stable() {
+            let dir = scratch("ok");
+            enrol_into(&dir, &dir.display().to_string(), now_unix() + 3600, 0o600);
+
+            let first = passkey_delegated_keypair(&dir).unwrap();
+            let second = passkey_delegated_keypair(&dir).unwrap();
+            assert_eq!(
+                libp2p::PeerId::from(first.public()),
+                libp2p::PeerId::from(second.public())
+            );
+        }
+
+        /// A delegation enrolled for one node's directory must not start a
+        /// node running from another — the same discrimination the TPM label
+        /// makes, so one machine can host several nodes.
+        #[test]
+        fn a_delegation_does_not_travel_to_another_directory() {
+            let source = scratch("scope-a");
+            let elsewhere = scratch("scope-b");
+            enrol_into(&source, &source.display().to_string(), now_unix() + 3600, 0o600);
+
+            for f in [DELEGATION_FILE, DELEGATED_SEED_FILE] {
+                std::fs::copy(source.join(f), elsewhere.join(f)).unwrap();
+            }
+
+            let err = passkey_delegated_keypair(&elsewhere).unwrap_err().to_string();
+            assert!(err.contains("scoped to"), "{err}");
+        }
+
+        /// An expired delegation stops the node. This is the mechanism that
+        /// compensates for the seed having no hardware protection, so it has
+        /// to actually bite.
+        #[test]
+        fn an_expired_delegation_refuses_to_start() {
+            let dir = scratch("expired");
+            enrol_into(&dir, &dir.display().to_string(), now_unix() - 1, 0o600);
+
+            let err = passkey_delegated_keypair(&dir).unwrap_err().to_string();
+            assert!(err.contains("expired"), "{err}");
+        }
+
+        /// A node key the filesystem shares with every local user is not a
+        /// secret, and a delegation over it authorises nothing.
+        #[cfg(unix)]
+        #[test]
+        fn a_group_readable_node_key_refuses_to_start() {
+            let dir = scratch("perms");
+            enrol_into(&dir, &dir.display().to_string(), now_unix() + 3600, 0o640);
+
+            let err = passkey_delegated_keypair(&dir).unwrap_err().to_string();
+            assert!(err.contains("beyond its owner"), "{err}");
+        }
+
+        /// The alternative to a delegation is not starting — never a key the
+        /// node generated for itself.
+        #[test]
+        fn an_unenrolled_directory_refuses_rather_than_generating_a_key() {
+            let dir = scratch("bare");
+            let err = passkey_delegated_keypair(&dir).unwrap_err().to_string();
+            assert!(err.contains("needs a passkey delegation"), "{err}");
+            assert!(!dir.join(DELEGATED_SEED_FILE).exists(), "invented a key");
+        }
+    }
+
     use super::*;
 
     fn ma(s: &str) -> Multiaddr {

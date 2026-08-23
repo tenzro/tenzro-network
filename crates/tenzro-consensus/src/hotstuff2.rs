@@ -88,6 +88,25 @@ pub trait BlockProvider: Send + Sync {
     fn get_block(&self, height: BlockHeight) -> Option<Block>;
 }
 
+/// Staging hook run immediately before an epoch transition.
+///
+/// The engine owns the transition but knows nothing about the validator
+/// registry, which lives a layer up. Callers used to stage the registry's
+/// plan themselves right before asking the engine to transition — except the
+/// engine's own finalize path, which asked nobody. A transition it initiated
+/// therefore applied an empty plan: the epoch rolled and the validator set
+/// did not change.
+///
+/// Handing the engine the hook makes staging part of crossing the boundary
+/// rather than something the caller has to remember to do first.
+pub trait EpochPlanStager: Send + Sync {
+    /// Stage validator-set deltas for the epoch about to begin.
+    ///
+    /// Called once per transition, with no engine locks held, and only after
+    /// the transition has been determined to be due.
+    fn stage_for_next_epoch(&self);
+}
+
 /// The current phase of the HotStuff-2 protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -657,6 +676,11 @@ pub struct HotStuff2Engine {
     /// finality tracker + RocksDB block store.
     block_provider: Option<Arc<dyn BlockProvider>>,
 
+    /// Staging hook run just before each epoch transition. See
+    /// [`EpochPlanStager`]. Absent in tests, which assert on the epoch
+    /// manager directly.
+    epoch_plan_stager: Option<Arc<dyn EpochPlanStager>>,
+
     /// Outbound channel for broadcasting consensus messages via gossipsub.
     /// Uses mpsc to avoid a circular crate dependency (tenzro-consensus cannot
     /// import tenzro-network). The event_loop in tenzro-node drains this channel
@@ -907,6 +931,7 @@ impl HotStuff2Engine {
             equivocation_detector: Arc::new(crate::validator::EquivocationDetector::new()),
             state_root_provider: None,
             block_provider: None,
+            epoch_plan_stager: None,
             consensus_out_tx: None,
             vote_state_store: Arc::new(MemoryVoteStateStore::new()),
             high_qc_view: Arc::new(RwLock::new(0)),
@@ -962,6 +987,14 @@ impl HotStuff2Engine {
         self
     }
 
+    /// Installs the hook that stages validator-set deltas for the epoch about
+    /// to begin. Required in production; without it every transition applies
+    /// an empty plan and the validator set never changes.
+    pub fn with_epoch_plan_stager(mut self, stager: Arc<dyn EpochPlanStager>) -> Self {
+        self.epoch_plan_stager = Some(stager);
+        self
+    }
+
     /// Wires up the outbound gossipsub channel so votes and proposals are
     /// broadcast to peers. Must be called before `start()`.
     pub fn with_consensus_out(
@@ -1007,6 +1040,18 @@ impl HotStuff2Engine {
         );
         if txs.is_empty() {
             return None;
+        }
+        // Bound the batch so it fits inside a block. `select_transactions` caps
+        // count and gas but not bytes, so a batch could hold thousands of
+        // transactions and dwarf the 2 MiB block limit; the overflow stays in
+        // the mempool and forms the next batch.
+        let (txs, deferred) = crate::batch_cert::BatchCertStore::split_to_fit(txs);
+        if !deferred.is_empty() {
+            tracing::debug!(
+                batched = txs.len(),
+                deferred = deferred.len(),
+                "batch_cert: batch bounded to fit a block; remainder stays pending"
+            );
         }
         let batch = store.produce(txs);
         let id = batch.id;
@@ -1152,6 +1197,19 @@ impl HotStuff2Engine {
     /// `tenzro_getMempoolLane`) without going through this engine.
     pub fn mempool(&self) -> &Arc<Mempool> {
         &self.mempool
+    }
+
+    /// Record a transaction that can never execute, so no future proposal
+    /// offers it again.
+    ///
+    /// Both stores must hear it. The mempool is the obvious one, but a
+    /// certified batch holds its own copy and the ordering path sources
+    /// proposals from the certified prefix — so evicting only from the mempool
+    /// was undone by the very next proposal.
+    pub fn mark_transaction_terminal(&self, tx_hash: Hash) {
+        if let Some(store) = self.batch_cert_store.as_ref() {
+            store.mark_terminal(tx_hash);
+        }
     }
 
     /// Snapshot of the highest view at which this replica has observed a
@@ -2747,6 +2805,96 @@ impl HotStuff2Engine {
         Ok(qc)
     }
 
+    /// Transaction hashes carried by the uncommitted prefix ending at `prev_hash`.
+    ///
+    /// Walks parent links from the block about to be extended back to the
+    /// finalized tip. Everything below that tip has already been evicted from
+    /// the mempool on finalization, so the walk stops there and the finalized
+    /// history is never touched.
+    ///
+    /// This is the set the next proposal must not re-propose. Without it a
+    /// transaction sits in a gap where nothing catches it: not a duplicate
+    /// within the new body, and not yet evicted from the mempool, because
+    /// eviction waits for a commit that has not happened. It gets proposed
+    /// again, executes against a spent nonce, fails, and overwrites the
+    /// receipt of the execution that actually moved the money.
+    ///
+    /// Bounded by `MAX_UNCOMMITTED_WALK` so a missing parent or a corrupt
+    /// link cannot spin here. Falling short only weakens the filter, and the
+    /// nonce check still refuses the duplicate — the cost is the wasted block
+    /// this is meant to avoid, not a double spend.
+    fn uncommitted_tx_hashes(&self, prev_hash: Hash) -> std::collections::HashSet<Hash> {
+        const MAX_UNCOMMITTED_WALK: usize = 512;
+
+        let finalized = self.finality_tracker.finalized_height();
+        let mut hashes = std::collections::HashSet::new();
+        let mut cursor = prev_hash;
+
+        for _ in 0..MAX_UNCOMMITTED_WALK {
+            let Some(block) = self.fork_choice.get_block(&cursor) else {
+                break;
+            };
+            if block.header.height <= finalized {
+                break;
+            }
+            for tx in &block.transactions {
+                hashes.insert(tx.transaction.hash());
+            }
+            if block.header.prev_hash == cursor {
+                break; // self-link; refuse to loop
+            }
+            cursor = block.header.prev_hash;
+        }
+
+        hashes
+    }
+
+    /// Whether a transition is due at `height`, by either bound.
+    ///
+    /// The staging hooks in `event_loop` need the same answer this uses, so
+    /// that a time-triggered transition finds the registry's plan already
+    /// queued rather than applying nothing.
+    pub fn is_transition_due(&self, height: BlockHeight) -> bool {
+        self.epoch_manager.should_transition(height) || self.epoch_overdue_by_time(height)
+    }
+
+    /// Whether the current epoch has run longer than [`MAX_EPOCH_DURATION_MS`],
+    /// measured between the timestamp of the block that started it and that of
+    /// the block at `height`.
+    ///
+    /// Both are on-chain values, so every node evaluating the same block gets
+    /// the same answer and the transition lands at the same height fleet-wide.
+    /// Reading a local clock here would put the boundary somewhere different on
+    /// every node, and the epoch number seeds leader election.
+    ///
+    /// Returns false when either block is unavailable — the height schedule
+    /// remains the only bound in that case, which is the pre-existing
+    /// behaviour rather than a guess.
+    fn epoch_overdue_by_time(&self, height: BlockHeight) -> bool {
+        let Some(provider) = self.block_provider.as_ref() else {
+            return false;
+        };
+        let epoch_start = self.epoch_manager.current_epoch().start_height;
+        if height <= epoch_start {
+            return false;
+        }
+        let (Some(started), Some(now)) = (
+            provider.get_block(epoch_start),
+            provider.get_block(height),
+        ) else {
+            return false;
+        };
+        // Timestamps are signed and a block is not obliged to be monotonic
+        // with its predecessor, so a negative delta is possible and must read
+        // as "not yet" rather than wrapping into a very large elapsed time.
+        let elapsed = now
+            .timestamp()
+            .as_millis()
+            .saturating_sub(started.timestamp().as_millis())
+            .max(0) as u64;
+        elapsed >= crate::epoch_manager::MAX_EPOCH_DURATION_MS
+    }
+
     /// Transitions the epoch at `height` when due and rebuilds the per-epoch
     /// collectors against the new validator set. Returns `Ok(true)` when a
     /// transition fired, `Ok(false)` when the height is not a boundary.
@@ -2760,8 +2908,18 @@ impl HotStuff2Engine {
     /// Callers must NOT hold the `vote_collector` / `timeout_collector` /
     /// `nec_collector` locks.
     pub fn transition_epoch_if_due(&self, height: BlockHeight) -> Result<bool> {
-        if !self.epoch_manager.should_transition(height) {
+        let height_due = self.epoch_manager.should_transition(height);
+        let time_due = !height_due && self.epoch_overdue_by_time(height);
+        if !height_due && !time_due {
             return Ok(false);
+        }
+
+        // Stage before crossing, on every path. The engine's own finalize
+        // path reaches here too, and it has no caller to have done this for
+        // it — which is how a transition came to roll the epoch and advance
+        // nobody.
+        if let Some(stager) = self.epoch_plan_stager.as_ref() {
+            stager.stage_for_next_epoch();
         }
 
         // The due-check inside transition_epoch runs under the epoch write
@@ -2782,9 +2940,15 @@ impl HotStuff2Engine {
                         .map(|b| b.hash())
                 })
         };
+        // `time_due` has to be carried through here. The plain
+        // `transition_epoch` defaults it to false, so the manager re-applies
+        // the height rule on its own and refuses: the gate above passes, the
+        // transition no-ops, and the whole thing runs again on the next block
+        // — staging each time, and `compute_epoch_transition` advances
+        // registry lifecycle state on every call rather than once per epoch.
         if self
             .epoch_manager
-            .transition_epoch(height, anchor_of)?
+            .transition_epoch_timed(height, time_due, anchor_of)?
             .is_none()
         {
             return Ok(false);
@@ -3204,10 +3368,39 @@ impl HotStuff2Engine {
             if prefix.is_empty() {
                 return None;
             }
+            // Whole batches only, and only as many as fit.
+            //
+            // Taking a partial batch is what made a batch partially finalized,
+            // and a partially-finalized batch is retained and re-offered
+            // forever. Batches are bounded at creation to fit inside one block,
+            // so stopping at a batch boundary always makes progress.
+            let max_block_bytes = self.config.max_block_size;
             let mut txs: Vec<tenzro_types::transaction::SignedTransaction> = Vec::new();
+            let mut used = 4096usize; // header reserve
             for batch_id in &prefix {
                 let body = store.get_body(batch_id)?;
-                txs.extend(body.transactions);
+                // Already-finalized transactions are filtered as a second line
+                // of defence. With whole-batch inclusion a batch should finalize
+                // in one block, but a re-org or a restart can still leave a
+                // certified batch whose contents partly landed.
+                let pending: Vec<_> = body
+                    .transactions
+                    .into_iter()
+                    .filter(|tx| !store.is_finalized(&tx.transaction.hash()))
+                    .collect();
+                if pending.is_empty() {
+                    continue;
+                }
+                let size: usize = pending
+                    .iter()
+                    .map(|tx| serde_json::to_string(tx).map(|s| s.len()).unwrap_or(0))
+                    .sum();
+                if !txs.is_empty() && used.saturating_add(size) > max_block_bytes {
+                    // Stop at the boundary rather than splitting this batch.
+                    break;
+                }
+                used = used.saturating_add(size);
+                txs.extend(pending);
             }
             if txs.is_empty() {
                 None
@@ -3220,6 +3413,12 @@ impl HotStuff2Engine {
                 Some(txs)
             }
         });
+
+        // Everything in the uncommitted prefix is off the table for this
+        // proposal. Set before either path assembles a body, because both
+        // funnel through the same shaping step.
+        self.proposer
+            .set_uncommitted_tx_hashes(self.uncommitted_tx_hashes(prev_hash));
 
         let block = match batch_sourced {
             Some(transactions) => self.proposer.propose_block_from_transactions(
@@ -4490,6 +4689,7 @@ impl Clone for HotStuff2Engine {
             equivocation_detector: self.equivocation_detector.clone(),
             state_root_provider: self.state_root_provider.clone(),
             block_provider: self.block_provider.clone(),
+            epoch_plan_stager: self.epoch_plan_stager.clone(),
             consensus_out_tx: self.consensus_out_tx.clone(),
             vote_state_store: self.vote_state_store.clone(),
             high_qc_view: self.high_qc_view.clone(),
@@ -4514,6 +4714,71 @@ mod tests {
     use super::*;
     use crate::validator::ValidatorInfo;
     use tenzro_crypto::KeyType;
+
+    struct CountingStager(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl EpochPlanStager for CountingStager {
+        fn stage_for_next_epoch(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The engine must stage the next epoch's validator-set deltas itself,
+    /// before it crosses.
+    ///
+    /// Two of the three paths that cross a boundary staged first; the
+    /// engine's own finalize path staged from nowhere, so a transition it
+    /// initiated applied an empty plan. From outside that is invisible — the
+    /// epoch rolls on schedule and the validator set simply never changes.
+    #[test]
+    fn the_engine_stages_before_it_crosses_a_boundary() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        let epoch_manager = EpochManager::new(create_test_validators(4), 100).unwrap();
+        let engine = HotStuff2Engine::new(
+            keypair,
+            pq,
+            bls,
+            ConsensusConfig::default(),
+            epoch_manager,
+        )
+        .with_epoch_plan_stager(std::sync::Arc::new(CountingStager(calls.clone())));
+
+        // Below the boundary there is no transition, so nothing to stage.
+        assert!(
+            !engine
+                .transition_epoch_if_due(BlockHeight::from(50))
+                .unwrap()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "staged without transitioning");
+
+        // At the boundary: staged exactly once, before crossing.
+        assert!(
+            engine
+                .transition_epoch_if_due(BlockHeight::from(100))
+                .unwrap()
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the engine crossed a boundary without staging the plan for it"
+        );
+        assert_eq!(engine.epoch_manager().current_epoch().number, 1);
+
+        // Asking again at the same height is a no-op and must not stage
+        // again — `compute_epoch_transition` advances registry state on
+        // every call, so a second stage would over-advance the candidates.
+        assert!(
+            !engine
+                .transition_epoch_if_due(BlockHeight::from(100))
+                .unwrap()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     fn create_test_validators(count: usize) -> Vec<ValidatorInfo> {
         (0..count)
@@ -4580,6 +4845,75 @@ mod tests {
     /// block stamp from `tenzro_node::genesis`: `gas_limit==0` triggers the
     /// genesis-edge in `calculate_next_base_fee`, so the child at height 1
     /// adopts `FeeMarketParams::default().initial_base_fee`.
+    /// An epoch that is due by elapsed time must actually transition.
+    ///
+    /// Nothing about the height schedule is involved here: height 5 with a
+    /// 100-block epoch is nowhere near a boundary, which is the whole point —
+    /// this is the chain that idles. The engine has to carry its own
+    /// time-due decision through to the manager, or the manager re-applies
+    /// the height rule and refuses.
+    #[test]
+    fn a_time_due_epoch_transitions_through_the_engine() {
+        use tenzro_types::primitives::Timestamp;
+
+        let provider = Arc::new(TestBlockProvider::new());
+
+        // The epoch's start block, and a later block far enough past it to be
+        // overdue. Timestamps are the only thing that differs.
+        let mut start = build_test_genesis();
+        start.header.timestamp = Timestamp::new(1_000_000);
+        provider.insert(start);
+
+        let mut later = build_test_genesis();
+        later.header.height = BlockHeight::from(5);
+        later.header.timestamp =
+            Timestamp::new(1_000_000 + crate::epoch_manager::MAX_EPOCH_DURATION_MS as i64 + 1);
+        provider.insert(later);
+
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        let epoch_manager = EpochManager::new(create_test_validators(4), 100).unwrap();
+        let engine = HotStuff2Engine::new(
+            keypair,
+            pq,
+            bls,
+            ConsensusConfig::default(),
+            epoch_manager,
+        )
+        .with_block_provider(provider);
+
+        assert_eq!(engine.epoch_manager().current_epoch().number, 0);
+        assert!(
+            !engine.epoch_manager().should_transition(BlockHeight::from(5)),
+            "height 5 must not be due by the height schedule"
+        );
+        assert!(
+            engine.is_transition_due(BlockHeight::from(5)),
+            "the elapsed bound should make it due"
+        );
+
+        assert!(
+            engine
+                .transition_epoch_if_due(BlockHeight::from(5))
+                .unwrap(),
+            "a time-due epoch must transition, not report no-op"
+        );
+
+        let epoch = engine.epoch_manager().current_epoch();
+        assert_eq!(epoch.number, 1);
+        assert_eq!(
+            epoch.start_height,
+            BlockHeight::from(5),
+            "a time-triggered epoch begins where the chain actually is"
+        );
+
+        // And it is no longer due: the new epoch's start block is the block we
+        // just crossed at, so nothing has elapsed. Without this the same
+        // transition would fire on every subsequent block.
+        assert!(!engine.is_transition_due(BlockHeight::from(5)));
+    }
+
     fn build_test_genesis() -> Block {
         use tenzro_types::block::{
             BlockHeader, BlockMetadata, ConsensusAlgorithm, ConsensusProof, FeeMarketParams,

@@ -89,9 +89,9 @@ impl PruneToolsCmd {
 
 #[derive(Debug, Parser)]
 pub struct ListToolsCmd {
-    /// Filter by tool type (e.g. "mcp", "api", "native")
-    #[arg(long)]
-    tool_type: Option<String>,
+    /// Filter by transport (mcp, mcp-stdio, api, native)
+    #[arg(long, value_parser = ["mcp", "mcp-stdio", "api", "native"])]
+    transport: Option<String>,
     /// Filter by category
     #[arg(long)]
     category: Option<String>,
@@ -114,8 +114,8 @@ impl ListToolsCmd {
         let rpc = rpc::RpcClient::new(&self.rpc);
 
         let mut filter = serde_json::json!({ "limit": self.limit });
-        if let Some(ref t) = self.tool_type {
-            filter["tool_type"] = serde_json::json!(t);
+        if let Some(ref t) = self.transport {
+            filter["transport"] = serde_json::json!(t);
         }
         if let Some(ref c) = self.category {
             filter["category"] = serde_json::json!(c);
@@ -141,7 +141,7 @@ impl ListToolsCmd {
                         .as_str()
                         .or_else(|| tool["tool_id"].as_str())
                         .unwrap_or("Unnamed");
-                    let tool_type = tool["tool_type"].as_str().unwrap_or("mcp");
+                    let transport = tool["transport"].as_str().unwrap_or("mcp");
                     let status = tool["status"].as_str().unwrap_or("unknown");
                     let category = tool["category"].as_str().unwrap_or("?");
                     let endpoint = tool["endpoint"].as_str().unwrap_or("(no endpoint)");
@@ -149,7 +149,7 @@ impl ListToolsCmd {
 
                     output::print_field("ID", tool_id);
                     output::print_field("Name", name);
-                    output::print_field("Type", tool_type);
+                    output::print_field("Transport", transport);
                     output::print_field("Category", category);
                     output::print_field("Status", status);
                     output::print_field("Endpoint", endpoint);
@@ -190,7 +190,7 @@ pub struct RegisterToolCmd {
     endpoint: String,
     /// Tool type (default: "mcp")
     #[arg(long, default_value = "mcp")]
-    tool_type: String,
+    transport: String,
     /// Comma-separated capabilities (e.g. "web-search,code-execution,file-access")
     #[arg(long, default_value = "")]
     capabilities: String,
@@ -225,7 +225,7 @@ impl RegisterToolCmd {
             "name": self.name,
             "description": self.description,
             "endpoint": self.endpoint,
-            "tool_type": self.tool_type,
+            "transport": self.transport,
             "capabilities": caps,
             "category": self.category,
             "version": self.version,
@@ -251,7 +251,7 @@ impl RegisterToolCmd {
                     output::print_field("Status", status);
                 }
                 output::print_field("Name", &self.name);
-                output::print_field("Type", &self.tool_type);
+                output::print_field("Transport", &self.transport);
                 output::print_field("Endpoint", &self.endpoint);
                 output::print_field("Version", &self.version);
                 output::print_field("Category", &self.category);
@@ -304,14 +304,14 @@ impl SearchToolsCmd {
                         .as_str()
                         .or_else(|| tool["tool_id"].as_str())
                         .unwrap_or("Unnamed");
-                    let tool_type = tool["tool_type"].as_str().unwrap_or("mcp");
+                    let transport = tool["transport"].as_str().unwrap_or("mcp");
                     let status = tool["status"].as_str().unwrap_or("unknown");
                     let endpoint = tool["endpoint"].as_str().unwrap_or("(no endpoint)");
                     let description = tool["description"].as_str().unwrap_or("No description");
 
                     output::print_field("ID", tool_id);
                     output::print_field("Name", name);
-                    output::print_field("Type", tool_type);
+                    output::print_field("Transport", transport);
                     output::print_field("Status", status);
                     output::print_field("Endpoint", endpoint);
                     output::print_field(

@@ -871,7 +871,7 @@ curl -X POST https://rpc.tenzro.xyz \
   -d '{
     "jsonrpc": "2.0",
     "method": "tenzro_listProviders",
-    "params": {"provider_type": "llm"},
+    "params": {"provider_type": "ai"},
     "id": 1
   }'
 ```
@@ -887,7 +887,7 @@ curl -X POST https://rpc.tenzro.xyz \
     {
       "peer_id": "12D3KooW...",
       "provider_address": "0x<hex>",
-      "provider_type": "llm",
+      "provider_type": "ai",
       "served_models": ["gemma4-9b", "qwen3.5-0.8b"],
       "capabilities": ["inference", "chat"],
       "rpc_endpoint": "http://10.128.0.5:8545",
@@ -906,7 +906,7 @@ The `is_local` field indicates whether the entry represents the local node itsel
 ```python
 from tools.tenzro_rpc import call_rpc
 providers = call_rpc("tenzro_listProviders", {})
-llm_providers = call_rpc("tenzro_listProviders", {"provider_type": "llm"})
+ai_providers = call_rpc("tenzro_listProviders", {"provider_type": "ai"})
 for p in providers:
     print(p["peer_id"], p["provider_type"], p["served_models"])
 ```
@@ -2261,7 +2261,7 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `unstake_tokens` — Unstake TNZO tokens (initiates unbonding period)
 - `register_provider` — Register as a provider with optional staking
 - `get_provider_stats` — Get provider statistics: served models, inferences, staking totals
-- `list_providers` — List all providers discovered via gossipsub; filter by provider_type (llm, tee, general)
+- `list_providers` — List all providers discovered via gossipsub; filter by provider_type (ai, tee, storage, compute, database, cloud, general). `ai` covers every model class — text, multimodal, image, video, audio. `llm` is accepted as a legacy alias for `ai`.
 - `set_role` — Set the node role (Validator, ModelProvider, TeeProvider, LightClient)
 - `set_provider_schedule` — Set provider availability schedule
 - `get_provider_schedule` — Get the current provider schedule

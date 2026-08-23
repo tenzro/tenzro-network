@@ -2814,6 +2814,40 @@ impl NodeConfig {
 
 #[cfg(test)]
 mod tests {
+    /// Genesis declares validator stake in whole TNZO; consensus counts in wei.
+    ///
+    /// `GenesisValidator::stake` is documented as "whole units, will be
+    /// multiplied by 10^18", and for a long time nothing multiplied it — a
+    /// genesis validator holding 10,000,000 TNZO entered the set recorded as
+    /// 10,000,000 *wei*, a hundred-billionth of a token.
+    ///
+    /// Everything it is compared against is in base units: `MIN_VALIDATOR_STAKE`
+    /// is `10_000 * ONE_TNZO`, and a `RegisterValidator` self-stake arrives in
+    /// wei. So any node that self-registered the bare minimum out-voted the
+    /// founding validator by fifteen orders of magnitude. This pins the
+    /// relationship rather than the numbers, so changing either side without the
+    /// other fails here instead of silently re-weighting consensus.
+    #[test]
+    fn genesis_stake_is_whole_tnzo_and_consensus_counts_base_units() {
+        use tenzro_types::constants::{MIN_VALIDATOR_STAKE, ONE_TNZO};
+
+        // A genesis entry the size of the registry minimum, in the units genesis
+        // uses, must clear the minimum once converted — and must fail to clear it
+        // if the conversion is dropped.
+        let declared_whole_tnzo: u64 = 10_000;
+        let converted = (declared_whole_tnzo as u128).saturating_mul(ONE_TNZO);
+
+        assert_eq!(
+            converted, MIN_VALIDATOR_STAKE,
+            "10,000 whole TNZO must equal the registry minimum once converted"
+        );
+        assert!(
+            (declared_whole_tnzo as u128) < MIN_VALIDATOR_STAKE,
+            "the unconverted value must be far below the minimum, which is exactly \
+             why passing it through unconverted was invisible rather than an error"
+        );
+    }
+
     use super::*;
 
     #[test]

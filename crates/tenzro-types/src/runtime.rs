@@ -290,6 +290,29 @@ pub struct TrustProfile {
     /// Whether the attestation has been cryptographically verified.
     #[serde(default)]
     pub verified: bool,
+    /// What roots this node's identity: `"tpm"` when authority is delegated to
+    /// the machine and the key is derived from its chip, or
+    /// `"passkey-delegated"` when a human authorised a key the machine
+    /// generated and stores on disk.
+    ///
+    /// These are different trust tiers and must not be scored alike. A
+    /// TPM-rooted key cannot be copied off the host; a delegated one is a file,
+    /// protected by nothing stronger than filesystem permissions and a expiry
+    /// the human has to renew. Consumers pricing or ranking providers should
+    /// treat the delegated tier as strictly weaker.
+    ///
+    /// Empty means the announcer did not report a root — treat as the weakest
+    /// tier, never as the strongest, since an absent value is unknown rather
+    /// than good.
+    ///
+    /// **This field is self-declared.** The announcement signature covers it,
+    /// so it cannot be edited in flight, but a signature proves authorship
+    /// rather than truth: a passkey-delegated node can sign an announcement
+    /// claiming `"tpm"` and nothing here detects that. Verifying the claim
+    /// needs hardware attestation, which is a separate mechanism this field
+    /// does not stand in for. Price it as a claim, not as evidence.
+    #[serde(default)]
+    pub identity_root: String,
 }
 
 /// Network topology metadata for a node.

@@ -594,7 +594,10 @@ impl SetupCmd {
         // When --data-dir is given, scope config to that directory so an
         // isolated run neither reads nor mutates the global
         // ~/.tenzro/config.json.
-        let scoped = self.data_dir.as_ref().map(|d| tenzro_types::paths::expand_tilde(d));
+        let scoped = self
+            .data_dir
+            .as_ref()
+            .map(tenzro_types::paths::expand_tilde);
         let mut cfg = match &scoped {
             Some(dir) => config::load_config_in(dir),
             None => config::load_config(),
@@ -1116,7 +1119,7 @@ fn ensure_keyset(data_dir: &Path) -> Result<tenzro_node::keygen::ValidatorKeyset
 /// persisting `{data_dir}/p2p_key` if it does not exist yet — so the
 /// join command printed for peers is valid before the node's first start.
 fn local_peer_id(data_dir: &Path) -> Result<String> {
-    let keypair = tenzro_network::service::load_or_generate_keypair(&Some(data_dir.to_path_buf()))?;
+    let keypair = tenzro_network::service::node_identity_keypair(&Some(data_dir.to_path_buf()))?;
     Ok(keypair.public().to_peer_id().to_string())
 }
 

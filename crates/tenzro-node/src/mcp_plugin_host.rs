@@ -444,8 +444,9 @@ impl McpPluginHost {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, McpPluginError> {
         let auth = ResolvedAuth::resolve(&self.vault, &tool.upstream_auth)?;
-        let transport = tool.transport_mode().unwrap_or(ToolTransportMode::Mcp);
-        match transport {
+        // No default: the field is the mode, so a transport this node does
+        // not implement cannot reach here disguised as HTTP MCP.
+        match tool.transport {
             ToolTransportMode::Mcp => {
                 self.invoke_streamable_http(tool, method_name, params, &auth)
                     .await

@@ -488,11 +488,25 @@ impl HfDownloader {
         )
         .await?;
 
-        // Verify download integrity (file size check)
+        /*
+         * Advisory only, and deliberately so.
+         *
+         * This compares the file against the catalog's hand-maintained `size_bytes`, which is not
+         * authoritative: the `gemma4-e2b-mtp-draft` entry claimed 200 MB for a file the server
+         * serves as 97,817,664 bytes, so a correct download reported a "mismatch" on every run.
+         * Failing closed here would have made a good model unusable.
+         *
+         * Truncation is caught in `download_one_file` against the server's Content-Length, which is
+         * the check that can actually be trusted. This one only flags that the catalog and reality
+         * disagree -- worth knowing, never worth refusing a download over.
+         */
         if let Err(e) = self.verify_download(&entry.id, entry.size_bytes) {
-            // Log but don't delete — the file may still be usable if the catalog
-            // size is slightly off. Callers can decide whether to retry.
-            warn!("Download verification warning for {}: {}", entry.id, e);
+            warn!(
+                "{}: on-disk size disagrees with the catalog ({}). The download itself was verified \
+                 against the server's Content-Length; this points at a stale catalog entry, not a \
+                 corrupt file.",
+                entry.id, e
+            );
         }
 
         // Opportunistic publish so neighbours can fetch from us next time.
@@ -1505,7 +1519,33 @@ async fn download_one_file(
         file.flush()
             .await
             .map_err(|e| ModelError::DownloadError(format!("Flush error: {}", e)))?;
+
+        /*
+         * A short transfer is a corrupt file, and until now it was accepted silently.
+         *
+         * `content_length` was read from the response and used only to drive the progress bar; nothing
+         * compared it against what actually landed on disk. A connection dropped at 90% produced a
+         * truncated GGUF that got renamed into place and loaded, and the only signal was a progress bar
+         * that never reached 100%.
+         *
+         * This gates on the SERVER's own Content-Length, not on the catalog's `size_bytes`. The
+         * distinction matters: the catalog figure is hand-maintained and demonstrably wrong for at least
+         * one entry, so gating on it would reject good downloads. What the server said it was sending is
+         * authoritative for whether we received all of it.
+         *
+         * Only checked when the server advertised a length -- chunked responses omit it, and "unknown"
+         * is not "mismatched". The temp file is removed so a retry starts clean rather than resuming
+         * onto a truncated prefix.
+         */
+        if content_length > 0 && downloaded != content_length {
+            let _ = std::fs::remove_file(tmp_path);
+            return Err(ModelError::DownloadError(format!(
+                "Truncated download for {}: received {} of {} bytes the server advertised",
+                progress_label, downloaded, content_length
+            )));
+        }
     }
+
 
     std::fs::rename(tmp_path, dest_path).map_err(|e| {
         ModelError::DownloadError(format!(

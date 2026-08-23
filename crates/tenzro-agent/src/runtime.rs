@@ -1025,17 +1025,21 @@ impl AgentRuntime {
         Ok(())
     }
 
-    /// Broadcasts a message to multiple agents
+    /// Broadcasts a message to multiple agents.
+    ///
+    /// `signer` holds the sender's hybrid keypair; every broadcast message is
+    /// signed with it, exactly as a direct send would be.
     pub async fn broadcast_message(
         &self,
         sender: AgentIdentity,
         recipients: Vec<AgentIdentity>,
         message_type: AgentMessageType,
         payload: Vec<u8>,
+        signer: &tenzro_crypto::composite::InMemoryHybridSigner,
     ) -> Result<Vec<String>> {
         let message_ids = self
             .message_router
-            .broadcast_message(sender, recipients, message_type, payload)
+            .broadcast_message(sender, recipients, message_type, payload, signer)
             .await?;
 
         // Update statistics

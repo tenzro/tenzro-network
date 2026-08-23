@@ -69,7 +69,8 @@ enum mmvq_parameter_table_id {
     MMVQ_PARAMETERS_GCN,
     MMVQ_PARAMETERS_RDNA2,
     MMVQ_PARAMETERS_RDNA3_0,
-    MMVQ_PARAMETERS_RDNA4
+    MMVQ_PARAMETERS_RDNA4,
+    MMVQ_PARAMETERS_BLACKWELL
 };
 
 static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
@@ -81,6 +82,8 @@ static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
     return MMVQ_PARAMETERS_RDNA2;
 #elif defined(GCN) || defined(CDNA)
     return MMVQ_PARAMETERS_GCN;
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
+    return MMVQ_PARAMETERS_BLACKWELL;
 #elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_TURING && __CUDA_ARCH__ < GGML_CUDA_CC_AMPERE
     return MMVQ_PARAMETERS_TURING;
 #else
@@ -103,6 +106,13 @@ static __host__ mmvq_parameter_table_id get_device_table_id(int cc) {
     }
     if (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_TURING && ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_AMPERE) {
         return MMVQ_PARAMETERS_TURING;
+    }
+    // Must mirror the device-side selector exactly: this value decides the
+    // launch geometry, and a host/device disagreement would size the block for
+    // one warp count while the kernel indexes shared memory for another.
+    if (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_BLACKWELL
+        && ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_RUBIN) {
+        return MMVQ_PARAMETERS_BLACKWELL;
     }
     return MMVQ_PARAMETERS_GENERIC;
 }
@@ -352,6 +362,63 @@ static constexpr __device__ int get_mmvq_mmid_max_batch_for_device() {
 }
 
 static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_dst, mmvq_parameter_table_id table_id) {
+    // NOTE: Praecise Engine is where this lives. It is duplicated here only
+    // because this tree still vendors its own llama.cpp rather than consuming
+    // praecise; when that migration lands, this copy goes and praecise's stays.
+    // Keep the two in step until then — the version here previously carried an
+    // unmeasured claim that praecise's did not.
+    // Blackwell: half the warps per block that the generic table uses.
+    //
+    // MMVQ is the decode kernel, and decode is bandwidth-bound rather than
+    // compute-bound. What helps there is latency hiding, and 4 warps (128
+    // threads) per block limits how many blocks an SM can hold at once.
+    // Halving to 2 warps (64 threads) lets more blocks be resident, so more
+    // memory requests are in flight to cover each other.
+    //
+    // That argument does not carry itself: resident *threads* per SM is what
+    // drives memory-level parallelism, and halving the block only raises it
+    // when block granularity or shared memory was the limiter rather than the
+    // thread cap — while adding blocks and widening the cross-block reduction.
+    // So it was measured rather than reasoned about, on an RTX 5070 Ti
+    // (sm_120), llama-bench tg, node stopped so the GPU was uncontended, four
+    // interleaved rounds after warmup:
+    //
+    //   Qwen3.8-27B Q3_K_XL   52.60 -> 53.70 t/s   +2.10%
+    //   qwen3.5-9B  Q4_K_M   131.91 -> 132.12 t/s  +0.16%  (noise)
+    //
+    // The gain is real and reproducible on Q3_K — every patched run landed in
+    // 53.69-53.72 against a baseline of 52.44-52.68, separated by far more than
+    // the +/-0.2-0.35 run-to-run error — and absent on Q4_K. MMVQ dispatches
+    // per quantisation type and Q3_K unpacks more per block, so it has more
+    // latency to hide. Read this as "worth it for the low-bit builds", not as a
+    // uniform speedup.
+    //
+    // The gate spans sm_120 through Rubin. GB10 (sm_121, GGML_CUDA_CC_DGX_SPARK)
+    // is inside that range and is where this was first tried; sm_120 is the
+    // measurement above. Both halves of the range now have evidence, which is
+    // the only reason the broad gate is left as it is.
+    //
+    // Only MMVQ. The sibling MMQ kernel is register-pressure-limited — its MMA
+    // accumulators want the whole register file — and its existing
+    // __launch_bounds__(256, 1) is already right for Blackwell.
+    if (table_id == MMVQ_PARAMETERS_BLACKWELL) {
+        switch (ncols_dst) {
+            // 1-4 is the change: the generic table returns 4 here. 5-8 already
+            // returns 2 generically, so the two agree above 4 and only the
+            // decode-shaped end of the range moves.
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+                return 2;
+            default:
+                return 1;
+        }
+    }
     if (table_id == MMVQ_PARAMETERS_GENERIC) {
         switch (ncols_dst) {
             case 1:

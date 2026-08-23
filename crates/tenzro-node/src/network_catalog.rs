@@ -32,17 +32,58 @@ use tenzro_types::model::{
 };
 use tenzro_types::primitives::Address;
 
-use crate::node::NetworkModelEntry;
+use crate::node::{NetworkModelEntry, NetworkProviderEntry};
 
 /// [`NetworkCatalog`] over the gossip announcement map. See module docs.
 pub struct GossipNetworkCatalog {
     models: Arc<DashMap<String, NetworkModelEntry>>,
+    /// The provider-announcement map, keyed by `peer_id`, joined onto each
+    /// model offer to recover the serving envelope. `None` leaves every offer
+    /// without a capacity, which selection reads as "nothing known".
+    providers: Option<Arc<DashMap<String, NetworkProviderEntry>>>,
 }
 
 impl GossipNetworkCatalog {
     /// Wraps the node's announcement map.
     pub fn new(models: Arc<DashMap<String, NetworkModelEntry>>) -> Self {
-        Self { models }
+        Self {
+            models,
+            providers: None,
+        }
+    }
+
+    /// Also joins provider announcements onto offers, so selection sees the
+    /// warm-prefix summary and concurrency the offering provider signed.
+    ///
+    /// The two live on separate gossip topics with separate TTLs — a model
+    /// offer names its `peer_id`, and the provider announcement is keyed by
+    /// exactly that — so this is a join, not a wire-format change. Without it
+    /// an offer reaches selection as `{model, endpoint}` and every
+    /// latency-deciding property the provider signed is dropped on the floor.
+    #[must_use]
+    pub fn with_providers(
+        mut self,
+        providers: Arc<DashMap<String, NetworkProviderEntry>>,
+    ) -> Self {
+        self.providers = Some(providers);
+        self
+    }
+
+    /// The serving envelope `peer_id` last announced, if it is still within
+    /// its own TTL.
+    ///
+    /// TTL is rechecked here rather than trusted from the model offer: the two
+    /// announcements expire independently, and a stale warm-prefix summary is
+    /// worse than none — it would route a prompt to a cache that has since
+    /// been evicted, paying the full prefill anyway plus a worse provider.
+    fn capacity_for(&self, peer_id: &str) -> Option<tenzro_types::AdvertisedCapacity> {
+        let providers = self.providers.as_ref()?;
+        let entry = providers.get(peer_id)?;
+        let ttl = std::time::Duration::from_secs(entry.announcement.ttl_secs);
+        if std::time::Instant::now().duration_since(entry.last_seen) >= ttl {
+            return None;
+        }
+        Some(entry.announcement.capacity.clone())
     }
 }
 
@@ -73,6 +114,7 @@ impl NetworkCatalog for GossipNetworkCatalog {
                 Some(ModelOffer {
                     model,
                     endpoint: reg.rpc_endpoint.clone(),
+                    capacity: self.capacity_for(&reg.peer_id),
                 })
             })
             .collect()
@@ -133,10 +175,63 @@ fn offer_model(reg: &ModelRegistrationMessage) -> Option<ModelInfo> {
         model.parameters.capabilities.push(reg.category.clone());
     }
 
+    // An announcement carries a single category, which is thinner than what the
+    // catalog knows. Capability tags are a catalog-owned fact — the same
+    // `capabilities_for_family` claim `to_model_info` stamps on a locally
+    // served model, and that `refresh_catalog_fields` re-derives on a stored
+    // one — and every node ships the same catalog, so a peer can recover the
+    // full set from the model id alone.
+    //
+    // Tiering is capability-sensitive between the tag floor (7B) and the raw
+    // size floor (30B): a 27B trained for code reaches `Strong` only via its
+    // tag. Rebuilt from one category it scores `Cheap` on every peer, and an
+    // intent asking for `quality_floor = strong` matches nothing — which
+    // surfaces to a caller as a budget failure rather than a tiering one.
+    //
+    // Only the tags are taken. Price, endpoint, schedule and liveness stay with
+    // the announcement, which is the provider's to declare.
+    if let Some(entry) = tenzro_model::catalog::get_model_by_id(&reg.model_id) {
+        // Size is catalog-owned too, and it is the other half of the tier test:
+        // `quality_tier` reads `parameter_count` for BOTH of its arms, so a
+        // `None` here tiers even a 30B model `Cheap` no matter what tags it
+        // carries. The announcement's own parameter string is a display value
+        // the provider composed, and it does not always survive parsing.
+        if let Some(count) = Some(tenzro_model::catalog::parse_params_active_b(&entry.parameters))
+            .filter(|b| *b > 0.0)
+            .map(|b| (b * 1e9) as u64)
+        {
+            model.parameters.parameter_count = Some(count);
+        }
+        for tag in tenzro_model::catalog::capabilities_for_family(&entry.family) {
+            if !model
+                .parameters
+                .capabilities
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&tag))
+            {
+                model.parameters.capabilities.push(tag);
+            }
+        }
+    }
+
     // The provider's own advertised rate. `per_token` prices input and output
     // alike — the announcement carries one token rate, not a split — and
     // `per_request` is the floor the provider charges regardless of length.
     model.pricing = announced_pricing(&reg.pricing);
+
+    // The two inputs `quality_tier` reads, logged at the point they are decided.
+    // A sub-30B model needs a code/reasoning tag to reach the strong tier and a
+    // parameter count to reach it at all, and both arrive here by inference
+    // rather than from the wire — so when a peer will not route to an offer,
+    // this line is the difference between reading the projection and guessing.
+    tracing::debug!(
+        model_id = %reg.model_id,
+        announced_category = %reg.category,
+        announced_parameters = %reg.parameters,
+        parameter_count = ?model.parameters.parameter_count,
+        capabilities = ?model.parameters.capabilities,
+        "projected a gossiped offer"
+    );
 
     Some(model)
 }
@@ -238,6 +333,39 @@ mod tests {
         assert_eq!(offer.model.parameters.context_window, 32_768);
         assert_eq!(offer.model.parameters.parameter_count, Some(8_000_000_000));
         assert_eq!(offer.model.status, ModelStatus::Active);
+    }
+
+    /// `qwen3.8-27b` sits between the tag floor (7B) and the raw size floor
+    /// (30B), so it reaches the strong tier only by its `code`/`reasoning` tag.
+    /// The announcement carries one category, so without recovering the rest
+    /// from the catalog a peer tiers it `Cheap` and never offers it for work
+    /// asking for `quality_floor = strong`.
+    #[test]
+    fn a_catalogued_offer_recovers_the_tags_tiering_reads() {
+        let mut reg = announcement();
+        reg.model_id = "qwen3.8-27b".to_string();
+        reg.name = "Qwen 3.8 27B".to_string();
+        reg.parameters = "27B (dense)".to_string();
+
+        let offers = catalog(vec![reg]).live_offers(ModelModality::Text);
+        let caps = &offers[0].model.parameters.capabilities;
+
+        // What the provider announced is kept,
+        assert!(caps.iter().any(|c| c == "chat"), "caps: {caps:?}");
+        // and what the catalog knows is recovered alongside it.
+        assert!(caps.iter().any(|c| c == "code"), "caps: {caps:?}");
+        assert!(caps.iter().any(|c| c == "reasoning"), "caps: {caps:?}");
+    }
+
+    /// An operator's own model is not in the catalog, so the announcement is
+    /// the only description of it that exists and nothing is invented.
+    #[test]
+    fn an_uncatalogued_offer_keeps_only_what_was_announced() {
+        let mut reg = announcement();
+        reg.model_id = "an-operators-own-finetune".to_string();
+
+        let offers = catalog(vec![reg]).live_offers(ModelModality::Text);
+        assert_eq!(offers[0].model.parameters.capabilities, vec!["chat"]);
     }
 
     #[test]

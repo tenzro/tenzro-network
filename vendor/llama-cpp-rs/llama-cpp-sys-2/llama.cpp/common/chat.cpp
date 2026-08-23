@@ -3231,9 +3231,19 @@ static common_chat_params common_chat_params_init_muse_glimmer(const common_chat
             });
             parser.build_grammar(builder, data.grammar_lazy);
         });
+        // The `<|start|>assistant` prefix is optional on purpose. It is part of
+        // the GENERATION PROMPT, so it never appears in the sampled stream for
+        // the first segment of a completion — the model starts emitting right
+        // after it. Requiring it meant the trigger could only ever fire on a
+        // second or later segment, and in practice never fired at all: the log
+        // showed "Grammar still awaiting trigger" through to `<|eot|>` while the
+        // model emitted an unconstrained `<atem:function_calls>` block.
+        //
+        // The capture group is unchanged, so the grammar still resumes at
+        // exactly the position it was written for.
         data.grammar_triggers = {
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN,
-              "<\\|start\\|>assistant( to=(?!self<\\|message\\|>)(?!user<\\|message\\|>)[^<]*?<\\|message\\|>)" },
+              "(?:<\\|start\\|>assistant)?( to=(?!self<\\|message\\|>)(?!user<\\|message\\|>)[^<]*?<\\|message\\|>)" },
         };
     }
 

@@ -970,11 +970,18 @@ mod tests {
         let err = entry_point.validate_user_op(&bad).unwrap_err();
         assert!(matches!(err, AccountAbstractionError::InvalidSignature));
 
-        // (c) For an account with NO installed validator, EntryPoint falls
-        // back to the legacy length check (non-empty sig is enough).
+        // (c) An account with NO installed validator is refused. There is no
+        // length-only fallback: nothing owns that account's signature
+        // semantics, so nothing can verify the signature, so the operation
+        // does not get admitted on the strength of being non-empty.
         let other = vec![0x02; 20];
         let op2 = dummy_user_op(other, vec![0xBB; 65]);
-        entry_point.validate_user_op(&op2).unwrap();
+        let err = entry_point.validate_user_op(&op2).unwrap_err();
+        assert!(
+            matches!(err, AccountAbstractionError::InvalidUserOp(ref m)
+                     if m.contains("no installed ERC-7579 validator module")),
+            "expected a refusal naming the missing module, got: {err:?}"
+        );
     }
 
     #[test]

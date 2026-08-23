@@ -955,26 +955,6 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>, chain_id: u
         NodeError::Other("Failed to build faucet address from pubkey".to_string())
     })?;
 
-    // Load the legacy sentinel faucet address (if any) so we can migrate its
-    // remaining balance to the new signing address.
-    let legacy_addr_opt: Option<Address> = match store.get(CF_METADATA, b"genesis_faucet_address") {
-        Ok(Some(bytes)) => {
-            let hex_str = String::from_utf8(bytes).ok();
-            hex_str.and_then(|h| Address::from_hex(&h).ok())
-        }
-        _ => None,
-    };
-
-    // Migrate legacy sentinel balance → new signing address.
-    if let Some(legacy_addr) = legacy_addr_opt {
-        migrate_faucet_balance(store, &legacy_addr, &new_faucet_address)?;
-    } else {
-        warn!(
-            "No legacy faucet address found under metadata; new faucet will \
-             start with zero balance until explicitly funded"
-        );
-    }
-
     // Provision the faucet's PQ signing identity (hybrid migration).
     // The seed is the deterministic source of truth — the verifying key is
     // rederived from it on every load.
@@ -1116,76 +1096,6 @@ pub async fn refill_faucet_if_low(store: &Arc<RocksDbStore>) -> Result<()> {
         current_balance,
         topup,
         new_balance
-    );
-
-    Ok(())
-}
-
-/// Move the faucet balance from the legacy sentinel address to the new
-/// keypair-backed signing address. Directly rewrites CF_ACCOUNTS balance
-/// entries.
-///
-/// Idempotency: if the legacy address is already empty, this is a no-op.
-/// If the destination already has a balance (e.g., from a partial previous
-/// migration), amounts are summed so we don't lose funds.
-fn migrate_faucet_balance(
-    store: &Arc<RocksDbStore>,
-    legacy: &Address,
-    new: &Address,
-) -> Result<()> {
-    // Keys match the TnzoToken RocksDbBackend layout: "balance:" + address bytes
-    let mut legacy_key = b"balance:".to_vec();
-    legacy_key.extend_from_slice(legacy.as_bytes());
-    let mut new_key = b"balance:".to_vec();
-    new_key.extend_from_slice(new.as_bytes());
-
-    let legacy_balance: u128 = match store.get(CF_ACCOUNTS, &legacy_key) {
-        Ok(Some(bytes)) if bytes.len() == 16 => {
-            let arr: [u8; 16] = bytes.try_into().unwrap();
-            u128::from_le_bytes(arr)
-        }
-        _ => 0,
-    };
-
-    if legacy_balance == 0 {
-        info!("Legacy faucet address has zero balance; nothing to migrate");
-        return Ok(());
-    }
-
-    let existing_new_balance: u128 = match store.get(CF_ACCOUNTS, &new_key) {
-        Ok(Some(bytes)) if bytes.len() == 16 => {
-            let arr: [u8; 16] = bytes.try_into().unwrap();
-            u128::from_le_bytes(arr)
-        }
-        _ => 0,
-    };
-
-    let merged = existing_new_balance
-        .checked_add(legacy_balance)
-        .ok_or_else(|| NodeError::Other("Faucet balance migration overflow".to_string()))?;
-
-    let ops = vec![
-        WriteOp::Put {
-            cf: CF_ACCOUNTS.to_string(),
-            key: new_key,
-            value: merged.to_le_bytes().to_vec(),
-        },
-        WriteOp::Put {
-            cf: CF_ACCOUNTS.to_string(),
-            key: legacy_key,
-            value: 0u128.to_le_bytes().to_vec(),
-        },
-    ];
-
-    store
-        .write_batch(ops)
-        .map_err(|e| NodeError::Other(format!("Failed to migrate faucet balance: {}", e)))?;
-
-    info!(
-        "Migrated faucet balance: {} wei moved from legacy address 0x{} to new address 0x{}",
-        legacy_balance,
-        hex::encode(legacy.as_bytes()),
-        hex::encode(new.as_bytes())
     );
 
     Ok(())

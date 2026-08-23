@@ -54,6 +54,27 @@ fn apply_epoch_transition(registry: &ValidatorRegistry, em: &EpochManager, new_e
     for addr in &plan.effective_exits {
         em.remove_pending_validator(addr);
     }
+
+    // Continuing members whose stake moved. Mirrors the production hook: a
+    // validator that stays Active appears in neither list above, so without
+    // this its voting power never tracks the registry.
+    let live_set = em.current_validator_set();
+    for entry in registry.list_active() {
+        let Some(seated) = live_set.get_by_address(&entry.address) else {
+            continue;
+        };
+        if seated.stake == entry.self_stake {
+            continue;
+        }
+        let pk = PublicKey::new(KeyType::Ed25519, entry.consensus_pubkey.clone());
+        em.add_pending_validator(ValidatorInfo::new(
+            entry.address,
+            pk,
+            entry.pq_pubkey.clone(),
+            entry.bls_pubkey.clone(),
+            entry.self_stake,
+        ));
+    }
 }
 
 /// Returns a `(consensus_address, ed25519_keypair, pq_vk, bls_vk)` tuple.
@@ -247,4 +268,75 @@ async fn jail_blocks_reactivation_until_governance() {
         "re-registration must reject the address while it has any non-Exited entry; got: {}",
         msg
     );
+}
+
+
+/// A stake increase on a validator that never leaves the set must reach
+/// consensus.
+///
+/// The bridge carries activations and exits. A continuing member appears in
+/// neither, so before the restage block its voting power stayed frozen at
+/// whatever it registered with: the registry reported the new stake, the RPC
+/// reported the new stake, and quorum arithmetic kept using the old one.
+///
+/// That is the operation a network bootstrapped from one heavily-funded
+/// genesis validator depends on — diluting the founder, or topping up the
+/// others, is the only route to a set that survives losing a node. Failing
+/// silently is the worst possible way for it to not work.
+#[tokio::test]
+async fn a_stake_increase_on_a_continuing_validator_reaches_consensus() {
+    let (addr, kp, pq, bls) = fresh_validator_keys(0x41);
+
+    let seated = ValidatorInfo::new(
+        addr,
+        kp.public_key().clone(),
+        pq.clone(),
+        bls.clone(),
+        DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+    );
+    let em = Arc::new(EpochManager::new(vec![seated], 100).expect("epoch manager"));
+
+    let registry = ValidatorRegistry::new();
+    registry
+        .seed_genesis_active(
+            addr,
+            kp.public_key().as_bytes().to_vec(),
+            pq.clone(),
+            bls.clone(),
+            addr,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            String::new(),
+        )
+        .expect("seed genesis");
+
+    // Triple the stake. Nothing about the validator's membership changes, so
+    // the plan's activation and exit lists both stay empty.
+    let topped_up = DEFAULT_MIN_VALIDATOR_SELF_STAKE * 3;
+    let new_total = registry
+        .increase_self_stake(&addr, DEFAULT_MIN_VALIDATOR_SELF_STAKE * 2)
+        .expect("increase self stake");
+    assert_eq!(new_total, topped_up);
+
+    let plan = registry.compute_epoch_transition(1);
+    assert!(
+        plan.effective_activations.is_empty() && plan.effective_exits.is_empty(),
+        "a continuing member must not show up as an entry or a departure"
+    );
+
+    apply_epoch_transition(&registry, &em, 1);
+
+    let next = em
+        .transition_epoch(tenzro_types::primitives::BlockHeight::from(100u64), |_| {
+            Some(tenzro_types::primitives::Hash::default())
+        })
+        .expect("transition")
+        .expect("a due transition returns the new set");
+
+    assert_eq!(
+        next.get_by_address(&addr).map(|v| v.stake),
+        Some(topped_up),
+        "consensus voting power must track the registry, not the stake the \
+         validator happened to register with"
+    );
+    assert_eq!(next.len(), 1, "restaging must not duplicate the validator");
 }

@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 /// safe posture is the one you fall into when nobody chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ResourceAccess {
     /// Served to anyone who settles an x402 payment for the request. No API key
     /// is required. `price_per_request` is the amount in the smallest unit of
@@ -48,15 +49,10 @@ pub enum ResourceAccess {
     /// and writes both require the credential; there is no payment fallback.
     Gated,
     /// Never served off the box. Refused unless the caller is loopback/on-node.
+    #[default]
     Private,
 }
 
-impl Default for ResourceAccess {
-    fn default() -> Self {
-        // Fail-closed: an unset access mode exposes nothing.
-        ResourceAccess::Private
-    }
-}
 
 impl ResourceAccess {
     /// Stable lowercase string form of the mode (without the price), for logs,

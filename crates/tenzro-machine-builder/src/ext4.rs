@@ -119,7 +119,7 @@ fn fsck(img: &Path) -> Result<(), BuildError> {
     // e2fsck exit codes are a bitmask: 0 clean, 1 errors corrected, 2 corrected
     // + reboot advised. 4+ means uncorrected errors / operational failure.
     let code = out.status.code().unwrap_or(-1);
-    if code >= 4 || code < 0 {
+    if !(0..4).contains(&code) {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(BuildError::Ext4(format!(
             "e2fsck exit {code}: {}",

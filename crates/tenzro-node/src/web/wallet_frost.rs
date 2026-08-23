@@ -788,6 +788,50 @@ fn aggregate_with_node_share(
 /// Common 32-byte seed derivation. Mirrors the wallet kernel's
 /// derivation byte-for-byte so both ends produce the same keys on
 /// the testnet stub.
+/// Seed for an account's ML-DSA-65 custody key.
+///
+/// Derived from the DID rather than generated, for the same reason the FROST
+/// shares are: a key that exists only in the process that made it is a key
+/// nobody has. Provisioning previously called `MlDsaSigningKey::generate()`,
+/// put the verifying key on the account, and dropped the signing key at the end
+/// of scope — so every account minted that way carried a PQ key nobody could
+/// ever sign with, while the validator required a PQ signature on every
+/// authorization. The account was unusable from the moment it was created, and
+/// the failure surfaced as "the assertion did not verify", which is what the
+/// check *after* the PQ length test reports.
+///
+/// Deriving it makes the key reproducible by the node whenever it is needed and
+/// storable nowhere, which is strictly better than sealing a copy.
+///
+/// This is the node's half of the hybrid. The WebAuthn leg is the owner's and
+/// only their authenticator can produce it; this leg is the node's and only the
+/// node can. Neither side can authorize alone, which is the 2-of-2 the custody
+/// model already claims for the ed25519 surface.
+pub(crate) fn ml_dsa_custody_seed(did: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(SEED_DOMAIN_TAG);
+    hasher.update(did.as_bytes());
+    hasher.update([0x00]);
+    // A distinct label, so this key can never coincide with a surface key even
+    // if the surface naming changes underneath it.
+    hasher.update(b"ml-dsa-65/custody");
+    let out = hasher.finalize();
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&out);
+    seed
+}
+
+/// The account's ML-DSA-65 custody key, re-derived.
+///
+/// Cheap enough to do per call, and doing so means there is no stored secret to
+/// leak, rotate, or fail to back up.
+pub(crate) fn ml_dsa_custody_key(
+    did: &str,
+) -> Result<tenzro_crypto::pq::MlDsaSigningKey, WalletApiError> {
+    tenzro_crypto::pq::MlDsaSigningKey::from_seed(&ml_dsa_custody_seed(did))
+        .map_err(|e| internal("ml_dsa_derive", format!("derive custody PQ key: {e}")))
+}
+
 fn derive_seed(did: &str, surface_key: &str, scheme: FrostScheme) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(SEED_DOMAIN_TAG);

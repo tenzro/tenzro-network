@@ -252,7 +252,11 @@ mod tests {
     }
 
     fn make_registry() -> Arc<IdentityRegistry> {
-        Arc::new(IdentityRegistry::new())
+        // Needs a binder: registration refuses without one rather than
+        // assigning an address no key can sign for.
+        Arc::new(
+            IdentityRegistry::with_in_process_binder().expect("in-process wallet binder"),
+        )
     }
 
     #[tokio::test]

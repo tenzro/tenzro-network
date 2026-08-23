@@ -58,6 +58,14 @@ pub struct WebState {
     /// invalidates all outstanding ceremonies, and the wallet just
     /// re-prompts the user.
     pub share_escrow: super::wallet_share::ShareEscrow,
+    /// Passkey credentials this node accepts assertions from.
+    ///
+    /// Replaces a stub that derived a credential verifying key from the
+    /// credential *id* — a public identifier echoed in every assertion, so
+    /// anyone who had seen one could reconstruct the signing half and mint
+    /// assertions that verified. Hydrated from `CF_CREDENTIALS` once a node is
+    /// attached, so a restart does not lock every wallet out of its share.
+    pub passkey_registry: super::passkey_registry::PasskeyRegistry,
 }
 
 impl Default for WebState {
@@ -82,10 +90,19 @@ impl WebState {
             faucet_cooldown_secs: 86400, // 24 hours
             frost_coordinator: super::wallet_frost::FrostCoordinator::new(),
             share_escrow: super::wallet_share::ShareEscrow::new(),
+            passkey_registry: super::passkey_registry::PasskeyRegistry::new(),
         }
     }
 
     pub fn with_node(mut self, node: Arc<TenzroNode>) -> Self {
+        // Hydrate registered passkeys from the node store. Without persistence
+        // every wallet would be locked out of its share by a node restart, and
+        // the tempting fix for that is to accept unregistered credentials —
+        // which is exactly the hole this registry closes.
+        if let Some(storage) = node.storage() {
+            let kv: Arc<dyn tenzro_storage::kv::KvStore> = storage.clone();
+            self.passkey_registry = super::passkey_registry::PasskeyRegistry::with_storage(kv);
+        }
         self.node = Some(node);
         self
     }

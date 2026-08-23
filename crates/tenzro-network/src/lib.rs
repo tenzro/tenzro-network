@@ -75,9 +75,11 @@ pub mod gossip;
 pub mod message;
 pub mod metrics;
 pub mod mpc_relay;
+pub mod node_delegation;
 pub mod peer_binding;
 pub mod peer_manager;
 pub mod peer_status;
+pub mod pq_announce;
 pub mod reachability;
 pub mod service;
 pub mod transport;
@@ -86,7 +88,8 @@ pub mod transport;
 pub use behaviour::{TenzroBehaviour, TenzroNetwork};
 pub use block_sync_proto::{
     BLOCK_SYNC_PROTOCOL, BlockSyncBehaviour, BlockSyncError, BlockSyncRequest, BlockSyncResponse,
-    MAX_BLOCK_HASHES_PER_REQUEST, MAX_BLOCKS_PER_RANGE, MAX_INBOUND_STREAMS_PER_PEER,
+    MAX_BLOCK_HASHES_PER_REQUEST, MAX_BLOCK_RANGE_BYTES, MAX_BLOCKS_PER_RANGE,
+    MAX_INBOUND_STREAMS_PER_PEER,
     MAX_INFLIGHT_REQUESTS_PER_PEER,
 };
 pub use cluster_tunnel_proto::{
@@ -143,7 +146,7 @@ pub use reachability::{
 pub use service::{
     BlockSyncOutboundError, InboundBlockSync, InboundClusterTunnel, NetworkService,
     OutboundBlockSyncResult, OutboundClusterTunnelResult, PeerEvent, TenzroNetworkService,
-    load_or_generate_keypair,
+    node_identity_keypair,
 };
 
 // Re-export libp2p types that are commonly used

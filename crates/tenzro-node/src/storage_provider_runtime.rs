@@ -92,8 +92,22 @@ const DEFAULT_MISS_THRESHOLD: u32 = 3;
 
 /// Owns a node's storage-provider services and the per-epoch billing loop.
 pub struct StorageProviderRuntime {
-    /// The local node's provider address (credited when epochs charge).
-    provider: Address,
+    /// Resolves the local node's provider address — the one credited when
+    /// epochs charge and bonded against when deals open.
+    ///
+    /// A closure rather than a captured `Address` because the address is not
+    /// knowable when this runtime is built. `resolve_operator_payee` says so
+    /// itself: it is a free function specifically "so background tasks that
+    /// outlive a `&self` borrow can re-derive it per tick — an identity
+    /// provisioned after startup has to be picked up without a restart".
+    ///
+    /// Caching it here broke exactly that. The runtime spawns ~1.6s before the
+    /// identity registry finishes loading, so the captured value was the
+    /// announce-key fallback while every later caller — staking included —
+    /// resolved to the identity wallet. A deal would then be bonded against
+    /// one address and its stake checked against another, and
+    /// `insufficient provider stake ... stake 0` was the only symptom.
+    provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
     /// Object store over the iroh transport.
     store: Arc<StorageProvider>,
     /// Streaming-deal billing + cross-service coverage.
@@ -106,11 +120,26 @@ pub struct StorageProviderRuntime {
     pricing: Arc<RwLock<PricingPolicy>>,
 }
 
+impl StorageProviderRuntime {
+    /// The provider address, resolved now rather than at construction.
+    ///
+    /// `None` when the node has no resolvable payee yet. Callers must treat
+    /// that as "cannot transact", never as the zero address: crediting or
+    /// bonding against `Address::default()` silently sends value nowhere.
+    fn provider(&self) -> Option<Address> {
+        (self.provider)()
+    }
+}
+
 impl std::fmt::Debug for StorageProviderRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let provider = self.provider();
         f.debug_struct("StorageProviderRuntime")
-            .field("provider", &self.provider)
-            .field("deals", &self.meter.active_exposure(&self.provider))
+            .field("provider", &provider)
+            .field(
+                "deals",
+                &provider.map(|p| self.meter.active_exposure(&p)),
+            )
             .finish()
     }
 }
@@ -121,7 +150,7 @@ impl StorageProviderRuntime {
     /// enforcement is wired through the shared stake ledger + obligations
     /// tracker so storage and rental exposure share one stake.
     pub fn new(
-        provider: Address,
+        provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
         resolver: Arc<dyn tenzro_iroh::IrohResolver>,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
         stake_ledger: Arc<dyn StakeLedger>,
@@ -147,7 +176,7 @@ impl StorageProviderRuntime {
     /// [`new`]: StorageProviderRuntime::new
     #[allow(clippy::too_many_arguments)]
     pub fn with_storage(
-        provider: Address,
+        provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
         resolver: Arc<dyn tenzro_iroh::IrohResolver>,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
         stake_ledger: Arc<dyn StakeLedger>,
@@ -168,7 +197,7 @@ impl StorageProviderRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn build(
-        provider: Address,
+        provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
         resolver: Arc<dyn tenzro_iroh::IrohResolver>,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
         stake_ledger: Arc<dyn StakeLedger>,
@@ -197,7 +226,7 @@ impl StorageProviderRuntime {
 
     /// Convenience constructor for a flat byte-epoch rate.
     pub fn with_fixed_rate(
-        provider: Address,
+        provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
         resolver: Arc<dyn tenzro_iroh::IrohResolver>,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
         stake_ledger: Arc<dyn StakeLedger>,
@@ -268,10 +297,20 @@ impl StorageProviderRuntime {
         size_bytes: u64,
         total_epochs: u64,
     ) -> tenzro_storage_provider::Result<StorageDeal> {
+        // Resolve now, not at construction. Refuse rather than fall back to
+        // the zero address: a deal bonded against an address the operator does
+        // not hold is worse than a deal that did not open.
+        let provider = self.provider().ok_or_else(|| {
+            tenzro_storage_provider::StorageProviderError::InvalidRequest(
+                "this node has no resolvable payee address to bond the deal against; \
+                 provision an operator identity or set `operator_did`"
+                    .to_string(),
+            )
+        })?;
         self.meter.open_deal(
             object_id,
             renter,
-            self.provider,
+            provider,
             asset_id,
             size_bytes,
             total_epochs,

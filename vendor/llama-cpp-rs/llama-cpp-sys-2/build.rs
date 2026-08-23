@@ -436,8 +436,68 @@ fn find_ibverbs() -> Option<String> {
     })
 }
 
+/// Refuse a CUDA build that this environment will silently turn into a CPU one.
+///
+/// Both conditions below produce a binary that compiles CUDA, links it, and then
+/// registers no CUDA backend at runtime. The build succeeds and exits 0, which
+/// is what makes them expensive: the first sign is inference running at a
+/// fraction of its throughput, hours later.
+///
+/// - **`CMAKE_CUDA_ARCHITECTURES` / `CUDAARCHS` set.** ggml selects its own
+///   architecture list. Setting one is enough on its own.
+/// - **`CC` not clang.** The `CC=clang` / `CXX=clang++` / `CUDAHOSTCXX=g++` trio
+///   in `Dockerfile.cuda` is calibrated; another host compiler gives the same
+///   silent CPU-only result.
+///
+/// This lives in the vendored crate rather than in `tenzro-model`, which is
+/// where it would more naturally sit, for one reason: cargo runs a dependency's
+/// build script before its dependent's. A check in `tenzro-model/build.rs` would
+/// fire only after llama.cpp had already been configured and compiled, which is
+/// the cost it exists to avoid. Here it fires first.
+///
+/// A hard failure rather than a warning, because `cargo:warning` from a build
+/// script is easy to lose in a build that emits hundreds of lines, and the
+/// remedy is a single `unset` away.
+fn refuse_silently_cpu_only_cuda() {
+    println!("cargo:rerun-if-env-changed=CMAKE_CUDA_ARCHITECTURES");
+    println!("cargo:rerun-if-env-changed=CUDAARCHS");
+    println!("cargo:rerun-if-env-changed=CC");
+
+    if env::var("CARGO_FEATURE_CUDA").is_err() {
+        return;
+    }
+
+    for var in ["CMAKE_CUDA_ARCHITECTURES", "CUDAARCHS"] {
+        if let Ok(v) = env::var(var) {
+            panic!(
+                "\n\n{var}={v} is set and the `cuda` feature is enabled.\n\n\
+                 ggml picks its own CUDA architecture list. Overriding it builds a binary that \
+                 links CUDA and then serves every layer on the CPU, with no error at build time.\n\n\
+                 Unset {var} and rebuild. See Dockerfile.cuda for the toolchain this expects.\n"
+            );
+        }
+    }
+
+    if let Ok(cc) = env::var("CC") {
+        let is_clang = Path::new(&cc)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f.contains("clang"));
+        if !is_clang {
+            panic!(
+                "\n\nCC={cc} with the `cuda` feature enabled.\n\n\
+                 The CUDA path here expects clang; another host compiler produces a binary that \
+                 links CUDA and then serves every layer on the CPU.\n\n\
+                 Set CC=clang and CXX=clang++ (with CUDAHOSTCXX=g++), or unset CC. See \
+                 Dockerfile.cuda.\n"
+            );
+        }
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    refuse_silently_cpu_only_cuda();
 
     let (target_os, target_triple) =
         parse_target_os().unwrap_or_else(|t| panic!("Failed to parse target os {t}"));

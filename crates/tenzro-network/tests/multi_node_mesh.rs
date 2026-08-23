@@ -23,9 +23,23 @@ use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_network::{
     MessagePayload, NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService,
-    ValidatorRegistry, binding_payload, encode_agent_binding, load_or_generate_keypair,
+    ValidatorRegistry, binding_payload, encode_agent_binding, node_identity_keypair,
 };
 use tokio::time::timeout;
+
+/// How long a node may take to bind a listen address.
+///
+/// Generous because node startup now derives its identity from the TPM, and
+/// that is genuinely slow: `TPM2_CreatePrimary` for the RSA-2048 template
+/// measures ~4.4s on this class of chip (~3.7s under the owner hierarchy,
+/// ~0.7s more under the endorsement hierarchy the identity actually uses).
+///
+/// The previous 5s left no headroom — a passing run took 4.53s — so the suite
+/// failed the moment derivation got slightly slower, which read as a mesh
+/// regression rather than what it was. The cost is paid once per process and
+/// is cached thereafter, so this bounds startup, not steady state.
+const BIND_DEADLINE: Duration = Duration::from_secs(30);
+
 
 const CONSENSUS_TOPIC: &str = "tenzro/consensus";
 const MESH_WAIT: Duration = Duration::from_secs(30);
@@ -53,7 +67,7 @@ async fn spawn_node() -> (TenzroNetworkService, Vec<Multiaddr>) {
 
     // Poll until the swarm reports at least one TCP listen address.
     // OS port assignment is fast but not synchronous with service creation.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + BIND_DEADLINE;
     loop {
         let addrs = service
             .listen_addresses()
@@ -65,7 +79,7 @@ async fn spawn_node() -> (TenzroNetworkService, Vec<Multiaddr>) {
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
-                "node never bound a TCP listen address after 5s; addrs={:?}",
+                "node never bound a TCP listen address after {BIND_DEADLINE:?}; addrs={:?}",
                 addrs
             );
         }
@@ -83,7 +97,7 @@ async fn spawn_bound_validator_node() -> (TenzroNetworkService, Vec<Multiaddr>, 
     let dir = std::env::temp_dir().join(format!("tenzro-mesh-test-{}", uuid::Uuid::new_v4()));
     let data_dir = Some(dir);
 
-    let p2p_key = load_or_generate_keypair(&data_dir).expect("p2p keypair");
+    let p2p_key = node_identity_keypair(&data_dir).expect("p2p keypair");
     let peer_id = PeerId::from(p2p_key.public());
 
     let validator_key = KeyPair::generate(KeyType::Ed25519).unwrap();
@@ -100,7 +114,7 @@ async fn spawn_bound_validator_node() -> (TenzroNetworkService, Vec<Multiaddr>, 
         .await
         .expect("network service spawned");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + BIND_DEADLINE;
     loop {
         let addrs = service
             .listen_addresses()
@@ -112,7 +126,7 @@ async fn spawn_bound_validator_node() -> (TenzroNetworkService, Vec<Multiaddr>, 
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
-                "node never bound a TCP listen address after 5s; addrs={:?}",
+                "node never bound a TCP listen address after {BIND_DEADLINE:?}; addrs={:?}",
                 addrs
             );
         }

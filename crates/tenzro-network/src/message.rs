@@ -465,6 +465,36 @@ pub struct ModelRegistrationMessage {
 const MODEL_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/model";
 const AGENT_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/agent";
 const PROVIDER_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/provider";
+/// Domain for the announce-key binding.
+///
+/// Deliberately distinct from `peer_binding::PEER_BINDING_DOMAIN`, which signs
+/// a *peer id* to bind it to a validator key. This one signs an *announce
+/// public key* to bind it to the peer that authorised it. Sharing a domain
+/// between the two would let a signature made for one purpose be replayed as
+/// the other.
+/// Canonical provider-class string for a node that serves models.
+///
+/// Generalised on purpose: a provider may serve text, multimodal, image,
+/// video, audio or embedding models, and frequently several at once. The
+/// class says *what kind of provider this is*, not what shape its models take.
+pub const PROVIDER_TYPE_AI: &str = "ai";
+
+/// Whether a declared provider class satisfies a requested one.
+///
+/// Case-insensitive equality. There is no alias table: this network runs one
+/// binary, so a declared class means the same thing on every node that can
+/// announce it.
+pub fn provider_type_matches(declared: &str, requested: &str) -> bool {
+    declared.eq_ignore_ascii_case(requested)
+}
+
+const ANNOUNCE_KEY_BINDING_DOMAIN: &[u8] = b"tenzro/announce/key-binding/v1";
+
+/// Domain separator for the announcement's post-quantum leg.
+///
+/// Distinct from the classical announce domain so one leg's signature can
+/// never be replayed as the other's, even though both cover the same struct.
+const PQ_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/pq/v1";
 const DATABASE_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/database";
 const BLOB_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/blobs";
 const SHARD_REPLICATION_DOMAIN: &[u8] = b"tenzro/announce/shard-replication";
@@ -618,13 +648,28 @@ impl AgentAnnouncementMessage {
 /// every 60s by nodes serving models or TEE services. All peers merge incoming
 /// announcements into their `network_providers` DashMap so any node can discover
 /// every provider in the network without a central registry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Default` exists so the wire-format tests can round-trip the *empty* case,
+/// which is the one that breaks: `skip_serializing_if` only omits bytes when a
+/// field is unset, so a fixture with everything populated proves nothing.
+///
+/// Note `ttl_secs` defaults to 0 here, not to [`default_provider_ttl`] — a
+/// constructed announcement must set it explicitly or it is born expired.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderAnnouncementMessage {
     /// libp2p peer ID of the announcing node
     pub peer_id: String,
     /// Wallet/account address of the provider
     pub provider_address: String,
-    /// Provider type (e.g. "llm", "tee", "general")
+    /// Provider class: `"ai"`, `"tee"`, `"storage"`, `"compute"`, `"database"`,
+    /// `"cloud"`, `"general"`.
+    ///
+    /// `"ai"` covers every model class a node can serve — text, multimodal,
+    /// image, video, audio, embeddings. It was previously emitted as `"llm"`,
+    /// which mislabelled any node serving something other than a text model,
+    /// and disagreed with this crate's own [`crate::discovery::ProviderType`],
+    /// whose variant has always been `Inference`. Compare with
+    /// [`provider_type_matches`], which is case-insensitive equality — the
+    /// `"llm"` alias has been removed and no longer matches.
     #[serde(default)]
     pub provider_type: String,
     /// Model IDs currently being served by this node
@@ -695,8 +740,49 @@ pub struct ProviderAnnouncementMessage {
     pub pubkey: Vec<u8>,
     /// Ed25519 signature over the canonical preimage. Empty on unsigned
     /// announcements, which consumers reject.
+    /// Ed25519 signature over the canonical preimage. Empty on unsigned
+    /// announcements, which consumers reject.
     #[serde(default)]
     pub signature: Vec<u8>,
+    /// This node's libp2p public key, protobuf-encoded.
+    ///
+    /// Present so a consumer can recompute `peer_id` from it and confirm the
+    /// announcement is entitled to the identity it claims. Empty on
+    /// announcements from nodes predating the binding.
+    #[serde(default)]
+    pub libp2p_pubkey: Vec<u8>,
+    /// Signature by the libp2p key over
+    /// `ANNOUNCE_KEY_BINDING_DOMAIN || pubkey`.
+    ///
+    /// Proves the holder of the peer identity authorised this announce key.
+    /// Without it, the announce signature only proves that *somebody* signed a
+    /// struct — it says nothing about whether that somebody owns the `peer_id`
+    /// inside it, which is what let a peer publish another node's `peer_id`
+    /// and inherit the capability that node had advertised.
+    #[serde(default)]
+    pub peer_binding_sig: Vec<u8>,
+    /// ML-DSA-65 verifying key for this node's announcement PQ leg, derived
+    /// from its identity key so it is the same key on every boot.
+    ///
+    /// Empty on nodes that predate the PQ leg. Absent is *unproven*, never
+    /// *forged* — see [`Self::verify_pq`].
+    #[serde(default)]
+    pub pq_pubkey: Vec<u8>,
+    /// ML-DSA-65 signature over this announcement.
+    ///
+    /// Written before the classical signature, so the classical leg covers it
+    /// and stripping the PQ leg to force a downgrade breaks the announcement.
+    #[serde(default)]
+    pub pq_signature: Vec<u8>,
+}
+
+/// What a peer signs with its libp2p key to authorise an announce key.
+fn announce_key_binding_payload(announce_pubkey: &[u8]) -> Vec<u8> {
+    let mut payload =
+        Vec::with_capacity(ANNOUNCE_KEY_BINDING_DOMAIN.len() + announce_pubkey.len());
+    payload.extend_from_slice(ANNOUNCE_KEY_BINDING_DOMAIN);
+    payload.extend_from_slice(announce_pubkey);
+    payload
 }
 
 impl ProviderAnnouncementMessage {
@@ -712,6 +798,135 @@ impl ProviderAnnouncementMessage {
         let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
         self.signature = sig.as_bytes().to_vec();
         Ok(())
+    }
+
+    /// Sign, and bind the announce key to this node's peer identity.
+    ///
+    /// Order matters. The binding is written first so the announce signature
+    /// covers it — otherwise the two fields could be stripped or swapped in
+    /// flight and the announcement would still verify.
+    ///
+    /// What this buys: `sign` alone proves *somebody* signed this struct. It
+    /// says nothing about whether that somebody owns the `peer_id` inside it,
+    /// so a peer could publish another node's `peer_id` with its own announce
+    /// key and inherit whatever capability that node had advertised — warm
+    /// caches, speculative decoding, an idle load figure. Signing the announce
+    /// key with the libp2p key closes that: only the holder of the peer
+    /// identity can produce it.
+    pub fn sign_bound(
+        &mut self,
+        signer: &dyn tenzro_crypto::signatures::Signer,
+        libp2p_key: &libp2p::identity::Keypair,
+    ) -> Result<(), String> {
+        let announce_pubkey = signer.public_key().as_bytes().to_vec();
+        self.libp2p_pubkey = libp2p_key.public().encode_protobuf();
+        self.peer_binding_sig = libp2p_key
+            .sign(&announce_key_binding_payload(&announce_pubkey))
+            .map_err(|e| format!("signing the announce-key binding: {e}"))?;
+        self.sign(signer)
+    }
+
+    /// Sign, bind to the peer identity, and add a post-quantum leg.
+    ///
+    /// Ordering is the security property. The PQ signature is written *before*
+    /// the classical one, so the classical signature covers both PQ fields:
+    /// an attacker who strips the PQ leg to push a peer onto the weaker path
+    /// invalidates the whole announcement. A PQ leg added after would be
+    /// removable without trace.
+    ///
+    /// See the [`crate::pq_announce`] module docs for what this does and does
+    /// not defend against — briefly, the PQ key is self-carried and therefore
+    /// unpinned, so this is downgrade resistance and key distribution today,
+    /// not quantum resistance today.
+    pub fn sign_bound_pq(
+        &mut self,
+        signer: &dyn tenzro_crypto::signatures::Signer,
+        libp2p_key: &libp2p::identity::Keypair,
+        pq: &tenzro_crypto::pq::MlDsaSigningKey,
+    ) -> Result<(), String> {
+        let announce_pubkey = signer.public_key().as_bytes().to_vec();
+        self.libp2p_pubkey = libp2p_key.public().encode_protobuf();
+        self.peer_binding_sig = libp2p_key
+            .sign(&announce_key_binding_payload(&announce_pubkey))
+            .map_err(|e| format!("signing the announce-key binding: {e}"))?;
+
+        // Populate every field the classical `sign` will set, *before* taking
+        // the PQ preimage. `sign` writes `pubkey` itself, so leaving it empty
+        // here would have the two legs cover different bytes: the PQ leg would
+        // sign an announcement with no announce key in it, then fail to verify
+        // against the one that actually ships.
+        self.pubkey = announce_pubkey;
+        self.pq_pubkey = pq.verifying_key_bytes().to_vec();
+        self.pq_signature = Vec::new();
+        self.signature = Vec::new();
+        let pq_preimage = announce_preimage(PQ_ANNOUNCE_DOMAIN, self)?;
+        self.pq_signature = pq.sign(&pq_preimage);
+
+        self.sign(signer)
+    }
+
+    /// Whether this announcement carries a valid post-quantum leg.
+    ///
+    /// Tri-state, mirroring [`Self::verify_peer_binding`], because "no PQ leg"
+    /// and "bad PQ leg" are different facts and collapsing them would either
+    /// reject every node predating the leg or accept a forged one:
+    ///
+    /// - `Ok(false)` — no leg present. Not proven, not forged.
+    /// - `Ok(true)` — the leg verifies against the key the announcement carries.
+    /// - `Err` — half-formed or invalid.
+    ///
+    /// `Ok(true)` does **not** mean the signer is who they claim. The verifying
+    /// key is self-supplied; until it is pinned through a trusted mapping, a
+    /// quantum adversary forging the classical identity would supply their own.
+    pub fn verify_pq(&self) -> Result<bool, String> {
+        if self.pq_pubkey.is_empty() && self.pq_signature.is_empty() {
+            return Ok(false);
+        }
+        if self.pq_pubkey.is_empty() || self.pq_signature.is_empty() {
+            return Err("half-formed post-quantum leg".to_string());
+        }
+        let mut unsigned = self.clone();
+        unsigned.pq_signature = Vec::new();
+        unsigned.signature = Vec::new();
+        let preimage = announce_preimage(PQ_ANNOUNCE_DOMAIN, &unsigned)?;
+        tenzro_crypto::pq::ml_dsa_verify(&self.pq_pubkey, &preimage, &self.pq_signature)
+            .map(|()| true)
+            .map_err(|e| format!("post-quantum leg did not verify: {e}"))
+    }
+
+    /// Whether this announcement proves it may speak for its `peer_id`.
+    ///
+    /// Separate from [`Self::verify`] so a consumer can decide what an unbound
+    /// announcement is worth rather than having that decided for it. An
+    /// announcement from a node predating the binding carries neither field
+    /// and returns `Ok(false)` — it is not forged, merely unproven.
+    pub fn verify_peer_binding(&self) -> Result<bool, String> {
+        if self.libp2p_pubkey.is_empty() && self.peer_binding_sig.is_empty() {
+            return Ok(false);
+        }
+        if self.libp2p_pubkey.is_empty() || self.peer_binding_sig.is_empty() {
+            return Err("half-formed peer binding".to_string());
+        }
+        let pk = libp2p::identity::PublicKey::try_decode_protobuf(&self.libp2p_pubkey)
+            .map_err(|e| format!("undecodable libp2p public key: {e}"))?;
+
+        // The carried key must actually be the one this peer id names, or a
+        // forger could present its own key and a matching signature.
+        let claimed: libp2p::PeerId = self
+            .peer_id
+            .parse()
+            .map_err(|e| format!("unparseable peer_id: {e}"))?;
+        if libp2p::PeerId::from_public_key(&pk) != claimed {
+            return Err("libp2p public key does not derive the announced peer_id".to_string());
+        }
+
+        if !pk.verify(
+            &announce_key_binding_payload(&self.pubkey),
+            &self.peer_binding_sig,
+        ) {
+            return Err("peer binding does not cover this announce key".to_string());
+        }
+        Ok(true)
     }
 
     /// Verify the embedded signature over the whole-struct preimage. Returns
@@ -1093,6 +1308,245 @@ pub fn validate_message(msg: &NetworkMessage) -> crate::error::Result<()> {
 mod tests {
     use super::*;
 
+    /// Build a minimal provider announcement claiming `peer_id`.
+    fn provider_ann(peer_id: &libp2p::PeerId) -> ProviderAnnouncementMessage {
+        let mut ann = sample_provider_announcement();
+        ann.peer_id = peer_id.to_string();
+        ann
+    }
+
+    /// An honest node signs and binds; both checks pass.
+    #[test]
+    fn a_bound_announcement_proves_it_owns_its_peer_id() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+
+        let mut ann = provider_ann(&peer);
+        ann.sign_bound(&signer, &libp2p_key).expect("sign_bound");
+
+        assert!(ann.verify().is_ok(), "announce signature");
+        assert_eq!(ann.verify_peer_binding(), Ok(true));
+    }
+
+    /// A node announcing the new value must still satisfy a client written
+    /// against the old one, and the reverse — both sides of a rollout.
+    #[test]
+    fn ai_and_llm_name_the_same_provider_class() {
+        assert!(provider_type_matches("ai", "ai"));
+        assert!(provider_type_matches("ai", "AI"));
+        // "llm" is no longer an alias for "ai" -- it is just another string.
+        assert!(!provider_type_matches("ai", "llm"));
+        assert!(!provider_type_matches("llm", "ai"));
+    }
+
+    /// The alias must not swallow other classes. A storage node is not an AI
+    /// node, and a filter for one must never return the other.
+    #[test]
+    fn the_alias_does_not_leak_into_other_classes() {
+        for other in ["tee", "storage", "compute", "database", "cloud", "general"] {
+            assert!(!provider_type_matches("ai", other), "ai vs {other}");
+            assert!(!provider_type_matches(other, "ai"), "{other} vs ai");
+
+        }
+        assert!(provider_type_matches("storage", "storage"));
+    }
+
+    /// Case is not meaningful in a class name; a client sending "AI" and a
+    /// node announcing "ai" are naming the same class.
+    ///
+    /// Case folding is all that happens — "llm" is a different class name
+    /// since the alias was removed, not a spelling of "ai".
+    #[test]
+    fn provider_class_matching_ignores_case() {
+        assert!(provider_type_matches("AI", "ai"));
+        assert!(provider_type_matches("ai", "AI"));
+        assert!(provider_type_matches("Storage", "storage"));
+        assert!(!provider_type_matches("AI", "llm"));
+        assert!(!provider_type_matches("LLM", "ai"));
+    }
+
+    /// The advertised trust tier is inside the signed struct, so an
+    /// intermediary cannot promote a delegated node to the TPM tier in flight.
+    /// This does not make the field true — the announcer could have signed the
+    /// stronger claim itself — it only removes everyone else from the attack.
+    #[test]
+    fn the_identity_root_cannot_be_upgraded_in_flight() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+
+        let mut ann = provider_ann(&peer);
+        ann.trust_profile.identity_root = "passkey-delegated".to_string();
+        ann.sign_bound(&signer, &libp2p_key).expect("sign_bound");
+        assert!(ann.verify().is_ok(), "honest announcement should verify");
+
+        ann.trust_profile.identity_root = "tpm".to_string();
+        assert!(
+            ann.verify().is_err(),
+            "a promoted trust tier must invalidate the signature"
+        );
+    }
+
+    /// A PQ-signed announcement verifies on both legs.
+    #[test]
+    fn both_legs_verify_on_an_honest_announcement() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+        let pq = crate::pq_announce::pq_identity_key(&libp2p_key).unwrap();
+
+        let mut ann = provider_ann(&peer);
+        ann.sign_bound_pq(&signer, &libp2p_key, &pq).unwrap();
+
+        assert!(ann.verify().is_ok(), "classical leg");
+        assert_eq!(ann.verify_peer_binding(), Ok(true), "binding");
+        assert_eq!(ann.verify_pq(), Ok(true), "post-quantum leg");
+    }
+
+    /// **The property the PQ leg actually buys today.** Stripping it to force a
+    /// peer onto the weaker path must not go unnoticed — which is why the PQ
+    /// signature is written before the classical one rather than after.
+    #[test]
+    fn stripping_the_pq_leg_breaks_the_announcement() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+        let pq = crate::pq_announce::pq_identity_key(&libp2p_key).unwrap();
+
+        let mut ann = provider_ann(&peer);
+        ann.sign_bound_pq(&signer, &libp2p_key, &pq).unwrap();
+
+        for strip in [0usize, 1] {
+            let mut tampered = ann.clone();
+            if strip == 0 {
+                tampered.pq_signature.clear();
+            } else {
+                tampered.pq_pubkey.clear();
+            }
+            assert!(
+                tampered.verify().is_err(),
+                "the classical signature must cover the PQ leg (case {strip})"
+            );
+        }
+    }
+
+    /// An announcement from a node predating the PQ leg is unproven, not
+    /// forged — collapsing those two would reject the entire existing network.
+    #[test]
+    fn an_absent_pq_leg_is_unproven_rather_than_invalid() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+
+        let mut ann = provider_ann(&peer);
+        ann.sign_bound(&signer, &libp2p_key).unwrap();
+
+        assert!(ann.verify().is_ok(), "still a valid announcement");
+        assert_eq!(ann.verify_pq(), Ok(false), "absent, not invalid");
+    }
+
+    /// Half a leg is a malformed announcement, not an absent one.
+    #[test]
+    fn a_half_formed_pq_leg_is_rejected() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+        let pq = crate::pq_announce::pq_identity_key(&libp2p_key).unwrap();
+
+        let mut ann = provider_ann(&peer);
+        ann.sign_bound_pq(&signer, &libp2p_key, &pq).unwrap();
+        ann.pq_signature.clear();
+
+        assert!(ann.verify_pq().is_err(), "half-formed must not read as absent");
+    }
+
+    /// Editing the body after signing must break the PQ leg on its own terms,
+    /// independently of the classical leg catching it too.
+    #[test]
+    fn the_pq_leg_covers_the_announcement_body() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+        let pq = crate::pq_announce::pq_identity_key(&libp2p_key).unwrap();
+
+        let mut ann = provider_ann(&peer);
+        ann.sign_bound_pq(&signer, &libp2p_key, &pq).unwrap();
+        ann.rpc_endpoint = "http://attacker.example".to_string();
+
+        assert!(
+            ann.verify_pq().is_err(),
+            "the PQ leg must cover the body, not just its own fields"
+        );
+    }
+
+    /// THE ATTACK: a peer publishes a victim's `peer_id` under its own keys.
+    ///
+    /// The announce signature is perfectly valid — the spoofer really did sign
+    /// the struct — which is exactly why `verify()` alone was not enough. Only
+    /// the binding catches it.
+    #[test]
+    fn a_spoofer_cannot_claim_another_nodes_peer_id() {
+        let victim = libp2p::identity::Keypair::generate_ed25519();
+        let victim_peer = libp2p::PeerId::from(victim.public());
+
+        let spoofer_libp2p = libp2p::identity::Keypair::generate_ed25519();
+        let spoofer_announce = test_signer();
+
+        let mut ann = provider_ann(&victim_peer);
+        ann.sign_bound(&spoofer_announce, &spoofer_libp2p)
+            .expect("spoofer can still sign");
+
+        assert!(
+            ann.verify().is_ok(),
+            "the announce signature is genuinely valid — this is the point"
+        );
+        assert!(
+            ann.verify_peer_binding().is_err(),
+            "binding must reject a peer_id this key does not own"
+        );
+    }
+
+    /// Stripping the binding must not silently downgrade to "trusted".
+    #[test]
+    fn a_stripped_binding_is_not_silently_accepted() {
+        let libp2p_key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = libp2p::PeerId::from(libp2p_key.public());
+        let signer = test_signer();
+
+        let mut ann = provider_ann(&peer);
+        ann.sign_bound(&signer, &libp2p_key).expect("sign_bound");
+
+        // Removing either half breaks the announce signature, because the
+        // binding is written before signing and is therefore covered by it.
+        let mut tampered = ann.clone();
+        tampered.peer_binding_sig.clear();
+        assert!(tampered.verify().is_err(), "stripping must break the signature");
+
+        let mut tampered = ann.clone();
+        tampered.libp2p_pubkey.clear();
+        assert!(tampered.verify().is_err(), "stripping must break the signature");
+
+        // And a half-formed binding is an error, not a quiet `false`.
+        let mut half = provider_ann(&peer);
+        half.libp2p_pubkey = libp2p_key.public().encode_protobuf();
+        assert!(half.verify_peer_binding().is_err());
+    }
+
+    /// A node predating the binding is unproven, not forged.
+    #[test]
+    fn an_unbound_announcement_is_unproven_not_invalid() {
+        let peer = libp2p::PeerId::from(
+            libp2p::identity::Keypair::generate_ed25519().public(),
+        );
+        let signer = test_signer();
+        let mut ann = provider_ann(&peer);
+        ann.sign(&signer).expect("plain sign");
+
+        assert!(ann.verify().is_ok());
+        assert_eq!(ann.verify_peer_binding(), Ok(false));
+    }
+
     #[test]
     fn test_message_serialization() {
         let msg = NetworkMessage::new(MessagePayload::Ping);
@@ -1139,7 +1593,7 @@ mod tests {
         ProviderAnnouncementMessage {
             peer_id: "12D3KooWTest".to_string(),
             provider_address: "0xabc".to_string(),
-            provider_type: "llm".to_string(),
+            provider_type: PROVIDER_TYPE_AI.to_string(),
             served_models: vec!["qwen3-0.6b".to_string()],
             capabilities: vec!["inference".to_string()],
             rpc_endpoint: "http://10.0.0.1:8545".to_string(),
@@ -1157,6 +1611,10 @@ mod tests {
             cluster_profile: None,
             pubkey: Vec::new(),
             signature: Vec::new(),
+            libp2p_pubkey: Vec::new(),
+            peer_binding_sig: Vec::new(),
+            pq_pubkey: Vec::new(),
+            pq_signature: Vec::new(),
         }
     }
 

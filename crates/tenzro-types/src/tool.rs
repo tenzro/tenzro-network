@@ -29,10 +29,11 @@ use serde::{Deserialize, Serialize};
 
 /// Transport mode for an MCP / tool resource.
 ///
-/// Old code that stored `tool_type: String` is preserved via
-/// `ToolDefinition::tool_type`; new code should prefer
-/// `transport_mode` which is strongly typed. The two are kept in sync
-/// at write time via `ToolDefinition::set_transport_mode`.
+/// This is the stored and wire form — `ToolDefinition::transport` is this
+/// enum, not a string it has to be parsed out of. Serde handles both
+/// directions in kebab-case (`mcp`, `mcp-stdio`, `api`, `native`), so a
+/// transport this node does not implement fails to deserialise rather than
+/// arriving as an unknown string for someone downstream to interpret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolTransportMode {
@@ -45,32 +46,6 @@ pub enum ToolTransportMode {
     Api,
     /// Built-in node capability — handled inline.
     Native,
-}
-
-impl ToolTransportMode {
-    /// Wire-format string for the legacy `tool_type` field. Used to
-    /// keep old clients reading the type as a string.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ToolTransportMode::Mcp => "mcp",
-            ToolTransportMode::McpStdio => "mcp-stdio",
-            ToolTransportMode::Api => "api",
-            ToolTransportMode::Native => "native",
-        }
-    }
-
-    /// Inverse of `as_str`. Returns `None` for unknown strings rather
-    /// than panicking so the registry can refuse to load unknown
-    /// transport modes safely.
-    pub fn parse_str(s: &str) -> Option<Self> {
-        match s {
-            "mcp" => Some(ToolTransportMode::Mcp),
-            "mcp-stdio" => Some(ToolTransportMode::McpStdio),
-            "api" => Some(ToolTransportMode::Api),
-            "native" => Some(ToolTransportMode::Native),
-            _ => None,
-        }
-    }
 }
 
 /// How the operator's upstream credentials are injected into an MCP
@@ -205,7 +180,7 @@ pub struct ToolDefinition {
     pub version: String,
 
     /// Tool type: "mcp", "api", or "native"
-    pub tool_type: String,
+    pub transport: ToolTransportMode,
 
     /// MCP/API endpoint URL (required for mcp and api types)
     pub endpoint: String,
@@ -263,7 +238,7 @@ pub struct ToolDefinition {
     pub upstream_auth: Option<UpstreamAuth>,
 
     /// Subprocess spawn specification for `McpStdio` transport.
-    /// Required when `tool_type == "mcp-stdio"`. Ignored for other
+    /// Required when `transport` is `McpStdio`. Ignored for other
     /// transports.
     pub spawn_spec: Option<StdioSpawnSpec>,
 
@@ -286,7 +261,7 @@ impl ToolDefinition {
     pub fn new(
         name: String,
         version: String,
-        tool_type: String,
+        transport: ToolTransportMode,
         endpoint: String,
         description: String,
         category: String,
@@ -301,7 +276,7 @@ impl ToolDefinition {
             tool_id,
             name,
             version,
-            tool_type,
+            transport,
             endpoint,
             description,
             capabilities: Vec::new(),
@@ -317,20 +292,6 @@ impl ToolDefinition {
             spawn_spec: None,
             allowed_to_subjects: None,
         }
-    }
-
-    /// Returns the typed transport mode derived from the legacy
-    /// `tool_type` string. Returns `None` for unknown strings so the
-    /// caller can refuse to invoke an unknown transport safely.
-    pub fn transport_mode(&self) -> Option<ToolTransportMode> {
-        ToolTransportMode::parse_str(&self.tool_type)
-    }
-
-    /// Sets both the typed transport mode and the legacy `tool_type`
-    /// string field in lockstep. Use this from the registration RPC
-    /// when the caller passes a strongly-typed transport mode.
-    pub fn set_transport_mode(&mut self, mode: ToolTransportMode) {
-        self.tool_type = mode.as_str().to_string();
     }
 
     /// Returns `true` when `subject` is permitted to invoke this tool
@@ -374,8 +335,10 @@ impl ToolDefinition {
 /// Filter parameters for listing and searching tools
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolFilter {
-    /// Filter by tool type ("mcp", "api", "native")
-    pub tool_type: Option<String>,
+    /// Filter by transport mode. Typed, so a filter naming a transport that
+    /// cannot exist is rejected when the request is parsed rather than
+    /// silently matching nothing.
+    pub transport: Option<ToolTransportMode>,
 
     /// Filter by category
     pub category: Option<String>,
@@ -431,7 +394,7 @@ mod tests {
         let tool = ToolDefinition::new(
             "web-search".to_string(),
             "1.0.0".to_string(),
-            "mcp".to_string(),
+            ToolTransportMode::Mcp,
             "http://localhost:3001/mcp".to_string(),
             "MCP server providing web search capability".to_string(),
             "search".to_string(),
@@ -440,7 +403,7 @@ mod tests {
         assert!(!tool.tool_id.is_empty());
         assert_eq!(tool.name, "web-search");
         assert_eq!(tool.version, "1.0.0");
-        assert_eq!(tool.tool_type, "mcp");
+        assert_eq!(tool.transport, ToolTransportMode::Mcp);
         assert!(tool.is_available());
         assert_eq!(tool.price_per_call, 0);
         assert!(!tool.is_paid());
@@ -454,7 +417,7 @@ mod tests {
         let mut tool = ToolDefinition::new(
             "premium-mcp".to_string(),
             "1.0.0".to_string(),
-            "mcp".to_string(),
+            ToolTransportMode::Mcp,
             "https://example.com/mcp".to_string(),
             "Paid MCP server".to_string(),
             "data".to_string(),
@@ -468,7 +431,7 @@ mod tests {
         let tool = ToolDefinition::new(
             "free-mcp".to_string(),
             "1.0.0".to_string(),
-            "mcp".to_string(),
+            ToolTransportMode::Mcp,
             "https://example.com/mcp".to_string(),
             "Free MCP server".to_string(),
             "data".to_string(),
@@ -481,7 +444,7 @@ mod tests {
         let mut tool = ToolDefinition::new(
             "paid-mcp".to_string(),
             "1.0.0".to_string(),
-            "mcp".to_string(),
+            ToolTransportMode::Mcp,
             "https://example.com/mcp".to_string(),
             "Paid MCP server".to_string(),
             "data".to_string(),
@@ -499,7 +462,7 @@ mod tests {
     #[test]
     fn test_tool_filter_default() {
         let filter = ToolFilter::default();
-        assert!(filter.tool_type.is_none());
+        assert!(filter.transport.is_none());
         assert!(filter.category.is_none());
         assert!(filter.status.is_none());
         assert!(filter.query.is_none());
@@ -510,7 +473,7 @@ mod tests {
         let mut tool = ToolDefinition::new(
             "code-executor".to_string(),
             "2.0.0".to_string(),
-            "mcp".to_string(),
+            ToolTransportMode::Mcp,
             "https://tools.tenzro.xyz/code-executor/mcp".to_string(),
             "Executes code in sandboxed environments".to_string(),
             "code".to_string(),

@@ -452,7 +452,16 @@ async fn an_authorized_add_reaches_the_signature_check() {
     let issued = n
         .rpc(
             "tenzro_createCustodyChallenge",
-            json!({ "account_address": account, "operation": "add_passkey" }),
+            // The challenge must name the key it authorizes: `addPasskey`
+            // binds the target to the new passkey's public key, normalised
+            // to raw P-256 X||Y (the SEC1 `04` prefix dropped). A challenge
+            // with no target authorizes nothing in particular, which is the
+            // whole point of the binding.
+            json!({
+                "account_address": account,
+                "operation": "add_passkey",
+                "target_hex": format!("{}{}", hex_of(0x31, 32), hex_of(0x32, 32)),
+            }),
         )
         .await;
     let challenge_id = issued["result"]["challenge_id"]
@@ -512,7 +521,16 @@ async fn a_custody_challenge_cannot_be_spent_twice() {
     let issued = n
         .rpc(
             "tenzro_createCustodyChallenge",
-            json!({ "account_address": account, "operation": "add_passkey" }),
+            // The challenge must name the key it authorizes: `addPasskey`
+            // binds the target to the new passkey's public key, normalised
+            // to raw P-256 X||Y (the SEC1 `04` prefix dropped). A challenge
+            // with no target authorizes nothing in particular, which is the
+            // whole point of the binding.
+            json!({
+                "account_address": account,
+                "operation": "add_passkey",
+                "target_hex": format!("{}{}", hex_of(0x31, 32), hex_of(0x32, 32)),
+            }),
         )
         .await;
     let challenge_id = issued["result"]["challenge_id"]

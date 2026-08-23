@@ -165,7 +165,7 @@ mod tests {
         let tool = ToolDefinition::new(
             "yield-source".to_string(),
             "1.0.0".to_string(),
-            "mcp".to_string(),
+            tenzro_types::ToolTransportMode::Mcp,
             "https://tools.tenzro.xyz/yield".to_string(),
             "yield discovery tool".to_string(),
             "yield-source".to_string(),

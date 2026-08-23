@@ -94,6 +94,15 @@ impl Epoch {
     }
 }
 
+/// Longest an epoch may run in wall-clock terms before a transition is due,
+/// measured between block timestamps.
+///
+/// The height schedule alone cannot bound an epoch on a chain that suppresses
+/// empty blocks: height advances only when there is work, so a quiet network
+/// sits inside one epoch indefinitely and its validator set can never rotate.
+/// This is the second bound. Whichever comes first ends the epoch.
+pub const MAX_EPOCH_DURATION_MS: u64 = 3_600_000;
+
 /// Manages epoch transitions and validator set updates
 ///
 /// # Atomicity Guarantees
@@ -398,6 +407,24 @@ impl EpochManager {
     where
         F: FnOnce(BlockHeight) -> Option<Hash>,
     {
+        self.transition_epoch_timed(height, false, anchor_of)
+    }
+
+    /// As [`Self::transition_epoch`], but `time_due` also authorises the
+    /// transition when the height schedule has not been reached.
+    ///
+    /// The caller decides that, because deciding it here would mean reading a
+    /// clock, and the only clock every node agrees on is the one carried by
+    /// the blocks themselves. See [`MAX_EPOCH_DURATION_MS`].
+    pub fn transition_epoch_timed<F>(
+        &self,
+        height: BlockHeight,
+        time_due: bool,
+        anchor_of: F,
+    ) -> Result<Option<ValidatorSet>>
+    where
+        F: FnOnce(BlockHeight) -> Option<Hash>,
+    {
         // Acquire write lock for atomic transition
         // This prevents any concurrent reads or writes to the current epoch
         let mut current = self.current_epoch.write();
@@ -406,7 +433,8 @@ impl EpochManager {
         // from `current.end_height`. A current epoch carrying drifted
         // boundaries (persisted by an earlier buggy transition) must not be
         // able to pin the node off-schedule — see `should_transition`.
-        if height.as_u64() / self.epoch_duration <= current.number {
+        let height_due = height.as_u64() / self.epoch_duration > current.number;
+        if !height_due && !time_due {
             return Ok(None);
         }
 
@@ -514,8 +542,20 @@ impl EpochManager {
         // fleet-wide, unconditionally. A node that transitions late (after
         // catching up from a stall) or that hydrated a drifted epoch record
         // walks back onto the same schedule as everyone else.
-        let start_height = BlockHeight::from(next_epoch_number * self.epoch_duration);
-        let end_height = start_height + self.epoch_duration;
+        // A height-triggered epoch sits on the canonical schedule. A
+        // time-triggered one has to begin where the chain actually is: the
+        // range an epoch carries is what `get_epoch_for_height` answers
+        // historical validator-set lookups from, and every commit-QC over
+        // those heights is verified against that answer. Keeping the
+        // canonical range here would file the epoch under heights it never
+        // governed and leave the heights it did govern pointing at the
+        // superseded set.
+        let (start_height, end_height) = if height_due {
+            let canonical = BlockHeight::from(next_epoch_number * self.epoch_duration);
+            (canonical, canonical + self.epoch_duration)
+        } else {
+            (height, height + self.epoch_duration)
+        };
 
         // Resolve the deterministic leader-election seed anchor: the
         // finalized block hash at the canonical boundary. Every node
@@ -540,6 +580,13 @@ impl EpochManager {
         );
 
         // Now perform all state updates atomically within this critical section
+
+        // Close the outgoing epoch where the new one starts. On the
+        // canonical schedule the two already coincide; after a time-triggered
+        // roll they do not, and an outgoing epoch still claiming its canonical
+        // end would overlap the new one. `get_epoch_for_height` scans history
+        // in order and would answer with the epoch that has been superseded.
+        current.end_height = start_height;
 
         // 1. Store current epoch in history
         {
@@ -851,6 +898,103 @@ mod tests {
         assert_eq!(epoch.number, 0);
         assert_eq!(epoch.start_height, BlockHeight::from(0));
         assert_eq!(epoch.end_height, BlockHeight::from(100));
+    }
+
+    /// A quiet chain must still be able to rotate its set.
+    ///
+    /// Height 30 is nowhere near the 100-block boundary, and on a chain that
+    /// suppresses empty blocks it may not arrive for weeks. With the elapsed
+    /// bound the epoch rolls anyway.
+    #[test]
+    fn an_epoch_can_roll_before_its_height_boundary() {
+        let manager = EpochManager::new(vec![create_test_validator(1000)], 100).unwrap();
+
+        // Not due by height, and not authorised by time either.
+        assert!(!manager.should_transition(BlockHeight::from(30)));
+        assert!(
+            manager
+                .transition_epoch(BlockHeight::from(30), |_| None)
+                .unwrap()
+                .is_none(),
+            "without the time authorisation this must stay a no-op"
+        );
+
+        assert!(
+            manager
+                .transition_epoch_timed(BlockHeight::from(30), true, |_| None)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(manager.current_epoch().number, 1);
+    }
+
+    /// The range a time-triggered epoch carries must be the range it governs.
+    ///
+    /// `get_epoch_for_height` answers historical validator-set lookups by
+    /// scanning ranges, and commit-QC verification is decided by what it
+    /// returns. An epoch that rolled at height 30 while the canonical schedule
+    /// put the boundary at 100 has to own [30, 130) — and its predecessor has
+    /// to stop at 30, or both claim height 50 and the older one wins the scan.
+    #[test]
+    fn a_time_triggered_epoch_owns_the_heights_it_governs() {
+        let manager = EpochManager::new(vec![create_test_validator(1000)], 100).unwrap();
+
+        manager
+            .transition_epoch_timed(BlockHeight::from(30), true, |_| None)
+            .unwrap()
+            .expect("time-authorised transition");
+
+        let epoch = manager.current_epoch();
+        assert_eq!(epoch.number, 1);
+        assert_eq!(epoch.start_height, BlockHeight::from(30));
+        assert_eq!(epoch.end_height, BlockHeight::from(130));
+
+        // Heights before the roll still resolve to epoch 0, which no longer
+        // claims to run to 100.
+        let before = manager
+            .get_epoch_for_height(BlockHeight::from(29))
+            .expect("epoch 0 covers height 29");
+        assert_eq!(before.number, 0);
+        assert_eq!(before.end_height, BlockHeight::from(30));
+
+        // And heights after it resolve to epoch 1, not to the epoch whose
+        // canonical range still nominally contains them.
+        for h in [30u64, 50, 129] {
+            let at = manager
+                .get_epoch_for_height(BlockHeight::from(h))
+                .unwrap_or_else(|| panic!("no epoch resolves height {h}"));
+            assert_eq!(at.number, 1, "height {h} resolved to the wrong epoch");
+        }
+    }
+
+    /// Rolling early must not leave the node stuck off the height schedule:
+    /// once height catches up past the new epoch's own end, the height rule
+    /// takes over again.
+    #[test]
+    fn the_height_rule_still_applies_after_an_early_roll() {
+        let manager = EpochManager::new(vec![create_test_validator(1000)], 100).unwrap();
+
+        manager
+            .transition_epoch_timed(BlockHeight::from(30), true, |_| None)
+            .unwrap()
+            .expect("time-authorised transition");
+
+        // Epoch 1 now; the canonical rule is `height / 100 > 1`, so 200 is the
+        // next height-triggered boundary and 150 is not one.
+        assert!(!manager.should_transition(BlockHeight::from(150)));
+        assert!(manager.should_transition(BlockHeight::from(200)));
+
+        manager
+            .transition_epoch(BlockHeight::from(200), |_| None)
+            .unwrap()
+            .expect("height-triggered transition");
+        let epoch = manager.current_epoch();
+        assert_eq!(epoch.number, 2);
+        assert_eq!(
+            epoch.start_height,
+            BlockHeight::from(200),
+            "a height-triggered roll returns to the canonical schedule"
+        );
     }
 
     #[test]

@@ -148,6 +148,11 @@ struct llama_grammar {
                              trigger_patterns;         // Regular expressions that trigger a lazy grammar. Must be a full match of the entire generated
                                                        // string, and the grammar will be given the string from the first match group onwards.
 
+    // Set once the grammar has given up on a turn. Accept is still called for
+    // every remaining token, so without this the "could not accept" warning is
+    // emitted once per token and buries the log. Declared last, and defaulted,
+    // because the struct is brace-initialized positionally in init/clone.
+    bool                     gave_up = false;
 };
 
 //

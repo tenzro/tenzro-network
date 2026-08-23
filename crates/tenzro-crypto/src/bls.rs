@@ -445,19 +445,10 @@ impl BlsKeyPair {
         use rand::RngCore;
         let mut ikm = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut ikm);
-
-        let secret_key_inner = SecretKey::key_gen(&ikm, &[])
-            .map_err(|e| BlsError::InvalidSecretKey(format!("Key generation failed: {:?}", e)))?;
-
-        let secret_key = BlsSecretKey {
-            inner: secret_key_inner,
-        };
-        let public_key = BlsPublicKey::from_secret_key(&secret_key);
-
-        Ok(Self {
-            secret_key,
-            public_key,
-        })
+        // Through the same KeyGen every other caller uses. A second copy of
+        // this here was the first version of this change, before noticing the
+        // TEE-sealed agent path had already needed exactly it.
+        Self::from_ikm(&ikm)
     }
 
     /// Derive a keypair deterministically from input key material.

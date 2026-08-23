@@ -97,6 +97,7 @@ pub async fn admit_inference(
     class: QosClass,
     deadline: Option<Duration>,
     queue_ahead: u32,
+    est_tokens: u64,
 ) -> Decision {
     // Two different budgets, because they answer two different questions.
     //
@@ -136,7 +137,7 @@ pub async fn admit_inference(
                 let traffic_guard =
                     match node
                         .traffic()
-                        .admit(model_id, class, Some(remaining), queue_ahead)
+                        .admit(model_id, class, Some(remaining), queue_ahead, est_tokens)
                     {
                         Ok(g) => g,
                         Err(refusal) => return Decision::Refused(refusal),

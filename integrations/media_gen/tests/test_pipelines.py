@@ -115,8 +115,11 @@ def test_a_renamed_field_fails_at_parse_time():
 
 
 def test_an_unknown_kind_label_fails_at_parse_time():
+    # Was "text2audio" until audio became a real kind. Any label here must be
+    # one the protocol genuinely does not define, or this stops testing
+    # anything the moment the enum grows.
     with pytest.raises(ValueError):
-        CatalogEntry.from_json(qwen_row(kinds=["text2audio"]))
+        CatalogEntry.from_json(qwen_row(kinds=["text2hologram"]))
 
 
 def test_declared_kinds_are_the_only_ones_served():

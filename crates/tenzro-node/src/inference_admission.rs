@@ -40,6 +40,30 @@ impl NodeInferenceAdmission {
     /// credentials directly so both the HTTP path (headers) and the iroh
     /// `tenzro/infer` path (JSON-RPC frame fields) can share the exact same
     /// gating logic.
+    /// Whether this node's RPC listener can only be reached from this machine.
+    ///
+    /// Read from the bind address rather than from the request, because a bind address is a fact
+    /// about the socket and a request header is a claim by whoever sent it. `127.0.0.0/8` and `::1`
+    /// are not routable off-host, so anything arriving on such a listener is on-node.
+    fn listener_is_loopback(&self) -> bool {
+        /*
+         * `rpc_addr` is a String, not a SocketAddr, so this has to parse -- and the parse can
+         * fail. It fails CLOSED: an address we cannot read is not an address we can prove is
+         * loopback, and the cost of the two mistakes is not symmetric. Guessing "loopback" on an
+         * unparseable bind address would expose private models to the network; guessing
+         * "not loopback" only declines a local call that the operator can still make explicit.
+         *
+         * A bare `:8545` or `0.0.0.0:8545` is NOT loopback -- those are wildcard binds reachable
+         * from off-host, which is exactly the case this guard exists to catch.
+         */
+        self.node
+            .config()
+            .rpc_addr
+            .parse::<std::net::SocketAddr>()
+            .map(|a| a.ip().is_loopback())
+            .unwrap_or(false)
+    }
+
     pub fn decide_creds(
         &self,
         api_key: Option<&str>,
@@ -98,7 +122,23 @@ impl NodeInferenceAdmission {
                     )
                 }
             }
-            // Private → never servable off-node.
+            /*
+             * Private → never servable OFF-node. On-node is the case this used to refuse too.
+             *
+             * `private` means the model is never announced and never leaves this machine. It was
+             * being read as "never served to anyone", so a node serving a model privately could
+             * not use its own model: `tenzro_chat` on 127.0.0.1 came back
+             * "not offered off-node", and the CLI then fell back to loading a SECOND copy of the
+             * weights in its own process — which on a 16 GB card OOMs against the copy the node
+             * already has resident.
+             *
+             * A request that arrived on a loopback-bound listener cannot have come from off-node:
+             * the kernel will not route off-host traffic to 127.0.0.0/8. That is a property of the
+             * socket, not a claim by the caller, so it cannot be spoofed by a header. When the
+             * listener is bound to a routable address this stays exactly as strict as before,
+             * because then a caller's origin genuinely is unknown here.
+             */
+            Some(_) if self.listener_is_loopback() => InferenceAccess::Allow,
             Some(_) => InferenceAccess::Refuse(403, format!("model {model} is not offered off-node")),
             // Unknown / not served here.
             None => InferenceAccess::Refuse(404, format!("model {model} not served here")),

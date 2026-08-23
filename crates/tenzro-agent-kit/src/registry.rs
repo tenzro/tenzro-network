@@ -337,8 +337,8 @@ impl RegistryClient {
         if let Some(q) = filter.query {
             obj.insert("query".to_string(), json!(q));
         }
-        if let Some(tt) = filter.tool_type {
-            obj.insert("tool_type".to_string(), json!(tt));
+        if let Some(tt) = filter.transport {
+            obj.insert("transport".to_string(), json!(tt));
         }
         if let Some(cat) = filter.category {
             obj.insert("category".to_string(), json!(cat));

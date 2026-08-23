@@ -7,7 +7,7 @@ MCP sidecars `3001-3008`, and any future stray bind) is refused off-box. This
 is the backstop behind the fail-closed binds (Part A moves those to loopback);
 the firewall guarantees it even if a future code path forgets.
 
-Run on EACH node (spark/admin1/server1/server2) with sudo. **Apply with console
+Run on EACH node in the fleet with sudo. **Apply with console
 access available** — a firewall mistake can lock out SSH.
 
 ## ufw (simplest)
@@ -46,7 +46,7 @@ Once Part A binds RPC to loopback and tenzro-code uses the overlay, the
 tailnet RPC bridge is obsolete and is an exposure. Stop and disable it:
 ```bash
 pkill -f tsbridge.py            # or: systemctl --user stop tsbridge (if unit)
-# remove any autostart entry for ~/alva/tsbridge.py
+# remove any autostart entry pointing at tsbridge.py
 ```
 Confirm nothing off-box still needs raw HTTP RPC before removing.
 

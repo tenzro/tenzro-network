@@ -443,6 +443,17 @@ impl ErasurePlan {
 /// execution path can fetch bodies for a referenced certificate. Persists both
 /// certificates and bodies write-through to `CF_AUDIT` and hydrates them on
 /// construction, so a restart does not lose certified-but-unexecuted batches.
+/// Largest batch body this node will produce, in bytes.
+///
+/// A batch must fit inside a single block, because a block that can only carry
+/// part of one forces the proposal path to slice it — and a sliced batch is
+/// never fully finalized, so it is retained and re-proposed indefinitely. The
+/// bound is well under `ConsensusConfig::max_block_size` (2 MiB) so several
+/// whole batches still fit per block, and it matches the order of magnitude
+/// Narwhal uses for worker batches (its worked example is 1,000 transactions of
+/// 512 B each, i.e. 512 KB).
+pub const MAX_BATCH_BYTES: usize = 512 * 1024;
+
 pub struct BatchCertStore {
     /// This node's BLS key, used to sign availability acknowledgments and to
     /// sign the acks for batches it stores.
@@ -462,6 +473,27 @@ pub struct BatchCertStore {
     /// Deduplicated by validator address within a batch. In-memory only — an
     /// uncertified batch that loses its acks across a restart is re-produced.
     pending_acks: DashMap<Hash, Vec<BatchAck>>,
+    /// Transaction hashes already finalized on-chain, for batches still held.
+    ///
+    /// A batch is only evicted once *every* transaction in it is finalized, so
+    /// a batch straddling a block boundary is retained — correctly, it still
+    /// backs transactions that have not landed. But the ordering path
+    /// concatenates whole bodies, so re-proposing that batch dragged its
+    /// already-finalized transactions back in, every block, forever:
+    ///
+    ///   height=1936 tx_count=78
+    ///   height=1937 tx_count=78   <- the same 78
+    ///   height=1938 tx_count=78
+    ///
+    /// which produced ~3 blocks/second of duplicates and 33,864 execution
+    /// failures in two minutes, all `Invalid nonce` — the transactions had
+    /// already executed.
+    ///
+    /// The bodies cannot simply be pruned: a batch id commits to its contents,
+    /// so editing a body would break [`Batch::verify_id`] and invalidate the
+    /// certificate over it. Instead the store remembers what has landed and
+    /// filters it out when a retained batch is reused.
+    finalized_txs: DashMap<Hash, ()>,
     /// Optional durable store.
     storage: Option<Arc<dyn KvStore>>,
 }
@@ -490,6 +522,7 @@ impl BatchCertStore {
             certs: DashMap::new(),
             bodies: DashMap::new(),
             pending_acks: DashMap::new(),
+            finalized_txs: DashMap::new(),
             storage: None,
         }
     }
@@ -507,6 +540,7 @@ impl BatchCertStore {
             certs: DashMap::new(),
             bodies: DashMap::new(),
             pending_acks: DashMap::new(),
+            finalized_txs: DashMap::new(),
             storage: Some(storage),
         };
         store.hydrate();
@@ -540,6 +574,34 @@ impl BatchCertStore {
     /// Assemble the next batch from selected transactions. Increments the local
     /// producer sequence and stores the body so this node can later serve it and
     /// sign its own availability ack.
+    /// The prefix of `transactions` that fits within [`MAX_BATCH_BYTES`], and
+    /// the remainder, which the caller should leave in the mempool for a later
+    /// batch.
+    ///
+    /// Splitting here rather than at proposal time is the point: once a batch
+    /// is certified, its contents are fixed — the id commits to them — so a
+    /// batch too large for a block can only ever be used by slicing it, which
+    /// is exactly what must not happen.
+    pub fn split_to_fit(
+        transactions: Vec<SignedTransaction>,
+    ) -> (Vec<SignedTransaction>, Vec<SignedTransaction>) {
+        let mut used = 0usize;
+        let mut fitted = Vec::new();
+        let mut deferred = Vec::new();
+        for tx in transactions {
+            let size = serde_json::to_string(&tx).map(|s| s.len()).unwrap_or(0);
+            // Always take at least one, or a single transaction larger than the
+            // bound would never batch at all and would wedge the mempool.
+            if fitted.is_empty() || used.saturating_add(size) <= MAX_BATCH_BYTES {
+                used = used.saturating_add(size);
+                fitted.push(tx);
+            } else {
+                deferred.push(tx);
+            }
+        }
+        (fitted, deferred)
+    }
+
     pub fn produce(&self, transactions: Vec<SignedTransaction>) -> Batch {
         let seq = {
             let mut s = self.sequence.lock();
@@ -713,23 +775,74 @@ impl BatchCertStore {
     /// only partially included) is retained so it can still back a later block.
     /// Returns the number of batches evicted.
     pub fn evict_finalized(&self, finalized_tx_hashes: &std::collections::HashSet<Hash>) -> usize {
+        // Remember every hash that landed, so a batch retained for its
+        // still-pending transactions does not re-offer the ones that did.
+        for h in finalized_tx_hashes {
+            self.finalized_txs.insert(*h, ());
+        }
+
+        // Iterate bodies rather than certs. A batch this node produced holds a
+        // body from the moment it is created but has no certificate until acks
+        // reach quorum, so scanning certs left every uncertified body in place
+        // forever — a leak, and one that hid this eviction path from any batch
+        // that never certified.
         let to_evict: Vec<Hash> = self
-            .certs
+            .bodies
             .iter()
             .filter_map(|entry| {
                 let id = *entry.key();
-                let body = self.bodies.get(&id)?;
+                let body = entry.value();
+                // Against the accumulated set, not just this block: a batch
+                // whose transactions landed across several blocks is fully
+                // finalized even though no single block contained all of them,
+                // and checking one block at a time never evicted it.
                 let all_finalized = body
                     .transactions
                     .iter()
-                    .all(|tx| finalized_tx_hashes.contains(&tx.transaction.hash()));
+                    .all(|tx| self.finalized_txs.contains_key(&tx.transaction.hash()));
                 if all_finalized { Some(id) } else { None }
             })
             .collect();
+
         for id in &to_evict {
+            // Drop this batch's hashes from the set as it goes — they are only
+            // needed while some retained batch could still offer them, so the
+            // set stays bounded by the unfinalized frontier rather than growing
+            // with chain history.
+            if let Some(body) = self.bodies.get(id) {
+                for tx in &body.transactions {
+                    self.finalized_txs.remove(&tx.transaction.hash());
+                }
+            }
             self.evict(id);
         }
         to_evict.len()
+    }
+
+    /// Whether this transaction has already been finalized on-chain.
+    ///
+    /// Consulted by the ordering path so a retained batch contributes only its
+    /// still-pending transactions to a proposal.
+    pub fn is_finalized(&self, tx_hash: &Hash) -> bool {
+        self.finalized_txs.contains_key(tx_hash)
+    }
+
+    /// Record a transaction that can never execute, so it is never proposed
+    /// again.
+    ///
+    /// Removing it from the mempool is not enough. A certified batch holds its
+    /// own copy, and the ordering path sources proposals from the certified
+    /// prefix — so a permanently-invalid transaction was evicted from the
+    /// mempool, re-offered by its batch, evicted again, forever. It was
+    /// observed retrying 78 times in five minutes while eviction fired 180
+    /// times against the wrong store.
+    ///
+    /// Shares the `finalized_txs` set: both answer the same question the
+    /// ordering path asks — will this transaction ever need to be in a block
+    /// again — and the set is bounded the same way, dropped when its batch is
+    /// evicted rather than growing with history.
+    pub fn mark_terminal(&self, tx_hash: Hash) {
+        self.finalized_txs.insert(tx_hash, ());
     }
 
     /// The ordered prefix of certified batch ids this node can reference in a
@@ -966,6 +1079,157 @@ mod tests {
         // Same validator's ack again must not double-count.
         assert!(store.record_ack(batch.id, ack, &vset).unwrap().is_none());
         assert!(store.get_cert(&batch.id).is_none());
+    }
+
+    fn tx_with_nonce(n: u64) -> SignedTransaction {
+        use tenzro_crypto::pq::MlDsaSigningKey;
+        use tenzro_types::primitives::{ChainId, Nonce};
+        use tenzro_types::transaction::{Transaction, TransactionType};
+        use tenzro_types::Signature;
+
+        let pq_key = MlDsaSigningKey::generate();
+        let tx = Transaction::new(
+            ChainId::from(1),
+            Address::default(),
+            Address::default(),
+            Nonce::from(n),
+            TransactionType::Transfer { amount: 1 },
+            21000,
+            100,
+            pq_key.verifying_key_bytes().to_vec(),
+        );
+        let sig = pq_key.sign(tx.hash().as_bytes()).to_vec();
+        SignedTransaction::new(tx, Signature::default(), sig)
+    }
+
+    /// A batch must never be larger than a block.
+    ///
+    /// `select_transactions` caps count and gas but not bytes, so a batch could
+    /// hold thousands of transactions and dwarf the 2 MiB block limit. A batch
+    /// bigger than a block can only be used by slicing it, and a sliced batch is
+    /// only partially finalized — retained, then re-offered forever. Bounding at
+    /// creation is what lets whole-batch inclusion always make progress.
+    #[test]
+    fn a_batch_is_bounded_to_fit_inside_a_block() {
+        let many: Vec<_> = (1..=400).map(tx_with_nonce).collect();
+        let offered = many.len();
+        let (fitted, deferred) = BatchCertStore::split_to_fit(many);
+
+        assert!(!fitted.is_empty(), "a batch must make progress");
+        assert_eq!(fitted.len() + deferred.len(), offered, "nothing may be dropped");
+
+        let size: usize = fitted
+            .iter()
+            .map(|t| serde_json::to_string(t).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        assert!(size <= MAX_BATCH_BYTES, "batch is {size} bytes, over the bound");
+        // Compared against the live config rather than a literal, so this
+        // tracks the real limit instead of a constant clippy can fold away.
+        assert!(
+            MAX_BATCH_BYTES < crate::config::ConsensusConfig::default().max_block_size,
+            "the bound must leave room for a whole batch inside a block"
+        );
+    }
+
+    /// A single transaction larger than the bound must still batch.
+    ///
+    /// Otherwise it can never be included and blocks the mempool behind it,
+    /// trading one liveness bug for another.
+    #[test]
+    fn an_oversized_single_transaction_still_makes_progress() {
+        let (fitted, deferred) = BatchCertStore::split_to_fit(vec![tx_with_nonce(1)]);
+        assert_eq!(fitted.len(), 1);
+        assert!(deferred.is_empty());
+    }
+
+    /// A transaction marked terminal is never offered again.
+    ///
+    /// Evicting from the mempool alone did not stop it: a certified batch holds
+    /// its own copy and the ordering path sources proposals from the certified
+    /// prefix, so the eviction was undone by the very next proposal. Two stale
+    /// grants were seen retrying 78 and 72 times in five minutes while eviction
+    /// fired 180 times against the wrong store.
+    #[test]
+    fn a_terminal_transaction_is_not_offered_again() {
+        let (_info, bls) = make_validator(9, 1000);
+        let store = BatchCertStore::new(bls, addr(9));
+
+        let doomed = tx_with_nonce(1);
+        let good = tx_with_nonce(2);
+        let batch = store.produce(vec![doomed.clone(), good.clone()]);
+
+        store.mark_terminal(doomed.transaction.hash());
+
+        // The batch survives — `good` still needs a block — but the doomed
+        // transaction is filtered out of any proposal built from it.
+        assert!(store.has_body(&batch.id));
+        assert!(store.is_finalized(&doomed.transaction.hash()));
+        assert!(!store.is_finalized(&good.transaction.hash()));
+    }
+
+    /// A partially-finalized batch must not re-offer what already landed.
+    ///
+    /// This is what drove the chain to ~3 blocks/second of duplicates. A batch
+    /// is retained until *all* of its transactions finalize, which is correct —
+    /// it still backs the ones that have not. But the ordering path
+    /// concatenated whole bodies, so the landed transactions came back on every
+    /// proposal and failed execution with `Invalid nonce`, forever.
+    #[test]
+    fn a_partially_finalized_batch_stops_offering_what_landed() {
+        let (_info, bls) = make_validator(9, 1000);
+        let store = BatchCertStore::new(bls, addr(9));
+
+        let landed = tx_with_nonce(1);
+        let pending = tx_with_nonce(2);
+        let batch = store.produce(vec![landed.clone(), pending.clone()]);
+
+        // One of the two makes it into a block.
+        let mut finalized = std::collections::HashSet::new();
+        finalized.insert(landed.transaction.hash());
+        store.evict_finalized(&finalized);
+
+        // The batch is correctly retained — `pending` still needs a block.
+        assert!(
+            store.has_body(&batch.id),
+            "a batch with unfinalized transactions must be kept"
+        );
+        // But the landed one must never be offered again.
+        assert!(store.is_finalized(&landed.transaction.hash()));
+        assert!(!store.is_finalized(&pending.transaction.hash()));
+    }
+
+    /// A batch finalized across several blocks is eventually evicted.
+    ///
+    /// Eviction compared against one block at a time, so a batch whose
+    /// transactions were split across blocks was never fully covered by any
+    /// single comparison and was retained forever.
+    #[test]
+    fn a_batch_finalized_across_blocks_is_evicted() {
+        let (_info, bls) = make_validator(9, 1000);
+        let store = BatchCertStore::new(bls, addr(9));
+
+        let first = tx_with_nonce(1);
+        let second = tx_with_nonce(2);
+        let batch = store.produce(vec![first.clone(), second.clone()]);
+
+        let mut block_a = std::collections::HashSet::new();
+        block_a.insert(first.transaction.hash());
+        assert_eq!(store.evict_finalized(&block_a), 0, "still one to go");
+        assert!(store.has_body(&batch.id));
+
+        let mut block_b = std::collections::HashSet::new();
+        block_b.insert(second.transaction.hash());
+        assert_eq!(
+            store.evict_finalized(&block_b),
+            1,
+            "the batch is fully finalized now, across two blocks"
+        );
+        assert!(!store.has_body(&batch.id));
+
+        // Its hashes are dropped with it, so the set tracks the unfinalized
+        // frontier rather than growing with chain history.
+        assert!(!store.is_finalized(&first.transaction.hash()));
+        assert!(!store.is_finalized(&second.transaction.hash()));
     }
 
     #[test]

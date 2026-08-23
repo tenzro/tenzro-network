@@ -2700,14 +2700,14 @@ async def list_registered_tools() -> dict:
 
 @mcp.tool
 async def register_tool(
-    name: str, tool_type: str, endpoint: str, description: str
+    name: str, transport: str, endpoint: str, description: str
 ) -> dict:
     """Register a new tool (MCP server endpoint) in the tools registry."""
     result = await rpc_call(
         "tenzro_registerTool",
         {
             "name": name,
-            "tool_type": tool_type,
+            "transport": transport,
             "endpoint": endpoint,
             "description": description,
         },

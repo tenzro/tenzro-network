@@ -371,7 +371,6 @@ pub(crate) async fn handle_wallet_readiness(
             Some(match e {
                 WalletReadiness::NeedsSecondDevice { .. }
                 | WalletReadiness::NeedsSeparateDevice => "bind_second_device",
-                WalletReadiness::NoHardwareBoundDevice => "bind_hardware_bound_device",
             }),
         ),
     };

@@ -111,7 +111,6 @@
 
 pub mod audio_runtime;
 pub mod autotune;
-pub mod batching;
 pub mod catalog;
 pub mod cluster;
 pub mod detection_runtime;
@@ -170,7 +169,9 @@ pub use audio_runtime::{
     AudioRuntime, MoonshineTranscriber, TranscribeConfig, TranscribeResult, Transcriber,
     TranscriptSegment, WhisperFamily, WhisperTranscriber,
 };
-pub use batching::{BatchEngine, BatchRequest, max_slots};
+// The batching engine lives in praecise; re-exported so existing callers
+// (`tenzro_model::max_slots`, the node's capacity cap) keep working.
+pub use praecise_runtime::batching::{BatchEngine, BatchRequest, max_slots};
 pub use catalog::{
     HfModelEntry, LicenseTier, MediaGenExpertPair, MediaGenModelEntry, ModelArchitecture, MoeShape,
     MtpKind, OnnxAudioEntry, OnnxDetectionEntry, OnnxForecastEntry, OnnxSegmentationEntry,

@@ -49,7 +49,7 @@ use tenzro_token::{GovernanceEngine, NetworkTreasury, StakingManager, TnzoToken,
 use tenzro_types::block::Block;
 use tenzro_types::constants::{CORRELATED_SLASH_BPS, DOUBLE_SIGN_SLASH_BPS};
 use tenzro_types::model::{ModelLocation, ModelServiceInstance, ModelVisibility, ServiceStatus};
-use tenzro_types::{RoleSet, primitives::Address};
+use tenzro_types::{RoleSet, ToolTransportMode, primitives::Address};
 use tenzro_vm::{MultiVmRuntime, VmConfig, eip1559::FeeMarket};
 use tenzro_wallet::TenzroWalletService;
 
@@ -1873,6 +1873,25 @@ fn resolve_operator_payee(
 }
 
 /// Main Tenzro Network node
+/// Runs the validator registry's epoch plan into the consensus engine's
+/// pending queues, immediately before the engine crosses a boundary.
+///
+/// The engine owns the transition and knows nothing about the registry; this
+/// is the seam between them.
+struct RegistryEpochPlanStager {
+    epoch_manager: Arc<tenzro_consensus::EpochManager>,
+    registry: Arc<tenzro_token::validator_registry::ValidatorRegistry>,
+}
+
+impl tenzro_consensus::hotstuff2::EpochPlanStager for RegistryEpochPlanStager {
+    fn stage_for_next_epoch(&self) {
+        crate::event_loop::EventLoop::stage_registry_epoch_plan(
+            &self.epoch_manager,
+            &self.registry,
+        );
+    }
+}
+
 pub struct TenzroNode {
     config: NodeConfig,
     pub(crate) state: Arc<RwLock<NodeState>>,
@@ -2487,6 +2506,19 @@ pub struct TenzroNode {
 
     // Identity & Payments (TDIP + MPP/x402)
     identity_registry: Option<Arc<IdentityRegistry>>,
+    /// The same registry, in a slot that exists before it does.
+    ///
+    /// `identity_registry` is a plain field set in `init_identity()`, which
+    /// runs *after* `init_ai_infrastructure()`. Anything built in between that
+    /// needs to reach the registry later cannot capture the field — it would
+    /// capture `None` and keep it forever. That is what made the storage and
+    /// compute runtimes resolve a payee the rest of the node disagreed with:
+    /// they held a resolver closure that could only ever see the pre-identity
+    /// fallback.
+    ///
+    /// Written once alongside `identity_registry`. Read through
+    /// `identity_registry_now()`.
+    identity_registry_slot: Arc<parking_lot::RwLock<Option<Arc<IdentityRegistry>>>>,
     payment_gateway: Option<Arc<TenzroPaymentGateway>>,
     x402_server: Option<Arc<X402PaymentServer>>,
 
@@ -3152,6 +3184,7 @@ impl TenzroNode {
             iroh_infer_dispatcher: None,
             iroh_http_handler: None,
             identity_registry: None,
+            identity_registry_slot: Arc::new(parking_lot::RwLock::new(None)),
             payment_gateway: None,
             x402_server: None,
             x402_facilitator: None,
@@ -4268,6 +4301,7 @@ impl TenzroNode {
         ));
         self.admission = None;
         self.identity_registry = None;
+        *self.identity_registry_slot.write() = None;
         self.agent_runtime = None;
         self.aa_validator_registry = None;
         self.aa_entry_point = None;
@@ -4823,7 +4857,7 @@ impl TenzroNode {
             match crate::keygen::load_validator_keypair(&self.config.data_dir) {
                 Ok(validator_keypair) => {
                     let p2p_keypair =
-                        tenzro_network::load_or_generate_keypair(&network_config.data_dir)
+                        tenzro_network::node_identity_keypair(&network_config.data_dir)
                             .map_err(|e| {
                                 NodeError::Other(format!(
                                     "Failed to load p2p keypair for peer binding: {}",
@@ -5831,6 +5865,27 @@ impl TenzroNode {
                     let mut addr_bytes = [0u8; 32];
                     addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
                     let v_address = Address::new(addr_bytes);
+                    // Consensus voting power, in the units genesis declares.
+                    //
+                    // `ValidatorInfo::stake` IS voting power —
+                    // `ValidatorInfo::voting_power()` returns it unchanged — and
+                    // every quorum certificate ever signed on this chain tallied
+                    // against these numbers. Converting to base units here (which
+                    // this briefly did, to match `MIN_VALIDATOR_STAKE`) rescales
+                    // voting power by 10^18 and makes every historical QC
+                    // unverifiable, so a fresh node cannot sync past height 1:
+                    //
+                    //   QC verification failed against epoch validator set:
+                    //   QC claims voting_power=10000000 but bitmap-tallied power
+                    //   is 10000000000000000000000000
+                    //
+                    // The unit mismatch against the *registry* is real —
+                    // `MIN_VALIDATOR_STAKE` is `10_000 * ONE_TNZO` and a
+                    // `RegisterValidator` self-stake arrives in wei — but it cannot
+                    // be corrected retroactively on a running chain, because the
+                    // signatures are already over the old numbers. Fixing it needs
+                    // a coordinated upgrade that rescales both sides at a known
+                    // height, not a change of interpretation.
                     out.push(ValidatorInfo::new(
                         v_address,
                         pk,
@@ -6022,6 +6077,24 @@ impl TenzroNode {
             ));
             engine = engine.with_block_provider(block_provider);
             info!("Block provider wired to consensus engine");
+
+            // Staging hook: the engine crosses epoch boundaries on three
+            // paths and only two of them had a caller staging the validator
+            // registry's plan first. Without this, a transition the engine
+            // initiates rolls the epoch and advances nobody.
+            if let Some(registry) = self.validator_registry.clone() {
+                let em = engine.epoch_manager();
+                engine = engine.with_epoch_plan_stager(Arc::new(RegistryEpochPlanStager {
+                    epoch_manager: em,
+                    registry,
+                }));
+                info!("Validator-registry epoch staging wired to consensus engine");
+            } else {
+                warn!(
+                    "No validator registry wired: epoch transitions on this node \
+                     will not change the validator set"
+                );
+            }
 
             // Wire the audit store so equivocation votes + evidence and
             // proposal records + proposal-equivocation evidence survive
@@ -7136,7 +7209,32 @@ impl TenzroNode {
             && let Some(staking) = self.staking.as_ref()
         {
             let staking = staking.clone();
-            let provider_address = self.operator_payee().unwrap_or_default();
+            // A resolver, not a value. The payee cannot be captured here:
+            // this runs before the identity registry finishes loading, so
+            // `operator_payee()` would answer with the announce-key fallback
+            // and keep that answer for the life of the process — while staking
+            // and settlement, resolving later, use the identity wallet. The
+            // deal is then bonded against one address and its stake read from
+            // another.
+            //
+            // The three inputs are cloned rather than capturing `self`, which
+            // would make the runtime hold an `Arc` back to the node.
+            let payee_registry = self.identity_registry_slot();
+            let payee_signer = self.announce_signer.clone();
+            let payee_configured = self.config.operator_did.clone();
+            let provider_address: Arc<
+                dyn Fn() -> Option<tenzro_types::primitives::Address> + Send + Sync,
+            > = Arc::new(move || {
+                // Read the slot per call. Before `init_identity()` this is
+                // still `None` and the announce-key fallback applies; after
+                // it, every caller agrees on the identity wallet.
+                let guard = payee_registry.read();
+                resolve_operator_payee(
+                    guard.as_ref(),
+                    payee_signer.as_ref(),
+                    payee_configured.as_deref(),
+                )
+            });
             let stake_ledger: Arc<dyn tenzro_settlement::rental::StakeLedger> = Arc::new(
                 crate::storage_provider_runtime::StakingStakeLedger::new(staking),
             );
@@ -7183,7 +7281,7 @@ impl TenzroNode {
                         let storage_rate = policy.effective_rate();
                         let runtime = match &self.storage {
                             Some(kv) => crate::storage_provider_runtime::StorageProviderRuntime::with_storage(
-                                provider_address,
+                                provider_address.clone(),
                                 resolver,
                                 balances.clone(),
                                 stake_ledger.clone(),
@@ -7192,7 +7290,7 @@ impl TenzroNode {
                                 kv.clone() as Arc<dyn tenzro_storage::KvStore>,
                             ),
                             None => crate::storage_provider_runtime::StorageProviderRuntime::new(
-                                provider_address,
+                                provider_address.clone(),
                                 resolver,
                                 balances.clone(),
                                 stake_ledger.clone(),
@@ -7202,9 +7300,9 @@ impl TenzroNode {
                         };
                         self.storage_runtime = Some(Arc::new(runtime));
                         info!(
-                            provider = %provider_address,
+                            provider = ?provider_address(),
                             rate = storage_rate,
-                            "Storage-provider runtime spawned"
+                            "Storage-provider runtime spawned (payee resolved per use)"
                         );
                     }
                     None => warn!(
@@ -7221,7 +7319,7 @@ impl TenzroNode {
                 let compute_rate = policy.effective_rate();
                 let runtime = match &self.storage {
                     Some(kv) => crate::compute_rental_runtime::ComputeRentalRuntime::with_storage(
-                        provider_address,
+                        provider_address.clone(),
                         balances.clone(),
                         stake_ledger.clone(),
                         obligations.clone(),
@@ -7229,7 +7327,7 @@ impl TenzroNode {
                         kv.clone() as Arc<dyn tenzro_storage::KvStore>,
                     ),
                     None => crate::compute_rental_runtime::ComputeRentalRuntime::new(
-                        provider_address,
+                        provider_address.clone(),
                         balances.clone(),
                         stake_ledger.clone(),
                         obligations.clone(),
@@ -7238,7 +7336,7 @@ impl TenzroNode {
                 };
                 self.compute_runtime = Some(Arc::new(runtime));
                 info!(
-                    provider = %provider_address,
+                    provider = ?provider_address(),
                     rate = compute_rate,
                     "Compute-rental runtime spawned"
                 );
@@ -7556,8 +7654,14 @@ impl TenzroNode {
             // so what the network can serve would depend on per-node curation.
             // Each offer also names the address that serves it, so the provider
             // share follows from the winning offer.
+            // The provider map is joined on so an offer arrives at selection
+            // carrying the warm-prefix summary and concurrency its provider
+            // signed, not just `{model, endpoint}` — that is what lets a
+            // follow-up turn return to the provider already holding the
+            // conversation's prefix instead of paying the prefill twice.
             meta = meta.with_network_catalog(Arc::new(
-                crate::network_catalog::GossipNetworkCatalog::new(self.network_models.clone()),
+                crate::network_catalog::GossipNetworkCatalog::new(self.network_models.clone())
+                    .with_providers(self.network_providers.clone()),
             ));
             // Operator task→model overrides (Cortex primitive): the operator
             // pins which served model handles which kind of task; unpinned use
@@ -8035,8 +8139,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "tenzro-mcp-server".to_string(), "1.0.0".to_string(),
-                        "mcp".to_string(), "https://mcp.tenzro.xyz/mcp".to_string(),
-                        "Tenzro Network MCP server with 24 tools for wallet, identity, payments, models, bridge, staking".to_string(),
+                        ToolTransportMode::Mcp, "https://mcp.tenzro.xyz/mcp".to_string(),                        "Tenzro Network MCP server with 24 tools for wallet, identity, payments, models, bridge, staking".to_string(),
                         "blockchain".to_string(),
                     );
                     t.capabilities = vec![
@@ -8056,8 +8159,7 @@ impl TenzroNode {
                     let mut t = ToolDefinition::new(
                         "web-search-mcp".to_string(),
                         "1.0.0".to_string(),
-                        "mcp".to_string(),
-                        "builtin://web-search-mcp".to_string(),
+                        ToolTransportMode::Mcp,                        "builtin://web-search-mcp".to_string(),
                         "MCP server providing web search capabilities".to_string(),
                         "search".to_string(),
                     );
@@ -8068,8 +8170,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "code-executor".to_string(), "1.0.0".to_string(),
-                        "mcp".to_string(), "builtin://code-executor".to_string(),
-                        "Execute a caller-supplied WASI 0.2 component under a fuel and deadline budget".to_string(),
+                        ToolTransportMode::Mcp, "builtin://code-executor".to_string(),                        "Execute a caller-supplied WASI 0.2 component under a fuel and deadline budget".to_string(),
                         "code".to_string(),
                     );
                     t.capabilities = vec![
@@ -8084,8 +8185,7 @@ impl TenzroNode {
                     let mut t = ToolDefinition::new(
                         "file-manager".to_string(),
                         "1.0.0".to_string(),
-                        "native".to_string(),
-                        "builtin://file-manager".to_string(),
+                        ToolTransportMode::Native,                        "builtin://file-manager".to_string(),
                         "Read, write, and manage files in agent workspaces".to_string(),
                         "storage".to_string(),
                     );
@@ -8097,8 +8197,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "tenzro-a2a-server".to_string(), "1.0.0".to_string(),
-                        "api".to_string(), "https://a2a.tenzro.xyz".to_string(),
-                        "Agent-to-Agent protocol server for inter-agent communication (Google A2A spec)".to_string(),
+                        ToolTransportMode::Api, "https://a2a.tenzro.xyz".to_string(),                        "Agent-to-Agent protocol server for inter-agent communication (Google A2A spec)".to_string(),
                         "communication".to_string(),
                     );
                     t.capabilities = vec![
@@ -8112,8 +8211,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "canton-submit-mandate".to_string(), "1.0.0".to_string(),
-                        "native".to_string(), "builtin://canton-submit-mandate".to_string(),
-                        "Submit a DAML command to Canton behind an AP2 mandate pair, returning both the validation and the ledger receipt".to_string(),
+                        ToolTransportMode::Native, "builtin://canton-submit-mandate".to_string(),                        "Submit a DAML command to Canton behind an AP2 mandate pair, returning both the validation and the ledger receipt".to_string(),
                         "settlement".to_string(),
                     );
                     t.capabilities = vec![
@@ -8128,8 +8226,7 @@ impl TenzroNode {
                     let mut t = ToolDefinition::new(
                         "identity-register".to_string(),
                         "1.0.0".to_string(),
-                        "native".to_string(),
-                        "builtin://identity-register".to_string(),
+                        ToolTransportMode::Native,                        "builtin://identity-register".to_string(),
                         "Register a human or machine identity under TDIP and provision its wallet"
                             .to_string(),
                         "identity".to_string(),
@@ -8145,8 +8242,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "da-publish".to_string(), "1.0.0".to_string(),
-                        "native".to_string(), "builtin://da-publish".to_string(),
-                        "Publish bytes to the node's content-addressed blob store and return the tenzro:// URI".to_string(),
+                        ToolTransportMode::Native, "builtin://da-publish".to_string(),                        "Publish bytes to the node's content-addressed blob store and return the tenzro:// URI".to_string(),
                         "storage".to_string(),
                     );
                     t.capabilities =
@@ -8157,8 +8253,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "erc7683-origin".to_string(), "1.0.0".to_string(),
-                        "native".to_string(), "builtin://erc7683-origin".to_string(),
-                        "Open an ERC-7683 cross-chain order on the origin side and return the order id".to_string(),
+                        ToolTransportMode::Native, "builtin://erc7683-origin".to_string(),                        "Open an ERC-7683 cross-chain order on the origin side and return the order id".to_string(),
                         "crosschain".to_string(),
                     );
                     t.capabilities = vec![
@@ -8338,19 +8433,10 @@ impl TenzroNode {
 
             // Storage key scheme for CF_AGENT_TEMPLATES is the template id so
             // that list_agent_templates → get_agent_template /
-            // spawn_agent_from_template lookups resolve correctly.
-            //
-            // For each built-in template: check the derived key, and if the
-            // row is absent, delete any row matching by (name, creator)
-            // under a different key before writing. That sweep is what
-            // clears a row an earlier build left under a random id, so two
-            // entries for the same template never both appear in
-            // discovery.
+            // spawn_agent_from_template lookups resolve correctly. The derived
+            // key is the only key a template is ever written under, so a
+            // present row at that key is the row.
             let mut templates_registered = 0usize;
-            let mut templates_migrated = 0usize;
-            let all_keys = storage
-                .get_keys_with_prefix(CF_AGENT_TEMPLATES, b"")
-                .unwrap_or_default();
             for template in &builtin_templates {
                 let key = template.template_id.as_bytes().to_vec();
                 let canonical_present = storage
@@ -8363,30 +8449,16 @@ impl TenzroNode {
                 if canonical_present {
                     continue;
                 }
-                // Purge any legacy entries at non-canonical keys that match by (name, creator).
-                for legacy_key in &all_keys {
-                    if legacy_key == &key {
-                        continue;
-                    }
-                    if let Ok(Some(v)) = storage.get(CF_AGENT_TEMPLATES, legacy_key)
-                        && let Ok(t) = serde_json::from_slice::<AgentTemplate>(&v)
-                        && t.name == template.name
-                        && t.creator == template.creator
-                        && storage.delete(CF_AGENT_TEMPLATES, legacy_key).is_ok()
-                    {
-                        templates_migrated += 1;
-                    }
-                }
                 if let Ok(value) = serde_json::to_vec(template)
                     && storage.put(CF_AGENT_TEMPLATES, &key, &value).is_ok()
                 {
                     templates_registered += 1;
                 }
             }
-            if templates_registered > 0 || templates_migrated > 0 {
+            if templates_registered > 0 {
                 info!(
-                    "Agent templates seeded: {} new, {} legacy-key entries migrated in CF_AGENT_TEMPLATES",
-                    templates_registered, templates_migrated
+                    "Agent templates seeded: {} new in CF_AGENT_TEMPLATES",
+                    templates_registered
                 );
             }
         }
@@ -10395,6 +10467,9 @@ impl TenzroNode {
 
         let registry_arc = Arc::new(registry);
         self.identity_registry = Some(registry_arc.clone());
+        // Publish to the slot in the same breath, so a subsystem built before
+        // this point can resolve against the real registry from now on.
+        *self.identity_registry_slot.write() = Some(registry_arc.clone());
 
         // Wire the live `PrincipalChainResolver` (Agent-Swarm Spec 5)
         // into the settlement engine. Settlement is constructed earlier
@@ -11555,7 +11630,7 @@ impl TenzroNode {
 
         // ─── Tools (MCP servers) ───
         let tools: Vec<(&str, &str, &str, &str, &[&str])> = vec![
-            // (name, tool_type, endpoint, description, capabilities)
+            // (name, transport, endpoint, description, capabilities)
             (
                 "tenzro-solana-mcp",
                 "mcp",
@@ -11610,7 +11685,7 @@ impl TenzroNode {
         let mut tool_registered = 0u32;
         let mut tool_skipped = 0u32;
 
-        for (name, tool_type, endpoint, description, caps) in &tools {
+        for (name, transport_str, endpoint, description, caps) in &tools {
             // Check if already exists by scanning for matching name
             let existing = storage
                 .get_keys_with_prefix(CF_TOOLS, b"")
@@ -11642,10 +11717,17 @@ impl TenzroNode {
                 "blockchain"
             };
 
+            // `transport_str` here is a &str chosen just above from the tool's
+            // shape; parse it once into the typed transport rather than
+            // carrying the string any further.
+            let transport = serde_json::from_value::<ToolTransportMode>(
+                serde_json::Value::String(transport_str.to_string()),
+            )
+            .unwrap_or(ToolTransportMode::Mcp);
             let mut tool = tenzro_types::ToolDefinition::new(
                 name.to_string(),
                 "0.1.0".to_string(),
-                tool_type.to_string(),
+                transport,
                 endpoint.to_string(),
                 description.to_string(),
                 category.to_string(),
@@ -12013,7 +12095,9 @@ impl TenzroNode {
                 capabilities.push("edge-ingress".to_string());
             }
             let provider_type: &str = if self.config.roles.serves_ai() {
-                "llm"
+                // Not "llm": this node may serve multimodal, image, video or
+                // audio models, and usually serves several classes at once.
+                tenzro_network::message::PROVIDER_TYPE_AI
             } else if self.config.roles.serves_tee() {
                 "tee"
             } else if self.config.roles.serves_compute() {
@@ -12080,6 +12164,7 @@ impl TenzroNode {
             capacity.jurisdiction = self.jurisdiction_claim.clone();
 
             let ctx = crate::event_loop::ProviderAnnouncementContext {
+                data_dir: self.config.data_dir.clone(),
                 hardware,
                 geography: self.config.geography.clone(),
                 provider_address,
@@ -13759,6 +13844,16 @@ impl TenzroNode {
             self.announce_signer.as_ref(),
             self.config.operator_did.as_deref(),
         )
+    }
+
+    /// The identity registry as of now, via the slot rather than the field.
+    ///
+    /// Equivalent to `identity_registry` once `init_identity()` has run, and
+    /// unlike the field it can be read by something constructed earlier.
+    pub(crate) fn identity_registry_slot(
+        &self,
+    ) -> Arc<parking_lot::RwLock<Option<Arc<IdentityRegistry>>>> {
+        self.identity_registry_slot.clone()
     }
 
     /// The DID that owns [`TenzroNode::operator_payee`]. `None` when this node
@@ -15939,6 +16034,12 @@ impl TenzroNode {
 
         match runtime.register_external_engine(model_id, engine).await {
             Ok(()) => {
+                // As on the serve path: an external engine needs its own load
+                // tracker entry, at the slot budget rather than the in-process
+                // serial cap, or the restored model reports a limit of zero and
+                // every request through the node is shed as `at-capacity`.
+                self.load_tracker
+                    .register_model(model_id, tenzro_model::max_slots() as u32);
                 info!(
                     model_id = %model_id,
                     engine = %engine_kind_str,

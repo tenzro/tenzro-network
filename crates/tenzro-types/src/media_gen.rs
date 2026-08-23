@@ -99,6 +99,14 @@ pub enum MediaGenKind {
     /// that can render video is not thereby able to produce geometry.
     #[serde(rename = "image23d")]
     Image23d,
+    /// Text prompt -> audio clip (music, speech, sound).
+    ///
+    /// A fourth output class alongside pixels, frames and geometry. The work
+    /// scales with duration rather than area, and the artifact is a waveform
+    /// nothing downstream should try to decode as an image — which is why it
+    /// is a kind rather than a flag on `Text2Image`.
+    #[serde(rename = "text2audio")]
+    Text2Audio,
     /// Text prompt -> 3D asset (mesh with PBR materials).
     #[serde(rename = "text23d")]
     Text23d,
@@ -111,6 +119,7 @@ impl fmt::Display for MediaGenKind {
             Self::Image2Image => write!(f, "image2image"),
             Self::Text2Video => write!(f, "text2video"),
             Self::Image2Video => write!(f, "image2video"),
+            Self::Text2Audio => write!(f, "text2audio"),
             Self::Image23d => write!(f, "image23d"),
             Self::Text23d => write!(f, "text23d"),
         }
@@ -126,6 +135,12 @@ impl MediaGenKind {
             "image2image" | "image-to-image" | "i2i" => Some(Self::Image2Image),
             "text2video" | "text-to-video" | "t2v" => Some(Self::Text2Video),
             "image2video" | "image-to-video" | "i2v" => Some(Self::Image2Video),
+            // `text2music` and `music` are accepted because that is what a
+            // caller reaching for a music model will type; the kind is the
+            // broader "audio out" so speech and sound effects share it.
+            "text2audio" | "text-to-audio" | "t2a" | "text2music" | "music" => {
+                Some(Self::Text2Audio)
+            }
             "image23d" | "image-to-3d" | "i23d" => Some(Self::Image23d),
             "text23d" | "text-to-3d" | "t23d" => Some(Self::Text23d),
             _ => None,
@@ -151,12 +166,27 @@ impl MediaGenKind {
         matches!(self, Self::Image23d | Self::Text23d)
     }
 
+    /// Whether this kind produces a waveform rather than pixels or geometry.
+    ///
+    /// The same seam as [`Self::is_3d`], for the same reason: an audio job has
+    /// no width, height or frames to reason about, and every branch that
+    /// divides work by output class should ask here rather than testing for a
+    /// specific variant.
+    pub fn is_audio(&self) -> bool {
+        matches!(self, Self::Text2Audio)
+    }
+
     /// The artifact's file extension, for the content-addressed store.
     ///
     /// 3D kinds return a GLB — a mesh with PBR materials — which nothing
     /// downstream should try to decode as frames.
     pub fn output_extension(&self) -> &'static str {
-        if self.is_3d() {
+        if self.is_audio() {
+            // WAV rather than a compressed container: the generators emit PCM,
+            // and re-encoding in the worker would make the artifact hash
+            // depend on an encoder version rather than on the model output.
+            "wav"
+        } else if self.is_3d() {
             "glb"
         } else if self.is_video() {
             "mp4"
@@ -280,6 +310,19 @@ pub struct MediaGenParams {
     /// surfaces, where an older client simply omits it.
     #[serde(default)]
     pub voxel_resolution: Option<u32>,
+    /// Requested audio length in seconds, for [`MediaGenKind::Text2Audio`].
+    ///
+    /// Seconds rather than frames because that is what the generators accept
+    /// and what a caller means; the frame rate is a property of the model and
+    /// is applied at pricing time. Ignored by every other kind. Absent means
+    /// the model's own default.
+    ///
+    /// `default` but deliberately **not** `skip_serializing_if`, for the same
+    /// reason as `voxel_resolution` above: these params cross the gossip wire
+    /// as bincode, which is positional. Skipping the field on write leaves the
+    /// decoder reading bytes that were never written.
+    #[serde(default)]
+    pub audio_duration_secs: Option<f32>,
     /// Optional deterministic seed. When `None` the worker picks one and
     /// reports it back in the receipt.
     pub seed: Option<u64>,
@@ -664,6 +707,56 @@ impl MediaGenJob {
 mod tests {
     use super::*;
 
+    /// The enum doc promises "the same string wherever the kind is written or
+    /// parsed". Serde, `Display` and `from_str_lossy` are three separate
+    /// implementations of that promise, and nothing makes them agree except
+    /// this test.
+    ///
+    /// `Text2Audio` shipped without its `#[serde(rename)]` and serialised as
+    /// "Text2Audio" while displaying as "text2audio" — the Python worker parses
+    /// the label, so a job posted by Rust would not have been readable by the
+    /// thing meant to run it.
+    #[test]
+    fn every_kind_agrees_across_serde_display_and_parse() {
+        let all = [
+            MediaGenKind::Text2Image,
+            MediaGenKind::Image2Image,
+            MediaGenKind::Text2Video,
+            MediaGenKind::Image2Video,
+            MediaGenKind::Text2Audio,
+            MediaGenKind::Image23d,
+            MediaGenKind::Text23d,
+        ];
+        for kind in all {
+            let displayed = kind.to_string();
+            let encoded = serde_json::to_string(&kind).expect("serialize");
+            let encoded = encoded.trim_matches('"');
+
+            assert_eq!(
+                encoded, displayed,
+                "{kind:?}: serde writes {encoded:?} but Display writes {displayed:?}"
+            );
+            assert_eq!(
+                MediaGenKind::from_str_lossy(&displayed),
+                Some(kind),
+                "{kind:?}: its own display label does not parse back"
+            );
+            let decoded: MediaGenKind =
+                serde_json::from_str(&format!("\"{displayed}\"")).expect("deserialize");
+            assert_eq!(decoded, kind, "{kind:?}: serde round-trip changed the value");
+
+            // Labels are lowercase by convention; a stray capital is how the
+            // original defect looked.
+            assert_eq!(
+                displayed,
+                displayed.to_ascii_lowercase(),
+                "{kind:?}: label {displayed:?} is not lowercase"
+            );
+        }
+    }
+
+    
+
     fn sample_params(kind: MediaGenKind) -> MediaGenParams {
         MediaGenParams {
             prompt: "a fox in a diorama".to_string(),
@@ -675,6 +768,7 @@ mod tests {
             steps: 30,
             guidance_scale: 4.5,
             voxel_resolution: None,
+            audio_duration_secs: None,
             seed: None,
             input_image_hash: if kind.requires_input_image() {
                 Some(Hash::new([7u8; 32]))

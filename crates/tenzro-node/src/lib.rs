@@ -167,6 +167,7 @@ pub mod rpc_gateway;
 pub mod rpc_integrations;
 pub mod saga_executor;
 pub mod sealed_agent_wallet_signer;
+pub mod tpm_validator_wallet_signer;
 pub mod sealed_model_attester;
 pub mod serving_admission;
 pub mod settle_authorized;

@@ -353,9 +353,18 @@ mod tests {
         assert_eq!(config.reconnect_interval, Duration::from_secs(60));
     }
 
+    /// `TENZRO_BOOT_NODES` is process-wide, so the tests that read it cannot
+    /// run concurrently. cargo runs tests on a thread pool, so without this
+    /// one test's `set_var` is visible to the other's read and whichever
+    /// loses the race fails — while both still pass when run alone.
+    static BOOT_NODES_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_bootstrap_config_from_env_parses_list() {
-        // SAFETY: single-threaded test; scoped set/remove of a process env var.
+        let _guard = BOOT_NODES_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: the guard above makes this the only test touching the var.
         unsafe {
             std::env::set_var(
                 "TENZRO_BOOT_NODES",
@@ -373,7 +382,10 @@ mod tests {
 
     #[test]
     fn test_bootstrap_config_from_env_absent_is_empty() {
-        // SAFETY: single-threaded test; ensure the var is unset.
+        let _guard = BOOT_NODES_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: the guard above makes this the only test touching the var.
         unsafe {
             std::env::remove_var("TENZRO_BOOT_NODES");
         }

@@ -1151,6 +1151,95 @@ def _encode_image_bytes(image: Any) -> bytes:
     return buf.getvalue()
 
 
+#: Sample rate written into the WAV header when a pipeline does not report one.
+#: MiniMax-Music3 documents 32 kHz stereo; other generators in this class are
+#: in the same range. Only used as a fallback — a pipeline that reports its own
+#: rate is always believed, because writing the wrong rate silently changes the
+#: pitch and duration of the result rather than failing.
+DEFAULT_AUDIO_SAMPLE_RATE = 32_000
+
+
+def _encode_audio_bytes(audio: Any, sample_rate: int) -> bytes:
+    """Encode generated audio as a 16-bit PCM WAV.
+
+    WAV rather than a compressed container: the generators emit PCM, and
+    re-encoding here would make the artifact hash — which the commitment is
+    taken over — depend on an encoder build rather than on the model output.
+
+    Accepts what the pipelines actually hand back: a torch tensor, a numpy
+    array, or a nested sequence, shaped ``(samples,)``, ``(channels, samples)``
+    or ``(batch, channels, samples)``. Float input is assumed to be in
+    ``[-1, 1]`` and is clipped before scaling, because a sample slightly past
+    1.0 would otherwise wrap to full-scale negative and arrive as a click.
+    """
+    import wave
+
+    import numpy as np
+
+    if hasattr(audio, "detach"):  # torch tensor
+        audio = audio.detach().to("cpu").float().numpy()
+    arr = np.asarray(audio)
+
+    # Drop a leading batch dimension if one is present.
+    if arr.ndim == 3:
+        arr = arr[0]
+    if arr.ndim == 1:
+        arr = arr[np.newaxis, :]
+    if arr.ndim != 2:
+        raise ValueError(f"unexpected audio shape {arr.shape!r}; want (channels, samples)")
+
+    # Some pipelines return (samples, channels). Channels are always the small
+    # axis in practice, so orient by that rather than trusting the order.
+    if arr.shape[0] > arr.shape[1]:
+        arr = arr.T
+
+    if np.issubdtype(arr.dtype, np.floating):
+        arr = np.clip(arr, -1.0, 1.0)
+        arr = (arr * 32767.0).astype(np.int16)
+    else:
+        arr = arr.astype(np.int16)
+
+    channels, _ = arr.shape
+    interleaved = arr.T.reshape(-1)  # WAV is interleaved, not planar.
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)  # 16-bit
+        wav.setframerate(int(sample_rate))
+        wav.writeframes(interleaved.tobytes())
+    return buf.getvalue()
+
+
+def _audio_from_output(out: Any) -> tuple[Any, int]:
+    """Pull the waveform and its sample rate out of a pipeline result.
+
+    Pipelines in this class disagree about the attribute name — ``audios``,
+    ``audio``, or a bare sequence — so this normalises rather than pinning one
+    shape a single model happens to use.
+    """
+    audio = None
+    for attr in ("audios", "audio", "waveforms", "waveform"):
+        if hasattr(out, attr):
+            audio = getattr(out, attr)
+            break
+    if audio is None:
+        if isinstance(out, (list, tuple)) and out:
+            audio = out[0]
+        else:
+            raise ValueError(
+                "pipeline returned no recognisable audio; expected an `audios`/`audio` "
+                f"attribute on {type(out).__name__}"
+            )
+
+    rate = None
+    for attr in ("sampling_rate", "sample_rate"):
+        if hasattr(out, attr):
+            rate = getattr(out, attr)
+            break
+    return audio, int(rate or DEFAULT_AUDIO_SAMPLE_RATE)
+
+
 def _encode_video_bytes(frames: Any, fps: int) -> bytes:
     from diffusers.utils import export_to_video
 
@@ -1180,14 +1269,33 @@ def denoise_whole(
     generator = torch.Generator(device=loaded.pipe._execution_device).manual_seed(seed)
 
     guidance_kwarg = guidance_kwarg_for(loaded.entry.pipeline_class_for(loaded.kind))
-    kwargs: dict[str, Any] = {
-        "prompt": params.prompt,
-        "width": params.width,
-        "height": params.height,
-        "num_inference_steps": params.steps,
-        guidance_kwarg: params.guidance_scale,
-        "generator": generator,
-    }
+    if loaded.kind.is_audio:
+        # No width, height or frames — passing them would be rejected by the
+        # pipeline or, worse, silently absorbed into **kwargs and ignored.
+        # `audio_duration` is in seconds, which is what these pipelines take
+        # and what the caller was quoted on.
+        kwargs: dict[str, Any] = {
+            "prompt": params.prompt,
+            "num_inference_steps": params.steps,
+            guidance_kwarg: params.guidance_scale,
+            "generator": generator,
+            "audio_duration": params.audio_duration_secs,
+        }
+        # Lyrics ride in `metadata` rather than being a protocol field: only
+        # some music models accept them, and the wire type should not grow a
+        # column for one family's optional input.
+        lyrics = params.metadata.get("lyrics")
+        if lyrics:
+            kwargs["lyrics"] = lyrics
+    else:
+        kwargs = {
+            "prompt": params.prompt,
+            "width": params.width,
+            "height": params.height,
+            "num_inference_steps": params.steps,
+            guidance_kwarg: params.guidance_scale,
+            "generator": generator,
+        }
     if loaded.entry.distilled:
         stage1, _ = family_adapter(loaded.entry.family).sigma_schedules(loaded.entry)
         kwargs["sigmas"] = stage1
@@ -1218,7 +1326,11 @@ def denoise_whole(
 
     out = loaded.pipe(**kwargs)
 
-    if loaded.kind.is_video:
+    if loaded.kind.is_audio:
+        audio, rate = _audio_from_output(out)
+        media = _encode_audio_bytes(audio, rate)
+        mime = "audio/wav"
+    elif loaded.kind.is_video:
         fps = params.fps or loaded.entry.default_fps or 16
         media = _encode_video_bytes(out.frames[0], fps)
         mime = "video/mp4"

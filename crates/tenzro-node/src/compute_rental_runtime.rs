@@ -39,7 +39,14 @@ use crate::pricing::{DynamicPricing, PricingPolicy, ResourceKind};
 /// Owns a node's compute-rental services and the per-epoch settlement loop.
 pub struct ComputeRentalRuntime {
     /// The local node's provider address (credited when epochs settle).
-    provider: Address,
+    /// Resolves this node's provider address.
+    ///
+    /// A closure rather than a captured `Address`, for the same reason as the
+    /// storage runtime: this is built before the identity registry finishes
+    /// loading, so a captured value is the announce-key fallback while every
+    /// later caller resolves to the identity wallet. Rentals would then be
+    /// booked against one address and their coverage checked against another.
+    provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
     /// Streaming-rental booking + settlement + cross-service coverage.
     manager: Arc<RentalManager>,
     /// The per-epoch pricing policy for this provider. Read at booking time;
@@ -50,8 +57,11 @@ pub struct ComputeRentalRuntime {
 impl std::fmt::Debug for ComputeRentalRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComputeRentalRuntime")
-            .field("provider", &self.provider)
-            .field("exposure", &self.manager.active_exposure(&self.provider))
+            .field("provider", &(self.provider)())
+            .field(
+                "exposure",
+                &(self.provider)().map(|p| self.manager.active_exposure(&p)),
+            )
             .finish()
     }
 }
@@ -62,7 +72,7 @@ impl ComputeRentalRuntime {
     /// through the shared stake ledger + obligations tracker so compute and
     /// storage exposure share one stake.
     pub fn new(
-        provider: Address,
+        provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
         stake_ledger: Arc<dyn StakeLedger>,
         obligations: Arc<ProviderObligations>,
@@ -83,7 +93,7 @@ impl ComputeRentalRuntime {
     ///
     /// [`new`]: ComputeRentalRuntime::new
     pub fn with_storage(
-        provider: Address,
+        provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
         stake_ledger: Arc<dyn StakeLedger>,
         obligations: Arc<ProviderObligations>,
@@ -103,7 +113,7 @@ impl ComputeRentalRuntime {
 
     /// Convenience constructor for a flat per-epoch rate.
     pub fn with_fixed_rate(
-        provider: Address,
+        provider: Arc<dyn Fn() -> Option<Address> + Send + Sync>,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
         stake_ledger: Arc<dyn StakeLedger>,
         obligations: Arc<ProviderObligations>,
@@ -143,7 +153,11 @@ impl ComputeRentalRuntime {
         let price_per_epoch = self.effective_rate();
         self.manager.book_rental(
             renter,
-            self.provider,
+            (self.provider)().ok_or_else(|| {
+                tenzro_settlement::error::SettlementError::PaymentFailed(
+                    "no resolvable payee address to book the rental against".to_string(),
+                )
+            })?,
             asset_id,
             price_per_epoch,
             total_epochs,
@@ -168,7 +182,12 @@ impl ComputeRentalRuntime {
     /// layer's own timeout accounting. Returns `(settled, missed, closed)`
     /// counts; per-rental errors are logged and skipped.
     pub fn run_billing_epoch(&self) -> (usize, usize, usize) {
-        let rentals = self.manager.get_rentals_by_provider(&self.provider);
+        let Some(provider) = (self.provider)() else {
+            // No payee yet: nothing to bill against. Returning zeroes rather
+            // than billing the zero address, which would credit nobody.
+            return (0, 0, 0);
+        };
+        let rentals = self.manager.get_rentals_by_provider(&provider);
         let mut settled = 0usize;
         let mut missed = 0usize;
         let mut closed = 0usize;
@@ -197,7 +216,12 @@ impl ComputeRentalRuntime {
     /// Re-checks coverage after a provider's stake dropped (e.g. a slash on one
     /// rental), shedding rentals newest-first until coverage holds again.
     pub fn recheck_coverage(&self) -> tenzro_settlement::error::Result<Vec<String>> {
-        self.manager.recheck_coverage(&self.provider)
+        let provider = (self.provider)().ok_or_else(|| {
+            tenzro_settlement::error::SettlementError::PaymentFailed(
+                "no resolvable payee address to recheck coverage for".to_string(),
+            )
+        })?;
+        self.manager.recheck_coverage(&provider)
     }
 
     /// Advances a dynamic pricing policy by one epoch from metered utilization

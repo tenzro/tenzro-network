@@ -82,8 +82,27 @@ use crate::{
 // Function selectors (4 bytes)
 const SELECTOR_PROVIDER_STAKE: [u8; 4] = [0x01, 0x00, 0x00, 0x01];
 const SELECTOR_PROVIDER_UNSTAKE: [u8; 4] = [0x01, 0x00, 0x00, 0x02];
-const SELECTOR_GOVERNANCE_PROPOSE: [u8; 4] = [0x02, 0x00, 0x00, 0x01];
-const SELECTOR_GOVERNANCE_VOTE: [u8; 4] = [0x02, 0x00, 0x00, 0x02];
+pub const SELECTOR_GOVERNANCE_PROPOSE: [u8; 4] = [0x02, 0x00, 0x00, 0x01];
+pub const SELECTOR_GOVERNANCE_VOTE: [u8; 4] = [0x02, 0x00, 0x00, 0x02];
+/// Enact a proposal whose voting window has closed and which passed.
+pub const SELECTOR_GOVERNANCE_EXECUTE: [u8; 4] = [0x02, 0x00, 0x00, 0x03];
+
+/// A protocol guardian pausing or resuming governance enactment.
+///
+/// Payload is a single byte: 1 to pause, 0 to resume.
+pub const SELECTOR_GOVERNANCE_PAUSE: [u8; 4] = [0x02, 0x00, 0x00, 0x05];
+
+/// A governance guardian vetoing a queued proposal during its timelock.
+pub const SELECTOR_GOVERNANCE_VETO: [u8; 4] = [0x02, 0x00, 0x00, 0x04];
+/// Add to an already-registered validator's self-stake.
+///
+/// `0x61`, not `0x30`: that was already `SELECTOR_VALIDATOR_REGISTER`, and a
+/// duplicate is not a compile error — it is an unreachable match arm. The
+/// second one silently never runs, so the transaction would have been accepted,
+/// routed, and executed as a *registration* instead.
+pub const SELECTOR_INCREASE_VALIDATOR_STAKE: [u8; 4] = [0x01, 0x00, 0x00, 0x61];
+/// Move funds into the governance treasury.
+pub const SELECTOR_TREASURY_DEPOSIT: [u8; 4] = [0x01, 0x00, 0x00, 0x62];
 pub const SELECTOR_ESCROW_CREATE: [u8; 4] = [0x01, 0x00, 0x00, 0x10];
 pub const SELECTOR_ESCROW_RELEASE: [u8; 4] = [0x01, 0x00, 0x00, 0x11];
 pub const SELECTOR_ESCROW_REFUND: [u8; 4] = [0x01, 0x00, 0x00, 0x12];
@@ -179,6 +198,13 @@ const GAS_STAKE: u64 = 50_000;
 const GAS_UNSTAKE: u64 = 50_000;
 const GAS_PROPOSE: u64 = 100_000;
 const GAS_VOTE: u64 = 30_000;
+/// Enacting a passed proposal. Priced above a vote because it reads the
+/// proposal, both tally legs and the electorate size, then moves balances.
+const GAS_GOVERNANCE_EXECUTE: u64 = 120_000;
+/// Increasing a self-stake: one storage read, a balance move, one write.
+const GAS_INCREASE_VALIDATOR_STAKE: u64 = 60_000;
+/// Depositing to the treasury: two balance reads, two writes.
+const GAS_TREASURY_DEPOSIT: u64 = 40_000;
 const GAS_ESCROW_CREATE: u64 = 75_000;
 const GAS_ESCROW_RELEASE: u64 = 60_000;
 const GAS_ESCROW_REFUND: u64 = 50_000;
@@ -602,33 +628,125 @@ impl NativeExecutor {
     }
 
     /// Handle a governance proposal transaction
+    /// Handle a `GovernancePropose` native transaction.
+    ///
+    /// Decodes a typed [`ProposalAction`](crate::governance::ProposalAction)
+    /// from `tx.data[4..]`, validates it, and opens it for voting.
+    ///
+    /// This used to store the payload as opaque bytes and return. Nothing
+    /// decoded it, so a proposal could say anything at all — including nothing
+    /// — and only be discovered as meaningless at the point somebody tried to
+    /// act on it, which nothing ever did. Validating at submission means a
+    /// proposal that reaches the electorate is one that can actually be
+    /// enacted.
+    ///
+    /// Authorization: only an address with bonded stake may propose. Without
+    /// that, anyone with gas money can fill consensus state with proposals
+    /// nobody will ever vote on, and each one is a permanent record every node
+    /// stores forever.
     async fn execute_propose(
         &self,
         tx: &VmTransaction,
         state: &mut dyn VmState,
         gas_meter: &mut GasMeter,
     ) -> Result<ExecutionResult> {
-        tracing::debug!(
-            "Executing governance proposal: from={}",
-            hex::encode(&tx.from)
-        );
+        use crate::governance::{Proposal, ProposalAction, Tally};
 
-        // Consume gas for proposal
         gas_meter.consume(GAS_PROPOSE)?;
 
-        // Extract proposal data (everything after 4-byte selector)
         if tx.data.len() < 5 {
             return Err(VmError::InvalidTransaction(
                 "Proposal transaction requires selector + proposal data".to_string(),
             ));
         }
-
         let proposal_data = &tx.data[4..];
 
-        // Calculate gas cost
-        let gas_cost = tx.gas_price.saturating_mul(GAS_PROPOSE as u128);
+        // Only bonded validators propose.
+        let proposer_stake = bonded_stake_of(state, &tx.from);
+        if proposer_stake == 0 {
+            return Err(VmError::InvalidTransaction(format!(
+                "{} has no bonded stake, so it cannot submit a governance proposal",
+                hex::encode(&tx.from)
+            )));
+        }
 
-        // Check sender balance for gas
+        let action: ProposalAction = serde_json::from_slice(proposal_data).map_err(|e| {
+            VmError::InvalidTransaction(format!("Invalid governance proposal payload: {e}"))
+        })?;
+        action
+            .validate()
+            .map_err(|e| VmError::InvalidTransaction(e.to_string()))?;
+
+        // A proposal signed by an agent is held to the agent phase. The
+        // phase is governed, defaults to `None`, and widening it is itself a
+        // timelocked, vetoable decision — so autonomy is something the network
+        // grants deliberately rather than something that arrives with a
+        // deployment.
+        if is_agent_identity(state, &tx.from) {
+            let phase = current_agent_phase(state);
+            let domain = action.domain();
+            if !phase.permits(domain) {
+                return Err(VmError::InvalidTransaction(format!(
+                    "an agent may not originate a {:?} action at agent phase '{}'; \
+                     advancing the phase is itself a governance decision",
+                    domain,
+                    phase.as_str()
+                )));
+            }
+        }
+
+        // Per-action admission checks. Both exist to keep a governance power
+        // from becoming a broader one than it is meant to be.
+        match &action {
+            // Bounds are already checked by `validate()` above, which runs
+            // before this and refuses an out-of-range value at submission.
+            // There is no further admission rule: changing a parameter is a
+            // network decision, reversible by another vote, and it moves no
+            // value.
+            ProposalAction::RecoverUnownedFunds { from, to, .. } => {
+                // Source must be a system-held sink, never a user account.
+                if !is_recoverable_source(from.as_bytes()) {
+                    return Err(VmError::InvalidTransaction(format!(
+                        "{} is not a system-held address; recovery may only draw from \
+                         protocol sinks, because a power that reaches a user balance is \
+                         confiscation rather than recovery",
+                        hex::encode(from.as_bytes())
+                    )));
+                }
+                // Destination needs an identity, exactly as a grant does.
+                // Recovering into an address answerable to nobody would
+                // recreate the condition being recovered from.
+                let idx = identity_wallet_index_key(to.as_bytes());
+                let known = state
+                    .get_storage(&SYSTEM_ADDRESS, idx.as_bytes())
+                    .is_some_and(|b| !b.is_empty());
+                if !known {
+                    return Err(VmError::InvalidTransaction(format!(
+                        "recovery destination {} has no registered identity",
+                        hex::encode(to.as_bytes())
+                    )));
+                }
+            }
+            ProposalAction::ParameterChange { .. } => {}
+            ProposalAction::TreasuryGrant { recipient, .. } => {
+                // The recipient must already have an identity. Paying an
+                // address with nobody behind it would mint exactly what the
+                // network forbids: a funded wallet answerable to no one.
+                let idx = identity_wallet_index_key(recipient.as_bytes());
+                let known = state
+                    .get_storage(&SYSTEM_ADDRESS, idx.as_bytes())
+                    .is_some_and(|b| !b.is_empty());
+                if !known {
+                    return Err(VmError::InvalidTransaction(format!(
+                        "grant recipient {} has no registered identity; every wallet on this \
+                         network answers to one",
+                        hex::encode(recipient.as_bytes())
+                    )));
+                }
+            }
+        }
+
+        let gas_cost = tx.gas_price.saturating_mul(GAS_PROPOSE as u128);
         let sender_balance = state.get_balance(&tx.from);
         if sender_balance < gas_cost {
             return Err(VmError::InsufficientBalance {
@@ -636,12 +754,11 @@ impl NativeExecutor {
                 available: sender_balance,
             });
         }
-
-        // Debit gas cost
         let new_balance = sender_balance.saturating_sub(gas_cost);
         state.set_balance(&tx.from, new_balance);
 
-        // Hash proposal to generate ID
+        // Derive the id from proposer, payload and nonce, so two identical
+        // proposals from the same account are still distinct records.
         let mut hasher = Sha256::new();
         hasher.update(&tx.from);
         hasher.update(proposal_data);
@@ -649,15 +766,27 @@ impl NativeExecutor {
         let proposal_hash = hasher.finalize();
         let proposal_id = hex::encode(&proposal_hash[..]);
 
-        // Store proposal
-        let proposal_key = format!("proposal:{}", proposal_id);
-        state.set_storage(
-            &SYSTEM_ADDRESS,
-            proposal_key.as_bytes(),
-            proposal_data.to_vec(),
+        let now_ms = deterministic_now_ms(tx);
+        let mut proposer = [0u8; 32];
+        let len = tx.from.len().min(32);
+        proposer[..len].copy_from_slice(&tx.from[..len]);
+        let proposal = Proposal::open(
+            proposal_id.clone(),
+            Address::new(proposer),
+            action.clone(),
+            now_ms,
         );
 
-        // Increment proposal counter
+        let (proposal_blob, prior_proposal) = store_proposal(state, &proposal)?;
+
+        // Open the tally with the electorate size recorded as of now.
+        let tally = Tally {
+            yes: 0,
+            no: 0,
+            total_eligible: total_bonded_stake(state),
+        };
+        let (tally_blob, prior_tally) = store_tally(state, &proposal_id, &tally)?;
+
         let counter_key = b"proposal_counter";
         let current_count = state
             .get_storage(&SYSTEM_ADDRESS, counter_key)
@@ -677,11 +806,9 @@ impl NativeExecutor {
             new_count.to_le_bytes().to_vec(),
         );
 
-        // Increment sender nonce
         let old_nonce = state.get_nonce(&tx.from);
         state.set_nonce(&tx.from, old_nonce + 1);
 
-        // Create state changes
         let state_changes = vec![
             StateChange::new(
                 tx.from.clone(),
@@ -691,9 +818,15 @@ impl NativeExecutor {
             ),
             StateChange::new(
                 SYSTEM_ADDRESS.to_vec(),
-                proposal_key.as_bytes().to_vec(),
-                None,
-                Some(proposal_data.to_vec()),
+                governance_proposal_key(&proposal_id).into_bytes(),
+                prior_proposal,
+                Some(proposal_blob),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                governance_tally_key(&proposal_id).into_bytes(),
+                prior_tally,
+                Some(tally_blob),
             ),
             StateChange::new(
                 SYSTEM_ADDRESS.to_vec(),
@@ -703,11 +836,15 @@ impl NativeExecutor {
             ),
         ];
 
-        // Emit log with proposal ID
         let log = Log::new(
             SYSTEM_ADDRESS.to_vec(),
             vec![b"ProposalCreated".to_vec()],
-            [proposal_hash.as_slice(), tx.from.as_slice()].concat(),
+            [
+                proposal_hash.as_slice(),
+                tx.from.as_slice(),
+                action.kind().as_bytes(),
+            ]
+            .concat(),
         );
 
         Ok(ExecutionResult::success(
@@ -718,19 +855,26 @@ impl NativeExecutor {
         ))
     }
 
-    /// Handle a governance vote transaction
+    /// Handle a `GovernanceVote` native transaction.
+    ///
+    /// Records a stake-weighted ballot and folds it into the proposal's running
+    /// totals.
+    ///
+    /// Two things were missing before, and either alone was fatal. Eligibility
+    /// was never checked, so *any* address could vote — an attacker needed only
+    /// gas to manufacture a result. And votes were never weighted or totalled,
+    /// so there was no result to manufacture in the first place; the bytes just
+    /// accumulated. Voting is now restricted to bonded validators, weighted by
+    /// what they had bonded when they cast it, and accumulated into a tally the
+    /// enactment path can actually read.
     async fn execute_vote(
         &self,
         tx: &VmTransaction,
         state: &mut dyn VmState,
         gas_meter: &mut GasMeter,
     ) -> Result<ExecutionResult> {
-        tracing::debug!("Executing governance vote: from={}", hex::encode(&tx.from));
-
-        // Consume gas for voting
         gas_meter.consume(GAS_VOTE)?;
 
-        // Extract proposal ID (32 bytes) and vote (1 byte)
         if tx.data.len() < 37 {
             return Err(VmError::InvalidTransaction(
                 "Vote transaction requires selector + proposal_id (32 bytes) + vote (1 byte)"
@@ -740,26 +884,32 @@ impl NativeExecutor {
 
         let proposal_id_bytes = &tx.data[4..36];
         let proposal_id = hex::encode(proposal_id_bytes);
-        let vote_byte = tx.data[36];
-        let _vote = vote_byte != 0; // Vote value (true/false), used in logs
+        let in_favour = tx.data[36] != 0;
 
-        // Check if proposal exists
-        let proposal_key = format!("proposal:{}", proposal_id);
-        let proposal_exists = state
-            .get_storage(&SYSTEM_ADDRESS, proposal_key.as_bytes())
-            .is_some();
+        let mut proposal = load_proposal(state, &proposal_id).ok_or_else(|| {
+            VmError::InvalidTransaction(format!("Proposal {proposal_id} does not exist"))
+        })?;
 
-        if !proposal_exists {
+        // The window has to be shut by the same clock every validator sees, or
+        // two nodes disagree about whether a late ballot counted and fork.
+        let now_ms = deterministic_now_ms(tx);
+        if !proposal.is_open_at(now_ms) {
             return Err(VmError::InvalidTransaction(format!(
-                "Proposal {} does not exist",
-                proposal_id
+                "voting on {proposal_id} closed at {} (now {now_ms})",
+                proposal.voting_ends_ms
             )));
         }
 
-        // Calculate gas cost
-        let gas_cost = tx.gas_price.saturating_mul(GAS_VOTE as u128);
+        // Weight is the voter's bond. Zero means they are not a validator.
+        let weight = bonded_stake_of(state, &tx.from);
+        if weight == 0 {
+            return Err(VmError::InvalidTransaction(format!(
+                "{} has no bonded stake, so it cannot vote",
+                hex::encode(&tx.from)
+            )));
+        }
 
-        // Check sender balance for gas
+        let gas_cost = tx.gas_price.saturating_mul(GAS_VOTE as u128);
         let sender_balance = state.get_balance(&tx.from);
         if sender_balance < gas_cost {
             return Err(VmError::InsufficientBalance {
@@ -767,22 +917,35 @@ impl NativeExecutor {
                 available: sender_balance,
             });
         }
-
-        // Debit gas cost
         let new_balance = sender_balance.saturating_sub(gas_cost);
         state.set_balance(&tx.from, new_balance);
 
-        // Store vote
-        let vote_key = format!("vote:{}:{}", proposal_id, hex::encode(&tx.from));
-        let old_vote = state.get_storage(&SYSTEM_ADDRESS, vote_key.as_bytes());
-        state.set_storage(&SYSTEM_ADDRESS, vote_key.as_bytes(), vec![vote_byte]);
+        let voter_hex = hex::encode(&tx.from);
+        let previous = load_vote(state, &proposal_id, &voter_hex);
 
-        // Increment sender nonce
+        let mut tally = load_tally(state, &proposal_id);
+        tally.apply_vote(weight, in_favour, previous);
+        let (tally_blob, prior_tally) = store_tally(state, &proposal_id, &tally)?;
+        let (vote_blob, prior_vote) = store_vote(state, &proposal_id, &voter_hex, weight, in_favour);
+
+        // Keep the stored proposal's status in step once the window shuts, so a
+        // reader does not have to recompute the outcome to know it.
+        let mut proposal_change = None;
+        if !proposal.is_open_at(now_ms) {
+            proposal.status = tally.outcome();
+            let (blob, prior) = store_proposal(state, &proposal)?;
+            proposal_change = Some(StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                governance_proposal_key(&proposal_id).into_bytes(),
+                prior,
+                Some(blob),
+            ));
+        }
+
         let old_nonce = state.get_nonce(&tx.from);
         state.set_nonce(&tx.from, old_nonce + 1);
 
-        // Create state changes
-        let state_changes = vec![
+        let mut state_changes = vec![
             StateChange::new(
                 tx.from.clone(),
                 b"balance".to_vec(),
@@ -791,22 +954,470 @@ impl NativeExecutor {
             ),
             StateChange::new(
                 SYSTEM_ADDRESS.to_vec(),
-                vote_key.as_bytes().to_vec(),
-                old_vote,
-                Some(vec![vote_byte]),
+                governance_vote_key(&proposal_id, &voter_hex).into_bytes(),
+                prior_vote,
+                Some(vote_blob),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                governance_tally_key(&proposal_id).into_bytes(),
+                prior_tally,
+                Some(tally_blob),
             ),
         ];
+        state_changes.extend(proposal_change);
 
-        // Emit log
-        let log = Log::new(
-            SYSTEM_ADDRESS.to_vec(),
-            vec![b"VoteCast".to_vec()],
-            [proposal_id_bytes, tx.from.as_slice(), &[vote_byte]].concat(),
-        );
+        let mut log_data = Vec::with_capacity(32 + 32 + 16 + 1);
+        log_data.extend_from_slice(proposal_id_bytes);
+        log_data.extend_from_slice(&tx.from);
+        log_data.extend_from_slice(&weight.to_le_bytes());
+        log_data.push(u8::from(in_favour));
+        let log = Log::new(SYSTEM_ADDRESS.to_vec(), vec![b"VoteCast".to_vec()], log_data);
 
         Ok(ExecutionResult::success(
             gas_meter.final_used(),
             Vec::new(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    /// Handle a `GovernanceExecute` native transaction: enact a passed proposal.
+    ///
+    /// Permissionless on purpose. Anyone may submit the enactment and pay its
+    /// gas, because the transaction carries no authority of its own — every
+    /// condition is re-checked here against consensus state. If the window is
+    /// still open, or quorum or threshold was not met, or the proposal already
+    /// ran, this refuses regardless of who asked. Restricting *who* may submit
+    /// it would add a liveness dependency without adding any safety: a passed
+    /// proposal that only its proposer can enact is one a departed proposer can
+    /// strand.
+    /// Pause or resume governance enactment. Protocol guardians only.
+    ///
+    /// Stops enactment and nothing else. Voting, proposing and vetoing carry
+    /// on, because freezing deliberation during an emergency would leave the
+    /// power that imposed the pause as the only way out of it. Ordinary
+    /// transactions are untouched: halting the chain is a different power from
+    /// delaying a governance action, and only the second is granted here.
+    async fn execute_governance_pause(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        use crate::governance::may_set_pause;
+
+        gas_meter.consume(GAS_GOVERNANCE_EXECUTE)?;
+
+        let want_paused = match tx.data.get(4) {
+            Some(0) => false,
+            Some(1) => true,
+            _ => {
+                return Err(VmError::InvalidTransaction(
+                    "pause payload must be a single byte: 1 to pause, 0 to resume".into(),
+                ));
+            }
+        };
+
+        let role = load_guardian_role(state, &tx.from);
+        let currently = is_governance_paused(state);
+        may_set_pause(role, currently, want_paused)
+            .map_err(|e| VmError::InvalidTransaction(format!("pause refused: {e}")))?;
+
+        let gas_cost = tx.gas_price.saturating_mul(GAS_GOVERNANCE_EXECUTE as u128);
+        let sender_balance = state.get_balance(&tx.from);
+        if sender_balance < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: sender_balance,
+            });
+        }
+        state.set_balance(&tx.from, sender_balance.saturating_sub(gas_cost));
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let previous = state.get_storage(&SYSTEM_ADDRESS, governance_paused_key().as_bytes());
+        let value = vec![u8::from(want_paused)];
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            governance_paused_key().as_bytes(),
+            value.clone(),
+        );
+
+        let topic = if want_paused {
+            b"GovernancePaused".to_vec()
+        } else {
+            b"GovernanceResumed".to_vec()
+        };
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            Vec::new(),
+            vec![Log::new(SYSTEM_ADDRESS.to_vec(), vec![topic], tx.from.clone())],
+            vec![StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                governance_paused_key().as_bytes().to_vec(),
+                previous,
+                Some(value),
+            )],
+        ))
+    }
+
+    /// Veto a queued proposal. Governance guardians only, timelock only.
+    ///
+    /// The whole power is negative: it stops one decision and originates
+    /// nothing. There is no path from here to moving funds or changing a
+    /// parameter, which is what keeps an emergency brake from being a back
+    /// door — a captured guardian can refuse to let the network act, visibly,
+    /// but cannot act in its name.
+    async fn execute_governance_veto(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        use crate::governance::may_veto;
+
+        gas_meter.consume(GAS_GOVERNANCE_EXECUTE)?;
+
+        let proposal_id = String::from_utf8(tx.data[4..].to_vec())
+            .map_err(|_| VmError::InvalidTransaction("proposal id is not utf-8".into()))?;
+
+        let mut proposal = load_proposal(state, &proposal_id).ok_or_else(|| {
+            VmError::InvalidTransaction(format!("Proposal {proposal_id} does not exist"))
+        })?;
+
+        let role = load_guardian_role(state, &tx.from);
+        may_veto(role, &proposal)
+            .map_err(|e| VmError::InvalidTransaction(format!("veto refused: {e}")))?;
+
+        let gas_cost = tx.gas_price.saturating_mul(GAS_GOVERNANCE_EXECUTE as u128);
+        let sender_balance = state.get_balance(&tx.from);
+        if sender_balance < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: sender_balance,
+            });
+        }
+        state.set_balance(&tx.from, sender_balance.saturating_sub(gas_cost));
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        if !proposal.veto() {
+            return Err(VmError::Internal(format!(
+                "proposal {proposal_id} could not be vetoed"
+            )));
+        }
+        store_proposal(state, &proposal).map_err(|e| {
+            VmError::Internal(format!("failed to persist vetoed proposal {proposal_id}: {e}"))
+        })?;
+
+        let mut log_data = Vec::new();
+        log_data.extend_from_slice(proposal_id.as_bytes());
+        log_data.extend_from_slice(&tx.from);
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            Vec::new(),
+            vec![Log::new(
+                SYSTEM_ADDRESS.to_vec(),
+                vec![b"ProposalVetoed".to_vec()],
+                log_data,
+            )],
+            vec![],
+        ))
+    }
+
+    async fn execute_governance_execute(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        use crate::governance::{ProposalAction, ProposalStatus, decide};
+
+        gas_meter.consume(GAS_GOVERNANCE_EXECUTE)?;
+
+        if tx.data.len() < 36 {
+            return Err(VmError::InvalidTransaction(
+                "Execute transaction requires selector + proposal_id (32 bytes)".to_string(),
+            ));
+        }
+        let proposal_id = hex::encode(&tx.data[4..36]);
+
+        let mut proposal = load_proposal(state, &proposal_id).ok_or_else(|| {
+            VmError::InvalidTransaction(format!("Proposal {proposal_id} does not exist"))
+        })?;
+
+        let tally = load_tally(state, &proposal_id);
+        let now_ms = deterministic_now_ms(tx);
+
+        // A pause stops enactment, which is the blast radius that matters:
+        // an attack that has already carried a vote is exactly what the brake
+        // is for. Checked before the vote is read, so a paused chain gives the
+        // same answer regardless of how the tally happens to stand.
+        if is_governance_paused(state) {
+            return Err(VmError::InvalidTransaction(
+                "governance enactment is paused by a protocol guardian; voting, proposing \
+                 and vetoing continue"
+                    .into(),
+            ));
+        }
+
+        // Terminal states are refused before anything else looks at the vote.
+        // A vetoed proposal must never become executable by re-deciding it, and
+        // an executed one must not enact twice.
+        match proposal.status {
+            ProposalStatus::Vetoed => {
+                return Err(VmError::InvalidTransaction(format!(
+                    "proposal {proposal_id} was vetoed during its timelock"
+                )));
+            }
+            ProposalStatus::Executed => {
+                return Err(VmError::InvalidTransaction(format!(
+                    "proposal {proposal_id} has already been executed"
+                )));
+            }
+            _ => {}
+        }
+
+        // Not yet queued: decide it, and if it carried, start the timelock.
+        // This call does not also enact — that is the point. Queuing and
+        // enacting in one call would set the deadline and pass it in the same
+        // instant, leaving the delay real in the type system and nowhere else.
+        if !matches!(proposal.status, ProposalStatus::Queued) {
+            let outcome = decide(&proposal, &tally, now_ms)
+                .map_err(|e| VmError::InvalidTransaction(e.to_string()))?;
+            if outcome != ProposalStatus::Passed {
+                return Err(VmError::InvalidTransaction(format!(
+                    "proposal {proposal_id} did not pass: {}",
+                    tally.failure_reason()
+                )));
+            }
+
+            proposal.status = ProposalStatus::Passed;
+            if !proposal.queue(now_ms) {
+                return Err(VmError::Internal(format!(
+                    "proposal {proposal_id} could not be queued"
+                )));
+            }
+
+            let gas_cost = tx.gas_price.saturating_mul(GAS_GOVERNANCE_EXECUTE as u128);
+            let sender_balance = state.get_balance(&tx.from);
+            if sender_balance < gas_cost {
+                return Err(VmError::InsufficientBalance {
+                    required: gas_cost,
+                    available: sender_balance,
+                });
+            }
+            state.set_balance(&tx.from, sender_balance.saturating_sub(gas_cost));
+            let old_nonce = state.get_nonce(&tx.from);
+            state.set_nonce(&tx.from, old_nonce + 1);
+            // A queue that is not persisted is a timelock that does not exist:
+            // the next call would find the proposal un-queued, decide it afresh
+            // and start the delay again, or worse, report success while nothing
+            // was written.
+            store_proposal(state, &proposal).map_err(|e| {
+                VmError::Internal(format!("failed to persist queued proposal {proposal_id}: {e}"))
+            })?;
+
+            let eta = proposal.eta_ms.unwrap_or_default();
+            let mut log_data = Vec::new();
+            log_data.extend_from_slice(proposal_id.as_bytes());
+            log_data.extend_from_slice(&eta.to_le_bytes());
+
+            return Ok(ExecutionResult::success(
+                gas_meter.final_used(),
+                eta.to_le_bytes().to_vec(),
+                vec![Log::new(
+                    SYSTEM_ADDRESS.to_vec(),
+                    vec![b"GovernanceQueued".to_vec()],
+                    log_data,
+                )],
+                vec![],
+            ));
+        }
+
+        // Queued: enact only once the delay has actually elapsed.
+        if !proposal.is_executable_at(now_ms) {
+            let eta = proposal.eta_ms.unwrap_or_default();
+            return Err(VmError::InvalidTransaction(format!(
+                "proposal {proposal_id} is in timelock until {eta} (now {now_ms}); \
+                 it can still be vetoed until then"
+            )));
+        }
+
+        let gas_cost = tx.gas_price.saturating_mul(GAS_GOVERNANCE_EXECUTE as u128);
+        let sender_balance = state.get_balance(&tx.from);
+        if sender_balance < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: sender_balance,
+            });
+        }
+        let new_balance = sender_balance.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_balance);
+
+        let treasury = derive_treasury_address();
+        let treasury_bytes = treasury.as_bytes().to_vec();
+        let mut state_changes = vec![StateChange::new(
+            tx.from.clone(),
+            b"balance".to_vec(),
+            Some(sender_balance.to_le_bytes().to_vec()),
+            Some(new_balance.to_le_bytes().to_vec()),
+        )];
+
+        let (moved, counterparty) = match &proposal.action {
+            ProposalAction::RecoverUnownedFunds {
+                from, to, amount, ..
+            } => {
+                let from_bytes = from.as_bytes().to_vec();
+
+                // Re-check eligibility at enactment. A voting period and a
+                // timelock separate submission from here, and the set of
+                // system addresses could move underneath in an upgrade.
+                if !is_recoverable_source(&from_bytes) {
+                    return Err(VmError::InvalidTransaction(format!(
+                        "{} is no longer a system-held address",
+                        hex::encode(&from_bytes)
+                    )));
+                }
+
+                // Governance supplies the claim; state settles it. A proposal
+                // asserting more than the source holds is refused however it
+                // voted.
+                let available = state.get_balance(&from_bytes);
+                if available < *amount {
+                    return Err(VmError::InsufficientBalance {
+                        required: *amount,
+                        available,
+                    });
+                }
+
+                let new_from = available.saturating_sub(*amount);
+                state.set_balance(&from_bytes, new_from);
+
+                let to_bytes = to.as_bytes().to_vec();
+                let old_to = state.get_balance(&to_bytes);
+                let new_to = old_to.checked_add(*amount).ok_or_else(|| {
+                    VmError::Internal("recovery would overflow the destination".to_string())
+                })?;
+                state.set_balance(&to_bytes, new_to);
+
+                state_changes.push(StateChange::new(
+                    from_bytes.clone(),
+                    b"balance".to_vec(),
+                    Some(available.to_le_bytes().to_vec()),
+                    Some(new_from.to_le_bytes().to_vec()),
+                ));
+                state_changes.push(StateChange::new(
+                    to_bytes.clone(),
+                    b"balance".to_vec(),
+                    Some(old_to.to_le_bytes().to_vec()),
+                    Some(new_to.to_le_bytes().to_vec()),
+                ));
+
+                (*amount, to_bytes)
+            }
+            ProposalAction::ParameterChange { key, value, .. } => {
+                // Re-check the bounds at enactment as well as at submission.
+                // The two are separated by a voting period and a timelock, and
+                // the table could have changed underneath in an upgrade; a
+                // value that is no longer permitted must not be written just
+                // because it was permitted when it was proposed.
+                let param = crate::governance::governed_param(key).ok_or_else(|| {
+                    VmError::InvalidTransaction(format!("'{key}' is not a governed parameter"))
+                })?;
+                if *value < param.min || *value > param.max {
+                    return Err(VmError::InvalidTransaction(format!(
+                        "{key} = {value} is outside the permitted range {}..={}",
+                        param.min, param.max
+                    )));
+                }
+
+                let storage_key = governed_param_key(key);
+                let previous = state.get_storage(&SYSTEM_ADDRESS, storage_key.as_bytes());
+                state.set_storage(
+                    &SYSTEM_ADDRESS,
+                    storage_key.as_bytes(),
+                    value.to_le_bytes().to_vec(),
+                );
+                state_changes.push(StateChange::new(
+                    SYSTEM_ADDRESS.to_vec(),
+                    storage_key.into_bytes(),
+                    previous,
+                    Some(value.to_le_bytes().to_vec()),
+                ));
+
+                // No value moved and there is no counterparty: this is the
+                // whole point of separating network decisions from treasury
+                // ones.
+                (0u128, Vec::new())
+            }
+            ProposalAction::TreasuryGrant {
+                recipient, amount, ..
+            } => {
+                let treasury_balance = state.get_balance(&treasury_bytes);
+                if treasury_balance < *amount {
+                    return Err(VmError::InsufficientBalance {
+                        required: *amount,
+                        available: treasury_balance,
+                    });
+                }
+                let new_treasury = treasury_balance.saturating_sub(*amount);
+                state.set_balance(&treasury_bytes, new_treasury);
+
+                let recipient_bytes = recipient.as_bytes().to_vec();
+                let old_recipient = state.get_balance(&recipient_bytes);
+                let new_recipient = old_recipient.checked_add(*amount).ok_or_else(|| {
+                    VmError::Internal("grant would overflow the recipient balance".to_string())
+                })?;
+                state.set_balance(&recipient_bytes, new_recipient);
+
+                state_changes.push(StateChange::new(
+                    treasury_bytes.clone(),
+                    b"balance".to_vec(),
+                    Some(treasury_balance.to_le_bytes().to_vec()),
+                    Some(new_treasury.to_le_bytes().to_vec()),
+                ));
+                state_changes.push(StateChange::new(
+                    recipient_bytes.clone(),
+                    b"balance".to_vec(),
+                    Some(old_recipient.to_le_bytes().to_vec()),
+                    Some(new_recipient.to_le_bytes().to_vec()),
+                ));
+                (*amount, recipient_bytes)
+            }
+
+        };
+
+        // Terminal, and written before returning: this is what stops the action
+        // being applied twice by two enactment transactions in the same block.
+        proposal.status = ProposalStatus::Executed;
+        let (proposal_blob, prior_proposal) = store_proposal(state, &proposal)?;
+        state_changes.push(StateChange::new(
+            SYSTEM_ADDRESS.to_vec(),
+            governance_proposal_key(&proposal_id).into_bytes(),
+            prior_proposal,
+            Some(proposal_blob),
+        ));
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let mut log_data = Vec::with_capacity(32 + 32 + 16);
+        log_data.extend_from_slice(&tx.data[4..36]);
+        log_data.extend_from_slice(&counterparty);
+        log_data.extend_from_slice(&moved.to_le_bytes());
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ProposalExecuted".to_vec()],
+            log_data,
+        );
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            moved.to_le_bytes().to_vec(),
             vec![log],
             state_changes,
         ))
@@ -2986,6 +3597,216 @@ impl NativeExecutor {
     // The `from` address is the validator's operator key — the same
     // address used as the staking address.
 
+    /// Handle an `IncreaseValidatorStake` native transaction.
+    ///
+    /// Debits `tx.from` and moves the amount into the staking vault, exactly as
+    /// registration does, then raises the recorded bond. The registry entry is
+    /// updated by the node layer from the emitted log, the same way
+    /// registration is mirrored.
+    ///
+    /// Authorization is structural: the stake is debited from `tx.from` and
+    /// credited to `tx.from`'s own bond, so a caller can only ever increase
+    /// their own — there is no address parameter to point elsewhere.
+    /// Handle a `TreasuryDeposit` native transaction.
+    ///
+    /// Debits `tx.from` and credits the treasury vault. The mirror image of
+    /// `TreasuryGrant`, which was previously the only side that existed — so the
+    /// treasury could pay out but never take in, and every grant proposal would
+    /// have passed its vote and then failed enactment on an empty balance.
+    async fn execute_treasury_deposit(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_TREASURY_DEPOSIT)?;
+
+        if tx.data.len() < 20 {
+            return Err(VmError::InvalidTransaction(
+                "TreasuryDeposit requires selector + amount (16 bytes)".to_string(),
+            ));
+        }
+        let mut amount_bytes = [0u8; 16];
+        amount_bytes.copy_from_slice(&tx.data[4..20]);
+        let amount = u128::from_le_bytes(amount_bytes);
+
+        if amount == 0 {
+            return Err(VmError::InvalidTransaction(
+                "treasury deposit must be greater than zero".to_string(),
+            ));
+        }
+
+        let gas_cost = tx.gas_price.saturating_mul(GAS_TREASURY_DEPOSIT as u128);
+        let total_debit = gas_cost.saturating_add(amount);
+        let balance = state.get_balance(&tx.from);
+        if balance < total_debit {
+            return Err(VmError::InsufficientBalance {
+                required: total_debit,
+                available: balance,
+            });
+        }
+        let new_balance = balance.saturating_sub(total_debit);
+        state.set_balance(&tx.from, new_balance);
+
+        let treasury = derive_treasury_address();
+        let treasury_bytes = treasury.as_bytes().to_vec();
+        let old_treasury = state.get_balance(&treasury_bytes);
+        let new_treasury = old_treasury
+            .checked_add(amount)
+            .ok_or_else(|| VmError::Internal("treasury overflow".to_string()))?;
+        state.set_balance(&treasury_bytes, new_treasury);
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let mut log_data = Vec::with_capacity(32 + 16 + 16);
+        log_data.extend_from_slice(&tx.from);
+        log_data.extend_from_slice(&amount.to_le_bytes());
+        log_data.extend_from_slice(&new_treasury.to_le_bytes());
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            new_treasury.to_le_bytes().to_vec(),
+            vec![Log::new(
+                SYSTEM_ADDRESS.to_vec(),
+                vec![b"TreasuryDeposit".to_vec()],
+                log_data,
+            )],
+            vec![
+                StateChange::new(
+                    tx.from.clone(),
+                    b"balance".to_vec(),
+                    Some(balance.to_le_bytes().to_vec()),
+                    Some(new_balance.to_le_bytes().to_vec()),
+                ),
+                StateChange::new(
+                    treasury_bytes,
+                    b"balance".to_vec(),
+                    Some(old_treasury.to_le_bytes().to_vec()),
+                    Some(new_treasury.to_le_bytes().to_vec()),
+                ),
+            ],
+        ))
+    }
+
+    async fn execute_increase_validator_stake(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_INCREASE_VALIDATOR_STAKE)?;
+
+        if tx.data.len() < 20 {
+            return Err(VmError::InvalidTransaction(
+                "IncreaseValidatorStake requires selector + amount (16 bytes)".to_string(),
+            ));
+        }
+        let mut amount_bytes = [0u8; 16];
+        amount_bytes.copy_from_slice(&tx.data[4..20]);
+        let additional = u128::from_le_bytes(amount_bytes);
+
+        if additional == 0 {
+            return Err(VmError::InvalidTransaction(
+                "stake increase must be greater than zero".to_string(),
+            ));
+        }
+
+        // Must already be a validator. Registering is a different transaction
+        // with different requirements — consensus keys, a withdrawal address —
+        // and silently creating an entry here would bypass all of them.
+        let marker_key = format!("validator_register:{}", hex::encode(&tx.from));
+        if state
+            .get_storage(&SYSTEM_ADDRESS, marker_key.as_bytes())
+            .filter(|b| !b.is_empty())
+            .is_none()
+        {
+            return Err(VmError::InvalidTransaction(format!(
+                "{} is not a registered validator; use RegisterValidator",
+                hex::encode(&tx.from)
+            )));
+        }
+
+        let gas_cost = tx
+            .gas_price
+            .saturating_mul(GAS_INCREASE_VALIDATOR_STAKE as u128);
+        let total_debit = gas_cost.saturating_add(additional);
+        let balance = state.get_balance(&tx.from);
+        if balance < total_debit {
+            return Err(VmError::InsufficientBalance {
+                required: total_debit,
+                available: balance,
+            });
+        }
+        let new_balance = balance.saturating_sub(total_debit);
+        state.set_balance(&tx.from, new_balance);
+
+        // Into the staking vault, so the replicated vault balance stays the sum
+        // of every live bond — the same invariant governance quorum divides by.
+        let old_vault = state.get_balance(&STAKING_VAULT_ADDRESS);
+        let new_vault = old_vault
+            .checked_add(additional)
+            .ok_or_else(|| VmError::Internal("staking vault overflow".to_string()))?;
+        state.set_balance(&STAKING_VAULT_ADDRESS, new_vault);
+
+        let bond_key = format!("staking_bond:{}", hex::encode(&tx.from));
+        let prior_bond = state
+            .get_storage(&SYSTEM_ADDRESS, bond_key.as_bytes())
+            .filter(|b| b.len() == 16)
+            .map(|b| {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&b);
+                u128::from_le_bytes(a)
+            })
+            .unwrap_or(0);
+        let new_bond = prior_bond
+            .checked_add(additional)
+            .ok_or_else(|| VmError::Internal("bond overflow".to_string()))?;
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            bond_key.as_bytes(),
+            new_bond.to_le_bytes().to_vec(),
+        );
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let mut log_data = Vec::with_capacity(32 + 16 + 16);
+        log_data.extend_from_slice(&tx.from);
+        log_data.extend_from_slice(&additional.to_le_bytes());
+        log_data.extend_from_slice(&new_bond.to_le_bytes());
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            new_bond.to_le_bytes().to_vec(),
+            vec![Log::new(
+                SYSTEM_ADDRESS.to_vec(),
+                vec![b"ValidatorStakeIncreased".to_vec()],
+                log_data,
+            )],
+            vec![
+                StateChange::new(
+                    tx.from.clone(),
+                    b"balance".to_vec(),
+                    Some(balance.to_le_bytes().to_vec()),
+                    Some(new_balance.to_le_bytes().to_vec()),
+                ),
+                StateChange::new(
+                    STAKING_VAULT_ADDRESS.to_vec(),
+                    b"balance".to_vec(),
+                    Some(old_vault.to_le_bytes().to_vec()),
+                    Some(new_vault.to_le_bytes().to_vec()),
+                ),
+                StateChange::new(
+                    SYSTEM_ADDRESS.to_vec(),
+                    bond_key.into_bytes(),
+                    Some(prior_bond.to_le_bytes().to_vec()),
+                    Some(new_bond.to_le_bytes().to_vec()),
+                ),
+            ],
+        ))
+    }
+
     async fn execute_validator_register(
         &self,
         tx: &VmTransaction,
@@ -3343,6 +4164,26 @@ impl NativeExecutor {
 
         let (bal, new_bal) = self.charge_gas(tx, state, GAS_IDENTITY_REGISTER)?;
         state.set_storage(&SYSTEM_ADDRESS, &key, blob.clone());
+
+        // Index the identity by its wallet address as well as by its DID.
+        //
+        // The DID-keyed record answers "who is this DID?". Nothing could ask
+        // the reverse — "does this address belong to anyone?" — because
+        // `VmState` has point lookups only and no way to scan for a record
+        // whose `wallet_address` matches. That question is the one a treasury
+        // grant has to ask before paying an address, since paying one with no
+        // identity behind it creates precisely what the network forbids: a
+        // funded wallet nobody answers for. Writing the reverse edge here is
+        // what makes it answerable in a single lookup.
+        let wallet_index_key = identity_wallet_index_key(payload.wallet_address.as_bytes());
+        let prior_wallet_index = state.get_storage(&SYSTEM_ADDRESS, wallet_index_key.as_bytes());
+        let wallet_index_value = payload.did.as_bytes().to_vec();
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            wallet_index_key.as_bytes(),
+            wallet_index_value.clone(),
+        );
+
         let old_nonce = state.get_nonce(&tx.from);
         state.set_nonce(&tx.from, old_nonce + 1);
 
@@ -3363,6 +4204,12 @@ impl NativeExecutor {
                     Some(new_bal.to_le_bytes().to_vec()),
                 ),
                 StateChange::new(SYSTEM_ADDRESS.to_vec(), key, existing, Some(blob)),
+                StateChange::new(
+                    SYSTEM_ADDRESS.to_vec(),
+                    wallet_index_key.into_bytes(),
+                    prior_wallet_index,
+                    Some(wallet_index_value),
+                ),
                 StateChange::new(
                     tx.from.clone(),
                     b"nonce".to_vec(),
@@ -4613,6 +5460,267 @@ fn require_compute_bond_owner(marker: &serde_json::Value, from: &[u8]) -> Result
     Ok(())
 }
 
+// ---- Governance storage ----------------------------------------------------
+
+/// Domain string the treasury vault address is derived from.
+///
+/// The treasury is an address with no key: nothing can sign for it, and the
+/// only thing that moves its balance is a proposal that cleared quorum and
+/// threshold. Deriving it from a fixed domain rather than nominating an
+/// existing account is what makes that true — there is no private key in
+/// existence that corresponds to it.
+const TREASURY_VAULT_DOMAIN: &[u8] = b"tenzro/treasury/v1";
+
+/// The treasury vault address.
+pub fn derive_treasury_address() -> Address {
+    let mut hasher = Sha256::new();
+    hasher.update(TREASURY_VAULT_DOMAIN);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Address::new(out)
+}
+
+/// Storage key for a stored [`Proposal`](crate::governance::Proposal).
+fn governance_proposal_key(id: &str) -> String {
+    format!("proposal:{id}")
+}
+
+/// Storage key for a proposal's running vote totals.
+fn governance_tally_key(id: &str) -> String {
+    format!("proposal_tally:{id}")
+}
+
+/// Storage key for one voter's ballot on one proposal.
+fn governance_vote_key(id: &str, voter_hex: &str) -> String {
+    format!("vote:{id}:{voter_hex}")
+}
+
+/// Storage key for the wallet-address -> DID reverse index.
+///
+/// Identity records are keyed by DID, which answers "who is this DID?" but not
+/// "does this address belong to anyone?". A treasury grant has to ask the
+/// second question — paying an address with no identity behind it would create
+/// exactly the thing the network forbids, a wallet nobody answers for — and
+/// with no prefix iteration in `VmState` the only way to ask it is an index
+/// written when the identity is registered.
+fn identity_wallet_index_key(address: &[u8]) -> String {
+    format!("identity_wallet:{}", hex::encode(address))
+}
+
+/// Stake `addr` currently has bonded, in the smallest unit.
+///
+/// This is the voter's weight. Zero means not a validator, which is also what
+/// makes someone ineligible to vote at all.
+fn bonded_stake_of(state: &dyn VmState, addr: &[u8]) -> u128 {
+    let key = format!("staking_bond:{}", hex::encode(addr));
+    state
+        .get_storage(&SYSTEM_ADDRESS, key.as_bytes())
+        .filter(|b| b.len() == 16)
+        .map(|b| {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&b);
+            u128::from_le_bytes(a)
+        })
+        .unwrap_or(0)
+}
+
+/// Total stake bonded network-wide — the denominator for quorum.
+///
+/// Read from the staking vault's balance rather than a separate counter. The
+/// vault is credited on `RegisterValidator` and debited on `ExitValidator` by
+/// exactly the bonded amount, so its balance *is* the sum of every live bond.
+/// A parallel counter would be a second source of truth that could drift from
+/// the first, and quorum would then be computed against a number no longer
+/// describing the electorate.
+fn total_bonded_stake(state: &dyn VmState) -> u128 {
+    state.get_balance(&STAKING_VAULT_ADDRESS)
+}
+
+/// Load a stored proposal.
+/// Addresses a recovery may draw from.
+///
+/// System-held sinks only. Everything on this list is an address the protocol
+/// itself credits, so a balance sitting there that the books cannot attribute
+/// is genuinely nobody's. A user account can never appear here: a recovery
+/// power that reaches a user balance is a confiscation power with a friendly
+/// name, and the difference has to be structural rather than a matter of who
+/// is proposing.
+fn is_recoverable_source(addr: &[u8]) -> bool {
+    if addr.len() >= 20 && addr[..20] == STAKING_VAULT_ADDRESS {
+        return true;
+    }
+    let treasury = derive_treasury_address();
+    addr == treasury.as_bytes()
+}
+
+/// The DID bound to `addr`, if any.
+fn identity_did_of(state: &dyn VmState, addr: &[u8]) -> Option<String> {
+    let blob = state.get_storage(&SYSTEM_ADDRESS, identity_wallet_index_key(addr).as_bytes())?;
+    if blob.is_empty() {
+        return None;
+    }
+    String::from_utf8(blob).ok()
+}
+
+/// Whether `addr` proposes as an autonomous agent.
+///
+/// `did:tenzro:agent:` specifically, **not** `did:tenzro:machine:`. The two
+/// are different things and conflating them locks governance shut: every
+/// validator holds a machine identity, machine identities are what hold stake,
+/// and gating them would leave nobody able to propose anything at the default
+/// phase. A validator operated by a person is hardware with an operator, not
+/// an autonomous process.
+///
+/// The distinction is the whole question. A machine identity says what the
+/// keys are bound to; an agent identity says what kind of thing decided.
+fn is_agent_identity(state: &dyn VmState, addr: &[u8]) -> bool {
+    identity_did_of(state, addr).is_some_and(|did| did.starts_with("did:tenzro:agent:"))
+}
+
+/// The agent phase currently in force, defaulting to the compiled-in value.
+///
+/// A network that has never voted on this sits at `None`, so agents originate
+/// nothing until somebody decides they should.
+fn current_agent_phase(state: &dyn VmState) -> crate::governance::AgentPhase {
+    use crate::governance::AgentPhase;
+    match read_governed_param(state, "governance.agent_phase", 0) {
+        1 => AgentPhase::Network,
+        2 => AgentPhase::All,
+        _ => AgentPhase::None,
+    }
+}
+
+/// Storage key for a governed parameter's current value.
+pub fn governed_param_key(key: &str) -> String {
+    format!("governance_param:{key}")
+}
+
+/// Read a governed parameter, falling back to `default` when governance has
+/// never set it.
+///
+/// The fallback is what lets this be introduced without a migration: every
+/// parameter starts at the value already compiled in, and only diverges once
+/// somebody votes. A node that has never seen a parameter change behaves
+/// exactly as it did before.
+pub fn read_governed_param(state: &dyn VmState, key: &str, default: u64) -> u64 {
+    state
+        .get_storage(&SYSTEM_ADDRESS, governed_param_key(key).as_bytes())
+        .filter(|b| b.len() == 8)
+        .map(|b| {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&b);
+            u64::from_le_bytes(a)
+        })
+        .unwrap_or(default)
+}
+
+/// Storage key for the governance-execution pause flag.
+fn governance_paused_key() -> &'static str {
+    "governance_paused"
+}
+
+/// Whether governance enactment is currently paused.
+fn is_governance_paused(state: &dyn VmState) -> bool {
+    state
+        .get_storage(&SYSTEM_ADDRESS, governance_paused_key().as_bytes())
+        .is_some_and(|b| b.first().copied() == Some(1))
+}
+
+/// Storage key for a guardian's role.
+fn guardian_key(addr: &[u8]) -> String {
+    format!("governance_guardian:{}", hex::encode(addr))
+}
+
+/// The guardian role held by `addr`, if any.
+///
+/// Consensus state rather than node configuration, deliberately: a guardian
+/// set that differed between nodes would veto on some and not others, which is
+/// a fork rather than a policy.
+fn load_guardian_role(state: &dyn VmState, addr: &[u8]) -> Option<crate::governance::GuardianRole> {
+    let blob = state.get_storage(&SYSTEM_ADDRESS, guardian_key(addr).as_bytes())?;
+    if blob.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(&blob).ok()
+}
+
+fn load_proposal(state: &dyn VmState, id: &str) -> Option<crate::governance::Proposal> {
+    let blob = state.get_storage(&SYSTEM_ADDRESS, governance_proposal_key(id).as_bytes())?;
+    if blob.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(&blob).ok()
+}
+
+/// Persist a proposal, returning the previous blob for the state-change record.
+fn store_proposal(
+    state: &mut dyn VmState,
+    proposal: &crate::governance::Proposal,
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    let key = governance_proposal_key(&proposal.id);
+    let previous = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes());
+    let blob = serde_json::to_vec(proposal)
+        .map_err(|e| VmError::Internal(format!("encoding proposal: {e}")))?;
+    state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), blob.clone());
+    Ok((blob, previous))
+}
+
+/// Load a proposal's running totals, defaulting to an empty tally.
+fn load_tally(state: &dyn VmState, id: &str) -> crate::governance::Tally {
+    state
+        .get_storage(&SYSTEM_ADDRESS, governance_tally_key(id).as_bytes())
+        .filter(|b| !b.is_empty())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Persist a proposal's running totals.
+fn store_tally(
+    state: &mut dyn VmState,
+    id: &str,
+    tally: &crate::governance::Tally,
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    let key = governance_tally_key(id);
+    let previous = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes());
+    let blob = serde_json::to_vec(tally)
+        .map_err(|e| VmError::Internal(format!("encoding tally: {e}")))?;
+    state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), blob.clone());
+    Ok((blob, previous))
+}
+
+/// A voter's existing ballot as `(weight, in_favour)`, if they have one.
+///
+/// The weight is stored alongside the direction rather than re-read from the
+/// voter's bond at tally time. A validator who bonds more after voting must not
+/// have their already-cast ballot grow underneath them.
+fn load_vote(state: &dyn VmState, id: &str, voter_hex: &str) -> Option<(u128, bool)> {
+    let blob = state.get_storage(&SYSTEM_ADDRESS, governance_vote_key(id, voter_hex).as_bytes())?;
+    if blob.len() != 17 {
+        return None;
+    }
+    let mut w = [0u8; 16];
+    w.copy_from_slice(&blob[..16]);
+    Some((u128::from_le_bytes(w), blob[16] != 0))
+}
+
+/// Record a voter's ballot as `weight_le(16) || direction(1)`.
+fn store_vote(
+    state: &mut dyn VmState,
+    id: &str,
+    voter_hex: &str,
+    weight: u128,
+    in_favour: bool,
+) -> (Vec<u8>, Option<Vec<u8>>) {
+    let key = governance_vote_key(id, voter_hex);
+    let previous = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes());
+    let mut blob = Vec::with_capacity(17);
+    blob.extend_from_slice(&weight.to_le_bytes());
+    blob.push(u8::from(in_favour));
+    state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), blob.clone());
+    (blob, previous)
+}
+
 /// Derive the deterministic singleton InsurancePool vault address:
 /// `Address(SHA-256("tenzro/insurance-pool/vault"))`.
 ///
@@ -4863,6 +5971,16 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_PROVIDER_UNSTAKE => self.execute_unstake(tx, state, &mut gas_meter).await,
             SELECTOR_GOVERNANCE_PROPOSE => self.execute_propose(tx, state, &mut gas_meter).await,
             SELECTOR_GOVERNANCE_VOTE => self.execute_vote(tx, state, &mut gas_meter).await,
+            SELECTOR_GOVERNANCE_PAUSE => {
+                self.execute_governance_pause(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_GOVERNANCE_VETO => {
+                self.execute_governance_veto(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_GOVERNANCE_EXECUTE => {
+                self.execute_governance_execute(tx, state, &mut gas_meter)
+                    .await
+            }
             SELECTOR_ESCROW_CREATE => self.execute_escrow_create(tx, state, &mut gas_meter).await,
             SELECTOR_ESCROW_RELEASE => self.execute_escrow_release(tx, state, &mut gas_meter).await,
             SELECTOR_ESCROW_REFUND => self.execute_escrow_refund(tx, state, &mut gas_meter).await,
@@ -4914,6 +6032,13 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_VALIDATOR_REGISTER => {
                 self.execute_validator_register(tx, state, &mut gas_meter)
                     .await
+            }
+            SELECTOR_INCREASE_VALIDATOR_STAKE => {
+                self.execute_increase_validator_stake(tx, state, &mut gas_meter)
+                    .await
+            }
+            SELECTOR_TREASURY_DEPOSIT => {
+                self.execute_treasury_deposit(tx, state, &mut gas_meter).await
             }
             SELECTOR_VALIDATOR_EXIT => self.execute_validator_exit(tx, state, &mut gas_meter).await,
             SELECTOR_VALIDATOR_UPDATE_METADATA => {
@@ -5025,6 +6150,11 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_PROVIDER_UNSTAKE => GAS_UNSTAKE,
             SELECTOR_GOVERNANCE_PROPOSE => GAS_PROPOSE,
             SELECTOR_GOVERNANCE_VOTE => GAS_VOTE,
+            SELECTOR_GOVERNANCE_EXECUTE => GAS_GOVERNANCE_EXECUTE,
+            SELECTOR_GOVERNANCE_VETO => GAS_GOVERNANCE_EXECUTE,
+            SELECTOR_GOVERNANCE_PAUSE => GAS_GOVERNANCE_EXECUTE,
+            SELECTOR_INCREASE_VALIDATOR_STAKE => GAS_INCREASE_VALIDATOR_STAKE,
+            SELECTOR_TREASURY_DEPOSIT => GAS_TREASURY_DEPOSIT,
             SELECTOR_ESCROW_CREATE => GAS_ESCROW_CREATE,
             SELECTOR_ESCROW_RELEASE => GAS_ESCROW_RELEASE,
             SELECTOR_ESCROW_REFUND => GAS_ESCROW_REFUND,
@@ -5225,99 +6355,595 @@ mod tests {
         assert_eq!(stake_amount, 1_000_000_000);
     }
 
-    #[tokio::test]
-    async fn test_native_governance_propose() {
-        let config = VmConfig::default();
-        let executor = NativeExecutor::new(config).unwrap();
-        let mut state = StateAdapter::new();
+    // ---- Governance ---------------------------------------------------------
 
-        let from = vec![1u8; 20];
+    /// No two native transactions may share a selector.
+    ///
+    /// A duplicate is not a compile error — it is an unreachable match arm, so
+    /// the second handler silently never runs and the transaction executes as
+    /// whichever one was declared first. `SELECTOR_INCREASE_VALIDATOR_STAKE`
+    /// was briefly `0x01000030`, already taken by `SELECTOR_VALIDATOR_REGISTER`,
+    /// which would have routed a stake increase into registration. Only a
+    /// warning caught it.
+    #[test]
+    fn every_native_selector_is_unique() {
+        let selectors: Vec<([u8; 4], &str)> = vec![
+            (SELECTOR_PROVIDER_STAKE, "provider_stake"),
+            (SELECTOR_PROVIDER_UNSTAKE, "provider_unstake"),
+            (SELECTOR_GOVERNANCE_PROPOSE, "governance_propose"),
+            (SELECTOR_GOVERNANCE_VOTE, "governance_vote"),
+            (SELECTOR_GOVERNANCE_EXECUTE, "governance_execute"),
+            (SELECTOR_INCREASE_VALIDATOR_STAKE, "increase_validator_stake"),
+            (SELECTOR_ESCROW_CREATE, "escrow_create"),
+            (SELECTOR_ESCROW_RELEASE, "escrow_release"),
+            (SELECTOR_ESCROW_REFUND, "escrow_refund"),
+            (SELECTOR_KILLSWITCH_PAUSE, "killswitch_pause"),
+            (SELECTOR_KILLSWITCH_QUARANTINE, "killswitch_quarantine"),
+            (SELECTOR_KILLSWITCH_TERMINATE, "killswitch_terminate"),
+            (SELECTOR_POST_AGENT_BOND, "post_agent_bond"),
+            (SELECTOR_INCREASE_AGENT_BOND, "increase_agent_bond"),
+            (SELECTOR_WITHDRAW_AGENT_BOND, "withdraw_agent_bond"),
+            (SELECTOR_PAY_INSURANCE_CLAIM, "pay_insurance_claim"),
+            (SELECTOR_X402_SETTLE, "x402_settle"),
+            (SELECTOR_POST_COMPUTE_BOND, "post_compute_bond"),
+            (SELECTOR_VALIDATOR_REGISTER, "validator_register"),
+            (SELECTOR_VALIDATOR_EXIT, "validator_exit"),
+            (SELECTOR_IDENTITY_REGISTER, "identity_register"),
+        ];
 
-        // Set initial balance
-        state.set_balance(&from, 10_000_000_000_000_000_000);
+        let mut seen = std::collections::HashMap::new();
+        for (sel, name) in selectors {
+            if let Some(prev) = seen.insert(sel, name) {
+                panic!("selector {sel:02x?} is used by both {prev} and {name}");
+            }
+        }
+    }
 
-        // Build proposal transaction data
-        let mut data = SELECTOR_GOVERNANCE_PROPOSE.to_vec();
-        data.extend_from_slice(b"Increase block gas limit to 50M");
+    const GOV_STAKE: u128 = 1_000_000;
+    const GOV_GAS_BALANCE: u128 = 10_000_000_000_000_000_000;
 
-        let tx = VmTransaction::new(
-            from.clone(),
+    /// Give `who` a bonded stake, and credit the staking vault to match.
+    ///
+    /// The vault balance is the electorate size the tally divides by, so a test
+    /// that bonds without crediting it would compute quorum against zero.
+    fn gov_bond(state: &mut StateAdapter, who: &[u8], stake: u128) {
+        let key = format!("staking_bond:{}", hex::encode(who));
+        state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), stake.to_le_bytes().to_vec());
+        let vault = state.get_balance(&STAKING_VAULT_ADDRESS);
+        state.set_balance(&STAKING_VAULT_ADDRESS, vault + stake);
+        state.set_balance(who, GOV_GAS_BALANCE);
+    }
+
+    /// Record that `address` belongs to some identity, as `RegisterIdentity` does.
+    fn gov_give_identity(state: &mut StateAdapter, address: &[u8], did: &str) {
+        let key = identity_wallet_index_key(address);
+        state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), did.as_bytes().to_vec());
+    }
+
+    fn gov_tx(from: &[u8], data: Vec<u8>, gas: u64, at_ms: i64) -> VmTransaction {
+        let mut tx = VmTransaction::new(
+            from.to_vec(),
             None,
             0,
             data,
-            100_000,
+            gas,
             1_000_000_000,
             0,
             VmType::Evm,
             1337,
         );
+        tx.block_timestamp_ms = Some(at_ms);
+        tx
+    }
 
-        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
+    fn gov_propose_data(action: &crate::governance::ProposalAction) -> Vec<u8> {
+        let mut data = SELECTOR_GOVERNANCE_PROPOSE.to_vec();
+        data.extend_from_slice(&serde_json::to_vec(action).unwrap());
+        data
+    }
 
-        assert!(result.success);
-        assert_eq!(result.gas_used, 100_000);
-        assert_eq!(result.logs.len(), 1);
-        assert_eq!(result.logs[0].topics[0], b"ProposalCreated".to_vec());
-        assert!(!result.output.is_empty()); // Contains proposal hash
+    fn gov_vote_data(proposal_id: &[u8], in_favour: bool) -> Vec<u8> {
+        let mut data = SELECTOR_GOVERNANCE_VOTE.to_vec();
+        data.extend_from_slice(proposal_id);
+        data.push(u8::from(in_favour));
+        data
+    }
 
-        // Verify proposal counter was incremented
-        let counter = state
-            .get_storage(&SYSTEM_ADDRESS, b"proposal_counter")
-            .unwrap();
-        let count = u64::from_le_bytes(counter[..8].try_into().unwrap());
-        assert_eq!(count, 1);
+    fn gov_execute_data(proposal_id: &[u8]) -> Vec<u8> {
+        let mut data = SELECTOR_GOVERNANCE_EXECUTE.to_vec();
+        data.extend_from_slice(proposal_id);
+        data
+    }
+
+    /// A canonical derived address: 20 significant bytes, zero tail.
+    fn gov_canonical(byte: u8) -> tenzro_types::primitives::Address {
+        let mut a = [0u8; 32];
+        a[..20].fill(byte);
+        tenzro_types::primitives::Address::new(a)
     }
 
     #[tokio::test]
-    async fn test_native_governance_vote() {
-        let config = VmConfig::default();
-        let executor = NativeExecutor::new(config).unwrap();
+    async fn a_proposal_opens_for_voting_and_records_the_electorate() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
         let mut state = StateAdapter::new();
+        let proposer = vec![1u8; 20];
+        gov_bond(&mut state, &proposer, GOV_STAKE);
 
-        let from = vec![1u8; 20];
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
 
-        // Set initial balance
-        state.set_balance(&from, 10_000_000_000_000_000_000);
-
-        // Create a proposal first
-        let proposal_id = [0xAAu8; 32];
-        let proposal_key = format!("proposal:{}", hex::encode(proposal_id));
-        state.set_storage(
-            &SYSTEM_ADDRESS,
-            proposal_key.as_bytes(),
-            b"Some proposal data".to_vec(),
-        );
-
-        // Build vote transaction data
-        let mut data = SELECTOR_GOVERNANCE_VOTE.to_vec();
-        data.extend_from_slice(&proposal_id); // proposal ID
-        data.push(1); // vote = true
-
-        let tx = VmTransaction::new(
-            from.clone(),
-            None,
-            0,
-            data,
-            30_000,
-            1_000_000_000,
-            0,
-            VmType::Evm,
-            1337,
-        );
-
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 500,
+            memo: "founding validator allocation".into(),
+        };
+        let tx = gov_tx(&proposer, gov_propose_data(&action), 100_000, 1_000);
         let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
 
         assert!(result.success);
-        assert_eq!(result.gas_used, 30_000);
-        assert_eq!(result.logs.len(), 1);
-        assert_eq!(result.logs[0].topics[0], b"VoteCast".to_vec());
+        assert_eq!(result.logs[0].topics[0], b"ProposalCreated".to_vec());
 
-        // Verify vote was recorded
-        let vote_key = format!("vote:{}:{}", hex::encode(proposal_id), hex::encode(&from));
-        let vote = state
-            .get_storage(&SYSTEM_ADDRESS, vote_key.as_bytes())
+        let id = hex::encode(&result.output);
+        let stored = load_proposal(&state, &id).expect("proposal stored");
+        assert_eq!(stored.status, crate::governance::ProposalStatus::Voting);
+        assert_eq!(stored.action, action);
+
+        // The tally opens knowing how much stake exists to be convinced.
+        let tally = load_tally(&state, &id);
+        assert_eq!(tally.total_eligible, GOV_STAKE);
+        assert_eq!((tally.yes, tally.no), (0, 0));
+    }
+
+    /// Proposing costs a bond, not just gas.
+    ///
+    /// Every proposal is a record every node keeps forever. Without this, an
+    /// address with pocket change can fill consensus state indefinitely.
+    #[tokio::test]
+    async fn an_unbonded_address_cannot_propose() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let stranger = vec![9u8; 20];
+        state.set_balance(&stranger, GOV_GAS_BALANCE);
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient: gov_canonical(0x22),
+            amount: 1,
+            memo: String::new(),
+        };
+        let tx = gov_tx(&stranger, gov_propose_data(&action), 100_000, 1_000);
+        let err = executor.execute_transaction(&tx, &mut state).await;
+        assert!(err.is_err(), "an unbonded address must not be able to propose");
+    }
+
+    /// The hole this closes: voting used to be open to any address at all, and
+    /// unweighted. A stranger with gas money could manufacture a result.
+    #[tokio::test]
+    async fn an_unbonded_address_cannot_vote() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let proposer = vec![1u8; 20];
+        gov_bond(&mut state, &proposer, GOV_STAKE);
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 500,
+            memo: String::new(),
+        };
+        let created = executor
+            .execute_transaction(
+                &gov_tx(&proposer, gov_propose_data(&action), 100_000, 1_000),
+                &mut state,
+            )
+            .await
             .unwrap();
-        assert_eq!(vote[0], 1);
+        let id_bytes = created.output.clone();
+
+        let stranger = vec![9u8; 20];
+        state.set_balance(&stranger, GOV_GAS_BALANCE);
+        let err = executor
+            .execute_transaction(
+                &gov_tx(&stranger, gov_vote_data(&id_bytes, true), 30_000, 2_000),
+                &mut state,
+            )
+            .await;
+        assert!(err.is_err(), "an unbonded address must not be able to vote");
+    }
+
+    fn gov_deposit_data(amount: u128) -> Vec<u8> {
+        let mut data = SELECTOR_TREASURY_DEPOSIT.to_vec();
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    /// The treasury had no way to be funded.
+    ///
+    /// `TreasuryGrant` debits it, but nothing credited it: no genesis
+    /// allocation, no fee routing, no deposit. A vault that can only be spent
+    /// from starts empty and stays empty, so every grant proposal would pass
+    /// its vote and then fail enactment on an insufficient balance — the
+    /// governance path was complete except for the half that makes it useful.
+    #[tokio::test]
+    async fn the_treasury_can_be_funded() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let donor = vec![1u8; 20];
+        state.set_balance(&donor, GOV_GAS_BALANCE);
+
+        let treasury = derive_treasury_address().as_bytes().to_vec();
+        assert_eq!(state.get_balance(&treasury), 0, "starts empty");
+
+        let result = executor
+            .execute_transaction(&gov_tx(&donor, gov_deposit_data(5_000), 40_000, 0), &mut state)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.logs[0].topics[0], b"TreasuryDeposit".to_vec());
+        assert_eq!(state.get_balance(&treasury), 5_000);
+    }
+
+    /// Deposit then grant: the full round trip the governance path needs.
+    #[tokio::test]
+    async fn a_funded_treasury_can_pay_a_grant() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+
+        // Fund it through the deposit path rather than by writing state, so
+        // this exercises the seam rather than assuming it.
+        executor
+            .execute_transaction(&gov_tx(&a, gov_deposit_data(10_000), 40_000, 0), &mut state)
+            .await
+            .unwrap();
+
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 4_000,
+            memo: "funded by deposit".into(),
+        };
+        let created = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .await
+            .unwrap();
+        let id = created.output.clone();
+        executor
+            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .await
+            .unwrap();
+
+        // Two calls now: the first queues into the timelock, the second enacts
+        // once it has elapsed. A single call cannot do both, or the delay would
+        // be set and passed in the same instant.
+        let after = crate::governance::VOTING_PERIOD_MS + 1;
+        executor
+            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .await
+            .expect("queueing a passed proposal");
+        let past_timelock = after + crate::governance::TIMELOCK_DELAY_MS + 1;
+        executor
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, past_timelock),
+                &mut state,
+            )
+            .await
+            .expect("a funded treasury must be able to pay");
+
+        assert_eq!(state.get_balance(recipient.as_bytes()), 4_000);
+        assert_eq!(state.get_balance(derive_treasury_address().as_bytes()), 6_000);
+    }
+
+    /// A deposit of nothing moves nothing and should not consume a nonce.
+    #[tokio::test]
+    async fn a_zero_treasury_deposit_is_refused() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let donor = vec![1u8; 20];
+        state.set_balance(&donor, GOV_GAS_BALANCE);
+        assert!(
+            executor
+                .execute_transaction(&gov_tx(&donor, gov_deposit_data(0), 40_000, 0), &mut state)
+                .await
+                .is_err()
+        );
+    }
+
+    /// A grant to an address with no identity is refused at submission.
+    ///
+    /// This is the network's standing invariant — no wallet without an identity
+    /// — and a treasury grant is the one operation that could otherwise create
+    /// a funded address answerable to nobody.
+    #[tokio::test]
+    async fn a_grant_to_an_address_with_no_identity_is_refused() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let proposer = vec![1u8; 20];
+        gov_bond(&mut state, &proposer, GOV_STAKE);
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient: gov_canonical(0x77), // never indexed
+            amount: 1,
+            memo: String::new(),
+        };
+        let err = executor
+            .execute_transaction(
+                &gov_tx(&proposer, gov_propose_data(&action), 100_000, 1_000),
+                &mut state,
+            )
+            .await;
+        assert!(
+            err.is_err(),
+            "paying an address with no identity behind it must be refused"
+        );
+    }
+
+    /// The whole path: propose, vote, wait, enact, money moves.
+    #[tokio::test]
+    async fn a_passed_grant_pays_the_recipient_from_the_treasury() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+
+        let a = vec![1u8; 20];
+        let b = vec![2u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        gov_bond(&mut state, &b, GOV_STAKE);
+
+        let treasury = derive_treasury_address().as_bytes().to_vec();
+        state.set_balance(&treasury, 10_000);
+
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 4_000,
+            memo: "founding validator allocation".into(),
+        };
+        let created = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .await
+            .unwrap();
+        let id = created.output.clone();
+
+        // Both validators vote yes: 100% of the electorate, well past 2/3.
+        for voter in [&a, &b] {
+            executor
+                .execute_transaction(&gov_tx(voter, gov_vote_data(&id, true), 30_000, 10), &mut state)
+                .await
+                .unwrap();
+        }
+
+        let after = crate::governance::VOTING_PERIOD_MS + 1;
+        executor
+            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .await
+            .expect("queueing a passed proposal");
+        let past_timelock = after + crate::governance::TIMELOCK_DELAY_MS + 1;
+        let executed = executor
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, past_timelock),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(executed.success);
+        assert_eq!(executed.logs[0].topics[0], b"ProposalExecuted".to_vec());
+
+        assert_eq!(
+            state.get_balance(recipient.as_bytes()),
+            4_000,
+            "the recipient must actually be paid"
+        );
+        assert_eq!(state.get_balance(&treasury), 6_000);
+        assert_eq!(
+            load_proposal(&state, &hex::encode(&id)).unwrap().status,
+            crate::governance::ProposalStatus::Executed
+        );
+    }
+
+    /// An action applies once. Two enactments in the same window must not pay twice.
+    #[tokio::test]
+    async fn a_grant_cannot_be_enacted_twice() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        let treasury = derive_treasury_address().as_bytes().to_vec();
+        state.set_balance(&treasury, 10_000);
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 4_000,
+            memo: String::new(),
+        };
+        let created = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .await
+            .unwrap();
+        let id = created.output.clone();
+        executor
+            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .await
+            .unwrap();
+
+        let after = crate::governance::VOTING_PERIOD_MS + 1;
+        executor
+            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .await
+            .expect("queueing a passed proposal");
+
+        // Inside the timelock the proposal is not yet enactable, and saying so
+        // is the whole point of the window.
+        let too_early = executor
+            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after + 1), &mut state)
+            .await;
+        assert!(too_early.is_err(), "a queued proposal must wait out its timelock");
+
+        let past_timelock = after + crate::governance::TIMELOCK_DELAY_MS + 1;
+        executor
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, past_timelock),
+                &mut state,
+            )
+            .await
+            .expect("enacting after the timelock");
+
+        let second = executor
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, past_timelock + 1),
+                &mut state,
+            )
+            .await;
+
+        assert!(second.is_err(), "a proposal must enact exactly once");
+        assert_eq!(
+            state.get_balance(recipient.as_bytes()),
+            4_000,
+            "the recipient must not be paid a second time"
+        );
+    }
+
+    /// The tally cannot be snapshotted at a convenient moment.
+    #[tokio::test]
+    async fn a_proposal_cannot_be_enacted_while_voting_is_open() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        let treasury = derive_treasury_address().as_bytes().to_vec();
+        state.set_balance(&treasury, 10_000);
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 1_000,
+            memo: String::new(),
+        };
+        let created = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .await
+            .unwrap();
+        let id = created.output.clone();
+        executor
+            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .await
+            .unwrap();
+
+        let err = executor
+            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, 20), &mut state)
+            .await;
+        assert!(err.is_err(), "enactment before the window closes must be refused");
+        assert_eq!(state.get_balance(recipient.as_bytes()), 0);
+    }
+
+    /// A proposal the electorate voted down does not pay out.
+    #[tokio::test]
+    async fn a_rejected_grant_pays_nothing() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        let b = vec![2u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        gov_bond(&mut state, &b, GOV_STAKE);
+        let treasury = derive_treasury_address().as_bytes().to_vec();
+        state.set_balance(&treasury, 10_000);
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 4_000,
+            memo: String::new(),
+        };
+        let created = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .await
+            .unwrap();
+        let id = created.output.clone();
+
+        // 50/50 clears quorum but not the two-thirds threshold.
+        executor
+            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .await
+            .unwrap();
+        executor
+            .execute_transaction(&gov_tx(&b, gov_vote_data(&id, false), 30_000, 10), &mut state)
+            .await
+            .unwrap();
+
+        let after = crate::governance::VOTING_PERIOD_MS + 1;
+        let err = executor
+            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .await;
+        assert!(err.is_err(), "a split vote must not move the treasury");
+        assert_eq!(state.get_balance(recipient.as_bytes()), 0);
+        assert_eq!(state.get_balance(&treasury), 10_000);
+    }
+
+    /// Changing a vote moves the weight instead of counting twice.
+    #[tokio::test]
+    async fn revoting_replaces_the_earlier_ballot() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        let recipient = gov_canonical(0x22);
+        gov_give_identity(&mut state, recipient.as_bytes(), "did:tenzro:machine:test");
+
+        let action = crate::governance::ProposalAction::TreasuryGrant {
+            recipient,
+            amount: 1,
+            memo: String::new(),
+        };
+        let created = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .await
+            .unwrap();
+        let id = created.output.clone();
+
+        executor
+            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .await
+            .unwrap();
+        executor
+            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, false), 30_000, 20), &mut state)
+            .await
+            .unwrap();
+
+        let tally = load_tally(&state, &hex::encode(&id));
+        assert_eq!(
+            (tally.yes, tally.no),
+            (0, GOV_STAKE),
+            "the earlier yes must be withdrawn, not kept alongside the no"
+        );
+        assert_eq!(tally.participation(), GOV_STAKE, "one voter is one voter's worth");
+    }
+
+    /// A payload that is not a valid action is refused rather than stored.
+    #[tokio::test]
+    async fn an_untyped_proposal_payload_is_refused() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+
+        let mut data = SELECTOR_GOVERNANCE_PROPOSE.to_vec();
+        data.extend_from_slice(b"Increase block gas limit to 50M");
+        let err = executor
+            .execute_transaction(&gov_tx(&a, data, 100_000, 0), &mut state)
+            .await;
+        assert!(
+            err.is_err(),
+            "a proposal that decodes to no action must not be stored"
+        );
     }
 
     // ---- Validator staking (register escrow / exit refund) tests -------------

@@ -706,7 +706,7 @@ mod tests {
         let mut tool = ToolDefinition::new(
             "code-executor".to_string(),
             "1.0.0".to_string(),
-            "mcp".to_string(),
+            tenzro_types::ToolTransportMode::Mcp,
             "builtin://code-executor".to_string(),
             "builtin".to_string(),
             "code".to_string(),
@@ -752,7 +752,7 @@ mod tests {
         let mut tool = ToolDefinition::new(
             "old-mcp".to_string(),
             "1.0.0".to_string(),
-            "mcp".to_string(),
+            tenzro_types::ToolTransportMode::Mcp,
             "http://nope".to_string(),
             "gone".to_string(),
             "search".to_string(),

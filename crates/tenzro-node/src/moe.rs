@@ -2206,8 +2206,68 @@ mod tests {
         assert_eq!(v["error"]["code"], -32700);
     }
 
+    /// An authenticated caller asking for an expert that is not loaded gets a
+    /// model error.
+    ///
+    /// The credential matters: `moe/execute` is gated, so without one this
+    /// never reaches the runtime and returns the auth error instead — which is
+    /// what it did after the gate landed, while still being named for the
+    /// model error it had stopped exercising.
     #[tokio::test]
     async fn dispatcher_execute_unloaded_expert_is_model_error() {
+        let mgr = crate::api_key::ApiKeyManager::new(Arc::new(
+            tenzro_storage::MemoryStore::new(),
+        ))
+        .unwrap();
+        let issued = mgr
+            .issue(
+                Some("did:tenzro:machine:moe-fixture".to_string()),
+                "moe-fixture",
+                vec![crate::api_key::ApiKeyScope::Inference],
+                crate::api_key::KeyClass::Subject,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let d = MoeIrohDispatcher::new(
+            Arc::new(MoeExpertRuntime::new()),
+            None,
+            Some(mgr),
+            Arc::new(crate::admission::NodeAdmissionGate::load(None, &[], None)),
+        );
+        let req = json!({
+            "jsonrpc": "2.0",
+            "method": MOE_METHOD_EXECUTE,
+            "api_key": issued.key,
+            "params": {
+                "model_id": "m",
+                "layer": 0,
+                "expert": 0,
+                "token_indices": [0],
+                "d_model": 2,
+                "hidden_states": encode_f32_base64(&[1.0, 2.0]),
+            },
+            "id": 1,
+        });
+        let resp = d
+            .dispatch(Bytes::from(serde_json::to_vec(&req).unwrap()))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(
+            v["error"]["code"], -32004,
+            "expected a model error, got {v:?}"
+        );
+    }
+
+    /// And the gate itself: the same request without a credential must be
+    /// refused before it reaches the runtime, or an unauthenticated peer can
+    /// spend this node's GPU for free.
+    #[tokio::test]
+    async fn dispatcher_execute_without_a_credential_is_refused() {
         let d = MoeIrohDispatcher::new(
             Arc::new(MoeExpertRuntime::new()),
             None,
@@ -2232,7 +2292,7 @@ mod tests {
             .await
             .unwrap();
         let v: Value = serde_json::from_slice(&resp).unwrap();
-        assert_eq!(v["error"]["code"], -32004);
+        assert_eq!(v["error"]["code"], -32001, "expected the auth refusal");
     }
 
     #[tokio::test]

@@ -59,6 +59,7 @@ def test_kind_labels_match_the_rust_serde_labels():
         "image2image",
         "text2video",
         "image2video",
+        "text2audio",
     ]
 
 
@@ -69,6 +70,14 @@ def test_kinds_declare_their_own_requirements():
     assert MediaGenKind.TEXT2VIDEO.is_video
     assert MediaGenKind.IMAGE2VIDEO.is_video
     assert not MediaGenKind.IMAGE2IMAGE.is_video
+    assert MediaGenKind.TEXT2AUDIO.is_audio
+    assert not MediaGenKind.TEXT2AUDIO.is_video
+    assert not MediaGenKind.TEXT2AUDIO.requires_input_image
+    assert not MediaGenKind.TEXT2VIDEO.is_audio
+    # The artifact must not be handed to a decoder for the wrong media type.
+    assert MediaGenKind.TEXT2AUDIO.output_extension == "wav"
+    assert MediaGenKind.TEXT2VIDEO.output_extension == "mp4"
+    assert MediaGenKind.TEXT2IMAGE.output_extension == "png"
 
 
 def test_only_the_three_end_states_are_terminal():

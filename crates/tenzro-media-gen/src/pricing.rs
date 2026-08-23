@@ -73,6 +73,14 @@ pub fn pixel_steps(kind: MediaGenKind, params: &MediaGenParams) -> u128 {
         return voxel_steps(params);
     }
 
+    // An audio job has no pixels either. `width`/`height` are untouched
+    // defaults on a text-to-audio request, so pricing on them would quote
+    // every clip identically regardless of length — a five-minute track and a
+    // five-second one would cost the same while differing 60x in work.
+    if kind.is_audio() {
+        return audio_frame_steps(params);
+    }
+
     let frames = if kind.is_video() {
         u128::from(params.num_frames.unwrap_or(1).max(1))
     } else {
@@ -82,6 +90,43 @@ pub fn pixel_steps(kind: MediaGenKind, params: &MediaGenParams) -> u128 {
         .saturating_mul(u128::from(params.height))
         .saturating_mul(u128::from(params.steps))
         .saturating_mul(frames)
+}
+
+/// Frames per second of generated audio, for pricing purposes.
+///
+/// 25 is what MiniMax-Music3 documents for its acoustic frames, and the
+/// generators in this class are within a small factor of each other. It is a
+/// pricing constant, not a model capability: it converts a duration a caller
+/// asked for into work units comparable with a pixel job, and does not have to
+/// match any particular decoder's internal rate to do that fairly.
+pub const AUDIO_FRAMES_PER_SECOND: u128 = 25;
+
+/// Default clip length when a request names none, in seconds.
+const DEFAULT_AUDIO_SECONDS: u128 = 30;
+
+/// Work units for an audio job, in the same unit as [`pixel_steps`].
+///
+/// Duration times step count, converted to frames so one second of audio is a
+/// fixed quantity of work rather than a wall-clock measurement. Quoted against
+/// the same `per_pixel_step` rate as pixels and voxels, for the same reason
+/// `voxel_steps` is: a second rate would be a second thing to govern and keep
+/// in step.
+///
+/// A 30-second clip at 30 steps is 22,500 units against a 1024x1024 image's
+/// 31.4 million — audio is genuinely cheap next to pixels, and the rate should
+/// not pretend otherwise.
+pub fn audio_frame_steps(params: &MediaGenParams) -> u128 {
+    // `audio_duration_secs` is an f32 from the wire; clamp before converting so
+    // a negative, NaN or absurd value cannot become a huge or zero quote.
+    let secs = params
+        .audio_duration_secs
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .map(|d| d.min(3600.0) as u128)
+        .unwrap_or(DEFAULT_AUDIO_SECONDS)
+        .max(1);
+
+    secs.saturating_mul(AUDIO_FRAMES_PER_SECOND)
+        .saturating_mul(u128::from(params.steps.max(1)))
 }
 
 /// Work units for a 3D job, in the same unit as [`pixel_steps`].
@@ -159,6 +204,7 @@ mod tests {
             steps: 30,
             guidance_scale: 4.5,
             voxel_resolution: None,
+            audio_duration_secs: None,
             seed: None,
             input_image_hash: None,
             metadata: HashMap::new(),
@@ -173,6 +219,65 @@ mod tests {
             height: 480,
             ..image_params()
         }
+    }
+
+    /// Audio must not be priced on pixels. A text-to-audio request leaves
+    /// width/height at their defaults, so quoting on area would charge every
+    /// clip the same regardless of length.
+    #[test]
+    fn audio_is_priced_on_duration_not_area() {
+        let mut short = image_params();
+        short.audio_duration_secs = Some(5.0);
+        let mut long = short.clone();
+        long.audio_duration_secs = Some(300.0);
+
+        let s = pixel_steps(MediaGenKind::Text2Audio, &short);
+        let l = pixel_steps(MediaGenKind::Text2Audio, &long);
+        assert_eq!(l, s * 60, "60x the audio should cost 60x, not the same");
+
+        // And the identical params priced as an image must differ, or the
+        // dispatch is not actually happening.
+        assert_ne!(pixel_steps(MediaGenKind::Text2Image, &short), s);
+    }
+
+    /// Steps scale audio the same way they scale pixels, so one rate governs
+    /// both.
+    #[test]
+    fn audio_scales_with_steps() {
+        let mut p = image_params();
+        p.audio_duration_secs = Some(10.0);
+        let base = pixel_steps(MediaGenKind::Text2Audio, &p);
+        p.steps *= 3;
+        assert_eq!(pixel_steps(MediaGenKind::Text2Audio, &p), base * 3);
+    }
+
+    /// A hostile or broken duration must not become a free or ruinous quote.
+    /// `audio_duration_secs` arrives as an f32 off the wire, so NaN, negative
+    /// and absurd values all have to land somewhere sane.
+    #[test]
+    fn a_malformed_duration_cannot_break_the_quote() {
+        let mut p = image_params();
+        for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+            p.audio_duration_secs = Some(bad);
+            let q = pixel_steps(MediaGenKind::Text2Audio, &p);
+            assert!(q > 0, "duration {bad} produced a free job");
+            assert!(q < u128::from(u64::MAX), "duration {bad} produced a runaway quote");
+        }
+
+        // An hour is the ceiling; asking for a year prices as an hour rather
+        // than overflowing or quoting a number nobody can pay.
+        p.audio_duration_secs = Some(31_536_000.0);
+        let capped = pixel_steps(MediaGenKind::Text2Audio, &p);
+        p.audio_duration_secs = Some(3600.0);
+        assert_eq!(capped, pixel_steps(MediaGenKind::Text2Audio, &p));
+    }
+
+    /// Absent duration falls back to a default rather than quoting zero.
+    #[test]
+    fn an_absent_duration_uses_the_default() {
+        let mut p = image_params();
+        p.audio_duration_secs = None;
+        assert!(pixel_steps(MediaGenKind::Text2Audio, &p) > 0);
     }
 
     #[test]
@@ -313,6 +418,7 @@ mod three_d_pricing_tests {
             steps,
             guidance_scale: 7.5,
             voxel_resolution: voxels,
+            audio_duration_secs: None,
             seed: None,
             input_image_hash: None,
             metadata: Default::default(),

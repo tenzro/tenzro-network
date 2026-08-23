@@ -205,6 +205,35 @@ pub enum TransactionType {
         /// Vote value
         vote: bool,
     },
+    /// Enact a governance proposal whose voting window has closed and which
+    /// passed.
+    ///
+    /// Carries no authority of its own — the VM re-checks the window, the
+    /// quorum, the threshold and the not-already-executed guard against
+    /// consensus state, so anyone may submit it and pay its gas. Making it
+    /// permissionless is deliberate: a passed proposal only its proposer could
+    /// enact is one a departed proposer can strand forever.
+    /// A governance guardian vetoing a queued proposal during its timelock.
+    ///
+    /// Terminal for that proposal. Only reachable while it is queued: before
+    /// it carries there is nothing to stop, and once it executes there is
+    /// nothing left to stop.
+    GovernanceVeto {
+        /// Which proposal to stop, by id.
+        proposal_id: String,
+    },
+    /// A protocol guardian pausing or resuming governance enactment.
+    ///
+    /// Stops enactment only. Voting, proposing and vetoing continue, so the
+    /// power that imposed a pause is not the only route out of it.
+    GovernancePause {
+        /// True to pause, false to resume.
+        paused: bool,
+    },
+    GovernanceExecute {
+        /// Hex-encoded 32-byte proposal ID.
+        proposal_id: String,
+    },
     /// Initiate a bridge transfer
     BridgeTransfer {
         /// Target chain
@@ -479,6 +508,40 @@ pub enum TransactionType {
     /// classical Ed25519 signature in `SignedTransaction::signature` proves
     /// control of `consensus_pubkey`, the ML-DSA-65 leg proves control of
     /// `pq_pubkey`, and the BLS leg proves control of `bls_pubkey`.
+    /// Move funds into the governance treasury.
+    ///
+    /// The treasury could pay out — `TreasuryGrant` debits it — but nothing
+    /// could ever credit it: no genesis allocation, no fee routing, no deposit.
+    /// A vault that can only be spent from starts empty and stays empty, so
+    /// every grant proposal would pass its vote and then fail enactment on an
+    /// insufficient balance.
+    ///
+    /// Permissionless on purpose. Giving away your own money needs no
+    /// authorization beyond holding it, and requiring some privileged role to
+    /// fund the commons would be a strange gate to build.
+    TreasuryDeposit {
+        /// Amount to move, in base units.
+        #[serde(with = "crate::primitives::u128_serde")]
+        amount: u128,
+    },
+    /// Add to an already-registered validator's self-stake.
+    ///
+    /// The registry could create a stake and end one, and nothing in between —
+    /// `RegisterValidator` refuses an address that has not exited, and exiting
+    /// to re-register costs the re-entry cooldown and the validator's place in
+    /// the set. A validator set therefore had no way to rebalance, which is
+    /// most consequential where it is least visible: a network bootstrapped
+    /// from one funded genesis validator cannot dilute it, and stays dependent
+    /// on that single node for every block however many others join.
+    ///
+    /// Authorization: `tx.from` MUST equal the validator's registry address.
+    IncreaseValidatorStake {
+        /// Additional self-stake, in base units. Must be greater than zero;
+        /// this only ever adds. Reducing a stake is unbonding, which has its
+        /// own path, delay and slashing exposure.
+        #[serde(with = "crate::primitives::u128_serde")]
+        additional: u128,
+    },
     RegisterValidator {
         /// 32-byte Ed25519 BFT signing key.
         consensus_pubkey: Vec<u8>,
@@ -761,6 +824,14 @@ impl SignedTransaction {
             TransactionType::GovernancePropose { proposal } => {
                 if proposal.len() > MAX_TX_DATA_SIZE {
                     return Err("Proposal data exceeds maximum size");
+                }
+            }
+            TransactionType::GovernanceExecute { proposal_id } => {
+                // A proposal id is a 32-byte hash rendered as hex. Checking the
+                // shape here means a malformed id is refused at admission
+                // rather than decoded into a silently different proposal.
+                if proposal_id.len() != 64 || hex::decode(proposal_id).is_err() {
+                    return Err("Proposal ID must be 64 hex characters (32 bytes)");
                 }
             }
             TransactionType::ReleaseEscrow { proof, .. } => {

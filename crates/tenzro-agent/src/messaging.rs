@@ -451,8 +451,6 @@ impl NetworkTransport for GossipsubTransport {
 pub struct MessageRouterConfig {
     /// Maximum queue size per agent
     pub max_queue_size: usize,
-    /// Enable message signing
-    pub enable_signing: bool,
     /// Maximum message size in bytes
     pub max_message_size: usize,
     /// Message retention period in seconds
@@ -465,7 +463,6 @@ impl Default for MessageRouterConfig {
     fn default() -> Self {
         Self {
             max_queue_size: DEFAULT_QUEUE_CAPACITY,
-            enable_signing: true,
             max_message_size: 1024 * 1024, // 1 MB
             message_retention_secs: 3600,  // 1 hour
             rate_limit: RateLimitConfig::default(),
@@ -857,9 +854,14 @@ impl MessageRouter {
     }
 
     /// Validates a message — size check plus full cryptographic
-    /// signature verification when signing is enabled (CRITICAL #54).
+    /// signature verification (CRITICAL #54).
     ///
-    /// When `config.enable_signing == true`, this method:
+    /// Verification is unconditional. A message from an agent that cannot be
+    /// checked against that agent's registered keys is not a message from
+    /// that agent, and there is no mode in which that stops being true, so
+    /// there is no flag to turn it off.
+    ///
+    /// This method:
     ///   1. Rejects messages that carry no signature.
     ///   2. Resolves the sender's public key via `key_resolver`.
     ///      Unknown senders are rejected.
@@ -871,11 +873,6 @@ impl MessageRouter {
     ///   5. On rejection, increments `rejected_signature_count` and
     ///      returns `AgentError::InvalidMessageSignature` so the
     ///      caller can audit/log the offending sender.
-    ///
-    /// When `config.enable_signing == false`, the signature is
-    /// ignored and only the size check is enforced. This branch
-    /// exists so trusted single-process tests don't have to plumb
-    /// signing keys.
     async fn validate_message(&self, message: &AgentMessage) -> Result<()> {
         // Check message size
         if message.payload.len() > self.config.max_message_size {
@@ -884,13 +881,12 @@ impl MessageRouter {
             ));
         }
 
-        // CRITICAL #54 + hybrid PQ: when signing is enabled, BOTH the
-        // classical Ed25519 leg and the post-quantum ML-DSA-65 leg are
-        // mandatory. They must either both be present (signed) or both be
-        // absent (rejected — `enable_signing == true` requires signatures).
-        // Mixed mode (one set, the other unset) is rejected to prevent
-        // downgrade attacks where an attacker drops the PQ leg.
-        if self.config.enable_signing {
+        // CRITICAL #54 + hybrid PQ: BOTH the classical Ed25519 leg and the
+        // post-quantum ML-DSA-65 leg are mandatory. They must either both be
+        // present (signed) or both be absent (rejected). Mixed mode (one set,
+        // the other unset) is rejected to prevent downgrade attacks where an
+        // attacker drops the PQ leg.
+        {
             let sender_id = message.from.agent_id.clone();
 
             // Both legs must be present together. Reject any unsigned or
@@ -1031,19 +1027,25 @@ impl MessageRouter {
         }
     }
 
-    /// Broadcasts a message to multiple agents
+    /// Broadcasts a message to multiple agents.
+    ///
+    /// Each message is signed with `signer` before it is sent. Every message
+    /// this router accepts must carry a signature from its sender, and a
+    /// broadcast is not an exception to that — it is several sends.
     pub async fn broadcast_message(
         &self,
         sender: AgentIdentity,
         recipients: Vec<AgentIdentity>,
         message_type: AgentMessageType,
         payload: Vec<u8>,
+        signer: &InMemoryHybridSigner,
     ) -> Result<Vec<String>> {
         let mut message_ids = Vec::new();
 
         for recipient in recipients {
-            let message =
+            let mut message =
                 AgentMessage::new(sender.clone(), recipient, message_type, payload.clone());
+            Self::sign_message(&mut message, signer)?;
             message_ids.push(message.message_id.clone());
             self.send_message(message).await?;
         }
@@ -1301,6 +1303,52 @@ impl MessageHandler for EchoMessageHandler {
 
 #[cfg(test)]
 mod tests {
+
+    /// A router plus one hybrid keypair per registered agent.
+    ///
+    /// Signature verification is unconditional, so every send needs a
+    /// signature from the sender's own key. This keeps tests that are about
+    /// routing, queueing and rate limiting focused on those things while
+    /// still exercising the path production actually takes.
+    struct SigningHarness {
+        router: MessageRouter,
+        signers: std::collections::HashMap<String, InMemoryHybridSigner>,
+    }
+
+    impl SigningHarness {
+        fn new(config: MessageRouterConfig) -> Self {
+            Self {
+                router: MessageRouter::with_config(config),
+                signers: std::collections::HashMap::new(),
+            }
+        }
+
+        /// Registers `id` and binds a fresh hybrid keypair for it.
+        fn agent(&mut self, id: &str) -> AgentIdentity {
+            let identity = create_test_identity(id);
+            let (signer, keys) = build_test_hybrid_signer();
+            self.router
+                .register_agent(identity.agent_id.clone())
+                .unwrap();
+            assert!(
+                self.router
+                    .register_local_key(identity.agent_id.clone(), keys),
+                "router should expose a local resolver"
+            );
+            self.signers.insert(identity.agent_id.clone(), signer);
+            identity
+        }
+
+        /// Signs `msg` with the sender's key and sends it.
+        async fn send(&self, mut msg: AgentMessage) -> Result<()> {
+            let signer = self
+                .signers
+                .get(&msg.from.agent_id)
+                .expect("sender must be registered through `agent()`");
+            MessageRouter::sign_message(&mut msg, signer).unwrap();
+            self.router.send_message(msg).await
+        }
+    }
     use super::*;
     use tenzro_crypto::signatures::Signer;
     use tenzro_types::primitives::Address;
@@ -1318,12 +1366,10 @@ mod tests {
     /// rate-limit / history tests that pre-date CRITICAL #54 and were
     /// written against unsigned `AgentMessage`s. New tests that need to
     /// exercise signature verification should use `build_signing_router`.
-    fn unsigned_test_router() -> MessageRouter {
-        let config = MessageRouterConfig {
-            enable_signing: false,
-            ..MessageRouterConfig::default()
-        };
-        MessageRouter::with_config(config)
+    /// A harness with default config. Named for what it is now: every router
+    /// verifies, so the only question is who holds the keys.
+    fn test_harness() -> SigningHarness {
+        SigningHarness::new(MessageRouterConfig::default())
     }
 
     #[tokio::test]
@@ -1340,13 +1386,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_routing() {
-        let router = unsigned_test_router();
+        let mut h = test_harness();
 
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
 
         let message = AgentMessage::new(
             sender.clone(),
@@ -1355,25 +1399,23 @@ mod tests {
             b"Hello".to_vec(),
         );
 
-        router.send_message(message).await.unwrap();
+        h.send(message).await.unwrap();
 
-        let received = router.receive_message(&recipient.agent_id).await.unwrap();
+        let received = h.router.receive_message(&recipient.agent_id).await.unwrap();
         assert!(received.is_some());
         assert_eq!(received.unwrap().payload, b"Hello");
     }
 
     #[tokio::test]
     async fn test_pending_message_count() {
-        let router = unsigned_test_router();
+        let mut h = test_harness();
 
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
 
         assert_eq!(
-            router.pending_message_count(&recipient.agent_id).unwrap(),
+            h.router.pending_message_count(&recipient.agent_id).unwrap(),
             0
         );
 
@@ -1384,41 +1426,44 @@ mod tests {
                 AgentMessageType::Query,
                 b"queued".to_vec(),
             );
-            router.send_message(message).await.unwrap();
+            h.send(message).await.unwrap();
         }
         assert_eq!(
-            router.pending_message_count(&recipient.agent_id).unwrap(),
+            h.router.pending_message_count(&recipient.agent_id).unwrap(),
             3
         );
 
-        router.receive_message(&recipient.agent_id).await.unwrap();
+        h.router.receive_message(&recipient.agent_id).await.unwrap();
         assert_eq!(
-            router.pending_message_count(&recipient.agent_id).unwrap(),
+            h.router.pending_message_count(&recipient.agent_id).unwrap(),
             2
         );
 
-        assert!(router.pending_message_count("nonexistent").is_err());
+        assert!(h.router.pending_message_count("nonexistent").is_err());
     }
 
     #[tokio::test]
     async fn test_broadcast() {
-        let router = unsigned_test_router();
+        let mut h = test_harness();
 
-        let sender = create_test_identity("sender");
-        let recipient1 = create_test_identity("recipient1");
-        let recipient2 = create_test_identity("recipient2");
+        let sender = h.agent("sender");
+        let recipient1 = h.agent("recipient1");
+        let recipient2 = h.agent("recipient2");
 
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient1.agent_id.clone()).unwrap();
-        router.register_agent(recipient2.agent_id.clone()).unwrap();
 
         let recipients = vec![recipient1.clone(), recipient2.clone()];
-        let message_ids = router
+        let sender_signer = h
+            .signers
+            .get(&sender.agent_id)
+            .expect("sender registered through agent()");
+        let message_ids = h
+            .router
             .broadcast_message(
-                sender,
+                sender.clone(),
                 recipients,
                 AgentMessageType::Notification,
                 b"Broadcast".to_vec(),
+                sender_signer,
             )
             .await
             .unwrap();
@@ -1428,13 +1473,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_history() {
-        let router = unsigned_test_router();
+        let mut h = test_harness();
 
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
 
         let message = AgentMessage::new(
             sender.clone(),
@@ -1443,9 +1486,10 @@ mod tests {
             b"Test".to_vec(),
         );
 
-        router.send_message(message).await.unwrap();
+        h.send(message).await.unwrap();
 
-        let history = router
+        let history = h
+            .router
             .get_message_history(&recipient.agent_id, None)
             .unwrap();
         assert_eq!(history.len(), 1);
@@ -1494,19 +1538,16 @@ mod tests {
     /// Rate limiting blocks a sender that exceeds the per-sender burst.
     #[tokio::test]
     async fn test_rate_limit_per_sender_burst() {
-        let mut config = MessageRouterConfig::default().with_rate_limit(
+        let config = MessageRouterConfig::default().with_rate_limit(
             RateLimitConfig::default()
                 .with_per_sender(10, 3) // small burst
                 .with_per_recipient(1000, 1000)
                 .with_global(1000, 1000),
         );
-        config.enable_signing = false;
-        let router = MessageRouter::with_config(config);
+        let mut h = SigningHarness::new(config);
 
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
         // First 3 should succeed (burst capacity)
         for _ in 0..3 {
@@ -1516,7 +1557,7 @@ mod tests {
                 AgentMessageType::Notification,
                 b"x".to_vec(),
             );
-            router.send_message(msg).await.unwrap();
+            h.send(msg).await.unwrap();
         }
 
         // 4th should be rate limited with sender scope
@@ -1526,7 +1567,7 @@ mod tests {
             AgentMessageType::Notification,
             b"x".to_vec(),
         );
-        let err = router.send_message(msg).await.unwrap_err();
+        let err = h.send(msg).await.unwrap_err();
         match err {
             AgentError::RateLimitExceeded {
                 scope,
@@ -1540,27 +1581,23 @@ mod tests {
             other => panic!("expected RateLimitExceeded, got {:?}", other),
         }
 
-        assert_eq!(router.rate_limited_count(), 1);
+        assert_eq!(h.router.rate_limited_count(), 1);
     }
 
     /// Rate limiting blocks a recipient targeted by multiple senders (mail bomb).
     #[tokio::test]
     async fn test_rate_limit_per_recipient_burst() {
-        let mut config = MessageRouterConfig::default().with_rate_limit(
+        let config = MessageRouterConfig::default().with_rate_limit(
             RateLimitConfig::default()
                 .with_per_sender(1000, 1000)
                 .with_per_recipient(10, 2) // very small recipient burst
                 .with_global(1000, 1000),
         );
-        config.enable_signing = false;
-        let router = MessageRouter::with_config(config);
+        let mut h = SigningHarness::new(config);
 
-        let sender_a = create_test_identity("sender_a");
-        let sender_b = create_test_identity("sender_b");
-        let victim = create_test_identity("victim");
-        router.register_agent(sender_a.agent_id.clone()).unwrap();
-        router.register_agent(sender_b.agent_id.clone()).unwrap();
-        router.register_agent(victim.agent_id.clone()).unwrap();
+        let sender_a = h.agent("sender_a");
+        let sender_b = h.agent("sender_b");
+        let victim = h.agent("victim");
 
         // Sender A sends 2 messages — both succeed (burst=2)
         for _ in 0..2 {
@@ -1570,7 +1607,7 @@ mod tests {
                 AgentMessageType::Notification,
                 b"flood".to_vec(),
             );
-            router.send_message(msg).await.unwrap();
+            h.send(msg).await.unwrap();
         }
 
         // Sender B attempts the 3rd — should be blocked at recipient scope
@@ -1580,7 +1617,7 @@ mod tests {
             AgentMessageType::Notification,
             b"flood".to_vec(),
         );
-        let err = router.send_message(msg).await.unwrap_err();
+        let err = h.send(msg).await.unwrap_err();
         match err {
             AgentError::RateLimitExceeded {
                 scope, agent_id, ..
@@ -1595,19 +1632,16 @@ mod tests {
     /// Global rate limit protects the router from aggregate floods.
     #[tokio::test]
     async fn test_rate_limit_global_burst() {
-        let mut config = MessageRouterConfig::default().with_rate_limit(
+        let config = MessageRouterConfig::default().with_rate_limit(
             RateLimitConfig::default()
                 .with_per_sender(1000, 1000)
                 .with_per_recipient(1000, 1000)
                 .with_global(5, 3), // tight global cap
         );
-        config.enable_signing = false;
-        let router = MessageRouter::with_config(config);
+        let mut h = SigningHarness::new(config);
 
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
         // First 3 messages consume the global burst
         for _ in 0..3 {
@@ -1617,7 +1651,7 @@ mod tests {
                 AgentMessageType::Notification,
                 b"g".to_vec(),
             );
-            router.send_message(msg).await.unwrap();
+            h.send(msg).await.unwrap();
         }
 
         // 4th should trip global scope
@@ -1627,7 +1661,7 @@ mod tests {
             AgentMessageType::Notification,
             b"g".to_vec(),
         );
-        let err = router.send_message(msg).await.unwrap_err();
+        let err = h.send(msg).await.unwrap_err();
         match err {
             AgentError::RateLimitExceeded {
                 scope, agent_id, ..
@@ -1643,21 +1677,17 @@ mod tests {
     /// prevent another from sending (assuming recipient/global have room).
     #[tokio::test]
     async fn test_rate_limit_per_sender_isolation() {
-        let mut config = MessageRouterConfig::default().with_rate_limit(
+        let config = MessageRouterConfig::default().with_rate_limit(
             RateLimitConfig::default()
                 .with_per_sender(1, 1)
                 .with_per_recipient(1000, 1000)
                 .with_global(1000, 1000),
         );
-        config.enable_signing = false;
-        let router = MessageRouter::with_config(config);
+        let mut h = SigningHarness::new(config);
 
-        let sender_a = create_test_identity("sender_a");
-        let sender_b = create_test_identity("sender_b");
-        let recipient = create_test_identity("recipient");
-        router.register_agent(sender_a.agent_id.clone()).unwrap();
-        router.register_agent(sender_b.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
+        let sender_a = h.agent("sender_a");
+        let sender_b = h.agent("sender_b");
+        let recipient = h.agent("recipient");
 
         // Sender A uses its single token
         let msg_a = AgentMessage::new(
@@ -1666,7 +1696,7 @@ mod tests {
             AgentMessageType::Notification,
             b"a".to_vec(),
         );
-        router.send_message(msg_a).await.unwrap();
+        h.send(msg_a).await.unwrap();
 
         // Sender A's 2nd message is rejected
         let msg_a2 = AgentMessage::new(
@@ -1676,7 +1706,7 @@ mod tests {
             b"a".to_vec(),
         );
         assert!(matches!(
-            router.send_message(msg_a2).await,
+            h.send(msg_a2).await,
             Err(AgentError::RateLimitExceeded { .. })
         ));
 
@@ -1687,20 +1717,17 @@ mod tests {
             AgentMessageType::Notification,
             b"b".to_vec(),
         );
-        router.send_message(msg_b).await.unwrap();
+        h.send(msg_b).await.unwrap();
     }
 
     /// Rate limiting can be disabled entirely via config.
     #[tokio::test]
     async fn test_rate_limit_disabled() {
-        let mut config = MessageRouterConfig::default().without_rate_limiting();
-        config.enable_signing = false;
-        let router = MessageRouter::with_config(config);
+        let config = MessageRouterConfig::default().without_rate_limiting();
+        let mut h = SigningHarness::new(config);
 
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
         // Send far more than default burst — should all succeed
         for i in 0..100 {
@@ -1710,19 +1737,17 @@ mod tests {
                 AgentMessageType::Notification,
                 format!("msg{}", i).into_bytes(),
             );
-            router.send_message(msg).await.unwrap();
+            h.send(msg).await.unwrap();
         }
-        assert_eq!(router.rate_limited_count(), 0);
+        assert_eq!(h.router.rate_limited_count(), 0);
     }
 
     /// Unregistering an agent drops its rate-limit buckets.
     #[tokio::test]
     async fn test_unregister_agent_drops_rate_limit_buckets() {
-        let router = unsigned_test_router();
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
+        let mut h = test_harness();
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
         // Send a message to materialize buckets
         let msg = AgentMessage::new(
@@ -1731,33 +1756,30 @@ mod tests {
             AgentMessageType::Notification,
             b"x".to_vec(),
         );
-        router.send_message(msg).await.unwrap();
-        assert!(router.sender_buckets.contains_key(&sender.agent_id));
-        assert!(router.recipient_buckets.contains_key(&recipient.agent_id));
+        h.send(msg).await.unwrap();
+        assert!(h.router.sender_buckets.contains_key(&sender.agent_id));
+        assert!(h.router.recipient_buckets.contains_key(&recipient.agent_id));
 
         // Unregister — buckets should be dropped
-        router.unregister_agent(&sender.agent_id).unwrap();
-        router.unregister_agent(&recipient.agent_id).unwrap();
-        assert!(!router.sender_buckets.contains_key(&sender.agent_id));
-        assert!(!router.recipient_buckets.contains_key(&recipient.agent_id));
+        h.router.unregister_agent(&sender.agent_id).unwrap();
+        h.router.unregister_agent(&recipient.agent_id).unwrap();
+        assert!(!h.router.sender_buckets.contains_key(&sender.agent_id));
+        assert!(!h.router.recipient_buckets.contains_key(&recipient.agent_id));
     }
 
     /// Counter correctly reflects rejected messages.
     #[tokio::test]
     async fn test_rate_limited_counter() {
-        let mut config = MessageRouterConfig::default().with_rate_limit(
+        let config = MessageRouterConfig::default().with_rate_limit(
             RateLimitConfig::default()
                 .with_per_sender(1, 1)
                 .with_per_recipient(1000, 1000)
                 .with_global(1000, 1000),
         );
-        config.enable_signing = false;
-        let router = MessageRouter::with_config(config);
+        let mut h = SigningHarness::new(config);
 
-        let sender = create_test_identity("sender");
-        let recipient = create_test_identity("recipient");
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
+        let sender = h.agent("sender");
+        let recipient = h.agent("recipient");
 
         // First succeeds, next 3 are rejected
         for i in 0..4 {
@@ -1767,9 +1789,9 @@ mod tests {
                 AgentMessageType::Notification,
                 format!("m{}", i).into_bytes(),
             );
-            let _ = router.send_message(msg).await;
+            let _ = h.send(msg).await;
         }
-        assert_eq!(router.rate_limited_count(), 3);
+        assert_eq!(h.router.rate_limited_count(), 3);
     }
 
     // ============================================================
@@ -1958,32 +1980,6 @@ mod tests {
             }
             other => panic!("expected InvalidMessageSignature, got {:?}", other),
         }
-    }
-
-    /// When `enable_signing = false`, unsigned messages bypass
-    /// verification and are delivered normally.
-    #[tokio::test]
-    async fn test_signing_disabled_bypasses_verification() {
-        let mut config = MessageRouterConfig::default().without_rate_limiting();
-        config.enable_signing = false;
-        let router = MessageRouter::with_config(config);
-
-        let sender = create_test_identity("nosig_sender");
-        let recipient = create_test_identity("nosig_recipient");
-        router.register_agent(sender.agent_id.clone()).unwrap();
-        router.register_agent(recipient.agent_id.clone()).unwrap();
-
-        let msg = AgentMessage::new(
-            sender,
-            recipient.clone(),
-            AgentMessageType::Notification,
-            b"plain".to_vec(),
-        );
-        router.send_message(msg).await.unwrap();
-        assert_eq!(router.rejected_signature_count(), 0);
-
-        let received = router.receive_message(&recipient.agent_id).await.unwrap();
-        assert!(received.is_some());
     }
 
     /// `sign_message` is idempotent: calling it twice produces the

@@ -195,6 +195,7 @@ mod tests {
             steps: 30,
             guidance_scale: 4.5,
             voxel_resolution: None,
+            audio_duration_secs: None,
             seed: Some(7),
             input_image_hash: None,
             metadata: Default::default(),

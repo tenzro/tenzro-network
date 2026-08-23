@@ -38,6 +38,17 @@ hf-hub = { workspace = true }
 # Metal auto-links on macOS ARM64 (no feature flag needed)
 # Other backends enabled via feature flags below
 llama-cpp-2 = { workspace = true }
+# The flash-attention policy setter on `LlamaContextParams` takes a raw
+# `llama_cpp_sys_2::llama_flash_attn_type`, so the sys crate has to be nameable here --
+# the safe wrapper exposes the setter but not the enum.
+#
+# It must be the PATH dep, not the crates.io one. `[patch.crates-io]` in the workspace
+# root redirects `llama-cpp-2` only; the sys crate is not patched. Depending on the
+# published version would pull a second, distinct `llama-cpp-sys-2` into the graph, and
+# its `llama_flash_attn_type` would be a different type from the one the vendored
+# `llama-cpp-2` expects -- a type mismatch on a setter that looks correct. Pointing at
+# the same directory the vendored wrapper points at keeps it one instance.
+llama-cpp-sys-2 = { path = "../../vendor/llama-cpp-rs/llama-cpp-sys-2" }
 praecise-runtime = { path = "../../vendor/llama-cpp-rs/praecise-runtime", features = ["bundled-llama"] }
 
 # Unicode decoding for llama.cpp token_to_piece

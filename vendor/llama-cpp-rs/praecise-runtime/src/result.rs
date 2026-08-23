@@ -69,10 +69,45 @@ pub struct InferenceResult {
 }
 
 /// A chat message with role and content, for chat-template formatting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The tool fields carry a turn's tool structure to templates that render tool
+/// history themselves. A model whose template has tool branches — muse-glimmer
+/// renders an assistant tool call as `<|start|>assistant to=NAME<|message|>`
+/// plus ATEM markup, and a result as `<|start|>tool NAME<|message|><tool_output
+/// …>` — must be shown its own dialect, because it will imitate whatever its
+/// history shows it. Flattening tool history into text taught it a foreign
+/// dialect, which it then reproduced instead of calling a tool: measured,
+/// giving it `<tool_use …>` XML made it emit `<tool_use …>` XML, and giving it
+/// prose made it emit prose.
+///
+/// Every field is optional and skipped when absent, so a template that has no
+/// tool branches sees exactly what it saw before.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
-    /// Message role (`system`, `user`, `assistant`, …).
+    /// Message role (`system`, `user`, `assistant`, `tool`, …).
     pub role: String,
     /// Message content.
     pub content: String,
+    /// Tool calls this assistant turn made, in the OpenAI shape templates
+    /// expect: `[{id, type: "function", function: {name, arguments}}]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+    /// For `role == "tool"`: the tool that produced this result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// For `role == "tool"`: the call this result answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    /// A plain turn with no tool structure — the shape every caller used before
+    /// the tool fields existed.
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            ..Default::default()
+        }
+    }
 }

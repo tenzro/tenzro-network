@@ -679,10 +679,12 @@ pub struct EntryPoint {
     /// Total operations processed
     pub total_ops_processed: AtomicU64,
 
-    /// Optional ERC-7579 validator registry. When set, `validate_user_op` will
-    /// route to installed validators in priority order before falling back to
-    /// the legacy length-only signature check. When unset, the legacy check
-    /// applies (used by the existing test suite and non-modular accounts).
+    /// ERC-7579 validator registry. `validate_user_op` routes to the sender's
+    /// installed validators in priority order.
+    ///
+    /// Optional only in construction order — an `EntryPoint` without one
+    /// cannot verify any signature, so it refuses every UserOperation rather
+    /// than admitting them unchecked. The node always attaches one.
     pub validator_registry: Option<Arc<crate::aa_validators::ValidatorRegistry>>,
 
     /// Optional VM runtime used to actually execute UserOp `call_data` against
@@ -987,10 +989,14 @@ impl EntryPoint {
             ));
         }
 
-        // Validate signature. If an ERC-7579 validator registry is attached
-        // and the sender has any installed validator modules, route to them
-        // (the first non-failure validator wins). Otherwise fall back to the
-        // legacy length-only check used by non-modular accounts.
+        // Validate the signature through the sender's installed ERC-7579
+        // validator modules (the first non-failure validator wins).
+        //
+        // There is no fallback. The previous one accepted any non-empty
+        // signature for an account with no installed validator, which is not
+        // a signature check -- `signature = [0x00]` passed it. An account
+        // whose signature semantics nothing owns cannot have its signature
+        // verified, so its operations are refused rather than admitted.
         if let Some(registry) = self.validator_registry.as_ref() {
             // Compute the canonical UserOp hash bound to this EntryPoint
             // (chain_id + address). 32-byte preimage matches what the on-chain
@@ -1008,13 +1014,19 @@ impl EntryPoint {
                 if result.is_failure() {
                     return Err(AccountAbstractionError::InvalidSignature);
                 }
-                // Skip the legacy length check — the validator module owns
-                // the signature semantics.
-            } else if op.signature.is_empty() {
-                return Err(AccountAbstractionError::InvalidSignature);
+                // The validator module owns the signature semantics; nothing
+                // further to check here.
+            } else {
+                return Err(AccountAbstractionError::InvalidUserOp(
+                    "sender has no installed ERC-7579 validator module, so its                      signature cannot be verified; install one before submitting                      UserOperations"
+                        .to_string(),
+                ));
             }
-        } else if op.signature.is_empty() {
-            return Err(AccountAbstractionError::InvalidSignature);
+        } else {
+            return Err(AccountAbstractionError::InvalidUserOp(
+                "EntryPoint has no validator registry attached, so UserOperation                  signatures cannot be verified"
+                    .to_string(),
+            ));
         }
 
         // Balance sufficiency is verified at execution time against the
@@ -2113,6 +2125,41 @@ fn decode_execute_calldata(call_data: &[u8]) -> Option<(Vec<u8>, u128, Vec<u8>)>
 
 #[cfg(test)]
 mod tests {
+
+    /// An `EntryPoint` whose `senders` can actually be validated.
+    ///
+    /// Validation routes through installed ERC-7579 validator modules and has
+    /// no fallback, so a test that is not about signatures still needs one.
+    /// `NoOpValidator` accepts any non-empty signature — the same rule the
+    /// removed length-only fallback applied — except that it is installed
+    /// deliberately here rather than applying to every account everywhere.
+    fn entry_point_with_validators(ep_address: Vec<u8>, senders: &[&[u8]]) -> EntryPoint {
+        use crate::aa_validators::{
+            ModuleAttestation, ModuleType, NoOpValidator, ValidatorRegistry,
+        };
+        let registry = ValidatorRegistry::new();
+        let module_addr = [0x7Au8; 20];
+        registry.attestations().attest(ModuleAttestation {
+            module_address: module_addr,
+            module_type: ModuleType::Validator,
+            registry: *registry.trusted_registry(),
+            attester: [0xAA; 20],
+            attestation_data: b"test".to_vec(),
+            revoked: false,
+        });
+        for sender in senders {
+            registry
+                .install(
+                    sender.to_vec(),
+                    ModuleType::Validator,
+                    std::sync::Arc::new(NoOpValidator::new(module_addr)),
+                    100,
+                    vec![],
+                )
+                .expect("install NoOpValidator for test sender");
+        }
+        EntryPoint::new(ep_address).with_validator_registry(std::sync::Arc::new(registry))
+    }
     use super::*;
 
     #[test]
@@ -2171,8 +2218,8 @@ mod tests {
 
     #[test]
     fn test_user_operation_validation() {
-        let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
+        let entry_point = entry_point_with_validators(vec![0x01; 20], &[&sender]);
 
         let user_op = test_user_op(sender.clone(), 0);
 
@@ -2201,8 +2248,8 @@ mod tests {
         // Without a VM runtime attached, handle_ops follows the
         // accounting-only path: validates, charges gas at the full call/
         // verification/pre-verification limit, increments nonce.
-        let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
+        let entry_point = entry_point_with_validators(vec![0x01; 20], &[&sender]);
 
         let user_op = test_user_op(sender.clone(), 0);
 
@@ -2510,8 +2557,8 @@ mod tests {
 
     #[test]
     fn test_simulate_user_op() {
-        let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
+        let entry_point = entry_point_with_validators(vec![0x01; 20], &[&sender]);
 
         let user_op = test_user_op(sender.clone(), 0);
 
@@ -2534,9 +2581,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_entry_point_stats() {
-        let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender1 = vec![0x02; 20];
         let sender2 = vec![0x03; 20];
+        let entry_point = entry_point_with_validators(vec![0x01; 20], &[&sender1, &sender2]);
 
         // Process operations on the no-runtime accounting path
         let user_op1 = test_user_op(sender1.clone(), 0);
@@ -2683,8 +2730,8 @@ mod tests {
     async fn test_gas_penalty_threshold_below() {
         // When unused gas < 40,000, only actual gas is charged (no penalty).
         // No-runtime path so the gas-used equals the full reserved limit.
-        let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
+        let entry_point = entry_point_with_validators(vec![0x01; 20], &[&sender]);
 
         // total_gas_limit = 100_000 + 50_000 + 21_000 = 171_000
         // gas_used = same 171_000 (no-runtime path), unused = 0 < 40_000
@@ -3059,10 +3106,12 @@ mod tests {
         );
         let bootstrap_handle = Arc::new(RwLock::new(bootstrap));
 
-        // EntryPoint wired to the paymaster only — no runtime, no validator
-        // registry. That puts the test on the validation-only path so we
-        // exercise paymaster-debit semantics in isolation.
-        let entry_point = EntryPoint::new(vec![0xEE; 20])
+        // EntryPoint wired to the paymaster and no runtime, so the test stays
+        // on the validation-only path and exercises paymaster-debit semantics
+        // in isolation. A validator module is installed for the sender because
+        // validation has no fallback — without one the op is refused before
+        // the paymaster is ever consulted.
+        let entry_point = entry_point_with_validators(vec![0xEE; 20], &[&sender])
             .with_chain_id(1337)
             .with_bootstrap_paymaster(bootstrap_handle.clone());
 

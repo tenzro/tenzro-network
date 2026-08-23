@@ -177,20 +177,80 @@ fn parse_tool_args(body: &str) -> serde_json::Value {
     }
 
     // A JSON object body is used verbatim.
-    if body.starts_with('{') {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+    if body.starts_with('{')
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
             return v;
         }
-    }
 
     // ATEM markup body.
-    if body.contains("<atem:") {
-        if let Some(v) = parse_atem_params(body) {
+    if body.contains("<atem:")
+        && let Some(v) = parse_atem_params(body) {
             return v;
+        }
+
+    empty_object()
+}
+
+/// Parse ATEM invoke blocks that arrive WITHOUT a harmony `to=<tool>` header.
+///
+/// muse normally names the tool in the segment header and puts only the
+/// arguments in the body, which [`parse_muse_harmony`] handles. Mid-agent-loop
+/// it also emits the markup bare — `<atem:function_calls><atem:invoke
+/// name="TOOL">…</atem:invoke></atem:function_calls>` with no header at all —
+/// and then the tool name is in the `invoke` tag instead. Unparsed, that
+/// reached the caller as prose and the run ended a step early while reporting
+/// success.
+///
+/// Returns the text with the consumed blocks removed, plus the calls found.
+pub(crate) fn parse_bare_atem(raw: &str) -> (String, Vec<ToolCall>) {
+    const OPEN: &str = "<atem:invoke";
+    const CLOSE: &str = "</atem:invoke>";
+
+    let mut calls = Vec::new();
+    let mut text = raw.to_string();
+
+    while let Some(start) = text.find(OPEN) {
+        let after_open = start + OPEN.len();
+        let Some(gt_rel) = text[after_open..].find('>') else {
+            break;
+        };
+        let attrs_end = after_open + gt_rel;
+        let Some(close_rel) = text[attrs_end..].find(CLOSE) else {
+            // Truncated mid-emission: leave it and stop rather than invent a
+            // call from half of one.
+            break;
+        };
+        let body_end = attrs_end + close_rel;
+        let close_end = body_end + CLOSE.len();
+
+        let name = extract_attr(&text[after_open..attrs_end], "name");
+        let body = text[attrs_end + 1..body_end].trim().to_string();
+
+        match name {
+            Some(name) if !name.is_empty() => {
+                calls.push(ToolCall {
+                    id: synth_call_id(),
+                    name,
+                    input: parse_tool_args(&body),
+                });
+                text.replace_range(start..close_end, "");
+            }
+            // An invoke with no name is not a call we can place.
+            _ => break,
         }
     }
 
-    empty_object()
+    // Drop the wrapper the invokes sat inside, so it does not surface as text.
+    for tag in [
+        "<atem:function_calls>",
+        "</atem:function_calls>",
+        "</atem:invoke>",
+        "</atem:parameter>",
+    ] {
+        text = text.replace(tag, "");
+    }
+
+    (text.trim().to_string(), calls)
 }
 
 /// Parse ATEM `<atem:parameter name="P">VALUE</atem:parameter>` pairs (anywhere

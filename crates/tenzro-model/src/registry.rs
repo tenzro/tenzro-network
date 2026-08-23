@@ -321,6 +321,22 @@ impl ModelRegistry {
     /// Returns `ModelError::ModelAlreadyExists` if a model with the same ID already exists.
     /// Returns `ModelError::InvalidModel` if the model configuration is invalid.
     pub fn register_model(&self, model: ModelInfo) -> Result<RegistryEvent> {
+        // Catalog-owned facts are re-derived on the way in, exactly as the
+        // hydration path does on the way out of storage.
+        //
+        // A `ModelInfo` reaches this point from several projections, and most
+        // of them cannot know these fields. A gossiped announcement carries one
+        // category string and a parameter display string, so a peer's row for a
+        // catalog model lands with a capability set holding only the announced
+        // category. That is load-bearing rather than cosmetic: `quality_tier`
+        // admits a sub-30B model to the strong tier only on a `code`/`reasoning`
+        // tag, so such a row tiers `Cheap` permanently and drops out of every
+        // `quality_floor = strong` request — while the provider serving the
+        // same model, whose row came from `to_model_info`, tiers it `Strong`.
+        // Deriving here fixes every projection at once instead of each caller
+        // remembering to.
+        let model = refresh_catalog_fields(model);
+
         // Validate model
         self.validate_model(&model)?;
 
@@ -386,6 +402,12 @@ impl ModelRegistry {
     /// Returns `ModelError::ModelNotFound` if the model doesn't exist.
     /// Returns `ModelError::InvalidModel` if the updated configuration is invalid.
     pub fn update_model(&self, model: ModelInfo) -> Result<RegistryEvent> {
+        // Same catalog re-derivation as `register_model`. Callers reach this
+        // through `register_model(...).or_else(update_model)`, so a model the
+        // registry already knows takes THIS path on every refresh — enriching
+        // only the insert would leave every existing row stale forever.
+        let model = refresh_catalog_fields(model);
+
         // Validate model
         self.validate_model(&model)?;
 

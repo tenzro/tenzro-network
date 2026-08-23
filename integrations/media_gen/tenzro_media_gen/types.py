@@ -33,6 +33,11 @@ from typing import Any
 MAX_MEDIA_GEN_DIMENSION = 8192
 MAX_MEDIA_GEN_STEPS = 500
 MAX_MEDIA_GEN_FRAMES = 3600
+# Longest audio clip a job may request, in seconds. An hour, matching the
+# ceiling the Rust pricing applies before quoting — a request past it is
+# refused here rather than being silently clamped to a different length than
+# the one the caller was charged for.
+MAX_MEDIA_GEN_AUDIO_SECONDS = 3600
 MAX_MEDIA_GEN_PROMPT_BYTES = 8192
 
 
@@ -77,6 +82,7 @@ class MediaGenKind(str, Enum):
     IMAGE2IMAGE = "image2image"
     TEXT2VIDEO = "text2video"
     IMAGE2VIDEO = "image2video"
+    TEXT2AUDIO = "text2audio"
 
     @property
     def requires_input_image(self) -> bool:
@@ -85,6 +91,23 @@ class MediaGenKind(str, Enum):
     @property
     def is_video(self) -> bool:
         return self in (MediaGenKind.TEXT2VIDEO, MediaGenKind.IMAGE2VIDEO)
+
+    @property
+    def is_audio(self) -> bool:
+        """Whether this kind produces a waveform rather than pixels.
+
+        The same seam as ``is_video``: an audio job has no width, height or
+        frames to reason about, and every branch that divides work by output
+        class should ask here rather than testing for a specific member.
+        """
+        return self is MediaGenKind.TEXT2AUDIO
+
+    @property
+    def output_extension(self) -> str:
+        """File extension for the artifact, mirroring the Rust side."""
+        if self.is_audio:
+            return "wav"
+        return "mp4" if self.is_video else "png"
 
 
 class MediaGenStatus(str, Enum):
@@ -160,6 +183,7 @@ class MediaGenParams:
     num_frames: int | None = None
     fps: int | None = None
     seed: int | None = None
+    audio_duration_secs: float | None = None
     input_image_hash: bytes | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -193,6 +217,19 @@ class MediaGenParams:
             raise ValueError("guidance_scale must be a finite non-negative number")
         if kind.requires_input_image and self.input_image_hash is None:
             raise ValueError("input_image_hash is required for this media-gen kind")
+        if kind.is_audio:
+            # Length is the only dimension an audio job has. A missing or
+            # non-positive duration would otherwise reach the pipeline as
+            # `audio_duration=None` and produce whatever the model defaults to,
+            # which is not what the caller was quoted for.
+            if self.audio_duration_secs is None:
+                raise ValueError("audio_duration_secs is required for audio media-gen kinds")
+            if not (self.audio_duration_secs > 0):
+                raise ValueError("audio_duration_secs must be positive")
+            if self.audio_duration_secs > MAX_MEDIA_GEN_AUDIO_SECONDS:
+                raise ValueError(
+                    f"audio_duration_secs exceeds {MAX_MEDIA_GEN_AUDIO_SECONDS}s"
+                )
         if kind.is_video:
             if self.num_frames is None or self.fps is None:
                 raise ValueError("num_frames and fps are required for video media-gen kinds")

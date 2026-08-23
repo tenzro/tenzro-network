@@ -941,8 +941,12 @@ impl InferenceRouter {
                 // when the prompt or the provider's advertised prefix is
                 // empty, so this reduces to the plain score in that case.
                 providers.sort_by(|a, b| {
-                    let sa = a.calculate_score() + Self::prefix_bias(a, prompt_run_hashes);
-                    let sb = b.calculate_score() + Self::prefix_bias(b, prompt_run_hashes);
+                    let sa = a.calculate_score()
+                        + Self::prefix_bias(a, prompt_run_hashes)
+                        + Self::speculation_bias(a);
+                    let sb = b.calculate_score()
+                        + Self::prefix_bias(b, prompt_run_hashes)
+                        + Self::speculation_bias(b);
                     sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
@@ -957,38 +961,42 @@ impl InferenceRouter {
             }
         }
 
-        // Prefix-affinity tie-break: among the providers the strategy ranks
+        // Capability tie-break: among the providers the strategy ranks
         // effectively equal at the top, prefer the one holding the longest
-        // warm prefix for this prompt. This applies to every strategy (not
-        // just WeightedScore) but only ever reorders providers the strategy
+        // warm prefix for this prompt and, failing that, the one that can
+        // decode speculatively. This applies to every strategy (not just
+        // WeightedScore) but only ever reorders providers the strategy
         // already considers interchangeable, so it never overrides a
         // strategy's primary ordering (e.g. LowestPrice still wins on price).
-        if !prompt_run_hashes.is_empty()
-            && providers.len() > 1
-            && let Some(best_len) = providers
-                .iter()
-                .map(|p| {
-                    p.provider
-                        .capacity
-                        .prefix_cache
-                        .longest_match_len(prompt_run_hashes)
-                })
-                .max()
-            && best_len > 0
-        {
-            // Only reorder within the leading tie-group of the strategy sort:
-            // find how many leading providers are equivalent to the first
-            // under the active strategy, then pick the best warm match among
-            // them.
+        //
+        // Both preferences are automatic — no caller flag, no operator
+        // config. A warm prefix saves a whole prefill and a co-located
+        // drafter is worth roughly 1.7-2x on decode at the low concurrency a
+        // provider network actually runs at, so a caller who did not ask for
+        // it still gets it when it is free.
+        //
+        // Only the warm prefix is decided here. Speculation is applied as
+        // `speculation_bias` inside the `WeightedScore` sort instead, because
+        // `leading_tie_group_len` returns 1 for that strategy and
+        // `InferenceRouter::new` builds it unconditionally — a speculation
+        // preference expressed in this block would be unreachable in the
+        // shipping binary while looking entirely live.
+        if providers.len() > 1 {
             let tie_len = Self::leading_tie_group_len(&providers, config);
             if tie_len > 1
-                && let Some(pos) = providers[..tie_len].iter().position(|p| {
-                    p.provider
-                        .capacity
-                        .prefix_cache
-                        .longest_match_len(prompt_run_hashes)
-                        == best_len
+                && let Some(pos) = (0..tie_len).max_by_key(|&i| {
+                    let cap = &providers[i].provider.capacity;
+                    let warm = if prompt_run_hashes.is_empty() {
+                        0
+                    } else {
+                        cap.prefix_cache.longest_match_len(prompt_run_hashes)
+                    };
+                    // `Reverse(i)` keeps the first best on equal keys, so a
+                    // group with nothing to distinguish it stays exactly as
+                    // the strategy scored it.
+                    (warm, std::cmp::Reverse(i))
                 })
+                && pos != 0
             {
                 providers.swap(0, pos);
             }
@@ -1025,6 +1033,38 @@ impl InferenceRouter {
         let prompt_bytes = (prompt_run_hashes.len() * tenzro_types::PREFIX_RUN_BYTES) as f64;
         let fraction = (matched / prompt_bytes).min(1.0);
         fraction * PREFIX_BIAS_CEILING
+    }
+
+    /// Bounded bonus for a provider that can decode speculatively *and* is
+    /// idle enough for it to pay, on the same 0-100 scale as
+    /// [`ProviderWithMetrics::calculate_score`].
+    ///
+    /// This lives in the score rather than in a tie-break because
+    /// `leading_tie_group_len` returns 1 for `WeightedScore`, and
+    /// `InferenceRouter::new` builds `WeightedScore` unconditionally — a
+    /// tie-break here would be unreachable in the shipping binary. Folding it
+    /// into the sort is what makes the preference actually run, and mirrors
+    /// how `prefix_bias` is applied.
+    ///
+    /// The ceiling sits below `PREFIX_BIAS_CEILING` because a warm prefix
+    /// saves a whole prefill while speculation only accelerates decode, and
+    /// the decode win is the less certain of the two: measured acceptance
+    /// varies by prompt, and a config accepting 4.64 tokens per step has been
+    /// measured running at 0.67x of plain decoding once the provider is
+    /// batching. `idle_enough` is what keeps this on the winning side of that
+    /// inversion, so the bonus is zero for a busy provider rather than merely
+    /// smaller.
+    fn speculation_bias(provider: &ProviderWithMetrics) -> f64 {
+        const SPECULATION_BIAS_CEILING: f64 = 4.0;
+        let cap = &provider.provider.capacity;
+        if cap.mtp_enabled && crate::meta_router::idle_enough(
+            cap.active_requests,
+            cap.max_concurrent_requests,
+        ) {
+            SPECULATION_BIAS_CEILING
+        } else {
+            0.0
+        }
     }
 
     /// Number of leading providers the active strategy ranks equal to the
@@ -1286,6 +1326,28 @@ impl InferenceRouter {
         }
         providers.retain(|p| p.provider.pricing.minimum_price <= request.max_price);
         providers.retain(|p| p.provider.capacity.has_capacity());
+        // A hedge is a duplicate request, so it is only free when the fleet
+        // has headroom to absorb it. `has_capacity()` only means "not
+        // completely full", which is far too late: measured replica-selection
+        // work finds duplication *inverts* well before saturation — C3 saw
+        // speculative retries 5x worse at p99 under load, Rein 2x worse tail
+        // above 55% utilisation, and Vulimiri et al. put the safe ceiling
+        // nearer 30%. Past that point the extra load is itself what lengthens
+        // the tail the hedge was meant to shorten.
+        //
+        // Requiring the *target* to be below half its declared ceiling keeps
+        // hedging in the regime where Dean & Barroso measured it winning
+        // (24x at p99.9 for ~2% extra requests) and switches it off exactly
+        // when it would start costing. Providers that declare no ceiling are
+        // excluded rather than assumed idle, for the same reason
+        // `speculation_pays` excludes them: an absent value is unknown, and
+        // unknown must not be the most attractive state to advertise.
+        providers.retain(|p| {
+            crate::meta_router::idle_enough(
+                p.provider.capacity.active_requests,
+                p.provider.capacity.max_concurrent_requests,
+            )
+        });
         // Respect circuit breakers: a quarantined (Open) provider must never
         // be a hedge target.
         providers.retain(|p| {

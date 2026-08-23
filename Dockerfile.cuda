@@ -198,13 +198,18 @@ RUN set -eux; \
 # The `rpc` feature (on by default via cluster-serving) builds the standalone
 # ggml `rpc-server` binary into llama-cpp-sys-2's cargo OUT_DIR. That path does
 # not survive into the runtime stage, so stage it at a fixed location for COPY.
+# Matched under both names: upstream llama.cpp builds this target as `ggml-rpc-server`,
+# while older revisions emitted `rpc-server`. Searching for one name only made the whole
+# CUDA image unbuildable — and it failed HERE, after the ~50 minute compile, which is the
+# most expensive place a filename can be wrong. No CI job builds this file, so nothing
+# caught it.
 # The final ldd guard fails the build if rpc-server links a ggml/llama shared
 # object. CUDA libraries are expected dynamic links here: libcudart/libcublas
 # resolve from the runtime image, and libcuda.so.1 is the driver library the
 # NVIDIA container runtime injects at `docker run --gpus all` — it is absent in
 # the build container, so it is excluded from the not-found check.
 RUN set -eux; \
-    src="$(find target/release/build -type f -name rpc-server -perm -u+x 2>/dev/null | head -n1)"; \
+    src="$(find target/release/build -type f \\( -name rpc-server -o -name ggml-rpc-server \\) -perm -u+x 2>/dev/null | head -n1)"; \
     test -n "$src"; \
     cp "$src" /build/rpc-server; \
     ldd /build/rpc-server || true; \

@@ -913,17 +913,21 @@ async fn main() -> Result<()> {
         web_state = web_state.with_network_metrics_registry(network.metrics_registry());
     }
 
-    // Wire faucet if configured. The faucet's source address is the
-    // runtime-provisioned signing-key address (see `provision_faucet_signing_key`
-    // in `genesis.rs`), NOT the legacy sentinel `faucet.address` from the TOML.
-    // The migration moves all balance from the legacy sentinel to the
-    // keypair-derived address; the web `/faucet` endpoint must transfer
-    // from the same address that holds the funds.
+    // Wire the faucet only when its funds actually have an address. The
+    // source is the runtime-provisioned signing-key address written by
+    // `provision_faucet_signing_key` in `genesis.rs`; `faucet.address` in the
+    // TOML names nothing that holds a balance.
+    //
+    // There is deliberately no fallback. Wiring `/faucet` to an address with
+    // no funds produces an endpoint that accepts requests and fails every one
+    // of them, and reports the fault to callers instead of to the operator who
+    // started the node. If provisioning has not run, the faucet stays unwired
+    // and says so here, once.
     if let Some(ref genesis) = config.genesis
         && let Some(ref faucet) = genesis.faucet
         && faucet.enabled
     {
-        let runtime_faucet_address = node_arc
+        match node_arc
             .storage()
             .and_then(|s| {
                 s.get("metadata", genesis::FAUCET_SIGNING_KEY_ADDRESS)
@@ -932,22 +936,25 @@ async fn main() -> Result<()> {
             })
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .map(|hex| format!("0x{}", hex))
-            .unwrap_or_else(|| {
-                warn!(
-                    "Faucet signing-key address not found in CF_METADATA; \
-                             falling back to legacy sentinel {}. /faucet will fail \
-                             until provision_faucet_signing_key() runs.",
-                    faucet.address
+        {
+            Some(runtime_faucet_address) => {
+                let dispense_amount =
+                    genesis::resolve_faucet_grant_tnzo(faucet.amount_per_request);
+                info!("Faucet dispensing {} TNZO per request", dispense_amount);
+                web_state = web_state.with_faucet(
+                    runtime_faucet_address,
+                    dispense_amount,
+                    faucet.cooldown_seconds,
                 );
-                faucet.address.clone()
-            });
-        let dispense_amount = genesis::resolve_faucet_grant_tnzo(faucet.amount_per_request);
-        info!("Faucet dispensing {} TNZO per request", dispense_amount);
-        web_state = web_state.with_faucet(
-            runtime_faucet_address,
-            dispense_amount,
-            faucet.cooldown_seconds,
-        );
+            }
+            None => {
+                warn!(
+                    "Faucet is enabled in genesis but no signing-key address is \
+                     provisioned in CF_METADATA — leaving /faucet unwired rather \
+                     than pointing it at an address holding no funds."
+                );
+            }
+        }
     }
 
     // Wire event sender if available
@@ -1851,6 +1858,23 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
                  whatever was already in --boot-nodes (may be empty).",
                 name
             );
+        } else if resolved.len() <= 2 {
+            // One target, resolved to its TCP and QUIC forms, is not
+            // redundancy — it is a single point of failure wearing two
+            // addresses. The module's own rationale rests on "multiple SRV
+            // targets + DNS caching" making discovery "resilient to single-host
+            // outages", and a zone can drift to one target without anything
+            // saying so. It did here: the only target had been decommissioned,
+            // so every node that trusted DNS alone had exactly one peer to try
+            // and it was dead.
+            config.network.boot_nodes.extend(resolved.iter().cloned());
+            tracing::warn!(
+                "Bootstrap DNS for {} resolved a single host ({} multiaddrs). Discovery \
+                 now depends on that one host being reachable — add more SRV targets to \
+                 the zone, or pass additional --boot-nodes.",
+                name,
+                resolved.len(),
+            );
         } else {
             config.network.boot_nodes.extend(resolved.iter().cloned());
             info!(
@@ -1860,6 +1884,20 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
                 config.network.boot_nodes.len(),
             );
         }
+    }
+
+    // A validator with no boot nodes cannot join anything.
+    //
+    // Kademlia cannot bootstrap from an empty peer set, so this node will sit
+    // alone indefinitely — healthy by every local measure, and part of no
+    // network. That is worth saying loudly at startup rather than leaving an
+    // operator to infer it from a peer count of zero.
+    if config.network.boot_nodes.is_empty() {
+        tracing::warn!(
+            "No boot nodes: this node has no way to discover peers and will not join \
+             the network. Pass --boot-nodes, or --bootstrap-dns pointing at a zone with \
+             reachable targets."
+        );
     }
 
     // Genesis resolution — runs AFTER boot nodes are known so "join the

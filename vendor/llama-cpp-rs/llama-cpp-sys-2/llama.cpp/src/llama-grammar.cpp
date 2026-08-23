@@ -1290,9 +1290,19 @@ struct llama_grammar * llama_grammar_init_impl(
     }
     for (size_t i = 0; i < num_trigger_patterns; i++) {
         GGML_ASSERT(trigger_patterns != nullptr);
-        auto & trigger = vec_trigger_patterns.emplace_back();
-        trigger.pattern = trigger_patterns[i];
-        trigger.regex = std::regex(trigger.pattern);
+        // std::regex throws on a pattern it cannot compile, and this runs under
+        // a C ABI where that reaches no handler and terminates the process.
+        // Drop the offending trigger instead: the grammar then arms on whatever
+        // triggers remain, or never arms and the turn runs unconstrained.
+        try {
+            llama_grammar_trigger_pattern trigger;
+            trigger.pattern = trigger_patterns[i];
+            trigger.regex   = std::regex(trigger.pattern);
+            vec_trigger_patterns.push_back(std::move(trigger));
+        } catch (const std::regex_error & e) {
+            LLAMA_LOG_WARN("%s: ignoring grammar trigger pattern '%s': %s\n",
+                           __func__, trigger_patterns[i], e.what());
+        }
     }
 
     // Important: vec_rules has to be moved here, not copied, because stacks contains
@@ -1354,6 +1364,21 @@ void llama_grammar_apply_impl(const struct llama_grammar & grammar, llama_token_
     GGML_ASSERT(grammar.vocab != nullptr);
 
     if (grammar.awaiting_trigger) {
+        return;
+    }
+
+    // Nothing left on the stacks means there is nothing left to constrain: the
+    // construct the grammar was armed for is finished (or could not be
+    // matched). Falling through reaches llama_grammar_reject_candidates, whose
+    // `GGML_ASSERT(!stacks.empty())` — marked "REVIEW" upstream — calls
+    // abort(). In a server that is not a failed request, it is a dead process:
+    // systemd restarts the node mid-response and every other request in flight
+    // dies with it.
+    //
+    // Returning here degrades to unconstrained sampling for the rest of the
+    // turn, which is exactly the behaviour when no grammar is attached at all,
+    // so this cannot be worse than not arming one.
+    if (grammar.stacks.empty()) {
         return;
     }
 
@@ -1441,12 +1466,25 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
     }
 
     if (grammar.vocab->is_eog(token)) {
+        // No stacks at all means the grammar is no longer constraining — it
+        // gave up earlier after failing to accept a piece. Ending generation
+        // then violates nothing.
+        if (grammar.stacks.empty()) {
+            return;
+        }
         for (const auto & stack : grammar.stacks) {
             if (stack.empty()) {
                 return;
             }
         }
-        GGML_ABORT("fatal error");
+        // The model ended the sequence with the grammar mid-rule. That is a
+        // malformed generation, not a reason to abort a serving process and
+        // take every other request in flight with it. Give up the constraint
+        // and let the caller's parsers deal with the partial output.
+        LLAMA_LOG_WARN("%s: end-of-generation while the grammar was incomplete; "
+                       "dropping the constraint\n", __func__);
+        grammar.stacks.clear();
+        return;
     }
 
     llama_grammar_accept_token(grammar, token, piece);
@@ -1463,7 +1501,13 @@ void llama_grammar_accept_str(struct llama_grammar & grammar, const std::string 
 
     grammar.partial_utf8 = decoded.second;
     if (grammar.stacks.empty()) {
-        throw std::runtime_error("Unexpected empty grammar stack after accepting piece: " + piece);
+        // Same reasoning as llama_grammar_accept_token: a throw here crosses the
+        // C ABI and terminates the process. Degrade to unconstrained instead.
+        if (!grammar.gave_up) {
+            grammar.gave_up = true;
+            LLAMA_LOG_WARN("%s: grammar could not accept piece '%s'; disabling the "
+                           "constraint for the rest of this turn\n", __func__, piece.c_str());
+        }
     }
 }
 
@@ -1518,7 +1562,25 @@ void llama_grammar_accept_token(struct llama_grammar & grammar, llama_token toke
     grammar.partial_utf8 = decoded.second;
 
     if (grammar.stacks.empty()) {
-        throw std::runtime_error("Unexpected empty grammar stack after accepting piece: " + piece + " (" + std::to_string(token) + ")");
+        // The piece cannot continue any live parse. Throwing here is fatal in a
+        // server: this runs under a C ABI, so the exception reaches no handler
+        // and terminate() takes the process down mid-response, killing every
+        // other request in flight. That is a much worse outcome than the
+        // grammar failing to constrain one turn.
+        //
+        // Leave the stacks empty instead. `llama_grammar_apply_impl` treats
+        // that as "nothing left to constrain" and samples unconstrained for the
+        // rest of the turn — the behaviour when no grammar is attached at all.
+        //
+        // Report it once. This is still called for every remaining token of the
+        // turn, and logging each one buried the node's journal in the same line
+        // repeated per token, which is how it first appeared in the logs.
+        if (!grammar.gave_up) {
+            grammar.gave_up = true;
+            LLAMA_LOG_WARN("%s: grammar could not accept piece '%s' (token %d); "
+                           "disabling the constraint for the rest of this turn\n",
+                           __func__, piece.c_str(), token);
+        }
     }
 }
 

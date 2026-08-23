@@ -233,6 +233,23 @@ impl IdentityRegistry {
             seen_credential_ids: DashSet::new(),
             usernames: DashMap::new(),
             wallet_index: DashMap::new(),
+            // Under test, back the registry with an in-process binder so
+            // registrations produce *signable* wallets.
+            //
+            // Registration used to fall back, with no binder, to an address
+            // hashed from the DID that no key can sign for — documented as
+            // "never correct for a live node" and now refused outright. Tests
+            // relied on that fallback, so without this they would either need a
+            // binder wired at dozens of call sites, or the dead-address path
+            // would have to stay alive — and its whole problem is that it looks
+            // like it worked.
+            //
+            // `WalletBinder::new` is documented as suitable for exactly this.
+            // Production wires its own through `with_wallet_binder_arc`, which
+            // replaces whatever is here.
+            #[cfg(test)]
+            wallet_binder: WalletBinder::new().ok().map(Arc::new),
+            #[cfg(not(test))]
             wallet_binder: None,
             fee_schedule: ServiceFeeSchedule::default(),
             storage: None,
@@ -277,6 +294,23 @@ impl IdentityRegistry {
             seen_credential_ids: DashSet::new(),
             usernames: DashMap::new(),
             wallet_index: DashMap::new(),
+            // Under test, back the registry with an in-process binder so
+            // registrations produce *signable* wallets.
+            //
+            // Registration used to fall back, with no binder, to an address
+            // hashed from the DID that no key can sign for — documented as
+            // "never correct for a live node" and now refused outright. Tests
+            // relied on that fallback, so without this they would either need a
+            // binder wired at dozens of call sites, or the dead-address path
+            // would have to stay alive — and its whole problem is that it looks
+            // like it worked.
+            //
+            // `WalletBinder::new` is documented as suitable for exactly this.
+            // Production wires its own through `with_wallet_binder_arc`, which
+            // replaces whatever is here.
+            #[cfg(test)]
+            wallet_binder: WalletBinder::new().ok().map(Arc::new),
+            #[cfg(not(test))]
             wallet_binder: None,
             fee_schedule,
             storage: None,
@@ -429,7 +463,10 @@ impl IdentityRegistry {
                 }
             }
             Err(e) => {
-                warn!("Failed to load additional-wallet mappings from storage: {}", e);
+                warn!(
+                    "Failed to load additional-wallet mappings from storage: {}",
+                    e
+                );
             }
         }
 
@@ -439,6 +476,23 @@ impl IdentityRegistry {
             seen_credential_ids,
             usernames,
             wallet_index,
+            // Under test, back the registry with an in-process binder so
+            // registrations produce *signable* wallets.
+            //
+            // Registration used to fall back, with no binder, to an address
+            // hashed from the DID that no key can sign for — documented as
+            // "never correct for a live node" and now refused outright. Tests
+            // relied on that fallback, so without this they would either need a
+            // binder wired at dozens of call sites, or the dead-address path
+            // would have to stay alive — and its whole problem is that it looks
+            // like it worked.
+            //
+            // `WalletBinder::new` is documented as suitable for exactly this.
+            // Production wires its own through `with_wallet_binder_arc`, which
+            // replaces whatever is here.
+            #[cfg(test)]
+            wallet_binder: WalletBinder::new().ok().map(Arc::new),
+            #[cfg(not(test))]
             wallet_binder: None,
             fee_schedule: ServiceFeeSchedule::default(),
             storage: Some(storage),
@@ -464,12 +518,30 @@ impl IdentityRegistry {
     /// node can stack persistent storage and a shared wallet service onto a
     /// single registry instance. When set, `register_human_with_fee` and
     /// `register_machine_with_fee` provision real MPC wallets through the
-    /// binder's `WalletService`; without it, those calls fall back to a
-    /// deterministic placeholder address with no signable wallet — useful for
-    /// tests but never correct for a live node.
+    /// binder's `WalletService`; without it, those calls now *refuse* rather
+    /// than assigning a placeholder address no key can sign for.
     pub fn with_wallet_binder_arc(mut self, wallet_binder: Arc<WalletBinder>) -> Self {
         self.wallet_binder = Some(wallet_binder);
         self
+    }
+
+    /// A registry backed by a fresh in-process [`WalletBinder`].
+    ///
+    /// For tests and single-process development, where registrations must yield
+    /// *signable* wallets but there is no shared node wallet service to bind to.
+    ///
+    /// A registry with no binder now refuses to register rather than assigning a
+    /// placeholder address hashed from the DID — an address no key can sign for,
+    /// which looks like an ordinary account until someone tries to spend from
+    /// it. That refusal is right for a live node and useless for a test, so
+    /// tests ask for this explicitly instead of being handed a dead address.
+    ///
+    /// Not for production node startup: the wallets live in a service private to
+    /// this registry, so the node's own signing paths would not know about them.
+    /// Production wires the shared service via [`Self::with_wallet_binder_arc`].
+    pub fn with_in_process_binder() -> Result<Self> {
+        let binder = Arc::new(WalletBinder::new()?);
+        Ok(Self::new().with_wallet_binder_arc(binder))
     }
 
     /// Returns `true` when this registry has a [`WalletBinder`] configured.
@@ -478,10 +550,10 @@ impl IdentityRegistry {
     /// spawner, which mints both controller and machine identities and
     /// expects each to come back with a signable on-chain address) can
     /// assert this up-front rather than discover the missing-binder
-    /// fallback path silently. Returns `false` for in-memory test
-    /// registries constructed via [`Self::new`] / [`Self::with_storage`]
-    /// without a binder, where `register_*_with_fee` falls back to a
-    /// deterministic placeholder address with no signable wallet.
+    /// missing-binder failure at registration time. Returns `false` for
+    /// in-memory registries constructed via [`Self::new`] /
+    /// [`Self::with_storage`] without a binder, where `register_*_with_fee`
+    /// refuses rather than producing an unsignable wallet.
     pub fn has_wallet_binder(&self) -> bool {
         self.wallet_binder.is_some()
     }
@@ -1757,11 +1829,7 @@ impl IdentityRegistry {
     /// `did` is rejected with [`IdentityError::WalletError`] — never a silent
     /// fallback to the primary wallet, which is exactly the confused-deputy hole
     /// this closes. An unknown DID errors via [`Self::resolve`].
-    pub fn resolve_wallet_for_did_from(
-        &self,
-        did: &str,
-        from: Option<&Address>,
-    ) -> Result<String> {
+    pub fn resolve_wallet_for_did_from(&self, did: &str, from: Option<&Address>) -> Result<String> {
         let identity = self.resolve(did)?;
         let from = match from {
             None => return Ok(identity.wallet_id),
@@ -3009,7 +3077,11 @@ impl IdentityRegistry {
             services: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            metadata: payload.metadata.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            metadata: payload
+                .metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             username: None,
         };
 
@@ -3127,32 +3199,36 @@ impl IdentityRegistry {
     /// When a `WalletBinder` is configured, the key comes from the wallet's
     /// keystore; otherwise we generate an ephemeral one so the identity still
     /// satisfies the structural invariant (test/no-binder paths only).
+    /// Provision this identity a wallet, or refuse to register it.
+    ///
+    /// This used to fall back, with no binder configured, to a "deterministic
+    /// placeholder address" hashed from the DID, paired with freshly generated
+    /// PQ and BLS keys that were then dropped. The registry documents that
+    /// fallback as "useful for tests but never correct for a live node", and
+    /// the node only wires a binder `if let Some(wallet_service)` — so a node
+    /// that came up without one logged a warning and then handed every identity
+    /// a wallet address no key in existence can sign for. Anything paid to one
+    /// is unrecoverable, and it looks like a perfectly ordinary account until
+    /// someone tries to spend from it.
+    ///
+    /// Refusing is the honest failure. A registration that cannot produce a
+    /// signable wallet has not succeeded, and reporting that lets an operator
+    /// fix the wiring instead of discovering it through lost funds.
     async fn provision_or_default(&self, did: &str) -> Result<(Address, String, Vec<u8>, Vec<u8>)> {
-        if let Some(ref binder) = self.wallet_binder {
-            let binding = binder.provision_wallet(did).await?;
-            Ok((
-                binding.address,
-                binding.wallet_id,
-                binding.pq_verifying_key,
-                binding.bls_verifying_key,
-            ))
-        } else {
-            // Default: generate a placeholder address from the DID
-            let hash = tenzro_crypto::sha256(did.as_bytes());
-            let mut addr_bytes = [0u8; 32];
-            addr_bytes.copy_from_slice(hash.as_bytes());
-            let address = Address::new(addr_bytes);
-            let wallet_id = format!("wallet-{}", &did[did.len().saturating_sub(12)..]);
-            let pq_verifying_key = tenzro_crypto::pq::MlDsaSigningKey::generate()
-                .verifying_key_bytes()
-                .to_vec();
-            let bls_verifying_key = tenzro_crypto::bls::BlsKeyPair::generate()
-                .map_err(|e| IdentityError::WalletError(e.to_string()))?
-                .public_key()
-                .to_bytes()
-                .to_vec();
-            Ok((address, wallet_id, pq_verifying_key, bls_verifying_key))
-        }
+        let Some(ref binder) = self.wallet_binder else {
+            return Err(IdentityError::WalletError(format!(
+                "cannot register {did}: no wallet binder is configured, so this registry \
+                 cannot provision a signable wallet. Refusing rather than assigning a \
+                 placeholder address no key can sign for."
+            )));
+        };
+        let binding = binder.provision_wallet(did).await?;
+        Ok((
+            binding.address,
+            binding.wallet_id,
+            binding.pq_verifying_key,
+            binding.bls_verifying_key,
+        ))
     }
 }
 
@@ -4689,7 +4765,10 @@ mod tests {
         // Unknown DID → fail-closed.
         assert!(
             registry
-                .add_wallet("did:tenzro:human:ghost:uuid", test_wallet_ref("wallet-9", 0x99))
+                .add_wallet(
+                    "did:tenzro:human:ghost:uuid",
+                    test_wallet_ref("wallet-9", 0x99)
+                )
                 .is_err()
         );
     }
@@ -4747,8 +4826,12 @@ mod tests {
 
         // Bob's primary address is not owned by Alice → fail-closed, never a
         // silent fallback to Alice's primary wallet.
-        let denied = registry.resolve_wallet_for_did_from(&alice.did_string(), Some(&bob.wallet_address));
-        assert!(denied.is_err(), "a `from` Alice does not own must be rejected");
+        let denied =
+            registry.resolve_wallet_for_did_from(&alice.did_string(), Some(&bob.wallet_address));
+        assert!(
+            denied.is_err(),
+            "a `from` Alice does not own must be rejected"
+        );
 
         // An address owned by nobody is likewise rejected.
         let nobody = Address::new([0xEE; 32]);
@@ -4824,7 +4907,10 @@ mod tests {
         // becomes resolvable locally.
         let registry = IdentityRegistry::new();
         let did = "did:tenzro:human:remote1";
-        assert!(registry.resolve(did).is_err(), "unknown DID must not resolve yet");
+        assert!(
+            registry.resolve(did).is_err(),
+            "unknown DID must not resolve yet"
+        );
 
         let landed = registry
             .upsert_from_chain(&chain_identity_payload(did))

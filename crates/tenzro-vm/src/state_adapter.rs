@@ -52,12 +52,35 @@ fn tnzo_balance_key(address: &[u8]) -> Vec<u8> {
 /// This adapter sits between the VM and the underlying storage layer,
 /// providing caching and batching capabilities for improved performance.
 /// When configured with a RocksDB store, it persists state changes to disk.
+/// One reverted mutation: the key touched and the value it displaced.
+///
+/// `None` means the key was absent. Absence has to be distinguishable from a
+/// stored zero — restoring a zero where there was nothing invents a balance
+/// that was never written, and later reads cannot tell the difference.
+#[derive(Debug, Clone)]
+enum JournalEntry {
+    Balance(Vec<u8>, Option<u128>),
+    Storage(Vec<u8>, Vec<u8>, Option<Vec<u8>>),
+    Code(Vec<u8>, Option<Vec<u8>>),
+}
+
+
 pub struct StateAdapter {
     /// Account code cache
     code_cache: Arc<DashMap<Vec<u8>, Vec<u8>>>,
 
     /// Storage cache: address -> key -> value
     storage_cache: Arc<DashMap<Vec<u8>, DashMap<Vec<u8>, Vec<u8>>>>,
+
+    /// Undo log for the transaction currently executing, if one is open.
+    ///
+    /// `None` means nothing is being recorded and mutations are permanent as
+    /// before. Entries hold the value each mutation *displaced*, so reverting
+    /// is a backwards replay. Recording the displaced value rather than the new
+    /// one is what makes repeated writes to the same key revert correctly: the
+    /// last entry replayed is the earliest one recorded, which holds the value
+    /// from before the transaction began.
+    journal: Arc<parking_lot::RwLock<Option<Vec<JournalEntry>>>>,
 
     /// Balance cache
     balance_cache: Arc<DashMap<Vec<u8>, u128>>,
@@ -81,6 +104,7 @@ impl StateAdapter {
         Self {
             code_cache: Arc::new(DashMap::new()),
             storage_cache: Arc::new(DashMap::new()),
+            journal: Arc::new(parking_lot::RwLock::new(None)),
             balance_cache: Arc::new(DashMap::new()),
             nonce_cache: Arc::new(DashMap::new()),
             dirty_code: Arc::new(DashMap::new()),
@@ -104,6 +128,7 @@ impl StateAdapter {
         Self {
             code_cache: Arc::new(DashMap::new()),
             storage_cache: Arc::new(DashMap::new()),
+            journal: Arc::new(parking_lot::RwLock::new(None)),
             balance_cache: Arc::new(DashMap::new()),
             nonce_cache: Arc::new(DashMap::new()),
             dirty_code: Arc::new(DashMap::new()),
@@ -180,10 +205,6 @@ impl StateAdapter {
             //   - gas debits / value transfers inside the EVM reduce the
             //     native balance, and
             //   - no duplicate/shadow balance view can drift out of sync.
-            //
-            // We also mirror-write the legacy CF_STATE key so existing
-            // snapshots, MPT state-root proofs, and unit tests that insert
-            // fixtures under `CF_STATE:balance:<hex>` continue to work.
             for entry in self.dirty_balance.iter() {
                 let addr = entry.key();
                 if let Some(balance) = self.balance_cache.get(addr) {
@@ -210,9 +231,7 @@ impl StateAdapter {
             // default u64). The VM is the only writer of execution nonces, so
             // mirroring here makes `eth_getTransactionCount` / faucet / signing
             // (which read through `AccountStore` over CF_ACCOUNTS) observe the
-            // exact nonce the VM enforced on the last applied transaction. The
-            // legacy CF_STATE `nonce:<hex>` key is also kept so VM-internal
-            // reads and historical snapshots stay valid.
+            // exact nonce the VM enforced on the last applied transaction.
             for entry in self.dirty_nonce.iter() {
                 let addr = entry.key();
                 if let Some(nonce) = self.nonce_cache.get(addr) {
@@ -274,6 +293,119 @@ impl StateAdapter {
         self.dirty_nonce.clear();
 
         Ok(())
+    }
+
+    /// Opens an undo log for one transaction.
+    ///
+    /// Every mutation from here until [`Self::commit_transaction`] or
+    /// [`Self::revert_transaction`] records the value it displaced. Nesting is
+    /// not supported and would silently discard the outer log, so an already
+    /// open journal is left alone and reported.
+    pub fn begin_transaction(&self) -> bool {
+        let mut j = self.journal.write();
+        if j.is_some() {
+            tracing::warn!("begin_transaction called with a journal already open");
+            return false;
+        }
+        *j = Some(Vec::new());
+        true
+    }
+
+    /// Accepts the transaction's mutations and closes the undo log.
+    pub fn commit_transaction(&self) {
+        *self.journal.write() = None;
+    }
+
+    /// Undoes everything the open transaction changed, and nothing else.
+    ///
+    /// Replayed backwards, so a key written more than once lands on the value
+    /// it held before the transaction started rather than an intermediate one.
+    /// Earlier transactions in the same block keep their mutations — that is
+    /// the whole reason this exists rather than the all-or-nothing `rollback`.
+    pub fn revert_transaction(&self) {
+        let Some(entries) = self.journal.write().take() else {
+            return;
+        };
+        for entry in entries.into_iter().rev() {
+            match entry {
+                JournalEntry::Balance(addr, prior) => match prior {
+                    Some(v) => {
+                        self.balance_cache.insert(addr.clone(), v);
+                    }
+                    None => {
+                        self.balance_cache.remove(&addr);
+                        self.dirty_balance.remove(&addr);
+                    }
+                },
+                JournalEntry::Storage(addr, key, prior) => {
+                    if let Some(slot) = self.storage_cache.get(&addr) {
+                        match prior {
+                            Some(v) => {
+                                slot.insert(key, v);
+                            }
+                            None => {
+                                slot.remove(&key);
+                            }
+                        }
+                    }
+                }
+                JournalEntry::Code(addr, prior) => match prior {
+                    Some(v) => {
+                        self.code_cache.insert(addr.clone(), v);
+                    }
+                    None => {
+                        self.code_cache.remove(&addr);
+                        self.dirty_code.remove(&addr);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Net change in value across every balance the open transaction touched.
+    ///
+    /// `Some(0)` means value was conserved — moved between accounts, not
+    /// created or destroyed. A non-zero result means the transaction minted or
+    /// burned, which is legitimate for some paths and a leak for the rest.
+    /// `None` means no transaction is open and there is nothing to measure.
+    ///
+    /// Computed against the *earliest* value recorded for each address, so a
+    /// transaction that writes the same balance repeatedly is measured from
+    /// where it started rather than from its last intermediate step.
+    ///
+    /// Must be read before `commit_transaction` or `revert_transaction`, both
+    /// of which consume the journal.
+    pub fn journal_balance_delta(&self) -> Option<i128> {
+        use std::collections::HashMap;
+
+        let guard = self.journal.read();
+        let entries = guard.as_ref()?;
+
+        // Earliest displaced value per address.
+        let mut before: HashMap<Vec<u8>, Option<u128>> = HashMap::new();
+        for entry in entries.iter() {
+            if let JournalEntry::Balance(addr, prior) = entry {
+                before.entry(addr.clone()).or_insert(*prior);
+            }
+        }
+
+        let mut delta: i128 = 0;
+        for (addr, prior) in before {
+            let now = self
+                .balance_cache
+                .get(&addr)
+                .map(|v| *v.value())
+                .unwrap_or(0);
+            delta += now as i128 - prior.unwrap_or(0) as i128;
+        }
+        Some(delta)
+    }
+
+    /// Records a displaced value when a transaction is open. No-op otherwise.
+    fn journal_push(&self, entry: JournalEntry) {
+        if let Some(log) = self.journal.write().as_mut() {
+            log.push(entry);
+        }
     }
 
     /// Rollback changes (discard cache)
@@ -633,6 +765,10 @@ impl VmState for StateAdapter {
     }
 
     fn set_code(&mut self, address: &[u8], code: Vec<u8>) {
+        self.journal_push(JournalEntry::Code(
+            address.to_vec(),
+            self.code_cache.get(address).map(|v| v.value().clone()),
+        ));
         self.code_cache.insert(address.to_vec(), code);
         self.dirty_code.insert(address.to_vec(), true);
     }
@@ -660,6 +796,13 @@ impl VmState for StateAdapter {
     }
 
     fn set_storage(&mut self, address: &[u8], key: &[u8], value: Vec<u8>) {
+        self.journal_push(JournalEntry::Storage(
+            address.to_vec(),
+            key.to_vec(),
+            self.storage_cache
+                .get(address)
+                .and_then(|s| s.get(key).map(|v| v.value().clone())),
+        ));
         let storage = self.storage_cache.entry(address.to_vec()).or_default();
         storage.insert(key.to_vec(), value);
 
@@ -682,22 +825,9 @@ impl VmState for StateAdapter {
         // same balance as `eth_getBalance` / `tenzro_getBalance` and the
         // faucet credit path.
         if let Some(store) = &self.storage {
-            // 1. Canonical: native TNZO ledger (CF_ACCOUNTS).
+            // Canonical and only home: native TNZO ledger (CF_ACCOUNTS).
             let native_key = tnzo_balance_key(address);
             if let Ok(Some(bytes)) = store.get(CF_ACCOUNTS, &native_key)
-                && bytes.len() == 16
-                && let Ok(arr) = bytes.as_slice().try_into()
-            {
-                let balance = u128::from_le_bytes(arr);
-                self.balance_cache.insert(address.to_vec(), balance);
-                return balance;
-            }
-
-            // 2. Legacy fallback: VM state key (CF_STATE). Preserved for
-            //    older snapshots, fixtures, and tests that populate balance
-            //    via `CF_STATE:balance:<hex>`.
-            let legacy_key = format!("balance:{}", hex::encode(address));
-            if let Ok(Some(bytes)) = store.get(CF_STATE, legacy_key.as_bytes())
                 && bytes.len() == 16
                 && let Ok(arr) = bytes.as_slice().try_into()
             {
@@ -711,6 +841,10 @@ impl VmState for StateAdapter {
     }
 
     fn set_balance(&mut self, address: &[u8], balance: u128) {
+        self.journal_push(JournalEntry::Balance(
+            address.to_vec(),
+            self.balance_cache.get(address).map(|v| *v.value()),
+        ));
         self.balance_cache.insert(address.to_vec(), balance);
         self.dirty_balance.insert(address.to_vec(), true);
     }
@@ -723,21 +857,10 @@ impl VmState for StateAdapter {
 
         // Fall back to RocksDB, canonical store first (same order as balance).
         if let Some(store) = &self.storage {
-            // 1. Canonical: account ledger (CF_ACCOUNTS, AccountStore layout).
+            // Canonical and only home: account ledger (CF_ACCOUNTS layout).
             let mut canonical_key = b"nonce:".to_vec();
             canonical_key.extend_from_slice(address);
             if let Ok(Some(bytes)) = store.get(CF_ACCOUNTS, &canonical_key)
-                && bytes.len() == 8
-                && let Ok(arr) = bytes.as_slice().try_into()
-            {
-                let nonce = u64::from_le_bytes(arr);
-                self.nonce_cache.insert(address.to_vec(), nonce);
-                return nonce;
-            }
-
-            // 2. Legacy fallback: VM state key (CF_STATE) for old snapshots.
-            let legacy_key = format!("nonce:{}", hex::encode(address));
-            if let Ok(Some(bytes)) = store.get(CF_STATE, legacy_key.as_bytes())
                 && bytes.len() == 8
                 && let Ok(arr) = bytes.as_slice().try_into()
             {
@@ -751,6 +874,14 @@ impl VmState for StateAdapter {
     }
 
     fn set_nonce(&mut self, address: &[u8], nonce: u64) {
+        // Deliberately not journalled: the nonce survives a revert.
+        //
+        // A failed transaction must still consume its nonce, or the identical
+        // transaction can be submitted again — same sender, same nonce, same
+        // hash. ethermint shipped the reverting version (#808) and got exactly
+        // that: two transactions sharing a hash, and a replay window. It is
+        // also what turns this chain's documented unsatisfiable-nonce retry
+        // loop from a bug into the specified behaviour.
         self.nonce_cache.insert(address.to_vec(), nonce);
         self.dirty_nonce.insert(address.to_vec(), true);
     }
@@ -848,6 +979,201 @@ struct StateSnapshot {
 
     /// Nonces: address -> nonce
     nonces: Vec<(Vec<u8>, u64)>,
+}
+
+#[cfg(test)]
+mod atomicity_tests {
+    use super::*;
+    use crate::traits::VmState;
+
+    fn addr(b: u8) -> Vec<u8> {
+        vec![b; 20]
+    }
+
+    /// A reverted transaction returns the sender's money.
+    ///
+    /// This is the shape that lost 10,000,000 TNZO on the live chain: the
+    /// sender was debited, the transaction then failed, and nothing put the
+    /// balance back. The funds sat in the vault credited to nobody.
+    #[test]
+    fn a_reverted_transaction_returns_the_debit() {
+        let mut a = StateAdapter::new();
+        let sender = addr(1);
+        let vault = addr(0xFE);
+        a.set_balance(&sender, 10_000_000);
+
+        assert!(a.begin_transaction());
+        a.set_balance(&sender, 0);
+        a.set_balance(&vault, 10_000_000);
+        a.revert_transaction();
+
+        assert_eq!(
+            a.get_balance(&sender),
+            10_000_000,
+            "the sender was not made whole by the revert"
+        );
+        assert_eq!(a.get_balance(&vault), 0, "the vault kept a credit for a failed transfer");
+    }
+
+    /// Reverting one transaction must not undo the ones before it in the block.
+    ///
+    /// The pre-existing `rollback` clears the whole cache, which is why it
+    /// could never be used here — one bad transaction would have erased every
+    /// good one sharing the block.
+    #[test]
+    fn a_revert_leaves_earlier_transactions_alone() {
+        let mut a = StateAdapter::new();
+        let first = addr(1);
+        let second = addr(2);
+
+        // A transaction that succeeds.
+        assert!(a.begin_transaction());
+        a.set_balance(&first, 500);
+        a.commit_transaction();
+
+        // A transaction that fails.
+        assert!(a.begin_transaction());
+        a.set_balance(&second, 900);
+        a.revert_transaction();
+
+        assert_eq!(a.get_balance(&first), 500, "a committed transaction was undone");
+        assert_eq!(a.get_balance(&second), 0, "a reverted transaction persisted");
+    }
+
+    /// Repeated writes to one key revert to the value from before the
+    /// transaction, not to an intermediate one.
+    #[test]
+    fn repeated_writes_revert_to_the_pre_transaction_value() {
+        let mut a = StateAdapter::new();
+        let who = addr(3);
+        a.set_balance(&who, 100);
+
+        assert!(a.begin_transaction());
+        a.set_balance(&who, 50);
+        a.set_balance(&who, 25);
+        a.set_balance(&who, 0);
+        a.revert_transaction();
+
+        assert_eq!(a.get_balance(&who), 100);
+    }
+
+    /// A key that did not exist goes back to not existing.
+    ///
+    /// Restoring a zero instead would invent a balance that was never written,
+    /// and nothing downstream could tell the difference.
+    #[test]
+    fn a_key_absent_before_the_transaction_is_absent_after_revert() {
+        let mut a = StateAdapter::new();
+        let fresh = addr(4);
+
+        assert!(a.begin_transaction());
+        a.set_balance(&fresh, 777);
+        a.set_nonce(&fresh, 3);
+        a.revert_transaction();
+
+        assert_eq!(a.get_balance(&fresh), 0);
+        assert!(!a.balance_cache.contains_key(&fresh), "an absent key was resurrected as zero");
+        // The nonce is deliberately outside the revert boundary — see set_nonce.
+        assert_eq!(a.get_nonce(&fresh), 3, "the nonce must survive so the tx cannot replay");
+    }
+
+    /// Storage reverts; the nonce does not.
+    ///
+    /// A failed transaction still consumes its nonce, otherwise the identical
+    /// transaction can be resubmitted with the same hash — ethermint #808.
+    #[test]
+    fn storage_reverts_but_the_nonce_survives() {
+        let mut a = StateAdapter::new();
+        let who = addr(5);
+        a.set_nonce(&who, 7);
+        a.set_storage(&who, b"k", b"before".to_vec());
+
+        assert!(a.begin_transaction());
+        a.set_nonce(&who, 8);
+        a.set_storage(&who, b"k", b"after".to_vec());
+        a.revert_transaction();
+
+        assert_eq!(a.get_nonce(&who), 8, "the nonce was rolled back, enabling replay");
+        assert_eq!(a.get_storage(&who, b"k"), Some(b"before".to_vec()));
+    }
+
+    /// A transfer moves value; it does not create any.
+    #[test]
+    fn a_balanced_transfer_reports_zero_delta() {
+        let mut a = StateAdapter::new();
+        let from = addr(1);
+        let to = addr(2);
+        a.set_balance(&from, 1_000);
+
+        assert!(a.begin_transaction());
+        a.set_balance(&from, 400);
+        a.set_balance(&to, 600);
+        assert_eq!(a.journal_balance_delta(), Some(0));
+        a.commit_transaction();
+    }
+
+    /// The shape that lost the money: a debit with no matching credit.
+    ///
+    /// 10,000,000 left an account and nothing anywhere gained it. The delta is
+    /// exactly the missing amount, and negative because value was destroyed
+    /// rather than moved.
+    #[test]
+    fn a_debit_with_no_credit_is_reported_as_a_loss() {
+        let mut a = StateAdapter::new();
+        let from = addr(1);
+        a.set_balance(&from, 10_000_000);
+
+        assert!(a.begin_transaction());
+        a.set_balance(&from, 0); // debited, credited nowhere
+        assert_eq!(a.journal_balance_delta(), Some(-10_000_000));
+        a.revert_transaction();
+    }
+
+    /// Value appearing from nowhere is caught the same way, with the opposite
+    /// sign.
+    #[test]
+    fn a_credit_with_no_debit_is_reported_as_a_mint() {
+        let mut a = StateAdapter::new();
+        let to = addr(2);
+
+        assert!(a.begin_transaction());
+        a.set_balance(&to, 5_000);
+        assert_eq!(a.journal_balance_delta(), Some(5_000));
+        a.revert_transaction();
+    }
+
+    /// Repeated writes are measured from where the transaction started, not
+    /// from the last intermediate value.
+    #[test]
+    fn the_delta_is_measured_from_the_pre_transaction_value() {
+        let mut a = StateAdapter::new();
+        let who = addr(3);
+        a.set_balance(&who, 100);
+
+        assert!(a.begin_transaction());
+        a.set_balance(&who, 90);
+        a.set_balance(&who, 80);
+        a.set_balance(&who, 70);
+        assert_eq!(a.journal_balance_delta(), Some(-30));
+        a.revert_transaction();
+    }
+
+    /// Nothing to measure when no transaction is open.
+    #[test]
+    fn there_is_no_delta_without_an_open_transaction() {
+        let a = StateAdapter::new();
+        assert_eq!(a.journal_balance_delta(), None);
+    }
+
+    /// With no transaction open, behaviour is exactly as before.
+    #[test]
+    fn mutations_outside_a_transaction_are_unaffected() {
+        let mut a = StateAdapter::new();
+        let who = addr(6);
+        a.set_balance(&who, 42);
+        a.revert_transaction(); // no journal open — must do nothing
+        assert_eq!(a.get_balance(&who), 42);
+    }
 }
 
 #[cfg(test)]
@@ -1031,11 +1357,16 @@ mod tests {
 
         let address = vec![1u8; 20];
 
-        // Manually write to storage bypassing the adapter
-        let balance_key = format!("balance:{}", hex::encode(&address));
+        // Manually write to storage bypassing the adapter, using the
+        // canonical CF_ACCOUNTS key. There is no second location to read
+        // from — CF_ACCOUNTS is the only home for a balance.
         let balance: u128 = 99999;
         store
-            .put(CF_STATE, balance_key.as_bytes(), &balance.to_le_bytes())
+            .put(
+                CF_ACCOUNTS,
+                &tnzo_balance_key(&address),
+                &balance.to_le_bytes(),
+            )
             .unwrap();
 
         // Adapter should read from storage on cache miss
@@ -1114,10 +1445,9 @@ mod tests {
         let addr = vec![7u8; 20];
         // Seed the backend directly, bypassing the adapter, so the only way
         // the cache gets the value is via a read-through.
-        let balance_key = format!("balance:{}", hex::encode(&addr));
         let balance: u128 = 42_000;
         store
-            .put(CF_STATE, balance_key.as_bytes(), &balance.to_le_bytes())
+            .put(CF_ACCOUNTS, &tnzo_balance_key(&addr), &balance.to_le_bytes())
             .unwrap();
 
         // Cold: not yet cached.
@@ -1268,7 +1598,7 @@ mod tests {
         // canonical store agree.
         let mut warm = StateAdapter::with_storage(store.clone());
         let base = warm.compute_state_root();
-        warm.set_balance(&vec![0xCCu8; 32], 7);
+        warm.set_balance(&[0xCCu8; 32], 7);
         let with_overlay = warm.compute_state_root();
         assert_ne!(base, with_overlay, "in-flight write must affect the root");
         warm.commit().unwrap();

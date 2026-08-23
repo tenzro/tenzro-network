@@ -7979,7 +7979,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'llm', 'tee', or 'general'."
+        description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'ai' (any model class -- text, multimodal, image, video, audio), 'tee', 'storage', 'compute', 'database', 'cloud' or 'general'. 'llm' is accepted as a legacy alias for 'ai'."
     )]
     async fn list_providers(
         &self,
@@ -8003,7 +8003,7 @@ impl TenzroMcpServer {
             result.push(serde_json::json!({
                 "peer_id": self_peer_id,
                 "provider_address": "0x0000000000000000000000000000000000000000",
-                "provider_type": "llm",
+                "provider_type": tenzro_network::message::PROVIDER_TYPE_AI,
                 "served_models": served,
                 "capabilities": ["inference"],
                 "rpc_endpoint": "",
@@ -8016,10 +8016,14 @@ impl TenzroMcpServer {
         for entry in self.node.network_providers_snapshot() {
             let peer_id = entry.announcement.peer_id.clone();
             if !seen_ids.contains(&peer_id) {
-                // Apply optional provider_type filter
+                // Apply optional provider_type filter. Matching is
+                // case-insensitive equality — there is no alias table.
                 if let Some(ref pt) = params.provider_type
                     && !pt.is_empty()
-                    && entry.announcement.provider_type != *pt
+                    && !tenzro_network::message::provider_type_matches(
+                        &entry.announcement.provider_type,
+                        pt,
+                    )
                 {
                     continue;
                 }
@@ -8519,8 +8523,7 @@ impl TenzroMcpServer {
             } else {
                 let turn = [tenzro_model::ChatMessage {
                     role: "user".to_string(),
-                    content: message.clone(),
-                }];
+                    content: message.clone(), ..Default::default() }];
                 model_runtime
                     .generate_chat_multimodal(&svc.model_id, &turn, &media, &[], &config)
                     .await
@@ -10176,16 +10179,19 @@ impl TenzroMcpServer {
             });
         }
 
-        // Use the first identity's address as the staker
-        let staker_address = if let Some(registry) = self.node.identity_registry() {
-            let identities = registry.list_all();
-            identities
-                .first()
-                .map(|(_, id)| id.wallet_address)
-                .unwrap_or_else(Address::zero)
-        } else {
-            Address::zero()
-        };
+        // The node's payee, resolved the same way the JSON-RPC surface and
+        // settlement resolve it. Not the first identity in the registry —
+        // that is whichever sorted first, and on a node with tenants it is a
+        // stranger's wallet. `Address::zero()` was worse still: collateral
+        // committed to an address nobody holds, reported as success.
+        let staker_address = self.node.operator_payee().ok_or_else(|| ErrorData {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(
+                "cannot determine this node's payee address to stake against; \
+                 provision an operator identity or set `operator_did`",
+            ),
+            data: None,
+        })?;
 
         match staking.stake_with_capacity(staker_address, amount_wei, provider_type, capacity) {
             Ok(_) => json_result(serde_json::json!({
@@ -10269,15 +10275,14 @@ impl TenzroMcpServer {
                 message: Cow::from("Staking subsystem is unavailable on this node; cannot register a provider with a stake"),
                 data: None,
             })?;
-            let staker_address = if let Some(registry) = self.node.identity_registry() {
-                let identities = registry.list_all();
-                identities
-                    .first()
-                    .map(|(_, id)| id.wallet_address)
-                    .unwrap_or_else(Address::zero)
-            } else {
-                Address::zero()
-            };
+            let staker_address = self.node.operator_payee().ok_or_else(|| ErrorData {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(
+                    "cannot determine this node's payee address to bond against; \
+                     provision an operator identity or set `operator_did`",
+                ),
+                data: None,
+            })?;
             staking
                 .stake_with_capacity(staker_address, stake_wei, provider_type, capacity)
                 .map_err(|e| ErrorData {
@@ -15641,14 +15646,50 @@ impl TenzroMcpServer {
                 .get("min_kyc_tier")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1);
-            // In a full implementation, we would look up the KYC tiers of from/to addresses
-            // via the identity registry. For now, we check if identity is registered.
-            if let Some(_identity_reg) = self.node.identity_registry() {
-                let from_addr = parse_address(&params.from)?;
-                let to_addr = parse_address(&params.to)?;
-                // Note: identity lookup by address is not directly supported;
-                // this is a compliance-level check that would be fully wired in production.
-                let _ = (from_addr, to_addr, min_tier);
+            // Both sides of the transfer must hold an identity verified to at
+            // least `min_kyc_tier`.
+            //
+            // This used to end in `let _ = (from_addr, to_addr, min_tier);` —
+            // the rule was parsed, the addresses were resolved, and then all of
+            // it was discarded. A token whose policy said transfers were
+            // restricted to verified holders moved freely between unverified
+            // ones, and the policy read as enforced from every angle except
+            // execution. `find_did_by_address` and `kyc_tier()` both existed;
+            // nothing called them.
+            let Some(identity_reg) = self.node.identity_registry() else {
+                return Err(err_internal_data(
+                    "this token requires KYC verification, but no identity registry is \
+                     configured on this node, so the requirement cannot be checked. \
+                     Refusing rather than transferring unchecked.",
+                ));
+            };
+
+            let from_addr = parse_address(&params.from)?;
+            let to_addr = parse_address(&params.to)?;
+
+            for (label, addr) in [("sender", &from_addr), ("recipient", &to_addr)] {
+                let Some(did) = identity_reg.find_did_by_address(addr) else {
+                    return Err(err_internal_data(format!(
+                        "{label} {} holds no registered identity, and this token requires \
+                         KYC tier {min_tier}",
+                        hex::encode(addr.as_bytes())
+                    )));
+                };
+                // A machine or institution identity carries no KYC tier, so
+                // `kyc_tier()` is None and the requirement is unmet — which is
+                // the right answer, not a reason to skip the check.
+                let tier = identity_reg
+                    .resolve(&did)
+                    .ok()
+                    .and_then(|identity| identity.kyc_tier())
+                    .map(|t| t as u64)
+                    .unwrap_or(0);
+                if tier < min_tier {
+                    return Err(err_internal_data(format!(
+                        "{label} {did} is verified to KYC tier {tier}, below the tier \
+                         {min_tier} this token requires"
+                    )));
+                }
             }
         }
 

@@ -22,7 +22,10 @@
 //!     queueing causes timeout cascades on the requester)
 //!   * Max blocks per `GetBlockRange`: 128 (matches Eth CL `MAX_REQUEST_BLOCKS_DENEB`)
 //!   * Max request size: 1 MiB (CBOR codec default)
-//!   * Max response size: 10 MiB (CBOR codec default; sufficient for 128
+//!   * Max response size: 10 MiB (CBOR codec default). A `BlockRange` is
+//!     additionally bounded by [`MAX_BLOCK_RANGE_BYTES`], because 128 blocks
+//!     at the 2 MiB block limit would be 256 MiB — the count cap is not a
+//!     size cap. Originally noted as "sufficient for 128
 //!     empty blocks, header+body)
 
 use libp2p::{
@@ -45,6 +48,27 @@ pub const BLOCK_SYNC_PROTOCOL: &str = "/tenzro/block-sync/1.0.0";
 /// Maximum blocks a peer may request in a single `GetBlockRange` call.
 /// Mirrors Eth CL `MAX_REQUEST_BLOCKS_DENEB` (128).
 pub const MAX_BLOCKS_PER_RANGE: u32 = 128;
+
+/// Largest `BlockRange` body a server will assemble, in bytes.
+///
+/// The count cap alone is not a size cap. The codec allows a 10 MiB response,
+/// and the note above records the original assumption — that 10 MiB is
+/// "sufficient for 128" blocks — which held only while blocks were small. A
+/// block may be up to `ConsensusConfig::max_block_size` (2 MiB), so 128 of them
+/// is up to 256 MiB. The response was silently truncated on the wire and the
+/// requester failed decoding it:
+///
+///   Block-sync: starting catch-up our_height=1496 target_height=3652 count=128
+///   error=IO error on outbound stream: Eof { name: "u8", expect: Small.. }
+///
+/// which left followers permanently stuck: every catch-up attempt asked for the
+/// same oversized range and died the same way.
+///
+/// Set below the codec ceiling so framing overhead cannot push a legal response
+/// over it. A server returning fewer blocks than asked for is normal — the
+/// requester re-asks from its new height — so truncating by bytes costs a round
+/// trip, not correctness.
+pub const MAX_BLOCK_RANGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum block hashes a peer may request in a single `GetBlockBodies` call.
 pub const MAX_BLOCK_HASHES_PER_REQUEST: usize = 128;
@@ -169,6 +193,44 @@ pub fn new_behaviour() -> BlockSyncBehaviour {
 
 #[cfg(test)]
 mod tests {
+    /// The count cap must not be mistaken for a size cap.
+    ///
+    /// The codec allows a 10 MiB response and the protocol notes assumed that
+    /// was "sufficient for 128" blocks — true only while blocks were small. At
+    /// the 2 MiB block limit, 128 blocks is 256 MiB, so the response was
+    /// truncated on the wire and every catch-up attempt died decoding it:
+    ///
+    ///   Block-sync: starting catch-up our_height=1496 target_height=3652 count=128
+    ///   error=IO error on outbound stream: Eof { name: "u8", expect: Small.. }
+    ///
+    /// leaving followers permanently stuck. The byte budget must therefore be
+    /// smaller than what the count cap can describe, and must sit below the
+    /// codec ceiling with room for framing.
+    // The assertions here are deliberately on constants: the point is to pin a
+    // relationship *between* the limits, so that changing one without the other
+    // fails the build rather than the network.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn the_block_count_cap_is_not_a_size_cap() {
+        const MAX_BLOCK_BYTES: usize = 2 * 1024 * 1024; // ConsensusConfig::max_block_size
+        const CODEC_RESPONSE_CEILING: usize = 10 * 1024 * 1024;
+
+        let worst_case = MAX_BLOCKS_PER_RANGE as usize * MAX_BLOCK_BYTES;
+        assert!(
+            worst_case > CODEC_RESPONSE_CEILING,
+            "if this no longer holds the byte budget may be unnecessary, but while it \
+             does, count alone cannot bound a response"
+        );
+        assert!(
+            MAX_BLOCK_RANGE_BYTES < CODEC_RESPONSE_CEILING,
+            "the byte budget must leave headroom for codec framing"
+        );
+        assert!(
+            MAX_BLOCK_RANGE_BYTES >= MAX_BLOCK_BYTES,
+            "the budget must fit at least one maximum-size block, or sync stalls"
+        );
+    }
+
     use super::*;
 
     /// Serde round-trip: every request variant must encode and decode cleanly.

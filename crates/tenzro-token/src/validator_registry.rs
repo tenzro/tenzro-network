@@ -560,6 +560,53 @@ impl ValidatorRegistry {
         self.entries.get(address).map(|e| e.value().clone())
     }
 
+    /// Add to a live validator's self-stake.
+    ///
+    /// The registry could create a stake and end one, and nothing in between:
+    /// `register_candidate` refuses an address that has not exited, and exiting
+    /// to re-register costs the re-entry cooldown and the validator's place in
+    /// the set. So a validator set could never rebalance, which matters most
+    /// where it is least visible — a network that starts from a single funded
+    /// genesis validator has no way to dilute it, and stays dependent on that
+    /// one node for every block no matter how many others join.
+    ///
+    /// Returns the new total. Only ever adds: reducing a stake is unbonding,
+    /// which has its own path, its own delay, and its own slashing exposure,
+    /// and must not be reachable by passing a smaller number here.
+    ///
+    /// The tier is recomputed, so crossing `min_self_stake` or
+    /// `min_rpc_provider_stake` promotes the validator exactly as it would at
+    /// registration.
+    pub fn increase_self_stake(&self, address: &Address, additional: u128) -> Result<u128> {
+        if additional == 0 {
+            return Err(TokenError::InvalidParameter(
+                "stake increase must be greater than zero".to_string(),
+            ));
+        }
+
+        let cfg = *self.config.read();
+        let updated = {
+            let mut entry = self.entries.get_mut(address).ok_or_else(|| {
+                TokenError::InvalidParameter(format!("validator {address} is not registered"))
+            })?;
+
+            if matches!(entry.status, ValidatorRegistryStatus::Exited) {
+                return Err(TokenError::Unauthorized {
+                    reason: format!("validator {address} has exited; re-register instead"),
+                });
+            }
+
+            entry.self_stake = entry.self_stake.checked_add(additional).ok_or_else(|| {
+                TokenError::InvalidParameter("stake increase overflows".to_string())
+            })?;
+            entry.tier = ValidatorTier::from_stake(entry.self_stake, &cfg);
+            entry.clone()
+        };
+
+        self.persist_entry(&updated);
+        Ok(updated.self_stake)
+    }
+
     /// Returns all entries (snapshot).
     pub fn list(&self) -> Vec<ValidatorRegistryEntry> {
         self.entries.iter().map(|e| e.value().clone()).collect()
@@ -690,6 +737,23 @@ impl ValidatorRegistry {
         self_stake: u128,
         metadata_uri: String,
     ) -> Result<bool> {
+        // Idempotent: an address already in the registry is left alone.
+        //
+        // This briefly repaired a stored stake that looked "too small", on the
+        // theory that genesis had seeded whole TNZO where base units were
+        // expected. The theory was wrong in the direction that matters:
+        // ValidatorInfo::stake IS consensus voting power, every historical QC
+        // was tallied against the genesis numbers exactly as declared, and
+        // rescaling them makes those QCs unverifiable — a fresh node cannot
+        // sync past height 1:
+        //
+        //   QC claims voting_power=10000000 but bitmap-tallied power is
+        //   10000000000000000000000000
+        //
+        // There is a genuine unit mismatch between genesis (whole TNZO) and the
+        // registry floors (MIN_VALIDATOR_STAKE is 10_000 * ONE_TNZO), but it
+        // cannot be repaired by reinterpreting stored state. It needs a
+        // coordinated upgrade that rescales both sides at a known height.
         if self.entries.contains_key(&address) {
             return Ok(false);
         }
@@ -1076,6 +1140,65 @@ mod tests {
 
     fn make_keys() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         (vec![0u8; 32], vec![0u8; ML_DSA_65_VK_LEN], vec![0u8; 48])
+    }
+
+    /// A live validator can add to its stake.
+    ///
+    /// The registry could create a stake and end one, and nothing between —
+    /// registration refuses an address that has not exited. So a set
+    /// bootstrapped from one heavily-funded genesis validator could never
+    /// dilute it, and stayed dependent on that node for every block.
+    #[test]
+    fn a_live_validator_can_add_to_its_stake() {
+        let reg = ValidatorRegistry::new();
+        let addr = Address::new([5u8; 32]);
+        let base = tenzro_types::constants::MIN_VALIDATOR_STAKE;
+
+        reg.seed_genesis_active(
+            addr,
+            vec![1u8; 32],
+            vec![2u8; 1952],
+            vec![3u8; 48],
+            addr,
+            base,
+            String::new(),
+        )
+        .unwrap();
+
+        let total = reg.increase_self_stake(&addr, base * 2).unwrap();
+        assert_eq!(total, base * 3);
+        assert_eq!(reg.get(&addr).unwrap().self_stake, base * 3);
+    }
+
+    /// Only ever adds. Reducing a stake is unbonding, with its own delay and
+    /// slashing exposure, and must not be reachable through this path.
+    #[test]
+    fn a_stake_increase_of_zero_is_refused() {
+        let reg = ValidatorRegistry::new();
+        let addr = Address::new([6u8; 32]);
+        reg.seed_genesis_active(
+            addr,
+            vec![1u8; 32],
+            vec![2u8; 1952],
+            vec![3u8; 48],
+            addr,
+            tenzro_types::constants::MIN_VALIDATOR_STAKE,
+            String::new(),
+        )
+        .unwrap();
+        assert!(reg.increase_self_stake(&addr, 0).is_err());
+    }
+
+    /// An unregistered address cannot acquire a stake this way — registration
+    /// requires consensus keys and a withdrawal address, and creating an entry
+    /// here would bypass all of it.
+    #[test]
+    fn an_unregistered_address_cannot_increase_a_stake() {
+        let reg = ValidatorRegistry::new();
+        assert!(
+            reg.increase_self_stake(&Address::new([7u8; 32]), 1_000)
+                .is_err()
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod universal_resolver;
 pub mod wallet_frost;
 pub mod wallet_mldsa;
 pub mod wallet_new;
+pub mod passkey_registry;
 pub mod wallet_share;
 
 pub use server::WebServer;

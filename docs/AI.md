@@ -151,7 +151,27 @@ An operator on Blackwell hardware who wants NVFP4 runs vLLM or SGLang beside
 the node and registers it as an external provider endpoint, the same way any
 other non-llama.cpp backend is integrated. The catalog stays GGUF-only.
 
-**Build recipes.** Pass the backend feature to `tenzro-node` at build time:
+**Build recipes.** Pass the backend feature to `tenzro-node` at build time.
+
+**Do not set `CMAKE_CUDA_ARCHITECTURES` or `CUDAARCHS`.** ggml picks the architecture list itself
+when they are undefined, covering Turing through Blackwell and appending `121a-real` on CUDA >= 12.9
+— a hand-written list is narrower than the one you get for free, and setting one produces a binary
+that compiles, links, reports `compiled backends: cpu`, and runs every layer on the CPU. The build
+still exits 0.
+
+The `CC=clang` / `CXX=clang++` / `CUDAHOSTCXX=g++` trio in `Dockerfile.cuda` is calibrated to the
+image that file pins (CUDA 13.0 on Ubuntu 24.04). On a newer host it can break unrelated crates:
+`aws-lc-sys` 0.40.0 does not build under clang 21, and a failed attempt leaves a CMake cache that
+breaks the following build too. Outside that image, the system compiler is fine — CUDA compiles
+under gcc.
+
+Verify the result rather than trusting the exit code. `nm -D` reports nothing on a stripped release
+binary, so it cannot tell the two apart:
+
+```sh
+strings target/release/tenzro-node | grep -c ggml_cuda   # 0 = CPU-only, non-zero = CUDA compiled in
+```
+
 
 ```bash
 cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/cuda

@@ -24,6 +24,7 @@ pub mod enclave_keystore;
 pub mod error;
 pub mod hardware_identity;
 pub mod platform_root;
+pub mod tpm_derive;
 pub mod registry;
 pub mod sealed_agent_keypair;
 pub mod sealed_secp256k1;

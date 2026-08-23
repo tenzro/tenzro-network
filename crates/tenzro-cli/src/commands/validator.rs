@@ -18,6 +18,8 @@ pub enum ValidatorCommand {
     Register(ValidatorRegisterCmd),
     /// Voluntarily exit the validator set (signed ExitValidator transaction)
     Exit(ValidatorExitCmd),
+    /// Add to this validator's self-stake (signed IncreaseValidatorStake)
+    IncreaseStake(ValidatorIncreaseStakeCmd),
     /// Update validator metadata / TEE attestation commitment
     UpdateMetadata(ValidatorUpdateMetadataCmd),
     /// Rotate validator consensus + PQ + BLS keys via tenzro_rotateValidatorKey
@@ -36,6 +38,7 @@ impl ValidatorCommand {
         match self {
             Self::Register(cmd) => cmd.execute().await,
             Self::Exit(cmd) => cmd.execute().await,
+            Self::IncreaseStake(cmd) => cmd.execute().await,
             Self::UpdateMetadata(cmd) => cmd.execute().await,
             Self::RotateKeys(cmd) => cmd.execute().await,
             Self::Get(cmd) => cmd.execute().await,
@@ -313,6 +316,82 @@ impl ValidatorRegisterCmd {
             "Candidate is staged under PendingActive. The next epoch boundary \
              admits it (subject to churn budget + min self-stake).",
         );
+        Ok(())
+    }
+}
+
+/// Add to an already-registered validator's self-stake.
+///
+/// The registry could create a stake and end one, and nothing in between:
+/// registration refuses an address that has not exited, and exiting to
+/// re-register costs the cooldown and the validator's place in the set. So a
+/// validator set had no way to rebalance — which matters most on a network
+/// bootstrapped from one heavily-funded genesis validator, where nothing could
+/// dilute it and every block stayed dependent on that single node.
+#[derive(Debug, Parser)]
+pub struct ValidatorIncreaseStakeCmd {
+    /// Validator stake-owning wallet address (hex; must match the signing key)
+    #[arg(long)]
+    from: String,
+
+    /// Additional self-stake in wei (1 TNZO = 10^18). Only ever adds —
+    /// reducing a stake is unbonding, which has its own path and delay.
+    #[arg(long)]
+    additional: u128,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ValidatorIncreaseStakeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Increase Validator Stake");
+
+        if self.additional == 0 {
+            anyhow::bail!("--additional must be greater than zero");
+        }
+
+        let rpc = RpcClient::new(&self.rpc);
+
+        let spinner = output::create_spinner("Querying nonce and chain ID...");
+        let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &self.from).await;
+        spinner.set_message("Signing IncreaseValidatorStake transaction...");
+
+        let tx_type = serde_json::json!({
+            "IncreaseValidatorStake": {
+                "additional": self.additional.to_string(),
+            }
+        });
+
+        let result: serde_json::Value = rpc
+            .send_tx_clearing_fee_floor(
+                "tenzro_signAndSendTransaction",
+                serde_json::json!({
+                    "from": self.from,
+                    "to": self.from,
+                    "value": 0u64,
+                    "gas_limit": 100_000u64,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "tx_type": tx_type,
+                }),
+            )
+            .await?;
+
+        spinner.finish_and_clear();
+
+        output::print_success("IncreaseValidatorStake transaction submitted");
+        println!();
+        output::print_field("From", &self.from);
+        output::print_field(
+            "Additional",
+            &format!("{} TNZO", self.additional / 1_000_000_000_000_000_000),
+        );
+        output::print_field("Transaction Hash", &extract_tx_hash(&result));
         Ok(())
     }
 }

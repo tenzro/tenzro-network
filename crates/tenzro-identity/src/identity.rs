@@ -55,9 +55,27 @@ where
     D: Deserializer<'de>,
 {
     let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
-    if bytes.len() != BLS_G1_COMPRESSED_LEN {
+    // Absent is legal; wrong-length is not.
+    //
+    // A BLS key exists so its holder can sign HotStuff-2 votes. Identities that
+    // never vote — a human wallet rooted in a passkey — have no key and no use
+    // for one, and minting one would mean this node generating and holding key
+    // material the owner does not control, on an identity whose whole premise is
+    // that it has exactly one root.
+    //
+    // Requiring 48 bytes here made every such identity unreadable the moment it
+    // was written: web/wallet_new.rs and passkey_rpc.rs both store an empty vec,
+    // so passkey-provisioned identities failed on this field for every read. The
+    // records were never corrupt — the writer and this validator disagreed.
+    //
+    // Nothing is weakened by allowing empty, because the place that matters
+    // already checks: validator enrolment in rpc.rs gates on !bls_vk.is_empty()
+    // before adding anyone to an epoch, so a keyless identity simply never
+    // becomes a validator. The invariant lives at the point of use, where it can
+    // see whether this identity is claiming to vote.
+    if !bytes.is_empty() && bytes.len() != BLS_G1_COMPRESSED_LEN {
         return Err(serde::de::Error::custom(format!(
-            "BLS12-381 G1-compressed verifying key must be exactly {} bytes, got {}",
+            "BLS12-381 G1-compressed verifying key must be exactly {} bytes when present, got {}",
             BLS_G1_COMPRESSED_LEN,
             bytes.len()
         )));
@@ -1235,5 +1253,48 @@ mod tests {
 
         assert_eq!(deserialized.controller_did(), identity.controller_did());
         assert!(deserialized.is_machine());
+    }
+    /// A passkey-provisioned identity carries no BLS key, and must still load.
+    ///
+    /// The regression that made every wallet identity unreadable:
+    /// web/wallet_new.rs writes bls_verifying_key: Vec::new(), and the
+    /// deserializer demanded 48 bytes, so the record failed on its last
+    /// mandatory field on every read. Nothing was corrupt — the writer and the
+    /// reader disagreed from the start.
+    #[test]
+    fn identity_without_bls_key_round_trips() {
+        let mut identity = make_test_human();
+        identity.bls_verifying_key = Vec::new();
+
+        let bytes = bincode::serialize(&identity).expect("serialize");
+        let back: TenzroIdentity = bincode::deserialize(&bytes).expect("deserialize");
+        assert!(back.bls_verifying_key.is_empty());
+    }
+
+    /// Present-but-wrong-length is still rejected. Absent means "does not vote";
+    /// 47 bytes means a truncated key, which must never load silently.
+    #[test]
+    fn identity_with_malformed_bls_key_is_rejected() {
+        let mut identity = make_test_human();
+        identity.bls_verifying_key = vec![0u8; BLS_G1_COMPRESSED_LEN - 1];
+
+        let bytes = bincode::serialize(&identity).expect("serialize");
+        let err = bincode::deserialize::<TenzroIdentity>(&bytes)
+            .expect_err("a truncated BLS key must not deserialize");
+        assert!(
+            err.to_string().contains("when present"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// A correct key still round-trips, so validators are unaffected.
+    #[test]
+    fn identity_with_valid_bls_key_round_trips() {
+        let mut identity = make_test_human();
+        identity.bls_verifying_key = vec![7u8; BLS_G1_COMPRESSED_LEN];
+
+        let bytes = bincode::serialize(&identity).expect("serialize");
+        let back: TenzroIdentity = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(back.bls_verifying_key.len(), BLS_G1_COMPRESSED_LEN);
     }
 }

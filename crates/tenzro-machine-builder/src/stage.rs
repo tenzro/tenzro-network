@@ -48,7 +48,7 @@ fn copy_tree(src: &Path, dst: &Path, budget: &mut u64) -> Result<u64, BuildError
             let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
             *budget = budget
                 .checked_sub(len)
-                .ok_or_else(|| BuildError::TooLarge(MAX_STAGE_BYTES))?;
+                .ok_or(BuildError::TooLarge(MAX_STAGE_BYTES))?;
             std::fs::copy(&from, &to)
                 .map_err(|e| BuildError::Stage(format!("copy {}: {e}", from.display())))?;
             copied += len;

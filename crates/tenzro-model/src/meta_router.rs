@@ -59,7 +59,9 @@ use crate::error::{ModelError, Result};
 use crate::registry::{ModelFilter, ModelRegistry};
 use crate::routing::InferenceRouter;
 use crate::usage::UsageTracker;
-use tenzro_types::model::{InferenceRequest, ModelInfo, ModelModality, ModelStatus};
+use tenzro_types::model::{
+    AdvertisedCapacity, InferenceRequest, ModelInfo, ModelModality, ModelStatus,
+};
 use tenzro_types::primitives::Address;
 use tracing::debug;
 
@@ -142,6 +144,25 @@ impl UseCase {
     }
 }
 
+/// Where a request is allowed to run.
+///
+/// `budget` is a cost constraint and was the only thing standing in for this
+/// one: setting it to zero happens to exclude paid remote offers. That is not
+/// the same guarantee — a free or subsidised provider satisfies a zero budget
+/// while still receiving the prompt. An application that promises its users
+/// their data stays on their own hardware needs to say so directly, and have it
+/// enforced rather than implied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Locality {
+    /// Either this machine or a network provider, cheapest acceptable wins.
+    #[default]
+    Any,
+    /// This machine only. A request that cannot be served locally fails rather
+    /// than falling back to the network — failing closed is the entire point,
+    /// since a silent fallback is exactly the outcome the caller asked to avoid.
+    LocalOnly,
+}
+
 /// Per-request cost cap. Enforced at discovery time — a model whose estimated
 /// cost for the request exceeds the cap is dropped before provider selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +208,8 @@ pub struct RouteIntent {
     pub budget: Budget,
     /// Reject any model below this tier. `None` accepts either tier.
     pub quality_floor: Option<QualityTier>,
+    /// Where this request may run. Defaults to [`Locality::Any`].
+    pub locality: Locality,
     /// Cost↔quality knob in `[0.0, 1.0]`: `0.0` = cheapest acceptable,
     /// `1.0` = strongest acceptable. Values in between shift the cut point
     /// between the cheap and strong tiers.
@@ -210,6 +233,22 @@ pub struct RouteIntent {
     /// one, or filled by [`MetaRouter::route_intent`] from `prompt` via the
     /// wired [`PromptEmbedder`].
     pub prompt_embedding: Option<Vec<f32>>,
+    /// The conversation prefix to match against providers' advertised warm
+    /// caches, hashed with the same rolling scheme they use.
+    ///
+    /// Deliberately **not** `prompt`. `prompt` is the last user turn, chosen
+    /// for difficulty clustering because earlier turns are context that would
+    /// blur the placement. Cache affinity needs the opposite: the whole
+    /// conversation from byte 0, because the rolling hash is position
+    /// dependent and providers warm every message joined by `\n`. Matching on
+    /// the last turn alone can never share run 0 with what a provider holds,
+    /// so every match scored zero — the multi-turn and shared-system-prompt
+    /// cases the feature exists for were exactly the ones it could not serve.
+    ///
+    /// `None` falls back to `prompt`, which is correct for a single-turn
+    /// conversation (the two are then the same bytes) and is why the fallback
+    /// is safe rather than a silent reintroduction of the mismatch.
+    pub affinity_prefix: Option<String>,
 }
 
 impl RouteIntent {
@@ -222,6 +261,7 @@ impl RouteIntent {
             modality: use_case.modality(),
             budget,
             quality_floor: None,
+            locality: Locality::default(),
             optimize: if use_case.favors_strong() { 0.7 } else { 0.5 },
             est_input_tokens: 256,
             est_output_tokens: 256,
@@ -229,7 +269,18 @@ impl RouteIntent {
             payer_address: None,
             prompt: None,
             prompt_embedding: None,
+            affinity_prefix: None,
         }
+    }
+
+    /// Sets the conversation prefix used for cache-affinity matching. Callers
+    /// with a multi-turn conversation should set this to every message's
+    /// content joined by `\n`, matching what providers hash when they record
+    /// a warm prompt.
+    #[must_use]
+    pub fn with_affinity_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.affinity_prefix = Some(prefix.into());
+        self
     }
 
     /// Sets the token estimates used for cost estimation.
@@ -249,6 +300,12 @@ impl RouteIntent {
 
     /// Sets the quality floor.
     #[must_use]
+    /// Require that this request never leaves the local machine.
+    pub fn local_only(mut self) -> Self {
+        self.locality = Locality::LocalOnly;
+        self
+    }
+
     pub fn with_quality_floor(mut self, floor: QualityTier) -> Self {
         self.quality_floor = Some(floor);
         self
@@ -353,6 +410,18 @@ pub struct ModelOffer {
     pub model: ModelInfo,
     /// JSON-RPC endpoint to dispatch the call to.
     pub endpoint: String,
+    /// The serving envelope the offering provider signed into its provider
+    /// announcement — warm-prefix summary, concurrency, and whether a
+    /// speculative drafter is co-loaded.
+    ///
+    /// `None` when no unexpired provider announcement has been seen for the
+    /// offering peer, which is the honest state at cold start: the model
+    /// announcement and the provider announcement ride separate topics and
+    /// separate TTLs, so an offer can be live before its provider envelope
+    /// arrives. Selection treats `None` as "nothing warm, nothing known"
+    /// rather than as a penalty, so an offer is never demoted for a gossip
+    /// race it did not cause.
+    pub capacity: Option<AdvertisedCapacity>,
 }
 
 /// The set of model offers live on the network right now.
@@ -368,6 +437,24 @@ pub trait NetworkCatalog: Send + Sync {
     /// decision, so implementations should read an in-memory map rather than
     /// hitting storage or the network.
     fn live_offers(&self, modality: ModelModality) -> Vec<ModelOffer>;
+}
+
+/// Whether a provider is idle enough for speculative decoding to pay: below
+/// half its declared admission ceiling.
+///
+/// `max == 0` means the provider declared no ceiling, which is *unknown*, not
+/// idle — see [`Candidate::speculation_pays`].
+///
+/// `div_ceil` rather than `/ 2` so a one-slot provider can qualify while
+/// genuinely idle: plain truncation makes `1 / 2 == 0`, and `active < 0` is
+/// unsatisfiable, which locked every single-slot MTP provider out of the
+/// preference no matter how idle it was.
+///
+/// Written as a comparison against `max` rather than `active * 2 < max`
+/// because both values come off a gossiped announcement — a peer can publish
+/// any `u32`, and the multiplication would overflow and panic in debug builds.
+pub(crate) fn idle_enough(active: u32, max: u32) -> bool {
+    max > 0 && active < max.div_ceil(2)
 }
 
 /// A model candidate scored during selection.
@@ -387,6 +474,59 @@ struct Candidate {
     /// `None` for a candidate from this node's own catalog, whose serving provider
     /// is resolved through the inference router instead.
     endpoint: Option<String>,
+    /// The offering provider's signed serving envelope, when this candidate
+    /// came from a network offer whose provider announcement is also live.
+    /// Carries the warm-prefix summary and concurrency that
+    /// [`Candidate::warm_match`] and [`Candidate::saturated`] read.
+    capacity: Option<AdvertisedCapacity>,
+}
+
+impl Candidate {
+    /// Bytes of this prompt the offering provider already holds warm, via the
+    /// longest chained-run match against its advertised radix summary.
+    ///
+    /// Zero for a local-catalog candidate, for a provider with no live
+    /// envelope, and for an empty prompt — in each case there is no evidence
+    /// of a warm prefix, which is the same routing outcome as a genuine miss.
+    fn warm_match(&self, prompt_run_hashes: &[u64]) -> u32 {
+        self.capacity
+            .as_ref()
+            .map(|c| c.prefix_cache.longest_match_len(prompt_run_hashes))
+            .unwrap_or(0)
+    }
+
+    /// Whether the offering provider is at its own declared admission ceiling.
+    ///
+    /// A saturated provider will queue the call behind work already in flight,
+    /// so its measured latency understates what this request would actually
+    /// wait. `max_concurrent_requests == 0` means the provider declined to
+    /// declare a ceiling and is never treated as saturated.
+    fn saturated(&self) -> bool {
+        self.capacity.as_ref().is_some_and(|c| {
+            c.max_concurrent_requests > 0 && c.active_requests >= c.max_concurrent_requests
+        })
+    }
+
+    /// Whether speculative decoding is both available here and likely to pay.
+    ///
+    /// A co-located drafter is worth roughly 1.7-2x on decode at low
+    /// concurrency, and *inverts into a slowdown* once the provider is
+    /// batching heavily — so availability alone is not enough to prefer it.
+    /// The gate is idleness: below half the declared admission ceiling.
+    ///
+    /// An undeclared ceiling (`0`) counts as **unknown, not idle**. Reading it
+    /// as "no limit, therefore never busy" made a missing field the
+    /// most-preferred state, so a peer that declared nothing outranked one
+    /// that answered honestly — and `0` is also the serde default, so a
+    /// truncated announcement landed in the winning bucket for free. It is
+    /// also what [`tenzro_types::model::ProviderCapacity::has_capacity`]
+    /// already treats as unusable, so this keeps the two readings of the same
+    /// field consistent.
+    fn speculation_pays(&self) -> bool {
+        self.capacity.as_ref().is_some_and(|c| {
+            c.mtp_enabled && idle_enough(c.active_requests, c.max_concurrent_requests)
+        })
+    }
 }
 
 /// Resolves an intent to a model and dispatches it through the inference
@@ -528,15 +668,15 @@ impl MetaRouter {
         // and the offers other providers are announcing on the network right now.
         // A cheaper or better-performing remote offer therefore wins on its
         // merits, and a node with an empty local catalog still routes.
-        let mut discovered: Vec<(ModelInfo, Option<String>)> = self
+        let mut discovered: Vec<(ModelInfo, Option<String>, Option<AdvertisedCapacity>)> = self
             .registry
             .search_models(&filter)
             .into_iter()
-            .map(|m| (m, None))
+            .map(|m| (m, None, None))
             .collect();
         if let Some(catalog) = &self.network_catalog {
             for offer in catalog.live_offers(intent.modality) {
-                discovered.push((offer.model, Some(offer.endpoint)));
+                discovered.push((offer.model, Some(offer.endpoint), offer.capacity));
             }
         }
         if discovered.is_empty() {
@@ -573,8 +713,20 @@ impl MetaRouter {
         });
 
         let mut candidates: Vec<Candidate> = Vec::new();
-        for (model, endpoint) in discovered {
+        for (model, endpoint, capacity) in discovered {
             let tier = quality_tier(&model);
+
+            // Locality: drop anything this node does not serve itself.
+            //
+            // Enforced here, beside the quality floor and the budget cap, so it
+            // is a discovery constraint rather than a post-hoc check — a
+            // candidate that would leave the machine is never considered, and
+            // an empty candidate set fails the request instead of quietly
+            // routing it out. `endpoint` is `Some` exactly when the candidate
+            // came from a live network offer; a local catalog entry has none.
+            if intent.locality == Locality::LocalOnly && endpoint.is_some() {
+                continue;
+            }
 
             // Quality floor: drop anything below the requested tier.
             if let Some(floor) = intent.quality_floor
@@ -612,6 +764,7 @@ impl MetaRouter {
             candidates.push(Candidate {
                 model,
                 endpoint,
+                capacity,
                 tier,
                 est_cost,
                 measured_cost,
@@ -686,15 +839,84 @@ impl MetaRouter {
         // still decides the fallback chain behind it. An override naming an
         // unavailable/unaffordable model simply does not match any candidate,
         // so selection falls through to the intelligent winner.
+        //
+        // Every offer of the pinned model moves to the front, not just the
+        // first. Moving one left the *old* head at index 1, and since that
+        // candidate names a different model, step 5c's tie-group scan stopped
+        // at it immediately — so pinning a model silently disabled cache
+        // affinity for it, in exactly the case the operator cared enough
+        // about to pin. Partition is stable, so the scored order is preserved
+        // both among the pinned offers and among the rest.
         if let Some(pinned) = self.task_models.get(intent.use_case.as_str())
-            && let Some(pos) = candidates.iter().position(|c| &c.model.model_id == pinned)
-            && pos != 0
+            && candidates.iter().any(|c| &c.model.model_id == pinned)
         {
-            let chosen = candidates.remove(pos);
-            candidates.insert(0, chosen);
+            let (mut front, back): (Vec<Candidate>, Vec<Candidate>) = candidates
+                .into_iter()
+                .partition(|c| &c.model.model_id == pinned);
+            front.extend(back);
+            candidates = front;
+        }
+
+        // 5c. Cache affinity and load, within the leading tie-group.
+        //
+        // Providers gossip a radix summary of the prompt prefixes they hold
+        // warm, and [`InferenceRouter::select_provider`] has scored it for
+        // years of wall-clock — but only on the local path, because a winning
+        // network offer returns its own signed provider and never reaches the
+        // inference router at all (see [`MetaRouter::route_and_select`]). In a
+        // multi-provider network that is exactly the case that matters: turn
+        // *N+1* of a conversation would otherwise land wherever price ordering
+        // put it, discarding a prefill the previous turn already paid for.
+        //
+        // The reorder is deliberately confined to the *leading tie-group* —
+        // offers of the same model at the same estimated cost, which are
+        // fungible on both axes the scoring above decided. So this can never
+        // trade cost or quality for a warm cache; it only breaks a tie the
+        // scoring left open, which is the same invariant the inference
+        // router's own prefix tie-break keeps.
+        let prompt_run_hashes = tenzro_types::prefix_run_hashes(
+            intent
+                .affinity_prefix
+                .as_deref()
+                .or(intent.prompt.as_deref())
+                .map(str::as_bytes)
+                .unwrap_or(&[]),
+        );
+        if candidates.len() > 1 {
+            let head_id = candidates[0].model.model_id.clone();
+            let head_cost = candidates[0].est_cost;
+            let tie_len = candidates
+                .iter()
+                .take_while(|c| c.model.model_id == head_id && c.est_cost == head_cost)
+                .count();
+            if tie_len > 1 {
+                // Prefer the longest warm prefix; among equally warm offers
+                // prefer one that isn't already at its admission ceiling, since
+                // a saturated provider queues the call behind work in flight.
+                // `Reverse(i)` keeps the *first* best on equal keys, so a tie
+                // with nothing warm leaves the order exactly as scored — an
+                // affinity rule that reshuffled equal candidates every turn
+                // would defeat its own purpose.
+                let best_pos = (0..tie_len).max_by_key(|&i| {
+                    let c = &candidates[i];
+                    (
+                        c.warm_match(&prompt_run_hashes),
+                        u8::from(!c.saturated()),
+                        u8::from(c.speculation_pays()),
+                        std::cmp::Reverse(i),
+                    )
+                });
+                if let Some(pos) = best_pos
+                    && pos != 0
+                {
+                    let chosen = candidates.remove(pos);
+                    candidates.insert(0, chosen);
+                }
+            }
         }
 
         let best = &candidates[0];
+        let warm_bytes = best.warm_match(&prompt_run_hashes);
 
         // 6. Per-DID rolling-window budget gate.
         if let (Some(did), Some(gate)) = (&intent.payer_did, &self.budget_gate) {
@@ -728,9 +950,20 @@ impl MetaRouter {
             },
         };
 
+        // Warm-prefix state rides the reason so an operator can tell a
+        // cache-affinity hit from a cold dispatch without instrumenting the
+        // provider — the two differ by a whole prefill, and nothing else in
+        // the decision distinguishes them.
+        let affinity = match (warm_bytes, best.saturated()) {
+            (0, false) => String::new(),
+            (0, true) => " affinity=cold,provider-saturated".to_string(),
+            (w, false) => format!(" affinity=warm({w}B)"),
+            (w, true) => format!(" affinity=warm({w}B),provider-saturated"),
+        };
+
         let reason = format!(
             "use_case={} modality={:?} tier={:?} optimize={:.2} \
-             est_cost={} survivors={} scoring={scoring} \
+             est_cost={} survivors={} scoring={scoring}{affinity} \
              (picked {} at {}; {} fallback{})",
             intent.use_case.as_str(),
             intent.modality,
@@ -838,9 +1071,36 @@ impl MetaRouter {
             .map(|c| c.min(u64::MAX as u128) as u64)
             .unwrap_or(u64::MAX);
 
+        // The prompt is what makes provider selection cache-aware: the
+        // inference router derives the incoming prompt's rolling run hashes
+        // from `request.input` and matches them against each provider's
+        // advertised warm-prefix summary. Passing an empty input — as this did
+        // — left `prefix_run_hashes` empty, which zeroes `prefix_bias` and
+        // guards off the prefix tie-break, so the whole affinity path was
+        // inert from this entry point however warm the providers were.
+        //
+        // Uses the same bytes as step 5c, for the same reason: the last user
+        // turn alone shares no run 0 with what providers warm.
+        //
+        // Routing reads these bytes and never transmits them — traced: the
+        // only wire use of `InferenceRequest.input` is `dispatch_to_provider`,
+        // which this path never calls. Dispatch re-sends the original request
+        // separately.
+        let routing_input: Vec<u8> = intent
+            .affinity_prefix
+            .as_deref()
+            .or(intent.prompt.as_deref())
+            .map(|p| p.as_bytes().to_vec())
+            .unwrap_or_default();
+
         let mut tried: Vec<String> = Vec::new();
         for model_id in &chain {
-            let request = InferenceRequest::new(model_id.clone(), requester, Vec::new(), max_price);
+            let request = InferenceRequest::new(
+                model_id.clone(),
+                requester,
+                routing_input.clone(),
+                max_price,
+            );
             match self.router.route_request(&request) {
                 Ok(provider) => {
                     return Ok((model_id.clone(), provider, decision));
@@ -992,6 +1252,279 @@ mod tests {
         let provider_manager = Arc::new(crate::provider::ProviderManager::new());
         let router = Arc::new(InferenceRouter::new(provider_manager));
         (registry, usage, router)
+    }
+
+    // ---- cache affinity / speculative preference over network offers ------
+    //
+    // These cover the seam where a *network* offer wins: `route` returns the
+    // announcement's own provider and the inference router is never consulted,
+    // so any preference that lives only in `InferenceRouter::select_provider`
+    // cannot fire here. That is the case a multi-provider network runs in.
+
+    /// A [`NetworkCatalog`] returning a fixed offer set.
+    struct StaticCatalog(Vec<ModelOffer>);
+
+    impl NetworkCatalog for StaticCatalog {
+        fn live_offers(&self, _modality: ModelModality) -> Vec<ModelOffer> {
+            self.0.clone()
+        }
+    }
+
+    /// Long enough to yield whole `PREFIX_RUN_BYTES` runs — a shorter prompt
+    /// hashes to nothing and every affinity assertion would pass vacuously.
+    fn warm_prompt() -> String {
+        "the quick brown fox jumps over the lazy dog. ".repeat(64)
+    }
+
+    /// An offer for `id` at `price`, served by provider byte-tag `tag`.
+    fn offer(
+        id: &str,
+        tag: u8,
+        price: u64,
+        capacity: Option<AdvertisedCapacity>,
+    ) -> (ModelOffer, Address) {
+        let mut m = model(id, 8_000_000_000, 8192, price, price);
+        let provider = Address::new([tag; 32]);
+        m.provider = provider;
+        (
+            ModelOffer {
+                model: m,
+                endpoint: format!("http://provider-{tag}:8545"),
+                capacity,
+            },
+            provider,
+        )
+    }
+
+    fn capacity(warm: Option<&str>, active: u32, max: u32, mtp: bool) -> Option<AdvertisedCapacity> {
+        Some(AdvertisedCapacity {
+            max_concurrent_requests: max,
+            active_requests: active,
+            mtp_enabled: mtp,
+            prefix_cache: warm
+                .map(|p| {
+                    tenzro_types::model::PrefixCacheSummary::from_warm_prompt(p.as_bytes())
+                })
+                .unwrap_or_default(),
+            ..Default::default()
+        })
+    }
+
+    fn decide(offers: Vec<ModelOffer>, prompt: Option<&str>) -> RouteDecision {
+        let (registry, usage, router) = router_stack();
+        let meta = MetaRouter::new(registry, usage, router)
+            .with_network_catalog(Arc::new(StaticCatalog(offers)));
+        let mut intent = RouteIntent::new(UseCase::Chat, Budget::None).with_tokens(64, 64);
+        intent.prompt = prompt.map(str::to_string);
+        meta.route(&intent).expect("an offer should win")
+    }
+
+    /// The production shape: the provider warmed the whole conversation, and
+    /// the router is handed only the *last user turn* as `prompt`.
+    ///
+    /// This is the case the original suite could not see, because every test
+    /// fed byte-identical strings to both sides. The rolling hash chains from
+    /// byte 0, so matching on the last turn alone shares no run with what the
+    /// provider holds — affinity scored zero for exactly the multi-turn and
+    /// shared-system-prompt traffic it was built to serve. `affinity_prefix`
+    /// is what carries the right bytes.
+    #[test]
+    fn affinity_matches_the_conversation_not_just_the_last_turn() {
+        let system = "you are a careful assistant. ".repeat(48);
+        let turn_1 = "explain rolling hashes";
+        let latest = "now compare to a radix tree";
+        // What a provider warms: every message's content joined by '\n'.
+        let warmed = format!("{system}\n{turn_1}");
+        // What the router sees as `prompt`: the last user turn only.
+        let conversation = format!("{warmed}\n{latest}");
+
+        let (cold, _) = offer("m", 1, 10, capacity(None, 0, 8, false));
+        let (warm, warm_addr) = offer("m", 2, 10, capacity(Some(&warmed), 0, 8, false));
+
+        // Without the affinity prefix the warm provider is invisible.
+        let (c1, _) = offer("m", 1, 10, capacity(None, 0, 8, false));
+        let (w1, _) = offer("m", 2, 10, capacity(Some(&warmed), 0, 8, false));
+        let blind = decide(vec![c1, w1], Some(latest));
+        assert!(
+            !blind.reason.contains("affinity=warm"),
+            "last-turn-only matching should find nothing warm: {}",
+            blind.reason
+        );
+
+        // With it, the provider holding the conversation prefix wins.
+        let (registry, usage, router) = router_stack();
+        let meta = MetaRouter::new(registry, usage, router)
+            .with_network_catalog(Arc::new(StaticCatalog(vec![cold, warm])));
+        let intent = RouteIntent::new(UseCase::Chat, Budget::None)
+            .with_tokens(64, 64)
+            .with_affinity_prefix(conversation);
+        let d = meta.route(&intent).expect("an offer should win");
+        assert_eq!(d.provider, Some(warm_addr), "{}", d.reason);
+        assert!(d.reason.contains("affinity=warm"), "{}", d.reason);
+    }
+
+    /// A peer can put anything in a gossiped announcement — a signature proves
+    /// who sent it, not that it is true. A forged `run_len` must not let a
+    /// provider holding nothing outrank one holding the real prefix.
+    #[test]
+    fn forged_run_len_cannot_win_the_tie_break() {
+        let w = warm_prompt();
+        let honest_cap = capacity(Some(&w), 0, 8, false).unwrap();
+        assert!(
+            honest_cap.prefix_cache.longest_match_len(&tenzro_types::prefix_run_hashes(
+                w.as_bytes()
+            )) > 0,
+            "fixture must genuinely match, else this proves nothing"
+        );
+
+        // One node claiming a saturating run length, matching only run 0.
+        let mut forged = tenzro_types::model::PrefixCacheSummary::from_warm_prompt(w.as_bytes());
+        forged.nodes.truncate(1);
+        forged.nodes[0].run_len = u32::MAX;
+        let forged_json = serde_json::to_string(&forged).expect("summary serializes");
+        let decoded: tenzro_types::model::PrefixCacheSummary =
+            serde_json::from_str(&forged_json).expect("summary deserializes");
+        assert!(
+            decoded.nodes.is_empty(),
+            "a run_len the honest producer never emits must be rejected at the \
+             deserialization boundary, leaving the peer advertising nothing"
+        );
+    }
+
+    /// Declaring no concurrency ceiling must not be better than answering
+    /// honestly — `0` is also the serde default, so a truncated announcement
+    /// would otherwise land in the most-preferred bucket for free.
+    #[test]
+    fn undeclared_ceiling_is_not_treated_as_idle() {
+        assert!(!idle_enough(0, 0), "no declared ceiling is unknown, not idle");
+        assert!(!idle_enough(u32::MAX, 0));
+        // A genuinely idle single-slot provider still qualifies.
+        assert!(idle_enough(0, 1), "1/2 truncating to 0 locked these out");
+        assert!(idle_enough(3, 8));
+        assert!(!idle_enough(4, 8));
+    }
+
+    #[test]
+    fn warm_offer_wins_at_equal_cost() {
+        let (cold, _) = offer("m", 1, 10, capacity(None, 0, 8, false));
+        let (warm, warm_addr) = offer("m", 2, 10, capacity(Some(&warm_prompt()), 0, 8, false));
+        let d = decide(vec![cold, warm], Some(&warm_prompt()));
+        assert_eq!(d.provider, Some(warm_addr), "{}", d.reason);
+        assert!(d.reason.contains("affinity=warm"), "{}", d.reason);
+    }
+
+    /// Affinity breaks ties; it never buys its way past price. This is the
+    /// invariant that keeps the tie-break safe to apply unconditionally.
+    #[test]
+    fn cheaper_cold_offer_still_beats_a_warm_one() {
+        let (cheap, cheap_addr) = offer("m", 1, 1, capacity(None, 0, 8, false));
+        let (warm, _) = offer("m", 2, 10, capacity(Some(&warm_prompt()), 0, 8, false));
+        let d = decide(vec![warm, cheap], Some(&warm_prompt()));
+        assert_eq!(d.provider, Some(cheap_addr), "{}", d.reason);
+    }
+
+    /// With nothing warm and no prompt, the scored order must survive intact —
+    /// an affinity rule that reshuffles equal candidates every turn would
+    /// destroy the very stickiness it exists to create.
+    #[test]
+    fn nothing_warm_leaves_scored_order_untouched() {
+        let (first, first_addr) = offer("m", 1, 10, capacity(None, 0, 8, false));
+        let (second, _) = offer("m", 2, 10, capacity(None, 0, 8, false));
+        let d = decide(vec![first, second], None);
+        assert_eq!(d.provider, Some(first_addr), "{}", d.reason);
+    }
+
+    /// Equally warm: the provider not already at its admission ceiling wins,
+    /// because the saturated one would queue the call behind work in flight.
+    #[test]
+    fn saturated_provider_loses_to_an_idle_equal() {
+        let w = warm_prompt();
+        let (full, _) = offer("m", 1, 10, capacity(Some(&w), 8, 8, false));
+        let (free, free_addr) = offer("m", 2, 10, capacity(Some(&w), 1, 8, false));
+        let d = decide(vec![full, free], Some(&w));
+        assert_eq!(d.provider, Some(free_addr), "{}", d.reason);
+    }
+
+    /// Speculation is preferred automatically — no `draft_n`, no operator
+    /// config — but only when the provider is idle enough for it to pay.
+    #[test]
+    fn idle_speculative_provider_preferred_when_nothing_is_warm() {
+        let (plain, _) = offer("m", 1, 10, capacity(None, 0, 8, false));
+        let (spec, spec_addr) = offer("m", 2, 10, capacity(None, 0, 8, true));
+        let d = decide(vec![plain, spec], Some(&warm_prompt()));
+        assert_eq!(d.provider, Some(spec_addr), "{}", d.reason);
+    }
+
+    /// Speculative decoding inverts into a slowdown once a provider is
+    /// batching heavily, so a busy MTP provider must not be preferred.
+    #[test]
+    fn busy_speculative_provider_is_not_preferred() {
+        let (plain, plain_addr) = offer("m", 1, 10, capacity(None, 0, 8, false));
+        let (spec, _) = offer("m", 2, 10, capacity(None, 7, 8, true));
+        let d = decide(vec![plain, spec], Some(&warm_prompt()));
+        assert_eq!(d.provider, Some(plain_addr), "{}", d.reason);
+    }
+
+    /// A warm prefix outranks speculation: skipping a whole prefill is the
+    /// larger and more certain saving.
+    #[test]
+    fn warm_prefix_outranks_speculation() {
+        let (spec, _) = offer("m", 1, 10, capacity(None, 0, 8, true));
+        let (warm, warm_addr) = offer("m", 2, 10, capacity(Some(&warm_prompt()), 0, 8, false));
+        let d = decide(vec![spec, warm], Some(&warm_prompt()));
+        assert_eq!(d.provider, Some(warm_addr), "{}", d.reason);
+    }
+
+    /// Pinning a model must not switch off cache affinity for it.
+    ///
+    /// The override used to move only the *first* matching offer to the
+    /// front, which left a differently-named candidate at index 1 and made
+    /// the tie-group scan stop there — so the operator's pinned model was
+    /// precisely the one that lost warm-prefix routing. Regression test: with
+    /// a cheaper unpinned model present, a cold pinned offer must not beat a
+    /// warm pinned offer at the same price.
+    #[test]
+    fn pinning_a_model_still_honours_cache_affinity() {
+        let w = warm_prompt();
+        // `a` is cheaper, so it heads the scored order; `b` is pinned.
+        let (cheap_other, cheap_addr) = offer("a", 1, 1, capacity(None, 0, 8, false));
+        let (pinned_cold, cold_addr) = offer("b", 2, 10, capacity(None, 0, 8, false));
+        let (pinned_warm, warm_addr) = offer("b", 3, 10, capacity(Some(&w), 0, 8, false));
+
+        let (registry, usage, router) = router_stack();
+        let meta = MetaRouter::new(registry, usage, router)
+            .with_network_catalog(Arc::new(StaticCatalog(vec![
+                cheap_other,
+                pinned_cold,
+                pinned_warm,
+            ])))
+            .with_routing_preferences(HashMap::from([(
+                UseCase::Chat.as_str().to_string(),
+                "b".to_string(),
+            )]));
+        let mut intent = RouteIntent::new(UseCase::Chat, Budget::None).with_tokens(64, 64);
+        intent.prompt = Some(w.clone());
+        let d = meta.route(&intent).expect("an offer should win");
+
+        assert_ne!(d.provider, Some(cheap_addr), "the pin must still win: {}", d.reason);
+        assert_eq!(
+            d.provider,
+            Some(warm_addr),
+            "pinned model must still prefer its warm offer, not {:?}: {}",
+            cold_addr,
+            d.reason
+        );
+        assert!(d.reason.contains("affinity=warm"), "{}", d.reason);
+    }
+
+    /// An offer whose provider announcement has not arrived carries no
+    /// capacity, and must not be demoted for a gossip race it did not cause.
+    #[test]
+    fn offer_without_announced_capacity_keeps_its_position() {
+        let (unknown, unknown_addr) = offer("m", 1, 10, None);
+        let (known, _) = offer("m", 2, 10, capacity(None, 0, 8, false));
+        let d = decide(vec![unknown, known], Some(&warm_prompt()));
+        assert_eq!(d.provider, Some(unknown_addr), "{}", d.reason);
     }
 
     #[test]
@@ -1275,6 +1808,91 @@ mod tests {
             .with_optimize(0.5)
             .with_tokens(10, 10)
             .with_prompt_embedding(embedding)
+    }
+
+    /// The default admits both, so nothing changes for callers that do not ask.
+    #[test]
+    fn locality_defaults_to_any() {
+        let intent = RouteIntent::new(UseCase::Chat, Budget::None);
+        assert_eq!(intent.locality, Locality::Any);
+    }
+
+    /// `local_only` is what an application promising "your data stays on your
+    /// machine" actually needs.
+    ///
+    /// `budget` was the only thing standing in for it — setting it to zero
+    /// happens to exclude *paid* remote offers — but that is a cost constraint
+    /// wearing a privacy constraint's clothes: a free or subsidised provider
+    /// satisfies a zero budget and still receives the prompt.
+    #[test]
+    fn local_only_is_distinct_from_a_zero_budget() {
+        let free_remote_is_allowed = RouteIntent::new(UseCase::Chat, Budget::PerRequestTnzo(0));
+        assert_eq!(
+            free_remote_is_allowed.locality,
+            Locality::Any,
+            "a zero budget must not be mistaken for a locality guarantee"
+        );
+
+        let intent = RouteIntent::new(UseCase::Chat, Budget::None).local_only();
+        assert_eq!(intent.locality, Locality::LocalOnly);
+    }
+
+    /// It must fail closed.
+    ///
+    /// A caller that asked for local-only and got a network provider anyway has
+    /// been handed the exact outcome they asked to avoid, silently. When the
+    /// only candidates are network offers, the route must fail.
+    #[test]
+    fn local_only_rejects_a_network_offer() {
+        let (network_offer, _provider) = offer("remote-model", 9, 1_000, None);
+        let (registry, usage, router) = router_stack();
+        let meta = MetaRouter::new(registry, usage, router)
+            .with_network_catalog(Arc::new(StaticCatalog(vec![network_offer])));
+
+        // Unconstrained, a network offer is a legitimate answer.
+        let open = RouteIntent::new(UseCase::Chat, Budget::None).with_tokens(64, 64);
+        assert!(
+            meta.route(&open).is_ok(),
+            "the fixture must route without the constraint, or the test below \
+             proves nothing"
+        );
+
+        // Local-only must not accept it, and must not fall back to it either.
+        let restricted = RouteIntent::new(UseCase::Chat, Budget::None)
+            .with_tokens(64, 64)
+            .local_only();
+        match meta.route(&restricted) {
+            Err(_) => {}
+            Ok(d) => {
+                // The router stack also carries local registry models, so a
+                // local win is acceptable — a *remote* one is not.
+                assert!(
+                    !d.model_id.starts_with("remote-"),
+                    "local_only routed to the network offer '{}'",
+                    d.model_id
+                );
+            }
+        }
+    }
+
+    /// And a node that serves nothing locally cannot satisfy local-only at all.
+    #[test]
+    fn local_only_fails_when_nothing_is_served_locally() {
+        let (network_offer, _provider) = offer("remote-only", 7, 1_000, None);
+        //  gives an empty local registry, which is the point:
+        // nothing is served here, so only the network offer is a candidate.
+        let (registry, usage, router) = router_stack();
+        let meta = MetaRouter::new(registry, usage, router)
+            .with_network_catalog(Arc::new(StaticCatalog(vec![network_offer])));
+
+        let intent = RouteIntent::new(UseCase::Chat, Budget::None)
+            .with_tokens(64, 64)
+            .local_only();
+        assert!(
+            meta.route(&intent).is_err(),
+            "with an empty local registry, local_only must fail rather than \
+             reach for the network"
+        );
     }
 
     #[test]

@@ -42,9 +42,10 @@
 //!    prose answer is unconstrained and the model is never forced to call a
 //!    tool it does not want.
 //!
-//! Of these, (1) is live and (2) is wired but **off by default** — the
-//! vendored llama.cpp aborts the process when the grammar is applied. See
-//! [`grammar_enabled`] for the evidence and the flag that turns it back on.
+//! Both are live as of 2026-08-16. (2) was off because applying it aborted the
+//! process; three abort paths in the vendored llama.cpp have since been fixed
+//! so a grammar that cannot match degrades to unconstrained sampling instead of
+//! killing the node. See [`grammar_enabled`] for the measurements.
 //! (1) is the half that carries the practical win: given its own format the
 //! model produces calls the existing parsers read directly.
 //!
@@ -59,7 +60,7 @@
 //! only thing standing behind a model served through the fallback.
 
 use llama_cpp_2::model::{AddBos, GrammarTrigger, GrammarTriggerType};
-use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
+use llama_cpp_2::model::{LlamaModel};
 use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
@@ -73,10 +74,14 @@ use crate::runtime::{ChatMessage, ToolDefinition};
 pub(crate) struct ToolGrammar {
     /// GBNF source, rooted at `root`.
     grammar: String,
-    /// Token ids that arm the grammar. Always non-empty — a grammar whose
-    /// triggers could not be resolved to tokens is declined outright, see
-    /// [`resolve_trigger_tokens`].
+    /// Token ids that arm the grammar. May be empty when the template arms by
+    /// pattern instead — see [`resolve_triggers`].
     trigger_tokens: Vec<LlamaToken>,
+    /// Regexes that arm the grammar, for templates whose trigger is a run of
+    /// text rather than one special token. muse-glimmer is the case that needs
+    /// this: it opens a tool turn with `<|start|>assistant to=<tool><|message|>`,
+    /// which no single token spells.
+    trigger_patterns: Vec<String>,
 }
 
 impl ToolGrammar {
@@ -88,14 +93,11 @@ impl ToolGrammar {
     /// model produces. Refusing to answer at all would be a worse trade for
     /// something that is a reliability aid, not a correctness gate.
     pub(crate) fn sampler(&self, model: &LlamaModel) -> Option<LlamaSampler> {
-        // Token triggers only, and an empty pattern list — see
-        // [`resolve_trigger_tokens`] for why the pattern path is off limits in
-        // this fork.
         let built = LlamaSampler::grammar_lazy_patterns(
             model,
             &self.grammar,
             "root",
-            &[],
+            &self.trigger_patterns,
             &self.trigger_tokens,
         );
 
@@ -170,29 +172,40 @@ pub(crate) fn native_chat_prompt(
     // template emits its pre-closed empty `<think></think>` block and the model
     // answers directly. Both paths return the same `ChatTemplateResult`.
     let render = if enable_thinking {
-        let chat: Vec<LlamaChatMessage> = messages
-            .iter()
-            .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
-            .collect::<std::result::Result<_, _>>()
-            .ok()?;
+        // Render from JSON rather than `LlamaChatMessage`, which carries only a
+        // role and a string: a turn's `tool_calls`, and a `tool` turn's name and
+        // call id, cannot survive that shape. Templates with tool branches need
+        // them — muse-glimmer renders an assistant tool call as
+        // `<|start|>assistant to=NAME<|message|>` with ATEM markup, and a result
+        // as `<|start|>tool NAME<|message|><tool_output …>` — and dropping them
+        // meant the model was never shown its own tool dialect. It then imitated
+        // whatever the history did contain, which is why multi-turn runs decayed.
+        //
+        // Both branches of this function now build the same JSON and differ only
+        // in `enable_thinking`, which is what the comment below always claimed.
+        let messages_json = messages_as_json(messages)?;
+        let params = OpenAIChatTemplateParams {
+            messages_json: &messages_json,
+            tools_json: tools_json.as_deref(),
+            tool_choice: None,
+            json_schema: None,
+            grammar: None,
+            reasoning_format: None,
+            chat_template_kwargs: None,
+            add_generation_prompt: true,
+            use_jinja: true,
+            parallel_tool_calls: false,
+            enable_thinking: true,
+            add_bos: true,
+            add_eos: false,
+            parse_tool_calls: tools_json.is_some(),
+        };
         model
-            .apply_chat_template_with_tools_oaicompat(
-                &template,
-                &chat,
-                tools_json.as_deref(),
-                None,
-                true,
-            )
+            .apply_chat_template_oaicompat(&template, &params)
             .map_err(|e| debug!("native chat template unavailable: {e}"))
             .ok()?
     } else {
-        let messages_json = serde_json::to_string(
-            &messages
-                .iter()
-                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-                .collect::<Vec<_>>(),
-        )
-        .ok()?;
+        let messages_json = messages_as_json(messages)?;
         // Mirror the tool-aware wrapper's fixed inputs (use_jinja + add_bos, the
         // double-BOS fix; generation prompt on) so the only difference from the
         // thinking-ON render is `enable_thinking = false`.
@@ -247,17 +260,23 @@ pub(crate) fn native_chat_prompt(
                 warn!("tool grammar is not lazy — declining it rather than forcing every reply to call a tool");
                 return None;
             }
-            let tokens = resolve_trigger_tokens(model, &render.grammar_triggers).or_else(|| {
+            let (tokens, patterns) = resolve_triggers(model, &render.grammar_triggers).or_else(|| {
                 warn!(
-                    "tool grammar triggers could not be resolved to tokens; serving unconstrained \
-                     and relying on output parsing"
+                    "tool grammar has no usable trigger; serving unconstrained and relying on \
+                     output parsing"
                 );
                 None
             })?;
+            debug!(
+                "tool grammar armed with {} token trigger(s) and {} pattern trigger(s)",
+                tokens.len(),
+                patterns.len()
+            );
 
             Some(ToolGrammar {
                 grammar: g,
                 trigger_tokens: tokens,
+                trigger_patterns: patterns,
             })
         })
     };
@@ -274,6 +293,39 @@ pub(crate) fn native_chat_prompt(
         grammar,
         render,
     })
+}
+
+/// Serialize turns for a chat template, keeping any tool structure they carry.
+///
+/// `role` and `content` always; `tool_calls`, `name` and `tool_call_id` only
+/// when present, so a template with no tool branches sees exactly the object it
+/// saw before.
+fn messages_as_json(messages: &[ChatMessage]) -> Option<String> {
+    let arr: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            let mut o = serde_json::Map::new();
+            o.insert("role".into(), serde_json::Value::String(m.role.clone()));
+            o.insert(
+                "content".into(),
+                serde_json::Value::String(m.content.clone()),
+            );
+            if let Some(tc) = &m.tool_calls {
+                o.insert("tool_calls".into(), tc.clone());
+            }
+            if let Some(n) = &m.name {
+                o.insert("name".into(), serde_json::Value::String(n.clone()));
+            }
+            if let Some(id) = &m.tool_call_id {
+                o.insert(
+                    "tool_call_id".into(),
+                    serde_json::Value::String(id.clone()),
+                );
+            }
+            serde_json::Value::Object(o)
+        })
+        .collect();
+    serde_json::to_string(&arr).ok()
 }
 
 /// Render `messages` and `tools` through the model's own chat template,
@@ -299,46 +351,74 @@ pub(crate) fn native_tool_prompt(
     Some((nc.prompt, nc.grammar))
 }
 
-/// Whether to attach the derived grammar to the sampler. Off unless
-/// `TENZRO_TOOL_GRAMMAR` is set to `1`/`true`/`yes`.
+/// Whether to attach the derived grammar to the sampler. **On** unless
+/// `TENZRO_TOOL_GRAMMAR` is set to `0`/`false`/`no`.
 ///
-/// # Why this is off
+/// # Why this is now on (2026-08-16)
 ///
-/// The grammar is the stronger half of this module on paper — a constrained
-/// sampler cannot spell a malformed call at all, where the template only makes
-/// a well-formed one likely. It is disabled because the vendored llama.cpp
-/// cannot currently apply it without aborting the process.
+/// The grammar is the stronger half of this module — a constrained sampler
+/// cannot spell a malformed call at all, where the template only makes a
+/// well-formed one likely. It was disabled because arming it aborted the
+/// process. Three abort paths in the vendored `llama-grammar.cpp` have since
+/// been fixed, all of them the same mistake: a library that calls `abort()` on
+/// malformed *model output* is unusable in a server, where it takes every other
+/// in-flight request down with the turn that upset it.
+///
+/// - `llama_grammar_apply_impl` walked into `llama_grammar_reject_candidates`
+///   with exhausted stacks, whose `GGML_ASSERT(!stacks.empty())` — marked
+///   "REVIEW" upstream — aborts. Empty stacks mean nothing left to constrain.
+/// - Both accept paths threw `std::runtime_error` on a piece they could not
+///   accept. Under a C ABI that reaches no handler: `terminate()`.
+/// - End-of-generation with the grammar mid-rule hit a `GGML_ABORT`.
+///
+/// All three now degrade to unconstrained sampling for the remainder of the
+/// turn, which is exactly the behaviour when no grammar is attached.
+///
+/// What this does NOT do, measured rather than assumed: **it does not help
+/// muse-glimmer**. One run of the 7-step loop completed 7/7 and looked like
+/// proof, but repeat runs gave 4 and 3 — muse's spread, not an effect. The log
+/// says why: `tool grammar triggers could not be resolved to tokens; serving
+/// unconstrained`. muse's trigger is ATEM markup, a multi-token string rather
+/// than one special token, so [`resolve_trigger_tokens`] declines and muse runs
+/// exactly as unconstrained as before. Arming it needs the pattern-trigger path
+/// below, which this fork implements with a substring `find` instead of a regex.
+///
+/// qwen3.8 was unchanged at 6 steps, as expected: it has `<tool_call>` and
+/// survives either way.
+///
+/// Kept behind the flag so it can be turned off without a rebuild.
+///
+/// # The original evidence (kept — the mismatch it describes is still real)
 ///
 /// Both ways of arming it were tried against `qwen3.6-35b-a3b-mtp`, and both
 /// ended at `llama-grammar.cpp:940`, `GGML_ASSERT(!stacks.empty())` inside
 /// `llama_grammar_reject_candidates` — `abort()`, so systemd restarts the node
 /// mid-response and every other request in flight dies with it:
 ///
-/// - **Pattern triggers.** The header requires a pattern to "be a full match of
-///   the entire generated" output with a capture group marking where the
-///   grammar resumes, and upstream's `common/sampling.cpp` wraps each trigger
-///   as `^[\s\S]*?(…)[\s\S]*` to satisfy that. This fork wraps nothing and
-///   matches with a substring `find` rather than a regex, so the grammar
-///   resumes at an offset that does not correspond to its root rule.
+/// - **Pattern triggers.** Recorded here as unusable because "this fork wraps
+///   nothing and matches with a substring `find` rather than a regex". **That
+///   was wrong** — `find` is a method on `llama_grammar_trigger_pattern` that
+///   runs `std::regex_match` for an anchored pattern and `std::regex_search`
+///   otherwise, resuming at the first non-empty capture group, exactly the
+///   documented contract. The path works and is now used; it is what arms
+///   muse-glimmer, whose trigger is a run of text no single token spells.
 /// - **Token triggers.** Armed correctly — the log shows `Grammar triggered on
 ///   token 248058 (<tool_call>)` — and the grammar still rejected the piece its
 ///   own root rule opens with (`tool-call ::= "<tool_call>\n" …`), emptying the
 ///   stacks on the first masked sample.
 ///
-/// The second case is a defect in this fork's GBNF engine rather than in how
-/// it is called, so it is not fixable from here. Rendering through the native
-/// template is the part that carries the reliability win in practice, and it
-/// is unaffected: the model emits its trained `<function=`/`<parameter=` form,
-/// which [`crate::runtime::extract_tool_calls`] reads directly.
-///
-/// Left wired and behind a flag rather than deleted, so that confirming a fixed
-/// llama.cpp is a matter of setting one environment variable.
+/// The grammar still cannot accept every piece qwen emits — the log shows it
+/// declining `function`, `>` and `</tool_call>` — so for that model it disables
+/// itself early and the turn proceeds unconstrained, exactly as before. That
+/// mismatch between this fork's GBNF engine and the grammar `chat.cpp` derives
+/// is unfixed. What changed is that discovering it no longer kills the node,
+/// which is what made arming the grammar for muse possible at all.
 fn grammar_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("TENZRO_TOOL_GRAMMAR")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false)
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+            .unwrap_or(true)
     })
 }
 
@@ -372,11 +452,12 @@ fn grammar_enabled() -> bool {
 /// way — a multi-token literal, or a regex with no fixed prefix. The caller
 /// then serves the turn unconstrained and falls back to parsing the output,
 /// which is how every model without a tool template is already served.
-fn resolve_trigger_tokens(
+fn resolve_triggers(
     model: &LlamaModel,
     triggers: &[GrammarTrigger],
-) -> Option<Vec<LlamaToken>> {
+) -> Option<(Vec<LlamaToken>, Vec<String>)> {
     let mut tokens = Vec::new();
+    let mut patterns = Vec::new();
 
     for GrammarTrigger {
         trigger_type,
@@ -387,14 +468,25 @@ fn resolve_trigger_tokens(
         match trigger_type {
             GrammarTriggerType::Token => tokens.push((*token)?),
             GrammarTriggerType::Word => tokens.push(leading_token(model, value)?),
+            // Hand regex triggers to llama.cpp rather than declining them. Its
+            // `llama_grammar_trigger_pattern::find` runs `regex_match` for an
+            // anchored pattern and `regex_search` otherwise, then resumes the
+            // grammar at the first non-empty capture group — which is the
+            // contract these patterns are written against.
+            //
+            // This path was previously refused on the belief that the fork
+            // matched triggers with a substring `find`. It does not; `find` is
+            // a method on the pattern struct that wraps `std::regex`. Declining
+            // cost muse-glimmer its grammar entirely, since its trigger
+            // (`<|start|>assistant to=<tool><|message|>`) is a run of text that
+            // no single token spells.
             GrammarTriggerType::Pattern | GrammarTriggerType::PatternFull => {
-                debug!("regex grammar trigger {value:?} cannot be resolved to a token");
-                return None;
+                patterns.push(value.clone());
             }
         }
     }
 
-    (!tokens.is_empty()).then_some(tokens)
+    (!tokens.is_empty() || !patterns.is_empty()).then_some((tokens, patterns))
 }
 
 /// The single token that opens `text`, if the tokenizer produces one whose
@@ -471,8 +563,7 @@ mod tests {
             .expect("load qwen3.5-0.8b");
         let msgs = vec![ChatMessage {
             role: "user".into(),
-            content: "Do you know javascript?".into(),
-        }];
+            content: "Do you know javascript?".into(), ..Default::default() }];
 
         let on = native_chat_prompt(&model, &msgs, &[], true).expect("render thinking-on");
         let off = native_chat_prompt(&model, &msgs, &[], false).expect("render thinking-off");
@@ -525,8 +616,7 @@ mod tests {
                 .expect("load qwen3.5-0.8b");
             let msgs = vec![ChatMessage {
                 role: "user".into(),
-                content: "Do you know javascript? Answer in one sentence.".into(),
-            }];
+                content: "Do you know javascript? Answer in one sentence.".into(), ..Default::default() }];
             let cfg = crate::runtime::GenerationConfig {
                 max_tokens: 80,
                 temperature: 0.6,
@@ -550,7 +640,7 @@ mod tests {
                 res.text
             );
             assert!(
-                res.thinking.as_deref().map_or(true, |t| t.trim().is_empty()),
+                res.thinking.as_deref().is_none_or(|t| t.trim().is_empty()),
                 "thinking-OFF should yield no reasoning span, got: {:?}",
                 res.thinking
             );

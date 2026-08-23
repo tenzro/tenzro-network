@@ -46,6 +46,7 @@
 
 pub mod aa_bootstrap_paymaster;
 pub mod aa_delegation_validator;
+pub mod aa_identity_key_validator;
 pub mod aa_tee_bound_validator;
 pub mod aa_validators;
 pub mod aa_webauthn_validator;
@@ -62,6 +63,7 @@ pub mod error;
 pub mod evm;
 pub mod gas;
 pub mod global_supply;
+pub mod governance;
 pub mod hot_state;
 pub mod native;
 pub mod parallel;

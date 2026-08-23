@@ -19,7 +19,22 @@ pub struct NonceManager {
     pending_nonces: DashMap<Address, u64>,
     /// Last confirmed on-chain nonce per address
     confirmed_nonces: DashMap<Address, u64>,
+    /// When each address last saw chain state advance, in seconds.
+    ///
+    /// A gap is only distinguishable from in-flight work by time. Chain state
+    /// says what has been *included*; it cannot say whether the rest is queued
+    /// or lost. If chain state has not moved for a while and the counter is
+    /// ahead, the difference was dropped rather than delayed.
+    last_progress_secs: DashMap<Address, u64>,
 }
+
+/// How long chain state may sit still, with the pending counter ahead of it,
+/// before the difference is treated as dropped rather than in flight.
+///
+/// Long enough that ordinary inclusion latency never trips it — blocks are
+/// transaction-driven here, so a quiet chain can take a while to include one —
+/// and short enough that a wedged address recovers without a restart.
+const STALL_SECS: u64 = 120;
 
 impl NonceManager {
     /// Create a new nonce manager
@@ -27,6 +42,7 @@ impl NonceManager {
         Self {
             pending_nonces: DashMap::new(),
             confirmed_nonces: DashMap::new(),
+            last_progress_secs: DashMap::new(),
         }
     }
 
@@ -59,15 +75,102 @@ impl NonceManager {
     /// than `max_inflight` means the gap can no longer be explained by
     /// transactions still in flight, so it is treated as abandoned.
     pub fn rebase_nonce(&self, address: &Address, chain_nonce: u64, max_inflight: u64) {
+        // `max_inflight` is retained in the signature — it is part of the
+        // `WalletService` trait and a caller-visible policy knob — but the
+        // counter is no longer trimmed against it. See below.
+        let _ = max_inflight;
         let mut entry = self.pending_nonces.entry(*address).or_insert(chain_nonce);
         let pending = *entry;
-        if pending < chain_nonce || pending > chain_nonce.saturating_add(max_inflight) {
+
+        // Chain state moved since last time: nothing is stuck, restart the clock.
+        let advanced = self
+            .confirmed_nonces
+            .get(address)
+            .map(|v| chain_nonce > *v)
+            .unwrap_or(true);
+        if advanced {
+            self.note_progress(address, chain_nonce);
+        }
+
+        // Forward only.
+        //
+        // The counter is the only record of what this process has handed out —
+        // `confirmed_nonces` tracks inclusion, not assignment — so moving it
+        // backwards for any reason re-issues a nonce that is already in flight.
+        // `chain_nonce` counts only what has been included in a block, so
+        // everything still in the mempool reads as unspent, and under load the
+        // counter passes any in-flight window legitimately. Trimming it there
+        // handed the same nonce to a second transaction and one of the pair
+        // failed, which is what filled the log with what looked like gaps:
+        //
+        //     Invalid nonce: expected 10, got 6
+        //     Invalid nonce: expected 1, got 0     (x158)
+        //
+        // Those are collisions. Only the behind-chain-state case is corrected,
+        // which is the restart case: the counter was rebuilt empty and would
+        // otherwise replay a nonce already spent on-chain.
+        //
+        // A counter that runs away because a signed transaction was dropped
+        // does leave a gap that nothing closes — but the address recovers on
+        // restart, and re-issuing live nonces to avoid that trades a stall for
+        // silent transaction loss. Closing it properly means tracking assigned
+        // nonces that were never included, not guessing from chain state.
+        if pending < chain_nonce {
             debug!(
-                "Rebasing pending nonce for {} from {} to chain nonce {}",
+                "Rebasing pending nonce for {} forward from {} to chain nonce {}",
                 address, pending, chain_nonce
             );
             *entry = chain_nonce;
+            self.note_progress(address, chain_nonce);
+            return;
         }
+
+        // Ahead of chain state. Whether that is in-flight work or a gap left by
+        // dropped transactions cannot be told apart from chain state alone —
+        // only from time. So the counter is rewound *only* once chain state has
+        // been stuck for `STALL_SECS` while the counter sits ahead of it:
+        //
+        //     Invalid nonce: expected 23, got 30
+        //     Invalid nonce: expected 23, got 32
+        //
+        // Every later grant reads as a gap and is rejected in turn, so one lost
+        // transaction wedges the address indefinitely. Waiting first is what
+        // keeps this from re-issuing nonces that were merely slow — the failure
+        // mode a naive rewind produced, where two transactions shared a nonce
+        // and one of them died.
+        let now = Self::now_secs();
+        let stalled_since = *self
+            .last_progress_secs
+            .entry(*address)
+            .or_insert(now)
+            .value();
+
+        if pending > chain_nonce && now.saturating_sub(stalled_since) >= STALL_SECS {
+            debug!(
+                "Nonce gap for {} did not close in {}s (pending {}, chain {}); \
+                 treating the difference as dropped",
+                address,
+                STALL_SECS,
+                pending,
+                chain_nonce
+            );
+            *entry = chain_nonce;
+            self.note_progress(address, chain_nonce);
+        }
+    }
+
+    /// Record that chain state moved for this address, restarting its clock.
+    fn note_progress(&self, address: &Address, chain_nonce: u64) {
+        self.confirmed_nonces.insert(*address, chain_nonce);
+        self.last_progress_secs
+            .insert(*address, Self::now_secs());
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
     }
 
     /// Peek at the next nonce without incrementing.
@@ -203,6 +306,61 @@ mod tests {
         assert_eq!(manager.next_nonce(&addr2), Nonce(0));
         assert_eq!(manager.next_nonce(&addr1), Nonce(2));
         assert_eq!(manager.next_nonce(&addr2), Nonce(1));
+    }
+
+    /// A rebase must never hand out a nonce twice.
+    ///
+    /// `chain_nonce` counts only what has been included in a block, so
+    /// transactions sitting in the mempool look unspent. Under load the pending
+    /// counter passes `max_inflight` legitimately; the old rebase then reset it
+    /// all the way to chain state and re-issued nonces already assigned. One of
+    /// each colliding pair failed, filling the log with what looked like gaps:
+    ///
+    ///     Invalid nonce: expected 10, got 6
+    ///     Invalid nonce: expected 1, got 0   (x158)
+    #[test]
+    fn a_rebase_never_reissues_a_nonce_that_was_already_assigned() {
+        let mgr = NonceManager::new();
+        let addr = Address::new([1u8; 32]);
+        let max_inflight = 8;
+
+        // Twelve grants issued back to back; nothing has been included yet, so
+        // chain state is still 0.
+        let mut assigned = Vec::new();
+        for _ in 0..12 {
+            mgr.rebase_nonce(&addr, 0, max_inflight);
+            assigned.push(mgr.next_nonce(&addr).0);
+        }
+
+        let mut seen = assigned.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            assigned.len(),
+            "every assignment must be unique; got {assigned:?}"
+        );
+    }
+
+    /// A counter behind chain state is still corrected forward.
+    ///
+    /// That is the restart case — the pending counter is rebuilt empty and
+    /// would otherwise replay a nonce that has already been spent on-chain.
+    #[test]
+    fn a_counter_behind_chain_state_is_moved_forward() {
+        let mgr = NonceManager::new();
+        let addr = Address::new([2u8; 32]);
+
+        mgr.rebase_nonce(&addr, 0, 8);
+        assert_eq!(mgr.next_nonce(&addr).0, 0);
+
+        // The chain has since included several transactions from this address.
+        mgr.rebase_nonce(&addr, 5, 8);
+        assert_eq!(
+            mgr.next_nonce(&addr).0,
+            5,
+            "a restarted counter must resume at chain state, not replay"
+        );
     }
 
     #[test]

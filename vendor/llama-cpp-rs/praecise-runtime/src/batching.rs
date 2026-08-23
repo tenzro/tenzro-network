@@ -212,6 +212,24 @@ impl Drop for EngineInner {
     }
 }
 
+/// What a slot's KV cache still holds after its request finished.
+///
+/// The whole point of prefix reuse: an agent's next turn repeats the system
+/// prompt, the tool schemas and the entire conversation so far, and re-reading
+/// those through the model is the single largest cost in an agent loop. Keeping
+/// the tokens that are already in KV lets the next request start where the last
+/// one diverged instead of at zero.
+#[derive(Default, Clone)]
+struct CachedPrefix {
+    /// Tokens resident in this sequence's KV, in order.
+    tokens: Vec<LlamaToken>,
+}
+
+/// Length of the shared prefix of two token runs.
+fn common_prefix_len(a: &[LlamaToken], b: &[LlamaToken]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 /// A running sequence occupying one slot.
 struct Sequence {
     /// KV-cache sequence id == slot index.
@@ -227,6 +245,9 @@ struct Sequence {
     prefill_cursor: usize,
     /// Next KV position for this sequence.
     n_past: i32,
+    /// Every token committed to this sequence's KV — prompt then generated —
+    /// so the next request on this slot can measure its shared prefix.
+    resident: Vec<LlamaToken>,
     input_tokens: u32,
     output_tokens: u32,
     /// Absolute position ceiling: `input_tokens + max_tokens`, capped at context.
@@ -335,6 +356,9 @@ fn scheduler_loop(
 
     // Slots: None == free.
     let mut slots: Vec<Option<Sequence>> = (0..max_slots()).map(|_| None).collect();
+    // What each slot's KV still holds between requests, so a follow-up turn can
+    // start from the divergence instead of from zero.
+    let mut cached: Vec<CachedPrefix> = (0..max_slots()).map(|_| CachedPrefix::default()).collect();
     let mut batch = LlamaBatch::new(physical_batch(), max_slots() as i32);
 
     loop {
@@ -353,6 +377,11 @@ fn scheduler_loop(
                 .is_some_and(tokio::sync::oneshot::Sender::is_closed);
             if client_gone && let Some(seq) = slots[slot_idx].take() {
                 let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
+                // The KV is gone, so the cache record must go with it. Leaving
+                // it would promise the next request a prefix that is no longer
+                // resident, and it would prefill from a position the cache
+                // cannot satisfy.
+                cached[slot_idx].tokens.clear();
             }
         }
 
@@ -363,7 +392,13 @@ fn scheduler_loop(
         // non-blocking.
         if active == 0 {
             match rx.recv_timeout(IDLE_POLL) {
-                Ok(req) => admit(&model, ctx_size, &mut slots, req, enable_thinking),
+                Ok(req) => {
+                    if let Some(r) =
+                        admit(&model, ctx_size, &mut slots, &mut cached, req, enable_thinking)
+                    {
+                        apply_prefix_reuse(&mut ctx, &mut slots, &mut cached, r);
+                    }
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -371,7 +406,13 @@ fn scheduler_loop(
         // Fill any remaining free slots without blocking.
         while slots.iter().any(|s| s.is_none()) {
             match rx.try_recv() {
-                Ok(req) => admit(&model, ctx_size, &mut slots, req, enable_thinking),
+                Ok(req) => {
+                    if let Some(r) =
+                        admit(&model, ctx_size, &mut slots, &mut cached, req, enable_thinking)
+                    {
+                        apply_prefix_reuse(&mut ctx, &mut slots, &mut cached, r);
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
@@ -395,6 +436,9 @@ fn scheduler_loop(
                 seq.pending_token = Some(tok);
                 continue;
             }
+            // Generated tokens land in KV too, so a follow-up turn that repeats
+            // this answer as history reuses it rather than re-decoding it.
+            seq.resident.push(tok);
             seq.n_past += 1;
             logits_slot.push((batch.n_tokens() - 1, slot_idx));
         }
@@ -423,6 +467,7 @@ fn scheduler_loop(
                 {
                     break;
                 }
+                seq.resident.push(prompt[cursor]);
                 seq.n_past += 1;
                 cursor += 1;
             }
@@ -447,6 +492,11 @@ fn scheduler_loop(
             for (_idx, slot_idx) in &logits_slot {
                 if let Some(mut seq) = slots[*slot_idx].take() {
                     let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
+                    // Same reason as the cancellation sweep: a discarded KV must
+                    // not leave a cache record behind, or one decode failure
+                    // becomes a permanent one for every later request on the
+                    // slot.
+                    cached[*slot_idx].tokens.clear();
                     seq.fail(Error::Inference(format!("decode failed: {}", e)));
                 }
             }
@@ -492,7 +542,7 @@ fn scheduler_loop(
             }
 
             if free_slot {
-                finalize_and_free(&mut ctx, &mut slots, slot_idx);
+                finalize_and_free(&mut ctx, &mut slots, &mut cached, slot_idx);
             }
         }
     }
@@ -508,15 +558,97 @@ fn scheduler_loop(
     Ok(())
 }
 
-/// Finalize a finished sequence and free its slot + KV.
+/// Finalize a finished sequence and free its slot, keeping its KV for reuse.
 fn finalize_and_free(
-    ctx: &mut llama_cpp_2::context::LlamaContext,
+    _ctx: &mut llama_cpp_2::context::LlamaContext,
     slots: &mut [Option<Sequence>],
+    cached: &mut [CachedPrefix],
     slot_idx: usize,
 ) {
     if let Some(seq) = slots[slot_idx].take() {
-        let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
+        // Keep the KV. The next request on this slot is very often the same
+        // conversation one turn later, and re-decoding a prefix we already hold
+        // is the largest avoidable cost in an agent loop. `admit` trims
+        // whatever the next prompt diverges from.
+        cached[slot_idx].tokens = seq.resident.clone();
         seq.finish();
+    }
+}
+
+/// Drop the part of a slot's KV cache that the new prompt diverges from, and
+/// record what the slot now holds.
+///
+/// Order matters: the trim must happen before the scheduler decodes anything
+/// into this sequence, or the new tokens would be written on top of positions
+/// still holding the previous request's.
+fn apply_prefix_reuse(
+    ctx: &mut llama_cpp_2::context::LlamaContext,
+    slots: &mut [Option<Sequence>],
+    cached: &mut [CachedPrefix],
+    r: PrefixReuse,
+) {
+    // Everything from the divergence onward was computed under a different
+    // prefix, so it is wrong rather than merely old. `None` for the end means
+    // "to the end of the sequence".
+    let seq = r.slot_idx as u32;
+
+    // Nothing past the reused span means nothing to drop. This is the ordinary
+    // agent turn — the conversation grew, so the new prompt starts with the
+    // whole of the old one — and it is also the only case that works on a model
+    // whose layers carry recurrent state, because such a cache can be cleared
+    // but not rewound to an arbitrary position. Asking it to trim here would be
+    // refused and would cost us the reuse we already have.
+    if r.reused > 0 && r.reused == r.cached_len {
+        cached[r.slot_idx].tokens = r.prompt[..r.reused].to_vec();
+        tracing::info!(
+            slot = r.slot_idx,
+            reused_tokens = r.reused,
+            prompt_tokens = r.prompt.len(),
+            "prefix cache hit (extension, no trim needed)"
+        );
+        return;
+    }
+
+    let removed = ctx
+        .clear_kv_cache_seq(Some(seq), Some(r.reused as u32), None)
+        .unwrap_or(false);
+
+    // Trust the trim only after confirming it. `llama_memory_seq_rm` returns
+    // true without removing anything when a cache shares cells, and a cache
+    // that kept its old positions is not a slow path — on an M-RoPE model the
+    // next batch must start strictly beyond the highest cached position, so a
+    // stale entry makes the request unschedulable and it fails outright.
+    // Verify against the cache itself rather than the return value.
+    let stale = ctx.kv_cache_seq_pos_max(r.slot_idx as i32) >= r.reused as i32;
+
+    if !removed || stale {
+        // Could not trim to the divergence. Drop the sequence's KV entirely and
+        // prefill from zero: strictly slower, but correct, and self-healing
+        // because the slot starts clean on the next turn either way.
+        let _ = ctx.clear_kv_cache_seq(Some(seq), None, None);
+        cached[r.slot_idx].tokens.clear();
+        if let Some(s) = slots[r.slot_idx].as_mut() {
+            s.prefill_cursor = 0;
+            s.n_past = 0;
+            s.resident.clear();
+        }
+        tracing::info!(
+            slot = r.slot_idx,
+            wanted_reuse = r.reused,
+            removed,
+            "prefix trim refused by the KV cache; prefilling from zero"
+        );
+        return;
+    }
+
+    cached[r.slot_idx].tokens = r.prompt[..r.reused].to_vec();
+    if r.reused > 0 {
+        tracing::info!(
+            slot = r.slot_idx,
+            reused_tokens = r.reused,
+            prompt_tokens = r.prompt.len(),
+            "prefix cache hit"
+        );
     }
 }
 
@@ -526,9 +658,10 @@ fn admit(
     model: &LlamaModel,
     ctx_size: i32,
     slots: &mut [Option<Sequence>],
+    cached: &mut [CachedPrefix],
     req: BatchRequest,
     enable_thinking: bool,
-) {
+) -> Option<PrefixReuse> {
     let Some(slot_idx) = slots.iter().position(|s| s.is_none()) else {
         // No free slot — reject rather than block. Caller sheds load.
         let _ = req.result_tx.send(Err(Error::QueueFull {
@@ -536,7 +669,7 @@ fn admit(
             waiting: slots.len(),
             max: slots.len(),
         }));
-        return;
+        return None;
     };
     let seq_id = slot_idx as i32;
 
@@ -544,7 +677,7 @@ fn admit(
         Ok(p) => p,
         Err(e) => {
             let _ = req.result_tx.send(Err(e));
-            return;
+            return None;
         }
     };
 
@@ -554,14 +687,14 @@ fn admit(
             let _ = req
                 .result_tx
                 .send(Err(Error::Other(format!("tokenization failed: {}", e))));
-            return;
+            return None;
         }
     };
     if tokens.is_empty() {
         let _ = req
             .result_tx
             .send(Err(Error::Other("empty prompt".into())));
-        return;
+        return None;
     }
 
     let input_tokens = tokens.len() as u32;
@@ -571,9 +704,21 @@ fn admit(
             "prompt of {} tokens exceeds context window {}",
             input_tokens, ctx_size
         ))));
-        return;
+        return None;
     }
     let max_pos = ctx_size.min(input_tokens as i32 + req.config.max_tokens as i32);
+
+    // Reuse whatever of this slot's KV already matches. The tokens are
+    // identical up to `reuse`, so those positions are already correct in the
+    // cache and only the divergent tail needs decoding. Everything at or past
+    // the divergence is dropped, because a KV entry computed under a different
+    // prefix is wrong, not merely stale.
+    let cached_len = cached[slot_idx].tokens.len();
+    let reuse = common_prefix_len(&cached[slot_idx].tokens, &tokens);
+    // A one-token overlap (the BOS) is not worth the bookkeeping, and reusing
+    // the entire prompt would leave nothing to decode and no logits to sample
+    // from — so always leave at least the final token to be processed.
+    let reuse = if reuse < 2 { 0 } else { reuse.min(tokens.len() - 1) };
 
     slots[slot_idx] = Some(Sequence {
         seq_id,
@@ -581,9 +726,12 @@ fn admit(
         token_tx: req.token_tx,
         result_tx: Some(req.result_tx),
         decoder: encoding_rs::UTF_8.new_decoder(),
-        pending_prompt: Some(tokens),
-        prefill_cursor: 0,
-        n_past: 0,
+        pending_prompt: Some(tokens.clone()),
+        // Prefill resumes at the divergence rather than at zero.
+        prefill_cursor: reuse,
+        n_past: reuse as i32,
+        // The reused prefix is already in KV, so it counts as resident.
+        resident: tokens[..reuse].to_vec(),
         input_tokens,
         output_tokens: 0,
         max_pos,
@@ -591,6 +739,29 @@ fn admit(
         started: Instant::now(),
         pending_token: None,
     });
+
+    Some(PrefixReuse {
+        slot_idx,
+        reused: reuse,
+        cached_len,
+        prompt: tokens,
+    })
+}
+
+/// What `admit` decided about an incoming request's prefix.
+///
+/// Returned rather than acted on inside `admit`, because trimming the KV cache
+/// needs the context and `admit` deliberately does not take it — tokenizing
+/// must not be able to touch the cache.
+struct PrefixReuse {
+    slot_idx: usize,
+    /// Tokens taken from cache instead of re-decoded.
+    reused: usize,
+    /// What the slot held before this request. When the whole of it is reused
+    /// the prompt merely extends the cache and nothing has to be dropped, which
+    /// is the difference between a trim we can skip and one that must succeed.
+    cached_len: usize,
+    prompt: Vec<LlamaToken>,
 }
 
 /// Render a [`BatchPrompt`] to the final prompt string fed to the tokenizer.
@@ -627,5 +798,99 @@ fn render_prompt(
             }
             Ok(render_chatml_prompt(messages))
         }
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    fn toks(ids: &[i32]) -> Vec<LlamaToken> {
+        ids.iter().copied().map(LlamaToken).collect()
+    }
+
+    /// The decision `admit` makes, extracted so it can be tested without a
+    /// model, a context, or a GPU.
+    fn reuse_for(cached: &[LlamaToken], prompt: &[LlamaToken]) -> usize {
+        let r = common_prefix_len(cached, prompt);
+        if r < 2 { 0 } else { r.min(prompt.len() - 1) }
+    }
+
+    #[test]
+    fn a_follow_up_turn_reuses_the_conversation_so_far() {
+        // The agent case: turn two repeats turn one verbatim and appends.
+        let turn1 = toks(&[1, 2, 3, 4, 5]);
+        let turn2 = toks(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(reuse_for(&turn1, &turn2), 5, "the whole prior turn is already in KV");
+    }
+
+    #[test]
+    fn a_different_conversation_reuses_nothing() {
+        let cached = toks(&[1, 2, 3, 4]);
+        let other = toks(&[9, 8, 7, 6]);
+        assert_eq!(reuse_for(&cached, &other), 0);
+    }
+
+    /// Whether the cache has to be trimmed at all, which decides whether reuse
+    /// survives on a model whose state cannot be rewound.
+    fn needs_trim(cached: &[LlamaToken], prompt: &[LlamaToken]) -> bool {
+        let reuse = reuse_for(cached, prompt);
+        !(reuse > 0 && reuse == cached.len())
+    }
+
+    #[test]
+    fn extending_a_conversation_needs_no_trim() {
+        // Turn two repeats turn one verbatim and appends: everything cached is
+        // still a prefix, so there is nothing to drop and the reuse holds even
+        // where a partial trim would be refused.
+        let turn1 = toks(&[1, 2, 3, 4, 5]);
+        let turn2 = toks(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(!needs_trim(&turn1, &turn2));
+    }
+
+    #[test]
+    fn diverging_from_the_cache_needs_a_trim() {
+        // The cached tail (4, 5) is not in the new prompt, so those entries are
+        // wrong rather than stale and cannot simply be kept.
+        let cached = toks(&[1, 2, 3, 4, 5]);
+        let prompt = toks(&[1, 2, 3, 9, 9, 9]);
+        assert!(needs_trim(&cached, &prompt));
+    }
+
+    #[test]
+    fn divergence_mid_prompt_stops_the_reuse_there() {
+        // Everything past the divergence was computed under a different prefix,
+        // so it is wrong rather than stale and must not be reused.
+        let cached = toks(&[1, 2, 3, 40, 50]);
+        let prompt = toks(&[1, 2, 3, 41, 51]);
+        assert_eq!(reuse_for(&cached, &prompt), 3);
+    }
+
+    #[test]
+    fn an_identical_prompt_still_leaves_a_token_to_decode() {
+        // Reusing everything would leave no token to run through the model and
+        // so no logits to sample the reply from.
+        let same = toks(&[1, 2, 3, 4, 5]);
+        assert_eq!(reuse_for(&same, &same), 4, "must hold back the final token");
+    }
+
+    #[test]
+    fn a_bos_only_overlap_is_not_worth_reusing() {
+        let cached = toks(&[1, 77, 78]);
+        let prompt = toks(&[1, 90, 91]);
+        assert_eq!(reuse_for(&cached, &prompt), 0);
+    }
+
+    #[test]
+    fn a_cold_slot_reuses_nothing() {
+        assert_eq!(reuse_for(&[], &toks(&[1, 2, 3])), 0);
+    }
+
+    #[test]
+    fn a_shorter_prompt_than_the_cache_is_bounded_by_the_prompt() {
+        // Cache holds a long conversation; the new prompt is a prefix of it.
+        let cached = toks(&[1, 2, 3, 4, 5, 6, 7]);
+        let prompt = toks(&[1, 2, 3]);
+        assert_eq!(reuse_for(&cached, &prompt), 2, "never past the prompt's own end");
     }
 }

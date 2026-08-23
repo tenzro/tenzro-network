@@ -434,7 +434,8 @@ mod tests {
     async fn fixture(daily_limit: Option<u128>, app_wallet_balance: u128) -> Fixture {
         let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
         let apps = AppRegistry::new(storage.clone()).unwrap();
-        let identities = IdentityRegistry::new();
+        let identities =
+            IdentityRegistry::with_in_process_binder().expect("in-process wallet binder");
         let token = TnzoToken::new();
 
         let treasury = Address::new([0x01; 32]);

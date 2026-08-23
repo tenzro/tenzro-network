@@ -40,7 +40,8 @@ use tenzro_consensus::HotStuff2Engine;
 use tenzro_consensus::QuorumCertificate;
 use tenzro_network::{
     BlockSyncError, BlockSyncRequest, BlockSyncResponse, InboundBlockSync, InboundRequestId,
-    MAX_BLOCKS_PER_RANGE, MAX_INFLIGHT_REQUESTS_PER_PEER, NetworkService, OutboundBlockSyncResult,
+    MAX_BLOCK_RANGE_BYTES, MAX_BLOCKS_PER_RANGE, MAX_INFLIGHT_REQUESTS_PER_PEER, NetworkService,
+    OutboundBlockSyncResult,
     OutboundRequestId, PeerEvent, TenzroNetworkService,
 };
 use tenzro_storage::traits::BlockStore;
@@ -54,6 +55,19 @@ use crate::error::{NodeError, Result};
 /// blocks of a peer's advertised tip, we consider ourselves synced and skip
 /// the catch-up state. Set to 8 (Lighthouse default).
 pub const SLOT_IMPORT_TOLERANCE: u64 = 8;
+
+/// How long a node may sit behind by *any* amount before block-sync engages
+/// regardless of [`SLOT_IMPORT_TOLERANCE`].
+///
+/// The block-count tolerance bounds staleness only when the block rate is
+/// bounded. This chain suppresses empty blocks and idles at one heartbeat
+/// block every ten minutes, so eight blocks can be eighty minutes — and inside
+/// that window a node that missed blocks advances only as gossip delivers
+/// them, one per heartbeat. Observed as a node knowing it was five blocks
+/// behind and issuing no range request for over 200 seconds.
+///
+/// A deadline restores the property the block count was standing in for.
+pub const MAX_BEHIND_DURATION: Duration = Duration::from_secs(45);
 
 /// How often the idle state probes peers for tip info.
 pub const TIP_PROBE_INTERVAL: Duration = Duration::from_secs(15);
@@ -224,6 +238,8 @@ pub struct BlockSyncEngine {
     /// building blocks past our tip, so even a gap of 1..=8 must be
     /// closed or this replica is stranded forever.
     hinted_until: Option<std::time::Instant>,
+    /// When we first observed being behind, for the staleness deadline.
+    behind_since: Option<std::time::Instant>,
 }
 
 /// Sent from the engine to the event loop to import a block. The event loop
@@ -270,6 +286,7 @@ impl BlockSyncEngine {
             peers: HashMap::new(),
             probe_tick: interval(TIP_PROBE_INTERVAL),
             hinted_until: None,
+            behind_since: None,
         }
     }
 
@@ -277,6 +294,23 @@ impl BlockSyncEngine {
     /// is active (consensus saw a proposal ahead of our tip), otherwise the
     /// steady-state `SLOT_IMPORT_TOLERANCE` that absorbs ordinary
     /// propagation jitter without flapping into sync mode.
+    /// True once we have been behind continuously for longer than
+    /// [`MAX_BEHIND_DURATION`], whatever the block count.
+    fn behind_for_too_long(&self) -> bool {
+        matches!(self.behind_since, Some(t) if t.elapsed() >= MAX_BEHIND_DURATION)
+    }
+
+    /// Records whether we are currently behind, so the deadline above can be
+    /// measured. Clearing on catch-up is what stops a stale timestamp from
+    /// forcing a sync the moment we fall one block behind later.
+    fn note_behind(&mut self, behind: bool) {
+        if behind {
+            self.behind_since.get_or_insert_with(std::time::Instant::now);
+        } else {
+            self.behind_since = None;
+        }
+    }
+
     fn sync_tolerance(&self) -> u64 {
         match self.hinted_until {
             Some(t) if std::time::Instant::now() < t => 0,
@@ -701,7 +735,31 @@ impl BlockSyncEngine {
                 }
                 let end = BlockHeight(start.0.saturating_add(*count as u64).saturating_sub(1));
                 match block_store.blocks_by_height_range(*start, end).await {
-                    Ok(blocks) => BlockSyncResponse::BlockRange { blocks },
+                    Ok(blocks) => {
+                        // Truncate to the byte budget. The requester asks by
+                        // count, but a block may be up to 2 MiB, so a full 128
+                        // exceeds the codec's response ceiling and the peer gets
+                        // a truncated stream it cannot decode. Returning a
+                        // shorter contiguous prefix is a normal answer — the
+                        // requester continues from its new height.
+                        let mut used = 0usize;
+                        let mut fitted = Vec::with_capacity(blocks.len());
+                        for block in blocks {
+                            let size =
+                                serde_json::to_string(&block).map(|s| s.len()).unwrap_or(0);
+                            // Always return at least one block, or a single
+                            // oversized block would stall the sync forever with
+                            // an empty response.
+                            if !fitted.is_empty()
+                                && used.saturating_add(size) > MAX_BLOCK_RANGE_BYTES
+                            {
+                                break;
+                            }
+                            used = used.saturating_add(size);
+                            fitted.push(block);
+                        }
+                        BlockSyncResponse::BlockRange { blocks: fitted }
+                    }
                     Err(e) => BlockSyncResponse::Error(BlockSyncError::Storage(format!(
                         "blocks_by_height_range: {}",
                         e
@@ -756,9 +814,27 @@ impl BlockSyncEngine {
                 self.peers.entry(peer).or_default().advertised_tip = Some((tip_height, tip_hash));
 
                 let our_height = self.local_tip().await?;
+                let behind = tip_height.0 > our_height.0;
+                self.note_behind(behind);
+
+                // Engage on either signal: a gap wide enough that the block
+                // count alone justifies it, or any gap that has persisted past
+                // the deadline. The second is what an idle chain needs — five
+                // blocks is under the tolerance forever, but five blocks of
+                // staleness is not acceptable forever.
+                let wide_enough = tip_height.0 > our_height.0 + self.sync_tolerance();
                 if matches!(self.state, SyncState::Synced | SyncState::Stalled)
-                    && tip_height.0 > our_height.0 + self.sync_tolerance()
+                    && (wide_enough || (behind && self.behind_for_too_long()))
                 {
+                    if !wide_enough {
+                        info!(
+                            ?peer,
+                            our_height = %our_height,
+                            tip_height = %tip_height,
+                            "Block-sync: behind past the staleness deadline, syncing a \
+                             gap narrower than the block tolerance"
+                        );
+                    }
                     self.start_sync_against(peer, tip_height, tip_hash).await?;
                 }
             }

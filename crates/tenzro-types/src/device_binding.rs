@@ -531,8 +531,6 @@ pub enum WalletReadiness {
     /// Two or more devices are bound, but they are all the machine the wallet
     /// would be created on.
     NeedsSeparateDevice,
-    /// A device is bound, but not to hardware that can protect a key.
-    NoHardwareBoundDevice,
 }
 
 impl fmt::Display for WalletReadiness {
@@ -553,11 +551,6 @@ impl fmt::Display for WalletReadiness {
                  separate one — a phone, or another machine — or losing this one loses the wallet \
                  with it. Scan the pairing QR code with your phone and authenticate with your \
                  passkey"
-            ),
-            Self::NoHardwareBoundDevice => write!(
-                f,
-                "no bound device holds its key in hardware, so nothing here can protect a wallet. \
-                 Bind a device whose passkey is device-bound and hardware-backed"
             ),
         }
     }
@@ -580,9 +573,34 @@ impl std::error::Error for WalletReadiness {}
 /// the machine asking, so a device that is only that machine again does not
 /// count toward the requirement.
 ///
-/// Only hardware-bound devices count. A syncable or software-backed credential
-/// would make the second factor an account rather than a device, which is the
-/// thing [`BindingPolicy`] exists to prevent.
+/// Every bound device counts, syncable or not.
+///
+/// This used to count only hardware-bound ones, on the reasoning that a
+/// syncable credential makes the second factor an account rather than a device.
+/// The reasoning is sound and the control is not, because backup eligibility is
+/// self-asserted: WebAuthn L3 §6.1 says the authenticator data bindings "are
+/// controlled by the authenticator itself", so an authenticator that wants to
+/// pass this check simply reports BE=0. Enforcing it for real needs attestation
+/// against an AAGUID allow-list, which excludes every consumer passkey provider
+/// — Apple, Google, and the rest do not attest.
+///
+/// So the filter rejected essentially every real user while stopping no
+/// attacker, which is worse than not having it: it is exclusion priced as
+/// security. The W3C working group settled the same question in October 2025
+/// (`w3c/webauthn#2342`), where a proposal to let a relying party select on
+/// backup eligibility was put and retired — offered the choice of both
+/// directions or neither, they took neither. There is no route to making this
+/// enforceable, now or later.
+///
+/// What survives is the part that was doing the work: **two separate devices**.
+/// That is what W3C §6.1.3 actually asks of a relying party — "ensure that each
+/// user account has additional authenticators registered and/or an account
+/// recovery process in place" — and losing one device still leaves the other,
+/// whether or not either syncs.
+///
+/// Backup eligibility is still recorded and still reported. It is useful as
+/// telemetry, and a BE=0/BS=1 pair is a malformed authenticator worth noticing.
+/// It is not an authorization input.
 ///
 /// # Errors
 ///
@@ -597,23 +615,14 @@ pub fn wallet_readiness(
         .filter(|d| d.identity_did == identity_did)
         .collect();
 
-    let hardware: Vec<&BoundDevice> = mine
-        .iter()
-        .copied()
-        .filter(|d| d.is_hardware_bound())
-        .collect();
-
-    if hardware.is_empty() {
-        return Err(WalletReadiness::NoHardwareBoundDevice);
+    if mine.len() < 2 {
+        return Err(WalletReadiness::NeedsSecondDevice { bound: mine.len() });
     }
-    if hardware.len() < 2 {
-        return Err(WalletReadiness::NeedsSecondDevice {
-            bound: hardware.len(),
-        });
-    }
-    // Two or more, but they must not all be the machine asking.
+    // Two or more, but they must not all be the machine asking. This is the
+    // requirement that carries the weight now: two credentials on one laptop
+    // are two ways into one box, and the box dying takes both.
     if let Some(this_machine) = this_machine_credential_id
-        && hardware.iter().all(|d| d.credential_id == this_machine)
+        && mine.iter().all(|d| d.credential_id == this_machine)
     {
         return Err(WalletReadiness::NeedsSeparateDevice);
     }
@@ -963,22 +972,29 @@ mod wallet_gate_tests {
 
     /// A synced passkey makes the second factor an account, not a device.
     #[test]
-    fn a_synced_second_device_does_not_satisfy_the_requirement() {
+    fn a_synced_second_device_satisfies_the_requirement() {
+        // It did not, and that was the bug. Backup eligibility is self-asserted
+        // — W3C L3 6.1 puts the authenticator in control of these bindings — so
+        // refusing BE=1 turned away every Apple and Google user while an
+        // attacker simply reports BE=0. The requirement that means something is
+        // two separate devices, and a synced phone is still a separate device:
+        // losing the laptop does not lose it.
         let mut phone = hardware_device("phone");
         phone.backup_eligible = true;
         let devices = vec![hardware_device("machine"), phone];
-        assert_eq!(
-            wallet_readiness(&devices, ALICE, Some("machine")),
-            Err(WalletReadiness::NeedsSecondDevice { bound: 1 })
-        );
+        assert_eq!(wallet_readiness(&devices, ALICE, Some("machine")), Ok(()));
     }
 
     #[test]
-    fn a_software_only_device_cannot_protect_a_wallet_at_all() {
+    fn one_device_is_refused_whatever_it_is_made_of() {
+        // A single device is refused because it is single, not because of how
+        // it stores its key. Key protection is reported and not gated on: it
+        // cannot be verified without attestation against an allow-list, which
+        // no consumer passkey provider supports.
         let mut machine = hardware_device("machine");
         machine.attestation.protection = KeyProtection::Software;
         let err = wallet_readiness(&[machine], ALICE, Some("machine")).expect_err("must refuse");
-        assert_eq!(err, WalletReadiness::NoHardwareBoundDevice);
+        assert_eq!(err, WalletReadiness::NeedsSecondDevice { bound: 1 });
     }
 
     /// Another identity's devices are not this identity's second factor.

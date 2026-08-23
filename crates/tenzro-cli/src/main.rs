@@ -964,7 +964,46 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         false
     } else if let Some(entry) = get_model_by_id(&model_id) {
         let gguf_path = downloader.model_path(&model_id);
-        if gguf_path.exists() || gguf_path.is_symlink() {
+        /*
+         * Does the NODE already hold this model? Then do not load a second copy.
+         *
+         * `runtime` here is this process's own ModelRuntime, so the `is_loaded` check below
+         * asks an empty map and always answers no -- the CLI loaded its own copy of the
+         * weights every time, even with the node serving that same model in the same
+         * machine's VRAM.
+         *
+         * Measured: with the node holding qwen3.5-4b at 10.6 GB, `tenzro chat` tried to load
+         * it again and died with `cudaMalloc failed ... failed to allocate buffer for kv
+         * cache` on a 16 GB card. Two copies of one model is never what an operator wanted;
+         * it is what happens when nobody asks.
+         *
+         * The network path this falls through to already exists -- the Err arm below says
+         * "Falling back to network" -- so this is not a new mechanism, only one that was
+         * never reached because the local attempt came first and usually succeeded.
+         */
+        let node_serves = {
+            let probe = rpc::RpcClient::new(&cmd.rpc);
+            match probe
+                .call::<serde_json::Value>(
+                    "tenzro_listModelEndpoints",
+                    serde_json::Value::Object(serde_json::Map::new()),
+                )
+                .await
+            {
+                Ok(v) => serde_json::to_string(&v)
+                    .map(|t| t.contains(&format!("\"{model_id}\"")))
+                    .unwrap_or(false),
+                // A node that cannot be reached is not a node that is serving it; falling
+                // through to the local load is right here -- that is the standalone case.
+                Err(_) => false,
+            }
+        };
+        if node_serves {
+            output::print_success(&format!(
+                "{model_id} is already served by the node -- using it rather than loading a second copy"
+            ));
+            false
+        } else if gguf_path.exists() || gguf_path.is_symlink() {
             // Auto-load model if downloaded but not yet loaded
             if !runtime.is_loaded(&model_id) {
                 let spinner =
@@ -1046,9 +1085,21 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         print!("{}> {}", output::colors::CYAN, output::colors::RESET);
         io::stdout().flush()?;
 
-        // Read user input
+        /*
+         * EOF ends the session. `read_line` returns Ok(0) at end of input and leaves the buffer
+         * empty; discarding that count turned a closed stdin into an infinite loop that reprinted
+         * the prompt as fast as it could. Piping a single prompt in -- `echo ... | tenzro chat` --
+         * wrote 6.7 GB of `> ` to a log in about six minutes before anything noticed.
+         *
+         * Ctrl-D on a terminal and a closed pipe are the same condition, and both mean the same
+         * thing: there are no more turns coming.
+         */
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        if io::stdin().read_line(&mut input)? == 0 {
+            println!();
+            output::print_success("Goodbye!");
+            break;
+        }
         let input = input.trim();
 
         // Check for commands
@@ -1226,10 +1277,10 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
             // ── Local inference ──────────────────────────────────────
             // Build chat messages — llama.cpp applies the correct template
             // from GGUF metadata (Gemma, Qwen, Mistral, etc.)
-            let mut messages = vec![ModelChatMessage {
-                role: "system".to_string(),
-                content: "You are a helpful assistant.".to_string(),
-            }];
+            let mut messages = vec![ModelChatMessage::new(
+                "system",
+                "You are a helpful assistant.",
+            )];
             for msg in &history {
                 let role = msg
                     .get("role")
@@ -1241,7 +1292,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                messages.push(ModelChatMessage { role, content });
+                messages.push(ModelChatMessage::new(role, content));
             }
 
             // Both paths report the same four fields this REPL prints; the

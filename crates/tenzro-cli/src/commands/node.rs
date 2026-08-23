@@ -41,6 +41,9 @@ pub enum NodeCommand {
     /// Compute-provider operations (book/settle fixed-term CPU/GPU rentals, pricing)
     #[command(subcommand)]
     Compute(ComputeCommand),
+    /// Authorise a TPM-less machine with a passkey
+    #[command(subcommand)]
+    Enroll(crate::commands::node_enroll::NodeEnrollCommand),
 }
 
 impl NodeCommand {
@@ -60,6 +63,7 @@ impl NodeCommand {
             Self::Alias(cmd) => cmd.execute().await,
             Self::Storage(cmd) => cmd.execute().await,
             Self::Compute(cmd) => cmd.execute().await,
+            Self::Enroll(cmd) => cmd.execute().await,
         }
     }
 }

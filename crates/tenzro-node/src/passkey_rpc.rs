@@ -775,29 +775,60 @@ pub(crate) async fn handle_enroll_passkey(
     pubkey_x.copy_from_slice(&p256_xy[..32]);
     pubkey_y.copy_from_slice(&p256_xy[32..]);
 
-    // 2. ML-DSA-65 verifying key is REQUIRED for hybrid PQ custody (Tenzro
-    //    PQ migration per genesis v3 — pre-quantum classical-only enrollments
-    //    are refused at this layer to keep the audit trail clean).
-    let ml_dsa_vk_bytes = req
-        .ml_dsa_public_key_hex
-        .as_deref()
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "ml_dsa_public_key_hex is required for hybrid PQ custody".to_string(),
-            data: None,
-        })?;
-    let ml_dsa_vk = decode_hex(ml_dsa_vk_bytes)?;
-    if ml_dsa_vk.len() != ML_DSA_65_VK_LEN {
-        return Err(JsonRpcError {
-            code: -32602,
-            message: format!(
-                "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
-                ML_DSA_65_VK_LEN,
-                ml_dsa_vk.len()
-            ),
-            data: None,
-        });
-    }
+    // 2. Generate the human DID. Moved ahead of the PQ key because the key can
+    //    be derived from it — see step 3. Nothing else about it changes: the
+    //    owner seed still binds passkey || credential || did, in that order.
+    let display_name = req
+        .display_name
+        .unwrap_or_else(|| "Passkey User".to_string());
+    let did = tenzro_identity::TenzroDid::new_human();
+    let did_string = did.to_string();
+
+    // 3. The ML-DSA-65 verifying key: supplied, or derived from the DID.
+    //
+    //    Hybrid PQ custody is not in question — pairing each P-256 passkey with
+    //    an ML-DSA key is the right posture. What was wrong was requiring the
+    //    *client* to produce it. A WebAuthn authenticator signs P-256 and there
+    //    is no ML-DSA in WebCrypto, so no browser could ever satisfy this and
+    //    the whole custody path was unreachable from a wallet (issue #6).
+    //
+    //    The node can produce it, because the account's PQ key is derived from
+    //    its DID rather than stored. `handle_add_passkey` already works this way
+    //    and the Add branch of `handle_create_passkey_session` documents it;
+    //    enroll was the one path still asking the caller to do the impossible.
+    //
+    //    This is not a weakening. The derived key is the node's half of the
+    //    2-of-2 the custody model already claims: the WebAuthn leg is the
+    //    owner's and only their authenticator can produce it, this leg is the
+    //    node's and only the node can. Neither authorizes alone. A caller that
+    //    holds its own PQ key still supplies it and this never runs.
+    let ml_dsa_vk = match req.ml_dsa_public_key_hex.as_deref() {
+        Some(hex) => {
+            let vk = decode_hex(hex)?;
+            if vk.len() != ML_DSA_65_VK_LEN {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
+                        ML_DSA_65_VK_LEN,
+                        vk.len()
+                    ),
+                    data: None,
+                });
+            }
+            vk
+        }
+        None => {
+            let key = crate::web::wallet_frost::ml_dsa_custody_key(&did_string).map_err(|e| {
+                JsonRpcError {
+                    code: -32603,
+                    message: format!("derive custody PQ key: {e:?}"),
+                    data: None,
+                }
+            })?;
+            key.verifying_key_bytes().to_vec()
+        }
+    };
     let account_key =
         WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| JsonRpcError {
             code: -32603,
@@ -805,14 +836,6 @@ pub(crate) async fn handle_enroll_passkey(
             data: None,
         })?;
     let credential_id = decode_hex(&req.credential_id_hex)?;
-
-    // 3. Generate the human DID up front. The smart-account owner seed binds
-    //    to it (step 4), and it is the DID the passkey-custody identity carries.
-    let display_name = req
-        .display_name
-        .unwrap_or_else(|| "Passkey User".to_string());
-    let did = tenzro_identity::TenzroDid::new_human();
-    let did_string = did.to_string();
 
     // 4. Deploy the smart account via CREATE2. Owner bytes = SHA-256 of
     //    (passkey || credential || did) so the account address is
@@ -1398,14 +1421,72 @@ pub(crate) async fn require_account_control(
     // Verify through the same path `tenzro_signWithPasskey` uses, so the
     // custody gate and the signing gate cannot disagree about what a valid
     // assertion is.
+    // The PQ leg, supplied by whoever can produce it.
+    //
+    // The validator requires an ML-DSA-65 signature on every entry, and it
+    // checks the length *before* looking at the WebAuthn assertion — so an
+    // absent leg fails as "the assertion did not verify", naming the wrong half.
+    // A browser cannot produce this leg: WebAuthn signs P-256 and there is no
+    // ML-DSA in WebCrypto. That is issue #6, and it left the whole custody path
+    // unreachable from a wallet.
+    //
+    // The node can, because the account's PQ key is derived from its DID rather
+    // than stored. So when the caller has no signature — which is every browser
+    // — this signs the same digest the WebAuthn leg covers.
+    //
+    // That is not a weakening: the two legs are the two halves of the hybrid.
+    // The WebAuthn leg is the owner's and only their authenticator can produce
+    // it; this one is the node's and only the node can. Neither authorizes
+    // alone, which is the 2-of-2 the custody model already claims. A caller that
+    // holds its own PQ key still supplies it and this never runs.
+    let ml_dsa_signature = match auth.ml_dsa_signature_hex.as_deref() {
+        Some(hex) => decode_hex(hex)?,
+        None => {
+            let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+                code: -32603,
+                message: "IdentityRegistry not initialized".to_string(),
+                data: None,
+            })?;
+            // Right-pad into the 32-byte slot, matching how enrolment stores
+            // `wallet_address`. A 20-byte smart-account address is the normal
+            // case here; `Address::from_bytes` alone takes 32 bytes and nothing
+            // else, so it rejected every one of them.
+            if account.len() > 32 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "account address is {} bytes; no address this registry stores is \
+                         longer than 32",
+                        account.len()
+                    ),
+                    data: None,
+                });
+            }
+            let mut account_slot = [0u8; 32];
+            account_slot[..account.len()].copy_from_slice(account);
+            let did = registry
+                .find_did_by_address(&tenzro_types::primitives::Address::new(account_slot))
+                .ok_or_else(|| JsonRpcError {
+                    code: -32001,
+                    message: "no identity is bound to this account, so its PQ custody \
+                              leg cannot be derived"
+                        .to_string(),
+                    data: None,
+                })?;
+            let key = crate::web::wallet_frost::ml_dsa_custody_key(&did).map_err(|e| {
+                JsonRpcError {
+                    code: -32603,
+                    message: format!("derive custody PQ key: {e:?}"),
+                    data: None,
+                }
+            })?;
+            key.sign(&digest)
+        }
+    };
+
     let legs = vec![HybridWebAuthnSignature {
         assertion: auth.assertion,
-        ml_dsa_signature: auth
-            .ml_dsa_signature_hex
-            .as_deref()
-            .map(decode_hex)
-            .transpose()?
-            .unwrap_or_default(),
+        ml_dsa_signature,
         credential_id,
     }];
     let sig_bytes = HybridWebAuthnSignature::encode_bundle(&legs).map_err(|e| JsonRpcError {
@@ -2461,32 +2542,36 @@ pub(crate) async fn handle_add_passkey(
     let account_addr = decode_hex(&req.account_address)?;
     let credential_id = decode_hex(&req.new_credential_id_hex)?;
 
-    // Custody gate. The account address is a public identifier, so
-    // "knows the address" is not a credential — this refuses unless an
-    // already-enrolled passkey has signed a node-issued challenge bound
-    // to exactly this operation and target.
-    // Target is empty for an add, unlike every other operation here.
+    // Custody gate, bound to the key being added.
     //
-    // The other mutations name something that already exists — the credential
-    // being revoked, the session key being withdrawn — so the challenge can be
-    // issued against it and a caller cannot spend one authorization on a
-    // different subject. A device being *added* does not exist yet: its
-    // credential id is produced by `navigator.credentials.create()` partway
-    // through the same ceremony that collects this proof, so there is nothing
-    // to bind at issue time.
+    // This used to pass an empty target, on the reasoning that a device being
+    // added does not exist at issue time — its credential is produced by
+    // `navigator.credentials.create()` partway through the same ceremony. The
+    // reasoning holds for the ordering and not for the consequence: with no
+    // target, one assertion authorizes "add SOME device to this account", so
+    // anything able to relay it inside the five-minute window can spend it on a
+    // key of its own choosing. That includes the relying party itself. A user
+    // proved presence; they did not consent to a particular key, and nothing in
+    // the challenge recorded which key they meant.
     //
-    // What still binds it: the account, the operation, a single-use claim, and
-    // a five-minute TTL. So this authorizes "add one device to this account,
-    // once, now" rather than "add this specific device" — which is exactly the
-    // ceremony the user is performing, and it is the reason both the session
-    // path and the direct-RPC path must agree on an empty target. They did not
-    // at first, and a mismatch here is not a security hole but a permanent
-    // refusal: the challenge would never match and no device could be added.
+    // Binding the public key closes it, and the ordering objection is solved by
+    // ordering: create the credential first, then ask for a challenge naming it.
+    // The caller already holds the key at this point — it is in this very
+    // request — so there is nothing to wait for.
+    //
+    // Both call paths must pass the same bytes, and now those bytes are derived
+    // from the request rather than agreed by convention, so they cannot drift
+    // apart the way an empty target silently did.
+    // Normalised here rather than later, because the challenge has to name the
+    // key and the key has to be in its canonical form before it can be named —
+    // otherwise the same key in two encodings would produce two targets.
+    let passkey_pubkey_bytes = decode_hex(&req.new_passkey_public_key_hex)?;
+    let target = normalize_p256_pubkey_to_raw_xy(&passkey_pubkey_bytes)?.to_vec();
     let authorizing_credential = require_account_control(
         node,
         &account_addr,
         CustodyOperation::AddPasskey,
-        &[],
+        &target,
         req.authorization,
     )
     .await?;
@@ -3084,25 +3169,27 @@ pub(crate) async fn handle_create_passkey_session(
     // the CLI instead of a dead browser page.
     let (challenge_b64, params_value) = match req.kind {
         AuthSessionKind::Enroll => {
-            let vk_hex = req
-                .ml_dsa_public_key_hex
-                .as_deref()
-                .ok_or_else(|| JsonRpcError {
-                    code: -32602,
-                    message: "ml_dsa_public_key_hex is required for enroll sessions".to_string(),
-                    data: None,
-                })?;
-            let vk = decode_hex(vk_hex)?;
-            if vk.len() != ML_DSA_65_VK_LEN {
-                return Err(JsonRpcError {
-                    code: -32602,
-                    message: format!(
-                        "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
-                        ML_DSA_65_VK_LEN,
-                        vk.len()
-                    ),
-                    data: None,
-                });
+            // Optional, exactly as it is for Add sessions. A browser has no
+            // way to produce an ML-DSA key, so demanding one here made an
+            // enroll session impossible to open from the very client this
+            // ceremony exists for. When it is absent, `handle_enroll_passkey`
+            // derives the key from the DID it mints; validated here only when
+            // a caller that does hold one supplies it, so a wrong length still
+            // fails at the CLI rather than midway through a browser ceremony.
+            let vk_hex = req.ml_dsa_public_key_hex.as_deref();
+            if let Some(hex) = vk_hex {
+                let vk = decode_hex(hex)?;
+                if vk.len() != ML_DSA_65_VK_LEN {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: format!(
+                            "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
+                            ML_DSA_65_VK_LEN,
+                            vk.len()
+                        ),
+                        data: None,
+                    });
+                }
             }
             let mut challenge = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut challenge);

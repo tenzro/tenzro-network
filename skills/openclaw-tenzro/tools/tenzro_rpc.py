@@ -136,7 +136,7 @@ Usage:
     python tenzro_rpc.py submit_daml_create Tenzro.Workflow:WorkflowAnchor '{"owner":"alice"}'
     python tenzro_rpc.py submit_daml_exercise Tenzro.Workflow:WorkflowAnchor <cid> Approve '{}'
     python tenzro_rpc.py set_role Validator
-    python tenzro_rpc.py list_providers llm
+    python tenzro_rpc.py list_providers ai
     python tenzro_rpc.py get_provider_schedule
     python tenzro_rpc.py get_provider_pricing
     python tenzro_rpc.py eth_block_number
@@ -3047,7 +3047,7 @@ def caip19(kind: str, token_id: str | None = None, collection_id: str | None = N
 
 
 def register_tool(name: str, description: str, endpoint: str,
-                  tool_type: str = "mcp", capabilities: list | None = None,
+                  transport: str = "mcp", capabilities: list | None = None,
                   category: str = "general", version: str = "1.0.0",
                   creator_did: str | None = None) -> dict:
     """Register a new tool (MCP server endpoint) in the Tools Registry.
@@ -3055,7 +3055,7 @@ def register_tool(name: str, description: str, endpoint: str,
     name: tool name
     description: tool description
     endpoint: MCP server endpoint URL
-    tool_type: mcp | api | native (default mcp)
+    transport: mcp | mcp-stdio | api | native (default mcp)
     capabilities: list of capabilities (e.g. ["web-search", "code-execution"])
     category: tool category (e.g. "search", "code", "data")
     version: version string
@@ -3065,7 +3065,7 @@ def register_tool(name: str, description: str, endpoint: str,
         "name": name,
         "description": description,
         "endpoint": endpoint,
-        "tool_type": tool_type,
+        "transport": transport,
         "category": category,
         "version": version,
     }
@@ -3076,18 +3076,18 @@ def register_tool(name: str, description: str, endpoint: str,
     return _rpc("tenzro_registerTool", [params])
 
 
-def list_tools(tool_type: str | None = None, category: str | None = None,
+def list_tools(transport: str | None = None, category: str | None = None,
                status: str | None = None, limit: int = 20) -> dict:
     """List registered tools (MCP servers) on the network.
 
-    tool_type: optional filter — mcp | api | native
+    transport: optional filter — mcp | mcp-stdio | api | native
     category: optional category filter
     status: optional — active | inactive | available
     limit: max tools to return (default 20)
     """
     params = {"limit": limit}
-    if tool_type:
-        params["tool_type"] = tool_type
+    if transport:
+        params["transport"] = transport
     if category:
         params["category"] = category
     if status:
@@ -4368,7 +4368,9 @@ def get_provider_pricing() -> dict:
 def list_providers(provider_type: str | None = None) -> dict:
     """List all providers discovered via gossipsub.
 
-    provider_type: optional filter — llm | tee | general
+    provider_type: optional filter — ai | tee | storage | compute |
+                   database | cloud | general. 'llm' is accepted as a
+                   legacy alias for 'ai'.
     """
     params = {}
     if provider_type:
