@@ -1,7 +1,7 @@
 {
   "template_id": "ref-solana-jupiter-swap-v1",
   "name": "Solana Jupiter Swap Agent",
-  "description": "Autonomous agent that quotes and executes SPL token swaps on Solana via the Jupiter v6 aggregator. Fetches the best-price route through the Tenzro Solana MCP server, then dispatches the assembled swap transaction through the agent's MPC wallet using SvmDispatch (DPoP-authenticated tenzro_svmDispatch).",
+  "description": "Autonomous agent that quotes and executes SPL token swaps on Solana via the Jupiter v6 aggregator. Fetches the best-price route through the Tenzro Solana MCP server, then dispatches the assembled swap transaction through the agent's wallet using SvmDispatch (DPoP-authenticated tenzro_svmDispatch).",
   "template_type": "autonomous",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",
@@ -19,7 +19,7 @@
     {
       "id": "jupiter_swap_execute",
       "name": "Jupiter Swap Execute",
-      "description": "Dispatches the assembled Jupiter swap instruction (program id, account metas, instruction data) through the agent's MPC wallet via SvmDispatch.",
+      "description": "Dispatches the assembled Jupiter swap instruction (program id, account metas, instruction data) through the agent's wallet via SvmDispatch.",
       "input_schema": "{\"type\":\"object\",\"properties\":{\"program_id\":{\"type\":\"string\"},\"swap_instruction_data\":{\"type\":\"string\"},\"user_source_token_account\":{\"type\":\"string\"},\"user_destination_token_account\":{\"type\":\"string\"}}}",
       "output_schema": "{\"type\":\"object\",\"properties\":{\"signature\":{\"type\":\"string\"},\"in_amount\":{\"type\":\"string\"},\"out_amount\":{\"type\":\"string\"}}}"
     }

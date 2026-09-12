@@ -11,11 +11,10 @@
 //!   [`HybridSignatureBytes`] shape the rest of the node verifies.
 //!
 //! `tenzro-node` is the only crate that sees both, so the adapter lives
-//! here — mirroring [`crate::mpc_threshold_signer::NodeThresholdSigner`],
-//! which closes the same gap for the bridge's `ThresholdSigner`.
+//! here.
 //!
 //! A machine wallet backed by this signer mints the hybrid pair from a
-//! key the node cannot read, instead of reconstructing FROST shares +
+//! key the node cannot read, instead of reconstructing threshold shares +
 //! the ML-DSA seed into node memory (`Keystore::load_shares`). Both legs
 //! sign the same message bytes; the classical leg is 64-byte Ed25519, the
 //! PQ leg is 3309-byte ML-DSA-65.

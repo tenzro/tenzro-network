@@ -446,18 +446,18 @@ pub(crate) async fn handle_transfer_machine_ownership(
             Some(did) => MachineAnchor::Delegated {
                 controller_did: did.clone(),
             },
-            None => MachineAnchor::HardwareRooted {
-                hardware_root_hex: identity
+            None => MachineAnchor::hardware_rooted(
+                identity
                     .metadata
                     .get("hardware_root")
                     .cloned()
                     .unwrap_or_default(),
-                sources: identity
+                identity
                     .metadata
                     .get("hardware_root_sources")
                     .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
                     .unwrap_or_default(),
-            },
+            ),
         },
         _ => {
             return Err(JsonRpcError {

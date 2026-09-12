@@ -159,14 +159,39 @@ pub async fn payment_gate_handler(
     // credentials bypass payment; open on-demand models fall through to the
     // x402 challenge below; gated/private/unknown models are refused without
     // issuing a pay-per-call challenge.
+    //
+    // `/v1/tenzro/forecasts` is included here too: it takes a plain JSON body
+    // naming its model under `model` exactly like chat does, so the same
+    // `ModelOnly` extraction below applies unmodified. Without this arm a
+    // valid `X-Tenzro-Api-Key` was accepted for chat but fell straight
+    // through to the raw x402 challenge here -- a forecast caller holding a
+    // subscription key got charged (or refused) as if it held no credential
+    // at all.
     if let Some(ref auth) = middleware.inference_admission
         && matches!(
             request.uri().path(),
-            "/chat" | "/v1/chat/completions" | "/chat-stream" | "/api/paid/chat/completions"
+            "/chat"
+                | "/v1/chat/completions"
+                | "/chat-stream"
+                | "/api/paid/chat/completions"
+                | "/v1/tenzro/forecasts"
+                // Embeddings are an inference route like the rest: a caller holding a
+                // subscription or rental credential must reach them without an x402
+                // round trip. Omitting this returned 402 to a valid X-Tenzro-Api-Key,
+                // which no client retries as a payment -- it reads as the model being down.
+                | "/v1/embeddings"
         )
     {
         let (parts, body) = request.into_parts();
-        let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
+        // Sized for the LARGEST gated route reaching this arm, not the chat
+        // routes alone. `/v1/embeddings` is mounted with the 64 MB media limit
+        // rather than the 2 MB JSON one, so a cap of 2 MB here would reject a
+        // legitimate batch as `InvalidCredential` -- a credential error for what
+        // is really a size overflow, which is close to undebuggable from the
+        // client side. Matches MEDIA_BODY_LIMIT in tenzro-node's rpc router;
+        // the per-route layers still enforce each route's own real limit.
+        const ADMISSION_BODY_LIMIT: usize = 64 * 1024 * 1024;
+        let bytes = axum::body::to_bytes(body, ADMISSION_BODY_LIMIT)
             .await
             .map_err(|e| PaymentGateError::InvalidCredential(format!("body read: {e}")))?;
 
@@ -726,5 +751,106 @@ mod tests {
         let parsed = parse_credential(&header).unwrap();
         assert_eq!(parsed.credential_id, "cred-2");
         assert_eq!(parsed.protocol, "x402");
+    }
+
+    /// An `InferenceAdmission` double: decides the same way regardless of
+    /// which model or headers it's asked about, so a test can assert what
+    /// the middleware does with a given decision without a real api-key
+    /// manager or served-model registry behind it.
+    struct FixedAdmission(InferenceAccess);
+
+    impl InferenceAdmission for FixedAdmission {
+        fn decide(&self, _headers: &axum::http::HeaderMap, _model_id: Option<&str>) -> InferenceAccess {
+            self.0.clone()
+        }
+    }
+
+    /// Regression test for the actual production bug: `/v1/tenzro/forecasts`
+    /// was added to `PAID_ROUTES` and given a handler, but never added to
+    /// this match arm, so a subscription api-key that skipped payment on
+    /// `/v1/chat/completions` fell straight through to an x402 challenge
+    /// here -- an `Allow` decision was reachable but never consulted for
+    /// this path. If the match arm regresses, this goes back to failing
+    /// exactly the way the live bug did.
+    #[tokio::test]
+    async fn test_forecasts_route_is_covered_by_inference_admission() {
+        let challenge_store = ChallengeStore::new();
+        let gateway =
+            Arc::new(TenzroPaymentGateway::new().with_challenge_store(challenge_store.clone()));
+        gateway.register_protocol(Arc::new(TestProtocol));
+
+        let middleware = PaymentGateMiddleware::new(
+            gateway,
+            PaymentGateConfig {
+                default_amount: 1000,
+                default_asset: "USDC".to_string(),
+                recipient: "0xrecipient".to_string(),
+                default_protocol: "test".to_string(),
+            },
+            challenge_store,
+        )
+        .with_inference_admission(Arc::new(FixedAdmission(InferenceAccess::Allow)));
+
+        let app = Router::new()
+            .route("/v1/tenzro/forecasts", axum::routing::post(test_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                middleware,
+                payment_gate_handler,
+            ));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/tenzro/forecasts")
+            .header("content-type", "application/json")
+            .header("x-tenzro-api-key", "irrelevant-to-this-double")
+            .body(Body::from(r#"{"model":"chronos-2","history":[1,2,3],"horizon":1}"#))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        // An Allow decision must skip payment entirely -- no credential was
+        // presented, so a 402 here would mean the pre-check either doesn't
+        // run for this path or ignores what it decided.
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// The other half: without an `InferenceAdmission` wired at all (the
+    /// state most nodes run in absent explicit configuration), the route
+    /// still falls back to the ordinary x402 challenge. The fix widens who
+    /// can skip payment; it does not make the route free.
+    #[tokio::test]
+    async fn test_forecasts_route_still_needs_payment_without_admission() {
+        let challenge_store = ChallengeStore::new();
+        let gateway =
+            Arc::new(TenzroPaymentGateway::new().with_challenge_store(challenge_store.clone()));
+        gateway.register_protocol(Arc::new(TestProtocol));
+
+        let middleware = PaymentGateMiddleware::new(
+            gateway,
+            PaymentGateConfig {
+                default_amount: 1000,
+                default_asset: "USDC".to_string(),
+                recipient: "0xrecipient".to_string(),
+                default_protocol: "test".to_string(),
+            },
+            challenge_store,
+        );
+
+        let app = Router::new()
+            .route("/v1/tenzro/forecasts", axum::routing::post(test_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                middleware,
+                payment_gate_handler,
+            ));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/tenzro/forecasts")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"model":"chronos-2","history":[1,2,3],"horizon":1}"#))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
     }
 }

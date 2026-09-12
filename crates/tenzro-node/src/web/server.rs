@@ -12,10 +12,7 @@ use tenzro_payments::middleware::{PaymentGateConfig, PaymentGateMiddleware, paym
 
 use super::handlers::{self, WebState};
 use super::oauth;
-use super::wallet_frost;
-use super::wallet_mldsa;
-use super::wallet_new;
-use super::wallet_share;
+use super::passkey_register;
 use crate::error::Result;
 
 /// Configuration for the HTTP 402 payment gate, plus the set of routes
@@ -391,9 +388,7 @@ impl WebServer {
         // plain-HTTP listener on `web_addr` below stays for internal callers and
         // overlay forwarding.
         #[cfg(feature = "edge-tls")]
-        if let (Some(settings), Some(node)) =
-            (self.edge_tls.clone(), self.state.node.clone())
-        {
+        if let (Some(settings), Some(node)) = (self.edge_tls.clone(), self.state.node.clone()) {
             let edge_app = app.clone();
             let edge_shutdown = shutdown_rx.resubscribe();
             tokio::spawn(async move {
@@ -520,74 +515,13 @@ impl WebServer {
                 "/1.0/methods",
                 get(crate::web::universal_resolver::list_methods),
             )
-            // ML-DSA-65 (FIPS 204) wallet signing surface — `tee-only`
-            // mode for testnet. Threshold endpoints await NIST IR 8214B
-            // and are intentionally unmounted (no dead routes).
-            .route(
-                "/wallet/mldsa/capabilities",
-                get(wallet_mldsa::capabilities_handler),
-            )
-            .route("/wallet/mldsa/sign", post(wallet_mldsa::sign_handler))
-            // FROST (RFC 9591) round-coordination — six endpoints,
-            // two schemes (ed25519 + secp256k1), curve dispatched via
-            // the `:scheme` path segment. Per-scheme behavior lives
-            // in `wallet_frost::{ed25519_ops, secp256k1_ops}`.
-            .route(
-                "/wallet/frost/:scheme/start",
-                post(wallet_frost::start_handler),
-            )
-            .route(
-                "/wallet/frost/:scheme/commit",
-                post(wallet_frost::commit_handler),
-            )
-            .route(
-                "/wallet/frost/:scheme/await-challenge",
-                post(wallet_frost::await_challenge_handler),
-            )
-            .route(
-                "/wallet/frost/:scheme/respond",
-                post(wallet_frost::respond_handler),
-            )
-            .route(
-                "/wallet/frost/:scheme/finalize",
-                post(wallet_frost::finalize_handler),
-            )
-            .route(
-                "/wallet/frost/:scheme/abort",
-                post(wallet_frost::abort_handler),
-            )
-            // Passkey share-unwrap surface — three endpoints. The
-            // wrapped FROST share is fetched via `envelope`; unwrap
-            // requires a fresh WebAuthn assertion bound to a
-            // server-issued single-use nonce.
             // Enrol a passkey credential. Assertions are checked against the
             // key the authenticator registered here; nothing is derived from
             // the credential id, which is public.
             .route(
                 "/wallet/passkey/register",
-                post(wallet_share::passkey_register_handler),
+                post(passkey_register::passkey_register_handler),
             )
-            .route(
-                "/wallet/share/envelope",
-                get(wallet_share::envelope_handler),
-            )
-            .route(
-                "/wallet/share/escrow/challenge",
-                post(wallet_share::challenge_handler),
-            )
-            .route(
-                "/wallet/share/escrow/unwrap",
-                post(wallet_share::unwrap_handler),
-            )
-            // Passkey-quorum wallet provisioning. A Tenzro-aware wallet mints
-            // a fresh TDIP identity whose signing key is split 2-of-2 between
-            // the device passkey and this node's TEE leg — no seed phrase.
-            // Consent for the new device is asserted by the WebAuthn
-            // attestation in `finalize`, so these stay on the open router.
-            .route("/wallet/new/start", post(wallet_new::start_handler))
-            .route("/wallet/new/finalize", post(wallet_new::finalize_handler))
-            .route("/wallet/new/confirm", post(wallet_new::confirm_handler))
-            .route("/wallet/new/cancel", post(wallet_new::cancel_handler))
             // Browser-launch passkey ceremony (gcloud-style CLI login).
             // The CLI creates a session over JSON-RPC, opens the page in a
             // browser, and polls `tenzro_getPasskeySession`; the page runs
@@ -916,152 +850,67 @@ mod tests {
         assert_ne!(response.status(), StatusCode::PAYMENT_REQUIRED);
     }
 
-    /// `/wallet/mldsa/sign` must reject any request lacking the
-    /// `Authorization: DPoP <jwt>` header. This is the central
-    /// invariant of the wallet auth surface — a missing header must
-    /// produce a 401, not a key-derivation attempt against an
-    /// attacker-supplied DID/surface_key.
+    /// The derived-key wallet cluster is gone: threshold signing
+    /// (`/wallet/frost/*`), the DID-derived ML-DSA signing surface
+    /// (`/wallet/mldsa/*`), the share-escrow surface (`/wallet/share/*`),
+    /// and the derived-key provisioning path (`/wallet/new/*`) all rooted
+    /// custody in keys the node could recompute, not in the holder's
+    /// hardware. Every one of their routes must be unmounted, not merely
+    /// unreachable — a surviving route would keep advertising a custody
+    /// model the node can no longer honour.
     #[tokio::test]
-    async fn test_wallet_mldsa_sign_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/wallet/mldsa/sign")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"did":"did:tenzro:human:alice","surface_key":"vault.0","preimage_b64":""}"#,
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
+    async fn test_derived_key_cluster_routes_are_unmounted() {
+        let post_paths = [
+            "/wallet/frost/ed25519/start",
+            "/wallet/frost/ed25519/commit",
+            "/wallet/frost/ed25519/await-challenge",
+            "/wallet/frost/ed25519/respond",
+            "/wallet/frost/ed25519/finalize",
+            "/wallet/frost/ed25519/abort",
+            "/wallet/frost/secp256k1/start",
+            "/wallet/mldsa/sign",
+            "/wallet/share/escrow/challenge",
+            "/wallet/share/escrow/unwrap",
+            "/wallet/new/start",
+            "/wallet/new/finalize",
+            "/wallet/new/confirm",
+            "/wallet/new/cancel",
+        ];
+        for path in post_paths {
+            let server = WebServer::new("127.0.0.1:0".to_string());
+            let app = server.build_app();
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} is still mounted"
+            );
+        }
 
-    /// `/wallet/mldsa/capabilities` is a discovery endpoint but is
-    /// still capability-gated — the wallet treats `tee-only` vs a
-    /// future `threshold` mode as authorization-relevant metadata
-    /// that should not leak to unauthenticated callers.
-    #[tokio::test]
-    async fn test_wallet_mldsa_capabilities_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("GET")
-            .uri("/wallet/mldsa/capabilities")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// `/wallet/frost/{scheme}/start` must reject any request lacking
-    /// the `Authorization: DPoP <jwt>` header. The auth check runs
-    /// *before* the FROST coordinator is even consulted, so an
-    /// unauthenticated client cannot allocate session state at all.
-    #[tokio::test]
-    async fn test_wallet_frost_start_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/wallet/frost/ed25519/start")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"did":"did:tenzro:human:alice","surface_key":"vault.0","preimage_b64":""}"#,
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Same reject-before-allocate guarantee for the secp256k1 leg.
-    #[tokio::test]
-    async fn test_wallet_frost_secp256k1_start_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/wallet/frost/secp256k1/start")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"did":"did:tenzro:human:alice","surface_key":"vault.0","preimage_b64":""}"#,
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Other FROST endpoints (`commit`, `respond`, `await-challenge`,
-    /// `finalize`, `abort`) all share the same auth helper; one
-    /// representative is enough to confirm they're wired the same way.
-    #[tokio::test]
-    async fn test_wallet_frost_respond_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/wallet/frost/ed25519/respond")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"session_id":"frost-fake","device_signature_share_b64":""}"#,
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// `/wallet/share/envelope` must reject any request lacking the
-    /// `Authorization: DPoP <jwt>` header. The auth check runs *before*
-    /// the share-wrapping derivation, so an unauthenticated client
-    /// cannot probe the wrapping construction.
-    #[tokio::test]
-    async fn test_wallet_share_envelope_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("GET")
-            .uri("/wallet/share/envelope?credential_id=cred-A&surface_key=vault.0")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Same reject-before-allocate guarantee for the escrow challenge
-    /// endpoint — an unauthenticated client must not be able to mint
-    /// nonces and pollute the escrow store.
-    #[tokio::test]
-    async fn test_wallet_share_challenge_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/wallet/share/escrow/challenge")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"credential_id":"cred-A","surface_key":"vault.0"}"#,
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// The unwrap endpoint must also reject before consulting the
-    /// escrow map — no information leaks (nonce existence, etc.) from
-    /// an unauthenticated probe.
-    #[tokio::test]
-    async fn test_wallet_share_unwrap_rejects_unauthenticated() {
-        let server = WebServer::new("127.0.0.1:0".to_string());
-        let app = server.build_app();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/wallet/share/escrow/unwrap")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"credential_id":"cred-A","surface_key":"vault.0","nonce_b64":"","assertion":{"authenticator_data_b64":"","client_data_json_b64":"","signature_b64":""}}"#,
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let get_paths = [
+            "/wallet/mldsa/capabilities",
+            "/wallet/share/envelope?credential_id=c&surface_key=s",
+        ];
+        for path in get_paths {
+            let server = WebServer::new("127.0.0.1:0".to_string());
+            let app = server.build_app();
+            let request = Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} is still mounted"
+            );
+        }
     }
 }

@@ -52,8 +52,7 @@ pub async fn pull_and_unpack(img: &OciRef, dest: &Path) -> Result<String, BuildE
         .map_err(|e| BuildError::Oci(format!("mkdir {}: {e}", dest.display())))?;
 
     for layer in &image.layers {
-        let gz =
-            layer.media_type.ends_with("gzip") || layer.media_type.ends_with("tar+gzip");
+        let gz = layer.media_type.ends_with("gzip") || layer.media_type.ends_with("tar+gzip");
         crate::archive::unpack_tar(&layer.data, gz, dest)?;
     }
     Ok(image.digest.unwrap_or_else(|| img.digest.clone()))

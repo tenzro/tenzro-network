@@ -675,6 +675,9 @@ impl AgentRuntime {
         &self,
         name: String,
         creator: Address,
+        // Public half of this machine's TPM or Secure Enclave key. Required:
+        // an agent is an autonomous machine and its wallet roots in hardware.
+        device_public_key: Vec<u8>,
         capabilities: Vec<Capability>,
         tee_backed: bool,
         nonce: u64,
@@ -689,7 +692,14 @@ impl AgentRuntime {
         // Register the agent identity and wallet
         let agent = self
             .identity_manager
-            .register_agent(name, creator, capabilities.clone(), tee_backed, nonce)
+            .register_agent(
+                name,
+                creator,
+                device_public_key,
+                capabilities.clone(),
+                tee_backed,
+                nonce,
+            )
             .await?;
 
         let agent_id = agent.identity.agent_id.clone();
@@ -1148,7 +1158,18 @@ impl AgentRuntime {
         // Register child agent with a unique nonce to avoid ID collision with parent
         let nonce = uuid::Uuid::new_v4().as_u128() as u64;
         let child = self
-            .register_agent(name.to_string(), creator, typed_caps, false, nonce)
+            // A child runs on the same machine as its parent, so it roots in
+            // the same secure element. Inheriting the parent's device key is
+            // the honest encoding of that; minting a fresh one here would
+            // invent a hardware root the child does not separately have.
+            .register_agent(
+                name.to_string(),
+                creator,
+                parent.classical_public_key.clone(),
+                typed_caps,
+                false,
+                nonce,
+            )
             .await?;
 
         // Track parent→child relationship
@@ -1565,7 +1586,14 @@ mod tests {
         let capabilities = vec![Capability::MultiAgentCoordination];
 
         let agent = runtime
-            .register_agent("TestAgent".to_string(), creator, capabilities, false, 0)
+            .register_agent(
+                "TestAgent".to_string(),
+                creator,
+                vec![7u8; 32],
+                capabilities,
+                false,
+                0,
+            )
             .await
             .unwrap();
 
@@ -1581,7 +1609,14 @@ mod tests {
         let creator = Address::from([1u8; 32]);
 
         let agent = runtime
-            .register_agent("Agent".to_string(), creator, vec![], false, 0)
+            .register_agent(
+                "Agent".to_string(),
+                creator,
+                vec![7u8; 32],
+                vec![],
+                false,
+                0,
+            )
             .await
             .unwrap();
 
@@ -1620,6 +1655,7 @@ mod tests {
             .register_agent(
                 "Agent1".to_string(),
                 creator,
+                vec![7u8; 32],
                 vec![capability.clone()],
                 false,
                 0,
@@ -1631,6 +1667,7 @@ mod tests {
             .register_agent(
                 "Agent2".to_string(),
                 creator,
+                vec![7u8; 32],
                 vec![capability.clone()],
                 false,
                 1,

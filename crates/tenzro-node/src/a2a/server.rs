@@ -1396,67 +1396,22 @@ fn handle_identity_query(state: &A2aState, text: &str) -> String {
     } else if text_lower.contains("register")
         && (text_lower.contains("identity") || text_lower.contains("did"))
     {
-        // Extract a display name: take the last meaningful word that isn't a stop word
-        let stop_words = [
-            "register", "a", "an", "the", "new", "identity", "named", "called", "with", "name",
-            "as", "create", "did", "human", "machine", "for", "please", "me", "my", "i", "want",
-            "to",
-        ];
-        let display_name = text
-            .split_whitespace()
-            .rev()
-            .find(|w| {
-                let clean = w.to_lowercase();
-                let clean = clean.trim_matches(|c: char| !c.is_alphanumeric());
-                !stop_words.contains(&clean) && clean.len() > 1
-            })
-            .unwrap_or("Agent");
-
-        // Actually register the identity via the registry
-        if let Some(registry) = state.node.identity_registry() {
-            // Generate a fresh Ed25519 keypair for the new identity
-            let keypair =
-                match tenzro_crypto::keys::KeyPair::generate(tenzro_crypto::keys::KeyType::Ed25519)
-                {
-                    Ok(kp) => kp,
-                    Err(e) => return format!("Failed to generate keypair: {}", e),
-                };
-            let pk_bytes = keypair.public_key().to_bytes();
-
-            // register_human_with_fee is async — run it on the current runtime
-            let handle = tokio::runtime::Handle::current();
-            let reg = registry.clone();
-            let name = display_name.to_string();
-            let result = tokio::task::block_in_place(move || {
-                handle.block_on(reg.register_human_with_fee(
-                    pk_bytes,
-                    name,
-                    tenzro_types::identity::KycTier::Unverified,
-                ))
-            });
-
-            match result {
-                Ok(reg_result) => {
-                    let identity = reg_result.identity;
-                    format!(
-                        "Identity registered successfully!\n\
-                         - DID: {}\n\
-                         - Display name: {}\n\
-                         - Type: Human\n\
-                         - Status: {:?}",
-                        identity.did_string(),
-                        display_name,
-                        identity.status,
-                    )
-                }
-                Err(e) => format!("Failed to register identity: {}", e),
-            }
-        } else {
-            "Identity registry not available — node may still be initializing.".to_string()
-        }
+        // Registering an identity needs key material and proof of consent, and a
+        // chat message carries neither. This used to generate an Ed25519 keypair
+        // here and drop the private half, producing an identity nobody could ever
+        // sign for. Point the caller at the RPC that takes a real passkey instead.
+        let _ = &state;
+        "Identity registration is not available over A2A chat.\n\
+         An identity is bound to a key you hold — a passkey for a person, a TPM \
+         or Secure Enclave key for a machine — and this node never generates one \
+         on your behalf.\n\
+         Use the `tenzro_registerIdentity` RPC, passing `public_key` and \
+         `credential_id` from your authenticator."
+            .to_string()
     } else {
-        "To manage identities, provide a DID (e.g., did:tenzro:human:abc123) \
-         or ask me to register a new identity."
+        "To look up an identity, provide a DID (e.g., did:tenzro:human:abc123). \
+         Registration happens over the `tenzro_registerIdentity` RPC, which \
+         takes the public half of a key you hold."
             .to_string()
     }
 }
@@ -2416,7 +2371,7 @@ fn rpc_bytes_to_address(bytes: &[u8]) -> tenzro_types::Address {
 
 fn handle_spawn_query(_state: &A2aState) -> String {
     "Agent Spawning\n\n\
-         Dynamically spawn autonomous sub-agents with their own DID and MPC wallet.\n\
+         Dynamically spawn autonomous sub-agents with their own DID and permissionless wallet.\n\
          Each parent agent can create up to 50 children. Children inherit the \
          parent's controller DID and delegation scope.\n\n\
          JSON-RPC:\n\
@@ -2506,7 +2461,7 @@ fn handle_join_query(_state: &A2aState, text: &str) -> String {
          Zero-install — no P2P binary required.\n\
          Auto-provisions:\n\
          • A TDIP decentralized identity (DID) — did:tenzro:human:<uuid>\n\
-         • A 2-of-3 MPC threshold wallet\n\
+         • A permissionless wallet (hardware-held key; no custody held)\n\
          • 10 network capabilities:\n\
            inference · payments · agent collaboration · MCP tools\n\
            task execution · chain queries · smart contracts\n\

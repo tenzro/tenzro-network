@@ -207,7 +207,7 @@ enum Command {
     #[command(subcommand)]
     Cortex(CortexCommand),
 
-    /// Custody & MPC wallet operations (create, export, import, rotate, limits, session)
+    /// Custody & wallet operations (create, export, import, limits, session)
     #[command(subcommand)]
     Custody(CustodyCommand),
 

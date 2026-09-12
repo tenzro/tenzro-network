@@ -129,7 +129,7 @@ impl StepExecutor for NodeStepExecutor {
             "model_id": resolved,
             "messages": [{ "role": "user", "content": input }],
         });
-        let response = crate::rpc::handle_chat(&self.node, Some(params))
+        let response = crate::rpc::handle_chat(&self.node, Some(params), None, None)
             .await
             .map_err(|e| OrchestratorError::NoCapability(e.message))?;
 
@@ -235,7 +235,7 @@ impl PlanCompletion for NodeStepExecutor {
                     "model_id": model_id,
                     "messages": [{ "role": "user", "content": prompt }],
                 });
-                crate::rpc::handle_chat(&node, Some(params)).await
+                crate::rpc::handle_chat(&node, Some(params), None, None).await
             })
         })
         .map_err(|e| OrchestratorError::NoCapability(e.message))?;

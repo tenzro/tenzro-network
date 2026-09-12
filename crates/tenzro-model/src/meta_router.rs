@@ -823,10 +823,10 @@ impl MetaRouter {
                 // path above supersedes this the moment a cluster is observed.
                 let uc = intent.use_case.as_str();
                 candidates.sort_by(|a, b| {
-                    let pa = crate::catalog::capability_prior(&a.model.model_id, uc)
-                        .unwrap_or(-1.0);
-                    let pb = crate::catalog::capability_prior(&b.model.model_id, uc)
-                        .unwrap_or(-1.0);
+                    let pa =
+                        crate::catalog::capability_prior(&a.model.model_id, uc).unwrap_or(-1.0);
+                    let pb =
+                        crate::catalog::capability_prior(&b.model.model_id, uc).unwrap_or(-1.0);
                     pb.total_cmp(&pa)
                         .then_with(|| cost_key(a).cmp(&cost_key(b)))
                 });
@@ -1296,15 +1296,18 @@ mod tests {
         )
     }
 
-    fn capacity(warm: Option<&str>, active: u32, max: u32, mtp: bool) -> Option<AdvertisedCapacity> {
+    fn capacity(
+        warm: Option<&str>,
+        active: u32,
+        max: u32,
+        mtp: bool,
+    ) -> Option<AdvertisedCapacity> {
         Some(AdvertisedCapacity {
             max_concurrent_requests: max,
             active_requests: active,
             mtp_enabled: mtp,
             prefix_cache: warm
-                .map(|p| {
-                    tenzro_types::model::PrefixCacheSummary::from_warm_prompt(p.as_bytes())
-                })
+                .map(|p| tenzro_types::model::PrefixCacheSummary::from_warm_prompt(p.as_bytes()))
                 .unwrap_or_default(),
             ..Default::default()
         })
@@ -1371,9 +1374,10 @@ mod tests {
         let w = warm_prompt();
         let honest_cap = capacity(Some(&w), 0, 8, false).unwrap();
         assert!(
-            honest_cap.prefix_cache.longest_match_len(&tenzro_types::prefix_run_hashes(
-                w.as_bytes()
-            )) > 0,
+            honest_cap
+                .prefix_cache
+                .longest_match_len(&tenzro_types::prefix_run_hashes(w.as_bytes()))
+                > 0,
             "fixture must genuinely match, else this proves nothing"
         );
 
@@ -1396,7 +1400,10 @@ mod tests {
     /// would otherwise land in the most-preferred bucket for free.
     #[test]
     fn undeclared_ceiling_is_not_treated_as_idle() {
-        assert!(!idle_enough(0, 0), "no declared ceiling is unknown, not idle");
+        assert!(
+            !idle_enough(0, 0),
+            "no declared ceiling is unknown, not idle"
+        );
         assert!(!idle_enough(u32::MAX, 0));
         // A genuinely idle single-slot provider still qualifies.
         assert!(idle_enough(0, 1), "1/2 truncating to 0 locked these out");
@@ -1506,7 +1513,12 @@ mod tests {
         intent.prompt = Some(w.clone());
         let d = meta.route(&intent).expect("an offer should win");
 
-        assert_ne!(d.provider, Some(cheap_addr), "the pin must still win: {}", d.reason);
+        assert_ne!(
+            d.provider,
+            Some(cheap_addr),
+            "the pin must still win: {}",
+            d.reason
+        );
         assert_eq!(
             d.provider,
             Some(warm_addr),
@@ -1614,9 +1626,8 @@ mod tests {
         registry
             .register_model(model("beta", 35_000_000_000, 8192, 10, 10))
             .unwrap();
-        let mr = MetaRouter::new(registry, usage, router).with_routing_preferences(HashMap::from([
-            ("code".to_string(), "ghost".to_string()),
-        ]));
+        let mr = MetaRouter::new(registry, usage, router)
+            .with_routing_preferences(HashMap::from([("code".to_string(), "ghost".to_string())]));
         let intent = RouteIntent::new(UseCase::Code, Budget::None).with_tokens(64, 64);
         assert_eq!(mr.route(&intent).unwrap().model_id, "alpha");
     }

@@ -185,10 +185,34 @@ pub fn estimate_footprint(
     max_concurrent: u32,
     layers: Option<u64>,
 ) -> Footprint {
+    // Delegates to the exact form, using the representative constant for the
+    // per-layer KV size. Prefer `estimate_footprint_exact` when the gguf gives
+    // the real attention dimensions.
+    estimate_footprint_exact(weights_bytes, context_length, max_concurrent, layers, None)
+}
+
+/// Footprint using the model's *actual* per-layer KV size when known.
+///
+/// AUDIT FIX. `estimate_footprint` uses `KV_BYTES_PER_TOKEN_PER_LAYER = 4096`
+/// and `ASSUMED_LAYERS = 32` as representative values. For a real model both
+/// can be wrong — a 64-layer model is already undercounted 2x by the assumed
+/// layer count, and the per-layer byte figure varies with the KV head count
+/// and head dim. When the gguf provides them (see `gguf_shape::read_model_shape`
+/// -> `ModelShape::kv_bytes_per_token_per_layer`), pass the real figure here so
+/// a "fits" verdict is not built on a guess. `kv_bytes_per_token_per_layer` of
+/// `None` falls back to the representative constant.
+pub fn estimate_footprint_exact(
+    weights_bytes: u64,
+    context_length: u32,
+    max_concurrent: u32,
+    layers: Option<u64>,
+    kv_bytes_per_token_per_layer: Option<u64>,
+) -> Footprint {
     let layers = layers.unwrap_or(ASSUMED_LAYERS);
+    let per_layer = kv_bytes_per_token_per_layer.unwrap_or(KV_BYTES_PER_TOKEN_PER_LAYER);
     let kv_cache_bytes = u64::from(context_length)
         .saturating_mul(layers)
-        .saturating_mul(KV_BYTES_PER_TOKEN_PER_LAYER)
+        .saturating_mul(per_layer)
         .saturating_mul(u64::from(max_concurrent.max(1)));
     Footprint {
         weights_bytes,
@@ -211,6 +235,11 @@ pub struct ServeRequest {
     pub max_concurrent: u32,
     /// Transformer depth, when known.
     pub layers: Option<u64>,
+    /// Real per-token, per-layer KV size in bytes, from the gguf's attention
+    /// dims (`ModelShape::kv_bytes_per_token_per_layer`). `None` falls back to
+    /// the representative constant. AUDIT FIX: without this a deep model's KV
+    /// cache is undercounted and a "fits" verdict can be wrong.
+    pub kv_bytes_per_token_per_layer: Option<u64>,
     /// Bits per weight of the current tier, for sizing a step down.
     pub current_bits_per_weight: f32,
     /// A lower tier available for this model, if any: `(name, bits)`.
@@ -230,11 +259,12 @@ pub struct ServeRequest {
 /// to spare may still want to know that halving their context would double
 /// their concurrency.
 pub fn plan(request: &ServeRequest, snapshot: &ResourceSnapshot) -> ServePlan {
-    let footprint = estimate_footprint(
+    let footprint = estimate_footprint_exact(
         request.weights_bytes,
         request.context_length,
         request.max_concurrent,
         request.layers,
+        request.kv_bytes_per_token_per_layer,
     );
     let total = footprint.total_bytes();
     let available = snapshot.resident_available_bytes;
@@ -262,11 +292,12 @@ pub fn plan(request: &ServeRequest, snapshot: &ResourceSnapshot) -> ServePlan {
     // cache, and most workloads never approach the context they were given.
     if footprint.kv_dominates() && request.context_length > 4096 {
         let halved = request.context_length / 2;
-        let after = estimate_footprint(
+        let after = estimate_footprint_exact(
             request.weights_bytes,
             halved,
             request.max_concurrent,
             request.layers,
+            request.kv_bytes_per_token_per_layer,
         );
         advice.push(Advice::ReduceContext {
             context_length: halved,
@@ -277,11 +308,12 @@ pub fn plan(request: &ServeRequest, snapshot: &ResourceSnapshot) -> ServePlan {
     // Concurrency, when there is more than one to give up.
     if request.max_concurrent > 1 {
         let halved = (request.max_concurrent / 2).max(1);
-        let after = estimate_footprint(
+        let after = estimate_footprint_exact(
             request.weights_bytes,
             request.context_length,
             halved,
             request.layers,
+            request.kv_bytes_per_token_per_layer,
         );
         let saves = total.saturating_sub(after.total_bytes());
         if saves > 0 {
@@ -386,6 +418,7 @@ mod tests {
             context_length: 8192,
             max_concurrent: 4,
             layers: Some(48),
+            kv_bytes_per_token_per_layer: None,
             current_bits_per_weight: 4.9,
             lower_tier: Some(("UD-Q3_K_XL".to_string(), 3.9)),
             drafter_id: None,
@@ -616,6 +649,25 @@ mod tests {
         // Guards the multiply; a serve always holds at least one sequence.
         let f = estimate_footprint(GB, 4096, 0, Some(32));
         assert!(f.kv_cache_bytes > 0);
+    }
+
+    #[test]
+    fn a_real_per_layer_kv_size_changes_the_fit_verdict() {
+        // AUDIT: the representative constant (4096 B/token/layer) undercounts a
+        // model with wide KV heads. Feeding the real figure must move the
+        // footprint — otherwise the exact path is doing nothing. Use a context
+        // where KV dominates so the per-layer size is what decides fit.
+        let generic = estimate_footprint_exact(10 * GB, 131_072, 8, Some(64), None);
+        let real = estimate_footprint_exact(10 * GB, 131_072, 8, Some(64), Some(16_384));
+        assert!(
+            real.kv_cache_bytes > generic.kv_cache_bytes,
+            "a 4x-larger per-layer KV must yield a larger cache: {} vs {}",
+            real.kv_cache_bytes,
+            generic.kv_cache_bytes
+        );
+        // And the default estimate_footprint must equal the exact form with None.
+        let via_default = estimate_footprint(10 * GB, 131_072, 8, Some(64));
+        assert_eq!(via_default.kv_cache_bytes, generic.kv_cache_bytes);
     }
 
     #[test]

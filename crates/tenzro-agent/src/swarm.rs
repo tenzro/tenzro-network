@@ -488,7 +488,14 @@ mod tests {
         // spawn_agent() looks up the parent by agent_id, so we must pre-register it.
         let creator = Address::from([1u8; 32]);
         let orch = runtime
-            .register_agent("Orchestrator".to_string(), creator, vec![], false, 0)
+            .register_agent(
+                "Orchestrator".to_string(),
+                creator,
+                vec![7u8; 32],
+                vec![],
+                false,
+                0,
+            )
             .await
             .expect("register orchestrator");
         let orch_id = &orch.identity.agent_id;
@@ -521,7 +528,14 @@ mod tests {
         // Register the orchestrator agent before creating a swarm.
         let creator = Address::from([1u8; 32]);
         let orch = runtime
-            .register_agent("Orchestrator2".to_string(), creator, vec![], false, 1)
+            .register_agent(
+                "Orchestrator2".to_string(),
+                creator,
+                vec![7u8; 32],
+                vec![],
+                false,
+                1,
+            )
             .await
             .expect("register orchestrator");
         let orch_id = &orch.identity.agent_id;

@@ -11,8 +11,9 @@ name = "tenzro-node"
 path = "src/main.rs"
 
 [dependencies]
-# Advisory flock for the single-instance guard (single_instance.rs).
-libc = { workspace = true }
+# Advisory cross-platform file lock for the single-instance guard
+# (single_instance.rs) — flock on Unix, LockFileEx on Windows.
+fs4 = { workspace = true }
 tenzro-types = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-tee = { workspace = true }
@@ -63,6 +64,8 @@ tower-http = { workspace = true }
 tower = { workspace = true }
 qrcode = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+maxminddb = { workspace = true }
 toml = { workspace = true }
 libp2p = { workspace = true }
 hex = { workspace = true }
@@ -77,6 +80,7 @@ schemars = { workspace = true }
 dashmap = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+url = { workspace = true }
 urlencoding = "2"
 tokio-stream = "0.1"
 # DNS resolver for the bootstrap-DNS discovery primitive (Fix 2: pkarr-based
@@ -105,8 +109,6 @@ rustls-acme = { version = "0.15.4", features = ["tokio"], optional = true }
 axum-server = { version = "0.8", default-features = false, features = [
   "tls-rustls-no-provider",
 ], optional = true }
-frost-ed25519 = { workspace = true }
-frost-secp256k1 = { workspace = true }
 ed25519-dalek = { workspace = true }
 aes-gcm = { workspace = true }
 hkdf = "0.12"
@@ -203,6 +205,7 @@ machine-builder-oci = ["machine-builder", "tenzro-machine-builder/oci"]
 svm-full = ["tenzro-vm/svm-full"]
 
 [dev-dependencies]
+tenzro-tee = { workspace = true, features = ["test-tpm"] }
 tempfile = "3"
 filetime = "0.2"
 reqwest = { workspace = true }

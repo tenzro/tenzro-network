@@ -41,8 +41,7 @@ use tenzro_consensus::QuorumCertificate;
 use tenzro_network::{
     BlockSyncError, BlockSyncRequest, BlockSyncResponse, InboundBlockSync, InboundRequestId,
     MAX_BLOCK_RANGE_BYTES, MAX_BLOCKS_PER_RANGE, MAX_INFLIGHT_REQUESTS_PER_PEER, NetworkService,
-    OutboundBlockSyncResult,
-    OutboundRequestId, PeerEvent, TenzroNetworkService,
+    OutboundBlockSyncResult, OutboundRequestId, PeerEvent, TenzroNetworkService,
 };
 use tenzro_storage::traits::BlockStore;
 use tenzro_storage::{BlockStoreImpl, RocksDbStore};
@@ -305,7 +304,8 @@ impl BlockSyncEngine {
     /// forcing a sync the moment we fall one block behind later.
     fn note_behind(&mut self, behind: bool) {
         if behind {
-            self.behind_since.get_or_insert_with(std::time::Instant::now);
+            self.behind_since
+                .get_or_insert_with(std::time::Instant::now);
         } else {
             self.behind_since = None;
         }
@@ -745,8 +745,7 @@ impl BlockSyncEngine {
                         let mut used = 0usize;
                         let mut fitted = Vec::with_capacity(blocks.len());
                         for block in blocks {
-                            let size =
-                                serde_json::to_string(&block).map(|s| s.len()).unwrap_or(0);
+                            let size = serde_json::to_string(&block).map(|s| s.len()).unwrap_or(0);
                             // Always return at least one block, or a single
                             // oversized block would stall the sync forever with
                             // an empty response.

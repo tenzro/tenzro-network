@@ -1,8 +1,10 @@
 [package]
 name = "tenzro-device-key"
-# Own version (overrides the workspace 0.1.0): the Secure-Enclave key now
-# persists in the legacy file keychain, fixing cross-restart wallet unlock.
-version = "0.2.0"
+# Own version (overrides the workspace 0.1.0). 0.3.0 is a BREAKING change: the
+# enclave key is now a CryptoKit SEP blob on disk rather than a keychain item,
+# so a 0.2.x key is not readable by this version. See src/backend_se.rs.
+# 0.4.0 adds the multi-recipient envelope; single-recipient wrapping is gone.
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,11 +14,13 @@ documentation = "https://docs.rs/tenzro-device-key"
 readme = "README.md"
 keywords = ["tenzro", "secure-enclave", "passkey", "ecies", "keystore"]
 categories = ["cryptography", "authentication", "hardware-support"]
+build = "build.rs"
 
 [features]
 # The Secure Enclave key itself — `create` / `open` / `delete`, signing,
-# ECIES secret-wrapping, and `SecureEnclaveUnlocker` — needs no asymmetric
-# software crypto, so the default build depends only on the platform keychain.
+# secret-wrapping, and `SecureEnclaveUnlocker` — needs no asymmetric software
+# crypto: the enclave does it. On Apple targets the only build-time requirement
+# is a working `swiftc` (Xcode or the Command Line Tools) for the CryptoKit shim.
 default = []
 
 # `pq-companion` — the ML-DSA-65 key that rides alongside the enclave P-256
@@ -38,16 +42,31 @@ hex = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
+subtle = { workspace = true }
+x25519-dalek = { workspace = true }
+# HPKE (RFC 9180) is hand-rolled in src/hpke.rs — every Rust HPKE crate models
+# the recipient private key as a value, which a non-extractable enclave or TPM
+# key cannot be. These are the primitives it is built from.
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+# NOTE: the workspace pins p256 to "=0.14.0-rc.12". This crate uses 0.13 because
+# that is the version the envelope code was built and tested against; the rc
+# could not be compiled here without the workspace Cargo.lock. Switching to
+# `{ workspace = true }` is a one-line change — do it once you can verify the
+# 0.14-rc ECDH API compiles. p256 types do not cross this crate's public API,
+# so the duplicate is contained.
+p256 = { workspace = true, features = ["ecdh"] }
 
-# OSX_10_15 gates the `Location` API used to persist the Secure-Enclave key in
-# the legacy file (login) keychain via `Location::DefaultFileKeychain`. That
-# path needs no keychain-access-groups entitlement or provisioning profile —
-# only the data-protection keychain does. See src/lib.rs / Apple TN3137.
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = { version = "3", features = ["OSX_10_15"] }
+# `security-framework` is deliberately gone. Persisting a Secure Enclave key
+# through it requires the data-protection keychain, which is entitlement-gated;
+# the crate now talks to CryptoKit through swift/TenzroSE.swift instead, which
+# never touches the keychain at all. See src/backend_se.rs for the measurements.
 
-[target.'cfg(target_os = "ios")'.dependencies]
-security-framework = { version = "3", features = ["OSX_10_15"] }
+# TBS (TPM Base Services) access for `backend_tpm`'s hardware Decapsulator —
+# same crate/feature set `tenzro-tee`'s TPM signing path uses, for the same
+# reason: Windows has no prebuilt tpm2-tools binary to shell out to.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_TpmBaseServices"] }
 
 [lints]
 workspace = true

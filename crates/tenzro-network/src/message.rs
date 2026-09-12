@@ -778,8 +778,7 @@ pub struct ProviderAnnouncementMessage {
 
 /// What a peer signs with its libp2p key to authorise an announce key.
 fn announce_key_binding_payload(announce_pubkey: &[u8]) -> Vec<u8> {
-    let mut payload =
-        Vec::with_capacity(ANNOUNCE_KEY_BINDING_DOMAIN.len() + announce_pubkey.len());
+    let mut payload = Vec::with_capacity(ANNOUNCE_KEY_BINDING_DOMAIN.len() + announce_pubkey.len());
     payload.extend_from_slice(ANNOUNCE_KEY_BINDING_DOMAIN);
     payload.extend_from_slice(announce_pubkey);
     payload
@@ -1347,7 +1346,6 @@ mod tests {
         for other in ["tee", "storage", "compute", "database", "cloud", "general"] {
             assert!(!provider_type_matches("ai", other), "ai vs {other}");
             assert!(!provider_type_matches(other, "ai"), "{other} vs ai");
-
         }
         assert!(provider_type_matches("storage", "storage"));
     }
@@ -1458,7 +1456,10 @@ mod tests {
         ann.sign_bound_pq(&signer, &libp2p_key, &pq).unwrap();
         ann.pq_signature.clear();
 
-        assert!(ann.verify_pq().is_err(), "half-formed must not read as absent");
+        assert!(
+            ann.verify_pq().is_err(),
+            "half-formed must not read as absent"
+        );
     }
 
     /// Editing the body after signing must break the PQ leg on its own terms,
@@ -1521,11 +1522,17 @@ mod tests {
         // binding is written before signing and is therefore covered by it.
         let mut tampered = ann.clone();
         tampered.peer_binding_sig.clear();
-        assert!(tampered.verify().is_err(), "stripping must break the signature");
+        assert!(
+            tampered.verify().is_err(),
+            "stripping must break the signature"
+        );
 
         let mut tampered = ann.clone();
         tampered.libp2p_pubkey.clear();
-        assert!(tampered.verify().is_err(), "stripping must break the signature");
+        assert!(
+            tampered.verify().is_err(),
+            "stripping must break the signature"
+        );
 
         // And a half-formed binding is an error, not a quiet `false`.
         let mut half = provider_ann(&peer);
@@ -1536,9 +1543,7 @@ mod tests {
     /// A node predating the binding is unproven, not forged.
     #[test]
     fn an_unbound_announcement_is_unproven_not_invalid() {
-        let peer = libp2p::PeerId::from(
-            libp2p::identity::Keypair::generate_ed25519().public(),
-        );
+        let peer = libp2p::PeerId::from(libp2p::identity::Keypair::generate_ed25519().public());
         let signer = test_signer();
         let mut ann = provider_ann(&peer);
         ann.sign(&signer).expect("plain sign");

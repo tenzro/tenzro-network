@@ -115,7 +115,7 @@ impl std::fmt::Display for IdentityType {
 /// Carries the **replicable** portion of an identity record — the DID, its
 /// public keys, wallet bindings, and display metadata — so an identity
 /// created on one node becomes consensus-state that every node re-executes
-/// and converges on. Key MATERIAL (FROST shares / TEE-sealed signing keys)
+/// and converges on. Key MATERIAL (TEE-sealed / hardware-held signing keys)
 /// stays node-local by design; only this public record replicates.
 ///
 /// Mirrors the node-alias exemplar ([`crate::node_alias::NodeAlias`]): the

@@ -141,6 +141,11 @@ async fn dispatch(node: &Arc<TenzroNode>, method: &str, params: Value, api_key: 
         jsonrpc: "2.0".to_string(),
         method: method.to_string(),
         params: Some(params),
+        // This route already authenticated the caller by key; carry it on the
+        // frame so a handler that forwards to a peer forwards the credential
+        // too, rather than arriving at the provider anonymous.
+        api_key: Some(api_key.to_string()),
+        service_key: None,
         id: json!(1),
     };
     let auth_ctx = crate::rpc::AuthContext::from_mcp(
@@ -184,6 +189,9 @@ async fn dispatch_open(node: &Arc<TenzroNode>, method: &str, params: Value) -> R
         jsonrpc: "2.0".to_string(),
         method: method.to_string(),
         params: Some(params),
+        // Deliberately unauthenticated surface — no credential to carry.
+        api_key: None,
+        service_key: None,
         id: json!(1),
     };
     let auth_ctx = crate::rpc::AuthContext::from_mcp(

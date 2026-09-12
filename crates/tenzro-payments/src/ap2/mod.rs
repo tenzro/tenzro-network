@@ -1421,7 +1421,12 @@ mod tests {
     ) -> (IdentityRegistry, String, String) {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(vec![1; 32], "Alice".into(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1; 32],
+                "Alice".into(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -1706,7 +1711,12 @@ mod tests {
     ) -> (IdentityRegistry, String, String) {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(principal_pk, "Alice".into(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                principal_pk,
+                "Alice".into(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;

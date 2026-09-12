@@ -171,7 +171,7 @@ pub struct IdentityRegistry {
     seen_credential_ids: DashSet<String>,
     /// Username → DID mapping for on-chain username uniqueness
     usernames: DashMap<String, String>,
-    /// DID → *additional* MPC wallets bound to that identity (D2b).
+    /// DID → *additional* identity-bound wallets bound to that identity (D2b).
     ///
     /// The primary wallet lives on the identity record itself
     /// (`TenzroIdentity::wallet_id` / `wallet_address`); this index holds every
@@ -221,6 +221,41 @@ pub struct IdentityRegistry {
     /// every receipt. Implemented by `tenzro_token::bond::BondManager` at
     /// node startup; tests may pass a fake.
     bond_lookup: Option<Arc<dyn BondLookup>>,
+}
+
+/// The key set an identity inherits from the wallet binding that created it.
+///
+/// `key-1` is the binding's own classical key, good for both authenticating as
+/// the identity and signing statements under it.
+///
+/// `key-2` appears only when the binding carries an Ed25519 assertion key, and
+/// exists because a P-256 passkey signs WebAuthn assertions rather than raw
+/// bytes: an identity holding only its passkey has no key an ordinary verifier
+/// can check a signature against, so `submit_reserve_attestation` refuses it
+/// for having "no Ed25519 verification key on file" — which is where every Boli
+/// pack stopped, unable to declare its backing.
+///
+/// The holder derives that key from the same credential (WebAuthn PRF) and
+/// supplies its public half at enrolment. It carries `AssertionMethod` and
+/// nothing else: it names what this identity *says*, never what may
+/// authenticate *as* it, so a leaked copy could publish a claim under the DID
+/// but could not move the account.
+fn binding_public_keys(binding: &WalletBinding) -> Vec<PublicKeyInfo> {
+    let mut keys = vec![PublicKeyInfo {
+        key_id: "key-1".to_string(),
+        key_type: binding.key_type.clone(),
+        public_key: binding.public_key.clone(),
+        purposes: vec![KeyPurpose::Authentication, KeyPurpose::AssertionMethod],
+    }];
+    if let Some(vk) = binding.ed25519_verifying_key.as_ref() {
+        keys.push(PublicKeyInfo {
+            key_id: "key-2".to_string(),
+            key_type: "Ed25519".to_string(),
+            public_key: vk.clone(),
+            purposes: vec![KeyPurpose::AssertionMethod],
+        });
+    }
+    keys
 }
 
 impl IdentityRegistry {
@@ -517,7 +552,7 @@ impl IdentityRegistry {
     /// Composes with `with_storage`, `with_resolution_backend`, etc. so the
     /// node can stack persistent storage and a shared wallet service onto a
     /// single registry instance. When set, `register_human_with_fee` and
-    /// `register_machine_with_fee` provision real MPC wallets through the
+    /// `register_machine_with_fee` provision identity-bound wallets through the
     /// binder's `WalletService`; without it, those calls now *refuse* rather
     /// than assigning a placeholder address no key can sign for.
     pub fn with_wallet_binder_arc(mut self, wallet_binder: Arc<WalletBinder>) -> Self {
@@ -801,17 +836,34 @@ impl IdentityRegistry {
     /// Creates a human DID, optionally provisions a wallet, and stores
     /// the identity in the registry. Returns both the identity and the
     /// registration fee required.
+    /// A human identity is rooted in a passkey, so `passkey_credential_id` is
+    /// required alongside its public key. Both come from the WebAuthn ceremony;
+    /// the private half never leaves the authenticator.
     pub async fn register_human_with_fee(
         &self,
+        passkey_credential_id: Vec<u8>,
         public_key: Vec<u8>,
         display_name: String,
         kyc_tier: KycTier,
     ) -> Result<RegistrationResult> {
-        let did = TenzroDid::new_human();
+        // The identity is the passkey: derive the DID from the credential key so
+        // the same authenticator always resolves to the same identity.
+        let did = TenzroDid::from_passkey(&public_key);
         let did_string = did.to_string();
 
-        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
-            self.provision_or_default(&did_string).await?;
+        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) = self
+            .provision_or_default(
+                &did_string,
+                tenzro_wallet::WalletIdentity::human(
+                    passkey_credential_id.clone(),
+                    tenzro_crypto::PublicKey::new(
+                        tenzro_crypto::KeyType::Ed25519,
+                        public_key.clone(),
+                    ),
+                )
+                .map_err(|e| IdentityError::WalletError(e.to_string()))?,
+            )
+            .await?;
 
         let identity = TenzroIdentity {
             did,
@@ -862,7 +914,7 @@ impl IdentityRegistry {
     /// key as the identity's `public_keys[0]`.
     ///
     /// This is the production onboarding path used by `tenzro_onboardHuman`,
-    /// `tenzro_participate`, and the desktop Setup flow: a single MPC wallet
+    /// `tenzro_participate`, and the desktop Setup flow: a single identity-bound wallet
     /// is provisioned in the shared `WalletService`, its `wallet_id` is
     /// stored on the identity, and the same keypair signs both at the
     /// authentication layer (key purposes Authentication + AssertionMethod)
@@ -874,28 +926,41 @@ impl IdentityRegistry {
     /// Returns `IdentityError::WalletError("no wallet binder configured")`
     /// if called on a registry without a binder — production node startup
     /// must wire one via `with_wallet_binder_arc`.
+    /// A **human** identity is rooted in a passkey, so the credential and its
+    /// public key are required. They are not optional and there is no path that
+    /// omits them: a human wallet whose signing key was minted by the service
+    /// would be custodial, and one with no credential could never be
+    /// authenticated by the person it belongs to.
+    ///
+    /// Machines do not use this path — they root in a TPM or Secure Enclave;
+    /// see `tenzro_wallet::WalletIdentity::machine`.
     pub async fn register_human_via_binder(
         &self,
+        passkey_credential_id: Vec<u8>,
+        passkey_public_key: Vec<u8>,
         display_name: String,
         kyc_tier: KycTier,
     ) -> Result<RegistrationResult> {
-        let did = TenzroDid::new_human();
+        // The identity is the passkey: derive the DID from the credential key so
+        // the same authenticator always resolves to the same identity, even
+        // after a remove-and-re-enrol.
+        let did = TenzroDid::from_passkey(&passkey_public_key);
         let did_string = did.to_string();
 
         let binder = self
             .wallet_binder
             .as_ref()
             .ok_or_else(|| IdentityError::WalletError("no wallet binder configured".to_string()))?;
-        let binding = binder.provision_wallet(&did_string).await?;
+        let identity = tenzro_wallet::WalletIdentity::human(
+            passkey_credential_id,
+            tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, passkey_public_key),
+        )
+        .map_err(|e| IdentityError::WalletError(e.to_string()))?;
+        let binding = binder.provision_wallet(&did_string, identity).await?;
 
         let identity = TenzroIdentity {
             did,
-            public_keys: vec![PublicKeyInfo {
-                key_id: "key-1".to_string(),
-                key_type: binding.key_type.clone(),
-                public_key: binding.public_key.clone(),
-                purposes: vec![KeyPurpose::Authentication, KeyPurpose::AssertionMethod],
-            }],
+            public_keys: binding_public_keys(&binding),
             identity_data: IdentityData::Human {
                 display_name: display_name.clone(),
                 kyc_tier,
@@ -938,7 +1003,7 @@ impl IdentityRegistry {
     ///
     /// The caller (node RPC) has already run a device ceremony — a passkey /
     /// WebAuthn enrollment plus, on TEE-equipped hardware, a sealed key
-    /// derivation — and provisioned a watch-only [`MpcWallet`] whose address /
+    /// derivation — and provisioned a watch-only [`Wallet`] whose address /
     /// classical pubkey / ML-DSA-65 vk / BLS vk come from device- or
     /// enclave-held material. No wallet is provisioned inside this method: the
     /// binder is not invoked and no server-side share reconstruction occurs.
@@ -960,12 +1025,7 @@ impl IdentityRegistry {
 
         let identity = TenzroIdentity {
             did,
-            public_keys: vec![PublicKeyInfo {
-                key_id: "key-1".to_string(),
-                key_type: binding.key_type.clone(),
-                public_key: binding.public_key.clone(),
-                purposes: vec![KeyPurpose::Authentication, KeyPurpose::AssertionMethod],
-            }],
+            public_keys: binding_public_keys(&binding),
             identity_data: IdentityData::Human {
                 display_name: display_name.clone(),
                 kyc_tier,
@@ -1013,17 +1073,29 @@ impl IdentityRegistry {
     /// stores `controller_did = None` for self-controlled machines per the
     /// `did:tenzro:machine:<uuid>` convention); otherwise pass the human
     /// controller's DID.
+    /// A **machine** identity is rooted in a secure element — TPM 2.0 on
+    /// Linux/Windows, the Secure Enclave on Apple — so the device key is
+    /// required. Machines do not use passkeys: there is no person present to
+    /// satisfy an authenticator ceremony on a node.
+    ///
+    /// `machine_id` and `device_public_key` come from the hardware root; the
+    /// private half cannot be exported from it. See
+    /// `tenzro_wallet::WalletIdentity::machine` and `tenzro_secure_enclave`.
     pub async fn register_machine_via_binder(
         &self,
         controller_did: &str,
+        machine_id: String,
+        device_public_key: Vec<u8>,
         capabilities: Vec<String>,
         delegation_scope: DelegationScope,
     ) -> Result<RegistrationResult> {
         let is_autonomous = controller_did == "self";
 
-        // Validate controller (skip for autonomous self-controlled machines)
+        // Validate controller (skip for autonomous self-controlled machines,
+        // which have none by definition — their DID is derived from the device
+        // key below rather than from a controller).
         let controller_id = if is_autonomous {
-            uuid::Uuid::new_v4().to_string()
+            String::new()
         } else {
             let controller = self
                 .identities
@@ -1044,8 +1116,11 @@ impl IdentityRegistry {
             controller.did.id.clone()
         };
 
+        // An autonomous machine is identified by the secure element it cannot
+        // export a key from, so the same hardware always lands on the same DID.
+        // Registering twice updates one identity instead of minting a second.
         let did = if is_autonomous {
-            TenzroDid::new_autonomous_machine()
+            TenzroDid::from_device_key(&device_public_key)?
         } else {
             TenzroDid::new_machine(&controller_id)
         };
@@ -1055,7 +1130,12 @@ impl IdentityRegistry {
             .wallet_binder
             .as_ref()
             .ok_or_else(|| IdentityError::WalletError("no wallet binder configured".to_string()))?;
-        let binding = binder.provision_wallet(&did_string).await?;
+        let identity = tenzro_wallet::WalletIdentity::machine(
+            machine_id,
+            tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, device_public_key),
+        )
+        .map_err(|e| IdentityError::WalletError(e.to_string()))?;
+        let binding = binder.provision_wallet(&did_string, identity).await?;
 
         let identity = TenzroIdentity {
             did,
@@ -1166,8 +1246,19 @@ impl IdentityRegistry {
         let did = TenzroDid::new_machine(&controller_id);
         let did_string = did.to_string();
 
-        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
-            self.provision_or_default(&did_string).await?;
+        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) = self
+            .provision_or_default(
+                &did_string,
+                tenzro_wallet::WalletIdentity::machine(
+                    did_string.clone(),
+                    tenzro_crypto::PublicKey::new(
+                        tenzro_crypto::KeyType::Ed25519,
+                        public_key.clone(),
+                    ),
+                )
+                .map_err(|e| IdentityError::WalletError(e.to_string()))?,
+            )
+            .await?;
 
         let identity = TenzroIdentity {
             did,
@@ -1297,6 +1388,7 @@ impl IdentityRegistry {
         let MachineAnchor::HardwareRooted {
             hardware_root_hex,
             sources,
+            ..
         } = &anchor
         else {
             return Err(IdentityError::PermissionDenied(
@@ -1306,11 +1398,37 @@ impl IdentityRegistry {
         let hardware_root_hex = hardware_root_hex.clone();
         let sources = sources.join(",");
 
-        let did = TenzroDid::new_autonomous_machine();
+        // The DID is derived from the very root the anchor just proved, so the
+        // same physical machine re-registers under the same identity instead of
+        // minting a new one each time. Anything else would make the anchor
+        // decorative: it would attest a root that the identifier ignored.
+        //
+        // First registration wins. If this machine already registered under
+        // some other root it can still present — its TPM went quiet and it is
+        // now offering a DMI root, or the reverse — it keeps the identity it
+        // already has rather than acquiring a second one.
+        let hardware_root = decode_hardware_root(&hardware_root_hex)?;
+        let mut presented = vec![hardware_root_hex.clone()];
+        presented.extend(anchor.alternate_roots_hex().iter().cloned());
+        let did = match existing_did_for_hardware(&self.identities, &presented) {
+            Some(existing) => TenzroDid::parse(&existing)?,
+            None => TenzroDid::from_hardware_root(&hardware_root)?,
+        };
         let did_string = did.to_string();
 
-        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
-            self.provision_or_default(&did_string).await?;
+        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) = self
+            .provision_or_default(
+                &did_string,
+                tenzro_wallet::WalletIdentity::machine(
+                    did_string.clone(),
+                    tenzro_crypto::PublicKey::new(
+                        tenzro_crypto::KeyType::Ed25519,
+                        public_key.clone(),
+                    ),
+                )
+                .map_err(|e| IdentityError::WalletError(e.to_string()))?,
+            )
+            .await?;
 
         let identity = TenzroIdentity {
             did,
@@ -1378,7 +1496,7 @@ impl IdentityRegistry {
     ///
     /// The caller passes their own classical (Ed25519) and post-quantum
     /// (ML-DSA-65) verifying keys. The wallet binder is **not** invoked —
-    /// no `WalletBinding` is created and no FROST shares are minted on the
+    /// no `WalletBinding` is created and no key material is minted on the
     /// node. The identity's `wallet_address` is derived deterministically
     /// from the supplied Ed25519 key as `Address(SHA-256(public_key))` so
     /// it is reproducible by the caller without a round-trip.
@@ -1398,15 +1516,26 @@ impl IdentityRegistry {
     ///
     /// # Errors
     ///
+    /// * `anchor` — the hardware root this machine stands on. Required, and
+    ///   required to be [`MachineAnchor::HardwareRooted`]: the DID is derived
+    ///   from it, so a machine with no anchor has no identity to derive. The
+    ///   submitted keys cannot serve as the anchor — a caller chooses those
+    ///   freely, so deriving from them would let a caller pick its own DID by
+    ///   picking a keypair.
+    ///
+    /// # Errors
+    ///
     /// Returns `IdentityError::InvalidPublicKey` when the classical key is
     /// not 32 bytes, the post-quantum key is not 1952 bytes, or the BLS key
-    /// is not 48 bytes.
+    /// is not 48 bytes, and `IdentityError::PermissionDenied` when `anchor`
+    /// is not hardware-rooted.
     pub async fn register_autonomous_machine_with_keys(
         &self,
         public_key: Vec<u8>,
         pq_verifying_key: Vec<u8>,
         bls_verifying_key: Vec<u8>,
         capabilities: Vec<String>,
+        anchor: crate::identity::MachineAnchor,
     ) -> Result<RegistrationResult> {
         if public_key.len() != 32 {
             return Err(IdentityError::InvalidPublicKey(format!(
@@ -1427,7 +1556,22 @@ impl IdentityRegistry {
             )));
         }
 
-        let did = TenzroDid::new_autonomous_machine();
+        let crate::identity::MachineAnchor::HardwareRooted {
+            hardware_root_hex, ..
+        } = &anchor
+        else {
+            return Err(IdentityError::PermissionDenied(
+                "a machine with no delegating party must be anchored by hardware".to_string(),
+            ));
+        };
+        if let Some(reason) = anchor.rejection_reason() {
+            return Err(IdentityError::PermissionDenied(reason.to_string()));
+        }
+
+        // Derived from the anchored root, so this machine re-registers under
+        // the same DID rather than minting a new identity each time.
+        let hardware_root = decode_hardware_root(hardware_root_hex)?;
+        let did = TenzroDid::from_hardware_root(&hardware_root)?;
         let did_string = did.to_string();
 
         // Deterministic wallet_address from the Ed25519 verifying key. The
@@ -1501,7 +1645,7 @@ impl IdentityRegistry {
     ///
     /// This is the self-custodial machine path: the node layer seals an
     /// `AgentKeyHandle` against the calling enclave, provisions a
-    /// watch-only [`MpcWallet`] (no FROST shares, no PQ seed held) whose
+    /// watch-only [`Wallet`] (no key material held) whose
     /// address / Ed25519 pubkey / ML-DSA-65 vk / BLS vk all come from the
     /// sealed handle, then passes the resulting [`WalletBinding`] here.
     /// The registry stores those keys as the identity's public material.
@@ -1670,6 +1814,17 @@ impl IdentityRegistry {
     ///   3. Optional remote `DidResolutionBackend` (e.g. JSON-RPC to a node).
     ///      A successful remote hit is cached locally so subsequent reads
     ///      avoid the network round-trip.
+    /// The DID a machine presenting any of `roots_hex` already registered under.
+    ///
+    /// A machine's readable identifiers change without the machine changing —
+    /// a TPM stops answering when its object contexts fill and answers again
+    /// after a reboot — so a caller that derived a different root than last
+    /// time asks here before minting a second identity for the same box. Pass
+    /// every root the host could present, strongest first.
+    pub fn did_for_hardware_roots(&self, roots_hex: &[String]) -> Option<String> {
+        existing_did_for_hardware(&self.identities, roots_hex)
+    }
+
     pub fn resolve(&self, did: &str) -> Result<TenzroIdentity> {
         // Try direct lookup first
         if let Some(identity) = self.identities.get(did) {
@@ -1710,7 +1865,7 @@ impl IdentityRegistry {
         Err(IdentityError::NotFound(did.to_string()))
     }
 
-    /// Resolves a DID to its bound MPC wallet id.
+    /// Resolves a DID to its bound wallet id.
     ///
     /// Convenience wrapper over [`Self::resolve`] that drops everything
     /// except the wallet handle. The auth-mediated signing path
@@ -1742,7 +1897,7 @@ impl IdentityRegistry {
         }
     }
 
-    /// Binds an *additional* MPC wallet to an already-registered identity (D2b).
+    /// Binds an *additional* identity-bound wallet to an already-registered identity (D2b).
     ///
     /// The identity keeps its existing primary (`wallet_id` / `wallet_address`);
     /// `wallet` is appended to the identity's additional-wallet set so a lost or
@@ -1858,6 +2013,66 @@ impl IdentityRegistry {
     /// hybrid auth track the new signing wallet). A no-op if `wallet_id` is
     /// already primary.
     ///
+    /// Re-point the primary wallet id at a live wallet holding the *same* key.
+    ///
+    /// Wallets live in the wallet service's memory and, without a keystore
+    /// password configured, do not survive a restart — but the identity's
+    /// reference to one is persisted. After a restart the identity therefore
+    /// names a wallet that no longer exists, and every signing call fails with
+    /// `Wallet not found` no matter which wallet the caller authenticates
+    /// with, because auth resolves to the identity's primary.
+    ///
+    /// Neither existing method can repair that. `add_wallet` refuses a wallet
+    /// whose address equals the primary's, and `set_primary_wallet` requires
+    /// the wallet to already be listed as additional — so the dangling id can
+    /// be neither replaced nor re-added.
+    ///
+    /// This is not adopting a new wallet: the address, and therefore the
+    /// hardware key that signs, is required to be identical. Only the id
+    /// changes, from one naming a wallet record that is gone to one naming the
+    /// record that exists now.
+    ///
+    /// # Errors
+    ///
+    /// `WalletError` when `address` is not the identity's current primary
+    /// address — re-pointing at a different key would be adopting a wallet,
+    /// which is what [`set_primary_wallet`](Self::set_primary_wallet) is for
+    /// and what its ownership check exists to prevent.
+    pub fn rebind_primary_wallet_id(
+        &self,
+        did: &str,
+        wallet_id: &str,
+        address: &Address,
+    ) -> Result<()> {
+        let mut identity = self
+            .identities
+            .get_mut(did)
+            .ok_or_else(|| IdentityError::NotFound(did.to_string()))?;
+
+        if identity.wallet_address != *address {
+            return Err(IdentityError::WalletError(format!(
+                "wallet {} has address {} but identity {} holds {} — rebinding may only \
+                 re-point an identity at the same key, never move it to another",
+                wallet_id, address, did, identity.wallet_address
+            )));
+        }
+        if identity.wallet_id == wallet_id {
+            return Ok(());
+        }
+
+        identity.wallet_id = wallet_id.to_string();
+        identity.updated_at = Utc::now();
+        let snapshot = identity.clone();
+        drop(identity);
+
+        self.persist_identity(did, &snapshot);
+        info!(
+            "Re-pointed primary wallet of identity {} at live wallet {} (same address {})",
+            did, wallet_id, address
+        );
+        Ok(())
+    }
+
     /// Fail-closed: `wallet_id` not owned by `did` is rejected — an identity
     /// cannot adopt a wallet it does not hold.
     pub fn set_primary_wallet(&self, did: &str, wallet_id: &str) -> Result<()> {
@@ -1909,7 +2124,7 @@ impl IdentityRegistry {
         Ok(())
     }
 
-    /// Reverse-lookup: find the local DID whose auto-provisioned MPC wallet
+    /// Reverse-lookup: find the local DID whose identity-bound wallet
     /// is `wallet_id`.
     ///
     /// The inverse of [`Self::find_wallet_id_for_did`]. Records that key on a
@@ -1953,7 +2168,7 @@ impl IdentityRegistry {
     }
 
     /// Reverse-lookup: find the local DID bound to `address` via its
-    /// auto-provisioned MPC wallet.
+    /// identity-bound wallet.
     ///
     /// Linear scan over `identities` — fine for testnet sizes; if the
     /// registry grows beyond ~10⁵ entries this should be replaced with a
@@ -3214,7 +3429,11 @@ impl IdentityRegistry {
     /// Refusing is the honest failure. A registration that cannot produce a
     /// signable wallet has not succeeded, and reporting that lets an operator
     /// fix the wiring instead of discovering it through lost funds.
-    async fn provision_or_default(&self, did: &str) -> Result<(Address, String, Vec<u8>, Vec<u8>)> {
+    async fn provision_or_default(
+        &self,
+        did: &str,
+        identity: tenzro_wallet::WalletIdentity,
+    ) -> Result<(Address, String, Vec<u8>, Vec<u8>)> {
         let Some(ref binder) = self.wallet_binder else {
             return Err(IdentityError::WalletError(format!(
                 "cannot register {did}: no wallet binder is configured, so this registry \
@@ -3222,7 +3441,7 @@ impl IdentityRegistry {
                  placeholder address no key can sign for."
             )));
         };
-        let binding = binder.provision_wallet(did).await?;
+        let binding = binder.provision_wallet(did, identity).await?;
         Ok((
             binding.address,
             binding.wallet_id,
@@ -3239,6 +3458,59 @@ impl IdentityRegistry {
 /// is deterministic, collision-resistant in practice (since the underlying
 /// Tenzro address is already a hash output), and lets us reuse the same
 /// wallet binding without a separate EVM keypair.
+/// The DID this machine already registered under, if any.
+///
+/// A machine's strongest readable identifier can change without the machine
+/// changing. A TPM stops answering when its object contexts fill up
+/// (`TPM_RC_OBJECT_MEMORY`) and answers again after a reboot; the fold then
+/// falls back to a DMI serial and returns a different root for the same box.
+/// Deriving from whatever answers today would give that machine a second
+/// identity, which is precisely what a hardware-rooted DID is supposed to
+/// prevent.
+///
+/// So the first registration is authoritative. A machine that presents *any*
+/// root already recorded against an identity re-registers as that identity —
+/// its keys and metadata are updated in place rather than a new DID being
+/// minted. `alternate_roots` carries the other identifiers the caller can
+/// currently produce, so a host whose TPM has gone quiet is still recognised
+/// by the DMI root it registered with, and vice versa.
+///
+/// Matching is on the root alone. A root is per-unit and unforgeable-by-
+/// accident, and an attacker who could present another machine's root could
+/// equally present its DID, so this opens no new door.
+fn existing_did_for_hardware(
+    identities: &DashMap<String, TenzroIdentity>,
+    roots: &[String],
+) -> Option<String> {
+    identities.iter().find_map(|entry| {
+        let recorded = entry.value().metadata.get("hardware_root")?;
+        roots
+            .iter()
+            .any(|root| root.eq_ignore_ascii_case(recorded))
+            .then(|| entry.key().clone())
+    })
+}
+
+/// Decodes the hex hardware root carried on a [`MachineAnchor::HardwareRooted`]
+/// into the fixed 32 bytes that DID derivation needs.
+///
+/// The anchor carries the root as hex because it crosses an RPC boundary, but
+/// derivation is defined over the bytes. A malformed or wrong-length value is
+/// refused rather than padded or truncated: a root that is not exactly the one
+/// the hardware produced would derive a different DID, silently giving the
+/// machine a second identity.
+fn decode_hardware_root(hardware_root_hex: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(hardware_root_hex).map_err(|e| {
+        IdentityError::PermissionDenied(format!("hardware root is not valid hex: {e}"))
+    })?;
+    let len = bytes.len();
+    bytes.try_into().map_err(|_| {
+        IdentityError::PermissionDenied(format!(
+            "hardware root must be exactly 32 bytes, got {len}"
+        ))
+    })
+}
+
 fn derive_evm_address(tenzro_addr: &tenzro_types::Address) -> [u8; 20] {
     let bytes = tenzro_addr.as_bytes();
     let mut addr = [0u8; 20];
@@ -3314,7 +3586,12 @@ mod tests {
     async fn test_register_human() {
         let registry = IdentityRegistry::new();
         let identity = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -3330,7 +3607,12 @@ mod tests {
     async fn test_register_machine_under_human() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -3370,10 +3652,7 @@ mod tests {
         // A readable serial is not proof. Anything on the machine can read one,
         // and anything anywhere can claim one — so accepting it would make the
         // rule cosmetic.
-        let readable_only = MachineAnchor::HardwareRooted {
-            hardware_root_hex: "cd".repeat(32),
-            sources: vec!["intel:ppin".to_string(), "smbios:platform".to_string()],
-        };
+        let readable_only = MachineAnchor::hardware_rooted("cd".repeat(32), vec!["intel:ppin".to_string(), "smbios:platform".to_string()]);
         let err = registry
             .register_autonomous_machine(
                 test_pubkey(21),
@@ -3389,10 +3668,7 @@ mod tests {
 
         // A malformed root is refused too — a 32-byte root is the claim being
         // made, and a truncated one is not that claim.
-        let malformed = MachineAnchor::HardwareRooted {
-            hardware_root_hex: "ab".to_string(),
-            sources: vec!["tpm:ek".to_string()],
-        };
+        let malformed = MachineAnchor::hardware_rooted("ab".to_string(), vec!["tpm:ek".to_string()]);
         assert!(
             registry
                 .register_autonomous_machine(
@@ -3405,10 +3681,7 @@ mod tests {
         );
 
         // A TPM does anchor it: the hardware takes the human's seat.
-        let attestable = MachineAnchor::HardwareRooted {
-            hardware_root_hex: "ab".repeat(32),
-            sources: vec!["tpm:ek".to_string()],
-        };
+        let attestable = MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]);
         let machine = registry
             .register_autonomous_machine(
                 test_pubkey(23),
@@ -3462,10 +3735,7 @@ mod tests {
             .register_autonomous_machine(
                 test_pubkey(1),
                 vec!["monitoring".to_string()],
-                crate::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                crate::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .unwrap();
@@ -3478,7 +3748,12 @@ mod tests {
     async fn test_resolve_did() {
         let registry = IdentityRegistry::new();
         let identity = registry
-            .register_human_with_fee(test_pubkey(1), "Bob".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Bob".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -3491,7 +3766,12 @@ mod tests {
     async fn test_link_tenzro_agent() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -3526,7 +3806,12 @@ mod tests {
     async fn test_credential_issuance_and_inheritance() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -3568,7 +3853,12 @@ mod tests {
     async fn test_revoke_cascading() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -3607,7 +3897,12 @@ mod tests {
     async fn test_revoke_cascading_multiple_machines() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -3688,7 +3983,12 @@ mod tests {
     async fn test_revoke_machine_does_not_affect_controller() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -3732,7 +4032,12 @@ mod tests {
     async fn test_suspend_and_reactivate() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -3752,12 +4057,22 @@ mod tests {
         assert_eq!(registry.count(), (0, 0));
 
         let h1 = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
         let h2 = registry
-            .register_human_with_fee(test_pubkey(2), "Bob".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(2),
+                "Bob".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -3803,7 +4118,12 @@ mod tests {
     async fn test_inherit_without_controller_credential() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -3847,7 +4167,12 @@ mod tests {
 
         // Register with fee info
         let result = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap();
 
@@ -3882,14 +4207,24 @@ mod tests {
         let issuer_signer = Ed25519SignerImpl::new(issuer_keypair).unwrap();
 
         let issuer = registry
-            .register_human_with_fee(issuer_pubkey, "Issuer Authority".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                issuer_pubkey,
+                "Issuer Authority".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
 
         // Register the subject
         let subject = registry
-            .register_human_with_fee(test_pubkey(99), "Subject".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(99),
+                "Subject".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -3941,13 +4276,23 @@ mod tests {
         let issuer_signer = Ed25519SignerImpl::new(issuer_keypair).unwrap();
 
         let issuer = registry
-            .register_human_with_fee(issuer_pubkey, "Issuer".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                issuer_pubkey,
+                "Issuer".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
 
         let subject = registry
-            .register_human_with_fee(test_pubkey(42), "Subject".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(42),
+                "Subject".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4030,7 +4375,12 @@ mod tests {
         // populate the mock backend with that identity.
         let remote = IdentityRegistry::new();
         let remote_identity = remote
-            .register_human_with_fee(test_pubkey(7), "Remote Bob".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(7),
+                "Remote Bob".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4065,7 +4415,12 @@ mod tests {
     async fn test_enforce_operation_returns_error_on_violation() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -4105,7 +4460,12 @@ mod tests {
     async fn test_enforce_operation_rejects_inactive_controller() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -4133,7 +4493,12 @@ mod tests {
     async fn test_enforce_operation_human_bypasses() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4158,14 +4523,24 @@ mod tests {
         let issuer_pub = issuer_kp.public_key().as_bytes().to_vec();
         let issuer_signer = Ed25519SignerImpl::new(issuer_kp).unwrap();
         let issuer = registry
-            .register_human_with_fee(issuer_pub, "Authority".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                issuer_pub,
+                "Authority".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
 
         // Subject starts at Basic.
         let subject = registry
-            .register_human_with_fee(test_pubkey(99), "Bob".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(99),
+                "Bob".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4208,12 +4583,22 @@ mod tests {
         let issuer_pub = issuer_kp.public_key().as_bytes().to_vec();
         let issuer_signer = Ed25519SignerImpl::new(issuer_kp).unwrap();
         let issuer = registry
-            .register_human_with_fee(issuer_pub, "Authority".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                issuer_pub,
+                "Authority".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
         let subject = registry
-            .register_human_with_fee(test_pubkey(11), "Eve".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(11),
+                "Eve".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4250,12 +4635,22 @@ mod tests {
         let real_kp = KeyPair::generate(KeyType::Ed25519).unwrap();
         let real_pub = real_kp.public_key().as_bytes().to_vec();
         let issuer = registry
-            .register_human_with_fee(real_pub, "Authority".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                real_pub,
+                "Authority".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
         let subject = registry
-            .register_human_with_fee(test_pubkey(22), "Mallory".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(22),
+                "Mallory".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4304,7 +4699,12 @@ mod tests {
         let registry = IdentityRegistry::new().with_revocation_broadcaster(broadcaster.clone());
 
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -4345,7 +4745,12 @@ mod tests {
     async fn test_apply_remote_revocation_marks_local_identity() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4370,7 +4775,12 @@ mod tests {
     async fn test_apply_remote_revocation_rejects_tampered_signature() {
         let registry = IdentityRegistry::new();
         let human = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4399,7 +4809,12 @@ mod tests {
 
         let registry = IdentityRegistry::new();
         let identity = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4430,7 +4845,12 @@ mod tests {
 
         let registry = IdentityRegistry::new();
         let identity = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4461,7 +4881,12 @@ mod tests {
     async fn principal_chain_for_human_acting_directly() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4482,7 +4907,12 @@ mod tests {
     async fn principal_chain_for_machine_under_human_controller() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -4518,10 +4948,7 @@ mod tests {
             .register_autonomous_machine(
                 test_pubkey(1),
                 vec!["monitoring".to_string()],
-                crate::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                crate::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .unwrap();
@@ -4548,7 +4975,12 @@ mod tests {
     async fn resolver_trait_resolves_by_address() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -4618,7 +5050,12 @@ mod tests {
             IdentityRegistry::new().with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
 
         let alice = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -4653,7 +5090,12 @@ mod tests {
     async fn principal_chain_bond_fields_none_without_lookup() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -4689,10 +5131,7 @@ mod tests {
             .register_autonomous_machine(
                 test_pubkey(7),
                 vec!["monitoring".to_string()],
-                crate::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                crate::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .unwrap();
@@ -4722,7 +5161,12 @@ mod tests {
     async fn add_wallet_binds_second_wallet_under_did() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(1),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4747,7 +5191,12 @@ mod tests {
     async fn add_wallet_rejects_duplicate_and_unknown_did() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(2), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(2),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4777,7 +5226,12 @@ mod tests {
     async fn from_aware_resolution_selects_named_wallet() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(3), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(3),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4814,12 +5268,22 @@ mod tests {
     async fn from_aware_resolution_rejects_unowned_from() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(4), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(4),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
         let bob = registry
-            .register_human_with_fee(test_pubkey(5), "Bob".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(5),
+                "Bob".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4846,7 +5310,12 @@ mod tests {
     async fn set_primary_wallet_promotes_and_swaps() {
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(6), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(6),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4928,7 +5397,12 @@ mod tests {
         // mirror must not clobber it on re-org / restart replay.
         let registry = IdentityRegistry::new();
         let alice = registry
-            .register_human_with_fee(test_pubkey(7), "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                test_pubkey(7),
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -4954,4 +5428,124 @@ mod tests {
             "a record with a malformed PQ key must be rejected fail-closed"
         );
     }
+
+    #[tokio::test]
+    async fn a_machine_keeps_its_did_when_its_strongest_identifier_goes_quiet() {
+        // The regression this guards: a TPM stops answering once its object
+        // contexts fill (TPM_RC_OBJECT_MEMORY, until the host reboots), the
+        // fold drops to a DMI serial, and the machine derives a different
+        // root. Deriving from whatever answers today would hand the same box a
+        // second identity — exactly what a hardware-rooted DID exists to
+        // prevent. First registration wins instead.
+        let registry = IdentityRegistry::new();
+        let tpm_root = "ab".repeat(32);
+        let dmi_root = "cd".repeat(32);
+
+        let first = registry
+            .register_autonomous_machine(
+                test_pubkey(41),
+                vec![],
+                crate::identity::MachineAnchor::hardware_rooted(
+                    tpm_root.clone(),
+                    vec!["tpm:ek".to_string()],
+                ),
+            )
+            .await
+            .expect("registers on its TPM root");
+
+        // Same box, TPM now silent: it leads with the DMI root and names the
+        // TPM root as one it can still present.
+        let second = registry
+            .register_autonomous_machine(
+                test_pubkey(41),
+                vec![],
+                crate::identity::MachineAnchor::hardware_rooted_with_alternates(
+                    dmi_root,
+                    vec!["tpm:ek".to_string()],
+                    vec![tpm_root],
+                ),
+            )
+            .await
+            .expect("re-registers");
+
+        assert_eq!(
+            first.did, second.did,
+            "the same machine must keep one identity across a change in what it can read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dangling_primary_wallet_can_be_repointed_but_never_moved() {
+        // Wallets live in memory and do not survive a restart; the identity's
+        // reference to one is persisted. The identity then names a wallet that
+        // is gone, and every signing call fails with `Wallet not found`
+        // because auth resolves to the primary. Re-provisioning the same key
+        // must repair that — and must not be usable to move an identity onto
+        // somebody else's key.
+        let registry = IdentityRegistry::new();
+        let machine = registry
+            .register_autonomous_machine(
+                test_pubkey(44),
+                vec![],
+                crate::identity::MachineAnchor::hardware_rooted(
+                    "77".repeat(32),
+                    vec!["tpm:ek".to_string()],
+                ),
+            )
+            .await
+            .expect("registers");
+        let did = machine.did.to_string();
+        let address = machine.wallet_address;
+
+        registry
+            .rebind_primary_wallet_id(&did, "a-live-wallet-id", &address)
+            .expect("same address re-points");
+        assert_eq!(
+            registry.resolve(&did).expect("resolves").wallet_id,
+            "a-live-wallet-id"
+        );
+
+        // A different address is a different key, so it is a move, not a repair.
+        let elsewhere = Address::new([0x99u8; 32]);
+        assert!(
+            registry
+                .rebind_primary_wallet_id(&did, "someone-elses-wallet", &elsewhere)
+                .is_err(),
+            "rebinding must never move an identity onto another key"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_machines_never_share_a_did() {
+        // The other half: recognition must not collapse distinct machines.
+        let registry = IdentityRegistry::new();
+        let a = registry
+            .register_autonomous_machine(
+                test_pubkey(42),
+                vec![],
+                crate::identity::MachineAnchor::hardware_rooted(
+                    "11".repeat(32),
+                    vec!["tpm:ek".to_string()],
+                ),
+            )
+            .await
+            .expect("first machine registers");
+        let b = registry
+            .register_autonomous_machine(
+                test_pubkey(43),
+                vec![],
+                crate::identity::MachineAnchor::hardware_rooted(
+                    "22".repeat(32),
+                    vec!["tpm:ek".to_string()],
+                ),
+            )
+            .await
+            .expect("second machine registers");
+
+        assert_ne!(
+            a.did, b.did,
+            "distinct hardware must derive distinct identities"
+        );
+    }
+
 }

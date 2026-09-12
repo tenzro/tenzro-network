@@ -240,6 +240,12 @@ mod onnx_backend {
     /// parameter — a shorter horizon is a truncation of this.
     const CHRONOS2_HORIZON: usize = 672;
 
+    /// The graph's `context` input is patch-tokenized in groups of 16
+    /// (`/model/patch_1/Reshape` folds it to `[1, -1, 16]`), so a context
+    /// length that is not a multiple of 16 fails ONNX Runtime's reshape
+    /// with a shape-mismatch error rather than anything forecast-shaped.
+    const CHRONOS2_INPUT_PATCH: usize = 16;
+
     /// Quantile levels the head emits, in order.
     const CHRONOS2_QUANTILES: [f32; 13] = [
         0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99,
@@ -287,18 +293,36 @@ mod onnx_backend {
 
         /// Truncate to the most recent `context_length` points, or return the
         /// history as-is when it is shorter.
-        ///
-        /// Unlike [`GenericForecast`], short histories are **not** padded: the
-        /// context dimension is dynamic in this graph, so a genuinely short
-        /// series can be passed at its own length. Padding it and masking the
-        /// pad would be the same computation with more room for the mask and
-        /// the data to disagree.
         fn fit_history<'a>(&self, history: &'a [f32]) -> &'a [f32] {
             if history.len() > self.context_length {
                 &history[history.len() - self.context_length..]
             } else {
                 history
             }
+        }
+
+        /// Left-pad `fitted` up to the next multiple of
+        /// [`CHRONOS2_INPUT_PATCH`], carry-forwarding the earliest observed
+        /// value the way [`GenericForecast`]'s own right-pad does. The graph's
+        /// context dimension is NOT actually dynamic below patch granularity —
+        /// see [`CHRONOS2_INPUT_PATCH`] — so a short or oddly-sized series has
+        /// to be padded, not passed at its own length. Padding goes on the
+        /// left (oldest end) so the real observations stay anchored to "now"
+        /// at the end of the sequence, matching how the model reads the final
+        /// timestep as the forecast origin. Returns the padded series and how
+        /// many of its leading positions are padding (for the attention mask).
+        fn pad_to_patch(fitted: &[f32]) -> (Vec<f32>, usize) {
+            let ctx = fitted.len();
+            let remainder = ctx % CHRONOS2_INPUT_PATCH;
+            let pad_len = if remainder == 0 { 0 } else { CHRONOS2_INPUT_PATCH - remainder };
+            if pad_len == 0 {
+                return (fitted.to_vec(), 0);
+            }
+            let pad_value = *fitted.first().unwrap_or(&0.0);
+            let mut padded = Vec::with_capacity(ctx + pad_len);
+            padded.extend(std::iter::repeat_n(pad_value, pad_len));
+            padded.extend_from_slice(fitted);
+            (padded, pad_len)
         }
     }
 
@@ -319,13 +343,18 @@ mod onnx_backend {
 
             let start = Instant::now();
             let fitted = self.fit_history(history);
-            let ctx = fitted.len();
+            let (padded, pad_len) = Self::pad_to_patch(fitted);
+            let ctx = padded.len();
 
-            let context = Array2::<f32>::from_shape_vec((1, ctx), fitted.to_vec())
+            let context = Array2::<f32>::from_shape_vec((1, ctx), padded)
                 .map_err(|e| ModelError::InferenceError(format!("context shape: {}", e)))?;
-            // Every position is real — nothing was padded — so the mask is all
-            // ones. Float, not int64.
-            let attention = Array2::<f32>::from_elem((1, ctx), 1.0f32);
+            // Real positions are 1, padded (leading) positions are 0 so the
+            // graph does not treat carried-forward padding as observed data.
+            // Float, not int64.
+            let mut attention = Array2::<f32>::from_elem((1, ctx), 1.0f32);
+            for i in 0..pad_len {
+                attention[[0, i]] = 0.0;
+            }
             // One series, so one group.
             let groups = Array2::<i64>::zeros((1, 1))
                 .into_shape_with_order(vec![1usize])
@@ -534,6 +563,63 @@ mod onnx_backend {
             self.max_horizon
         }
     }
+
+    #[cfg(test)]
+    mod pad_tests {
+        use super::*;
+
+        // The bug: `chronos2_reads_a_quantile_major_output` (in the parent
+        // module's own test suite) used a 256-point history — already a
+        // multiple of 16 — so it never exercised any length that needed
+        // padding at all. These don't need the ONNX artifact: `pad_to_patch`
+        // is pure data-shaping, exercised directly.
+
+        #[test]
+        fn already_aligned_length_is_untouched() {
+            let fitted: Vec<f32> = (0..32).map(|i| i as f32).collect();
+            let (padded, pad_len) = Chronos2Forecast::pad_to_patch(&fitted);
+            assert_eq!(pad_len, 0);
+            assert_eq!(padded, fitted);
+        }
+
+        #[test]
+        fn short_of_a_patch_boundary_is_left_padded_to_it() {
+            // 20 points -- the exact length that crashed ONNX Runtime's
+            // reshape before this fix, per the live error observed serving
+            // a real forecast request.
+            let fitted: Vec<f32> = (0..20).map(|i| i as f32).collect();
+            let (padded, pad_len) = Chronos2Forecast::pad_to_patch(&fitted);
+            // 20 is 4 past a patch boundary, so the next multiple of 16 is 32,
+            // not 24. An earlier revision of this test asserted 4/24 — an
+            // 8-wide rounding — while its own message said "multiple of 16",
+            // which 24 is not. The graph settles it: `/model/patch_1/Reshape`
+            // concatenates a literal 16 into its target shape, folding context
+            // to [batch, -1, 16]. A 24-long context would fail that reshape
+            // exactly as 20 did.
+            assert_eq!(pad_len, 12);
+            assert_eq!(padded.len(), 32, "rounds up to the next multiple of 16");
+            assert_eq!(padded.len() % CHRONOS2_INPUT_PATCH, 0);
+            // Padding on the LEFT: the real, most-recent observations stay
+            // anchored at the end of the sequence.
+            assert_eq!(&padded[12..], fitted.as_slice());
+        }
+
+        #[test]
+        fn padding_carries_forward_the_earliest_observed_value() {
+            let fitted = vec![10.0f32, 11.0, 12.0];
+            let (padded, pad_len) = Chronos2Forecast::pad_to_patch(&fitted);
+            assert_eq!(pad_len, 13);
+            assert!(padded[..pad_len].iter().all(|&v| v == 10.0));
+        }
+
+        #[test]
+        fn a_single_point_is_padded_to_one_full_patch() {
+            let fitted = vec![42.0f32];
+            let (padded, pad_len) = Chronos2Forecast::pad_to_patch(&fitted);
+            assert_eq!(pad_len, 15);
+            assert_eq!(padded.len(), CHRONOS2_INPUT_PATCH);
+        }
+    }
 }
 
 pub use onnx_backend::{Chronos2Forecast, GenericForecast};
@@ -645,9 +731,11 @@ mod tests {
     /// Set `TENZRO_CHRONOS2_ONNX` to a downloaded `chronos-2-small.onnx` to
     /// run it. Skips otherwise so CI without a 112 MB artifact stays green —
     /// but unlike a silently-skipping test, the assertions below are the ones
-    /// that caught the two things this adapter exists to get right: the
-    /// quantile-major output layout, and covariate tensors that cannot be
-    /// empty.
+    /// that caught the three things this adapter exists to get right: the
+    /// quantile-major output layout, covariate tensors that cannot be empty,
+    /// and a context length that isn't a multiple of the graph's 16-wide
+    /// input patch (`onnx_backend::pad_tests` covers the padding function in
+    /// isolation; this covers it end to end against the real graph).
     #[test]
     fn chronos2_reads_a_quantile_major_output() {
         let Ok(path) = std::env::var("TENZRO_CHRONOS2_ONNX") else {
@@ -661,9 +749,12 @@ mod tests {
             .expect("the artifact is a Chronos-2 graph");
         assert_eq!(model.max_horizon(), 672);
 
-        // A clean sine, so a forecast that read quantiles as timesteps would
-        // be visibly wrong rather than merely different.
-        let history: Vec<f32> = (0..256).map(|i| (i as f32 / 10.0).sin()).collect();
+        // A clean sine, deliberately NOT a multiple of 16 (250, not 256) — the
+        // exact shape of history a real caller sends, since nothing about a
+        // trader's or economist's actual series happens to align to the
+        // graph's patch size. Before the padding fix this failed ONNX
+        // Runtime's reshape outright rather than returning a forecast.
+        let history: Vec<f32> = (0..250).map(|i| (i as f32 / 10.0).sin()).collect();
         let cfg = ForecastConfig {
             horizon: 24,
             ..Default::default()

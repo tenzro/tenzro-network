@@ -10,7 +10,7 @@
 //!   1. Fetches the template by id from the registry over JSON-RPC
 //!   2. Auto-discovers required tools from `CF_TOOLS` by tag query
 //!   3. Auto-discovers required skills from `CF_SKILLS` by tag query
-//!   4. Provisions a TDIP human controller identity + MPC wallet
+//!   4. Provisions a TDIP human controller identity + permissionless wallet
 //!   5. Provisions a TDIP machine identity with delegation scope
 //!   6. Registers the agent with the [`tenzro_agent::AgentRuntime`]
 //!   7. Walks the template's [`ExecutionSpec`] step list, gating each

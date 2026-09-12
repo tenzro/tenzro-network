@@ -22,7 +22,7 @@
 //! 3. **TEE** - Trusted Execution Environment (optional)
 //! 4. **VM Runtime** - Multi-VM execution (EVM + SVM)
 //! 5. **Token Economics** - TNZO token, staking, governance, treasury
-//! 6. **Wallet** - MPC wallet service
+//! 6. **Wallet** - permissionless wallet service
 //! 7. **Consensus** - HotStuff-2 BFT consensus (validators only)
 //! 8. **Settlement** - Payment settlement engine
 //! 9. **AI Infrastructure** - Models, providers, agents
@@ -135,18 +135,9 @@ pub mod mcp_plugin_host;
 pub mod metrics;
 pub mod model_blob_fetcher_bridge;
 pub mod moe;
-pub mod mpc_keygen;
-pub mod mpc_keyshare_store;
-pub mod mpc_libp2p_adapter;
-pub mod mpc_threshold_signer;
 pub mod network_catalog;
+pub mod hardware_keystore_unlock;
 pub mod node;
-/// Environment variable carrying the operator's keystore-unlock secret.
-///
-/// One variable for the whole node: the wallet keystore and the node's own
-/// identity keys unlock from the same source, so an operator configures their
-/// passkey-gated device key (or KMS) once rather than per subsystem.
-pub const KEYSTORE_PASSWORD_ENV: &str = "TENZRO_KEYSTORE_PASSWORD";
 
 pub mod node_alias;
 pub mod node_did_document;
@@ -167,7 +158,6 @@ pub mod rpc_gateway;
 pub mod rpc_integrations;
 pub mod saga_executor;
 pub mod sealed_agent_wallet_signer;
-pub mod tpm_validator_wallet_signer;
 pub mod sealed_model_attester;
 pub mod serving_admission;
 pub mod settle_authorized;
@@ -187,6 +177,8 @@ pub mod storage_provider_runtime;
 pub mod streaming;
 #[cfg(feature = "visa-tap")]
 pub mod tap_reputation_dispatcher;
+pub mod territory;
+pub mod tpm_validator_wallet_signer;
 pub mod train_slashing_bridge;
 pub mod trainer_daemon;
 pub mod training_enclave_verifier;

@@ -209,7 +209,7 @@ RUN set -eux; \
 # NVIDIA container runtime injects at `docker run --gpus all` — it is absent in
 # the build container, so it is excluded from the not-found check.
 RUN set -eux; \
-    src="$(find target/release/build -type f \\( -name rpc-server -o -name ggml-rpc-server \\) -perm -u+x 2>/dev/null | head -n1)"; \
+    src="$(find target/release/build -type f \( -name rpc-server -o -name ggml-rpc-server \) -perm -u+x 2>/dev/null | head -n1)"; \
     test -n "$src"; \
     cp "$src" /build/rpc-server; \
     ldd /build/rpc-server || true; \

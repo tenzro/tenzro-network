@@ -1,7 +1,7 @@
 //! Join command for one-click participation in Tenzro Network.
 //!
 //! Calls the node's `tenzro_joinAsMicroNode` RPC to provision a TDIP identity,
-//! MPC wallet, and full network capabilities as a zero-install MicroNode.
+//! permissionless wallet, and full network capabilities as a zero-install MicroNode.
 //! Falls back to `tenzro_participate` for nodes that don't yet support MicroNode.
 //!
 //! With `--provider`, continues past identity provisioning into the full
@@ -18,7 +18,7 @@ use clap::Parser;
 /// Join the Tenzro Network as a MicroNode participant.
 ///
 /// Zero-install — no P2P binary required.
-/// Auto-provisions a TDIP DID, MPC wallet, and full network capabilities.
+/// Auto-provisions a TDIP DID, permissionless wallet, and full network capabilities.
 /// Pass `--provider` on a machine running `tenzro-node` to also become
 /// an inference provider in the same command.
 #[derive(Debug, Parser)]

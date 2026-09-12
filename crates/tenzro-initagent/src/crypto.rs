@@ -174,15 +174,29 @@ mod tests {
 
         let mk = |v: &str| SealedEnvVar {
             name: "K".into(),
-            sealed_value: serde_json::to_value(node::envelope_encrypt(&node_pub, v.as_bytes()).unwrap())
-                .unwrap(),
+            sealed_value: serde_json::to_value(
+                node::envelope_encrypt(&node_pub, v.as_bytes()).unwrap(),
+            )
+            .unwrap(),
         };
         let sealed = vec![
-            SealedEnvVar { name: "A".into(), ..mk("alpha") },
-            SealedEnvVar { name: "B".into(), ..mk("beta") },
+            SealedEnvVar {
+                name: "A".into(),
+                ..mk("alpha")
+            },
+            SealedEnvVar {
+                name: "B".into(),
+                ..mk("beta")
+            },
         ];
         let out = unseal_all(&secret_bytes, &sealed).unwrap();
-        assert_eq!(out, vec![("A".to_string(), "alpha".to_string()), ("B".to_string(), "beta".to_string())]);
+        assert_eq!(
+            out,
+            vec![
+                ("A".to_string(), "alpha".to_string()),
+                ("B".to_string(), "beta".to_string())
+            ]
+        );
     }
 
     #[test]

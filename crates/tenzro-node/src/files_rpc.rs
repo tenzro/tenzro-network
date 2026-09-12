@@ -227,10 +227,13 @@ pub(crate) async fn handle_upload_file(
         .ok()
         .map(|d| d.deal_id);
 
+    let sha256 = crate::files_api::content_digest(&data);
+
     let record = FileObject {
         id: file_id_for(&object_id),
         object: "file",
         bytes: size,
+        sha256,
         created_at: crate::files_routes::now_secs(),
         filename,
         purpose,

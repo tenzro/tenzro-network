@@ -474,7 +474,6 @@ impl CantonClientConfig {
         let scheme = if self.use_tls { "https" } else { "http" };
         format!("{}://{}:{}", scheme, self.host, self.admin_api_port)
     }
-
 }
 
 /// Connection state for a gRPC channel

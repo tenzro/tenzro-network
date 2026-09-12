@@ -22,7 +22,7 @@
 //! - **Verifiable Credentials** — Issue, inherit, and verify W3C VC-compatible credentials
 //! - **Delegation Scopes** — Fine-grained control over machine permissions including
 //!   payment protocol restrictions and chain allowlists
-//! - **Auto-provisioned wallets** — Every identity gets an MPC wallet automatically
+//! - **Auto-provisioned wallets** — Every identity gets a wallet automatically, bound to that identity
 //! - **Cascading revocation** — Revoking a human revokes all controlled machines
 //!
 //! # Examples
@@ -36,7 +36,10 @@
 //! let registry = IdentityRegistry::new();
 //!
 //! // Register a human identity
+//! // The first argument is the passkey credential id that owns this identity;
+//! // the second is the passkey's public half. The registry never sees a secret.
 //! let human = registry.register_human_with_fee(
+//!     b"passkey-credential-id".to_vec(),
 //!     vec![1; 32],
 //!     "Alice".to_string(),
 //!     KycTier::Enhanced,

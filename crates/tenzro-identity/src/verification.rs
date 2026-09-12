@@ -560,7 +560,12 @@ mod tests {
         let verifier = IdentityVerifier::new(registry.clone());
 
         let human = registry
-            .register_human_with_fee(vec![1; 32], "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1; 32],
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -577,7 +582,12 @@ mod tests {
         let verifier = IdentityVerifier::new(registry.clone());
 
         let human = registry
-            .register_human_with_fee(vec![1; 32], "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1; 32],
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -605,7 +615,12 @@ mod tests {
         let verifier = IdentityVerifier::new(registry.clone());
 
         let human = registry
-            .register_human_with_fee(vec![1; 32], "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1; 32],
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -631,7 +646,12 @@ mod tests {
         let verifier = IdentityVerifier::new(registry.clone());
 
         let human = registry
-            .register_human_with_fee(vec![1; 32], "Alice".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1; 32],
+                "Alice".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity;
@@ -659,7 +679,12 @@ mod tests {
         let verifier = IdentityVerifier::new(registry.clone());
 
         let human = registry
-            .register_human_with_fee(vec![1; 32], "Alice".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1; 32],
+                "Alice".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -721,12 +746,18 @@ mod tests {
 
         // Register the three identities
         let root = registry
-            .register_human_with_fee(root_pub.clone(), "Root CA".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                root_pub.clone(),
+                "Root CA".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
         let intermediate = registry
             .register_human_with_fee(
+                b"test-credential".to_vec(),
                 intermediate_pub.clone(),
                 "Intermediate".to_string(),
                 KycTier::Enhanced,
@@ -735,7 +766,12 @@ mod tests {
             .unwrap()
             .identity;
         let leaf = registry
-            .register_human_with_fee(leaf_pub.clone(), "Leaf".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                leaf_pub.clone(),
+                "Leaf".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -928,12 +964,22 @@ mod tests {
         let pub_b = kp_b.public_key().as_bytes().to_vec();
 
         let id_a = registry
-            .register_human_with_fee(pub_a.clone(), "A".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                pub_a.clone(),
+                "A".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
         let id_b = registry
-            .register_human_with_fee(pub_b.clone(), "B".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                pub_b.clone(),
+                "B".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;
@@ -1028,7 +1074,12 @@ mod tests {
         let pub_bytes = kp.public_key().as_bytes().to_vec();
 
         let id = registry
-            .register_human_with_fee(pub_bytes.clone(), "Self".to_string(), KycTier::Full)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                pub_bytes.clone(),
+                "Self".to_string(),
+                KycTier::Full,
+            )
             .await
             .unwrap()
             .identity;

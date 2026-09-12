@@ -1057,10 +1057,9 @@ impl InferenceRouter {
     fn speculation_bias(provider: &ProviderWithMetrics) -> f64 {
         const SPECULATION_BIAS_CEILING: f64 = 4.0;
         let cap = &provider.provider.capacity;
-        if cap.mtp_enabled && crate::meta_router::idle_enough(
-            cap.active_requests,
-            cap.max_concurrent_requests,
-        ) {
+        if cap.mtp_enabled
+            && crate::meta_router::idle_enough(cap.active_requests, cap.max_concurrent_requests)
+        {
             SPECULATION_BIAS_CEILING
         } else {
             0.0

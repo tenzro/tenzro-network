@@ -36,6 +36,15 @@ pub struct OpenAIChatTemplateParams<'a> {
     pub add_eos: bool,
     /// Whether to parse tool calls in responses.
     pub parse_tool_calls: bool,
+    /// Skip `common_chat`'s per-family format auto-detection and hardcoded
+    /// per-format prompt builders: render the template directly via Jinja
+    /// and treat everything after the generation prompt as plain content,
+    /// unparsed (no tool calls, no reasoning split, no grammar). This is
+    /// llama.cpp's own generic escape hatch for a template the detector
+    /// misidentifies — a caller opts a model into it via data (e.g. a
+    /// catalog flag), not by special-casing that model's family here or
+    /// upstream in `common_chat`.
+    pub force_pure_content: bool,
 }
 
 /// Streaming OpenAI-compatible parser state.

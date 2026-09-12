@@ -130,6 +130,32 @@ fn maybe_promote_kad_to_server(state: &mut EventLoopState) {
 /// TPM when authority is delegated to the machine, or a passkey when it is
 /// delegated to a human, and there is no third option — so a machine without
 /// a TPM needs a passkey, not a random key and a warning in the log.
+/// The string a data directory contributes to the identity-derivation label,
+/// with path separators normalized so the *same* directory always yields the
+/// *same* label regardless of which separator convention named it.
+///
+/// `Path::display()` alone is not that: on Windows, `\` and `/` are both
+/// valid separators the filesystem treats as identical, but `Path` does not
+/// normalize between them — `C:\foo\bar` and `C:/foo/bar` are `!=` as
+/// `PathBuf`s and therefore render as two different strings, even though
+/// they name the same directory. Since this label directly seeds a TPM
+/// derivation, that made a node's identity depend on which slash style
+/// happened to spell `--data-dir` (or `$TENZRO_DATA_DIR`) on a given
+/// invocation — confirmed empirically: the same directory passed once with
+/// `/` and once with `\` derived two different, each internally stable,
+/// `PeerId`s. `.canonicalize()` was deliberately not used instead — it
+/// requires the directory to already exist (this can run before startup
+/// creates it) and additionally folds in `..`/symlink resolution, which is a
+/// broader notion of "same path" than the separator-only gap being closed
+/// here.
+///
+/// Not applied to the ephemeral (`data_dir: None`) branch below: that label
+/// is process- and sequence-scoped already, not path-derived, so there is no
+/// separator to normalize.
+fn normalize_path_label(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 pub fn node_identity_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identity::Keypair> {
     // `data_dir` is read only by the passkey-delegation path below, when no
     // TPM is present. Identity itself never comes from disk.
@@ -143,7 +169,8 @@ pub fn node_identity_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::ident
         let Some(dir) = data_dir.as_ref() else {
             return Err(crate::error::NetworkError::NoHardwareRoot(
                 "this machine exposes no usable TPM and has no data directory, so there is \
-                 nowhere to hold a passkey delegation either".to_string(),
+                 nowhere to hold a passkey delegation either"
+                    .to_string(),
             ));
         };
         return passkey_delegated_keypair(dir);
@@ -160,7 +187,7 @@ pub fn node_identity_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::ident
     // Moving a node to a different path gives it a different identity, which is
     // the honest reading — that is a different node.
     let label = match data_dir.as_ref() {
-        Some(home) => format!("{LIBP2P_IDENTITY_PURPOSE}/{}", home.display()),
+        Some(home) => format!("{LIBP2P_IDENTITY_PURPOSE}/{}", normalize_path_label(home)),
         None => {
             // A node with no data directory has nowhere to keep a stable
             // discriminator, so its identity cannot persist — that is inherent
@@ -174,7 +201,10 @@ pub fn node_identity_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::ident
                  It is hardware-rooted but will not survive this process. Configure a data \
                  directory for any node that must keep its PeerId."
             );
-            format!("{LIBP2P_IDENTITY_PURPOSE}/ephemeral/{}/{n}", std::process::id())
+            format!(
+                "{LIBP2P_IDENTITY_PURPOSE}/ephemeral/{}/{n}",
+                std::process::id()
+            )
         }
     };
 
@@ -378,8 +408,8 @@ fn passkey_delegated_keypair(dir: &std::path::Path) -> Result<libp2p::identity::
             delegation_path.display()
         ))
     })?;
-    let delegation: crate::node_delegation::NodeDelegation = serde_json::from_slice(&raw)
-        .map_err(|e| {
+    let delegation: crate::node_delegation::NodeDelegation =
+        serde_json::from_slice(&raw).map_err(|e| {
             NoHardwareRoot(format!(
                 "passkey delegation at {} is not readable as one: {e}",
                 delegation_path.display()
@@ -461,8 +491,7 @@ const LIBP2P_IDENTITY_PURPOSE: &str = "libp2p-identity";
 /// label and therefore the same `PeerId` — two nodes claiming one identity,
 /// which is exactly the collision the data-directory discriminator prevents
 /// for persistent nodes.
-static EPHEMERAL_IDENTITY_SEQ: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static EPHEMERAL_IDENTITY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Returns true only if `addr` contains an IP that other nodes can actually
 /// reach. Rejects:
@@ -823,52 +852,6 @@ pub trait NetworkService: Send + Sync {
     async fn subscribe_consensus_direct(&self)
     -> Result<mpsc::UnboundedReceiver<ConsensusMessage>>;
 
-    /// Installs the DID-to-PeerId resolver used by the MPC relay overlay.
-    ///
-    /// The resolver is consulted on every outbound `send_mpc_relay_message`
-    /// (to find the PeerId for `to_did`) and on every inbound MPC request
-    /// (to audit that `from_did` is in fact controlled by the sending peer).
-    /// A missing resolver causes outbound sends to fail with
-    /// `NetworkError::InvalidConfig` and inbound messages to be rejected
-    /// with `MpcRelayError::UnknownSender` — the relay is fail-closed.
-    ///
-    /// Idempotent — calling twice replaces the prior resolver.
-    async fn set_mpc_did_resolver(
-        &self,
-        resolver: std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>,
-    ) -> Result<()>;
-
-    /// Sends one MPC round message to the peer that controls `to_did`.
-    ///
-    /// Resolves `to_did` through the installed `MpcDidResolver`; returns
-    /// `Err(NetworkError::PeerNotFound)` if the DID does not resolve. The
-    /// returned `Ok(())` means the request was handed to the libp2p
-    /// request-response codec — not that the peer has acknowledged it. The
-    /// MPC session driver on the other side will reply `Ack`/`Error`
-    /// asynchronously; transport-level failures (peer unreachable, timeout)
-    /// surface through the codec's `OutboundFailure` event and are logged
-    /// by the event loop. The bridge-side session driver's per-message
-    /// receive timer is the authoritative deadline for the whole exchange.
-    async fn send_mpc_relay_message(
-        &self,
-        message: crate::mpc_relay::MpcRelayRequest,
-    ) -> Result<()>;
-
-    /// Subscribes to inbound MPC relay round messages.
-    ///
-    /// Only one subscriber is supported at a time — calling twice replaces
-    /// the previous channel. The subscriber MUST drain the receiver
-    /// continuously; if the channel is full or dropped, the event loop
-    /// responds to the sending peer with `MpcRelayError::NoSubscriber` so
-    /// the sender's session driver can fast-fail and abort the session
-    /// rather than wait for a per-round timeout. The receiver delivers
-    /// `MpcRelayRequest` envelopes that have already been audited
-    /// (`from_did` ↔ peer-ID match verified against the installed DID
-    /// resolver) — the consumer can trust the `from_did` field.
-    async fn subscribe_mpc_relay(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>;
-
     /// Sends one cluster-tunnel frame to a member peer over the
     /// `cluster-tunnel` request-response overlay.
     ///
@@ -1113,25 +1096,6 @@ enum NetworkCommand {
     /// node — calling twice replaces the previous channel.
     SubscribeConsensusDirect {
         response: oneshot::Sender<Result<mpsc::UnboundedReceiver<ConsensusMessage>>>,
-    },
-    /// Installs the DID-to-PeerId resolver used by the MPC relay overlay.
-    /// Idempotent — calling twice replaces the prior resolver.
-    SetMpcDidResolver {
-        resolver: std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>,
-        response: oneshot::Sender<Result<()>>,
-    },
-    /// Dispatches one MPC round message to the peer that controls
-    /// `message.to_did`. The `to_did` is resolved through the installed
-    /// `MpcDidResolver`; failure to resolve returns `PeerNotFound`.
-    SendMpcRelayMessage {
-        message: crate::mpc_relay::MpcRelayRequest,
-        response: oneshot::Sender<Result<()>>,
-    },
-    /// Subscribes to inbound MPC relay round messages. One subscriber per
-    /// node — calling twice replaces the previous channel.
-    SubscribeMpcRelay {
-        response:
-            oneshot::Sender<Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>>,
     },
     /// Sends one cluster-tunnel frame to `peer`. Returns the
     /// `OutboundRequestId`; the member's `Ack`/`Error` or a transport
@@ -1783,29 +1747,6 @@ impl NetworkService for TenzroNetworkService {
             .await
     }
 
-    async fn set_mpc_did_resolver(
-        &self,
-        resolver: std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>,
-    ) -> Result<()> {
-        self.send_command(|response| NetworkCommand::SetMpcDidResolver { resolver, response })
-            .await
-    }
-
-    async fn send_mpc_relay_message(
-        &self,
-        message: crate::mpc_relay::MpcRelayRequest,
-    ) -> Result<()> {
-        self.send_command(move |response| NetworkCommand::SendMpcRelayMessage { message, response })
-            .await
-    }
-
-    async fn subscribe_mpc_relay(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>> {
-        self.send_command(|response| NetworkCommand::SubscribeMpcRelay { response })
-            .await
-    }
-
     async fn send_cluster_tunnel_frame(
         &self,
         peer: PeerId,
@@ -1978,25 +1919,6 @@ struct EventLoopState {
     /// overflow with `ConsensusDirectError::ServerBusy` rather than queueing.
     /// Decremented on `ResponseSent` / `InboundFailure`.
     consensus_direct_inbound_inflight: HashMap<PeerId, usize>,
-    /// Subscriber channel for inbound MPC relay round messages. `None` until
-    /// the node-level MPC adapter attaches via `SubscribeMpcRelay`. Inbound
-    /// requests arriving while this is `None` are answered with
-    /// `MpcRelayError::NoSubscriber`.
-    mpc_relay_subscriber: Option<mpsc::UnboundedSender<crate::mpc_relay::MpcRelayRequest>>,
-    /// Latched once `SubscribeMpcRelay` runs. Same rationale as
-    /// `consensus_direct_subscriber_ever_attached`.
-    mpc_relay_subscriber_ever_attached: bool,
-    /// Per-peer count of currently-in-flight inbound MPC relay streams.
-    /// Enforces `mpc_relay::MAX_INBOUND_STREAMS_PER_PEER`; overflow is
-    /// rejected with `MpcRelayError::ServerBusy`. Decremented on
-    /// `ResponseSent` / `InboundFailure`.
-    mpc_relay_inbound_inflight: HashMap<PeerId, usize>,
-    /// DID-to-PeerId resolver for the MPC relay overlay. `None` until the
-    /// node-level adapter installs it via `SetMpcDidResolver`. Missing
-    /// resolver causes outbound sends to fail and inbound messages to be
-    /// rejected with `MpcRelayError::UnknownSender` — the relay is
-    /// fail-closed.
-    mpc_did_resolver: Option<std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>>,
     /// Pending inbound cluster-tunnel response channels keyed by
     /// `InboundRequestId`. Parked here until the member's serving runtime
     /// answers via `SendClusterTunnelResponse`. Same rationale as
@@ -2415,10 +2337,6 @@ async fn run_event_loop(
         consensus_direct_subscriber: None,
         consensus_direct_subscriber_ever_attached: false,
         consensus_direct_inbound_inflight: HashMap::new(),
-        mpc_relay_subscriber: None,
-        mpc_relay_subscriber_ever_attached: false,
-        mpc_relay_inbound_inflight: HashMap::new(),
-        mpc_did_resolver: None,
         pending_inbound_cluster_tunnel: HashMap::new(),
         cluster_tunnel_request_subscriber: None,
         cluster_tunnel_request_subscriber_ever_attached: false,
@@ -3041,217 +2959,6 @@ fn handle_consensus_direct_event(
             // Decrement inflight on the happy path — the response is now on
             // the wire and the inbound stream slot is freed.
             if let Some(count) = state.consensus_direct_inbound_inflight.get_mut(&peer)
-                && *count > 0
-            {
-                *count -= 1;
-            }
-        }
-    }
-}
-
-/// Handles inbound and outbound events from the MPC relay
-/// request-response codec (`/tenzro/mpc/req-resp/1.0.0`).
-///
-/// Mirrors `handle_consensus_direct_event` with one extra step: every
-/// inbound `MpcRelayRequest` is audited against the installed
-/// `MpcDidResolver` — the sender's claimed `from_did` must round-trip back
-/// to the connection's `PeerId`. A mismatch (or a missing resolver) means
-/// either no identity is bound or the sender is spoofing a DID they don't
-/// control; either way we reject with `MpcRelayError::UnknownSender` so the
-/// session driver on the other side fails fast.
-fn handle_mpc_relay_event(
-    state: &mut EventLoopState,
-    event: request_response::Event<
-        crate::mpc_relay::MpcRelayRequest,
-        crate::mpc_relay::MpcRelayResponse,
-    >,
-) {
-    use crate::mpc_relay::{MAX_INBOUND_STREAMS_PER_PEER, MpcRelayError, MpcRelayResponse};
-    use request_response::{Event as RrEvent, Message};
-    match event {
-        RrEvent::Message {
-            peer,
-            message:
-                Message::Request {
-                    request_id: _,
-                    request,
-                    channel,
-                },
-            ..
-        } => {
-            // Per-peer inbound concurrency cap. Reject overflow synchronously
-            // with ServerBusy — queueing would cause the requester's
-            // per-round timeout to fire while the request sits in our
-            // backlog (same rationale as consensus-direct).
-            let inflight = state.mpc_relay_inbound_inflight.entry(peer).or_insert(0);
-            if *inflight >= MAX_INBOUND_STREAMS_PER_PEER {
-                tracing::warn!(
-                    %peer,
-                    limit = MAX_INBOUND_STREAMS_PER_PEER,
-                    "mpc-relay: rejecting overflow inbound stream"
-                );
-                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
-                    channel,
-                    MpcRelayResponse::Error(MpcRelayError::ServerBusy {
-                        limit: MAX_INBOUND_STREAMS_PER_PEER,
-                    }),
-                );
-                return;
-            }
-
-            // Sender-DID audit. The relay is fail-closed: no resolver means
-            // no identity binding is wired, so we cannot prove who the peer
-            // claims to be. Either way the inbound message is rejected
-            // before it reaches the session pipeline.
-            let claimed_did = request.from_did.clone();
-            let audit_ok = match state.mpc_did_resolver.as_ref() {
-                None => {
-                    tracing::warn!(
-                        %peer,
-                        claimed_did = %claimed_did,
-                        "mpc-relay: rejecting inbound — no DID resolver installed"
-                    );
-                    false
-                }
-                Some(resolver) => match resolver.did_for_peer_id(&peer) {
-                    Some(actual_did) if actual_did == claimed_did => true,
-                    Some(actual_did) => {
-                        tracing::warn!(
-                            %peer,
-                            claimed_did = %claimed_did,
-                            actual_did = %actual_did,
-                            "mpc-relay: from_did does not match peer's bound DID — rejecting"
-                        );
-                        false
-                    }
-                    None => {
-                        tracing::warn!(
-                            %peer,
-                            claimed_did = %claimed_did,
-                            "mpc-relay: peer has no bound DID — rejecting"
-                        );
-                        false
-                    }
-                },
-            };
-            if !audit_ok {
-                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
-                    channel,
-                    MpcRelayResponse::Error(MpcRelayError::UnknownSender),
-                );
-                return;
-            }
-
-            // No subscriber attached — fast-fail so the sending session
-            // driver can abort rather than wait for a per-round timeout.
-            // Pre-attach is normal during bootstrap (the bridge attaches
-            // the MPC subscriber only after the keyshare store loads).
-            let Some(tx) = state.mpc_relay_subscriber.as_ref() else {
-                if state.mpc_relay_subscriber_ever_attached {
-                    tracing::warn!(
-                        %peer,
-                        "mpc-relay: subscriber was dropped — replying NoSubscriber"
-                    );
-                } else {
-                    tracing::debug!(
-                        %peer,
-                        "mpc-relay: inbound during bootstrap window \
-                         (subscriber not yet attached) — replying NoSubscriber"
-                    );
-                }
-                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
-                    channel,
-                    MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
-                );
-                return;
-            };
-
-            // Forward into the session pipeline and Ack synchronously. The
-            // Ack means "we accepted the round message into our pipeline",
-            // not "we completed the protocol round".
-            let send_result = tx.send(request);
-            if send_result.is_err() {
-                tracing::warn!(
-                    %peer,
-                    "mpc-relay: subscriber dropped — replying NoSubscriber"
-                );
-                state.mpc_relay_subscriber = None;
-                let _ = state.swarm.behaviour_mut().mpc_relay.send_response(
-                    channel,
-                    MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
-                );
-                return;
-            }
-
-            *inflight += 1;
-
-            let _ = state
-                .swarm
-                .behaviour_mut()
-                .mpc_relay
-                .send_response(channel, MpcRelayResponse::Ack);
-        }
-        RrEvent::Message {
-            peer,
-            message:
-                Message::Response {
-                    request_id,
-                    response,
-                },
-            ..
-        } => match response {
-            MpcRelayResponse::Ack => {
-                tracing::trace!(%peer, %request_id, "mpc-relay ack");
-            }
-            MpcRelayResponse::Error(err) => {
-                tracing::warn!(
-                    %peer,
-                    %request_id,
-                    %err,
-                    "mpc-relay: peer returned error response"
-                );
-            }
-        },
-        RrEvent::OutboundFailure {
-            peer,
-            request_id,
-            error,
-            ..
-        } => {
-            tracing::warn!(
-                %peer,
-                %request_id,
-                %error,
-                "mpc-relay outbound failure"
-            );
-        }
-        RrEvent::InboundFailure {
-            peer,
-            request_id,
-            error,
-            ..
-        } => {
-            tracing::debug!(
-                %peer,
-                %request_id,
-                %error,
-                "mpc-relay inbound failure"
-            );
-            if let Some(count) = state.mpc_relay_inbound_inflight.get_mut(&peer)
-                && *count > 0
-            {
-                *count -= 1;
-            }
-        }
-        RrEvent::ResponseSent {
-            peer, request_id, ..
-        } => {
-            tracing::trace!(
-                %peer,
-                %request_id,
-                "mpc-relay response flushed to wire"
-            );
-            if let Some(count) = state.mpc_relay_inbound_inflight.get_mut(&peer)
                 && *count > 0
             {
                 *count -= 1;
@@ -4255,9 +3962,6 @@ async fn handle_swarm_event(state: &mut EventLoopState, event: SwarmEvent<Tenzro
             TenzroBehaviourEvent::ConsensusDirect(rr_event) => {
                 handle_consensus_direct_event(state, rr_event);
             }
-            TenzroBehaviourEvent::MpcRelay(rr_event) => {
-                handle_mpc_relay_event(state, rr_event);
-            }
             TenzroBehaviourEvent::ClusterTunnel(rr_event) => {
                 handle_cluster_tunnel_event(state, rr_event);
             }
@@ -4927,35 +4631,6 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             };
             let _ = response.send(Ok(count));
         }
-        NetworkCommand::SetMpcDidResolver { resolver, response } => {
-            state.mpc_did_resolver = Some(resolver);
-            let _ = response.send(Ok(()));
-        }
-        NetworkCommand::SendMpcRelayMessage { message, response } => {
-            let result = match state.mpc_did_resolver.as_ref() {
-                None => Err(NetworkError::InvalidConfig(
-                    "mpc-relay send requires an installed MpcDidResolver".to_string(),
-                )),
-                Some(resolver) => match resolver.peer_id_for_did(&message.to_did) {
-                    None => Err(NetworkError::PeerNotFound(message.to_did.clone())),
-                    Some(peer) => {
-                        let _req_id = state
-                            .swarm
-                            .behaviour_mut()
-                            .mpc_relay
-                            .send_request(&peer, message);
-                        Ok(())
-                    }
-                },
-            };
-            let _ = response.send(result);
-        }
-        NetworkCommand::SubscribeMpcRelay { response } => {
-            let (tx, rx) = mpsc::unbounded_channel();
-            state.mpc_relay_subscriber = Some(tx);
-            state.mpc_relay_subscriber_ever_attached = true;
-            let _ = response.send(Ok(rx));
-        }
         NetworkCommand::SendClusterTunnelFrame {
             peer,
             request,
@@ -5093,6 +4768,29 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
 
 #[cfg(test)]
 mod tests {
+    use super::normalize_path_label;
+
+    /// The property the whole function exists for: on Windows, the same
+    /// directory named with `/` and with `\` must fold into the identical
+    /// derivation label, or the same `--data-dir` spelled two ways derives
+    /// two different node identities — confirmed as a real, not merely
+    /// theoretical, regression before this fix.
+    #[test]
+    fn forward_and_back_slash_spellings_of_one_path_normalize_identically() {
+        let forward = std::path::Path::new("C:/Users/op/.tenzro/node-data");
+        let back = std::path::Path::new(r"C:\Users\op\.tenzro\node-data");
+        assert_eq!(normalize_path_label(forward), normalize_path_label(back));
+        assert_eq!(normalize_path_label(back), "C:/Users/op/.tenzro/node-data");
+    }
+
+    /// A relative Unix-style path with no backslashes anywhere is untouched
+    /// — this is a no-op everywhere the separator ambiguity does not exist.
+    #[test]
+    fn already_forward_slash_paths_pass_through() {
+        let p = std::path::Path::new("./data/default");
+        assert_eq!(normalize_path_label(p), "./data/default");
+    }
+
     /// End-to-end cover for the passkey path: a real enrolment written to a
     /// real directory, loaded back through the real loader.
     mod passkey_delegation {
@@ -5104,8 +4802,8 @@ mod tests {
         fn scratch(tag: &str) -> std::path::PathBuf {
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir()
-                .join(format!("tenzro-deleg-{}-{tag}-{n}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("tenzro-deleg-{}-{tag}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             dir
@@ -5137,8 +4835,9 @@ mod tests {
             auth_data.push(0x01 | tenzro_crypto::webauthn::AUTH_DATA_FLAG_UV);
             auth_data.extend_from_slice(&0u32.to_be_bytes());
             let signer = tenzro_crypto::p256::P256Signer::from_keypair(&passkey);
-            let sig = signer
-                .sign_prehash(&tenzro_crypto::webauthn::webauthn_signed_hash(&auth_data, &cdj));
+            let sig = signer.sign_prehash(&tenzro_crypto::webauthn::webauthn_signed_hash(
+                &auth_data, &cdj,
+            ));
 
             let delegation = NodeDelegation {
                 node_pubkey: node_pubkey.to_vec(),
@@ -5195,13 +4894,20 @@ mod tests {
         fn a_delegation_does_not_travel_to_another_directory() {
             let source = scratch("scope-a");
             let elsewhere = scratch("scope-b");
-            enrol_into(&source, &source.display().to_string(), now_unix() + 3600, 0o600);
+            enrol_into(
+                &source,
+                &source.display().to_string(),
+                now_unix() + 3600,
+                0o600,
+            );
 
             for f in [DELEGATION_FILE, DELEGATED_SEED_FILE] {
                 std::fs::copy(source.join(f), elsewhere.join(f)).unwrap();
             }
 
-            let err = passkey_delegated_keypair(&elsewhere).unwrap_err().to_string();
+            let err = passkey_delegated_keypair(&elsewhere)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("scoped to"), "{err}");
         }
 

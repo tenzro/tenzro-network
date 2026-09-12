@@ -51,7 +51,9 @@ pub fn generate_speculative(
         .str_to_token(prompt, AddBos::Always)
         .map_err(|e| Error::Other(format!("Tokenization failed: {}", e)))?;
     if tokens_list.is_empty() {
-        return Err(Error::Inference("prompt tokenized to zero tokens".to_string()));
+        return Err(Error::Inference(
+            "prompt tokenized to zero tokens".to_string(),
+        ));
     }
     let input_tokens = tokens_list.len() as u32;
 
@@ -134,18 +136,20 @@ pub fn generate_speculative(
             spec.target_context_mut()
                 .decode(&mut pbatch)
                 .map_err(|err| Error::Other(format!("Prompt decode failed: {}", err)))?;
-            spec.process(&pbatch).map_err(|err| Error::SpeculativeUnavailable {
-                reason: format!("MtpSpeculative prefill process failed: {}", err),
-            })?;
+            spec.process(&pbatch)
+                .map_err(|err| Error::SpeculativeUnavailable {
+                    reason: format!("MtpSpeculative prefill process failed: {}", err),
+                })?;
             s = e;
         }
     }
 
     let mut n_past = prefill_toks.len() as i32;
 
-    spec.begin(prefill_toks).map_err(|e| Error::SpeculativeUnavailable {
-        reason: format!("MtpSpeculative begin failed: {}", e),
-    })?;
+    spec.begin(prefill_toks)
+        .map_err(|e| Error::SpeculativeUnavailable {
+            reason: format!("MtpSpeculative begin failed: {}", e),
+        })?;
 
     let mut prompt_so_far: Vec<llama_cpp_2::token::LlamaToken> = tokens_list.clone();
 
@@ -190,9 +194,10 @@ pub fn generate_speculative(
             .kv_cache_seq_rm(0, Some(n_past as u32), None);
 
         // 4. Re-seed the draft context from this decode for the next block.
-        spec.process(&batch).map_err(|e| Error::SpeculativeUnavailable {
-            reason: format!("MtpSpeculative process failed: {}", e),
-        })?;
+        spec.process(&batch)
+            .map_err(|e| Error::SpeculativeUnavailable {
+                reason: format!("MtpSpeculative process failed: {}", e),
+            })?;
 
         // 5. Accept the longest matching prefix.
         let mut n_accepted: u16 = 0;
@@ -227,9 +232,10 @@ pub fn generate_speculative(
 
         // 6. Tell the drafter how many drafts were accepted.
         if !drafts.is_empty() {
-            spec.accept(n_accepted).map_err(|e| Error::SpeculativeUnavailable {
-                reason: format!("MtpSpeculative accept failed: {}", e),
-            })?;
+            spec.accept(n_accepted)
+                .map_err(|e| Error::SpeculativeUnavailable {
+                    reason: format!("MtpSpeculative accept failed: {}", e),
+                })?;
         }
 
         // 7. Advance and trim rejected-draft KV from both contexts.

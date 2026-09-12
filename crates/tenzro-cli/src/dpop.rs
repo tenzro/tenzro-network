@@ -19,8 +19,15 @@
 //! # Shape
 //!
 //! The key is Ed25519 (`OKP`/`Ed25519` is the only JWK form the node's
-//! verifier accepts), persisted at `~/.tenzro/dpop.key` with `0600`
-//! permissions. The proof is a compact JWS:
+//! verifier accepts) and is **derived from this machine's TPM, never stored**.
+//! Key material belongs in a TPM, a Secure Enclave or a passkey authenticator
+//! and nowhere else: a file is copyable, and a proof minted by whoever copied it
+//! is indistinguishable from one minted here.
+//!
+//! Deriving rather than sealing is what makes the identity durable. A sealed
+//! blob is worthless off this machine but still dies with the file; a derived
+//! key is recomputed from a hierarchy seed that never leaves the chip, so a
+//! wiped home directory returns the *same* `jkt`. The proof is a compact JWS:
 //!
 //! ```text
 //! header  = {"typ":"dpop+jwt","alg":"EdDSA","jwk":{"kty":"OKP","crv":"Ed25519","x":…}}
@@ -36,23 +43,16 @@
 //! `{"crv","kty","x"}`, byte-for-byte what `tenzro_auth::DpopProof::compute_jkt`
 //! recomputes on the other side. It is the value `--dpop-jkt` wants.
 
-use std::path::PathBuf;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use sha2::{Digest, Sha256};
 use tenzro_crypto::keys::{KeyPair, KeyType};
 
-/// Where the client's DPoP key lives. One key per machine: the token is bound
-/// to its thumbprint, so rotating it invalidates every token already issued
-/// against the old one.
-pub fn key_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tenzro")
-        .join("dpop.key")
-}
+/// HKDF label for this key. Independent per purpose, so knowing the DPoP key
+/// tells an attacker nothing about the validator identity derived from the same
+/// chip.
+const DPOP_PURPOSE: &str = "tenzro/cli/dpop-ed25519";
 
 /// The client's DPoP signing key.
 pub struct DpopKey {
@@ -60,45 +60,47 @@ pub struct DpopKey {
 }
 
 impl DpopKey {
-    /// Load the stored key, generating and persisting one on first use.
+    /// The DPoP key for this machine, derived from its TPM.
+    ///
+    /// Fails closed when there is no usable chip. This mirrors `keygen.rs`
+    /// exactly, and for the reason stated there: authority is delegated to a
+    /// machine through a TPM or to a human through a passkey, and there is no
+    /// third option. An `OsRng` fallback would look like it worked and would
+    /// hand back a credential nobody can reproduce or revoke.
     pub fn load_or_create() -> Result<Self> {
-        let path = key_path();
-        if path.exists() {
-            return Self::load();
+        if !tenzro_tee::tpm_derive::derivation_available() {
+            anyhow::bail!(
+                "no TPM available to derive the DPoP key from. A DPoP key authorises \
+                 signing requests, so it must be rooted in a TPM (machine-delegated) or \
+                 a passkey (human-delegated); this client will not fall back to a random \
+                 key written to disk"
+            );
         }
 
-        let keypair = KeyPair::generate(KeyType::Ed25519)
-            .map_err(|e| anyhow::anyhow!("generate DPoP key: {e}"))?;
-        let seed = keypair.secret_key().as_bytes().to_vec();
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        std::fs::write(&path, hex::encode(&seed))
-            .with_context(|| format!("write {}", path.display()))?;
-        restrict(&path)?;
-
+        let seed = tenzro_tee::tpm_derive::derive_secret(DPOP_PURPOSE)
+            .map_err(|e| anyhow::anyhow!("TPM present but deriving the DPoP key failed: {e}"))?;
+        let keypair = KeyPair::from_bytes(KeyType::Ed25519, seed.as_ref())
+            .map_err(|e| anyhow::anyhow!("build DPoP key from derived material: {e}"))?;
         Ok(Self { keypair })
     }
 
-    /// Load the stored key, failing if there is none.
+    /// Same as [`Self::load_or_create`].
+    ///
+    /// Kept as a distinct name because callers read differently at the two call
+    /// sites, but there is no longer a stored/not-stored distinction to make:
+    /// the key is a function of the chip, so it always exists on a machine that
+    /// has one and never exists on a machine that does not.
     pub fn load() -> Result<Self> {
-        let path = key_path();
-        let hexed =
-            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let seed =
-            hex::decode(hexed.trim()).with_context(|| format!("{} is not hex", path.display()))?;
-        let keypair = KeyPair::from_bytes(KeyType::Ed25519, &seed)
-            .map_err(|e| anyhow::anyhow!("load DPoP key: {e}"))?;
-        Ok(Self { keypair })
+        Self::load_or_create()
     }
 
-    /// Whether a key has been created yet. Used to decide whether to mint a
-    /// proof automatically rather than making every unrelated call pay for a
-    /// key it does not need.
+    /// Whether this machine can produce a DPoP key at all.
+    ///
+    /// Used to decide whether to mint a proof automatically rather than making
+    /// every unrelated call pay for one it does not need. Now a capability
+    /// question rather than a filesystem one.
     pub fn exists() -> bool {
-        key_path().exists()
+        tenzro_tee::tpm_derive::derivation_available()
     }
 
     /// The public key as a JWK, in RFC 7638 canonical form — sorted members,
@@ -182,18 +184,6 @@ fn normalize_htu(url: &str) -> String {
     } else {
         format!("{base}/")
     }
-}
-
-#[cfg(unix)]
-fn restrict(path: &std::path::Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 600 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict(_path: &std::path::Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

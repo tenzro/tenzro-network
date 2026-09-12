@@ -1858,7 +1858,10 @@ mod tests {
         let err = mgr.check_deploy_mint_rate(did, 3).unwrap_err();
         assert_eq!(err.0, 3);
         // A different DID has its own independent window.
-        assert!(mgr.check_deploy_mint_rate("did:tenzro:machine:other", 3).is_ok());
+        assert!(
+            mgr.check_deploy_mint_rate("did:tenzro:machine:other", 3)
+                .is_ok()
+        );
     }
 
     #[test]

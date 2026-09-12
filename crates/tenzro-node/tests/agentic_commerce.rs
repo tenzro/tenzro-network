@@ -136,6 +136,8 @@ async fn identity_provision_and_wallet_bind() {
 
     let identity = registry
         .register_human_with_fee(
+            // Stand-in for the credential id a WebAuthn ceremony returns.
+            b"test-passkey-alice".to_vec(),
             public_key.clone(),
             "Alice (test)".to_string(),
             KycTier::Enhanced,

@@ -226,7 +226,10 @@ impl EnrollCompleteCmd {
         // `complete` against a stale challenge.
         let _ = std::fs::remove_file(&request_path);
 
-        println!("Enrolled. This node is authorised until {}.", delegation.not_after);
+        println!(
+            "Enrolled. This node is authorised until {}.",
+            delegation.not_after
+        );
         println!("Re-run `tenzro node enroll begin` before then, or it will refuse to start.");
         Ok(())
     }

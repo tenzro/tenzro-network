@@ -20,7 +20,6 @@ use tenzro_storage::KvStore;
 
 /// Environment variable holding the wallet-keystore password. Set it to make
 /// wallets persist; leave it unset for an ephemeral node.
-use tenzro_node::KEYSTORE_PASSWORD_ENV;
 
 /// Tenzro Network Node CLI
 #[derive(Parser, Debug)]
@@ -32,9 +31,39 @@ struct Cli {
     #[arg(short, long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Data directory
-    #[arg(short, long, value_name = "DIR")]
+    /// Data directory. Also settable via `$TENZRO_DATA_DIR` so an operator
+    /// can pin it once — in the environment, a service unit, a shell
+    /// profile — rather than repeating the flag on every start; the flag
+    /// wins when both are given.
+    #[arg(short, long, value_name = "DIR", env = "TENZRO_DATA_DIR")]
     data_dir: Option<PathBuf>,
+
+    /// GiB held back from models for the OS, this process, RocksDB, iroh, and
+    /// the service surfaces — never lent to a model at any load. Defaults to
+    /// 16. Also settable via `$TENZRO_RESERVE_GB`; the flag wins when both
+    /// are given. Lower it on a node that only serves models; raise it on one
+    /// carrying a deep RocksDB working set or co-hosting other services.
+    #[arg(long, value_name = "GB", env = "TENZRO_RESERVE_GB")]
+    reserve_gb: Option<u32>,
+
+    /// GiB ceiling for always-resident models (language models, embeddings,
+    /// forecasting, ASR, TTS). Omit to use 60% of what remains after the
+    /// reserve. Also settable via `$TENZRO_RESIDENT_CEILING_GB`; the flag
+    /// wins when both are given.
+    #[arg(long, value_name = "GB", env = "TENZRO_RESIDENT_CEILING_GB")]
+    resident_ceiling_gb: Option<u32>,
+
+    /// GiB ceiling for pipelines loaded per job and evicted afterwards —
+    /// image and video generation. Omit to use whatever the resident tier
+    /// does not take. Also settable via `$TENZRO_ON_DEMAND_CEILING_GB`; the
+    /// flag wins when both are given. Separate from the resident ceiling on
+    /// purpose: a chat model must not be able to crowd out the diffusion
+    /// worker, and a video pipeline must not evict the model currently
+    /// answering requests. On a memory-constrained box, the 60/40 default
+    /// split can leave this tier too small for a single on-demand pipeline —
+    /// raise it explicitly when that happens.
+    #[arg(long, value_name = "GB", env = "TENZRO_ON_DEMAND_CEILING_GB")]
+    on_demand_ceiling_gb: Option<u32>,
 
     /// Node roles, comma-separated (e.g. "validator,storage,ai"). A node may
     /// serve any combination of roles under a single stake. Aliases accepted:
@@ -215,6 +244,32 @@ struct Cli {
     #[arg(long, value_name = "ADDRS", value_delimiter = ',')]
     external_iroh_addr: Vec<String>,
 
+    /// Pkarr relay this node publishes its iroh address record to.
+    ///
+    /// Defaults to the Tenzro-operated relay. It is overridable because a
+    /// hardcoded relay is a single point of failure with no operator recourse:
+    /// when it is unreachable the node keeps running, keeps serving, keeps
+    /// reporting healthy, and silently publishes nothing — so every peer
+    /// dial falls through to a ~30s timeout before the HTTP fallback, and
+    /// nothing in the node's own status says why.
+    ///
+    /// Point this at any `iroh-dns-server` instance. A relay reachable only
+    /// on a private overlay is fine, and is usually the right answer for a
+    /// fleet that already shares one.
+    ///
+    /// Example: `--pkarr-relay-url https://pkarr.internal:6881`
+    #[arg(long, value_name = "URL", env = "TENZRO_PKARR_RELAY_URL")]
+    pkarr_relay_url: Option<String>,
+
+    /// Also publish to n0's public discovery service as a fallback.
+    ///
+    /// Off by default, and deliberately so — publishing there puts this
+    /// node's endpoint id and direct addresses on a third-party service, so
+    /// it is a disclosure decision rather than a tuning knob. Turn it on when
+    /// reachability matters more than keeping the fleet's topology private.
+    #[arg(long)]
+    pkarr_n0_fallback: bool,
+
     /// State-sync bootstrap: fetch the highest snapshot from the given
     /// peer's RPC endpoint, verify chunk hashes against the manifest, and
     /// commit it to the local KV store before starting consensus. Skips
@@ -274,6 +329,67 @@ struct Cli {
     #[arg(long, value_name = "ID", value_delimiter = ',')]
     accept_license: Vec<String>,
 
+    /// How to handle models whose licence restricts the territories they may be
+    /// served to.
+    ///
+    /// Most licences carry no such term — seven of the eight custom licences in
+    /// the catalog are unrestricted — so this affects only the few that do, and
+    /// costs nothing for everything else.
+    ///
+    /// * `enforce` (default) — check the caller's territory per request.
+    ///   Requires `--territory-db`.
+    /// * `refuse-restricted` — do not serve territorially-restricted models at
+    ///   all. Needs no database: it removes the obligation rather than the
+    ///   enforcement of it, and is the right setting for an operator who does
+    ///   not want these models.
+    /// * `operator-asserts-compliance` — serve them with **no per-request
+    ///   check**, because the operator satisfies the licence by other means
+    ///   (e.g. a private deployment wholly inside the permitted territory).
+    ///   Never inferred: a node that silently stopped checking would serve
+    ///   outside its grant while appearing to comply.
+    #[arg(long, value_name = "MODE", default_value = "enforce")]
+    territory_mode: String,
+
+    /// Path to an mmdb country database for territorial enforcement.
+    ///
+    /// ⚠ Use a database you may redistribute: DB-IP Lite Country (CC BY 4.0) or
+    /// sapics/ip-location-db `user-country` (PDDL-1.0, public domain). MaxMind
+    /// GeoLite2 is **not** suitable — its EULA requires deleting superseded
+    /// databases within 30 days of a release, which a distributed binary cannot
+    /// honour, and redistribution needs a paid licence.
+    ///
+    /// Without one, `enforce` refuses territorially-restricted models — and
+    /// only those. Every other model keeps serving.
+    #[arg(long, value_name = "PATH")]
+    territory_db: Option<std::path::PathBuf>,
+
+    /// A label for the territory database, recorded on every decision (e.g.
+    /// `dbip-country-lite-2026-08`).
+    ///
+    /// A decision has to stay interpretable after the database is updated
+    /// underneath it: both a bloc's membership and an address's allocation can
+    /// change, so "which data said so" is part of the record.
+    #[arg(long, value_name = "LABEL")]
+    territory_db_label: Option<String>,
+
+    /// Reverse proxies whose `X-Forwarded-For` this node will believe.
+    ///
+    /// ⛔ Without this, the header is ignored entirely and the socket address is
+    /// used — which is correct: any client can set `X-Forwarded-For`, so
+    /// trusting it unconditionally turns the whole check into a no-op.
+    #[arg(long, value_name = "IP", value_delimiter = ',')]
+    trusted_proxy: Vec<std::net::IpAddr>,
+
+    /// Territory to record for callers on this machine or its private network
+    /// (ISO 3166-1 alpha-2, e.g. `SG`).
+    ///
+    /// Local addresses cannot be geolocated. Absent this, they are treated like
+    /// any other unresolvable caller and refused for restricted models. Setting
+    /// it is an operator attestation about their own deployment, and is
+    /// recorded as such rather than as a measurement.
+    #[arg(long, value_name = "CC")]
+    local_territory: Option<String>,
+
     /// Optional subcommand. When omitted, the binary runs as a full node
     /// using the top-level flags above. Subcommands are administrative
     /// helpers that talk to a *running* node over its JSON-RPC and exit.
@@ -313,8 +429,10 @@ enum Command {
         /// from with no flags — previously `./data` while the node used
         /// `./data/user`, so initialising and then starting in the
         /// default configuration left the keys where the node did not
-        /// look for them.
-        #[arg(long, value_name = "DIR")]
+        /// look for them. Also settable via `$TENZRO_DATA_DIR`, so it
+        /// stays the same directory the running node picks up from that
+        /// same variable.
+        #[arg(long, value_name = "DIR", env = "TENZRO_DATA_DIR")]
         data_dir: Option<PathBuf>,
 
         /// Genesis stake to print in the emitted `[[validators]]`
@@ -501,25 +619,35 @@ async fn main() -> Result<()> {
     // Create and start the node
     let mut node = TenzroNode::new(config.clone()).await?;
 
-    // Wallet keystore. Without an unlocker the wallet service keeps FROST key
-    // shares in memory only: identities and balances survive a restart because
-    // they are chain state, but the key material to spend or sign with them
-    // does not. A provider that cannot sign after a restart cannot hold a
-    // compute bond or serve paid work, and any funds already at its address
-    // are stranded — so an operator running a long-lived node needs this set.
-    // Left unset the node still boots, ephemeral, which is the right default
-    // for a throwaway or test node that should not write key material at all.
-    match tenzro_keystore_unlock::EnvUnlocker::new(KEYSTORE_PASSWORD_ENV).unlock_password() {
+    // Wallet keystore, unlocked from this machine's own hardware.
+    //
+    // Without an unlocker the wallet service keeps key material in memory
+    // only: identities and balances survive a restart because they are chain
+    // state, but the keys to sign with them do not. A provider that cannot
+    // sign after a restart cannot hold a compute bond or serve paid work, and
+    // any funds at its address are stranded. Boli hit exactly this — every
+    // node restart invalidated the attestor's wallet id and no allocation
+    // vector could be signed until it was recreated by hand.
+    //
+    // The password is derived from the TPM, never read from the environment.
+    // An env var made the keystore only as good as a string in a unit file,
+    // outside the hardware boundary every other Tenzro identity lives inside,
+    // and identity is rooted in a TPM, a Secure Enclave or a passkey and
+    // nothing else. A machine with no TPM stays ephemeral rather than getting
+    // a weaker kind of persistence: an ephemeral wallet is a legible
+    // limitation, a file-backed password looks identical to a real one until
+    // it is copied.
+    match tenzro_node::hardware_keystore_unlock::HardwareUnlocker::new().unlock_password() {
         Ok(_) => {
             node.set_keystore_unlocker(std::sync::Arc::new(
-                tenzro_keystore_unlock::EnvUnlocker::new(KEYSTORE_PASSWORD_ENV),
+                tenzro_node::hardware_keystore_unlock::HardwareUnlocker::new(),
             ));
         }
         Err(e) => {
             tracing::warn!(
-                "{} not usable ({}); wallets will be EPHEMERAL — anything created via \
-                 tenzro_createWallet / participate / onboarding is unsignable after a restart",
-                KEYSTORE_PASSWORD_ENV,
+                "wallet keystore has no hardware root ({}); wallets will be EPHEMERAL — \
+                 anything created via tenzro_createWallet / participate / onboarding is \
+                 unsignable after a restart",
                 e
             );
         }
@@ -719,6 +847,77 @@ async fn main() -> Result<()> {
 
     // Start RPC server
     let node_arc = Arc::new(node);
+
+    // Territorial licence enforcement. Configured before any request is served,
+    // because the default is to enforce and a restricted model must never be
+    // servable in the window before this runs.
+    {
+        use tenzro_node::territory::{
+            CountryDb, EnforcementMode, LocalCallerPolicy, TerritoryEnforcer,
+        };
+        let mode = match cli.territory_mode.trim().to_ascii_lowercase().as_str() {
+            "enforce" => EnforcementMode::Enforce,
+            "refuse-restricted" | "refuse_restricted" => EnforcementMode::RefuseRestricted,
+            "operator-asserts-compliance" | "operator_asserts_compliance" => {
+                EnforcementMode::OperatorAssertsCompliance
+            }
+            other => {
+                // Refuse to start rather than silently fall back: guessing here
+                // could mean serving a restricted model the operator meant to
+                // withhold, or withholding one they meant to serve.
+                return Err(error::NodeError::Other(format!(
+                    "--territory-mode must be enforce, refuse-restricted or \
+                     operator-asserts-compliance (got '{other}')"
+                )));
+            }
+        };
+
+        let db = match (&cli.territory_db, mode) {
+            (Some(path), _) => {
+                let label = cli
+                    .territory_db_label
+                    .clone()
+                    .unwrap_or_else(|| path.display().to_string());
+                match CountryDb::open(path, label) {
+                    Ok(db) => Some(db),
+                    // A database that was named but cannot be opened is an
+                    // operator error, not a reason to serve unchecked.
+                    Err(e) => {
+                        return Err(error::NodeError::Other(format!("--territory-db: {e}")));
+                    }
+                }
+            }
+            (None, EnforcementMode::Enforce) => {
+                tracing::warn!(
+                    "no --territory-db: territorially-restricted models will be refused. \
+                     Other models are unaffected."
+                );
+                None
+            }
+            (None, _) => None,
+        };
+
+        let (local_policy, declared_local_country) = match &cli.local_territory {
+            Some(cc) => (LocalCallerPolicy::DeclareInside, Some(cc.to_uppercase())),
+            None => (LocalCallerPolicy::Refuse, None),
+        };
+
+        if mode == EnforcementMode::OperatorAssertsCompliance {
+            tracing::warn!(
+                "--territory-mode=operator-asserts-compliance: territorially-restricted \
+                 models are served WITHOUT a per-request check. The operator asserts \
+                 compliance by other means."
+            );
+        }
+
+        *node_arc.territory.write() = TerritoryEnforcer {
+            mode,
+            db,
+            trusted_proxies: cli.trusted_proxy.clone(),
+            local_policy,
+            declared_local_country,
+        };
+    }
 
     // Reload the modality runtimes this node had loaded before it stopped.
     // `served_models` already covers the chat tier, so a GGUF model reloads on
@@ -938,8 +1137,7 @@ async fn main() -> Result<()> {
             .map(|hex| format!("0x{}", hex))
         {
             Some(runtime_faucet_address) => {
-                let dispense_amount =
-                    genesis::resolve_faucet_grant_tnzo(faucet.amount_per_request);
+                let dispense_amount = genesis::resolve_faucet_grant_tnzo(faucet.amount_per_request);
                 info!("Faucet dispensing {} TNZO per request", dispense_amount);
                 web_state = web_state.with_faucet(
                     runtime_faucet_address,
@@ -1647,6 +1845,16 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         config.data_dir = tenzro_types::paths::expand_tilde(data_dir);
     }
 
+    if let Some(gb) = cli.reserve_gb {
+        config.memory.reserve_gb = gb;
+    }
+    if cli.resident_ceiling_gb.is_some() {
+        config.memory.resident_ceiling_gb = cli.resident_ceiling_gb;
+    }
+    if cli.on_demand_ceiling_gb.is_some() {
+        config.memory.on_demand_ceiling_gb = cli.on_demand_ceiling_gb;
+    }
+
     // Model-license acceptance. CLI flags are additive on top of any policy
     // set in the config file: `--accept-non-commercial` turns the flag on,
     // and each `--accept-license <id>` appends to the accepted set. Neither
@@ -1850,8 +2058,7 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         // one-shot failure would leave it permanently isolated — Kademlia can't
         // re-bootstrap from zero known peers. The helper retries transient
         // failures and empty results, logging each attempt.
-        let resolved =
-            tenzro_node::bootstrap_dns::resolve_bootstrap_dns_with_retry(name, 6).await;
+        let resolved = tenzro_node::bootstrap_dns::resolve_bootstrap_dns_with_retry(name, 6).await;
         if resolved.is_empty() {
             tracing::warn!(
                 "Bootstrap DNS produced no peers for {} after retries; continuing with \
@@ -2037,6 +2244,32 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
             );
             config.iroh.external_addrs = parsed;
         }
+    }
+
+    // Pkarr relay override. Parsed strictly rather than permissively: an
+    // operator who passes a relay URL has decided discovery matters, and
+    // silently falling back to a default they did not choose is how a node
+    // ends up publishing nowhere while reporting healthy.
+    if let Some(raw) = cli.pkarr_relay_url.as_deref() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            match url::Url::parse(trimmed) {
+                Ok(u) => {
+                    info!("Pkarr relay override: {}", u);
+                    config.iroh.pkarr_relay_url = Some(u);
+                }
+                Err(e) => {
+                    return Err(error::NodeError::Config(format!(
+                        "Invalid --pkarr-relay-url '{trimmed}': {e}"
+                    )));
+                }
+            }
+        }
+    }
+
+    if cli.pkarr_n0_fallback {
+        info!("Publishing iroh discovery to n0 default service as a fallback");
+        config.iroh.publish_to_n0_default_discovery = true;
     }
 
     Ok(())

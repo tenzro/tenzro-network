@@ -226,10 +226,7 @@ mod tests {
             .register_autonomous_machine(
                 vec![1; 32],
                 vec!["inference".to_string()],
-                tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .unwrap()
@@ -255,10 +252,7 @@ mod tests {
             .register_autonomous_machine(
                 vec![2; 32],
                 vec!["inference".to_string()],
-                tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .unwrap()
@@ -279,7 +273,12 @@ mod tests {
 
         // Register a human identity
         let human_did = registry
-            .register_human_with_fee(vec![3; 32], "Alice".to_string(), KycTier::Unverified)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![3; 32],
+                "Alice".to_string(),
+                KycTier::Unverified,
+            )
             .await
             .unwrap()
             .identity
@@ -299,7 +298,12 @@ mod tests {
 
         // Register controller
         let controller_did = registry
-            .register_human_with_fee(vec![4; 32], "Bob".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![4; 32],
+                "Bob".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity
@@ -338,7 +342,12 @@ mod tests {
 
         // Register controller
         let controller_did = registry
-            .register_human_with_fee(vec![6; 32], "Charlie".to_string(), KycTier::Enhanced)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![6; 32],
+                "Charlie".to_string(),
+                KycTier::Enhanced,
+            )
             .await
             .unwrap()
             .identity
@@ -384,7 +393,12 @@ mod tests {
 
         // Register controller
         let controller_did = registry
-            .register_human_with_fee(vec![8; 32], "Dave".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![8; 32],
+                "Dave".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity

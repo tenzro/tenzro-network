@@ -19,6 +19,7 @@ tenzro-node = { workspace = true }
 tenzro-network = { workspace = true }
 tenzro-model = { workspace = true }
 tenzro-zk = { workspace = true }
+tenzro-tee = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

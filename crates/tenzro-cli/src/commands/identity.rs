@@ -1146,7 +1146,7 @@ impl IdentityForgetCmd {
 
 /// Export a portable CARv1 identity bundle. The bundle contains the
 /// TenzroIdentity (DID + credentials + delegations) plus the encrypted
-/// keystore files for the bound MPC wallet (FROST shares, ML-DSA-65 seed,
+/// keystore files for the bound wallet (ML-DSA-65 seed,
 /// BLS12-381 seed). The keystore files are exported as already-encrypted
 /// ciphertext — the password never leaves the user's head, so the CAR
 /// bundle can travel over insecure transport (email, USB stick, etc.).

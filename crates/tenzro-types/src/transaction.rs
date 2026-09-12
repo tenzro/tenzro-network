@@ -652,7 +652,7 @@ pub enum TransactionType {
     /// node-side `IdentityRegistry` consumes the log and upserts the record
     /// so it becomes replicated read-model state.
     ///
-    /// Key MATERIAL (FROST shares / TEE-sealed signing keys) is NOT carried
+    /// Key MATERIAL (TEE-sealed / hardware-held signing keys) is NOT carried
     /// here and stays node-local by design — only the public identity record
     /// (DID, controller pubkey, wallet bindings, verifying keys, metadata)
     /// replicates.

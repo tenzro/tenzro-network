@@ -61,10 +61,7 @@ impl GossipNetworkCatalog {
     /// an offer reaches selection as `{model, endpoint}` and every
     /// latency-deciding property the provider signed is dropped on the floor.
     #[must_use]
-    pub fn with_providers(
-        mut self,
-        providers: Arc<DashMap<String, NetworkProviderEntry>>,
-    ) -> Self {
+    pub fn with_providers(mut self, providers: Arc<DashMap<String, NetworkProviderEntry>>) -> Self {
         self.providers = Some(providers);
         self
     }
@@ -196,9 +193,11 @@ fn offer_model(reg: &ModelRegistrationMessage) -> Option<ModelInfo> {
         // `None` here tiers even a 30B model `Cheap` no matter what tags it
         // carries. The announcement's own parameter string is a display value
         // the provider composed, and it does not always survive parsing.
-        if let Some(count) = Some(tenzro_model::catalog::parse_params_active_b(&entry.parameters))
-            .filter(|b| *b > 0.0)
-            .map(|b| (b * 1e9) as u64)
+        if let Some(count) = Some(tenzro_model::catalog::parse_params_active_b(
+            &entry.parameters,
+        ))
+        .filter(|b| *b > 0.0)
+        .map(|b| (b * 1e9) as u64)
         {
             model.parameters.parameter_count = Some(count);
         }

@@ -49,6 +49,27 @@ pub enum StorageProviderError {
     #[error("invalid redundancy parameters: {0}")]
     InvalidRedundancy(String),
 
+    /// A different object already occupies this id.
+    ///
+    /// Storing the *same* bytes under the same id stays idempotent — a node
+    /// re-announcing what it already published is ordinary. Storing different
+    /// bytes is not a retry, it is a second version of a name that other
+    /// parties have already read and may have signed over, so it is refused
+    /// rather than silently overwriting them.
+    #[error(
+        "object {object_id} already exists with different content \
+         (stored {stored_bytes} bytes, offered {offered_bytes}); \
+         an object id names one immutable object"
+    )]
+    ObjectAlreadyExists {
+        /// The id that is already taken.
+        object_id: String,
+        /// Size of what is stored under it now.
+        stored_bytes: u64,
+        /// Size of what the caller offered.
+        offered_bytes: u64,
+    },
+
     /// Erasure-coding backend error.
     #[error("erasure coding error: {0}")]
     Erasure(String),

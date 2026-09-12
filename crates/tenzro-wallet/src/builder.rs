@@ -6,7 +6,7 @@
 use crate::error::{Result, WalletError};
 use crate::nonce::NonceManager;
 use crate::validation::{TransactionValidator, ValidationConfig};
-use crate::wallet::MpcWallet;
+use crate::wallet::Wallet;
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, ChainId, Nonce};
 use tenzro_types::settlement::{ReleaseConditions, ServiceProof};
@@ -93,7 +93,7 @@ impl TransactionBuilder {
     }
 
     /// Set the sender from a wallet.
-    pub fn from_wallet(mut self, wallet: &MpcWallet) -> Self {
+    pub fn from_wallet(mut self, wallet: &Wallet) -> Self {
         self.from = Some(wallet.address);
         self
     }
@@ -105,7 +105,7 @@ impl TransactionBuilder {
     /// classical address and its FIPS-204 verifying key, ensuring the
     /// `Transaction::hash()` preimage is locked to the same key pair that
     /// will later sign it.
-    pub fn from_wallet_pq(mut self, wallet: &MpcWallet) -> Self {
+    pub fn from_wallet_pq(mut self, wallet: &Wallet) -> Self {
         self.from = Some(wallet.address);
         self.pq_public_key = Some(wallet.pq_verifying_key_bytes());
         self
@@ -397,10 +397,19 @@ mod tests {
         ));
     }
 
+    /// `from_wallet` takes the sender address off the wallet. It survived the
+    /// custody change and would otherwise be untested — the test that covered
+    /// it went out with the provisioner it happened to build its wallet from.
     #[test]
     fn test_build_with_wallet() {
-        let provisioner = crate::provisioning::WalletProvisioner::new();
-        let wallet = provisioner.provision_wallet().unwrap();
+        let wallet = Wallet::new(
+            crate::WalletId::new(),
+            Address::new([9u8; 32]),
+            tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, vec![4u8; 32]),
+            tenzro_crypto::pq::MlDsaSigningKey::generate(),
+            tenzro_crypto::bls::BlsKeyPair::generate().unwrap(),
+        )
+        .unwrap();
 
         let tx = TransactionBuilder::default_chain()
             .from_wallet(&wallet)

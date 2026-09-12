@@ -347,7 +347,7 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 name: "Agent Spawning".to_string(),
                 description: "Dynamically spawn autonomous sub-agents with specific capabilities. \
                               Parent agents can create up to 50 children, each with its own DID \
-                              and MPC wallet. Supports hierarchical agent topologies."
+                              and permissionless wallet. Supports hierarchical agent topologies."
                     .to_string(),
                 tags: vec![
                     "agents".to_string(),
@@ -460,7 +460,7 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 id: "join".to_string(),
                 name: "Join as MicroNode".to_string(),
                 description: "Join the Tenzro Network as a full MicroNode participant — \
-                              zero-install. Auto-provisions a TDIP DID, MPC wallet, and \
+                              zero-install. Auto-provisions a TDIP DID, permissionless wallet, and \
                               10 network capabilities (inference, payments, agent collaboration, \
                               MCP tools, task execution, chain queries, smart contracts, \
                               TEE compute, cross-chain bridge, governance)."

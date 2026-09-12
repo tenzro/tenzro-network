@@ -727,8 +727,16 @@ impl ListPendingRecoveriesCmd {
 // ---------------------------------------------------------------------------
 
 /// Resolve the web-API base URL that serves `/auth/passkey`. The web API
-/// listens on a different port/host than JSON-RPC, so it cannot be
-/// derived mechanically — only the two well-known layouts are inferred.
+/// listens on a different host than JSON-RPC, so it is inferred from the
+/// RPC host: any `rpc.<zone>` under a Tenzro zone (`tenzro.com` /
+/// `tenzro.xyz`) maps to `api.<zone>` — the WebAuthn ceremony must be served
+/// from a real domain because the passkey rpId is bound to it. New RPC
+/// subdomains under those zones therefore work without `--web-url`.
+///
+/// Local development is inferred to the loopback web port. Any other host
+/// (a third-party operator's own domain) must pass `--web-url` explicitly —
+/// and, in future, such operators will need to be trusted network operators
+/// before their domain can host a ceremony.
 pub(crate) fn derive_web_url(explicit: Option<&str>, rpc_url: &str) -> Result<String> {
     if let Some(url) = explicit {
         return Ok(url.trim_end_matches('/').to_string());
@@ -736,12 +744,36 @@ pub(crate) fn derive_web_url(explicit: Option<&str>, rpc_url: &str) -> Result<St
     if rpc_url.contains("127.0.0.1") || rpc_url.contains("localhost") {
         return Ok("http://127.0.0.1:8080".to_string());
     }
-    if rpc_url.contains("rpc.tenzro.xyz") {
-        return Ok("https://api.tenzro.xyz".to_string());
+    // Extract the host from the RPC URL (strip scheme, path, port).
+    // `rsplit` rather than `split(..).next_back()`: `Split` is only
+    // double-ended when its pattern is reversible, and a `&str` pattern is not,
+    // so `next_back()` does not compile here.
+    let host = rpc_url
+        .rsplit("://")
+        .next()
+        .unwrap_or(rpc_url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    // `rpc.<zone>` -> `api.<zone>` for the Tenzro zones. The zone is the last
+    // two labels; only `tenzro.com` / `tenzro.xyz` are inferred by convention.
+    for zone in ["tenzro.com", "tenzro.xyz"] {
+        if host == format!("rpc.{zone}").as_str() || host.ends_with(&format!(".rpc.{zone}")) {
+            return Ok(format!("https://api.{zone}"));
+        }
+        // A bare-zone or other `*.tenzro.{com,xyz}` RPC host still routes to the
+        // zone's canonical api host.
+        if host == zone || host.ends_with(&format!(".{zone}")) {
+            return Ok(format!("https://api.{zone}"));
+        }
     }
     bail!(
         "cannot derive the browser-ceremony URL from RPC URL {rpc_url}; \
-         pass --web-url with the node's web API base (default port 8080)"
+         it is not a *.tenzro.com / *.tenzro.xyz host, so pass --web-url with \
+         the node's web API base (default port 8080)"
     )
 }
 
@@ -1217,5 +1249,57 @@ impl SignCmd {
                 .unwrap_or("?"),
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod web_url_tests {
+    use super::derive_web_url;
+
+    #[test]
+    fn maps_tenzro_zones_by_convention() {
+        assert_eq!(
+            derive_web_url(None, "https://rpc.tenzro.xyz").unwrap(),
+            "https://api.tenzro.xyz"
+        );
+        assert_eq!(
+            derive_web_url(None, "https://rpc.tenzro.com").unwrap(),
+            "https://api.tenzro.com"
+        );
+        // Port and path are stripped from the host before matching.
+        assert_eq!(
+            derive_web_url(None, "https://rpc.tenzro.xyz:8545/rpc").unwrap(),
+            "https://api.tenzro.xyz"
+        );
+        // Any other subdomain under a Tenzro zone routes to that zone's api host.
+        assert_eq!(
+            derive_web_url(None, "https://node7.tenzro.com").unwrap(),
+            "https://api.tenzro.com"
+        );
+    }
+
+    #[test]
+    fn loopback_maps_to_local_web_port() {
+        assert_eq!(
+            derive_web_url(None, "http://127.0.0.1:8545").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            derive_web_url(None, "http://localhost:8545").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn explicit_web_url_wins_and_is_trimmed() {
+        assert_eq!(
+            derive_web_url(Some("https://my.host/"), "https://rpc.tenzro.xyz").unwrap(),
+            "https://my.host"
+        );
+    }
+
+    #[test]
+    fn third_party_host_requires_explicit_web_url() {
+        assert!(derive_web_url(None, "https://rpc.example.com").is_err());
     }
 }

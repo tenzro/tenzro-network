@@ -8,15 +8,14 @@ use crate::balance::{Balance, BalanceTracker};
 use crate::contacts::{AddressBook, Contact};
 use crate::error::{Result, WalletError};
 use crate::history::{HistoryFilter, TransactionHistory, TxRecord};
+use crate::identity_binding::WalletIdentity;
 use crate::keystore::Keystore;
-use crate::mpc_signing::TransactionSigner;
 use crate::nonce::NonceManager;
-use crate::provisioning::{ProvisioningConfig, WalletProvisioner};
 use crate::signing::{HybridSignatureBytes, HybridSigner};
 use crate::state_sync::{ChainStateProvider, WalletStateSync};
 use crate::traits::WalletService;
 use crate::validation::{TransactionValidator, ValidationConfig};
-use crate::wallet::{MpcWallet, WalletId};
+use crate::wallet::{Wallet, WalletId};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -33,8 +32,6 @@ pub struct WalletServiceConfig {
     pub keystore_path: PathBuf,
     /// Path to contacts file
     pub contacts_path: PathBuf,
-    /// Provisioning configuration
-    pub provisioning_config: ProvisioningConfig,
     /// Default password for auto-provisioning (for demo/testing only)
     pub default_password: Option<String>,
     /// Transaction validation configuration
@@ -46,7 +43,6 @@ impl Default for WalletServiceConfig {
         Self {
             keystore_path: tenzro_types::paths::default_data_dir().join("wallets"),
             contacts_path: tenzro_types::paths::default_data_dir().join("contacts.json"),
-            provisioning_config: ProvisioningConfig::default(),
             default_password: None,
             validation_config: ValidationConfig::default(),
         }
@@ -59,16 +55,9 @@ impl WalletServiceConfig {
         Self {
             keystore_path: keystore_path.clone(),
             contacts_path: keystore_path.join("contacts.json"),
-            provisioning_config: ProvisioningConfig::default(),
             default_password: None,
             validation_config: ValidationConfig::default(),
         }
-    }
-
-    /// Set the provisioning configuration
-    pub fn with_provisioning_config(mut self, config: ProvisioningConfig) -> Self {
-        self.provisioning_config = config;
-        self
     }
 
     /// Set default password (for testing only)
@@ -87,7 +76,7 @@ impl WalletServiceConfig {
 /// Main wallet service implementation for Tenzro Network.
 ///
 /// This service manages:
-/// - Auto-provisioning of MPC wallets
+/// - Provisioning of identity-bound wallets
 /// - In-memory wallet cache with persistent keystore
 /// - Balance tracking (local + on-chain sync)
 /// - Transaction validation, signing, and verification
@@ -98,10 +87,8 @@ impl WalletServiceConfig {
 pub struct TenzroWalletService {
     /// Configuration
     config: WalletServiceConfig,
-    /// Wallet provisioner
-    provisioner: WalletProvisioner,
     /// In-memory wallet store
-    wallets: Arc<DashMap<WalletId, MpcWallet>>,
+    wallets: Arc<DashMap<WalletId, Wallet>>,
     /// Balance tracker
     balances: Arc<BalanceTracker>,
     /// Asset manager
@@ -124,7 +111,7 @@ pub struct TenzroWalletService {
     /// delegate both legs to the registered [`HybridSigner`] — the secret
     /// never enters node memory. Autonomous-machine wallets bind their
     /// TEE-sealed agent key here; absent an entry, signing falls back to
-    /// the server-custodial FROST + ML-DSA path.
+    /// the former server-custodial path.
     hybrid_signers: Arc<DashMap<WalletId, Arc<dyn HybridSigner>>>,
 }
 
@@ -136,7 +123,6 @@ impl TenzroWalletService {
 
     /// Create a new wallet service with custom configuration
     pub fn with_config(config: WalletServiceConfig) -> Result<Self> {
-        let provisioner = WalletProvisioner::with_config(config.provisioning_config.clone())?;
         let keystore = Keystore::new(&config.keystore_path)?;
         let validator = TransactionValidator::with_config(config.validation_config.clone());
         let nonces = Arc::new(NonceManager::new());
@@ -155,7 +141,6 @@ impl TenzroWalletService {
 
         Ok(Self {
             config,
-            provisioner,
             wallets: Arc::new(DashMap::new()),
             balances,
             assets: Arc::new(AssetManager::new()),
@@ -205,7 +190,7 @@ impl TenzroWalletService {
     /// delegate both signature legs to `signer` — the wallet's secret
     /// never enters node memory. This is the custody seam autonomous-machine
     /// wallets use to route through their TEE-sealed agent key
-    /// (`SealedAgentWalletSigner`) instead of server-side FROST + ML-DSA
+    /// (`SealedAgentWalletSigner`) instead of a server-side custodial key
     /// reconstruction.
     pub fn set_hybrid_signer(&self, wallet_id: WalletId, signer: Arc<dyn HybridSigner>) {
         self.hybrid_signers.insert(wallet_id, signer);
@@ -234,13 +219,13 @@ impl TenzroWalletService {
         signer: Arc<dyn HybridSigner>,
         classical_key_type: tenzro_crypto::KeyType,
         bls_verifying_key: Vec<u8>,
-    ) -> Result<MpcWallet> {
+    ) -> Result<Wallet> {
         let public_key =
             tenzro_crypto::PublicKey::new(classical_key_type, signer.classical_public_key());
         let pq_verifying_key = signer.pq_verifying_key();
 
         let wallet_id = WalletId::new();
-        let wallet = MpcWallet::new_watch_only(
+        let wallet = Wallet::new_watch_only(
             wallet_id.clone(),
             public_key,
             pq_verifying_key,
@@ -277,27 +262,25 @@ impl TenzroWalletService {
 
     /// Load a wallet from keystore.
     ///
-    /// The keystore returns the `(PublicKeyPackage, Vec<KeyShare>)` pair
-    /// atomically — the FROST group public key is required for signing and
-    /// is not reconstructible from individual shares, so it is sealed in the
-    /// same Argon2id-derived bundle.
+    /// The keystore returns the classical public key plus the ML-DSA-65 and
+    /// BLS signing seeds, sealed together in one Argon2id-derived bundle. The
+    /// classical private half is never here — it lives in the holder's
+    /// hardware.
     async fn load_wallet_from_keystore(
         &self,
         wallet_id: &WalletId,
         password: &str,
-    ) -> Result<MpcWallet> {
+    ) -> Result<Wallet> {
         let mut keystore = self.keystore.lock().await;
-        let (pubkey_package, key_shares) = keystore.load_shares(wallet_id, password)?;
+        // The classical public key is recorded in the sealed metadata; the
+        // private half lives in hardware and is never in this keystore.
+        let secrets = keystore.load_secrets(wallet_id, password)?;
+        let classical_public_key = tenzro_crypto::PublicKey::new(
+            tenzro_crypto::KeyType::Ed25519,
+            secrets.classical_public_key.clone(),
+        );
 
-        if key_shares.is_empty() {
-            return Err(WalletError::KeystoreError(
-                "No key shares found in keystore".to_string(),
-            ));
-        }
-
-        // Derive address from the FROST group public key.
-        let group_pk = pubkey_package.group_public_key.as_public_key();
-        let crypto_addr = group_pk.to_address();
+        let crypto_addr = classical_public_key.to_address();
         let mut addr_bytes = [0u8; 32];
         addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
         let address = Address::new(addr_bytes);
@@ -309,32 +292,30 @@ impl TenzroWalletService {
         let bls_signing_key = keystore.load_bls_seed(wallet_id, password)?;
         drop(keystore);
 
-        let wallet = MpcWallet::new(
+        let wallet = Wallet::new(
             wallet_id.clone(),
             address,
-            key_shares,
-            pubkey_package,
+            classical_public_key,
             pq_signing_key,
             bls_signing_key,
         )?;
 
-        warn!(
-            "Loaded wallet {} from keystore (metadata reconstructed from shares)",
-            wallet_id
-        );
+        warn!("Loaded wallet {} from keystore", wallet_id);
 
         Ok(wallet)
     }
 
-    /// Store a wallet to keystore (FROST bundle + PQ signing seed + BLS
+    /// Store a wallet to keystore (local secrets + PQ signing seed + BLS
     /// signing seed).
-    async fn store_wallet_to_keystore(&self, wallet: &MpcWallet, password: &str) -> Result<()> {
+    async fn store_wallet_to_keystore(&self, wallet: &Wallet, password: &str) -> Result<()> {
         let mut keystore = self.keystore.lock().await;
-        let pubkey_package = wallet.frost_pubkey_package()?;
-        keystore.store_shares(
+        keystore.store_secrets(
             &wallet.wallet_id,
-            pubkey_package,
-            &wallet.key_shares,
+            &crate::keystore::WalletSecrets {
+                pq_seed: Vec::new(),
+                bls_key: Vec::new(),
+                classical_public_key: wallet.public_key.to_bytes().to_vec(),
+            },
             password,
         )?;
         // Mandatory PQ leg — persist the 32-byte canonical FIPS 204 seed
@@ -374,7 +355,7 @@ impl TenzroWalletService {
     }
 
     /// Get wallet by ID (from cache or keystore)
-    async fn get_wallet_internal(&self, wallet_id: &WalletId) -> Result<Option<MpcWallet>> {
+    async fn get_wallet_internal(&self, wallet_id: &WalletId) -> Result<Option<Wallet>> {
         // Check cache first
         if let Some(wallet) = self.wallets.get(wallet_id) {
             return Ok(Some(wallet.clone()));
@@ -405,10 +386,27 @@ impl Default for TenzroWalletService {
 impl WalletService for TenzroWalletService {
     // === Wallet Lifecycle ===
 
-    async fn provision_wallet(&self) -> Result<MpcWallet> {
-        info!("Provisioning new wallet");
+    async fn provision_wallet(&self, identity: WalletIdentity) -> Result<Wallet> {
+        info!("Provisioning {} wallet", identity.kind());
 
-        let wallet = self.provisioner.provision_wallet()?;
+        // Only the two legs with no hardware backing are minted here: ML-DSA-65
+        // and BLS. The signing key belongs to the identity and this service
+        // never sees its secret half — generating one would put a custodial key
+        // in process memory, which is the design being removed.
+        let signing_public_key = identity.public_key().clone();
+        let crypto_addr = signing_public_key.to_address();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+        let address = Address::new(addr_bytes);
+
+        let wallet = Wallet::new(
+            WalletId::new(),
+            address,
+            signing_public_key,
+            tenzro_crypto::pq::MlDsaSigningKey::generate(),
+            tenzro_crypto::bls::BlsKeyPair::generate()
+                .map_err(|e| WalletError::KeystoreError(format!("generate BLS key: {e}")))?,
+        )?;
 
         debug!(
             "Provisioned wallet {} at address {}",
@@ -430,16 +428,12 @@ impl WalletService for TenzroWalletService {
                 .set_balance(&wallet.address, asset_id, Balance::zero());
         }
 
-        info!(
-            "Successfully provisioned wallet {} with {} shares",
-            wallet.wallet_id,
-            wallet.share_count()
-        );
+        info!("Successfully provisioned wallet {}", wallet.wallet_id);
 
         Ok(wallet)
     }
 
-    async fn get_wallet(&self, wallet_id: &WalletId) -> Result<Option<MpcWallet>> {
+    async fn get_wallet(&self, wallet_id: &WalletId) -> Result<Option<Wallet>> {
         self.get_wallet_internal(wallet_id).await
     }
 
@@ -537,23 +531,22 @@ impl WalletService for TenzroWalletService {
         // Hash the transaction for signing
         let tx_hash = tx.hash();
 
-        // Custody seam: if an external hybrid signer is bound to this wallet
-        // (autonomous-machine TEE-sealed key), delegate both legs to it — the
-        // secret never enters node memory. Otherwise fall back to the
-        // server-custodial FROST + ML-DSA path below.
-        let external_signer = self
+        // Custody seam: signing always goes through a bound HybridSigner, so
+        // the classical secret never enters node memory. There is no
+        // server-custodial fallback — the former threshold path was exactly that,
+        // and removing it is the point: a wallet the node can sign for on its
+        // own is a wallet the node can be compelled to sign for.
+        let signer = self
             .hybrid_signers
             .get(wallet_id)
-            .map(|r| r.value().clone());
-        let HybridSignatureBytes { classical, pq } = if let Some(signer) = external_signer {
-            signer.sign_hybrid(tx_hash.as_bytes()).await?
-        } else {
-            // Classical leg — threshold MPC signature with post-signing verification.
-            let classical = TransactionSigner::sign_transaction(&wallet, tx_hash.as_bytes())?;
-            // Post-quantum leg — ML-DSA-65 signature over the same hash.
-            let pq = wallet.pq_signing_key()?.sign(tx_hash.as_bytes());
-            HybridSignatureBytes::new(classical, pq)
-        };
+            .map(|r| r.value().clone())
+            .ok_or_else(|| {
+                WalletError::SignatureFailed(format!(
+                    "no signer bound to wallet {wallet_id}; bind one with \
+                     set_hybrid_signer (see tenzro_wallet::device_custody)"
+                ))
+            })?;
+        let HybridSignatureBytes { classical, pq } = signer.sign_hybrid(tx_hash.as_bytes()).await?;
 
         // Record in history
         let record = TxRecord::new_outgoing(
@@ -590,9 +583,11 @@ impl WalletService for TenzroWalletService {
             .await?
             .ok_or_else(|| WalletError::WalletNotFound(wallet_id.to_string()))?;
 
-        let classical = TransactionSigner::sign_raw(&wallet, data)?;
-        let pq = wallet.pq_signing_key()?.sign(data);
-        Ok(HybridSignatureBytes::new(classical, pq))
+        let _ = &wallet;
+        Err(WalletError::SignatureFailed(format!(
+            "no signer bound to wallet {wallet_id}; bind one with set_hybrid_signer \
+             (see tenzro_wallet::device_custody)"
+        )))
     }
 
     // === Nonce ===
@@ -695,7 +690,7 @@ impl WalletService for TenzroWalletService {
     }
 
     async fn import_wallet_metadata(&self, metadata: &str) -> Result<WalletId> {
-        let wallet = MpcWallet::from_metadata_json(metadata)?;
+        let wallet = Wallet::from_metadata_json(metadata)?;
         let wallet_id = wallet.wallet_id.clone();
         self.wallets.insert(wallet_id.clone(), wallet);
         Ok(wallet_id)
@@ -704,6 +699,48 @@ impl WalletService for TenzroWalletService {
 
 #[cfg(test)]
 mod tests {
+    use crate::identity_binding::WalletIdentity;
+
+    /// Stands in for a hardware-backed signer. Signing goes through this seam
+    /// precisely so the service never holds the secret; the tests have to bind
+    /// one for the same reason a node does.
+    struct TestHybridSigner {
+        pq: tenzro_crypto::pq::MlDsaSigningKey,
+    }
+
+    #[async_trait]
+    impl HybridSigner for TestHybridSigner {
+        fn classical_public_key(&self) -> Vec<u8> {
+            vec![9u8; 32]
+        }
+        fn pq_verifying_key(&self) -> Vec<u8> {
+            self.pq.verifying_key_bytes().to_vec()
+        }
+        async fn sign_hybrid(&self, message: &[u8]) -> Result<HybridSignatureBytes> {
+            Ok(HybridSignatureBytes::new(
+                vec![1u8; 64],
+                self.pq.sign(message),
+            ))
+        }
+    }
+
+    fn bind_test_signer(service: &TenzroWalletService, wallet_id: &WalletId) {
+        service.set_hybrid_signer(
+            wallet_id.clone(),
+            std::sync::Arc::new(TestHybridSigner {
+                pq: tenzro_crypto::pq::MlDsaSigningKey::generate(),
+            }),
+        );
+    }
+
+    fn test_identity() -> WalletIdentity {
+        WalletIdentity::machine(
+            "test-machine",
+            tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, vec![9u8; 32]),
+        )
+        .expect("valid machine identity")
+    }
+
     use super::*;
     use crate::history::TxStatus;
     use tempfile::TempDir;
@@ -726,9 +763,7 @@ mod tests {
     async fn test_provision_wallet() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
-
-        assert!(wallet.can_sign());
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
         assert!(!wallet.supported_assets.is_empty());
     }
 
@@ -736,7 +771,7 @@ mod tests {
     async fn test_get_wallet() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
 
         let retrieved = service.get_wallet(&wallet.wallet_id).await.unwrap();
         assert!(retrieved.is_some());
@@ -747,7 +782,7 @@ mod tests {
     async fn test_balance_query() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
 
         let balance = service
             .get_balance(&wallet.address, &AssetId::tnzo())
@@ -762,7 +797,8 @@ mod tests {
     async fn test_sign_validated_transaction() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
+        bind_test_signer(&service, &wallet.wallet_id);
 
         let tx = Transaction::new(
             ChainId(1337),
@@ -793,7 +829,7 @@ mod tests {
     async fn test_sign_invalid_transaction_fails() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
 
         // Wrong chain ID
         let tx = Transaction::new(
@@ -816,7 +852,7 @@ mod tests {
     async fn test_sign_wrong_sender_fails() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
 
         // Sender doesn't match wallet
         let tx = Transaction::new(
@@ -839,7 +875,7 @@ mod tests {
     async fn test_nonce_management() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
 
         assert_eq!(service.peek_nonce(&wallet.address), Nonce(0));
         assert_eq!(service.next_nonce(&wallet.address), Nonce(0));
@@ -869,8 +905,8 @@ mod tests {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
 
-        let wallet1 = service.provision_wallet().await.unwrap();
-        let wallet2 = service.provision_wallet().await.unwrap();
+        let wallet1 = service.provision_wallet(test_identity()).await.unwrap();
+        let wallet2 = service.provision_wallet(test_identity()).await.unwrap();
 
         let wallets = service.list_wallets().await.unwrap();
         assert_eq!(wallets.len(), 2);
@@ -882,7 +918,7 @@ mod tests {
     async fn test_delete_wallet() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
 
         service.delete_wallet(&wallet.wallet_id).await.unwrap();
 
@@ -894,7 +930,7 @@ mod tests {
     async fn test_asset_support() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
 
         let new_asset = AssetId::from("TEST");
         service
@@ -925,7 +961,9 @@ mod tests {
     async fn test_sign_data() {
         let (_dir, config) = test_config();
         let service = TenzroWalletService::with_config(config).unwrap();
-        let wallet = service.provision_wallet().await.unwrap();
+        let wallet = service.provision_wallet(test_identity()).await.unwrap();
+
+        bind_test_signer(&service, &wallet.wallet_id);
 
         let data = b"arbitrary data to sign";
         let signature = service.sign_data(&wallet.wallet_id, data).await.unwrap();

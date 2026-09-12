@@ -38,7 +38,81 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::EmbeddingTemplate;
 use crate::error::{ModelError, Result};
+
+/// Which role a batch of inputs plays, for families whose template
+/// distinguishes queries from documents (see [`EmbeddingTemplate`]).
+///
+/// Defaults to `Document` rather than `Query`: a caller that forgets to
+/// set this on an asymmetric family (Qwen3-Embedding, EmbeddingGemma) gets
+/// the document-side treatment, which is a same-quality-or-slightly-lower
+/// retrieval hit — not the wrong-instruction corruption that defaulting to
+/// `Query` would silently apply to every document a caller embeds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum EmbedRole {
+    /// Being indexed for later retrieval. `title` is only consumed by
+    /// families whose template wants one (EmbeddingGemma); ignored
+    /// elsewhere.
+    Document {
+        #[serde(default)]
+        title: Option<String>,
+    },
+    /// Being embedded to search an existing index. `task` is only
+    /// consumed by families whose template wants one (Qwen3-Embedding,
+    /// EmbeddingGemma) — falls back to the catalog entry's own
+    /// `default_task` when not set. Ignored on families with no
+    /// instruction template (BGE-M3) or a fixed one (ModernBERT).
+    Query {
+        #[serde(default)]
+        task: Option<String>,
+    },
+}
+
+impl Default for EmbedRole {
+    fn default() -> Self {
+        Self::Document { title: None }
+    }
+}
+
+/// Apply a family's [`EmbeddingTemplate`] to one input string for the given
+/// role. Pure data-in-data-out — the encoder calls this once per input
+/// before tokenization; no model-name branching lives here or anywhere
+/// downstream of it.
+pub fn apply_embedding_template(
+    template: &EmbeddingTemplate,
+    role: &EmbedRole,
+    text: &str,
+) -> String {
+    match (template, role) {
+        (EmbeddingTemplate::None, _) => text.to_string(),
+        (EmbeddingTemplate::InstructQuery { .. }, EmbedRole::Document { .. }) => text.to_string(),
+        (EmbeddingTemplate::InstructQuery { default_task }, EmbedRole::Query { task }) => {
+            let task = task.as_deref().unwrap_or(default_task);
+            // Verified byte-for-byte against Qwen3-Embedding's own
+            // `get_detailed_instruct` example: no space after "Query:".
+            format!("Instruct: {}\nQuery:{}", task, text)
+        }
+        (EmbeddingTemplate::GemmaTask { .. }, EmbedRole::Document { title }) => {
+            format!(
+                "title: {} | text: {}",
+                title.as_deref().unwrap_or("none"),
+                text
+            )
+        }
+        (EmbeddingTemplate::GemmaTask { default_task }, EmbedRole::Query { task }) => {
+            let task = task.as_deref().unwrap_or(default_task);
+            format!("task: {} | query: {}", task, text)
+        }
+        (EmbeddingTemplate::NomicPrefix, EmbedRole::Document { .. }) => {
+            format!("search_document: {}", text)
+        }
+        (EmbeddingTemplate::NomicPrefix, EmbedRole::Query { .. }) => {
+            format!("search_query: {}", text)
+        }
+    }
+}
 
 /// Configuration for a text-embedding request.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -53,6 +127,10 @@ pub struct TextEmbedConfig {
     /// this on; downstream classification heads want it off.
     #[serde(default)]
     pub normalize: bool,
+    /// Query vs. document role, for families whose template distinguishes
+    /// them. See [`EmbedRole`].
+    #[serde(default)]
+    pub role: EmbedRole,
 }
 
 /// Result of a text-embedding call.
@@ -134,9 +212,9 @@ impl TextEncoder for StubTextEncoder {
 
 mod onnx_backend {
     use super::*;
-    use ndarray::Array2;
+    use ndarray::{Array2, Array4};
     use ort::session::Session;
-    use ort::value::Tensor;
+    use ort::value::{Tensor, ValueType};
     use std::time::Instant;
     use tokenizers::{
         PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams,
@@ -154,6 +232,7 @@ mod onnx_backend {
         session: parking_lot::Mutex<Session>,
         tokenizer: Tokenizer,
         family: TextEncoderFamily,
+        embedding_template: EmbeddingTemplate,
         embedding_dim: usize,
         max_sequence_length: usize,
         /// Cached input names. Most exports use `input_ids` /
@@ -170,6 +249,18 @@ mod onnx_backend {
         output_name: String,
         /// Whether `output_name` is `sentence_embedding` (already pooled).
         output_is_pooled: bool,
+        /// `(key_name, value_name)` per layer, when the graph declares
+        /// `past_key_values.{i}.key`/`.value` inputs. Some decoder-repurposed
+        /// embedding exports (Qwen3-Embedding) keep these even though
+        /// embedding only ever does a single forward pass with no prior
+        /// cache — ONNX Runtime still requires every declared input to be
+        /// fed, so an empty (`past_sequence_length = 0`) tensor is supplied
+        /// for each at inference time. Empty when the graph has none.
+        past_kv_names: Vec<(String, String)>,
+        /// `(num_kv_heads, head_dim)` for the empty past-KV tensors above,
+        /// read off the graph's own declared static shape — never guessed
+        /// or hardcoded to one model. `None` iff `past_kv_names` is empty.
+        kv_shape: Option<(usize, usize)>,
     }
 
     impl GenericTextEncoder {
@@ -181,6 +272,7 @@ mod onnx_backend {
             onnx_path: impl AsRef<Path>,
             tokenizer_path: impl AsRef<Path>,
             family: TextEncoderFamily,
+            embedding_template: EmbeddingTemplate,
             embedding_dim: usize,
             max_sequence_length: usize,
         ) -> Result<Self> {
@@ -199,6 +291,43 @@ mod onnx_backend {
                 })?;
             let position_ids_name = pick_input(&input_names, &["position_ids"]);
             let token_type_ids_name = pick_input(&input_names, &["token_type_ids"]);
+
+            // Detect an optional per-layer KV-cache input pair. Generic over
+            // however many layers the graph declares — found by name
+            // pattern, not hardcoded to one model's layer count.
+            let mut past_kv_names: Vec<(String, String)> = Vec::new();
+            let mut kv_shape: Option<(usize, usize)> = None;
+            let mut layer = 0usize;
+            loop {
+                let key_name = format!("past_key_values.{layer}.key");
+                let value_name = format!("past_key_values.{layer}.value");
+                if !input_names.contains(&key_name) || !input_names.contains(&value_name) {
+                    break;
+                }
+                if kv_shape.is_none() {
+                    let key_input = session
+                        .inputs
+                        .iter()
+                        .find(|i| i.name == key_name)
+                        .expect("just matched by name");
+                    if let ValueType::Tensor { shape, .. } = &key_input.input_type
+                        && shape.len() == 4
+                        && shape[1] > 0
+                        && shape[3] > 0
+                    {
+                        kv_shape = Some((shape[1] as usize, shape[3] as usize));
+                    }
+                }
+                past_kv_names.push((key_name, value_name));
+                layer += 1;
+            }
+            if !past_kv_names.is_empty() && kv_shape.is_none() {
+                return Err(ModelError::InvalidModel(format!(
+                    "ONNX model declares {} past_key_values input(s) but their static \
+                     (num_kv_heads, head_dim) shape could not be read",
+                    past_kv_names.len()
+                )));
+            }
 
             // Introspect outputs. Prefer `sentence_embedding` when the
             // family asks for it; otherwise read `last_hidden_state` and
@@ -260,6 +389,7 @@ mod onnx_backend {
                 session: parking_lot::Mutex::new(session),
                 tokenizer,
                 family,
+                embedding_template,
                 embedding_dim,
                 max_sequence_length,
                 input_ids_name,
@@ -268,6 +398,8 @@ mod onnx_backend {
                 token_type_ids_name,
                 output_name,
                 output_is_pooled,
+                past_kv_names,
+                kv_shape,
             })
         }
 
@@ -315,7 +447,11 @@ mod onnx_backend {
                 });
             }
             let start = Instant::now();
-            let (input_ids, attention_mask) = self.tokenize(inputs)?;
+            let templated: Vec<String> = inputs
+                .iter()
+                .map(|s| apply_embedding_template(&self.embedding_template, &config.role, s))
+                .collect();
+            let (input_ids, attention_mask) = self.tokenize(&templated)?;
             let (batch_size, seq_len) = (input_ids.shape()[0], input_ids.shape()[1]);
             let prompt_tokens = attention_mask.iter().filter(|m| **m != 0).count() as u32;
 
@@ -336,6 +472,14 @@ mod onnx_backend {
             } else {
                 None
             };
+            // Empty (`past_sequence_length = 0`) KV-cache tensors, one pair
+            // per declared `past_key_values.{i}` layer — see the field docs
+            // on `past_kv_names`/`kv_shape`. Every layer shares the same
+            // shape, so build it once and clone per layer.
+            let empty_past_kv: Option<Array4<f32>> =
+                self.kv_shape.map(|(num_kv_heads, head_dim)| {
+                    Array4::<f32>::zeros((batch_size, num_kv_heads, 0, head_dim))
+                });
 
             // input_ids is consumed by the tensor; attention_mask must be
             // cloned because the pooling step below still needs it.
@@ -354,7 +498,7 @@ mod onnx_backend {
             let (out_shape, out_data): (Vec<i64>, Vec<f32>) = {
                 let mut session = self.session.lock();
                 let mut feed: Vec<(String, ort::session::SessionInputValue<'_>)> =
-                    Vec::with_capacity(4);
+                    Vec::with_capacity(4 + self.past_kv_names.len() * 2);
                 feed.push((self.input_ids_name.clone(), input_ids_tensor.into()));
                 feed.push((
                     self.attention_mask_name.clone(),
@@ -371,6 +515,18 @@ mod onnx_backend {
                         ModelError::InferenceError(format!("ORT tensor token_type_ids: {}", e))
                     })?;
                     feed.push((name.clone(), t.into()));
+                }
+                if let Some(empty) = &empty_past_kv {
+                    for (key_name, value_name) in &self.past_kv_names {
+                        let key_t = Tensor::from_array(empty.clone()).map_err(|e| {
+                            ModelError::InferenceError(format!("ORT tensor {key_name}: {e}"))
+                        })?;
+                        let value_t = Tensor::from_array(empty.clone()).map_err(|e| {
+                            ModelError::InferenceError(format!("ORT tensor {value_name}: {e}"))
+                        })?;
+                        feed.push((key_name.clone(), key_t.into()));
+                        feed.push((value_name.clone(), value_t.into()));
+                    }
                 }
 
                 let outputs = session
@@ -604,6 +760,7 @@ impl TextEmbeddingRuntime {
         onnx_path: impl AsRef<Path>,
         tokenizer_path: impl AsRef<Path>,
         family: TextEncoderFamily,
+        embedding_template: EmbeddingTemplate,
         embedding_dim: usize,
         max_sequence_length: usize,
     ) -> Result<()> {
@@ -611,6 +768,7 @@ impl TextEmbeddingRuntime {
             onnx_path,
             tokenizer_path,
             family,
+            embedding_template,
             embedding_dim,
             max_sequence_length,
         )?;
@@ -653,6 +811,96 @@ impl TextEmbeddingRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruct_query_prefixes_only_the_query_role() {
+        let t = EmbeddingTemplate::InstructQuery {
+            default_task: "retrieve relevant passages".into(),
+        };
+        assert_eq!(
+            apply_embedding_template(&t, &EmbedRole::Query { task: None }, "capital of France"),
+            "Instruct: retrieve relevant passages\nQuery:capital of France"
+        );
+        assert_eq!(
+            apply_embedding_template(
+                &t,
+                &EmbedRole::Query {
+                    task: Some("find code examples".into())
+                },
+                "capital of France"
+            ),
+            "Instruct: find code examples\nQuery:capital of France"
+        );
+        // Document role: no prefix at all, per Qwen3-Embedding's own docs.
+        assert_eq!(
+            apply_embedding_template(
+                &t,
+                &EmbedRole::Document { title: None },
+                "Paris is the capital of France."
+            ),
+            "Paris is the capital of France."
+        );
+    }
+
+    #[test]
+    fn gemma_task_prefixes_both_roles_differently() {
+        let t = EmbeddingTemplate::GemmaTask {
+            default_task: "search result".into(),
+        };
+        assert_eq!(
+            apply_embedding_template(&t, &EmbedRole::Query { task: None }, "capital of France"),
+            "task: search result | query: capital of France"
+        );
+        assert_eq!(
+            apply_embedding_template(
+                &t,
+                &EmbedRole::Document { title: None },
+                "Paris is the capital of France."
+            ),
+            "title: none | text: Paris is the capital of France."
+        );
+        assert_eq!(
+            apply_embedding_template(
+                &t,
+                &EmbedRole::Document {
+                    title: Some("France".into())
+                },
+                "Paris is the capital of France."
+            ),
+            "title: France | text: Paris is the capital of France."
+        );
+    }
+
+    #[test]
+    fn nomic_prefix_differs_by_role() {
+        let t = EmbeddingTemplate::NomicPrefix;
+        assert_eq!(
+            apply_embedding_template(&t, &EmbedRole::Query { task: None }, "x"),
+            "search_query: x"
+        );
+        assert_eq!(
+            apply_embedding_template(&t, &EmbedRole::Document { title: None }, "x"),
+            "search_document: x"
+        );
+    }
+
+    #[test]
+    fn none_template_never_prefixes() {
+        let t = EmbeddingTemplate::None;
+        assert_eq!(
+            apply_embedding_template(&t, &EmbedRole::Query { task: None }, "x"),
+            "x"
+        );
+        assert_eq!(
+            apply_embedding_template(&t, &EmbedRole::Document { title: None }, "x"),
+            "x"
+        );
+    }
+
+    #[test]
+    fn default_role_is_document() {
+        assert_eq!(EmbedRole::default(), EmbedRole::Document { title: None });
+    }
 
     #[test]
     fn runtime_starts_empty() {
@@ -755,6 +1003,7 @@ mod tests {
         let cfg = TextEmbedConfig {
             requested_dim: Some(4),
             normalize: false,
+            role: EmbedRole::default(),
         };
         let r = rt.embed("k", vec!["x".into()], cfg).await.unwrap();
         assert_eq!(r.dim, 4);

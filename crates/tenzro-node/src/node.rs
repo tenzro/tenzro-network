@@ -274,104 +274,6 @@ impl SlashingCallback for StakingSlashingCallback {
     }
 }
 
-/// Bridges the MPC layer's `MpcSlashingCallback` trait to the token layer's
-/// `StakingManager`. Symmetric to [`StakingSlashingCallback`] but driven by
-/// admitted MPC abort evidence (see `tenzro_bridge::mpc::abort::admit_evidence`)
-/// rather than consensus equivocation.
-///
-/// By the time `report_abort` is called, the abort packet has already cleared
-/// witness-quorum and signature checks — the bridge is the authoritative slash
-/// dispatch. A first admitted abort costs [`DOUBLE_SIGN_SLASH_BPS`] of the
-/// accused operator's TNZO stake; an operator with a prior slash on record pays
-/// [`CORRELATED_SLASH_BPS`], mirroring the equivocation escalation.
-///
-/// Operator-DID → on-chain Address resolution flows through
-/// `IdentityRegistry::resolve(&did).map(|i| i.wallet_address)`. Aborts naming a
-/// DID that does not resolve are logged at WARN and dropped (admission cannot
-/// see the registry, so a stale/unknown DID is possible).
-pub struct MpcAbortSlashingCallback {
-    staking: Arc<StakingManager>,
-    identity_registry: Arc<IdentityRegistry>,
-}
-
-impl MpcAbortSlashingCallback {
-    pub fn new(staking: Arc<StakingManager>, identity_registry: Arc<IdentityRegistry>) -> Self {
-        Self {
-            staking,
-            identity_registry,
-        }
-    }
-}
-
-impl tenzro_bridge::mpc::abort::MpcSlashingCallback for MpcAbortSlashingCallback {
-    fn report_abort(&self, evidence: &tenzro_bridge::mpc::abort::MpcAbortEvidence) {
-        let accused_did = &evidence.accused_did;
-
-        let operator_address = match self.identity_registry.resolve(accused_did) {
-            Ok(identity) => identity.wallet_address,
-            Err(e) => {
-                tracing::warn!(
-                    accused_did = %accused_did,
-                    error = %e,
-                    "MPC abort evidence references DID that does not resolve in identity registry; dropping"
-                );
-                return;
-            }
-        };
-
-        let slash_amount = self
-            .staking
-            .get_stake(&operator_address)
-            .map(|info| {
-                let rate_bps = if info.slashing_history.is_empty() {
-                    DOUBLE_SIGN_SLASH_BPS
-                } else {
-                    CORRELATED_SLASH_BPS
-                };
-                info.amount * rate_bps as u128 / 10_000
-            })
-            .unwrap_or(0);
-
-        if slash_amount == 0 {
-            tracing::warn!(
-                accused_did = %accused_did,
-                operator = %operator_address,
-                category = ?evidence.category,
-                "MPC abort admitted but operator has no stake to slash"
-            );
-            return;
-        }
-
-        let reason = format!(
-            "MPC identifiable abort: category={:?} severity={:?} context={}",
-            evidence.category, evidence.severity, evidence.context,
-        );
-
-        match self
-            .staking
-            .slash(&operator_address, slash_amount, reason, Address::default())
-        {
-            Ok(()) => {
-                tracing::warn!(
-                    accused_did = %accused_did,
-                    operator = %operator_address,
-                    slash_amount = slash_amount,
-                    category = ?evidence.category,
-                    "Slashed MPC operator for identifiable abort"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    accused_did = %accused_did,
-                    operator = %operator_address,
-                    error = %e,
-                    "Failed to slash MPC operator for identifiable abort"
-                );
-            }
-        }
-    }
-}
-
 /// Bridges the token layer's `ProposalExecutor` trait to the node's actual
 /// subsystems. Mirrors `StakingSlashingCallback`: the trait lives in
 /// `tenzro-token` so the engine stays free of node-level cross-crate refs;
@@ -1402,6 +1304,148 @@ pub struct HardwareProfile {
     pub hardware_root_sources: Vec<String>,
 }
 
+/// A resource profile bound to a time window.
+///
+/// Extends the single provider-wide window into a schedule of named profiles:
+/// "off-hours" runs the full model set at a high resident ceiling, "workday"
+/// keeps the node for its owner. The profile names an existing tenzro-mode
+/// profile (a resident ceiling + model set) rather than inlining a second copy
+/// of those numbers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResourceWindow {
+    pub name: String,
+    pub start_hour: u8,
+    pub end_hour: u8,
+    /// Per-window timezone: two audiences live in two zones, so the window a
+    /// user schedules is in the audience's clock, not the node's.
+    pub timezone: String,
+    pub days_of_week: [bool; 7],
+    /// Resident ceiling for this window, in GiB. Applied HOT via
+    /// MemoryBudget::set_resident_ceiling — no node restart.
+    pub resident_ceiling_gb: u32,
+    /// Models to hold resident during this window.
+    pub models: Vec<String>,
+}
+
+impl ResourceWindow {
+    /// Whether `hour` on `weekday` (0=Mon) falls in this window.
+    ///
+    /// Handles a window that wraps midnight (start > end), e.g. 17:00-09:00.
+    ///
+    /// Private: both arguments must already be in THIS window's timezone, and
+    /// only [`Self::contains_at`] knows how to produce them. A public version
+    /// invited callers to pass a UTC clock, which is the bug this replaced.
+    fn contains(&self, weekday: usize, hour: u8) -> bool {
+        if !self.days_of_week[weekday] {
+            return false;
+        }
+        if self.start_hour <= self.end_hour {
+            hour >= self.start_hour && hour < self.end_hour
+        } else {
+            hour >= self.start_hour || hour < self.end_hour
+        }
+    }
+
+    /// The IANA zone this window is scheduled in, or UTC if the string does not
+    /// name one.
+    ///
+    /// An unparseable zone falls back to UTC rather than erroring: a typo in
+    /// one window must not take the scheduler down, and UTC is the value the
+    /// field defaults to anyway.
+    pub fn tz(&self) -> chrono_tz::Tz {
+        self.timezone
+            .parse::<chrono_tz::Tz>()
+            .unwrap_or(chrono_tz::UTC)
+    }
+
+    /// Whether `instant` falls in this window, evaluated in the window's OWN
+    /// timezone.
+    ///
+    /// This is the correct entry point. `timezone` was previously stored and
+    /// serialized but never applied — every window was compared against a UTC
+    /// clock, so a `Europe/Berlin` window ran one hour early in winter and two
+    /// in summer. A fixed offset cannot express that; it needs the zone.
+    pub fn contains_at(&self, instant: chrono::DateTime<chrono::Utc>) -> bool {
+        use chrono::{Datelike, Timelike};
+        let local = instant.with_timezone(&self.tz());
+        let weekday = local.weekday().num_days_from_monday() as usize;
+        self.contains(weekday, local.hour() as u8)
+    }
+
+    /// When this window next ends, at or after `instant`, in UTC.
+    ///
+    /// Returns `None` if the window is not active at `instant`. Consumers use
+    /// this to plan around a switch — draining in-flight work before the models
+    /// are unloaded — rather than discovering the change through failures.
+    ///
+    /// Resolved by walking forward hour by hour (max 8 days, which covers any
+    /// weekly pattern including a wrap-midnight window on a single active day)
+    /// and converting back through the zone each step, so a DST transition
+    /// inside the window is handled by the same conversion as everything else.
+    pub fn ends_after(
+        &self,
+        instant: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::Timelike;
+        if !self.contains_at(instant) {
+            return None;
+        }
+        let mut probe = instant;
+        for _ in 0..(24 * 8) {
+            let next = probe + chrono::Duration::hours(1);
+            if !self.contains_at(next) {
+                // Truncate to the hour boundary: the window ends on the hour,
+                // not at the arbitrary minute the probe happens to land on.
+                return next
+                    .with_minute(0)
+                    .and_then(|t| t.with_second(0))
+                    .and_then(|t| t.with_nanosecond(0));
+            }
+            probe = next;
+        }
+        None
+    }
+
+    /// When this window next starts, strictly after `instant`, in UTC.
+    ///
+    /// `None` if it never starts within the next 8 days (e.g. `days_of_week`
+    /// is all-false, which is a validly-expressible "never").
+    pub fn starts_after(
+        &self,
+        instant: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::Timelike;
+        let mut probe = instant;
+        let mut was_in = self.contains_at(instant);
+        for _ in 0..(24 * 8) {
+            probe += chrono::Duration::hours(1);
+            let now_in = self.contains_at(probe);
+            if now_in && !was_in {
+                return probe
+                    .with_minute(0)
+                    .and_then(|t| t.with_second(0))
+                    .and_then(|t| t.with_nanosecond(0));
+            }
+            was_in = now_in;
+        }
+        None
+    }
+}
+
+/// What a reconcile pass should apply, computed from the active window.
+///
+/// Pure data — the loop that owns MemoryBudget and the model registry acts on
+/// it, so the decision is testable without a running node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleAction {
+    /// The resident ceiling to set, in bytes. None = leave the base default.
+    pub resident_ceiling_bytes: Option<u64>,
+    /// Models that should be resident now.
+    pub want_models: Vec<String>,
+    /// The active window's name, for logging. None = no window active.
+    pub active_window: Option<String>,
+}
+
 /// Provider scheduling configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSchedule {
@@ -1410,6 +1454,123 @@ pub struct ProviderSchedule {
     pub end_hour: u8,
     pub timezone: String,
     pub days_of_week: [bool; 7], // Mon-Sun
+    /// Resource/model windows. Empty = today's behaviour (availability only).
+    #[serde(default)]
+    pub windows: Vec<ResourceWindow>,
+}
+
+/// What a model declares it needs, across every modality catalog.
+///
+/// Returns `None` for an id no catalog knows, which the caller reports rather
+/// than treating as zero — a typo that silently contributed nothing would make
+/// an over-committed window look like it fits.
+fn declared_min_ram_gb(id: &str) -> Option<u32> {
+    if let Some(e) = tenzro_model::catalog::get_model_by_id(id) {
+        return Some(e.min_ram_gb);
+    }
+    if let Some(e) = tenzro_model::catalog::get_vision_model_by_id(id) {
+        return Some(e.min_ram_gb);
+    }
+    if let Some(e) = tenzro_model::catalog::get_segmentation_model_by_id(id) {
+        return Some(e.min_ram_gb);
+    }
+    // The embedding and forecast catalogs declare no RAM figure. They are
+    // recognised so a real id is never reported as a typo, and counted as 0
+    // because inventing a number would corrupt the very total this check
+    // exists to protect. Both are sub-gigabyte ONNX models, so the error is
+    // small and in the safe direction — it can only make a window look
+    // slightly emptier than it is, never fuller.
+    if tenzro_model::catalog::get_text_embedding_model_by_id(id).is_some()
+        || tenzro_model::catalog::get_forecast_model_by_id(id).is_some()
+    {
+        return Some(0);
+    }
+    None
+}
+
+/// A window that asks for more than it is allowed to hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowOvercommit {
+    pub window: String,
+    /// What the members need together, in GiB.
+    pub required_gb: u64,
+    /// What the window permits.
+    pub ceiling_gb: u32,
+    /// The members counted, so an operator can see which to drop.
+    pub members: Vec<(String, u32)>,
+    /// Members named in the window that the catalog does not know. Reported
+    /// rather than ignored: a typo silently reduces the total and would make
+    /// an over-committed window look like it fits.
+    pub unknown: Vec<String>,
+}
+
+impl std::fmt::Display for WindowOvercommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "window '{}' holds {} models needing {} GiB together, but its \
+             resident ceiling is {} GiB",
+            self.window,
+            self.members.len(),
+            self.required_gb,
+            self.ceiling_gb
+        )?;
+        if !self.unknown.is_empty() {
+            write!(f, " (unrecognised: {})", self.unknown.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+impl ProviderSchedule {
+    /// Refuse a schedule the machine could not honour.
+    ///
+    /// A window names models and a ceiling to hold them in. Nothing previously
+    /// compared the two, so a window whose members could never fit was accepted
+    /// at configuration time and discovered at the window boundary — as a
+    /// stall, on a machine that by then had a stack half-loaded. The failure
+    /// was hours away from the edit that caused it and looked nothing like it.
+    ///
+    /// Checking here turns that into an error the operator sees while still
+    /// looking at the schedule they typed.
+    ///
+    /// Deliberately arithmetic on declared sizes, not a live memory reading:
+    /// this answers "is this schedule self-consistent", which is a property of
+    /// the configuration and true or false regardless of what the machine is
+    /// doing right now. Whether the machine can honour it *at this moment* is a
+    /// different question, asked at load time against measured ground.
+    pub fn overcommitted_windows(&self) -> Vec<WindowOvercommit> {
+        self.windows
+            .iter()
+            .filter(|w| w.resident_ceiling_gb > 0 && !w.models.is_empty())
+            .filter_map(|w| {
+                let mut members = Vec::new();
+                let mut unknown = Vec::new();
+                for id in &w.models {
+                    // A stack mixes modalities — the Spark's serves a text
+                    // model, a vision-language model, an embedding model and a
+                    // forecaster together — so every catalog is consulted
+                    // rather than only the text one.
+                    match declared_min_ram_gb(id) {
+                        Some(gb) => members.push((id.clone(), gb)),
+                        None => unknown.push(id.clone()),
+                    }
+                }
+                let required_gb: u64 = members.iter().map(|(_, gb)| *gb as u64).sum();
+                if required_gb > w.resident_ceiling_gb as u64 {
+                    Some(WindowOvercommit {
+                        window: w.name.clone(),
+                        required_gb,
+                        ceiling_gb: w.resident_ceiling_gb,
+                        members,
+                        unknown,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 impl Default for ProviderSchedule {
@@ -1420,6 +1581,48 @@ impl Default for ProviderSchedule {
             end_hour: 24,
             timezone: "UTC".to_string(),
             days_of_week: [true; 7],
+            windows: Vec::new(),
+        }
+    }
+}
+
+impl ProviderSchedule {
+    /// The first window active at `instant`, each evaluated in its OWN
+    /// timezone. Ordered; first match wins.
+    pub fn active_window_at(
+        &self,
+        instant: chrono::DateTime<chrono::Utc>,
+    ) -> Option<&ResourceWindow> {
+        self.windows.iter().find(|w| w.contains_at(instant))
+    }
+
+    /// The window that starts soonest after `instant`, with its start time.
+    ///
+    /// Ties break on window order, matching `active_window_at`'s first-match
+    /// rule, so "what runs next" agrees with what will actually be selected.
+    pub fn next_window_at(
+        &self,
+        instant: chrono::DateTime<chrono::Utc>,
+    ) -> Option<(&ResourceWindow, chrono::DateTime<chrono::Utc>)> {
+        self.windows
+            .iter()
+            .filter_map(|w| w.starts_after(instant).map(|t| (w, t)))
+            .min_by_key(|(_, t)| *t)
+    }
+
+    /// What to apply at `instant`, resolving windows in their own timezones.
+    pub fn action_now(&self, instant: chrono::DateTime<chrono::Utc>) -> ScheduleAction {
+        match self.active_window_at(instant) {
+            Some(w) => ScheduleAction {
+                resident_ceiling_bytes: Some(u64::from(w.resident_ceiling_gb) * 1024 * 1024 * 1024),
+                want_models: w.models.clone(),
+                active_window: Some(w.name.clone()),
+            },
+            None => ScheduleAction {
+                resident_ceiling_bytes: None,
+                want_models: Vec::new(),
+                active_window: None,
+            },
         }
     }
 }
@@ -2022,11 +2225,6 @@ pub struct TenzroNode {
     /// that scores no-shows as `SlaResult::Missed` past `deadline_ms`.
     /// Empty on non-validator nodes.
     sla_outstanding_probes: Arc<DashMap<String, tenzro_model::SlaProbe>>,
-    /// In-flight + completed DKLS23 DKG sessions keyed by hex instance id.
-    /// Populated by `tenzro_mpcKeygen`, polled by `tenzro_mpcKeygenStatus`.
-    /// Orchestration state only — the durable output of a successful run is
-    /// the sealed `KeyshareEnvelope` in `CF_MPC_KEYSHARES`.
-    mpc_keygen_sessions: Arc<crate::mpc_keygen::KeygenSessionRegistry>,
     /// Workflow runtime — typed mirror of the privileged-VM workflow
     /// selectors (`0x01000040`–`0x0100004B`). Bundles `WorkflowManager`
     /// (workflows / obligations / approvals / lifecycle) and
@@ -2869,6 +3067,10 @@ pub struct TenzroNode {
 
     // Provider state
     pub provider_schedule: Arc<RwLock<ProviderSchedule>>,
+    /// Territorial licence enforcement. Consulted only for models whose licence
+    /// carries a territorial term that reaches outputs — seven of the eight
+    /// custom licences carry none, so the common path never touches it.
+    pub territory: Arc<RwLock<crate::territory::TerritoryEnforcer>>,
     pub provider_pricing: Arc<RwLock<ProviderPricing>>,
     pub model_downloads: Arc<DashMap<String, ModelDownloadStatus>>,
     /// Background MoE expert-extraction jobs keyed by job id
@@ -3091,7 +3293,6 @@ impl TenzroNode {
             challenge_manager: None,
             sla_manager: None,
             sla_outstanding_probes: Arc::new(DashMap::new()),
-            mpc_keygen_sessions: Arc::new(DashMap::new()),
             workflow_runtime: None,
             validator_registry: None,
             aa_validator_registry: None,
@@ -3272,6 +3473,7 @@ impl TenzroNode {
             chain_tip: Arc::new(AtomicU64::new(0)),
             peer_status,
             provider_schedule: Arc::new(RwLock::new(ProviderSchedule::default())),
+            territory: Arc::new(RwLock::new(crate::territory::TerritoryEnforcer::default())),
             provider_pricing: Arc::new(RwLock::new(provider_pricing)),
             model_downloads: Arc::new(DashMap::new()),
             moe_prepare_jobs: Arc::new(DashMap::new()),
@@ -4035,9 +4237,8 @@ impl TenzroNode {
             None => return Ok(()),
         };
         let (balance, nonce) = {
-            let state = tenzro_vm::StateAdapter::with_storage(
-                storage as Arc<dyn tenzro_storage::KvStore>,
-            );
+            let state =
+                tenzro_vm::StateAdapter::with_storage(storage as Arc<dyn tenzro_storage::KvStore>);
             use tenzro_vm::traits::VmState as _;
             (
                 state.get_balance(address.as_bytes()),
@@ -4090,7 +4291,9 @@ impl TenzroNode {
         match self.consensus() {
             Some(consensus) => consensus
                 .submit_transaction(signed_tx.clone())
-                .map_err(|e| NodeError::Config(format!("self-register rejected by mempool: {}", e)))?,
+                .map_err(|e| {
+                    NodeError::Config(format!("self-register rejected by mempool: {}", e))
+                })?,
             None => return Ok(()),
         }
         if let Some(sender) = self.event_sender() {
@@ -4115,7 +4318,7 @@ impl TenzroNode {
     /// record — DID, controller pubkey, wallet bindings, verifying keys,
     /// metadata — signs it with the node's system hybrid signer, and submits
     /// it through the same consensus mempool path `eth_sendRawTransaction`
-    /// uses (then gossips). Key MATERIAL (FROST shares / sealed keys) is never
+    /// uses (then gossips). Key MATERIAL (TEE-sealed / hardware-held signing keys) is never
     /// carried and stays node-local by design.
     ///
     /// The VM enforces DID uniqueness against consensus state; every node
@@ -4184,7 +4387,7 @@ impl TenzroNode {
                 NodeError::Config("storage not wired; cannot replicate identity".to_string())
             })?;
             let state = tenzro_vm::StateAdapter::with_storage(
-                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>
             );
             use tenzro_vm::traits::VmState as _;
             state.get_nonce(from_addr.as_bytes())
@@ -4224,9 +4427,11 @@ impl TenzroNode {
         let hash_str = format!("{}", in_block_hash);
 
         match self.consensus() {
-            Some(consensus) => consensus.submit_transaction(signed_tx.clone()).map_err(|e| {
-                NodeError::Config(format!("identity-register rejected by mempool: {}", e))
-            })?,
+            Some(consensus) => consensus
+                .submit_transaction(signed_tx.clone())
+                .map_err(|e| {
+                    NodeError::Config(format!("identity-register rejected by mempool: {}", e))
+                })?,
             None => {
                 return Err(NodeError::Config(
                     "consensus not wired; cannot replicate identity registration".to_string(),
@@ -4856,14 +5061,15 @@ impl TenzroNode {
         if self.config.roles.is_validator() {
             match crate::keygen::load_validator_keypair(&self.config.data_dir) {
                 Ok(validator_keypair) => {
-                    let p2p_keypair =
-                        tenzro_network::node_identity_keypair(&network_config.data_dir)
-                            .map_err(|e| {
-                                NodeError::Other(format!(
-                                    "Failed to load p2p keypair for peer binding: {}",
-                                    e
-                                ))
-                            })?;
+                    let p2p_keypair = tenzro_network::node_identity_keypair(
+                        &network_config.data_dir,
+                    )
+                    .map_err(|e| {
+                        NodeError::Other(format!(
+                            "Failed to load p2p keypair for peer binding: {}",
+                            e
+                        ))
+                    })?;
                     let local_peer_id = libp2p::PeerId::from(p2p_keypair.public());
                     let validator_pubkey = validator_keypair.public_key().to_bytes();
                     let signer =
@@ -4983,7 +5189,10 @@ impl TenzroNode {
             .as_ref()
             .map(|g| g.chain_id)
             .unwrap_or(vm_config.chain_id);
-        info!(chain_id = vm_config.chain_id, "VM chain id bound to genesis");
+        info!(
+            chain_id = vm_config.chain_id,
+            "VM chain id bound to genesis"
+        );
 
         // If Canton is not enabled, remove Daml from enabled VMs
         if !self.config.canton.enabled {
@@ -5682,6 +5891,44 @@ impl TenzroNode {
         }
 
         let wallet_service = Arc::new(TenzroWalletService::with_config(wallet_config)?);
+
+        // Re-bind the TPM signer to every persisted wallet that holds this
+        // machine's validator key.
+        //
+        // A signer is not part of a wallet's stored state — it cannot be,
+        // since the private half never leaves the chip — so a wallet reloaded
+        // from the keystore comes back signer-less and fails with "no signer
+        // bound to wallet …". Binding only at creation was invisible while
+        // wallets were ephemeral, because every wallet was necessarily
+        // freshly created; making them persist is exactly what exposed it.
+        //
+        // Only same-key wallets are bound, so a wallet for some other key
+        // stays watch-only rather than being handed this machine's validator.
+        if let Ok(tpm_signer) =
+            crate::tpm_validator_wallet_signer::TpmValidatorWalletSigner::from_data_dir(
+                &self.config.data_dir,
+            )
+        {
+            use tenzro_wallet::WalletService;
+            let validator_pubkey = tpm_signer.validator_public_key().to_vec();
+            let signer: std::sync::Arc<dyn tenzro_wallet::signing::HybridSigner> =
+                std::sync::Arc::new(tpm_signer);
+            let mut bound = 0usize;
+            if let Ok(ids) = wallet_service.list_wallets().await {
+                for id in ids {
+                    if let Ok(Some(w)) = wallet_service.get_wallet(&id).await
+                        && w.public_key.as_bytes() == validator_pubkey.as_slice()
+                    {
+                        wallet_service.set_hybrid_signer(id, signer.clone());
+                        bound += 1;
+                    }
+                }
+            }
+            if bound > 0 {
+                info!("Re-bound the TPM validator signer to {bound} persisted wallet(s)");
+            }
+        }
+
         self.wallet_service = Some(wallet_service);
         self.health_monitor.mark_healthy("wallet");
 
@@ -7684,8 +7931,10 @@ impl TenzroNode {
                 }
             }
             if !task_models.is_empty() {
-                let mut pairs: Vec<String> =
-                    task_models.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                let mut pairs: Vec<String> = task_models
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
                 pairs.sort();
                 info!("Cortex task-model overrides active: {}", pairs.join(", "));
             }
@@ -7733,6 +7982,14 @@ impl TenzroNode {
                 .as_ref()
                 .and_then(|s| announce_signer_wallet_address(s.as_ref()))
                 .unwrap_or_else(Address::zero);
+            // These agents are machines running on THIS node, so the device key
+            // they bind to is this node's own announce key — held locally, not
+            // minted for them. Without one the node cannot announce anyway, so
+            // there is nothing to register.
+            let node_device_key = self
+                .announce_signer
+                .as_ref()
+                .map(|s| s.public_key().as_bytes().to_vec());
             let tenzroclaw_caps = vec![
                 Capability::NaturalLanguageProcessing {
                     languages: vec!["en".to_string()],
@@ -7749,13 +8006,16 @@ impl TenzroNode {
                 },
                 Capability::MultiAgentCoordination,
             ];
-            if let Some(ref ar) = self.agent_runtime {
+            if let (Some(ar), Some(node_device_key)) =
+                (self.agent_runtime.as_ref(), node_device_key)
+            {
                 let ar1 = ar.clone();
                 let caps1 = tenzroclaw_caps.clone();
                 let addr1 = agent_owner_addr;
+                let dk1 = node_device_key.clone();
                 tokio::spawn(async move {
                     match ar1
-                        .register_agent("TenzroClaw-1".to_string(), addr1, caps1, false, 1)
+                        .register_agent("TenzroClaw-1".to_string(), addr1, dk1, caps1, false, 1)
                         .await
                     {
                         Ok(a) => info!(
@@ -7773,11 +8033,13 @@ impl TenzroNode {
                 });
                 let ar2 = ar.clone();
                 let addr2 = agent_owner_addr;
+                let dk2 = node_device_key;
                 tokio::spawn(async move {
                     match ar2
                         .register_agent(
                             "TenzroClaw-2".to_string(),
                             addr2,
+                            dk2,
                             tenzroclaw_caps,
                             false,
                             2,
@@ -8159,7 +8421,8 @@ impl TenzroNode {
                     let mut t = ToolDefinition::new(
                         "web-search-mcp".to_string(),
                         "1.0.0".to_string(),
-                        ToolTransportMode::Mcp,                        "builtin://web-search-mcp".to_string(),
+                        ToolTransportMode::Mcp,
+                        "builtin://web-search-mcp".to_string(),
                         "MCP server providing web search capabilities".to_string(),
                         "search".to_string(),
                     );
@@ -8185,7 +8448,8 @@ impl TenzroNode {
                     let mut t = ToolDefinition::new(
                         "file-manager".to_string(),
                         "1.0.0".to_string(),
-                        ToolTransportMode::Native,                        "builtin://file-manager".to_string(),
+                        ToolTransportMode::Native,
+                        "builtin://file-manager".to_string(),
                         "Read, write, and manage files in agent workspaces".to_string(),
                         "storage".to_string(),
                     );
@@ -8226,7 +8490,8 @@ impl TenzroNode {
                     let mut t = ToolDefinition::new(
                         "identity-register".to_string(),
                         "1.0.0".to_string(),
-                        ToolTransportMode::Native,                        "builtin://identity-register".to_string(),
+                        ToolTransportMode::Native,
+                        "builtin://identity-register".to_string(),
                         "Register a human or machine identity under TDIP and provision its wallet"
                             .to_string(),
                         "identity".to_string(),
@@ -9102,7 +9367,112 @@ impl TenzroNode {
 
         self.health_monitor.mark_healthy("ai");
 
+        // Start the scheduled-residency loop now that the model runtime exists.
+        self.spawn_residency_schedule_loop();
+
         Ok(())
+    }
+
+    fn spawn_residency_schedule_loop(&self) {
+        let schedule = self.provider_schedule.clone();
+        let served = self.served_models.clone();
+        let runtime = match &self.model_runtime {
+            Some(rt) => rt.clone(),
+            // No runtime means this node does not serve models — nothing to schedule.
+            None => return,
+        };
+        let models_dir = self.config.effective_models_dir();
+
+        tokio::spawn(async move {
+            // Every minute: fine enough that a window boundary is honoured promptly,
+            // coarse enough to be free. The ceiling change and model reconcile are
+            // idempotent, so re-running an already-applied window is a no-op.
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_window: Option<String> = None;
+
+            loop {
+                ticker.tick().await;
+
+                // Resolve each window in its OWN timezone. This used to pass a
+                // UTC weekday/hour, so a `Europe/Berlin` window switched one
+                // hour early in winter and two in summer — the `timezone` field
+                // was stored and serialized but never actually applied.
+                let action = schedule.read().action_now(chrono::Utc::now());
+
+                // Only act when the active window changed, so we do not thrash the
+                // runtime every minute. The action is still recomputed each tick so
+                // a schedule edit or a wrap-midnight boundary is picked up.
+                if action.active_window == last_window {
+                    continue;
+                }
+                tracing::info!(
+                    from = ?last_window,
+                    to = ?action.active_window,
+                    "residency schedule: window changed",
+                );
+                last_window = action.active_window.clone();
+
+                // 1. Move the resident ceiling HOT. None restores the base default.
+                if let Err(e) = tenzro_model::memory_budget::global()
+                    .set_resident_ceiling(action.resident_ceiling_bytes)
+                {
+                    tracing::warn!(error = %format!("{e:?}"), "residency schedule: refused ceiling change");
+                    // Do not proceed to serve models under a ceiling we could not set.
+                    continue;
+                }
+
+                // 2. Reconcile the resident set: serve what the window wants, unload
+                //    what it no longer does. When no window is active (want empty),
+                //    nothing is force-unloaded — the base default ceiling governs and
+                //    idle models age out normally; a scheduled window is additive
+                //    intent, not a demand to strip the node bare.
+                let want: std::collections::BTreeSet<String> =
+                    action.want_models.iter().cloned().collect();
+
+                // Serve the missing ones.
+                for model_id in &want {
+                    if runtime.is_loaded(model_id) {
+                        continue;
+                    }
+                    let gguf = models_dir.join(format!("{model_id}.gguf"));
+                    if !gguf.exists() {
+                        tracing::warn!(%model_id, "residency schedule: model not on disk, skipping");
+                        continue;
+                    }
+                    match runtime.load_model(model_id, &gguf).await {
+                        Ok(()) => {
+                            served.insert(model_id.clone(), Default::default());
+                            tracing::info!(%model_id, "residency schedule: served for the active window");
+                        }
+                        Err(e) => {
+                            tracing::warn!(%model_id, error = %e, "residency schedule: load failed")
+                        }
+                    }
+                }
+
+                // Unload models this schedule previously pinned that the new window
+                // does not want. Only ones the SCHEDULE served (tracked via served)
+                // — never touch a model an operator loaded by hand, which is why we
+                // reconcile against `want`, not against every loaded model.
+                if action.active_window.is_some() {
+                    let loaded_by_schedule: Vec<String> = served
+                        .iter()
+                        .map(|e| e.key().clone())
+                        .filter(|m| !want.contains(m))
+                        .collect();
+                    for model_id in loaded_by_schedule {
+                        if let Err(e) = runtime.unload_model(&model_id).await {
+                            tracing::warn!(%model_id, error = %e, "residency schedule: unload failed");
+                        } else {
+                            served.remove(&model_id);
+                            tracing::info!(%model_id, "residency schedule: unloaded, not in the active window");
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("residency schedule loop spawned (60s tick)");
     }
 
     /// Auto-register Cortex (recurrent-depth) workers declared in `NodeConfig.cortex.workers`.
@@ -9329,7 +9699,7 @@ impl TenzroNode {
 
     /// Builds an `EvmTransactionSigner` from a [`BridgeAdapterConfig`],
     /// dispatching in priority order:
-    ///   1. `mpc_threshold` → DKLS23 t-of-n threshold ECDSA
+    ///   1. `tee_sealed` → TEE/secure-element-sealed single key
     ///   2. `tee_sealed`    → TEE-derived single-key
     ///   3. raw / env       → in-memory secp256k1 key (dev only)
     ///
@@ -9344,11 +9714,6 @@ impl TenzroNode {
         adapter_name: &str,
         cfg: &crate::config::BridgeAdapterConfig,
     ) -> Option<EvmTransactionSigner> {
-        if let Some(mpc_cfg) = cfg.mpc_threshold.as_ref() {
-            return self
-                .build_threshold_bridge_signer(adapter_name, cfg, mpc_cfg)
-                .await;
-        }
         if cfg.tee_sealed {
             let label = cfg.tee_label_bytes();
             match EvmTransactionSigner::with_tee_sealed(&label, cfg.chain_id, cfg.rpc_url.clone())
@@ -9410,238 +9775,6 @@ impl TenzroNode {
                 }
             }
         }
-    }
-
-    /// Build an `EvmTransactionSigner` backed by a node-layer
-    /// `NodeThresholdSigner` (DKLS23 t-of-n threshold ECDSA).
-    ///
-    /// Wires together — for this single adapter — the four dependencies the
-    /// bridge crate intentionally does NOT depend on directly:
-    /// `NodeKeyshareStore` (RocksDB), `TeeKeyshareSealer` (TEE-rooted in
-    /// production, fails closed off-hardware), `NetworkMpcSurface` (libp2p
-    /// `/tenzro/mpc/v1` request_response), and `BlockStoreEntropyProvider`
-    /// (HotStuff-2 finalized block hash for grinding-resistant committee
-    /// draw).
-    ///
-    /// Returns `None` on any wiring failure — the adapter then runs in
-    /// quote-only mode. Per `feedback_no_simulation_in_testnet`, the
-    /// sealer construction errors loudly (no fallback to an in-memory
-    /// keyshare sealer in production).
-    async fn build_threshold_bridge_signer(
-        &self,
-        adapter_name: &str,
-        cfg: &crate::config::BridgeAdapterConfig,
-        mpc_cfg: &crate::config::MpcThresholdConfig,
-    ) -> Option<EvmTransactionSigner> {
-        use tenzro_bridge::mpc::sealing::TeeKeyshareSealer;
-        use tenzro_bridge::mpc::setup::{MpcCurve, MpcParameters};
-        use tenzro_bridge::mpc::store::GroupId;
-
-        // -------- Prerequisite: storage + network must be initialized -----
-        let storage = match self.storage.as_ref() {
-            Some(s) => s.clone(),
-            None => {
-                warn!(
-                    "{} threshold signer requires storage to be initialized — adapter will be \
-                     quote-only",
-                    adapter_name
-                );
-                return None;
-            }
-        };
-        let network = match self.network.as_ref() {
-            Some(n) => n.clone(),
-            None => {
-                warn!(
-                    "{} threshold signer requires network to be initialized — adapter will be \
-                     quote-only",
-                    adapter_name
-                );
-                return None;
-            }
-        };
-
-        // -------- Parse hex-encoded group identifier ----------------------
-        let group_id_bytes = match hex::decode(&mpc_cfg.group_id_hex) {
-            Ok(b) if b.len() == 32 => b,
-            Ok(b) => {
-                warn!(
-                    "{} threshold signer: group_id_hex decoded to {} bytes, expected 32 — \
-                     adapter will be quote-only",
-                    adapter_name,
-                    b.len()
-                );
-                return None;
-            }
-            Err(e) => {
-                warn!(
-                    "{} threshold signer: group_id_hex decode failed: {} — adapter will be \
-                     quote-only",
-                    adapter_name, e
-                );
-                return None;
-            }
-        };
-        let mut group_id_arr = [0u8; 32];
-        group_id_arr.copy_from_slice(&group_id_bytes);
-        let group_id = GroupId(group_id_arr);
-
-        // -------- Parse hex-encoded group public key ----------------------
-        let group_public_key_compressed = match hex::decode(&mpc_cfg.group_public_key_hex) {
-            Ok(b) if b.len() == 33 => b,
-            Ok(b) => {
-                warn!(
-                    "{} threshold signer: group_public_key_hex decoded to {} bytes, \
-                         expected 33 (SEC1-compressed) — adapter will be quote-only",
-                    adapter_name,
-                    b.len()
-                );
-                return None;
-            }
-            Err(e) => {
-                warn!(
-                    "{} threshold signer: group_public_key_hex decode failed: {} — adapter \
-                         will be quote-only",
-                    adapter_name, e
-                );
-                return None;
-            }
-        };
-
-        // -------- Validate parameters + group membership ------------------
-        let parameters = match MpcParameters::new(
-            MpcCurve::Secp256k1,
-            mpc_cfg.threshold,
-            mpc_cfg.total_parties,
-        ) {
-            Some(p) => p,
-            None => {
-                warn!(
-                    "{} threshold signer: invalid MpcParameters threshold={} total_parties={} \
-                     (need 2 <= t <= n <= 32) — adapter will be quote-only",
-                    adapter_name, mpc_cfg.threshold, mpc_cfg.total_parties
-                );
-                return None;
-            }
-        };
-        if mpc_cfg.group_members.len() != mpc_cfg.total_parties as usize {
-            warn!(
-                "{} threshold signer: group_members.len()={} but total_parties={} — adapter \
-                 will be quote-only",
-                adapter_name,
-                mpc_cfg.group_members.len(),
-                mpc_cfg.total_parties
-            );
-            return None;
-        }
-        if mpc_cfg.local_did.is_empty() {
-            warn!(
-                "{} threshold signer: local_did is empty — adapter will be quote-only",
-                adapter_name
-            );
-            return None;
-        }
-        if !mpc_cfg
-            .group_members
-            .iter()
-            .any(|d| d == &mpc_cfg.local_did)
-        {
-            warn!(
-                "{} threshold signer: local_did={} is not a member of group_members — adapter \
-                 will be quote-only",
-                adapter_name, mpc_cfg.local_did
-            );
-            return None;
-        }
-
-        // -------- Build the four runtime dependencies ---------------------
-        let keyshare_store = std::sync::Arc::new(
-            crate::mpc_keyshare_store::NodeKeyshareStore::new(storage.clone()),
-        );
-
-        // Production-posture sealer: TEE-rooted IKM. Fails closed
-        // off-hardware (no-simulation policy).
-        let sealer: std::sync::Arc<dyn tenzro_bridge::mpc::sealing::KeyshareSealer> =
-            match TeeKeyshareSealer::derive_auto().await {
-                Ok(s) => std::sync::Arc::new(s),
-                Err(e) => {
-                    warn!(
-                        "{} threshold signer: TEE keyshare sealer unavailable: {} — adapter \
-                         will be quote-only (no raw-IKM fallback in production)",
-                        adapter_name, e
-                    );
-                    return None;
-                }
-            };
-
-        let surface: std::sync::Arc<dyn tenzro_bridge::mpc::libp2p_relay::MpcLibp2pSurface> =
-            match crate::mpc_libp2p_adapter::NetworkMpcSurface::new(network).await {
-                Ok(s) => std::sync::Arc::new(s),
-                Err(e) => {
-                    warn!(
-                        "{} threshold signer: network MPC surface subscription failed: {} — \
-                     adapter will be quote-only",
-                        adapter_name, e
-                    );
-                    return None;
-                }
-            };
-
-        let block_store = match tenzro_storage::block_store::BlockStoreImpl::new(storage) {
-            Ok(bs) => std::sync::Arc::new(bs),
-            Err(e) => {
-                warn!(
-                    "{} threshold signer: block store construction failed: {} — adapter will \
-                     be quote-only",
-                    adapter_name, e
-                );
-                return None;
-            }
-        };
-        let chain_entropy: std::sync::Arc<dyn crate::mpc_threshold_signer::ChainEntropyProvider> =
-            std::sync::Arc::new(crate::mpc_threshold_signer::BlockStoreEntropyProvider::new(
-                block_store,
-            ));
-
-        // -------- Construct + dispatch ------------------------------------
-        let signer = match crate::mpc_threshold_signer::NodeThresholdSigner::new(
-            group_id,
-            mpc_cfg.local_did.clone(),
-            mpc_cfg.group_members.clone(),
-            group_public_key_compressed,
-            parameters,
-            keyshare_store,
-            sealer,
-            surface,
-            chain_entropy,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(
-                    "{} threshold signer construction failed: {} — adapter will be quote-only",
-                    adapter_name, e
-                );
-                return None;
-            }
-        };
-
-        let sender_address = signer.cached_sender_address();
-        let evm_signer = EvmTransactionSigner::with_threshold_signer(
-            std::sync::Arc::new(signer),
-            cfg.chain_id,
-            cfg.rpc_url.clone(),
-        );
-        info!(
-            "{} signer configured (DKLS23 threshold {}-of-{}): chain_id={}, sender=0x{}, \
-             group_id={}",
-            adapter_name,
-            mpc_cfg.threshold,
-            mpc_cfg.total_parties,
-            cfg.chain_id,
-            hex::encode(sender_address),
-            group_id.to_hex()
-        );
-        Some(evm_signer)
     }
 
     async fn init_bridge(&mut self) -> Result<()> {
@@ -10284,7 +10417,7 @@ impl TenzroNode {
             let binder = Arc::new(tenzro_identity::WalletBinder::from_service(wallet_service));
             registry = registry.with_wallet_binder_arc(binder);
             info!(
-                "Wallet binder wired: identity registrations provision MPC wallets via the shared WalletService"
+                "Wallet binder wired: identity registrations provision permissionless wallets via the shared WalletService"
             );
         } else {
             warn!(
@@ -11720,9 +11853,9 @@ impl TenzroNode {
             // `transport_str` here is a &str chosen just above from the tool's
             // shape; parse it once into the typed transport rather than
             // carrying the string any further.
-            let transport = serde_json::from_value::<ToolTransportMode>(
-                serde_json::Value::String(transport_str.to_string()),
-            )
+            let transport = serde_json::from_value::<ToolTransportMode>(serde_json::Value::String(
+                transport_str.to_string(),
+            ))
             .unwrap_or(ToolTransportMode::Mcp);
             let mut tool = tenzro_types::ToolDefinition::new(
                 name.to_string(),
@@ -14989,12 +15122,6 @@ impl TenzroNode {
         &self.sla_outstanding_probes
     }
 
-    /// Returns the DKG session registry. Always present; populated by
-    /// `tenzro_mpcKeygen` and polled by `tenzro_mpcKeygenStatus`.
-    pub fn mpc_keygen_sessions(&self) -> &Arc<crate::mpc_keygen::KeygenSessionRegistry> {
-        &self.mpc_keygen_sessions
-    }
-
     /// Returns the WorkflowRuntime if initialized — typed mirror of the
     /// privileged-VM workflow selectors (`0x01000040`–`0x0100004B`).
     pub fn workflow_runtime(&self) -> Option<&Arc<crate::workflow_runtime::WorkflowRuntime>> {
@@ -15711,8 +15838,9 @@ impl TenzroNode {
     /// - `"inline"`              — single-file MTP model; the draft head lives
     ///   inside the target GGUF itself (no separate drafter to load)
     /// - `"drafter_loaded"`      — drafter GGUF found locally and loaded
-    /// - `"drafter_downloading"` — drafter missing locally; background
-    ///   download + load started, target serves non-speculatively until then
+    /// - `"drafter_not_on_disk"` — drafter declared but not present locally;
+    ///   the target is served batched (every slot, no speculation) until the
+    ///   drafter is downloaded and the model re-served
     /// - `"drafter_load_failed"` — local drafter present but the runtime
     ///   rejected it (e.g. memory admission)
     /// - `"drafter_unavailable"` — drafter_id doesn't resolve in the catalog
@@ -15768,92 +15896,22 @@ impl TenzroNode {
             };
         }
 
-        // Drafter not on disk — download in the background, then load.
-        let Some(hf) = self.hf_downloader.clone() else {
-            return "drafter_unavailable";
-        };
-        let downloads = self.model_downloads.clone();
-        downloads.insert(
-            drafter_id.to_string(),
-            ModelDownloadStatus {
-                model_id: drafter_id.to_string(),
-                status: "downloading".to_string(),
-                progress_percent: 0.0,
-                downloaded_bytes: 0,
-                total_bytes: drafter_entry.size_bytes,
-                error: None,
-            },
+        // Not on disk: serve without it. This used to start a background
+        // download and load the drafter when it landed, which raced the
+        // target's own load — the runtime picks serial or batched at load
+        // from what is on disk at that moment, so a drafter arriving later
+        // either could not attach (batched target) or, worse, attached to a
+        // serial target whose advertised concurrency was already computed
+        // without it. Placing a drafter is an operator act: download it, then
+        // re-serve the target.
+        warn!(
+            target = %target_model_id,
+            drafter = %drafter_id,
+            "Catalog pairs this model with an MTP drafter that is not on disk — serving batched \
+             without speculative decoding. To enable it: `tenzro model download {drafter_id}` and \
+             re-serve {target_model_id}.",
         );
-        let target = target_model_id.to_string();
-        tokio::spawn(async move {
-            let drafter_id = drafter_entry.id.clone();
-            let (progress_tx, mut progress_rx) =
-                tokio::sync::watch::channel(tenzro_model::DownloadProgress {
-                    model_id: drafter_id.clone(),
-                    status: tenzro_model::DownloadState::Pending,
-                    progress_percent: 0.0,
-                    downloaded_bytes: 0,
-                    total_bytes: drafter_entry.size_bytes,
-                });
-            let downloads_inner = downloads.clone();
-            let drafter_id_inner = drafter_id.clone();
-            tokio::spawn(async move {
-                while progress_rx.changed().await.is_ok() {
-                    let prog = progress_rx.borrow().clone();
-                    if let Some(mut row) = downloads_inner.get_mut(&drafter_id_inner) {
-                        row.status = prog.status.to_string();
-                        row.progress_percent = prog.progress_percent;
-                        row.downloaded_bytes = prog.downloaded_bytes;
-                        row.total_bytes = prog.total_bytes;
-                    }
-                }
-            });
-            match hf
-                .download_model(
-                    &drafter_entry,
-                    None,
-                    tenzro_model::SourcePolicy::Auto,
-                    progress_tx,
-                )
-                .await
-            {
-                Ok(path) => {
-                    if let Some(mut row) = downloads.get_mut(&drafter_id) {
-                        row.status = "completed".to_string();
-                        row.progress_percent = 100.0;
-                    }
-                    match runtime
-                        .load_drafter(&target, &path, Some(drafter_entry.context_length))
-                        .await
-                    {
-                        Ok(()) => info!(
-                            target = %target,
-                            drafter = %drafter_id,
-                            "Downloaded and loaded MTP drafter for speculative decoding",
-                        ),
-                        Err(e) => warn!(
-                            target = %target,
-                            drafter = %drafter_id,
-                            "MTP drafter load failed after download: {}",
-                            e,
-                        ),
-                    }
-                }
-                Err(e) => {
-                    if let Some(mut row) = downloads.get_mut(&drafter_id) {
-                        row.status = "failed".to_string();
-                        row.error = Some(e.to_string());
-                    }
-                    warn!(
-                        target = %target,
-                        drafter = %drafter_id,
-                        "MTP drafter download failed: {} — serving without speculative decoding",
-                        e,
-                    );
-                }
-            }
-        });
-        "drafter_downloading"
+        "drafter_not_on_disk"
     }
 
     /// Evict Local ModelServiceInstance entries whose model is no longer loaded
@@ -16060,10 +16118,40 @@ impl TenzroNode {
         }
     }
 
+    /// Whether a served model runs on the serial single-context path: it
+    /// loaded a multimodal projector, or it will speculate — an inline MTP
+    /// head, or a separate drafter that is on disk now and will be attached.
+    /// A catalog pairing whose drafter is absent does not count: the runtime
+    /// serves that model through the batching engine and never attaches a
+    /// drafter to it (`ModelRuntime::load_model_with_context` applies the
+    /// same rule from the same evidence).
+    pub fn serving_path_is_serial(&self, entry: &tenzro_model::HfModelEntry) -> bool {
+        let drafter_on_disk = entry
+            .drafter_id
+            .as_deref()
+            .is_some_and(|d| self.resolve_gguf_path(d).is_some());
+        let speculates = entry.mtp_kind != tenzro_model::MtpKind::None
+            && (entry.drafter_id.is_none() || drafter_on_disk);
+        entry.mmproj.is_some() || speculates
+    }
+
+    /// The most requests a served model can really run at once: one on the
+    /// serial path, the slot budget on the continuous-batching engine. Every
+    /// site that registers a model's concurrency — the boot path, `tenzro
+    /// model serve` over RPC, and MCP — caps with this, so they cannot
+    /// disagree about a model's capacity the way they once did.
+    pub fn serving_capacity_cap(&self, entry: &tenzro_model::HfModelEntry) -> u32 {
+        if self.serving_path_is_serial(entry) {
+            1
+        } else {
+            tenzro_model::max_slots() as u32
+        }
+    }
+
     /// Register a served model with the load tracker, sizing max-concurrency
     /// against detected hardware. Shared by the serve path and the lazy loader
     /// so the concurrency budget is computed identically everywhere.
-    async fn register_load_tracker(&self, model_id: &str, entry: &tenzro_model::HfModelEntry) {
+    pub(crate) async fn register_load_tracker(&self, model_id: &str, entry: &tenzro_model::HfModelEntry) {
         // The hardware profile is populated lazily by the first probe, so it is
         // routinely absent here: a model reloaded at boot, or lazily loaded on
         // first use, registers before anything has measured the machine.
@@ -16128,12 +16216,8 @@ impl TenzroNode {
         // admits a flood that then piles behind one mutex — each a full
         // generation — which presents as a stall/wedge under load. Admitting
         // real capacity sheds the surplus with a fast "retry later" instead.
-        let is_serial = entry.mmproj.is_some() || entry.mtp_kind != tenzro_model::MtpKind::None;
-        let capacity_cap = if is_serial {
-            1
-        } else {
-            tenzro_model::max_slots() as u32
-        };
+        let is_serial = self.serving_path_is_serial(entry);
+        let capacity_cap = self.serving_capacity_cap(entry);
         let max_concurrent = mem_max_concurrent.min(capacity_cap).max(1);
         info!(
             model_id = %model_id,
@@ -16384,11 +16468,11 @@ impl TenzroNode {
         // "no healthy provider" at dispatch. One provider entry (this node's
         // address) carries every served model; upserted so repeat reconciles
         // refresh the list.
-        if let (Some(pm), Some(local_addr)) =
-            (self.provider_manager.as_ref(), self.local_validator_address())
-        {
-            let served: Vec<String> =
-                self.served_models.iter().map(|e| e.key().clone()).collect();
+        if let (Some(pm), Some(local_addr)) = (
+            self.provider_manager.as_ref(),
+            self.local_validator_address(),
+        ) {
+            let served: Vec<String> = self.served_models.iter().map(|e| e.key().clone()).collect();
             if !served.is_empty() {
                 let local_addr = *local_addr;
                 let mut provider =
@@ -16985,4 +17069,334 @@ pub struct NodeStatus {
     /// service is not running. Dialers use this to construct a
     /// `/p2p/<peer_id>` boot-node multiaddr targeting this node.
     pub self_peer_id: Option<String>,
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::{ProviderSchedule, ResourceWindow};
+
+    fn window(
+        name: &str,
+        start: u8,
+        end: u8,
+        days: [bool; 7],
+        gib: u32,
+        models: &[&str],
+    ) -> ResourceWindow {
+        ResourceWindow {
+            name: name.into(),
+            start_hour: start,
+            end_hour: end,
+            timezone: "UTC".into(),
+            days_of_week: days,
+            resident_ceiling_gb: gib,
+            models: models.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    const WEEKDAYS: [bool; 7] = [true, true, true, true, true, false, false];
+
+    /// Build a window in a named IANA zone.
+    fn tz_window(name: &str, start: u8, end: u8, tz: &str, models: &[&str]) -> ResourceWindow {
+        let mut w = window(name, start, end, [true; 7], 100, models);
+        w.timezone = tz.into();
+        w
+    }
+
+    fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// The bug this fixes: `timezone` was stored and serialized but never
+    /// applied, so every window was compared against a UTC clock. A Berlin
+    /// window is UTC+2 in summer, so 08:00 UTC is 10:00 local — inside a
+    /// 10:00-22:00 window — while a UTC comparison would call it outside.
+    #[test]
+    fn a_window_is_evaluated_in_its_own_timezone_not_utc() {
+        let w = tz_window("media", 10, 22, "Europe/Berlin", &[]);
+
+        // 08:00Z = 10:00 Berlin (CEST) -> inside.
+        assert!(w.contains_at(utc("2026-08-27T08:00:00Z")));
+        // The same instant judged as UTC would be 08:00, i.e. outside.
+        assert!(!w.contains(3, 8), "sanity: 08:00 is outside 10-22");
+
+        // 07:59Z = 09:59 Berlin -> still outside.
+        assert!(!w.contains_at(utc("2026-08-27T07:59:00Z")));
+    }
+
+    /// DST is why a fixed offset is not enough. The same wall-clock window
+    /// maps to a different UTC hour in January than in August.
+    #[test]
+    fn the_same_window_shifts_with_dst() {
+        let w = tz_window("coding", 10, 22, "Europe/Berlin", &[]);
+
+        // Winter: Berlin is UTC+1, so 09:00Z = 10:00 local -> inside.
+        assert!(w.contains_at(utc("2026-01-15T09:00:00Z")));
+        assert!(!w.contains_at(utc("2026-01-15T08:59:00Z")));
+
+        // Summer: Berlin is UTC+2, so the boundary moves an hour earlier in UTC.
+        assert!(w.contains_at(utc("2026-08-15T08:00:00Z")));
+        assert!(!w.contains_at(utc("2026-08-15T07:59:00Z")));
+    }
+
+    /// An unparseable zone must not take the scheduler down — it falls back to
+    /// UTC, which is what the field defaults to anyway.
+    #[test]
+    fn an_unknown_timezone_falls_back_to_utc() {
+        let w = tz_window("typo", 10, 22, "Not/AZone", &[]);
+        assert_eq!(w.tz(), chrono_tz::UTC);
+        assert!(w.contains_at(utc("2026-08-27T10:00:00Z")));
+    }
+
+    /// `until` is what lets an app drain before a switch instead of
+    /// discovering it through failures.
+    #[test]
+    fn ends_after_reports_the_windows_own_end() {
+        let w = tz_window("coding", 0, 10, "Europe/Berlin", &[]);
+        // 02:00Z = 04:00 Berlin, inside 00:00-10:00.
+        let end = w.ends_after(utc("2026-08-27T02:00:00Z")).expect("active");
+        // 10:00 Berlin in summer = 08:00Z.
+        assert_eq!(end, utc("2026-08-27T08:00:00Z"));
+    }
+
+    #[test]
+    fn ends_after_is_none_when_the_window_is_not_active() {
+        let w = tz_window("media", 10, 22, "Europe/Berlin", &[]);
+        assert!(w.ends_after(utc("2026-08-27T02:00:00Z")).is_none());
+    }
+
+    /// `starts_at` for the stack that runs next.
+    #[test]
+    fn starts_after_finds_the_next_opening() {
+        let w = tz_window("media", 10, 22, "Europe/Berlin", &[]);
+        // 02:00Z = 04:00 Berlin; the window opens 10:00 Berlin = 08:00Z.
+        let start = w.starts_after(utc("2026-08-27T02:00:00Z")).expect("opens");
+        assert_eq!(start, utc("2026-08-27T08:00:00Z"));
+    }
+
+    /// The scheduler must agree with what it advertises: whatever
+    /// `next_window_at` names is what `active_window_at` will select once that
+    /// instant arrives.
+    #[test]
+    fn next_window_matches_what_becomes_active() {
+        let sched = ProviderSchedule {
+            enabled: true,
+            windows: vec![
+                tz_window("coding", 0, 10, "Europe/Berlin", &["qwen3.8-flash-next"]),
+                tz_window("media", 10, 24, "Europe/Berlin", &["ltx-2.5"]),
+            ],
+            ..Default::default()
+        };
+        let now = utc("2026-08-27T02:00:00Z"); // 04:00 Berlin -> coding
+        assert_eq!(sched.active_window_at(now).unwrap().name, "coding");
+
+        let (next, at) = sched.next_window_at(now).expect("a next window");
+        assert_eq!(next.name, "media");
+        assert_eq!(sched.active_window_at(at).unwrap().name, "media");
+    }
+
+    /// A stack is any number of models of any modality — nothing in the type
+    /// constrains count or kind.
+    #[test]
+    fn a_stack_holds_any_number_and_mix_of_models() {
+        let w = tz_window(
+            "coding",
+            0,
+            10,
+            "Europe/Berlin",
+            &[
+                "qwen3.8-flash-next",
+                "muse-glimmer-30b",
+                "qwen3-embedding-0.6b",
+                "timesfm-2.5",
+            ],
+        );
+        assert_eq!(w.models.len(), 4);
+        let action = ProviderSchedule {
+            enabled: true,
+            windows: vec![w],
+            ..Default::default()
+        }
+        .action_now(utc("2026-08-27T02:00:00Z"));
+        assert_eq!(action.want_models.len(), 4);
+        assert_eq!(action.active_window.as_deref(), Some("coding"));
+    }
+
+    #[test]
+    fn a_daytime_window_contains_its_hours_only() {
+        let w = window("workday", 9, 17, WEEKDAYS, 10, &[]);
+        assert!(!w.contains(0, 8), "08:00 is before the window");
+        assert!(w.contains(0, 9), "09:00 opens it");
+        assert!(w.contains(0, 16), "16:00 still in");
+        assert!(!w.contains(0, 17), "17:00 closes it (exclusive end)");
+        assert!(!w.contains(5, 12), "Saturday is off");
+    }
+
+    #[test]
+    fn a_window_that_wraps_midnight_is_handled() {
+        // The off-hours case: 17:00 to 09:00 the next morning.
+        let w = window("off-hours", 17, 9, WEEKDAYS, 80, &[]);
+        assert!(w.contains(0, 20), "20:00 is in the evening half");
+        assert!(w.contains(0, 3), "03:00 is in the morning half");
+        assert!(!w.contains(0, 12), "noon is NOT off-hours");
+        assert!(w.contains(0, 17), "17:00 opens it");
+        assert!(!w.contains(0, 9), "09:00 closes it");
+    }
+
+    #[test]
+    fn the_first_matching_window_wins() {
+        // Two windows overlap at 10:00; ordering resolves it.
+        let mut sched = ProviderSchedule::default();
+        sched.windows = vec![
+            window("early", 8, 12, WEEKDAYS, 40, &["qwen"]),
+            window("all-day", 0, 24, WEEKDAYS, 20, &["gemma"]),
+        ];
+        // 10:00 UTC on a Monday; both windows are UTC so the clock is direct.
+        let active = sched
+            .active_window_at(utc("2026-08-24T10:00:00Z"))
+            .expect("10:00 matches");
+        assert_eq!(active.name, "early", "first match wins, not all-day");
+    }
+
+    #[test]
+    fn action_sets_the_ceiling_and_models_of_the_active_window() {
+        let mut sched = ProviderSchedule::default();
+        sched.windows = vec![window(
+            "off-hours",
+            17,
+            9,
+            WEEKDAYS,
+            80,
+            &["qwen3.8-27b", "muse-glimmer-30b"],
+        )];
+
+        // 20:00 Monday → off-hours active.
+        let a = sched.action_now(utc("2026-08-24T20:00:00Z"));
+        assert_eq!(a.active_window.as_deref(), Some("off-hours"));
+        assert_eq!(a.resident_ceiling_bytes, Some(80 * 1024 * 1024 * 1024));
+        assert_eq!(a.want_models, vec!["qwen3.8-27b", "muse-glimmer-30b"]);
+    }
+
+    #[test]
+    fn no_active_window_returns_to_the_base_default() {
+        // A schedule whose only window is off-hours; at noon nothing is active,
+        // so the ceiling returns to default (None) and no models are pinned.
+        let mut sched = ProviderSchedule::default();
+        sched.windows = vec![window("off-hours", 17, 9, WEEKDAYS, 80, &["qwen"])];
+        let a = sched.action_now(utc("2026-08-24T12:00:00Z"));
+        assert_eq!(a.active_window, None);
+        assert_eq!(
+            a.resident_ceiling_bytes, None,
+            "no window = base default ceiling"
+        );
+        assert!(a.want_models.is_empty());
+    }
+
+    #[test]
+    fn a_schedule_with_no_windows_pins_nothing() {
+        // No windows at all: the action is always the base default, so a node
+        // that has not configured stacks keeps whatever residency it had.
+        let sched = ProviderSchedule::default();
+        assert!(sched.windows.is_empty());
+        let a = sched.action_now(utc("2026-08-26T14:00:00Z"));
+        assert_eq!(a.resident_ceiling_bytes, None);
+        assert_eq!(a.active_window, None);
+    }
+}
+
+
+#[cfg(test)]
+mod schedule_capacity_tests {
+    use super::*;
+
+    fn window(name: &str, ceiling_gb: u32, models: &[&str]) -> ResourceWindow {
+        ResourceWindow {
+            name: name.to_string(),
+            start_hour: 0,
+            end_hour: 24,
+            timezone: "UTC".to_string(),
+            days_of_week: [true; 7],
+            resident_ceiling_gb: ceiling_gb,
+            models: models.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn schedule(windows: Vec<ResourceWindow>) -> ProviderSchedule {
+        ProviderSchedule {
+            enabled: true,
+            windows,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_window_that_fits_is_accepted() {
+        // granite4-1b declares 2 GiB; 8 is ample.
+        let s = schedule(vec![window("small", 8, &["granite4-1b"])]);
+        assert!(s.overcommitted_windows().is_empty());
+    }
+
+    #[test]
+    fn a_window_that_cannot_fit_is_reported() {
+        // The real shape of the bug: a ceiling far below what the members need.
+        let s = schedule(vec![window("tight", 1, &["granite4-1b"])]);
+        let over = s.overcommitted_windows();
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].window, "tight");
+        assert!(over[0].required_gb > over[0].ceiling_gb as u64);
+    }
+
+    #[test]
+    fn an_unknown_id_is_reported_not_silently_counted_as_zero() {
+        // A typo must not make an over-committed window look like it fits.
+        let s = schedule(vec![window("typo", 1, &["granite4-1b", "granite4-1bb"])]);
+        let over = s.overcommitted_windows();
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].unknown, vec!["granite4-1bb".to_string()]);
+    }
+
+    #[test]
+    fn a_window_with_no_ceiling_is_not_judged() {
+        // 0 means "unset", not "no room" — judging it would refuse every
+        // schedule written before ceilings existed.
+        let s = schedule(vec![window("unset", 0, &["granite4-1b"])]);
+        assert!(s.overcommitted_windows().is_empty());
+    }
+
+    #[test]
+    fn an_empty_window_is_not_judged() {
+        let s = schedule(vec![window("empty", 4, &[])]);
+        assert!(s.overcommitted_windows().is_empty());
+    }
+
+    #[test]
+    fn every_offending_window_is_reported_not_just_the_first() {
+        // An operator fixing one and resubmitting to find another is the
+        // failure mode this avoids.
+        let s = schedule(vec![
+            window("a", 1, &["granite4-1b"]),
+            window("b", 8, &["granite4-1b"]),
+            window("c", 1, &["granite4-1b"]),
+        ]);
+        let over = s.overcommitted_windows();
+        assert_eq!(over.len(), 2);
+        assert_eq!(over[0].window, "a");
+        assert_eq!(over[1].window, "c");
+    }
+
+    #[test]
+    fn the_message_names_the_window_and_both_numbers() {
+        let s = schedule(vec![window("tight", 1, &["granite4-1b"])]);
+        let msg = s.overcommitted_windows()[0].to_string();
+        assert!(msg.contains("tight"), "{msg}");
+        assert!(msg.contains("ceiling"), "{msg}");
+    }
+
+    #[test]
+    fn a_schedule_with_no_windows_is_accepted() {
+        // Availability-only schedules predate windows and must keep working.
+        assert!(schedule(vec![]).overcommitted_windows().is_empty());
+    }
 }

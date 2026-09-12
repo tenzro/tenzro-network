@@ -47,7 +47,8 @@ use std::time::{Duration, Instant};
 
 use tenzro_model::lifecycle::{Admission, InFlightGuard, WarmingStatus};
 use tenzro_model::memory_budget::{MemoryBudget, Tier};
-use tenzro_model::traffic::{QosClass, Refusal, RequestGuard};
+use tenzro_model::traffic::{AdmissionDecision, AdmissionRefusal, QosClass, Refusal, RequestGuard, Shape};
+
 use tracing::{debug, info, warn};
 
 use crate::node::TenzroNode;
@@ -60,12 +61,27 @@ use crate::node::TenzroNode;
 /// other.
 #[derive(Debug)]
 pub struct ServingPermit {
-    _traffic: RequestGuard,
+    traffic: RequestGuard,
     _model: InFlightGuard,
     /// The per-model concurrency slot. Held here so the four bounds are
     /// acquired and released as one unit rather than by separate call sites
     /// that can disagree about whether a request ran.
     _load: tenzro_model::LoadGuard,
+}
+
+impl ServingPermit {
+    /// Tell the admission layer what this request actually produced: how
+    /// many tokens it generated and, when the handler measured it, the
+    /// milliseconds from admission to the first token.
+    ///
+    /// This is what the per-model cost model learns from. A handler that
+    /// never calls it frees its slot and teaches nothing — and a cost model
+    /// that learns nothing quotes every waiting caller the seed rates, which
+    /// is tolerable, where one that learned "1,000 tokens cost as much as a
+    /// 20-token prompt" was not.
+    pub fn record(&mut self, generated_tokens: u64, first_token_ms: Option<u64>) {
+        self.traffic.record(generated_tokens, first_token_ms);
+    }
 }
 
 /// What a handler should do with this request.
@@ -80,12 +96,25 @@ pub enum Decision {
     Refused(Refusal),
 }
 
-/// Decide whether to serve `model_id` now, warming it if necessary.
+/// Decide whether to serve `model_id` now, warming it if necessary and
+/// holding the caller while the model is busy.
 ///
-/// `queue_ahead` is how many requests are already waiting on this model; it
-/// converts a per-request cost estimate into a completion-time prediction.
-/// Pass 0 when the depth is not known — the prediction then reflects an
-/// unloaded queue, which is the optimistic case.
+/// `shape` is what the request will cost — prompt tokens and the output
+/// ceiling it was given. It is what the per-model scheduler prices a slot
+/// by, so a handler should pass the real `max_tokens` rather than a nominal
+/// figure: a 20-token prompt asking for 4,096 tokens is a two-minute request
+/// on a slow decoder, and pricing it as 20 tokens is the mistake that had a
+/// node refusing 200-token requests as "unattainable".
+///
+/// # A busy model is a queue, not a refusal
+///
+/// When every slot for the model is taken, the caller is held and asked
+/// again as running requests finish — up to the class's wait budget, with
+/// the ETA the scheduler computes from what is running. Only an ETA past
+/// that budget, or a queue at its depth limit, comes back as
+/// [`Decision::Refused`]. The batching engine underneath already queues
+/// this way; refusing above it with a `retry_after` the caller could not act
+/// on was throwing that queue away.
 ///
 /// Order is deliberate. Traffic admission runs **first**: it is the cheapest
 /// check and the one protecting the machine, so an overloaded node refuses
@@ -96,8 +125,7 @@ pub async fn admit_inference(
     model_id: &str,
     class: QosClass,
     deadline: Option<Duration>,
-    queue_ahead: u32,
-    est_tokens: u64,
+    shape: Shape,
 ) -> Decision {
     // Two different budgets, because they answer two different questions.
     //
@@ -116,6 +144,11 @@ pub async fn admit_inference(
     let warm_budget = warm_wait_budget().max(serving_budget);
     let budget = warm_budget;
     let started = Instant::now();
+    // Whether this caller is currently counted in the model's queue. Entered
+    // the first time the scheduler says "wait", left on every exit path — a
+    // phantom waiter would lengthen every ETA quoted after it, forever.
+    let mut queued = false;
+    let traffic = node.traffic();
 
     loop {
         // Reconcile with the runtime before deciding. Models also reach memory
@@ -130,15 +163,75 @@ pub async fn admit_inference(
 
         let warming_status = match node.lifecycle().admit(model_id) {
             Admission::Ready(model_guard) => {
+                let remaining = serving_budget.saturating_sub(started.elapsed());
+
+                // The scheduler's idea of the model's slot count follows the
+                // per-model cap, which is registered when the model is served
+                // and can change on re-registration.
+                //
+                // A served model with no tracker entry is not "at capacity", it
+                // is untracked: `tenzro model stop` drops the entry and a re-serve
+                // that finds the model already resident does not put it back, so
+                // every acquire below failed and a healthy engine served nothing.
+                // Register it here from the same rule the serve paths use.
+                if node.load_tracker.snapshot(model_id).is_none()
+                    && let Some(entry) = tenzro_model::get_model_by_id(model_id)
+                {
+                    node.register_load_tracker(model_id, &entry).await;
+                }
+                if let Some(snap) = node.load_tracker.snapshot(model_id) {
+                    traffic.declare_capacity(model_id, snap.max_concurrent);
+                }
+
+                // Is there a slot, and if not, how long until there is?
+                match traffic.queue_decision(model_id, class, shape) {
+                    AdmissionDecision::Admit => {}
+                    AdmissionDecision::Wait { eta, position } => {
+                        if !queued {
+                            traffic.enter_queue(model_id);
+                            queued = true;
+                            debug!(
+                                model_id = %model_id,
+                                eta_ms = eta.as_millis() as u64,
+                                position,
+                                "every slot busy; holding the caller for a slot"
+                            );
+                        }
+                        if remaining.is_zero() {
+                            // The caller's patience ran out while we waited.
+                            traffic.leave_queue(model_id);
+                            let budget_ms = serving_budget.as_millis() as u64;
+                            return Decision::Refused(traffic.refuse_from_queue(
+                                AdmissionRefusal::WaitTooLong {
+                                    eta_ms: budget_ms.saturating_add(eta.as_millis() as u64),
+                                    budget_ms,
+                                },
+                            ));
+                        }
+                        // Re-ask soon: a slot frees the moment a running
+                        // request ends, which is usually earlier than the
+                        // ETA's mean-based guess. Bounded by what is left of
+                        // the caller's budget.
+                        tokio::time::sleep(eta.min(QUEUE_POLL_INTERVAL).min(remaining)).await;
+                        continue;
+                    }
+                    AdmissionDecision::Refuse(r) => {
+                        if queued {
+                            traffic.leave_queue(model_id);
+                        }
+                        return Decision::Refused(traffic.refuse_from_queue(r));
+                    }
+                }
+                if queued {
+                    traffic.leave_queue(model_id);
+                    queued = false;
+                }
+
                 // Only now take a concurrency slot. Taking it before the wait
                 // would have a hundred queued callers occupying the capacity
                 // needed to serve them.
-                let remaining = serving_budget.saturating_sub(started.elapsed());
                 let traffic_guard =
-                    match node
-                        .traffic()
-                        .admit(model_id, class, Some(remaining), queue_ahead, est_tokens)
-                    {
+                    match traffic.admit(model_id, class, Some(remaining), shape) {
                         Ok(g) => g,
                         Err(refusal) => return Decision::Refused(refusal),
                     };
@@ -151,21 +244,30 @@ pub async fn admit_inference(
                 // goodput reported 100% while most requests failed. A bound
                 // that can refuse must be part of the same decision, and a
                 // request that never ran must not be counted as one that did.
+                //
+                // The scheduler and this cap count the same requests, so a
+                // refusal here is a race with a caller admitted between the
+                // decision above and now — a reason to go round again, not
+                // to turn this one away.
                 let Ok(load_guard) = node.load_tracker.try_acquire(model_id) else {
-                    let snapshot = node.load_tracker.snapshot(model_id);
-                    let (active, limit) = snapshot
-                        .map(|s| (s.active_requests, s.max_concurrent))
-                        .unwrap_or((0, 0));
                     traffic_guard.abort();
-                    return Decision::Refused(Refusal::AtCapacity {
-                        in_flight: active,
-                        limit,
-                        retry_after_ms: 1_000,
-                    });
+                    if remaining.is_zero() {
+                        let snapshot = node.load_tracker.snapshot(model_id);
+                        let (active, limit) = snapshot
+                            .map(|s| (s.active_requests, s.max_concurrent))
+                            .unwrap_or((0, 0));
+                        return Decision::Refused(Refusal::AtCapacity {
+                            in_flight: active,
+                            limit,
+                            retry_after_ms: 1_000,
+                        });
+                    }
+                    tokio::time::sleep(QUEUE_POLL_INTERVAL.min(remaining)).await;
+                    continue;
                 };
 
                 return Decision::Proceed(Box::new(ServingPermit {
-                    _traffic: traffic_guard,
+                    traffic: traffic_guard,
                     _model: model_guard,
                     _load: load_guard,
                 }));
@@ -193,6 +295,9 @@ pub async fn admit_inference(
                 remaining_ms = remaining.as_millis() as u64,
                 "warm would outlast the request deadline; returning warming status"
             );
+            if queued {
+                traffic.leave_queue(model_id);
+            }
             return Decision::Warming(warming_status);
         }
 
@@ -201,6 +306,9 @@ pub async fn admit_inference(
         // Deadline spent while waiting. Report the current estimate so the
         // caller can decide whether to come back with a longer one.
         if started.elapsed() >= budget {
+            if queued {
+                traffic.leave_queue(model_id);
+            }
             return Decision::Warming(warming_status);
         }
     }
@@ -227,6 +335,11 @@ fn warm_wait_budget() -> Duration {
 /// latency nobody needs — and long enough that a hundred waiters do not spin
 /// the lock. The poll is a lock read, not work, so this is cheap.
 const WARM_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How often a queued request re-asks the scheduler for a slot when the quoted
+/// ETA is longer than this. Short enough that a slot freed early is taken
+/// promptly; long enough that a deep queue does not spin.
+const QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Load `model_id` in the background, evicting to make room if needed.
 fn spawn_warm(node: Arc<TenzroNode>, model_id: String) {
@@ -582,9 +695,9 @@ mod tests {
     fn retry_after_never_rounds_down_to_zero() {
         // A sub-second hint rounding to "0" produces a hot retry loop exactly
         // when the node is most loaded.
-        let refusal = Refusal::DeadlineUnattainable {
-            predicted_ms: 10,
-            deadline_ms: 5,
+        let refusal = Refusal::QueueWaitTooLong {
+            eta_ms: 10,
+            budget_ms: 5,
             retry_after_ms: 100,
         };
         let response = refusal_http_response(&refusal);

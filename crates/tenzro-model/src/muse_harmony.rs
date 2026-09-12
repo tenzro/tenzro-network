@@ -178,15 +178,17 @@ fn parse_tool_args(body: &str) -> serde_json::Value {
 
     // A JSON object body is used verbatim.
     if body.starts_with('{')
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-            return v;
-        }
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+    {
+        return v;
+    }
 
     // ATEM markup body.
     if body.contains("<atem:")
-        && let Some(v) = parse_atem_params(body) {
-            return v;
-        }
+        && let Some(v) = parse_atem_params(body)
+    {
+        return v;
+    }
 
     empty_object()
 }

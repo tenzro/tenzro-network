@@ -33,9 +33,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
+use rustls::ServerConfig;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use rustls::ServerConfig;
 use rustls_acme::acme::ACME_TLS_ALPN_NAME;
 use rustls_acme::caches::DirCache;
 use rustls_acme::{AcmeConfig, ResolvesServerCertAcme};
@@ -212,12 +212,13 @@ pub async fn serve(
     // aws-lc-rs is the workspace-wide rustls provider (PQ-hybrid named group);
     // build the server config with it explicitly so the edge does not depend on
     // a process-wide default provider having been installed.
-    let mut server_config =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| std::io::Error::other(format!("edge TLS rustls config: {e}")))?
-            .with_no_client_auth()
-            .with_cert_resolver(resolver);
+    let mut server_config = ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| std::io::Error::other(format!("edge TLS rustls config: {e}")))?
+    .with_no_client_auth()
+    .with_cert_resolver(resolver);
     // Advertise HTTP/2 and HTTP/1.1 for real traffic, plus `acme-tls/1` so an
     // incoming TLS-ALPN-01 validation handshake negotiates the challenge protocol
     // and the per-host resolver presents the challenge certificate.

@@ -160,6 +160,38 @@ fn derive_eth_address(vk: &VerifyingKey) -> [u8; 20] {
 
 #[cfg(test)]
 mod tests {
+
+    /// The bridge's single-key custody path must work on Apple hardware.
+    ///
+    /// `derive_auto` roots in `platform_root_ikm`, which returned NotAvailable
+    /// on every Mac until the Secure Enclave branch was added — leaving the
+    /// bridge with only the dev-only raw key there. This is the test that
+    /// closes that gap, and it must keep passing before DKLS23 threshold
+    /// signing is removed.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn sealed_key_derives_on_apple_hardware() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = rt
+            .block_on(SealedSecp256k1Key::derive_auto(b"tenzro/bridge/evm"))
+            .expect("a Mac with a Secure Enclave must derive a sealed bridge key");
+        let b = rt
+            .block_on(SealedSecp256k1Key::derive_auto(b"tenzro/bridge/evm"))
+            .expect("second derivation");
+        // Reproducible, or the bridge's sender address changes on restart.
+        assert_eq!(a.address(), b.address(), "sealed key address is not stable");
+
+        // Domain separation: a different label must yield a different key.
+        let other = rt
+            .block_on(SealedSecp256k1Key::derive_auto(b"tenzro/bridge/other"))
+            .expect("labelled derivation");
+        assert_ne!(
+            a.address(),
+            other.address(),
+            "label is not domain-separating"
+        );
+    }
+
     use super::*;
 
     #[test]

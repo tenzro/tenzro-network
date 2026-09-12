@@ -5,7 +5,7 @@
 //!
 //! # Features
 //!
-//! - **Agent Identity Management**: Self-sovereign agent identities with auto-provisioned MPC wallets
+//! - **Agent Identity Management**: Self-sovereign agent identities with identity-bound wallets
 //! - **Lifecycle Management**: State machine for agent lifecycle (Created → Active → Suspended → Terminated)
 //! - **Inter-Agent Messaging**: Message routing, queuing, and delivery between agents
 //! - **Capability Registry**: Register, verify, and discover agent capabilities
@@ -27,7 +27,7 @@
 //!    ┌─────────▼────────┐  ┌──▼─────────┐  ┌─▼────────────┐
 //!    │ Identity Manager │  │ Lifecycle  │  │   Message    │
 //!    │  - Registration  │  │  - States  │  │   Router     │
-//!    │  - MPC Wallets  │  │  - Events  │  │  - Queuing   │
+//!    │  - Wallets       │  │  - Events  │  │  - Queuing   │
 //!    └──────────────────┘  └────────────┘  └──────────────┘
 //!              │                                   │
 //!    ┌─────────▼────────┐           ┌─────────────▼────────┐
@@ -52,9 +52,12 @@
 //! let creator = Address::from([1u8; 32]);
 //! let capabilities = vec![Capability::MultiAgentCoordination];
 //!
+//! // The third argument is the agent's device key (TPM / Secure Enclave)
+//! // public half — an agent is a machine and is bound to its own key.
 //! let agent = runtime.register_agent(
 //!     "MyAgent".to_string(),
 //!     creator,
+//!     vec![7u8; 32],
 //!     capabilities,
 //!     false, // not TEE-backed
 //!     0,     // nonce
@@ -194,12 +197,26 @@ mod tests {
         let cap = Capability::MultiAgentCoordination;
 
         runtime
-            .register_agent("Agent1".to_string(), creator, vec![cap.clone()], false, 0)
+            .register_agent(
+                "Agent1".to_string(),
+                creator,
+                vec![7u8; 32],
+                vec![cap.clone()],
+                false,
+                0,
+            )
             .await
             .unwrap();
 
         runtime
-            .register_agent("Agent2".to_string(), creator, vec![cap.clone()], false, 1)
+            .register_agent(
+                "Agent2".to_string(),
+                creator,
+                vec![7u8; 32],
+                vec![cap.clone()],
+                false,
+                1,
+            )
             .await
             .unwrap();
 

@@ -492,6 +492,7 @@ mod tests {
     async fn register_with_key(registry: &IdentityRegistry, pk: Vec<u8>) -> String {
         registry
             .register_human_with_fee(
+                b"test-credential".to_vec(),
                 pk,
                 "Tester".to_string(),
                 tenzro_types::identity::KycTier::Basic,

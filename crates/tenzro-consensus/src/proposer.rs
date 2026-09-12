@@ -757,7 +757,11 @@ mod tests {
         hashes.sort_unstable_by_key(|h| h.as_bytes().to_vec());
         hashes.dedup();
         assert_eq!(before, hashes.len(), "the block contains a duplicate");
-        assert_eq!(block.transactions.len(), 2, "both distinct transactions kept");
+        assert_eq!(
+            block.transactions.len(),
+            2,
+            "both distinct transactions kept"
+        );
     }
 
     /// Equal-fee transactions must order identically on every validator.

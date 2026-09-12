@@ -159,8 +159,31 @@ pub struct EmbedTextRunCmd {
     /// L2-normalize the output (most retrieval pipelines want this).
     #[arg(long, default_value_t = false)]
     normalize: bool,
+    /// Whether these inputs are a search query or documents being indexed.
+    /// Drives the model's own instruction template (Qwen3-Embedding,
+    /// EmbeddingGemma, ModernBERT-embed each prefix queries/documents
+    /// differently, or not at all for BGE-M3) — see `embed-text catalog`
+    /// for which family this model belongs to. Defaults to document.
+    #[arg(long, value_enum, default_value_t = EmbedRoleArg::Document)]
+    role: EmbedRoleArg,
+    /// Task description for the query role (Qwen3-Embedding,
+    /// EmbeddingGemma). Falls back to the model's own default task when
+    /// omitted. Ignored for the document role and for families with no
+    /// instruction template.
+    #[arg(long)]
+    task: Option<String>,
+    /// Title for the document role (EmbeddingGemma only; ignored
+    /// elsewhere).
+    #[arg(long)]
+    title: Option<String>,
     #[arg(long, default_value = DEFAULT_RPC)]
     rpc: String,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum EmbedRoleArg {
+    Document,
+    Query,
 }
 
 impl EmbedTextRunCmd {
@@ -168,6 +191,10 @@ impl EmbedTextRunCmd {
         if self.inputs.is_empty() {
             return Err(anyhow!("at least one --input is required"));
         }
+        let role = match self.role {
+            EmbedRoleArg::Document => json!({"role": "document", "title": self.title}),
+            EmbedRoleArg::Query => json!({"role": "query", "task": self.task}),
+        };
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc
             .call(
@@ -177,6 +204,7 @@ impl EmbedTextRunCmd {
                     "inputs": self.inputs,
                     "requested_dim": self.requested_dim,
                     "normalize": self.normalize,
+                    "role": role,
                 }),
             )
             .await?;

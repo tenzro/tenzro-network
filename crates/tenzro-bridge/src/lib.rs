@@ -104,7 +104,6 @@ pub mod layerzero;
 pub mod lifi;
 pub mod message_format;
 pub mod monitor;
-pub mod mpc;
 pub mod near_chain_sig;
 pub mod price_oracle;
 pub mod router;

@@ -149,10 +149,7 @@ impl NonceManager {
             debug!(
                 "Nonce gap for {} did not close in {}s (pending {}, chain {}); \
                  treating the difference as dropped",
-                address,
-                STALL_SECS,
-                pending,
-                chain_nonce
+                address, STALL_SECS, pending, chain_nonce
             );
             *entry = chain_nonce;
             self.note_progress(address, chain_nonce);
@@ -162,8 +159,7 @@ impl NonceManager {
     /// Record that chain state moved for this address, restarting its clock.
     fn note_progress(&self, address: &Address, chain_nonce: u64) {
         self.confirmed_nonces.insert(*address, chain_nonce);
-        self.last_progress_secs
-            .insert(*address, Self::now_secs());
+        self.last_progress_secs.insert(*address, Self::now_secs());
     }
 
     fn now_secs() -> u64 {

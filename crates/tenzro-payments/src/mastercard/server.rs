@@ -507,10 +507,7 @@ mod tests {
             .register_autonomous_machine(
                 vec![10; 32],
                 vec!["payment".to_string()],
-                tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .unwrap()
@@ -565,10 +562,7 @@ mod tests {
             .register_autonomous_machine(
                 vec![11; 32],
                 vec!["payment".to_string()],
-                tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .unwrap()

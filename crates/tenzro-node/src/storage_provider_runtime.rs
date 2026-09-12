@@ -136,10 +136,7 @@ impl std::fmt::Debug for StorageProviderRuntime {
         let provider = self.provider();
         f.debug_struct("StorageProviderRuntime")
             .field("provider", &provider)
-            .field(
-                "deals",
-                &provider.map(|p| self.meter.active_exposure(&p)),
-            )
+            .field("deals", &provider.map(|p| self.meter.active_exposure(&p)))
             .finish()
     }
 }

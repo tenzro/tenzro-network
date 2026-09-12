@@ -184,6 +184,11 @@ pub fn read_model_shape(path: &Path) -> Result<ModelShape, GgufShapeError> {
     let mut arch: Option<String> = None;
     let mut block_count: Option<u32> = None;
     let mut embedding_length: Option<u32> = None;
+    // KV-cache inputs. Optional: a model whose gguf omits them still yields a
+    // ModelShape (weights + activation), just without a KV estimate.
+    let mut head_count_kv: Option<u32> = None;
+    let mut key_length: Option<u32> = None;
+    let mut context_length: Option<u32> = None;
 
     for _ in 0..kv_count {
         let key = r.string()?;
@@ -198,13 +203,17 @@ pub fn read_model_shape(path: &Path) -> Result<ModelShape, GgufShapeError> {
             block_count = Some(r.read_u32_value(&key, ty)?);
         } else if key.ends_with(".embedding_length") {
             embedding_length = Some(r.read_u32_value(&key, ty)?);
+        } else if key.ends_with(".attention.head_count_kv") {
+            head_count_kv = Some(r.read_u32_value(&key, ty)?);
+        } else if key.ends_with(".attention.key_length") {
+            key_length = Some(r.read_u32_value(&key, ty)?);
+        } else if key.ends_with(".context_length") {
+            context_length = Some(r.read_u32_value(&key, ty)?);
         } else {
             r.skip_value(ty)?;
         }
-
-        if arch.is_some() && block_count.is_some() && embedding_length.is_some() {
-            break;
-        }
+        // No early break: the KV keys can appear after the three required ones,
+        // so the whole metadata block is scanned. GGUF headers are small.
     }
 
     let layers = block_count.ok_or_else(|| GgufShapeError::MissingKey("*.block_count".into()))?;
@@ -215,6 +224,9 @@ pub fn read_model_shape(path: &Path) -> Result<ModelShape, GgufShapeError> {
         layers,
         hidden_dim,
         total_vram_gb: file_size as f32 / 1_073_741_824.0,
+        head_count_kv,
+        key_length,
+        context_length,
     })
 }
 

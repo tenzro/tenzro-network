@@ -242,7 +242,11 @@ class ModelBase:
                         raise ValueError(f"Can't load 'weight_map' from {index_name!r}")
                     tensor_names_from_index.update(weight_map.keys())
                     part_dict: dict[str, None] = dict.fromkeys(weight_map.values(), None) # ty: ignore[invalid-assignment]
-                    part_names = sorted(part_dict.keys())
+                    # Skip shards that are not on disk. An MTP-only export needs a
+                    # handful of the checkpoint's shards, but index_tensors opens
+                    # every one named in the index to read its header, so a partial
+                    # download dies on model-00001 before reaching anything wanted.
+                    part_names = [p for p in sorted(part_dict.keys()) if (self.dir_model / p).is_file()]
             else:
                 weight_map = {}
         else:
@@ -279,7 +283,9 @@ class ModelBase:
                         tensors[tname] = tgen
 
         # verify tensor name presence and identify potentially missing files
-        if len(tensor_names_from_index) > 0:
+        # An MTP-only export deliberately carries a fraction of the index, so the
+        # leftover-tensor warning is noise there, not a problem.
+        if not self.mtp_only and len(tensor_names_from_index) > 0:
             if len(tensor_names_from_parts.symmetric_difference(tensor_names_from_index)) > 0:
                 missing = sorted(tensor_names_from_index.difference(tensor_names_from_parts))
                 extra = sorted(tensor_names_from_parts.difference(tensor_names_from_index))

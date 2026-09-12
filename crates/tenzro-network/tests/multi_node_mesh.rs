@@ -40,7 +40,6 @@ use tokio::time::timeout;
 /// is cached thereafter, so this bounds startup, not steady state.
 const BIND_DEADLINE: Duration = Duration::from_secs(30);
 
-
 const CONSENSUS_TOPIC: &str = "tenzro/consensus";
 const MESH_WAIT: Duration = Duration::from_secs(30);
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
@@ -138,6 +137,7 @@ async fn spawn_bound_validator_node() -> (TenzroNetworkService, Vec<Multiaddr>, 
 /// failure mode. Both nodes subscribe to the consensus topic, node B
 /// dials node A, both wait for mesh ≥1, then A broadcasts and B receives.
 #[tokio::test]
+#[ignore = "multi-node libp2p mesh: binds sockets + forms peer meshes; run with --ignored on a networked host"]
 async fn two_node_consensus_mesh_forms_and_broadcasts() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -220,6 +220,7 @@ async fn two_node_consensus_mesh_forms_and_broadcasts() {
 /// Once the mesh forms across all 4, node 0 broadcasts and all of 1, 2,
 /// 3 must receive.
 #[tokio::test]
+#[ignore = "multi-node libp2p mesh: binds sockets + forms peer meshes; run with --ignored on a networked host"]
 async fn four_node_consensus_mesh_full_propagation() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -309,6 +310,7 @@ impl ValidatorRegistry for StaticValidatorRegistry {
 /// 4 nodes, all installed with the SAME registry containing every peer.
 /// This is the "happy path" — every peer should authorize every other.
 #[tokio::test]
+#[ignore = "multi-node libp2p mesh: binds sockets + forms peer meshes; run with --ignored on a networked host"]
 async fn four_node_with_validator_registry_propagates() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -402,6 +404,7 @@ async fn four_node_with_validator_registry_propagates() {
 /// and we need to look at why `try_register_validator_on_identify` isn't
 /// firing on the cluster.
 #[tokio::test]
+#[ignore = "multi-node libp2p mesh: binds sockets + forms peer meshes; run with --ignored on a networked host"]
 async fn validator_registry_blocks_unknown_publisher() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -500,6 +503,7 @@ impl ValidatorRegistry for DynamicValidatorRegistry {
 /// FAIL = the dynamic-admission path has a real timing bug that needs
 /// fixing on the cluster.
 #[tokio::test]
+#[ignore = "multi-node libp2p mesh: binds sockets + forms peer meshes; run with --ignored on a networked host"]
 async fn dynamic_admission_via_identify_propagates_consensus() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -582,6 +586,7 @@ async fn dynamic_admission_via_identify_propagates_consensus() {
 /// is correct, mesh+admission convergence is detected the moment it
 /// happens, and the broadcast lands.
 #[tokio::test]
+#[ignore = "multi-node libp2p mesh: binds sockets + forms peer meshes; run with --ignored on a networked host"]
 async fn wait_for_admitted_mesh_is_sufficient_first_publish_gate() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -663,6 +668,7 @@ async fn wait_for_admitted_mesh_is_sufficient_first_publish_gate() {
 /// `wait_for_admitted_mesh` should fall back to plain mesh peer count.
 /// This guards against breaking single-node / pre-genesis startup.
 #[tokio::test]
+#[ignore = "multi-node libp2p mesh: binds sockets + forms peer meshes; run with --ignored on a networked host"]
 async fn wait_for_admitted_mesh_permissive_when_no_registry() {
     let _ = tracing_subscriber::fmt::try_init();
 

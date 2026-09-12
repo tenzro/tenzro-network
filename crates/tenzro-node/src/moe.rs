@@ -2215,10 +2215,8 @@ mod tests {
     /// model error it had stopped exercising.
     #[tokio::test]
     async fn dispatcher_execute_unloaded_expert_is_model_error() {
-        let mgr = crate::api_key::ApiKeyManager::new(Arc::new(
-            tenzro_storage::MemoryStore::new(),
-        ))
-        .unwrap();
+        let mgr = crate::api_key::ApiKeyManager::new(Arc::new(tenzro_storage::MemoryStore::new()))
+            .unwrap();
         let issued = mgr
             .issue(
                 Some("did:tenzro:machine:moe-fixture".to_string()),

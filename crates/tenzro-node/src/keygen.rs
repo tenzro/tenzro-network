@@ -342,11 +342,11 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
             } else {
                 format!("erc8004-system/{attempt}")
             };
-            fresh_secret(&purpose).ok().and_then(|s| SecretKey::from_slice(&s).ok())
+            fresh_secret(&purpose)
+                .ok()
+                .and_then(|s| SecretKey::from_slice(&s).ok())
         })
-        .ok_or_else(|| {
-            NodeError::Other("could not derive a valid secp256k1 scalar".to_string())
-        })?;
+        .ok_or_else(|| NodeError::Other("could not derive a valid secp256k1 scalar".to_string()))?;
     let bytes = sk.to_bytes();
     write_secret(&key_path, &bytes)?;
     let mut out = [0u8; 32];
@@ -503,14 +503,15 @@ fn sealed_dir_for(path: &Path) -> std::path::PathBuf {
 /// it. That is the honest position: refusing outright would make every
 /// developer machine and TPM-less VM unusable, and silently degrading would
 /// let an operator believe in protection they do not have.
-/// Process-level flag: when set, key persistence MUST use hardware TPM sealing
-/// and refuses to degrade to encrypt-at-rest or plaintext. Autonomous operator
-/// mode sets this before keygen so a TPM permission/absence failure is a hard
-/// error, never a silent unsealed-key fallback.
+/// Process-level flag: when set, key persistence MUST use a hardware seal — a
+/// TPM 2.0 on a PC, or the Secure Enclave on Apple hardware — and refuses to
+/// degrade to encrypt-at-rest or plaintext. Autonomous operator mode sets this
+/// before keygen so a hardware-seal permission/absence failure is a hard error,
+/// never a silent unsealed-key fallback.
 static REQUIRE_HW_SEAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Require (or stop requiring) hardware TPM sealing for all subsequent key
-/// writes in this process. Called by autonomous-operator setup.
+/// Require (or stop requiring) a hardware seal (TPM 2.0 or Secure Enclave) for
+/// all subsequent key writes in this process. Called by autonomous-operator setup.
 pub fn set_require_hw_seal(require: bool) {
     REQUIRE_HW_SEAL.store(require, std::sync::atomic::Ordering::Relaxed);
 }
@@ -558,13 +559,55 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
         }
     }
 
+    // Apple hardware: seal to the Secure Enclave. The wrapping key is derived
+    // from the SEP-bound machine root, whose bytes never touch the disk in the
+    // clear, so a copied directory yields a blob no other machine's enclave can
+    // open — the same machine-bound guarantee the TPM path gives. This is a
+    // first-class hardware seal, so it satisfies `REQUIRE_HW_SEAL`.
+    if tenzro_tee::se_seal::available() {
+        match tenzro_tee::se_seal::seal(&sealed_dir, bytes) {
+            Ok(()) => {
+                if path.exists() {
+                    let _ = std::fs::remove_file(path);
+                    tracing::info!(
+                        target: "tenzro::keygen",
+                        path = %path.display(),
+                        "removed plaintext key superseded by its Secure-Enclave-sealed form"
+                    );
+                }
+                tracing::info!(
+                    target: "tenzro::keygen",
+                    dir = %sealed_dir.display(),
+                    "secret sealed to Secure Enclave"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&sealed_dir);
+                if REQUIRE_HW_SEAL.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(NodeError::Other(format!(
+                        "operator=autonomous requires a hardware-sealed key but Secure Enclave \
+                         sealing failed for {}: {e}. Refusing to write an unsealed key — fix \
+                         Secure Enclave access and re-run, or use --operator self.",
+                        path.display()
+                    )));
+                }
+                tracing::warn!(
+                    target: "tenzro::keygen",
+                    path = %path.display(),
+                    "Secure Enclave present but sealing failed ({e}); falling back to a 0o600 file"
+                );
+            }
+        }
+    }
+
     // Autonomous operator: hardware sealing is mandatory. If control reaches
-    // here the TPM is absent or sealing failed — refuse rather than degrade to
-    // encrypt-at-rest or plaintext.
+    // here neither a TPM nor a Secure Enclave sealed the key — refuse rather
+    // than degrade to encrypt-at-rest or plaintext.
     if REQUIRE_HW_SEAL.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(NodeError::Other(format!(
-            "operator=autonomous requires TPM-sealed keys but no working TPM is available \
-             for {}. Refusing to write an unsealed key.",
+            "operator=autonomous requires a hardware-sealed key but no working TPM or Secure \
+             Enclave is available for {}. Refusing to write an unsealed key.",
             path.display()
         )));
     }
@@ -667,10 +710,13 @@ fn encrypted_path_for(path: &Path) -> std::path::PathBuf {
 /// configured source on a headless validator.
 fn operator_unlock_secret() -> Option<zeroize::Zeroizing<String>> {
     use tenzro_keystore_unlock::KeystoreUnlocker as _;
-    // Same variable the wallet keystore unlocks from (`main.rs`), so an
-    // operator configures their passkey-gated device key or KMS once and both
-    // the wallet and the node's own identity keys are covered by it.
-    tenzro_keystore_unlock::EnvUnlocker::new(crate::KEYSTORE_PASSWORD_ENV)
+    // The same hardware root the wallet keystore unlocks from (`main.rs`), so
+    // a node has one unlock story rather than two. It used to be an
+    // environment variable, which put the factor guarding the node's identity
+    // keys outside the hardware boundary those keys otherwise live inside —
+    // and identity is rooted in a TPM, a Secure Enclave or a passkey and
+    // nothing else.
+    crate::hardware_keystore_unlock::HardwareUnlocker::new()
         .unlock_password()
         .ok()
         .filter(|p| !p.is_empty())
@@ -737,7 +783,9 @@ fn decrypt_at_rest(blob: &[u8], passphrase: &str) -> Result<Vec<u8>> {
 /// the node either refuses to start on a key it can read or overwrites one it
 /// cannot see.
 fn secret_exists(path: &Path) -> bool {
-    tenzro_tee::tpm_seal::is_sealed(&sealed_dir_for(path))
+    let sealed_dir = sealed_dir_for(path);
+    tenzro_tee::tpm_seal::is_sealed(&sealed_dir)
+        || tenzro_tee::se_seal::is_sealed(&sealed_dir)
         || encrypted_path_for(path).exists()
         || path.exists()
 }
@@ -756,6 +804,11 @@ fn read_secret(path: &Path) -> Result<Vec<u8>> {
         return tenzro_tee::tpm_seal::unseal(&sealed_dir)
             .map(|z| z.to_vec())
             .map_err(|e| NodeError::Other(format!("unseal {}: {}", sealed_dir.display(), e)));
+    }
+    if tenzro_tee::se_seal::is_sealed(&sealed_dir) {
+        return tenzro_tee::se_seal::unseal(&sealed_dir)
+            .map(|z| z.to_vec())
+            .map_err(|e| NodeError::Other(format!("se-unseal {}: {}", sealed_dir.display(), e)));
     }
 
     let enc_path = encrypted_path_for(path);

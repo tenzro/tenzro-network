@@ -4,9 +4,10 @@
 //!   must compute on the client side.
 //! - `NonceManager::next_nonce` + `allocate_nonce` — the contended path on
 //!   high-throughput senders.
-//! - Wallet provisioning — FROST keygen + ML-DSA-65 + BLS12-381 generate, the
-//!   onboarding cost.
-//! - Argon2id-backed `Keystore::store_shares` — bounded by the KDF (64MB / 3
+//! - Wallet provisioning — ML-DSA-65 + BLS12-381 generate. The classical key is
+//!   not minted here: it lives in a passkey or secure element and only its
+//!   public half reaches this crate.
+//! - Argon2id-backed `Keystore::store_secrets` — bounded by the KDF (64MB / 3
 //!   iter / parallelism 4), so this is the dominant onboarding latency.
 
 use std::time::Duration;
@@ -14,9 +15,8 @@ use std::time::Duration;
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 
 use tenzro_types::primitives::Address;
-use tenzro_wallet::{
-    Keystore, NonceManager, UserOp, UserOpBuilder, WalletProvisioner, user_op_hash,
-};
+use tenzro_wallet::keystore::WalletSecrets;
+use tenzro_wallet::{Keystore, NonceManager, UserOp, UserOpBuilder, user_op_hash};
 
 fn sample_user_op() -> UserOp {
     UserOpBuilder::new()
@@ -55,22 +55,24 @@ fn bench_nonce_manager(c: &mut Criterion) {
 }
 
 fn bench_wallet_provision(c: &mut Criterion) {
-    let provisioner = WalletProvisioner::new();
     let mut group = c.benchmark_group("wallet_provision");
-    // Provisioning includes FROST trusted-dealer keygen + ML-DSA-65 + BLS12-381
-    // keygen — slow. Bound the run to keep CI reasonable.
+    // Provisioning no longer generates a classical key — that one lives in a
+    // passkey or secure element and only its public half reaches this crate.
+    // What is left to measure is the ML-DSA-65 + BLS12-381 legs, which have no
+    // hardware backing on any current platform and so are minted here.
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(15));
-    group.bench_function("frost_2of3_plus_mldsa65_plus_bls", |b| {
+    group.bench_function("mldsa65_plus_bls", |b| {
         b.iter(|| {
-            let w = provisioner.provision_wallet().expect("provision");
-            black_box(w);
+            let pq = tenzro_crypto::pq::MlDsaSigningKey::generate();
+            let bls = tenzro_crypto::bls::BlsKeyPair::generate().expect("bls keygen");
+            black_box((pq, bls));
         });
     });
     group.finish();
 }
 
-fn bench_keystore_store_shares(c: &mut Criterion) {
+fn bench_keystore_store_secrets(c: &mut Criterion) {
     // Argon2id KDF is the dominant cost. Use a unique tmp dir per call.
     let tmp_root = std::env::temp_dir().join(format!(
         "tenzro-wallet-bench-keystore-{}-{}",
@@ -81,10 +83,14 @@ fn bench_keystore_store_shares(c: &mut Criterion) {
             .unwrap_or(0),
     ));
     std::fs::create_dir_all(&tmp_root).expect("mkdir");
-    let provisioner = WalletProvisioner::new();
-    let wallet = provisioner.provision_wallet().expect("provision");
+    let wallet_id = tenzro_wallet::WalletId::new();
+    let secrets = WalletSecrets {
+        pq_seed: vec![7u8; 32],
+        bls_key: vec![9u8; 32],
+        classical_public_key: vec![1u8; 32],
+    };
 
-    let mut group = c.benchmark_group("keystore_store_shares");
+    let mut group = c.benchmark_group("keystore_store_secrets");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(20));
     let mut i: u64 = 0;
@@ -97,13 +103,8 @@ fn bench_keystore_store_shares(c: &mut Criterion) {
                 Keystore::new(dir).expect("open keystore")
             },
             |mut ks| {
-                ks.store_shares(
-                    &wallet.wallet_id,
-                    wallet.frost_pubkey_package.as_ref().expect("pubkey pkg"),
-                    &wallet.key_shares,
-                    "correct horse battery staple",
-                )
-                .expect("store shares");
+                ks.store_secrets(&wallet_id, &secrets, "correct horse battery staple")
+                    .expect("store secrets");
             },
             BatchSize::PerIteration,
         );
@@ -116,6 +117,6 @@ criterion_group!(
     bench_user_op_hash,
     bench_nonce_manager,
     bench_wallet_provision,
-    bench_keystore_store_shares,
+    bench_keystore_store_secrets,
 );
 criterion_main!(benches);

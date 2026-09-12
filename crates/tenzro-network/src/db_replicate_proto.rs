@@ -6,15 +6,13 @@
 //! body plus an ack, so the caller can enforce write consistency (Quorum / All)
 //! by counting acknowledgments across the partition's holder set.
 //!
-//! ## Why this shape (vs. the MPC relay's Ack-only pattern)
+//! ## Why this shape (request→reply-carrying)
 //!
-//! The MPC relay (`mpc_relay.rs`) is fire-and-forget: real replies flow back
-//! over a separate subscriber channel. A replicated write is genuinely
-//! request→**reply-carrying** — the requesting holder must know whether each
-//! peer holder actually applied the write before it can declare quorum. So the
-//! outbound side uses per-request `oneshot` correlation (keyed by
-//! `OutboundRequestId`) — the caller awaits its own reply — exactly like the
-//! committee-DA relay (`da_committee_relay.rs`).
+//! A replicated write is genuinely request→**reply-carrying** — the requesting
+//! holder must know whether each peer holder actually applied the write before
+//! it can declare quorum. So the outbound side uses per-request `oneshot`
+//! correlation (keyed by `OutboundRequestId`) — the caller awaits its own
+//! reply — exactly like the committee-DA relay (`da_committee_relay.rs`).
 //!
 //! ## Why the payload is an opaque byte body
 //!

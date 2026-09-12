@@ -46,7 +46,7 @@ The crates that implement this:
 
 ### 2.1 Provider model
 
-A node runs as a model provider with `--roles ai`, registers each model it can serve through `tenzro_serveModel` (or `tenzro model serve` on the CLI), and the registration writes through to `CF_MODEL_SERVICES`. The provider's TDIP identity is bound at registration; payments route to its MPC wallet.
+A node runs as a model provider with `--roles ai`, registers each model it can serve through `tenzro_serveModel` (or `tenzro model serve` on the CLI), and the registration writes through to `CF_MODEL_SERVICES`. The provider's TDIP identity is bound at registration; payments route to its permissionless wallet (the node's signing key is held in its own TPM 2.0 / Secure Enclave — no custody is held).
 
 Registration and provider announcements are authenticated over gossip. Each announcement on `tenzro/models` and `tenzro/providers` is Ed25519-signed by the node's key over a canonical preimage of its routable fields and carries the signing public key; consumers verify on ingest and drop anything unsigned or tampered. A model announcement also advertises `weights_sha256` — a streaming SHA-256 of the served on-disk weights — inside the signed payload, so a consumer can detect weight substitution before routing inference to that provider.
 
@@ -611,7 +611,7 @@ This is the optimistic-rollup pattern applied to training. We chose it over runn
 
 Even though training itself is TEE-optional, Tenzro Network uses TEEs everywhere a key, identity, or verification authority is at stake — that is unchanged here:
 
-- **Trainer keys.** Stake-bonding signatures, weight-update signatures, and payout addresses live in the operator's MPC wallet, whose key shares are TEE-sealed (`tenzro-tee` + `tenzro-wallet`). This holds for Open-tier trainers too.
+- **Trainer keys.** Stake-bonding signatures, weight-update signatures, and payout addresses are made by the operator's permissionless wallet, whose classical signing key is held in the machine's TPM 2.0 / Secure Enclave and never leaves it (`tenzro-tee` + `tenzro-wallet`) — no custody is held. This holds for Open-tier trainers too.
 - **Syncer election and signing.** The elected syncer signs round receipts with a key sealed inside its TEE; sponsors and observers verify those signatures against the syncer's attestation report. The syncer is always TEE'd; trainers may not be.
 - **Confidential-tier data sealing.** Dataset symmetric keys, when used, are sealed to the trainer's enclave; cleartext never reaches the host OS.
 - **Receipt minting.** The on-chain training receipt commits the syncer's TEE attestation chain alongside the merkle root of accepted gradients, so verifiers downstream can audit the syncer's identity even if individual trainers were Open-tier.
@@ -858,7 +858,7 @@ Python reference trainer that implements the inner training loop for each modali
 
 The Python trainer is a thin agent that:
 
-1. Authenticates with its TDIP DID + MPC wallet (via the Tenzro JSON-RPC).
+1. Authenticates with its TDIP DID + permissionless wallet (via the Tenzro JSON-RPC).
 2. Subscribes to the `tenzro/training` gossip topic.
 3. On task assignment, resolves the dataset shard URI (`tenzro://blob/<hash>` natively through the local node's `tenzro_iroh_fetchBlob` RPC, with `ipfs://` / `ar://` / `http(s)://` as gateway-resolved alternatives and `file://` passthrough; remote fetches cache under `~/.cache/tenzro-trainer/shards`), then runs the inner loop the task's `objective` selects: H supervised SGD steps for `Supervised`, or H GRPO steps for `RlPostTraining` (Language modality only — per step, sample a `group_size` rollout group from one shard prompt, score with the sponsor's `py:<module>:<callable>` reward, take one optimizer step on the clipped surrogate with a k3 KL penalty against the sampling-time policy). Either way it emits its outer gradient as a safetensors blob — the outer contract is objective-agnostic.
 4. Submits the safetensors blob + signature to the Rust syncer over JSON-RPC (`tenzro_training_submitOuterGradient`).

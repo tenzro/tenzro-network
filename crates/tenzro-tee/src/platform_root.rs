@@ -104,8 +104,33 @@ pub async fn platform_root_ikm() -> Result<Zeroizing<Vec<u8>>> {
         return tpm_platform_root();
     }
 
+    // The Secure Enclave is the commodity root on Apple hardware exactly as the
+    // TPM is on a PC, so it belongs in this list on the same footing.
+    //
+    // This is key DERIVATION, not machine identification — the two are kept
+    // apart deliberately (`hardware_identity` handles the latter). What unifies
+    // the branches here is that each returns reproducible per-machine keying
+    // material; SEV-SNP and TDX additionally bind the measured image, and
+    // neither the TPM nor the SEP does.
+    //
+    // ⚠ Weaker than the TPM branch above in one specific way: the SEP has no
+    // PCRs and issues no quote. Anything recording HOW a key is rooted must
+    // consult `tenzro_secure_enclave::MachineRootKind` rather than assume a
+    // root implies an attestation.
+    //
+    // Without this branch every Apple host falls through to NotAvailable, so
+    // `SealedSecp256k1Key::derive_auto` fails and the only remaining bridge
+    // backend is the dev-only raw key.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        if tenzro_secure_enclave::available() {
+            return tenzro_secure_enclave::machine_root_ikm()
+                .map_err(|e| TeeError::not_available(format!("secure enclave root: {e}")));
+        }
+    }
+
     Err(TeeError::not_available(
-        "no SEV-SNP, TDX or TPM platform root available for key derivation",
+        "no SEV-SNP, TDX, TPM or Secure Enclave platform root available for key derivation",
     ))
 }
 
@@ -161,6 +186,12 @@ pub fn platform_root_available() -> bool {
             return true;
         }
     }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        if tenzro_secure_enclave::available() {
+            return true;
+        }
+    }
     crate::tpm_seal::tpm_available()
 }
 
@@ -181,6 +212,36 @@ pub async fn derive_platform_key(label: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Before the Secure Enclave branch existed, every Apple host fell through
+    /// to NotAvailable — so `SealedSecp256k1Key::derive_auto` failed and the
+    /// only remaining bridge backend was the dev-only raw key.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn apple_hardware_has_a_platform_root() {
+        assert!(
+            platform_root_available(),
+            "a Mac with a Secure Enclave must report a usable platform root"
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ikm = rt
+            .block_on(platform_root_ikm())
+            .expect("platform_root_ikm must succeed on Apple hardware");
+        assert!(!ikm.is_empty());
+        assert!(ikm.iter().any(|b| *b != 0), "root must not be all zeroes");
+    }
+
+    /// The root has to be reproducible or every key derived from it rotates on
+    /// restart, stranding anything that recorded the old public key.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn apple_platform_root_is_stable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = rt.block_on(platform_root_ikm()).expect("first");
+        let b = rt.block_on(platform_root_ikm()).expect("second");
+        assert_eq!(&a[..], &b[..], "platform root changed between calls");
+    }
+
     use super::*;
 
     #[tokio::test]

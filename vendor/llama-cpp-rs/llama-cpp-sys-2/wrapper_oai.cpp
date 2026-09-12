@@ -412,6 +412,7 @@ extern "C" llama_rs_status llama_rs_apply_chat_template_oaicompat(
         inputs.enable_thinking = params->enable_thinking;
         inputs.add_bos = params->add_bos;
         inputs.add_eos = params->add_eos;
+        inputs.force_pure_content = params->force_pure_content;
 
         inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(params->messages));
         if (params->tools && std::strlen(params->tools) > 0) {

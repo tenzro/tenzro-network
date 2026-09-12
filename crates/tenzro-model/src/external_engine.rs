@@ -312,6 +312,14 @@ impl ExternalEngine {
         if (config.repeat_penalty - 1.0).abs() > f32::EPSILON {
             body["frequency_penalty"] = json!((config.repeat_penalty - 1.0) as f64);
         }
+        // Structured-output constraint, verbatim: SGLang enforces it at the
+        // sampler through its grammar backend (xgrammar), llama.cpp's server
+        // converts a json_schema to GBNF itself. The engine is the validator —
+        // a shape it cannot enforce comes back as its own 400, not a silent
+        // drop here.
+        if let Some(rf) = &config.response_format {
+            body["response_format"] = rf.clone();
+        }
         if stream {
             // Ask both engines to include the final usage block in the stream.
             body["stream_options"] = json!({ "include_usage": true });
@@ -730,7 +738,10 @@ vllm:prefix_cache_hits_total{engine="0",model_name="qwen3.8-27b"} 0.0
             "a zero counter means no prefix cache, however present the metric"
         );
 
-        let warm = LIVE_VLLM.replace("prefix_cache_queries_total{engine=\"0\",model_name=\"qwen3.8-27b\"} 0.0", "prefix_cache_queries_total{engine=\"0\",model_name=\"qwen3.8-27b\"} 4096.0");
+        let warm = LIVE_VLLM.replace(
+            "prefix_cache_queries_total{engine=\"0\",model_name=\"qwen3.8-27b\"} 0.0",
+            "prefix_cache_queries_total{engine=\"0\",model_name=\"qwen3.8-27b\"} 4096.0",
+        );
         let m = EngineMetrics::parse(&warm).expect("parses");
         assert!(m.prefix_cache_is_real());
         assert_eq!(m.prefix_cache_queries, 4096);
@@ -741,7 +752,10 @@ vllm:prefix_cache_hits_total{engine="0",model_name="qwen3.8-27b"} 0.0
     #[test]
     fn nothing_recognisable_is_unknown_not_idle() {
         assert_eq!(EngineMetrics::parse(""), None);
-        assert_eq!(EngineMetrics::parse("# HELP something else\nfoo_bar 1.0"), None);
+        assert_eq!(
+            EngineMetrics::parse("# HELP something else\nfoo_bar 1.0"),
+            None
+        );
     }
 
     /// SGLang exposes the same facts under its own prefix.

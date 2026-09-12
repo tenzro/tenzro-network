@@ -8,7 +8,7 @@
 
 A coordination layer is only as good as the substrate underneath it. Tenzro Network is the protocol layer that lets thousands of independently operated peers — validators, model providers, compute providers, storage providers, TEE providers, light clients, agents behind home / mobile / corporate NAT — find each other, propagate messages efficiently, distinguish validator traffic from non-validator traffic, and exchange large content-addressed payloads without going through a central broker. A single peer can take on several of these roles at once against one stake; the roles describe what a node serves, not how many nodes there are.
 
-The design has two planes. The **control plane** (`tenzro-network`) is libp2p — gossipsub for topic-based pub/sub, Kademlia DHT for peer discovery, request/response protocols for direct exchanges (block sync, consensus messages, MPC relay), Identify for protocol negotiation, AutoNAT v2 + Circuit-Relay v2 + DCUtR for NAT traversal. The **data plane** (`tenzro-iroh`) is iroh — content-addressed transport over QUIC, used for model weights, training gradients, sealed shards, agent memory archives, and A2A + MCP-over-iroh ALPNs.
+The design has two planes. The **control plane** (`tenzro-network`) is libp2p — gossipsub for topic-based pub/sub, Kademlia DHT for peer discovery, request/response protocols for direct exchanges (block sync, consensus messages), Identify for protocol negotiation, AutoNAT v2 + Circuit-Relay v2 + DCUtR for NAT traversal. The **data plane** (`tenzro-iroh`) is iroh — content-addressed transport over QUIC, used for model weights, training gradients, sealed shards, agent memory archives, and A2A + MCP-over-iroh ALPNs.
 
 Both planes share peer identity. A node's libp2p peer ID and its iroh `EndpointId` are both derived from its TDIP Ed25519 key, so authentication on one plane carries to the other.
 
@@ -30,7 +30,6 @@ Built on `libp2p` 0.56. Wraps the standard libp2p protocols into a single `Tenzr
 - **`allow_block_list`** — permanent ban list for byzantine peers
 - **`block_sync`** — request/response on `/tenzro/block-sync/1.0.0`, used by lagging nodes to catch up without relying on gossipsub backfill
 - **`consensus_direct`** — request/response on `/tenzro/consensus-direct/1.0.0`, carries HotStuff-2 votes and quorum certificates between validators with bounded latency
-- **`mpc_relay`** — request/response on `/tenzro/mpc/req-resp/1.0.0` plus gossipsub topic `/tenzro/mpc/session/<instance_id>`, carries DKLS23 round messages
 - **`relay`** + **`autonat`** + **`dcutr`** — NAT traversal stack (server halves on validators with confirmed public addresses; client halves on joiners behind NAT)
 
 ### Data plane — `tenzro-iroh`
@@ -70,7 +69,6 @@ The control plane carries fifteen topics built on top of `gossipsub` with a hard
 | `tenzro/training` | trainers + syncer | every training participant | no |
 | `tenzro/training/syncer` | witness committee | training participants | no |
 | `tenzro/media-gen` | requesters + media workers | enrolled media workers | no |
-| `/tenzro/mpc/session/<instance_id>` | DKLS23 round participants | session participants | no |
 
 Validator-only topics enforce origin on the receive side: `ValidatorRegistry::is_validator(peer_id)` is consulted before a `tenzro/blocks`, `tenzro/consensus`, or `tenzro/batches` message is admitted. Non-validators that publish on these topics get their messages dropped.
 
@@ -127,7 +125,6 @@ Some message flows are too sensitive to gossipsub's lossy fanout. Tenzro carries
 
 - **`/tenzro/block-sync/1.0.0`** — a lagging node requests a contiguous range of blocks from a chosen peer. The provider streams the response in framed chunks. A standard state-sync / storage-service protocol. The wire types live in `block_sync_proto.rs`.
 - **`/tenzro/consensus-direct/1.0.0`** — validators exchange HotStuff-2 vote messages and quorum certificates directly without going through gossipsub. Bounded latency, validator-only.
-- **`/tenzro/mpc/req-resp/1.0.0`** — DKLS23 round messages between MPC committee members. Pairs with the `/tenzro/mpc/session/<instance_id>` gossipsub topic for broadcast rounds.
 - **`/tenzro/cluster-tunnel/1.0.0`** — the authenticated transport for intra-cluster pipeline traffic. A LAN cluster head opens one tunnel session per member; framed payloads carry the ggml RPC byte stream between the head's loopback bridge and the member's loopback `rpc-server` (see AI.md §3.5). The member never binds its `rpc-server` on a network interface — the tunnel is the only way in, so the unauthenticated RPC protocol is wrapped in libp2p's authenticated transport. Sessions are demultiplexed by a session id carried on each frame; one request-response pair is full-duplex with return bytes piggybacked on the acknowledgement.
 - **`/tenzro/da/committee/1.0.0`** — the committee-resident data-availability store. A writer sends `StoreSliver` to each committee member ("hold this erasure-coded sliver for this blob commitment") and the member replies with a signed attestation of custody; a reader sends `FetchSliver` and the member returns the sliver it holds (or `None`). A challenger sends `ChallengeSliver` with a random 32-byte nonce and the member must reply with its full sliver plus an Ed25519 signature binding the nonce — the challenger re-verifies the sliver against the blob commitment, so a member cannot pass a possession challenge with cached metadata. Every resolution feeds the target's rolling 0–1000 availability score (+1 pass, −5 silence or honest not-held, −25 bad proof); each validator also runs a background auditor that challenges one random certificate attester every 10 minutes. Slivers and encoding shapes travel as opaque bincode blobs because `tenzro-network` does not depend on `tenzro-storage` — the node-layer adapter does the typed encode/decode. 16 MiB request/response cap. The wire types live in `da_committee_relay.rs`; challenge issuance, scoring, and persistence live in the node adapter (`da_committee.rs`), surfaced over `tenzro_daChallenge` / `tenzro_daListChallenges` / `tenzro_daAvailability` / `tenzro_daCommittee` / `tenzro_daListBlobs`, the matching MCP tools, and `tenzro da`.
 
@@ -365,7 +362,7 @@ These Prometheus metrics let operators monitor mesh size, dial rate-limit pressu
 - Behaviour composition: `crates/tenzro-network/src/behaviour.rs::TenzroBehaviour`
 - Validator authentication: `crates/tenzro-network/src/peer_manager.rs::ValidatorRegistry`
 - Gossipsub topics: `crates/tenzro-network/src/gossip.rs`
-- Wire protocols: `crates/tenzro-network/src/{block_sync_proto, consensus_direct_proto, mpc_relay, da_committee_relay}.rs`
+- Wire protocols: `crates/tenzro-network/src/{block_sync_proto, consensus_direct_proto, da_committee_relay}.rs`
 - Bootstrap DNS: `crates/tenzro-node/src/bootstrap_dns.rs`
 - Iroh config: `crates/tenzro-iroh/src/config.rs::TenzroIrohConfig`
 - Iroh A2A + MCP ALPNs: `crates/tenzro-iroh/src/jsonrpc.rs`, `crates/tenzro-iroh/src/lib.rs`

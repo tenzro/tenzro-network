@@ -34,7 +34,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
 bytes = { workspace = true }
-frost-ed25519 = { workspace = true }
 blst = { workspace = true }
 argon2 = { workspace = true }
 subtle = { workspace = true }

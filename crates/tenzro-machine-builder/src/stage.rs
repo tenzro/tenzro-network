@@ -33,7 +33,9 @@ fn copy_tree(src: &Path, dst: &Path, budget: &mut u64) -> Result<u64, BuildError
         .map_err(|e| BuildError::Stage(format!("read_dir {}: {e}", src.display())))?
     {
         let entry = entry.map_err(|e| BuildError::Stage(e.to_string()))?;
-        let ft = entry.file_type().map_err(|e| BuildError::Stage(e.to_string()))?;
+        let ft = entry
+            .file_type()
+            .map_err(|e| BuildError::Stage(e.to_string()))?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if ft.is_dir() {
@@ -94,7 +96,11 @@ pub fn run_json_bytes(run: &RunSpec) -> Result<Vec<u8>, BuildError> {
 ///   * `app_dir` contents placed at `run.cwd` (default `/app`);
 ///   * the init binary at `/sbin/tenzro-initagent` (0755);
 ///   * `/etc/tenzro/run.json`.
-pub fn stage(ctx: &BuildContext, base_dir: Option<&Path>, stage_dir: &Path) -> Result<Staged, BuildError> {
+pub fn stage(
+    ctx: &BuildContext,
+    base_dir: Option<&Path>,
+    stage_dir: &Path,
+) -> Result<Staged, BuildError> {
     if !ctx.app_dir.is_dir() {
         return Err(BuildError::Stage(format!(
             "app_dir {} is not a directory",
@@ -174,15 +180,25 @@ fn manifest(root: &Path, run_bytes: &[u8], initagent: &Path) -> Result<(String, 
     Ok((hex::encode(hasher.finalize()), total))
 }
 
-fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, u64, [u8; 32])>) -> Result<(), BuildError> {
+fn collect(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, u64, [u8; 32])>,
+) -> Result<(), BuildError> {
     for entry in std::fs::read_dir(dir).map_err(|e| BuildError::Stage(e.to_string()))? {
         let entry = entry.map_err(|e| BuildError::Stage(e.to_string()))?;
         let path = entry.path();
-        let ft = entry.file_type().map_err(|e| BuildError::Stage(e.to_string()))?;
+        let ft = entry
+            .file_type()
+            .map_err(|e| BuildError::Stage(e.to_string()))?;
         if ft.is_dir() {
             collect(root, &path, out)?;
         } else if ft.is_file() {
-            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
             let bytes = std::fs::read(&path).map_err(|e| BuildError::Stage(e.to_string()))?;
             let digest: [u8; 32] = Sha256::digest(&bytes).into();
             out.push((rel, bytes.len() as u64, digest));
@@ -271,8 +287,12 @@ mod tests {
     fn manifest_hash_is_stable_across_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let (c, _) = ctx(tmp.path());
-        let h1 = stage(&c, None, &tmp.path().join("s1")).unwrap().manifest_hash;
-        let h2 = stage(&c, None, &tmp.path().join("s2")).unwrap().manifest_hash;
+        let h1 = stage(&c, None, &tmp.path().join("s1"))
+            .unwrap()
+            .manifest_hash;
+        let h2 = stage(&c, None, &tmp.path().join("s2"))
+            .unwrap()
+            .manifest_hash;
         assert_eq!(h1, h2, "same inputs -> same hash");
     }
 }

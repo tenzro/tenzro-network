@@ -85,8 +85,9 @@ pub struct NodeStartCmd {
     /// per-instance directory under the Tenzro root ($TENZRO_HOME, or
     /// ~/.tenzro) — the same one `tenzro-node` picks with no flags, so
     /// starting through the CLI and starting the binary directly land on the
-    /// same state rather than two half-populated trees.
-    #[arg(long)]
+    /// same state rather than two half-populated trees. Also settable via
+    /// `$TENZRO_DATA_DIR`, the same variable `tenzro-node` itself reads.
+    #[arg(long, env = "TENZRO_DATA_DIR")]
     data_dir: Option<PathBuf>,
 
     /// Enable metrics server

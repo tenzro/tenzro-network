@@ -1,23 +1,21 @@
-//! Custody and MPC wallet management commands for the Tenzro CLI
+//! Custody and wallet management commands for the Tenzro CLI
 //!
-//! Create MPC wallets, export/import keystores, rotate keys, manage spending
+//! Create permissionless wallets, export/import keystores, manage spending
 //! limits, and create/revoke session keys.
 
 use crate::output;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-/// Custody & MPC wallet operations
+/// Custody & wallet operations
 #[derive(Debug, Subcommand)]
 pub enum CustodyCommand {
-    /// Create a new MPC threshold wallet
+    /// Create a new wallet
     CreateWallet(CustodyCreateWalletCmd),
     /// Export an encrypted keystore file
     Export(CustodyExportCmd),
     /// Import a wallet from an encrypted keystore
     Import(CustodyImportCmd),
-    /// Rotate MPC key shares without changing the address
-    Rotate(CustodyRotateCmd),
     /// Set spending limits for a wallet
     SetLimits(CustodySetLimitsCmd),
     /// Get current spending limits and usage
@@ -26,8 +24,6 @@ pub enum CustodyCommand {
     Session(CustodySessionCmd),
     /// Revoke an active session key
     RevokeSession(CustodyRevokeSessionCmd),
-    /// Get key share information for a wallet
-    KeyShares(CustodyKeySharesCmd),
 }
 
 impl CustodyCommand {
@@ -36,25 +32,17 @@ impl CustodyCommand {
             Self::CreateWallet(cmd) => cmd.execute().await,
             Self::Export(cmd) => cmd.execute().await,
             Self::Import(cmd) => cmd.execute().await,
-            Self::Rotate(cmd) => cmd.execute().await,
             Self::SetLimits(cmd) => cmd.execute().await,
             Self::GetLimits(cmd) => cmd.execute().await,
             Self::Session(cmd) => cmd.execute().await,
             Self::RevokeSession(cmd) => cmd.execute().await,
-            Self::KeyShares(cmd) => cmd.execute().await,
         }
     }
 }
 
-/// Create MPC wallet
+/// Create a wallet (permissionless; key held in the caller's hardware)
 #[derive(Debug, Parser)]
 pub struct CustodyCreateWalletCmd {
-    /// Threshold (minimum shares to sign)
-    #[arg(long, default_value = "2")]
-    threshold: u32,
-    /// Total number of key shares
-    #[arg(long, default_value = "3")]
-    shares: u32,
     /// Key type: ed25519 or secp256k1
     #[arg(long, default_value = "ed25519")]
     key_type: String,
@@ -67,31 +55,23 @@ impl CustodyCreateWalletCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
 
-        output::print_header("Create MPC Wallet");
+        output::print_header("Create Wallet");
         let spinner = output::create_spinner("Creating wallet...");
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc
             .call(
-                "tenzro_createMpcWallet",
-                serde_json::json!({
-                    "threshold": self.threshold,
-                    "total_shares": self.shares,
-                    "key_type": self.key_type,
-                }),
+                "tenzro_createWallet",
+                serde_json::json!({ "key_type": self.key_type }),
             )
             .await?;
 
         spinner.finish_and_clear();
 
-        output::print_success("MPC wallet created!");
+        output::print_success("Wallet created!");
         output::print_field(
             "Address",
             result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
-        );
-        output::print_field(
-            "Threshold",
-            &format!("{}-of-{}", self.threshold, self.shares),
         );
         output::print_field("Key Type", &self.key_type);
 
@@ -184,50 +164,6 @@ impl CustodyImportCmd {
         output::print_field(
             "Address",
             result.get("address").and_then(|v| v.as_str()).unwrap_or(""),
-        );
-
-        Ok(())
-    }
-}
-
-/// Rotate keys
-#[derive(Debug, Parser)]
-pub struct CustodyRotateCmd {
-    /// Wallet address (hex)
-    #[arg(long)]
-    address: String,
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-}
-
-impl CustodyRotateCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-
-        output::print_header("Rotate Key Shares");
-        let spinner = output::create_spinner("Rotating...");
-        let rpc = RpcClient::new(&self.rpc);
-
-        let result: serde_json::Value = rpc
-            .call(
-                "tenzro_rotateKeys",
-                serde_json::json!({
-                    "address": self.address,
-                }),
-            )
-            .await?;
-
-        spinner.finish_and_clear();
-
-        output::print_success("Key shares rotated! Address unchanged.");
-        output::print_field("Address", &self.address);
-        output::print_field(
-            "Status",
-            result
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("ok"),
         );
 
         Ok(())
@@ -435,85 +371,6 @@ impl CustodyRevokeSessionCmd {
 
         output::print_success("Session revoked!");
         output::print_field("Session ID", &self.session_id);
-
-        Ok(())
-    }
-}
-
-/// Get key share information for a wallet
-#[derive(Debug, Parser)]
-pub struct CustodyKeySharesCmd {
-    /// Wallet address (hex)
-    #[arg(long)]
-    address: String,
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-}
-
-impl CustodyKeySharesCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-
-        output::print_header("Key Shares");
-        let spinner = output::create_spinner("Fetching key shares...");
-        let rpc = RpcClient::new(&self.rpc);
-
-        let result: serde_json::Value = rpc
-            .call(
-                "tenzro_getKeyShares",
-                serde_json::json!({
-                    "address": self.address,
-                }),
-            )
-            .await?;
-
-        spinner.finish_and_clear();
-
-        output::print_field("Address", &self.address);
-        output::print_field(
-            "Threshold",
-            result
-                .get("threshold")
-                .and_then(|v| v.as_u64())
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "?".to_string())
-                .as_str(),
-        );
-        output::print_field(
-            "Total Shares",
-            result
-                .get("total_shares")
-                .and_then(|v| v.as_u64())
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "?".to_string())
-                .as_str(),
-        );
-        output::print_field(
-            "Key Type",
-            result
-                .get("key_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown"),
-        );
-
-        if let Some(shares) = result.get("shares").and_then(|v| v.as_array()) {
-            println!();
-            for (i, share) in shares.iter().enumerate() {
-                let status = share
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let location = share
-                    .get("location")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                output::print_field(
-                    &format!("Share {}", i + 1),
-                    &format!("{} ({})", location, status),
-                );
-            }
-        }
 
         Ok(())
     }

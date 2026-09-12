@@ -214,6 +214,17 @@ class WorkerConfig:
     #: some output fidelity for roughly a quarter to a half of the VRAM, which
     #: is what makes a large video model fit on a single card at all.
     precision: str | None = None
+    #: Text-encoder weight format; ``None`` leaves it at ``dtype``. See
+    #: ``load_pipeline`` for when the encoder, not the transformer, is what
+    #: does not fit.
+    text_encoder_precision: str | None = None
+    #: Keep components in host memory and stream each onto the GPU for its
+    #: own pass. Peak VRAM becomes the largest component, not the sum.
+    cpu_offload: bool = False
+    #: What to record against the node's memory ledger per pipeline, in GB,
+    #: instead of the catalog's ``min_vram_gb``. For quantized/offloaded
+    #: configurations whose real peak is far below the catalog floor.
+    admit_vram_gb: float | None = None
     cache_dir: str | None = None
     poll_interval_secs: float = 5.0
     partner_timeout_secs: float = 900.0
@@ -457,6 +468,8 @@ class MediaGenWorker:
             dtype=self.config.dtype,
             precision=self.config.precision,
             cache_dir=self.config.cache_dir,
+            text_encoder_precision=self.config.text_encoder_precision,
+            cpu_offload=self.config.cpu_offload,
         )
         self._pipelines[cache_key] = loaded
         return loaded
@@ -532,6 +545,15 @@ class MediaGenWorker:
         running it, which is the closest thing to a truthful number available
         without loading it first. Falls back to the on-disk size when absent.
         """
+        # An operator running a quantized, offloaded pipeline knows its real
+        # footprint better than the catalog's full-precision floor does: NF4
+        # on both klein's transformer and its text encoder, streamed one at a
+        # time, peaks near 4.5 GB where the catalog says 12. Admitting the
+        # catalog figure would be refused on a card shared with an LLM; not
+        # admitting at all would leave the node blind to the load. The
+        # override is the honest middle.
+        if self.config.admit_vram_gb is not None:
+            return float(self.config.admit_vram_gb)
         declared = getattr(entry, "min_vram_gb", None)
         if declared:
             return float(declared)

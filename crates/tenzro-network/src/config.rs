@@ -128,6 +128,23 @@ impl NetworkConfig {
         }
     }
 
+    /// A sandbox-safe configuration for tests / CI: TCP loopback on an ephemeral
+    /// port only. No QUIC (UDP) and no mDNS (multicast), both of which a
+    /// hermetic build sandbox (e.g. Cloud Build) blocks, causing transport bind
+    /// failures. Behaviourally identical to `local()` for a single in-process
+    /// node otherwise.
+    pub fn for_tests() -> Self {
+        Self {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            boot_nodes: Vec::new(),
+            max_inbound_peers: 10,
+            max_outbound_peers: 5,
+            enable_mdns: false,
+            enable_dht: false,
+            ..Default::default()
+        }
+    }
+
     /// Validates the configuration
     pub fn validate(&self) -> crate::error::Result<()> {
         if self.max_inbound_peers == 0 && self.max_outbound_peers == 0 {

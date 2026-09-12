@@ -21,6 +21,10 @@
 //! [`result::InferenceResult`], [`result::StopReason`], [`error::Error`] —
 //! compiles and is usable with or without a bundled backend.
 
+/// Admission and queueing: a two-term cost model (prefill and decode learned
+/// separately), a queue-wait SLO instead of an end-to-end deadline, and a
+/// scheduler that answers with an ETA before it ever refuses. Backend-agnostic.
+pub mod admission;
 pub mod config;
 pub mod error;
 pub mod prompt;
@@ -44,14 +48,18 @@ pub mod loaded;
 #[cfg(feature = "bundled-llama")]
 pub mod speculative;
 
+pub use admission::{
+    Class as AdmissionClass, CostModel, Decision as AdmissionDecision, Estimate, Observation,
+    Policy as AdmissionPolicy, Refusal as AdmissionRefusal, Scheduler, Shape,
+};
 pub use config::GenerationConfig;
 pub use error::{Error, Result};
 pub use prompt::render_chatml_prompt;
 pub use result::{ChatMessage, InferenceResult, StopReason};
-pub use stream::{matched_stop_len, StopStream};
+pub use stream::{StopStream, matched_stop_len};
 
 #[cfg(feature = "bundled-llama")]
-pub use batching::{max_slots, BatchEngine, BatchPrompt, BatchRequest};
+pub use batching::{BatchEngine, BatchPrompt, BatchRequest, max_slots};
 #[cfg(feature = "bundled-llama")]
 pub use loaded::{LoadedDrafter, LoadedModel};
 #[cfg(feature = "bundled-llama")]

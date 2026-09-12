@@ -20,9 +20,14 @@
 //! looks busy. The corrective, consistent across the 2024–2026 SLO-serving
 //! work (QLM, SLOs-Serve, SCORPIO), is:
 //!
-//! - **Admit on predicted deadline, not on free capacity.** Estimate the
-//!   request's completion time including current queue depth; if it cannot
-//!   meet its SLO, say so immediately rather than accepting it and missing.
+//! - **Put the SLO on the wait, not the answer.** Queue-wait and time to
+//!   first token are the deadlines; total generation is the caller's choice.
+//!   Predict when a slot frees, from what is running and a cost model that
+//!   prices prefill and decode separately; hold the caller while that ETA is
+//!   inside its budget, refuse only when it is not. (This module once
+//!   predicted end-to-end time against a fixed 30 s and refused nearly every
+//!   real coding turn on a 30 tok/s decoder; see
+//!   `praecise_runtime::admission`, which now owns the model.)
 //! - **Order by deadline, not arrival.** Least-deadline-first, because FIFO
 //!   under load makes the tightest deadlines wait behind the loosest.
 //! - **Separate the classes.** Interactive and batch traffic in one queue is
@@ -59,6 +64,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use praecise_runtime::{AdmissionClass, AdmissionPolicy, CostModel, Scheduler};
+// Re-exported so hosts speak the scheduler's vocabulary without depending
+// on the engine crate themselves.
+pub use praecise_runtime::{AdmissionDecision, AdmissionRefusal, Shape};
 use serde::{Deserialize, Serialize};
 
 /// Latency expectation attached to a request.
@@ -78,16 +87,26 @@ pub enum QosClass {
 }
 
 impl QosClass {
-    /// Default end-to-end deadline for this class.
+    /// Default *queue-wait* budget for this class: how long a caller will
+    /// sit before its first token, not how long the answer may take.
     ///
     /// Interactive is 30s: past that a caller has usually given up, so
     /// admitting the work spends capacity on a result nobody will read.
-    /// Batch is 10 minutes, which is a job-completion target rather than a
-    /// per-token one — per-token SLOs are meaningless for bulk work.
+    /// Batch is 10 minutes. Neither bounds generation length — a caller that
+    /// asked for 4,096 tokens has asked for a long answer, and refusing it
+    /// because thirty is a round number protects no one. That mistake, and
+    /// what it did to a 30 tok/s decoder, is written up in
+    /// `praecise_runtime::admission`.
     pub fn default_deadline(self) -> Duration {
-        match self {
-            Self::Interactive => Duration::from_secs(30),
-            Self::Batch => Duration::from_secs(600),
+        AdmissionPolicy::default().wait_budget(self.into())
+    }
+}
+
+impl From<QosClass> for AdmissionClass {
+    fn from(c: QosClass) -> Self {
+        match c {
+            QosClass::Interactive => AdmissionClass::Interactive,
+            QosClass::Batch => AdmissionClass::Batch,
         }
     }
 }
@@ -109,14 +128,25 @@ pub enum Refusal {
         /// When to come back.
         retry_after_ms: u64,
     },
-    /// Admitting this would miss its deadline, so it is refused now rather
-    /// than accepted and missed later. Refusing early is what keeps the
-    /// already-admitted requests on time.
-    DeadlineUnattainable {
-        /// Predicted milliseconds to completion, including queue wait.
-        predicted_ms: u64,
-        /// The deadline it had to meet.
-        deadline_ms: u64,
+    /// Every slot for this model is busy and none is predicted to free
+    /// within what this class will wait. The caller would have sat past its
+    /// own patience, so it is told now — with the ETA, so it can decide
+    /// whether to come back or go elsewhere.
+    QueueWaitTooLong {
+        /// Predicted milliseconds until a slot frees for this request.
+        eta_ms: u64,
+        /// The wait this class tolerates.
+        budget_ms: u64,
+        /// When to come back.
+        retry_after_ms: u64,
+    },
+    /// The per-model queue is at its depth limit. Nothing about this request
+    /// is wrong; there are simply too many ahead of it.
+    QueueFull {
+        /// Callers already waiting.
+        depth: u32,
+        /// The depth limit.
+        limit: u32,
         /// When to come back.
         retry_after_ms: u64,
     },
@@ -133,7 +163,8 @@ impl Refusal {
     pub fn retry_after_ms(&self) -> u64 {
         match self {
             Self::AtCapacity { retry_after_ms, .. }
-            | Self::DeadlineUnattainable { retry_after_ms, .. }
+            | Self::QueueWaitTooLong { retry_after_ms, .. }
+            | Self::QueueFull { retry_after_ms, .. }
             | Self::ShedForInteractive { retry_after_ms } => *retry_after_ms,
         }
     }
@@ -150,14 +181,15 @@ impl Refusal {
             Self::AtCapacity {
                 in_flight, limit, ..
             } => format!("node at capacity: {in_flight} of {limit} concurrent requests in flight"),
-            Self::DeadlineUnattainable {
-                predicted_ms,
-                deadline_ms,
-                ..
+            Self::QueueWaitTooLong {
+                eta_ms, budget_ms, ..
             } => format!(
-                "refused up front: predicted {predicted_ms} ms exceeds the {deadline_ms} ms \
-                 deadline, so admitting it would miss and cost the requests already running"
+                "every slot is busy and the next is predicted to free in {eta_ms} ms, past the \
+                 {budget_ms} ms this class will wait; generation length is not the limit"
             ),
+            Self::QueueFull { depth, limit, .. } => {
+                format!("queue full: {depth} of {limit} callers already waiting for this model")
+            }
             Self::ShedForInteractive { .. } => {
                 "batch work shed to protect interactive capacity".to_string()
             }
@@ -287,62 +319,12 @@ pub struct Reservation {
     pub in_use: u32,
 }
 
-/// Rolling cost model for one model's requests.
-///
-/// Predicting completion time is what makes deadline-based admission
-/// possible. The prediction does not need to be precise — it needs to be
-/// *calibrated enough* to tell a request that will finish in 2 seconds from
-/// one that will take 5 minutes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct CostModel {
-    /// Cost per thousand tokens, not per request.
-    ///
-    /// A per-request mean cannot tell a twenty-token prompt from a
-    /// hundred-thousand-token agent turn, so one long turn taught the model
-    /// that *every* request costs what it cost — and every small request behind
-    /// it was then refused as deadline-unattainable. Observed on this node: an
-    /// agent turn carrying 172k tokens trained the mean to ~70s, after which a
-    /// "hello world" prompt was predicted at 73s and refused.
-    ///
-    /// Normalising by size is what makes the estimate transferable between
-    /// requests of different shapes.
-    mean_ms_per_kilotoken: u64,
-    samples: u32,
-}
-
-impl CostModel {
-    /// Cost of a request we have no samples for, per thousand tokens.
-    const DEFAULT_MS_PER_KTOK: u64 = 2_000;
-    /// Below this a request is all fixed overhead and the per-token rate says
-    /// nothing useful, so sizes are floored rather than dividing by ~zero.
-    const MIN_KILOTOKENS_X1000: u64 = 250;
-
-    /// Size in thousandths of a kilotoken (i.e. tokens), floored.
-    fn scale(tokens: u64) -> u64 {
-        tokens.max(Self::MIN_KILOTOKENS_X1000)
-    }
-
-    fn observe(&mut self, ms: u64, tokens: u64) {
-        let per_ktok = ms.saturating_mul(1_000) / Self::scale(tokens);
-        if self.samples == 0 {
-            self.mean_ms_per_kilotoken = per_ktok;
-        } else {
-            // 25% on the newest sample: converges within a handful of
-            // requests without one pathological long generation poisoning
-            // every subsequent admission decision.
-            self.mean_ms_per_kilotoken = (per_ktok * 25 + self.mean_ms_per_kilotoken * 75) / 100;
-        }
-        self.samples = self.samples.saturating_add(1);
-    }
-
-    fn predict_ms(&self, tokens: u64) -> u64 {
-        let rate = if self.samples == 0 {
-            Self::DEFAULT_MS_PER_KTOK
-        } else {
-            self.mean_ms_per_kilotoken
-        };
-        rate.saturating_mul(Self::scale(tokens)) / 1_000
-    }
+/// Milliseconds on a process-local monotonic clock, for the praecise scheduler.
+/// It wants a plain number so its arithmetic stays deterministic under test;
+/// the epoch is whenever this is first called.
+fn now_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// Holds a concurrency slot for the life of a request.
@@ -354,9 +336,16 @@ impl CostModel {
 pub struct RequestGuard {
     model_id: String,
     class: QosClass,
-    /// Size this request was admitted against, so its cost is recorded per
-    /// token rather than per request.
-    est_tokens: u64,
+    /// The praecise scheduler's ticket for this request, so its slot and its
+    /// cost sample are released against the right entry.
+    ticket: u64,
+    /// What the request actually produced, when the handler reported it via
+    /// [`RequestGuard::record`]. Zero teaches the cost model nothing — a
+    /// request that never generated is a refusal, not a sample.
+    generated_tokens: u64,
+    /// Time to first token, when the handler measured it. This is what lets
+    /// the cost model separate prefill from decode.
+    first_token_ms: Option<u64>,
     /// Set when the request never actually ran, so its slot is returned
     /// without being recorded as a completion.
     aborted: bool,
@@ -380,6 +369,18 @@ impl RequestGuard {
         self.aborted = true;
     }
 
+    /// Report what the request produced, so the cost model learns from real
+    /// output rather than from the `max_tokens` it was admitted against.
+    ///
+    /// Call once the result (or the end of the stream) is known. A guard
+    /// dropped without this frees its slot and records nothing — better no
+    /// sample than one that prices a 1,000-token answer as a 20-token prompt,
+    /// which is the mistake that had this node refusing 200-token requests.
+    pub fn record(&mut self, generated_tokens: u64, first_token_ms: Option<u64>) {
+        self.generated_tokens = generated_tokens;
+        self.first_token_ms = first_token_ms;
+    }
+
     /// The model this request is running against.
     pub fn model_id(&self) -> &str {
         &self.model_id
@@ -398,19 +399,23 @@ impl RequestGuard {
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
-        let elapsed_ms = self.started.elapsed().as_millis() as u64;
         if self.aborted {
-            self.inner
-                .release_aborted(&self.model_id, self.class, self.lease_id.as_deref());
+            self.inner.release_aborted(
+                &self.model_id,
+                self.class,
+                self.lease_id.as_deref(),
+                self.ticket,
+            );
             return;
         }
         self.inner.release(
             &self.model_id,
             self.class,
             self.lease_id.as_deref(),
-            elapsed_ms,
+            self.ticket,
+            self.generated_tokens,
+            self.first_token_ms,
             self.deadline,
-            self.est_tokens,
         );
     }
 }
@@ -435,12 +440,22 @@ struct TrafficInner {
 struct TrafficState {
     in_flight_interactive: u32,
     in_flight_batch: u32,
-    costs: HashMap<String, CostModel>,
+    /// Per-model scheduler from praecise: the two-term cost model, what is
+    /// running on that model and how many callers are waiting for it. Slot
+    /// count is whatever the caller last declared (the per-model serving
+    /// capacity), defaulting to one until it does.
+    scheds: HashMap<String, Scheduler>,
     /// Guaranteed capacity sold to leases, by lease id.
     reservations: HashMap<String, Reservation>,
 }
 
 impl TrafficState {
+    fn sched(&mut self, model_id: &str) -> &mut Scheduler {
+        self.scheds
+            .entry(model_id.to_string())
+            .or_insert_with(|| Scheduler::new(1, AdmissionPolicy::default()))
+    }
+
     fn total_in_flight(&self) -> u32 {
         self.in_flight_interactive + self.in_flight_batch
     }
@@ -481,7 +496,7 @@ impl TrafficInner {
     /// cost model or the goodput counters — an aborted request carries no
     /// information about how long the model takes, and counting it would
     /// corrupt both.
-    fn release_aborted(&self, _model_id: &str, class: QosClass, lease_id: Option<&str>) {
+    fn release_aborted(&self, model_id: &str, class: QosClass, lease_id: Option<&str>, ticket: u64) {
         // A request that never ran was never really admitted. Undo the admit
         // and record the refusal, so `admitted - completed` stays a real
         // measure of work in flight rather than drifting by one per abort.
@@ -489,6 +504,8 @@ impl TrafficInner {
         self.counters.refused.fetch_add(1, Ordering::Relaxed);
 
         let mut state = self.state.lock();
+        // Zero generated tokens: frees the scheduler slot, teaches nothing.
+        state.sched(model_id).finish(ticket, 0, None, now_ms());
         if let Some(id) = lease_id
             && let Some(r) = state.reservations.get_mut(id)
         {
@@ -509,12 +526,16 @@ impl TrafficInner {
         model_id: &str,
         class: QosClass,
         lease_id: Option<&str>,
-        elapsed_ms: u64,
+        ticket: u64,
+        generated_tokens: u64,
+        first_token_ms: Option<u64>,
         deadline: Duration,
-        est_tokens: u64,
     ) {
         {
             let mut state = self.state.lock();
+            state
+                .sched(model_id)
+                .finish(ticket, generated_tokens, first_token_ms, now_ms());
             if let Some(id) = lease_id
                 && let Some(r) = state.reservations.get_mut(id)
             {
@@ -528,14 +549,14 @@ impl TrafficInner {
                     state.in_flight_batch = state.in_flight_batch.saturating_sub(1);
                 }
             }
-            state
-                .costs
-                .entry(model_id.to_string())
-                .or_default()
-                .observe(elapsed_ms, est_tokens);
         }
         self.counters.completed.fetch_add(1, Ordering::Relaxed);
-        if elapsed_ms <= deadline.as_millis() as u64 {
+        // On time means the caller got its first token inside the wait budget
+        // it was admitted under. The answer's total length is the caller's
+        // choice, not a service failure — so it is not what goodput measures.
+        // A handler that did not measure TTFT is counted on time: it was
+        // admitted within budget, which is all this layer promised.
+        if first_token_ms.is_none_or(|t| t <= deadline.as_millis() as u64) {
             self.counters.on_time.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -603,24 +624,79 @@ impl TrafficManager {
         }
     }
 
-    /// Decide whether to run a request now.
+    /// Take a slot for a request now.
     ///
-    /// `deadline` is how long the caller is willing to wait end to end;
-    /// `None` takes the class default. `queue_ahead` is how many requests are
-    /// already waiting for this model, which is what turns a per-request cost
-    /// estimate into a completion-time prediction.
+    /// `deadline` is how long the caller was willing to wait for its first
+    /// token; `None` takes the class default. It is recorded for goodput,
+    /// not enforced here — whether to hold the caller or turn it away is
+    /// [`TrafficManager::queue_decision`]'s question, asked by the host
+    /// before it calls this. `shape` is what the request will cost: prompt
+    /// tokens and the output ceiling it was given. The scheduler prices the
+    /// slot by it, and by what the request actually produced once the guard
+    /// [`records`](RequestGuard::record) that.
     ///
     /// Checks run cheapest-first and most-protective-first: the global
-    /// ceiling, then the batch reservation, then the deadline prediction.
+    /// ceiling, then the batch reservation.
     pub fn admit(
         &self,
         model_id: &str,
         class: QosClass,
         deadline: Option<Duration>,
-        queue_ahead: u32,
-        est_tokens: u64,
+        shape: Shape,
     ) -> Result<RequestGuard, Refusal> {
-        self.admit_for_lease(model_id, class, deadline, queue_ahead, None, est_tokens)
+        self.admit_for_lease(model_id, class, deadline, None, shape)
+    }
+
+    /// Ask the per-model scheduler what to do with a request that found the
+    /// model busy, without changing anything.
+    ///
+    /// `Admit` when a slot is free; `Wait { eta, .. }` when one is predicted
+    /// to free inside the class's wait budget, in which case the host should
+    /// [`enter_queue`](Self::enter_queue), sleep about `eta` (or until
+    /// something finishes) and ask again; `Refuse` only when the ETA is past
+    /// the budget or the queue is at depth. This is the queue that used to be
+    /// thrown away: the batching engine underneath already holds requests
+    /// until a slot frees, and refusing above it with a `retry_after` the
+    /// caller could not act on discarded that.
+    pub fn queue_decision(&self, model_id: &str, class: QosClass, shape: Shape) -> AdmissionDecision {
+        let mut state = self.inner.state.lock();
+        state.sched(model_id).decide(class.into(), shape, now_ms())
+    }
+
+    /// Record that a caller is now waiting for this model. Its presence
+    /// lengthens the ETA quoted to callers behind it.
+    pub fn enter_queue(&self, model_id: &str) {
+        self.inner.state.lock().sched(model_id).enqueue();
+    }
+
+    /// The caller has stopped waiting — admitted, refused or gone.
+    pub fn leave_queue(&self, model_id: &str) {
+        self.inner.state.lock().sched(model_id).dequeue();
+    }
+
+    /// Declare how many requests the model can decode at once — the batching
+    /// engine's slot count. The scheduler uses it to tell "a slot is free"
+    /// from "hold on": until declared it assumes one.
+    pub fn declare_capacity(&self, model_id: &str, slots: u32) {
+        self.inner.state.lock().sched(model_id).set_slots(slots.max(1));
+    }
+
+    /// Translate a scheduler refusal into this layer's vocabulary, counting
+    /// it. For hosts that got `Refuse` from [`queue_decision`](Self::queue_decision).
+    pub fn refuse_from_queue(&self, r: AdmissionRefusal) -> Refusal {
+        self.refuse(match r {
+            AdmissionRefusal::QueueFull { depth, limit, retry_after_ms } => Refusal::QueueFull {
+                depth,
+                limit,
+                retry_after_ms: retry_after_ms.max(1_000),
+            },
+            AdmissionRefusal::WaitTooLong { eta_ms, budget_ms } => Refusal::QueueWaitTooLong {
+                eta_ms,
+                budget_ms,
+                // Come back once the predicted wait has passed, not instantly.
+                retry_after_ms: eta_ms.saturating_sub(budget_ms).max(1_000),
+            },
+        })
     }
 
     /// Admit a request, drawing on a lease's guaranteed capacity when one is
@@ -640,9 +716,8 @@ impl TrafficManager {
         model_id: &str,
         class: QosClass,
         deadline: Option<Duration>,
-        queue_ahead: u32,
         lease_id: Option<&str>,
-        est_tokens: u64,
+        shape: Shape,
     ) -> Result<RequestGuard, Refusal> {
         let deadline = deadline.unwrap_or_else(|| class.default_deadline());
         let mut state = self.inner.state.lock();
@@ -681,44 +756,15 @@ impl TrafficManager {
             }));
         }
 
-        // 3. Deadline prediction. Cost of this request, plus the queue it
-        //    must wait behind. Refusing here is what protects the requests
-        //    already admitted — accepting work that will miss does not help
-        //    the new caller and hurts everyone ahead of them.
-        let per_request_ms = state
-            .costs
-            .get(model_id)
-            .map(|c| c.predict_ms(est_tokens))
-            .unwrap_or_else(|| CostModel::default().predict_ms(est_tokens));
-        let predicted_ms = per_request_ms.saturating_mul(u64::from(queue_ahead) + 1);
-        let deadline_ms = deadline.as_millis() as u64;
-
-        // An idle node always admits, whatever the estimate says.
-        //
-        // Without this the predictor can deadlock itself, and did on real
-        // hardware: a burst of 24 concurrent requests each took ~30s, the cost
-        // model learned 30s as the per-request cost, and every subsequent
-        // request was then refused as deadline-unattainable — including the
-        // ones that would have run alone in three. Refusing everything means
-        // nothing completes, nothing completes means no new samples, and the
-        // estimate can never come down. A permanent outage from a transient
-        // spike.
-        //
-        // The underlying error is that elapsed time measures *sojourn* — how
-        // long a request took including waiting behind others — while the
-        // prediction uses it as *service* time. Until those are measured
-        // separately, an idle node is the one case where the estimate is
-        // knowably wrong and reality can correct it.
-        let idle = state.total_in_flight() == 0;
-        if !idle && predicted_ms > deadline_ms {
-            drop(state);
-            return Err(self.refuse(Refusal::DeadlineUnattainable {
-                predicted_ms,
-                deadline_ms,
-                // Come back after roughly the queue draining, not instantly.
-                retry_after_ms: per_request_ms.max(1_000),
-            }));
-        }
+        // 3. There is no deadline prediction here any more. Predicting
+        //    end-to-end time against a fixed deadline, from a cost model that
+        //    had never seen an output length, refused nearly every real
+        //    coding turn on a 30 tok/s decoder and got worse the longer it
+        //    ran. The scheduler below prices prefill and decode separately,
+        //    the SLO is on queue wait, and a busy model answers with an ETA
+        //    through `queue_decision` before this is ever called. Here, a
+        //    slot is a slot: taking one is unconditional.
+        let ticket = state.sched(model_id).start(shape, now_ms());
 
         match class {
             QosClass::Interactive => state.in_flight_interactive += 1,
@@ -739,7 +785,9 @@ impl TrafficManager {
         Ok(RequestGuard {
             model_id: model_id.to_string(),
             class,
-            est_tokens,
+            ticket,
+            generated_tokens: 0,
+            first_token_ms: None,
             aborted: false,
             lease_id: charged_lease,
             started: Instant::now(),
@@ -830,22 +878,41 @@ impl TrafficManager {
             .saturating_sub(self.inner.config.public_floor)
     }
 
-    /// Seed the cost model for a model whose requests have not been measured.
+    /// Seed the cost model from a model's measured rates, so the first
+    /// callers are quoted a real ETA rather than the default's.
     ///
-    /// Lets an operator calibrate before serving traffic instead of letting
-    /// the first few callers absorb a wrong prediction.
-    /// `expected` is the cost of a *typical* request for this model; it is
-    /// stored as a per-token rate against a nominal one-kilotoken request, so a
-    /// declared figure calibrates requests of any size rather than only ones
-    /// the same shape as the operator imagined.
+    /// `prefill_tok_per_s` and `decode_tok_per_s` are solo-request figures
+    /// (the numbers a benchmark reports at concurrency one); the scheduler
+    /// scales decode by concurrency itself.
+    pub fn declare_rates(&self, model_id: &str, prefill_tok_per_s: u64, decode_tok_per_s: u64) {
+        self.inner
+            .state
+            .lock()
+            .sched(model_id)
+            .set_cost(CostModel::from_rates(prefill_tok_per_s.max(1), decode_tok_per_s.max(1)));
+    }
+
+    /// Seed the cost model from the expected time of a nominal request: one
+    /// thousand tokens of output on a short prompt. Kept for operators who
+    /// think in "about ten seconds a turn"; [`declare_rates`](Self::declare_rates)
+    /// is the precise form.
     pub fn declare_expected_cost(&self, model_id: &str, expected: Duration) {
-        self.inner.state.lock().costs.insert(
-            model_id.to_string(),
-            CostModel {
-                mean_ms_per_kilotoken: expected.as_millis() as u64,
-                samples: 1,
-            },
+        let ms = (expected.as_millis() as u64).max(1);
+        // 1,000 output tokens in `expected`; prefill stays at the default.
+        let decode_tok_per_s = (1_000_000 / ms).max(1);
+        self.declare_rates(
+            model_id,
+            1_000_000 / CostModel::DEFAULT_PREFILL_US_PER_TOK,
+            decode_tok_per_s,
         );
+    }
+
+    /// What the scheduler currently believes about a model's speed, for
+    /// status endpoints and tests.
+    pub fn rates(&self, model_id: &str) -> (u64, u64) {
+        let mut state = self.inner.state.lock();
+        let c = state.sched(model_id).cost();
+        (c.prefill_tok_per_s(), c.decode_tok_per_s())
     }
 
     /// Current admission state.
@@ -905,6 +972,11 @@ mod tests {
         }
     }
 
+    /// A nominal request shape for tests that do not care about cost.
+    fn sh() -> Shape {
+        Shape::new(1_000, 256)
+    }
+
     #[test]
     fn a_lease_holder_gets_capacity_public_traffic_cannot_take() {
         // The whole point of #55: before this, a renter paying for dedicated
@@ -916,7 +988,7 @@ mod tests {
         // Public traffic fills everything it is allowed to reach. The four
         // reserved-and-idle slots are not available to it.
         let mut public = Vec::new();
-        while let Ok(g) = tm.admit("m", QosClass::Interactive, None, 0, 1_000) {
+        while let Ok(g) = tm.admit("m", QosClass::Interactive, None, sh()) {
             public.push(g);
         }
         assert_eq!(public.len(), 4, "public is capped at 8 - 4 reserved-idle");
@@ -925,7 +997,7 @@ mod tests {
         let mut leased = Vec::new();
         for _ in 0..4 {
             leased.push(
-                tm.admit_for_lease("m", QosClass::Interactive, None, 0, Some("lease-a"), 1_000)
+                tm.admit_for_lease("m", QosClass::Interactive, None, Some("lease-a"), sh())
                     .expect("reserved capacity is guaranteed"),
             );
         }
@@ -941,13 +1013,13 @@ mod tests {
         let mut held = Vec::new();
         for _ in 0..2 {
             held.push(
-                tm.admit_for_lease("m", QosClass::Interactive, None, 0, Some("lease-a"), 1_000)
+                tm.admit_for_lease("m", QosClass::Interactive, None, Some("lease-a"), sh())
                     .expect("own reservation"),
             );
         }
         // Reservation spent; the next one draws on the public pool.
         held.push(
-            tm.admit_for_lease("m", QosClass::Interactive, None, 0, Some("lease-a"), 1_000)
+            tm.admit_for_lease("m", QosClass::Interactive, None, Some("lease-a"), sh())
                 .expect("falls back rather than being refused"),
         );
         assert_eq!(held.len(), 3);
@@ -1010,7 +1082,7 @@ mod tests {
         let tm = TrafficManager::new(leased_cfg(8, 4, 0));
         tm.reserve_for_lease("a", 2).expect("fits");
         let running = tm
-            .admit_for_lease("m", QosClass::Interactive, None, 0, Some("a"), 1_000)
+            .admit_for_lease("m", QosClass::Interactive, None, Some("a"), sh())
             .expect("admitted");
 
         tm.release_lease("a");
@@ -1031,17 +1103,17 @@ mod tests {
         tm.reserve_for_lease("a", 4).expect("fits");
 
         let _public_batch = tm
-            .admit("m", QosClass::Batch, None, 0, 1_000)
+            .admit("m", QosClass::Batch, None, sh())
             .expect("first batch");
         assert!(
-            tm.admit("m", QosClass::Batch, None, 0, 1_000).is_err(),
+            tm.admit("m", QosClass::Batch, None, sh()).is_err(),
             "public batch is capped at 1"
         );
 
         let mut leased = Vec::new();
         for _ in 0..4 {
             leased.push(
-                tm.admit_for_lease("m", QosClass::Batch, None, 0, Some("a"), 1_000)
+                tm.admit_for_lease("m", QosClass::Batch, None, Some("a"), sh())
                     .expect("reserved capacity ignores the public batch cap"),
             );
         }
@@ -1053,7 +1125,7 @@ mod tests {
         let tm = TrafficManager::new(leased_cfg(8, 4, 2));
         tm.reserve_for_lease("a", 4).expect("fits");
         let _g = tm
-            .admit_for_lease("m", QosClass::Interactive, None, 0, Some("a"), 1_000)
+            .admit_for_lease("m", QosClass::Interactive, None, Some("a"), sh())
             .expect("admitted");
 
         let stats = tm.stats();
@@ -1069,14 +1141,32 @@ mod tests {
         // error either — it is just an ordinary caller.
         let tm = TrafficManager::new(leased_cfg(2, 1, 0));
         let _a = tm
-            .admit_for_lease("m", QosClass::Interactive, None, 0, Some("no-such-lease"), 1_000)
+            .admit_for_lease(
+                "m",
+                QosClass::Interactive,
+                None,
+                Some("no-such-lease"),
+                sh(),
+            )
             .expect("public pool");
         let _b = tm
-            .admit_for_lease("m", QosClass::Interactive, None, 0, Some("no-such-lease"), 1_000)
+            .admit_for_lease(
+                "m",
+                QosClass::Interactive,
+                None,
+                Some("no-such-lease"),
+                sh(),
+            )
             .expect("public pool");
         assert!(
-            tm.admit_for_lease("m", QosClass::Interactive, None, 0, Some("no-such-lease"), 1_000)
-                .is_err(),
+            tm.admit_for_lease(
+                "m",
+                QosClass::Interactive,
+                None,
+                Some("no-such-lease"),
+                sh(),
+            )
+            .is_err(),
             "an unknown lease gets no more than the public ceiling"
         );
     }
@@ -1098,14 +1188,14 @@ mod tests {
         let mut held = Vec::new();
         for i in 0..4 {
             held.push(
-                tm.admit(&format!("model-{i}"), QosClass::Interactive, None, 0, 1_000)
+                tm.admit(&format!("model-{i}"), QosClass::Interactive, None, sh())
                     .expect("within the ceiling"),
             );
         }
         // A fifth request against a fifth, entirely idle model still fails —
         // the ceiling is the machine's, not the model's.
         let refused = tm
-            .admit("model-4", QosClass::Interactive, None, 0, 1_000)
+            .admit("model-4", QosClass::Interactive, None, sh())
             .expect_err("global ceiling must bind across models");
         assert!(matches!(refused, Refusal::AtCapacity { .. }));
     }
@@ -1114,20 +1204,20 @@ mod tests {
     fn batch_traffic_cannot_starve_interactive() {
         let tm = TrafficManager::new(cfg(4, 2));
         let _b1 = tm
-            .admit("embed", QosClass::Batch, None, 0, 1_000)
+            .admit("embed", QosClass::Batch, None, sh())
             .expect("first batch");
         let _b2 = tm
-            .admit("embed", QosClass::Batch, None, 0, 1_000)
+            .admit("embed", QosClass::Batch, None, sh())
             .expect("second batch");
 
         let shed = tm
-            .admit("embed", QosClass::Batch, None, 0, 1_000)
+            .admit("embed", QosClass::Batch, None, sh())
             .expect_err("batch is capped at its reservation");
         assert!(matches!(shed, Refusal::ShedForInteractive { .. }));
 
         // The reserved half is still there for a waiting human.
         let _i = tm
-            .admit("chat", QosClass::Interactive, None, 0, 1_000)
+            .admit("chat", QosClass::Interactive, None, sh())
             .expect("interactive capacity is reserved, not shared");
     }
 
@@ -1137,12 +1227,12 @@ mod tests {
         let mut held = Vec::new();
         for _ in 0..4 {
             held.push(
-                tm.admit("chat", QosClass::Interactive, None, 0, 1_000)
+                tm.admit("chat", QosClass::Interactive, None, sh())
                     .expect("interactive may fill the whole node"),
             );
         }
         let refused = tm
-            .admit("chat", QosClass::Interactive, None, 0, 1_000)
+            .admit("chat", QosClass::Interactive, None, sh())
             .expect_err("at capacity");
         assert!(
             matches!(refused, Refusal::AtCapacity { .. }),
@@ -1151,125 +1241,183 @@ mod tests {
     }
 
     #[test]
-    fn a_request_that_cannot_meet_its_deadline_is_refused_up_front() {
-        // Accepting it would miss anyway, and inflate the queue for everyone
-        // already admitted.
+    fn a_busy_model_answers_with_an_eta_not_a_refusal() {
+        // The defect this replaced: with every slot busy the old gate refused
+        // up front, and the queue the batching engine already holds was
+        // never used. Now the answer is "wait about this long".
         let tm = TrafficManager::new(cfg(8, 4));
-        tm.declare_expected_cost("slow", Duration::from_secs(10));
-
-        // An idle node always admits a probe, so hold one in flight: the
-        // deadline guard exists to protect requests already running, and with
-        // none running there is nothing to protect.
+        tm.declare_capacity("m", 1);
+        tm.declare_rates("m", 730, 31); // spark, flash-next
         let _running = tm
-            .admit(
-                "slow",
-                QosClass::Interactive,
-                Some(Duration::from_secs(30)),
-                0,
-            1_000,)
-            .expect("probe");
+            .admit("m", QosClass::Interactive, None, Shape::new(20, 200))
+            .expect("a free slot admits");
 
-        let refused = tm
-            .admit(
-                "slow",
-                QosClass::Interactive,
-                Some(Duration::from_secs(5)),
-                0,
-            1_000,)
-            .expect_err("10s of work cannot meet a 5s deadline");
-        match refused {
-            Refusal::DeadlineUnattainable {
-                predicted_ms,
-                deadline_ms,
-                ..
-            } => {
-                assert_eq!(predicted_ms, 10_000);
-                assert_eq!(deadline_ms, 5_000);
+        match tm.queue_decision("m", QosClass::Interactive, Shape::new(20, 200)) {
+            AdmissionDecision::Wait { eta, position } => {
+                assert_eq!(position, 0);
+                // 200 tokens at 31 tok/s is ~6.5 s; the ETA is that minus
+                // nothing (it just started), and well inside 30 s.
+                assert!(eta.as_millis() < 10_000, "eta {eta:?}");
             }
-            other => panic!("expected DeadlineUnattainable, got {other:?}"),
+            other => panic!("expected Wait, got {other:?}"),
         }
     }
 
     #[test]
-    fn an_idle_node_admits_even_when_the_estimate_says_it_cannot() {
-        // The deadlock found on real hardware. A saturated burst taught the
-        // cost model a 30s per-request time; every later request was then
-        // refused, so nothing ran, so the estimate never corrected. An idle
-        // node must always take work — it is the one case where reality can
-        // falsify the estimate.
+    fn a_free_slot_admits_whatever_the_estimate_says() {
+        // The deadlock found on real hardware, from the other side: an
+        // estimate can only be corrected by running something. A free slot is
+        // capacity; there is nothing to protect.
         let tm = TrafficManager::new(cfg(8, 4));
         tm.declare_expected_cost("m", Duration::from_secs(300));
+        assert!(matches!(
+            tm.queue_decision("m", QosClass::Interactive, Shape::new(20, 4_096)),
+            AdmissionDecision::Admit
+        ));
+        tm.admit(
+            "m",
+            QosClass::Interactive,
+            Some(Duration::from_secs(5)),
+            Shape::new(20, 4_096),
+        )
+        .expect("an idle model must admit");
+    }
 
-        let g = tm
-            .admit("m", QosClass::Interactive, Some(Duration::from_secs(5)), 0, 1_000)
-            .expect("an idle node must admit a probe");
-        assert_eq!(tm.stats().in_flight_interactive, 1);
+    #[test]
+    fn a_long_generation_does_not_poison_the_next_short_one() {
+        // A 1,000-token answer must not teach the model that a 200-token
+        // request is 32 s of work. It was priced by prompt bytes before,
+        // which is exactly what happened.
+        let tm = TrafficManager::new(cfg(8, 4));
+        tm.declare_capacity("m", 1);
+        tm.declare_rates("m", 730, 31);
+        let (_, decode_before) = tm.rates("m");
 
-        // With that probe in flight the node is no longer idle, so the
-        // deadline check applies again and protects the running request.
-        assert!(
-            tm.admit("m", QosClass::Interactive, Some(Duration::from_secs(5)), 0, 1_000)
-                .is_err(),
-            "a busy node still refuses work it cannot finish in time"
-        );
+        let mut g = tm
+            .admit("m", QosClass::Interactive, None, Shape::new(20, 1_000))
+            .expect("free");
+        g.record(1_000, Some(30));
         drop(g);
+
+        let (_, decode_after) = tm.rates("m");
+        // The sample ran in ~0 ms, so if anything decode looks faster; the
+        // point is it did not collapse toward "128 s per kilotoken".
+        assert!(
+            decode_after >= decode_before / 2,
+            "{decode_before} -> {decode_after}"
+        );
     }
 
     #[test]
-    fn the_estimate_can_recover_after_a_pessimistic_spike() {
-        // End to end: a bad estimate must be correctable by observed reality,
-        // or a transient spike becomes a permanent refusal.
+    fn a_wait_past_the_class_budget_is_refused_with_the_eta() {
+        // Only when a slot will not free inside the class's patience does the
+        // caller get turned away — and it is told when to come back.
         let tm = TrafficManager::new(cfg(8, 4));
-        tm.declare_expected_cost("m", Duration::from_secs(300));
+        tm.declare_capacity("m", 1);
+        tm.declare_rates("m", 730, 1); // one token a second
+        // ~300 s of decode ahead: past the 30 s an interactive caller will
+        // wait, inside the ten minutes a batch caller will.
+        let _running = tm
+            .admit("m", QosClass::Interactive, None, Shape::new(20, 300))
+            .expect("free");
 
-        // Idle probes run fast and teach the model the truth.
-        for _ in 0..12 {
-            let g = tm
-                .admit("m", QosClass::Interactive, Some(Duration::from_secs(30)), 0, 1_000)
-                .expect("idle admits");
-            drop(g);
+        let decision = tm.queue_decision("m", QosClass::Interactive, Shape::new(20, 10));
+        let AdmissionDecision::Refuse(r) = decision else {
+            panic!("expected Refuse, got {decision:?}")
+        };
+        let refusal = tm.refuse_from_queue(r);
+        match refusal {
+            Refusal::QueueWaitTooLong {
+                eta_ms,
+                budget_ms,
+                retry_after_ms,
+            } => {
+                assert!(eta_ms > budget_ms, "{eta_ms} vs {budget_ms}");
+                assert_eq!(budget_ms, 30_000);
+                assert!(retry_after_ms >= 1_000);
+            }
+            other => panic!("expected QueueWaitTooLong, got {other:?}"),
         }
-
-        // Now two can be in flight at once without the second being refused,
-        // which was impossible while the estimate stood at 300s.
-        let _first = tm
-            .admit("m", QosClass::Interactive, Some(Duration::from_secs(30)), 0, 1_000)
-            .expect("first");
-        tm.admit("m", QosClass::Interactive, Some(Duration::from_secs(30)), 0, 1_000)
-            .expect("the estimate has recovered, so a busy node admits again");
+        // A batch caller will wait ten minutes for the same slot.
+        assert!(matches!(
+            tm.queue_decision("m", QosClass::Batch, Shape::new(20, 10)),
+            AdmissionDecision::Wait { .. }
+        ));
+        assert_eq!(tm.stats().refused, 1);
     }
 
     #[test]
-    fn queue_depth_is_part_of_the_prediction() {
-        // One request fits the deadline; the same request behind nine others
-        // does not. Ignoring the queue is what makes naive admission accept
-        // work it cannot finish.
+    fn waiting_callers_lengthen_the_eta_quoted_behind_them() {
+        // One request fits the budget; the same request behind a queue of
+        // others sees a longer ETA. Ignoring the queue is what makes naive
+        // admission accept work it cannot start.
         let tm = TrafficManager::new(cfg(64, 32));
-        tm.declare_expected_cost("m", Duration::from_secs(1));
-
-        // Bound, not dropped: an idle node always admits a probe, so the
-        // queue-depth check only applies once something is actually running.
+        tm.declare_capacity("m", 1);
+        tm.declare_rates("m", 730, 100);
         let _running = tm
-            .admit("m", QosClass::Interactive, Some(Duration::from_secs(5)), 0, 1_000)
-            .expect("alone, 1s fits inside 5s");
+            .admit("m", QosClass::Interactive, None, Shape::new(20, 500))
+            .expect("free");
 
-        let refused = tm
-            .admit("m", QosClass::Interactive, Some(Duration::from_secs(5)), 9, 1_000)
-            .expect_err("behind nine others it is 10s of work");
-        assert!(matches!(refused, Refusal::DeadlineUnattainable { .. }));
+        let alone = match tm.queue_decision("m", QosClass::Interactive, Shape::new(20, 500)) {
+            AdmissionDecision::Wait { eta, .. } => eta,
+            other => panic!("{other:?}"),
+        };
+        for _ in 0..4 {
+            tm.enter_queue("m");
+        }
+        let behind = match tm.queue_decision("m", QosClass::Interactive, Shape::new(20, 500)) {
+            AdmissionDecision::Wait { eta, position } => {
+                assert_eq!(position, 4);
+                eta
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(behind > alone, "{behind:?} should exceed {alone:?}");
+        for _ in 0..4 {
+            tm.leave_queue("m");
+        }
+        assert!(matches!(
+            tm.queue_decision("m", QosClass::Interactive, Shape::new(20, 500)),
+            AdmissionDecision::Wait { position: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn the_queue_has_a_depth_limit() {
+        let tm = TrafficManager::new(cfg(64, 32));
+        tm.declare_capacity("m", 1);
+        let _running = tm
+            .admit("m", QosClass::Batch, None, Shape::new(20, 10))
+            .expect("free");
+        let limit = AdmissionPolicy::default().max_queue_depth;
+        for _ in 0..limit {
+            tm.enter_queue("m");
+        }
+        let AdmissionDecision::Refuse(r) =
+            tm.queue_decision("m", QosClass::Batch, Shape::new(20, 10))
+        else {
+            panic!("queue at depth must refuse")
+        };
+        assert!(matches!(
+            tm.refuse_from_queue(r),
+            Refusal::QueueFull { depth, .. } if depth == limit
+        ));
     }
 
     #[test]
     fn a_slot_is_returned_when_the_request_finishes() {
         let tm = TrafficManager::new(cfg(1, 1));
         {
-            let _g = tm.admit("m", QosClass::Interactive, None, 0, 1_000).expect("fits");
+            let _g = tm
+                .admit("m", QosClass::Interactive, None, sh())
+                .expect("fits");
             assert!(
-                tm.admit("m", QosClass::Interactive, None, 0, 1_000).is_err(),
+                tm.admit("m", QosClass::Interactive, None, sh())
+                    .is_err(),
                 "the single slot is taken"
             );
         }
-        tm.admit("m", QosClass::Interactive, None, 0, 1_000)
+        tm.admit("m", QosClass::Interactive, None, sh())
             .expect("slot returned on drop");
     }
 
@@ -1280,7 +1428,7 @@ mod tests {
         // reported success for work that never ran.
         let tm = TrafficManager::new(cfg(4, 2));
         let g = tm
-            .admit("m", QosClass::Interactive, None, 0, 1_000)
+            .admit("m", QosClass::Interactive, None, sh())
             .expect("admitted");
         assert_eq!(tm.stats().admitted, 1);
 
@@ -1299,7 +1447,7 @@ mod tests {
         let tm = TrafficManager::new(leased_cfg(8, 4, 0));
         tm.reserve_for_lease("a", 2).expect("fits");
         let g = tm
-            .admit_for_lease("m", QosClass::Interactive, None, 0, Some("a"), 1_000)
+            .admit_for_lease("m", QosClass::Interactive, None, Some("a"), sh())
             .expect("admitted");
         assert_eq!(tm.reservations()[0].in_use, 1);
         g.abort();
@@ -1314,25 +1462,36 @@ mod tests {
     fn an_abort_does_not_teach_the_cost_model_anything() {
         // An aborted request carries no information about how long the model
         // takes; folding its near-zero duration in would make the predictor
-        // wildly optimistic and admit work that cannot finish.
+        // wildly optimistic and quote ETAs nothing can meet.
         let tm = TrafficManager::new(cfg(8, 4));
-        tm.declare_expected_cost("m", Duration::from_secs(10));
+        tm.declare_rates("m", 730, 31);
         for _ in 0..20 {
-            tm.admit("m", QosClass::Interactive, None, 0, 1_000)
+            tm.admit("m", QosClass::Interactive, None, sh())
                 .expect("admitted")
                 .abort();
         }
-        // The 10s estimate must survive: a 5s deadline is still unattainable.
-        // Checked with a request in flight, since an idle node admits a probe
-        // regardless of the estimate.
-        let _running = tm
-            .admit("m", QosClass::Interactive, Some(Duration::from_secs(30)), 0, 1_000)
-            .expect("probe");
-        assert!(
-            tm.admit("m", QosClass::Interactive, Some(Duration::from_secs(5)), 0, 1_000)
-                .is_err(),
-            "aborts must not have dragged the cost estimate down"
+        assert_eq!(
+            tm.rates("m"),
+            (730, 31),
+            "aborts must not have moved the rates"
         );
+    }
+
+    #[test]
+    fn a_guard_dropped_without_a_record_teaches_nothing_either() {
+        // Zero generated tokens frees the slot and is not a sample: better no
+        // sample than one that prices a 1,000-token answer as a 20-token
+        // prompt, which is the mistake that had this node refusing 200-token
+        // requests.
+        let tm = TrafficManager::new(cfg(8, 4));
+        tm.declare_rates("m", 730, 31);
+        for _ in 0..20 {
+            drop(
+                tm.admit("m", QosClass::Interactive, None, sh())
+                    .expect("admitted"),
+            );
+        }
+        assert_eq!(tm.rates("m"), (730, 31));
     }
 
     #[test]
@@ -1343,7 +1502,9 @@ mod tests {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
             let tm = tm.clone();
             move || {
-                let _g = tm.admit("m", QosClass::Interactive, None, 0, 1_000).expect("fits");
+                let _g = tm
+                    .admit("m", QosClass::Interactive, None, sh())
+                    .expect("fits");
                 panic!("handler blew up");
             }
         }));
@@ -1360,11 +1521,14 @@ mod tests {
         // A refusal without a hint produces either a hammering client or one
         // that gives up on work that would have succeeded.
         let tm = TrafficManager::new(cfg(1, 1));
-        let _held = tm.admit("m", QosClass::Interactive, None, 0, 1_000).expect("fits");
+        let _held = tm
+            .admit("m", QosClass::Interactive, None, sh())
+            .expect("fits");
 
         let refusals = [
-            tm.admit("m", QosClass::Interactive, None, 0, 1_000).unwrap_err(),
-            tm.admit("m", QosClass::Batch, None, 0, 1_000).unwrap_err(),
+            tm.admit("m", QosClass::Interactive, None, sh())
+                .unwrap_err(),
+            tm.admit("m", QosClass::Batch, None, sh()).unwrap_err(),
         ];
         for r in refusals {
             assert!(r.retry_after_ms() > 0, "{r:?}");
@@ -1376,121 +1540,63 @@ mod tests {
     #[test]
     fn goodput_falls_when_work_misses_its_deadline_even_as_throughput_holds() {
         // The signal this module exists to expose. Both runs complete the
-        // same number of requests; only goodput distinguishes them.
+        // same number of requests; only goodput distinguishes them. The
+        // deadline is on the first token, not the whole answer.
         let tm = TrafficManager::new(cfg(8, 4));
         for _ in 0..4 {
-            let g = tm
+            let mut g = tm
                 .admit(
                     "fast",
                     QosClass::Interactive,
                     Some(Duration::from_secs(30)),
-                    0,
-                1_000,)
+                    sh(),
+                )
                 .expect("fits");
+            g.record(100, Some(50));
             drop(g);
         }
         assert_eq!(tm.stats().goodput_pct, 100.0);
 
-        // Now four requests with a deadline they cannot possibly meet.
+        // Now four whose first token came after the wait they were promised.
         for _ in 0..4 {
-            let g = tm
-                .admit("fast", QosClass::Interactive, Some(Duration::ZERO), 0, 1_000)
-                .expect("admitted: a zero deadline predicts nothing ahead of it");
-            std::thread::sleep(Duration::from_millis(2));
+            let mut g = tm
+                .admit(
+                    "fast",
+                    QosClass::Interactive,
+                    Some(Duration::from_secs(1)),
+                    sh(),
+                )
+                .expect("admitted");
+            g.record(100, Some(5_000));
             drop(g);
         }
         let stats = tm.stats();
         assert_eq!(stats.completed, 8, "throughput is unchanged");
-        assert!(
-            stats.goodput_pct < 100.0,
-            "goodput must fall: {}%",
-            stats.goodput_pct
-        );
+        assert_eq!(stats.goodput_pct, 50.0);
     }
 
     #[test]
-    fn a_big_turn_does_not_make_small_requests_unschedulable() {
-        // The failure this normalisation exists for. An agent turn carrying
-        // 172k tokens took ~70s; under a per-request mean that taught the node
-        // that *every* request costs 70s, and the next twenty-token prompt was
-        // predicted at 73s and refused as deadline-unattainable whenever
-        // anything else was in flight. Observed on a live node.
-        let mut c = CostModel::default();
-        c.observe(70_000, 172_000);
-
-        let big = c.predict_ms(172_000);
-        let small = c.predict_ms(20);
-        assert!(big > 30_000, "a 172k-token turn is still expensive: {big}ms");
-        assert!(
-            small < 5_000,
-            "a 20-token prompt must not inherit the big turn's cost, got {small}ms"
-        );
-    }
-
-    #[test]
-    fn cost_is_carried_between_differently_shaped_requests() {
-        // Normalising by size is what makes one request's measurement useful
-        // for predicting another of a different shape.
-        let mut c = CostModel::default();
-        c.observe(10_000, 10_000);
-        let doubled = c.predict_ms(20_000);
-        assert!(
-            (18_000..=22_000).contains(&doubled),
-            "twice the tokens should predict about twice the time, got {doubled}ms"
-        );
-    }
-
-    #[test]
-    fn a_tiny_request_is_not_predicted_as_free() {
-        // Below the floor a request is all fixed overhead; dividing by a
-        // near-zero size would predict ~0ms and admit without bound.
-        let mut c = CostModel::default();
-        c.observe(2_000, 1);
-        assert!(
-            c.predict_ms(1) >= 1_000,
-            "a one-token sample must not collapse the rate"
-        );
-    }
-
-    #[test]
-    fn the_cost_model_learns_from_completed_requests() {
-        // Admission quality depends on prediction quality, so predictions
-        // have to track reality rather than stay at the default.
+    fn the_cost_model_learns_from_recorded_output() {
+        // ETA quality depends on the rates tracking reality rather than
+        // staying at the seed. A handler that records generated tokens and
+        // TTFT is what moves them.
         let tm = TrafficManager::new(cfg(8, 4));
-
-        // Default is 2s, so a 1s deadline is unattainable before any
-        // measurement — visible only once something is in flight, since an
-        // idle node always admits a probe.
-        let running = tm
-            .admit("m", QosClass::Interactive, Some(Duration::from_secs(30)), 0, 1_000)
-            .expect("probe");
-        assert!(
-            tm.admit(
-                "m",
-                QosClass::Interactive,
-                Some(Duration::from_millis(1_000)),
-                0
-            , 1_000)
-            .is_err()
-        );
-        drop(running);
-
-        // Run some genuinely fast requests.
+        tm.declare_rates("m", 730, 31);
+        let (_, before) = tm.rates("m");
         for _ in 0..8 {
-            let g = tm
-                .admit("m", QosClass::Interactive, Some(Duration::from_secs(30)), 0, 1_000)
-                .expect("fits under a loose deadline");
+            let mut g = tm
+                .admit("m", QosClass::Interactive, None, Shape::new(20, 500))
+                .expect("fits");
+            // Pretend the decoder is far faster than the seed says.
+            std::thread::sleep(Duration::from_millis(5));
+            g.record(500, Some(1));
             drop(g);
         }
-
-        // Having learned they are fast, the tight deadline is now attainable.
-        tm.admit(
-            "m",
-            QosClass::Interactive,
-            Some(Duration::from_millis(1_000)),
-            0,
-        1_000,)
-        .expect("measured cost should now be well under 1s");
+        let (_, after) = tm.rates("m");
+        assert!(
+            after > before,
+            "decode rate should have risen: {before} -> {after}"
+        );
     }
 
     #[test]
@@ -1520,7 +1626,7 @@ mod tests {
                 let tm = tm.clone();
                 let peak = Arc::clone(&peak);
                 s.spawn(move || {
-                    if let Ok(g) = tm.admit("m", QosClass::Interactive, None, 0, 1_000) {
+                    if let Ok(g) = tm.admit("m", QosClass::Interactive, None, sh()) {
                         let now = tm.stats().in_flight_interactive as usize;
                         peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
                         std::thread::sleep(Duration::from_millis(1));

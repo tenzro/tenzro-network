@@ -484,7 +484,12 @@ mod tests {
         // Register a payer identity (default placeholder wallet is derived
         // from the DID, so it is non-zero and receivable).
         let result = identities
-            .register_human_with_fee(vec![9u8; 32], "payer".to_string(), KycTier::Unverified)
+            .register_human_with_fee(
+                vec![9u8; 32],
+                vec![2u8; 33],
+                "payer".to_string(),
+                KycTier::Unverified,
+            )
             .await
             .unwrap();
         let payer_did = result.identity.did.to_string();

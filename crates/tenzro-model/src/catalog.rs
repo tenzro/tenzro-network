@@ -354,7 +354,10 @@ impl ServingProfile {
             // user prompt at idx 0). Override is wired in
             // tenzro-inference sidecar.rs TEMPLATE_OVERRIDES — the
             // catalog only carries the sampler profile.
-            "qwen3.5" | "qwen3.6" | "qwen3.8" => Self {
+            // flash-next carries its own family string, so it must be listed
+            // alongside "qwen3.8" or it silently falls through to the generic
+            // default instead of Qwen's published sampling row.
+            "qwen3.5" | "qwen3.6" | "qwen3.8" | "qwen3.8-flash-next" => Self {
                 temperature: 1.0,
                 top_p: 0.95,
                 top_k: 20,
@@ -609,7 +612,13 @@ impl ReasoningPolicy {
             // Qwen 3.5/3.6 size-gated `Auto`. Requires the larger 32K budget
             // the model card recommends for its reasoning traces; safe-min is
             // moot under `Always` (kept 0.0).
-            "qwen3.8" => Self {
+            // `qwen3.8-flash-next` is listed explicitly: it is its own family
+            // string in the catalog, so matching only "qwen3.8" dropped it to
+            // the Default policy (`supports_thinking: false`) and the
+            // thinking-only flagship was served as if it had a non-thinking
+            // mode — which also made `reasoning_effort` a no-op, since the
+            // template reads it only inside its thinking branch.
+            "qwen3.8" | "qwen3.8-flash-next" => Self {
                 supports_thinking: true,
                 default_mode: ReasoningMode::Always,
                 thinking_safe_min_b: 0.0,
@@ -735,6 +744,28 @@ impl ReasoningPolicy {
                 thinking_safe_min_b: 4.0,
                 thinking_min_budget_tokens: 16_384,
             },
+            // Gemma 4: thinking is a genuine per-request template toggle
+            // (`enable_thinking`), OFF by default per Google's own docs
+            // (ai.google.dev/gemma/docs/capabilities/thinking) — not an
+            // instruct-only family with no toggle at all. Missing this arm
+            // fell through to `Self::default()` (`supports_thinking: false`),
+            // which `resolve_enable_thinking` reads as "no toggle, preserve
+            // the on-by-default behaviour" — forcing thinking on for every
+            // request regardless of budget. `Never` matches Google's actual
+            // default and, on the 12B+ variants, is required to trigger the
+            // template's own stabilization: the docs note those sizes need
+            // an explicit empty `<|channel>thought\n<channel|>` stub injected
+            // when `enable_thinking` is false, or a "ghost" thought channel
+            // can still open. Observed live: with the missing arm, a
+            // JSON-mode structured-extraction call burned its entire token
+            // budget inside an unclosed thought channel and returned empty
+            // content instead of the answer.
+            "gemma4" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Never,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 0,
+            },
             // Everything else: instruct-only families. Don't touch
             // enable_thinking at all (the GGUF template handles it).
             _ => Self::default(),
@@ -761,15 +792,39 @@ pub enum TemplateFix {
     /// `"qwen3.5-3.6-froggeric-v20.jinja"`). The catalog declares
     /// WHICH fix; the client supplies the file.
     Vendored { filename: String },
+    /// Render the embedded jinja directly and take everything after the
+    /// generation prompt as plain content — no tool-call/reasoning parsing,
+    /// no grammar, no format auto-detection. For a family whose template
+    /// `common_chat`'s auto-detector misidentifies as a *different* known
+    /// format (observed: gemma4-12b-qat detected as gpt-oss/Harmony-shaped,
+    /// which corrupted both the render and the reply parsing — see
+    /// `llama_rs_chat_template_oaicompat_params::force_pure_content` in the
+    /// vendored `llama-cpp-sys-2` wrapper). The template itself is fine;
+    /// only the auto-detection is wrong, so this asks llama.cpp to skip
+    /// detection rather than trying to out-guess it. Trade: no native
+    /// tool-calling for this family — falls back to the preamble/XML path,
+    /// same as any template without a tool branch. Remove for a family once
+    /// `common_chat`'s detector is confirmed fixed for it upstream.
+    ForcePureContent,
 }
 
 impl TemplateFix {
-    /// Recommended chat-template fix for a catalog `family`. Currently
-    /// only Qwen 3.5 / 3.6 ship a known-bad embedded template; froggeric
-    /// v20 patches the prompt-drop + empty-think bugs that otherwise
-    /// produce empty-content multi-turn output. See
-    /// <https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates> and
-    /// <https://github.com/ggml-org/llama.cpp/issues/13178>.
+    /// Recommended chat-template fix for a catalog `family`.
+    ///
+    /// - Qwen 3.5 / 3.6 ship a known-bad embedded template; froggeric v20
+    ///   patches the prompt-drop + empty-think bugs that otherwise produce
+    ///   empty-content multi-turn output. See
+    ///   <https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates> and
+    ///   <https://github.com/ggml-org/llama.cpp/issues/13178>.
+    /// - Gemma 4 renders correctly through neither of `common_chat`'s two
+    ///   template paths on this llama.cpp build: the auto-detecting
+    ///   oaicompat path misidentifies it as gpt-oss/Harmony-shaped (the
+    ///   model's reply mixed `<|channel|>` and `<|im_start|>` markers with
+    ///   its own), and the legacy `llama_chat_apply_template` path's fixed
+    ///   format table doesn't have a case for it at all (falls through to
+    ///   the ChatML safety net, which Gemma wasn't trained on and echoes/
+    ///   loops on). `ForcePureContent` sidesteps both by skipping detection
+    ///   entirely.
     pub fn for_family(family: &str) -> Self {
         match family {
             // Only Qwen 3.5 / 3.6 ship the known-bad embedded template that
@@ -781,6 +836,7 @@ impl TemplateFix {
             "qwen3.5" | "qwen3.6" => Self::Vendored {
                 filename: "qwen3.5-3.6-froggeric-v20.jinja".to_string(),
             },
+            "gemma4" => Self::ForcePureContent,
             _ => Self::None,
         }
     }
@@ -858,6 +914,117 @@ pub fn parse_params_total_b(parameters: &str) -> f32 {
 /// a match returns `false` before any policy lookup.
 ///
 /// An unknown `model_id` returns `true` (the unchanged default).
+/// How a family's chat template exposes a reasoning-budget control.
+///
+/// This is per-family configuration rather than a constant because the two
+/// families served today disagree on every axis. Qwen 3.8 reads a
+/// `reasoning_effort` kwarg accepting `xhigh | medium | low`, aliases `high`
+/// onto `xhigh`, and **raises** on anything else. Muse-Glimmer reads
+/// `reasoning_strength`, accepts `low | medium | high | xhigh`, defaults to
+/// `high`, and performs **no validation at all** — it interpolates whatever
+/// string it is handed straight into its system prompt. A single hardcoded
+/// kwarg name would simply be ignored by one of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct EffortPolicy {
+    /// Chat-template variable to set. Empty means the family exposes no
+    /// reasoning-budget control, and any caller-supplied value is dropped.
+    pub kwarg: String,
+    /// Levels the template accepts, lowercase.
+    pub levels: Vec<String>,
+    /// Accepted spellings that are not themselves levels, mapped onto one that
+    /// is (e.g. Qwen 3.8's `high` -> `xhigh`). Resolving aliases here keeps the
+    /// rendered prompt identical however the caller spelled it.
+    pub aliases: Vec<(String, String)>,
+}
+
+impl EffortPolicy {
+    fn of(kwarg: &str, levels: &[&str], aliases: &[(&str, &str)]) -> Self {
+        Self {
+            kwarg: kwarg.to_string(),
+            levels: levels.iter().map(|s| s.to_string()).collect(),
+            aliases: aliases
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect(),
+        }
+    }
+
+    /// Per-family reasoning-budget control.
+    ///
+    /// A family absent from this table returns the empty policy, which drops
+    /// any caller-supplied value rather than guessing — the safe direction,
+    /// since a template that validates will raise mid-request on a wrong one.
+    pub fn for_family(family: &str) -> Self {
+        match family {
+            // Qwen 3.8 / Flash-Next: `xhigh` (the template's own default),
+            // `medium` and `low`, plus a `high` alias the template folds into
+            // `xhigh`. `medium` is the *neutral* setting rather than a midpoint
+            // — an instruction is injected only for `xhigh` and `low`.
+            "qwen3.8" | "qwen3.8-flash-next" => Self::of(
+                "reasoning_effort",
+                &["xhigh", "medium", "low"],
+                &[("high", "xhigh")],
+            ),
+            // Muse-Glimmer: a differently-named variable over the full
+            // four-level ladder, per its model card. Its template does no
+            // validation — it interpolates whatever string it is handed
+            // straight into the system prompt — so screening here is what keeps
+            // a typo out of the model's context. No aliases: the card defines
+            // exactly these four spellings.
+            "muse-glimmer" => Self::of(
+                "reasoning_strength",
+                &["low", "medium", "high", "xhigh"],
+                &[],
+            ),
+            _ => Self::default(),
+        }
+    }
+
+    /// Normalise one caller-supplied value against this policy.
+    fn normalize(&self, raw: &str) -> Option<String> {
+        let raw = raw.trim().to_ascii_lowercase();
+        if raw.is_empty() {
+            return None;
+        }
+        if self.levels.iter().any(|l| *l == raw) {
+            return Some(raw);
+        }
+        self.aliases
+            .iter()
+            .find(|(from, _)| *from == raw)
+            .map(|(_, to)| to.clone())
+    }
+}
+
+/// Resolve a caller-supplied reasoning budget for `model_id` into the
+/// template variable and value to render with, or `None` to leave the
+/// template's own default in place.
+///
+/// Validation happens here because a template that checks its input *raises*
+/// on an unrecognised value, which would turn a bad client string into a hard
+/// generation failure; and a template that does not check will happily
+/// interpolate a typo into the model's system prompt. Either way the caller's
+/// value must be screened before it reaches the prompt. Anything unrecognised
+/// falls back to the template default rather than failing the request.
+///
+/// Operators can pin a default without a rebuild via `TENZRO_REASONING_EFFORT`,
+/// validated against the same policy — an unsupported pin is ignored rather
+/// than breaking every request.
+pub fn resolve_reasoning_effort(model_id: &str, effort: Option<&str>) -> Option<(String, String)> {
+    let family = get_model_by_id(model_id).map(|e| e.family.clone())?;
+    let policy = EffortPolicy::for_family(&family);
+    if policy.kwarg.is_empty() {
+        return None;
+    }
+    let requested = match effort {
+        Some(e) => e.to_string(),
+        None => std::env::var("TENZRO_REASONING_EFFORT").ok()?,
+    };
+    policy
+        .normalize(&requested)
+        .map(|v| (policy.kwarg.clone(), v))
+}
+
 pub fn resolve_enable_thinking(model_id: &str, budget_tokens: Option<u32>) -> bool {
     // Operator escape hatch first: a comma-separated id list forces those
     // models onto the non-thinking path with no rebuild. Empty/whitespace
@@ -868,9 +1035,9 @@ pub fn resolve_enable_thinking(model_id: &str, budget_tokens: Option<u32>) -> bo
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .any(|id| id == model_id)
-        {
-            return false;
-        }
+    {
+        return false;
+    }
     let Some(entry) = get_model_by_id(model_id) else {
         return true;
     };
@@ -915,6 +1082,12 @@ pub enum ModelArchitecture {
     /// a dense and an MoE sibling — every released Qwen3-Next checkpoint
     /// is MoE, so there is no dense variant to distinguish it from.
     Qwen3Next,
+    /// Qwen4-Exp (`qwen4_exp`): the experimental architecture behind
+    /// Qwen3.8-Flash-Next and, per Qwen, the basis of Qwen4. Gated delta net
+    /// on 3 of every 4 layers, Qwen Sparse Attention (QSA) on the rest,
+    /// hyper-connections, and a per-layer-embedding n-gram table. Support is
+    /// vendored into our llama.cpp — no released build can load it.
+    Qwen4Exp,
     Gemma3,
     Gemma4,
     Gemma4Moe,
@@ -951,6 +1124,7 @@ impl std::fmt::Display for ModelArchitecture {
             Self::Qwen36Moe => write!(f, "qwen36moe"),
             Self::Qwen3Vl => write!(f, "qwen3vl"),
             Self::Qwen3Next => write!(f, "qwen3next"),
+            Self::Qwen4Exp => write!(f, "qwen4exp"),
             Self::Gemma3 => write!(f, "gemma3"),
             Self::Gemma4 => write!(f, "gemma4"),
             Self::Gemma4Moe => write!(f, "gemma4moe"),
@@ -1301,6 +1475,41 @@ pub fn get_forecast_catalog() -> Vec<OnnxForecastEntry> {
                 "Amazon Chronos-2 — multivariate-capable foundation forecaster, 13-quantile head"
                     .into(),
         },
+        // ── Chronos-2 (Apache 2.0, Amazon / OpenSTEF) ────────────────
+        // The full-size release `amazon/chronos-2` is a single 120M-parameter
+        // model — Chronos-2 was NOT shipped as a small/base/large family the
+        // way the older Chronos-Bolt line was (9M-710M). `chronos-2-small`
+        // above is a genuinely smaller, DISTINCT checkpoint
+        // (`autogluon/chronos-2-small`), not a scaled-down member of a
+        // Chronos-2 size tier — this entry is the actual full model,
+        // ~4.3x the weight of the "small" one despite both being called
+        // "120M" upstream. Same graph shape and `chronos2` adapter as
+        // chronos-2-small (see that entry's comment for the input/output
+        // contract); only the weights differ. Verified live: `chronos-2.onnx`
+        // (the unsuffixed, dynamic-context variant — NOT `chronos-2_static.onnx`,
+        // which freezes the context axis and would reject this adapter's
+        // per-request padded length) at exactly 478,544,773 bytes via HTTP
+        // HEAD against huggingface.co on 2026-08-28.
+        OnnxForecastEntry {
+            id: "chronos-2".into(),
+            name: "Chronos-2".into(),
+            family: "chronos2".into(),
+            hf_repo: "OpenSTEF/chronos-2-onnx".into(),
+            hf_filename: "chronos-2.onnx".into(),
+            context_length: 5760,
+            max_horizon: 672,
+            n_quantiles: 13,
+            output_name: Some("quantile_preds".into()),
+            batch_size: 1,
+            parameters: "120M".into(),
+            size_bytes: 478_544_773,
+            min_ram_gb: 3,
+            license: "Apache 2.0".into(),
+            license_tier: LicenseTier::Permissive,
+            description:
+                "Amazon Chronos-2 (full) — multivariate-capable foundation forecaster, 13-quantile head"
+                    .into(),
+        },
         // ── TiRex 35M (NXAI Community License, NXAI) ────────────────
         // sLSTM recurrent forecaster, not a transformer. Upstream ships
         // tirex.onnx in the model repo, so no re-export is involved.
@@ -1339,6 +1548,46 @@ pub fn get_forecast_model_by_id(id: &str) -> Option<OnnxForecastEntry> {
 // ─────────────────────────────────────────────────────────────────────
 // Text embedding catalog.
 // ─────────────────────────────────────────────────────────────────────
+
+/// How a text-embedding family expects queries and documents to be
+/// prefixed before tokenization.
+///
+/// This is the embedding-side counterpart to [`TemplateFix`]: embedding
+/// families disagree on instruction formatting exactly the way chat
+/// families disagree on chat templates, and the fix is the same — data on
+/// the catalog entry, read generically by the runtime, never a per-model
+/// branch in the encoder itself. Every variant below is verified against
+/// the family's own HF model card / README (2026-08-27), not guessed:
+///
+/// - Qwen3-Embedding: an unprefixed query embeds noticeably worse on
+///   retrieval (its own docs give the `Instruct: …\nQuery:…` template as
+///   required for queries; documents take no prefix at all).
+/// - EmbeddingGemma: queries AND documents both take a prefix, but two
+///   different ones — mixing them up silently degrades retrieval rather
+///   than erroring.
+/// - BGE-M3: explicitly dropped the instruction requirement earlier BGE
+///   versions had ("no longer requires adding instruction to the
+///   queries") — `None` is the correct, verified answer here, not an
+///   oversight.
+/// - ModernBERT-embed / other Nomic-lineage encoders: the `search_query:`
+///   / `search_document:` prefix pair from Nomic's own convention.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EmbeddingTemplate {
+    /// No prefix for either role. BGE-M3.
+    None,
+    /// Qwen3-Embedding: query → `"Instruct: {task}\nQuery:{text}"` (no
+    /// space after the colon — verified byte-for-byte against the model's
+    /// own `get_detailed_instruct` example); document → no prefix.
+    /// `default_task` is used when a caller's request doesn't supply one.
+    InstructQuery { default_task: String },
+    /// EmbeddingGemma: query → `"task: {task} | query: {text}"`;
+    /// document → `"title: {title|none} | text: {text}"`. `default_task`
+    /// is used when a caller's request doesn't supply one.
+    GemmaTask { default_task: String },
+    /// Nomic-lineage (ModernBERT-embed, nomic-embed-*): query →
+    /// `"search_query: {text}"`; document → `"search_document: {text}"`.
+    NomicPrefix,
+}
 
 /// A curated ONNX text-embedding entry.
 ///
@@ -1389,6 +1638,18 @@ pub struct OnnxTextEmbeddingEntry {
     pub license_tier: LicenseTier,
     /// Short description.
     pub description: String,
+    /// Per-family query/document instruction template — see
+    /// [`EmbeddingTemplate`]. `#[serde(default)]` so an older recorded
+    /// catalog snapshot (attestation, cached listing) without this field
+    /// deserializes as `None` rather than failing to load.
+    #[serde(default = "EmbeddingTemplate::default_none")]
+    pub embedding_template: EmbeddingTemplate,
+}
+
+impl EmbeddingTemplate {
+    fn default_none() -> Self {
+        Self::None
+    }
 }
 
 /// Get the curated ONNX text-embedding catalog.
@@ -1410,13 +1671,24 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
             embedding_dim: 1024,
-            matryoshka_dims: vec![],
+            // Qwen3-Embedding's own docs give a supported *range* (32-2560
+            // scaled per model), not a discrete recommended list — these
+            // are representative round-number stops within that range, not
+            // an official set. The runtime truncates+renormalizes for any
+            // requested_dim <= embedding_dim regardless of what's listed
+            // here; this field is advertised metadata, not an allowlist.
+            matryoshka_dims: vec![768, 512, 256, 128, 64, 32],
             supports_fp16: true,
             size_bytes: 2_400_000_000,
             min_ram_gb: 3,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
             description: "Qwen3-Embedding 0.6B — multilingual text embeddings, edge-tier".into(),
+            embedding_template: EmbeddingTemplate::InstructQuery {
+                default_task:
+                    "Given a web search query, retrieve relevant passages that answer the query"
+                        .into(),
+            },
         },
         OnnxTextEmbeddingEntry {
             id: "qwen3-embedding-4b".into(),
@@ -1428,13 +1700,20 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
             embedding_dim: 2560,
-            matryoshka_dims: vec![],
+            // See the 0.6B entry's comment — representative stops within
+            // the documented 32-2560 range, not an official discrete list.
+            matryoshka_dims: vec![2048, 1536, 1024, 768, 512, 256, 128, 32],
             supports_fp16: true,
             size_bytes: 16_100_000_000,
             min_ram_gb: 20,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
             description: "Qwen3-Embedding 4B — mid-tier multilingual text embeddings".into(),
+            embedding_template: EmbeddingTemplate::InstructQuery {
+                default_task:
+                    "Given a web search query, retrieve relevant passages that answer the query"
+                        .into(),
+            },
         },
         OnnxTextEmbeddingEntry {
             id: "qwen3-embedding-8b".into(),
@@ -1446,13 +1725,20 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
             embedding_dim: 4096,
-            matryoshka_dims: vec![],
+            // See the 0.6B entry's comment — representative stops within
+            // the documented 32-2560-scaled range, not an official list.
+            matryoshka_dims: vec![2560, 2048, 1024, 512, 256, 128, 32],
             supports_fp16: true,
             size_bytes: 30_300_000_000,
             min_ram_gb: 36,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
             description: "Qwen3-Embedding 8B — flagship multilingual text embeddings".into(),
+            embedding_template: EmbeddingTemplate::InstructQuery {
+                default_task:
+                    "Given a web search query, retrieve relevant passages that answer the query"
+                        .into(),
+            },
         },
         // ── EmbeddingGemma 300M (Gemma terms, Google) ──────────────
         // Matryoshka 768→512→256→128. fp32 only.
@@ -1474,6 +1760,9 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             license_tier: LicenseTier::CommercialCustom,
             description: "Google EmbeddingGemma 300M — Matryoshka edge embeddings, fp32-only"
                 .into(),
+            embedding_template: EmbeddingTemplate::GemmaTask {
+                default_task: "search result".into(),
+            },
         },
         // ── BGE-M3 (MIT, BAAI) ─────────────────────────────────────
         // Multilingual + multi-functional (dense, sparse, ColBERT) — dense only here.
@@ -1494,6 +1783,10 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
             description: "BAAI BGE-M3 — multilingual multi-granularity retrieval encoder".into(),
+            // Verified: BGE-M3's own docs state it "no longer requires
+            // adding instruction to the queries" (unlike earlier BGE
+            // versions) — None is the correct answer, not an omission.
+            embedding_template: EmbeddingTemplate::None,
         },
         // ── ModernBERT embedding variants (Apache 2.0) ─────────────
         // Bidirectional RoPE encoder, 8192 context, mean pooling.
@@ -1518,6 +1811,7 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             description:
                 "ModernBERT-embed base — 8192-context mean-pooled retrieval encoder, Matryoshka 256"
                     .into(),
+            embedding_template: EmbeddingTemplate::NomicPrefix,
         },
         OnnxTextEmbeddingEntry {
             id: "modernbert-embed-large".into(),
@@ -1537,6 +1831,7 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             license_tier: LicenseTier::Permissive,
             description: "ModernBERT-embed large — 8192-context mean-pooled retrieval encoder"
                 .into(),
+            embedding_template: EmbeddingTemplate::NomicPrefix,
         },
     ]
 }
@@ -3102,6 +3397,102 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             transformer_class: None,
             config_repo: None,
         },
+        // ── FLUX.2 klein 9B, quantised ────────────────────────────────────
+        //
+        // Two points on unsloth's 15-quant range, not the whole ladder: Q8_0
+        // where the goal is "smaller with no visible cost", and Q4_K_M where
+        // the goal is "fits alongside something else". Registering all fifteen
+        // would be a menu, not a choice, and every entry here is a claim a
+        // worker can advertise and then be held to.
+        //
+        // *Why these exist at all.* The bf16 entry's `min_vram_gb` of 24
+        // describes the transformer alone. The pipeline also loads three text
+        // encoders and a VAE: measured on disk, 16.9 + 9.1 + 7.8 + 4.6 + 4.6 +
+        // 4.6 + 1.5 GB, so **~50 GB** rather than 24. In `video` mode a 121 GB
+        // box offers ~80 GB outside the resident ceiling and the reserve, so
+        // bf16 FLUX (50) beside H3 FP8 (53) is 103 GB and does not fit. Q8_0
+        // brings the pair to roughly 75 and Q4_K_M to roughly 71. These are
+        // what make an image and a video model co-resident, not a nicety.
+        //
+        // *The GGUF repo is ungated where the base repo is not.* `gated: false`
+        // here is a property of unsloth's mirror, not a licence change: both
+        // remain FLUX.2 Non-Commercial, so `license_tier` and the acceptance
+        // path are identical to the bf16 entry. Quantisation never relaxes
+        // terms.
+        //
+        // *Unrun.* Step count and guidance are inherited from the distilled
+        // bf16 entry. Neither has been served here; measure before pricing.
+        MediaGenModelEntry {
+            id: "flux2-klein-9b-gguf-q8".to_string(),
+            name: "FLUX.2 klein 9B (GGUF Q8_0)".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "Flux2KleinPipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            default_steps: 4,
+            default_guidance_scale: 1.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "9B (Q8_0)".to_string(),
+            size_bytes: 10_000_000_000,
+            min_vram_gb: 14,
+            distilled: false,
+            latent_upsampler: None,
+            license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "FLUX.2 klein 9B, Q8_0 — near-lossless at under half \
+                          the bf16 footprint"
+                .to_string(),
+            gguf_repo: Some("unsloth/FLUX.2-klein-9B-GGUF".to_string()),
+            gguf_file: Some("flux-2-klein-9b-Q8_0.gguf".to_string()),
+            // Required, not optional: the loader falls back to `pipeline_class`
+            // when this is None, and `Flux2KleinPipeline` has no
+            // `from_single_file` — only the transformer class does. Leaving it
+            // unset fails at render time with a bare AttributeError, after the
+            // job has been posted, priced and admitted.
+            transformer_class: Some("Flux2Transformer2DModel".to_string()),
+            config_repo: None,
+        },
+        MediaGenModelEntry {
+            id: "flux2-klein-9b-gguf-q4".to_string(),
+            name: "FLUX.2 klein 9B (GGUF Q4_K_M)".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "Flux2KleinPipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            default_steps: 4,
+            default_guidance_scale: 1.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "9B (Q4_K_M)".to_string(),
+            size_bytes: 5_900_000_000,
+            min_vram_gb: 10,
+            distilled: false,
+            latent_upsampler: None,
+            license: "FLUX.2 Non-Commercial / BFL custom".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "FLUX.2 klein 9B, Q4_K_M — runs beside a video model \
+                          on one box"
+                .to_string(),
+            gguf_repo: Some("unsloth/FLUX.2-klein-9B-GGUF".to_string()),
+            gguf_file: Some("flux-2-klein-9b-Q4_K_M.gguf".to_string()),
+            transformer_class: Some("Flux2Transformer2DModel".to_string()),
+            config_repo: None,
+        },
         // ── FLUX.2 klein base 9B (custom BFL licence, gated) ──
         // Undistilled 9B: normal step count and real guidance, for when the
         // four-step output is not good enough.
@@ -3544,6 +3935,70 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
             transformer_class: Some("LTX2VideoTransformer3DModel".to_string()),
             config_repo: None,
         },
+        MediaGenModelEntry {
+            id: "ltx-2.5-22b-dev-int8".to_string(),
+            name: "LTX-2.5 22B Dev (comfy-int8)".to_string(),
+            family: "ltx2".to_string(),
+            hf_repo: "Lightricks/LTX-2.5".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "LTX2Pipeline".to_string(),
+            kinds: vec![Text2Video],
+            default_width: 768,
+            default_height: 512,
+            max_resolution: 1280,
+            default_steps: 40,
+            default_guidance_scale: 4.0,
+            default_num_frames: Some(121),
+            default_fps: Some(24),
+            parameters: "22B".to_string(),
+            size_bytes: 200_900_000_000,
+            min_vram_gb: 44,
+            distilled: false,
+            latent_upsampler: Some("latent_upsampler".to_string()),
+            license: "LTX-2.x Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: true,
+            description: "LTX-2.5 22B dev text-to-video, comfy-int8 transformer with the matching int8 text encoder. Same weights repo as the bf16 entry; the smaller serving set is what lets it share a node with the LLM tier. Unverified: catalogued from the files on disk, never rendered here."
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: Some("LTX2VideoTransformer3DModel".to_string()),
+            config_repo: None,
+        },
+        MediaGenModelEntry {
+            id: "ltx-2.5-22b-distilled-nvfp4".to_string(),
+            name: "LTX-2.5 22B Distilled (nvfp4)".to_string(),
+            family: "ltx2".to_string(),
+            hf_repo: "Lightricks/LTX-2.5".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "LTX2Pipeline".to_string(),
+            kinds: vec![Text2Video],
+            default_width: 768,
+            default_height: 512,
+            max_resolution: 1280,
+            default_steps: 8,
+            default_guidance_scale: 1.0,
+            default_num_frames: Some(121),
+            default_fps: Some(24),
+            parameters: "22B".to_string(),
+            size_bytes: 200_900_000_000,
+            min_vram_gb: 41,
+            distilled: true,
+            latent_upsampler: Some("latent_upsampler".to_string()),
+            license: "LTX-2.x Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: true,
+            description: "LTX-2.5 22B distilled text-to-video, nvfp4 transformer. Lightricks ships nvfp4 for the distilled transformer only, so there is no dev equivalent. Fixed 8-step, CFG 1.0 schedule inherited from the distilled checkpoint; raising either fights the distillation. Unverified: catalogued from the files on disk, never rendered here."
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: Some("LTX2VideoTransformer3DModel".to_string()),
+            config_repo: None,
+        },
         // MiniMax-Music3, text-to-music. The first audio entry in the
         // catalog, and the reason `MediaGenKind::Text2Audio` exists.
         //
@@ -3707,6 +4162,209 @@ pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
                 .to_string(),
             gguf_repo: None,
             gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
+        // ── MiniMax H3, quantised ──────────────────────────────────────────
+        //
+        // The `minimax-h3` entry above needs 144 GB and so refuses on every box
+        // in this fleet. These four are the variants that actually fit, and
+        // they are separate entries rather than quant options on that one
+        // because they are not all the same model: the task partitions differ,
+        // and with them the kinds a worker may honestly advertise.
+        //
+        // *What the quantisers actually published.* H3 ships two denoiser
+        // partitions and a load opens exactly one. `fl2va_pruned` takes "text,
+        // plus zero, one or two frames" — **zero frames is text-only**, so
+        // FL2VA covers `Text2Video` as well as `Image2Video`. `ref2va_pruned`
+        // takes a prompt plus reference images, video and audio.
+        //
+        // An earlier revision of this comment claimed the GGUFs quantise FL2VA
+        // "rather than the base text-to-video transformer, so they do not serve
+        // this entry's kind". That is wrong twice over: FL2VA *is* the
+        // text-to-video path, and there is no separate "base" denoiser to
+        // contrast it with. The claim was inherited from the unrun bf16 entry
+        // rather than read off the model card.
+        //
+        // These GGUFs nonetheless stay unusable *here*, for a different reason:
+        // they are `stable-diffusion.cpp` artifacts. Upstream's only published
+        // invocation is `sd-cli --mode vid_gen`, and this worker is diffusers.
+        // Serving them needs an sd.cpp backend, not a catalog edit.
+        //
+        // *Licence is unchanged by quantisation.* All four remain under the H3
+        // Community License, territorially excluded from the EU, UK, Korea and
+        // the US including Outputs. The 144 GB floor no longer guards them, so
+        // `--accept-license minimax-h3-community` is the only guard left and is
+        // registered for each below.
+        //
+        // *Unrun.* No variant here has been served. Step counts and guidance
+        // come from the base entry, which marked them provisional against an
+        // SGLang reference deployment that exposes neither; they are inherited
+        // rather than measured and must be verified before anything is priced.
+        //
+        // The FP8 base transformer: text-to-video within a 121 GB box.
+        // 20.3 GB transformer + 27.1 GB Qwen3-VL-32B INT8 encoder + 5.8 GB
+        // VAEs ~= 53 GB resident, so the ceiling is set at 64 to leave the
+        // activation headroom a 240-frame render needs.
+        MediaGenModelEntry {
+            id: "minimax-h3-fp8".to_string(),
+            name: "MiniMax H3 (Hailuo 3.0) H3-Base (int8)".to_string(),
+            family: "minimax-h3".to_string(),
+            // The diffusers-layout repo, not `unsloth/MiniMax-H3-FP8`. That
+            // one holds bare `.pt` state dicts and no JSON at all, so there is
+            // no pipeline to build from it. Worse, its weights are cut from
+            // Comfy-Org's *pruned* checkpoint, whose per-block modulation is
+            // `[96768, 8]` against a shared `adaln_t_table`. Diffusers 0.40's
+            // `MiniMaxH3AdaLayerNormModulation` builds the full
+            // `[96768, 2688]` projection and carries no notion of the pruned
+            // form, so those weights cannot load here at any precision --
+            // verified by loading the checkpoint against a `meta` skeleton and
+            // reading the size mismatch on every one of the 50 blocks.
+            //
+            // This repo is already in diffusers layout: `transformer/` with
+            // `config.json`, 14 shards, and `transformer_blocks.*` key names.
+            // It loads with plain `from_pretrained` and no converter.
+            hf_repo: "MiniMaxAI/MiniMax-H3".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "MiniMaxH3ModularPipeline".to_string(),
+            kinds: vec![Text2Video],
+            default_width: 1360,
+            default_height: 768,
+            max_resolution: 1360,
+            default_steps: 50,
+            default_guidance_scale: 1.0,
+            default_num_frames: Some(240),
+            default_fps: Some(24),
+            parameters: "H3-Base + Qwen3-VL-32B text encoder, int8".to_string(),
+            // bf16 on disk is 144 GB -- transformer 66.3, text encoder 66.7,
+            // video VAE 10.4, audio VAE 0.6 -- which is what the unquantised
+            // `minimax-h3` entry declares and why it refuses everywhere. Served
+            // at `--precision int8` the two large components roughly halve, so
+            // ~78 GB resident against `video` mode's 81 GiB on-demand tier.
+            // Tight but real; drop the text encoder to CPU for headroom, which
+            // is what upstream's own `--backend te=cpu` does.
+            size_bytes: 144_000_000_000,
+            min_vram_gb: 78,
+            distilled: false,
+            latent_upsampler: None,
+            license: "MiniMax H3 Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "MiniMax H3 text-to-video, FP8 transformer, 768p short \
+                          edge, 4-15s. Licence excludes the EU, UK, South Korea \
+                          and the USA, including outputs"
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
+        // Reference-conditioned, FP8. Same weights family, different partition,
+        // so `Image2Video` and not `Text2Video`.
+        MediaGenModelEntry {
+            id: "minimax-h3-ref2va-fp8".to_string(),
+            name: "MiniMax H3 Ref2VA (FP8)".to_string(),
+            family: "minimax-h3".to_string(),
+            hf_repo: "unsloth/MiniMax-H3-FP8".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "MiniMaxH3ModularPipeline".to_string(),
+            kinds: vec![Image2Video],
+            default_width: 1360,
+            default_height: 768,
+            max_resolution: 1360,
+            default_steps: 50,
+            default_guidance_scale: 1.0,
+            default_num_frames: Some(240),
+            default_fps: Some(24),
+            parameters: "H3 Ref2VA FP8 + Qwen3-VL-32B INT8 text encoder".to_string(),
+            size_bytes: 53_000_000_000,
+            min_vram_gb: 64,
+            distilled: false,
+            latent_upsampler: None,
+            license: "MiniMax H3 Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "MiniMax H3 reference-image-to-video, FP8. Licence \
+                          excludes the EU, UK, South Korea and the USA, \
+                          including outputs"
+                .to_string(),
+            gguf_repo: None,
+            gguf_file: None,
+            transformer_class: None,
+            config_repo: None,
+        },
+        // The GGUF partitions. Q4_K is the largest quant that leaves room for
+        // the 18.2 GB Q4_K_M text encoder inside `video` mode's on-demand tier;
+        // Q8_0 is offered for a box with more headroom. Both are `Image2Video`.
+        MediaGenModelEntry {
+            id: "minimax-h3-fl2va-gguf".to_string(),
+            name: "MiniMax H3 FL2VA (GGUF Q4_K)".to_string(),
+            family: "minimax-h3".to_string(),
+            hf_repo: "MiniMaxAI/MiniMax-H3".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "MiniMaxH3ModularPipeline".to_string(),
+            kinds: vec![Image2Video],
+            default_width: 1360,
+            default_height: 768,
+            max_resolution: 1360,
+            default_steps: 50,
+            default_guidance_scale: 1.0,
+            default_num_frames: Some(240),
+            default_fps: Some(24),
+            parameters: "H3 FL2VA pruned Q4_K + Qwen3-VL-32B Q4_K_M".to_string(),
+            size_bytes: 35_400_000_000,
+            min_vram_gb: 44,
+            distilled: false,
+            latent_upsampler: None,
+            license: "MiniMax H3 Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "MiniMax H3 first-and-last-frame to video, Q4_K. \
+                          Licence excludes the EU, UK, South Korea and the \
+                          USA, including outputs"
+                .to_string(),
+            gguf_repo: Some("unsloth/MiniMax-H3-GGUF".to_string()),
+            gguf_file: Some("minimax_h3_fl2va_pruned-Q4_K.gguf".to_string()),
+            transformer_class: None,
+            config_repo: None,
+        },
+        MediaGenModelEntry {
+            id: "minimax-h3-ref2va-gguf".to_string(),
+            name: "MiniMax H3 Ref2VA (GGUF Q4_K)".to_string(),
+            family: "minimax-h3".to_string(),
+            hf_repo: "MiniMaxAI/MiniMax-H3".to_string(),
+            backend: MediaGenBackend::Diffusers,
+            default_voxel_resolution: None,
+            pipeline_class: "MiniMaxH3ModularPipeline".to_string(),
+            kinds: vec![Image2Video],
+            default_width: 1360,
+            default_height: 768,
+            max_resolution: 1360,
+            default_steps: 50,
+            default_guidance_scale: 1.0,
+            default_num_frames: Some(240),
+            default_fps: Some(24),
+            parameters: "H3 Ref2VA pruned Q4_K + Qwen3-VL-32B Q4_K_M".to_string(),
+            size_bytes: 35_400_000_000,
+            min_vram_gb: 44,
+            distilled: false,
+            latent_upsampler: None,
+            license: "MiniMax H3 Community License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            gated: false,
+            description: "MiniMax H3 reference-image-to-video, Q4_K. Licence \
+                          excludes the EU, UK, South Korea and the USA, \
+                          including outputs"
+                .to_string(),
+            gguf_repo: Some("unsloth/MiniMax-H3-GGUF".to_string()),
+            gguf_file: Some("minimax_h3_ref2va_pruned-Q4_K.gguf".to_string()),
             transformer_class: None,
             config_repo: None,
         },
@@ -6218,6 +6876,115 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
+    // ── Qwen3.8-Flash-Next MTP drafter (Apache-2.0) ───────────────────
+    // The multi-token-prediction head that ships inside the official
+    // Qwen/Qwen3.8-Flash-Next: one full `qwen4exp` block (attention + the
+    // 512-expert MoE + hyper-connections, ~3.9B params), exported as a
+    // standalone sidecar. Unsloth's UD-Q2_K_XL build STRIPS it — that GGUF
+    // loads 48 blocks and no MTP tensors at all — so self-speculation via
+    // `mtp_kind` on the target alone is not available and the head has to
+    // come from a separate file. This is the whole reason for a separate
+    // drafter entry rather than an inline one.
+    //
+    // Q8_0 rather than the Q4_K_M in the same repo. Speculative speedup is
+    // governed by draft acceptance rate, and the head is small enough that
+    // the extra precision is nearly free here: 4.1 GB against 2.8 GB, on a
+    // box with ~29 GB spare once the target is resident. That matches how
+    // the Gemma 4 MTP heads in this catalog are carried (BF16) — high
+    // precision for a small head. If drafter compute rather than acceptance
+    // turns out to dominate, the Q4_K_M in this same repo is a drop-in swap.
+    //
+    // The `mtp-` filename prefix matters: the runtime infers the algorithm
+    // from the drafter filename (`dflash-*` -> draft-dflash, otherwise
+    // draft-mtp), so this must NOT be renamed to a `dflash-` form.
+    catalog.push(HfModelEntry {
+        id: "qwen3.8-flash-next-mtp-draft".into(),
+        name: "Qwen3.8-Flash-Next MTP Drafter".into(),
+        family: "qwen3.8-flash-next".into(),
+        hf_repo: "quimmedes/Qwen3.8-Flash-Next-MTP-GGUF".into(),
+        hf_filename: "mtp-Qwen3.8-Flash-Next-Q8_0.gguf".into(),
+        parameters: "MTP head".into(),
+        architecture: ModelArchitecture::Qwen4Exp,
+        context_length: 262144,
+        quantization: "Q8_0".into(),
+        size_bytes: 4_137_470_112,
+        min_ram_gb: 6,
+        license: "Apache 2.0".into(),
+        description: "Qwen's jointly-trained Multi-Token Prediction head for Qwen3.8-Flash-Next, exported as a standalone GGUF sidecar (Unsloth's main build strips it). Pair with the Flash-Next target via `--spec-type draft-mtp`.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+    // ── Qwen3.8-Flash-Next (Apache-2.0, Alibaba Qwen) ─────────────────
+    // 125B total, ~6B active. On a bandwidth-bound box the active count is
+    // what sets decode speed, not the total: measured on a DGX Spark at the
+    // same quant class, a 30B MoE runs 89 tok/s against a 32B dense at 10.7.
+    //
+    // UD-Q2_K_XL rather than the smaller quants on purpose. Unsloth's own
+    // data shows a sharp cliff below it — top-1 at 32 tokens falls from ~25%
+    // to under 10%, and sub-Q2 quants loop — which is the wrong trade for
+    // coding work. 73.5 GiB over three shards fits a 121 GB box with room
+    // for the KV cache; UD-Q4_K_XL at 111 GB does not.
+    //
+    // `qwen4_exp` is vendored into our llama.cpp; no released build can
+    // load this file.
+    catalog.push(HfModelEntry {
+        id: "qwen3.8-flash-next".into(),
+        name: "Qwen3.8-Flash-Next (MoE)".into(),
+        family: "qwen3.8-flash-next".into(),
+        hf_repo: "unsloth/Qwen3.8-Flash-Next-GGUF".into(),
+        hf_filename: "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf".into(),
+        parameters: "125B (MoE, 6B active)".into(),
+        architecture: ModelArchitecture::Qwen4Exp,
+        context_length: 262144,
+        quantization: "UD-Q2_K_XL".into(),
+        size_bytes: 78_869_128_864,
+        // 73.5 GiB of weights plus KV cache and headroom. The practical
+        // ceiling on a 128 GB unified box is ~100-110 GB, and overshooting
+        // there hangs the machine rather than raising a CUDA OOM.
+        min_ram_gb: 88,
+        license: "Apache 2.0".into(),
+        description: "Qwen3.8-Flash-Next — agentic coding and long-horizon tool use. MTP-enabled — pairs with `qwen3.8-flash-next-mtp-draft` for lossless speculative decode.".into(),
+        // Pairing a drafter also moves this model off the continuous-batching
+        // engine onto the serial single-context path (target and drafter are
+        // two contexts that cannot share one batch scheduler). That is the
+        // right trade here and costs nothing we were using: this node runs
+        // TENZRO_MAX_SLOTS=1, so the batch engine was already serialising
+        // every request. It also FIXES a real bug — the batch path resolves
+        // the thinking gate with no token budget, which is why this model
+        // returned empty content with finish_reason "length" under a small
+        // `max_tokens` and needed TENZRO_NOTHINK_MODELS as a workaround. The
+        // serial path passes the request's own `max_tokens` to that gate.
+        drafter_id: Some("qwen3.8-flash-next-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+        // 512 routed experts, top-10, one gated shared expert.
+        // 3 x 640 x 2560 per expert per layer over 48 layers is ~0.24B.
+        moe: Some(MoeShape {
+            num_experts: 512,
+            experts_per_token: 10,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
     // ── Qwen-AgentWorld 35B-A3B (Apache-2.0, Alibaba Qwen) ────────────
     // Agentic MoE: 35B total with ~3B active, so it serves at roughly the
     // cost of a 3B while holding a 35B's knowledge. 22.3 GB quantized.
@@ -6621,10 +7388,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         hf_repo: "ibm-granite/granite-4.0-1b-GGUF".into(),
         hf_filename: "granite-4.0-1b-Q4_K_M.gguf".into(),
         parameters: "1B".into(),
-        architecture: ModelArchitecture::Granite,
+        architecture: ModelArchitecture::GraniteH,
         context_length: 131072,
         quantization: "Q4_K_M".into(),
-        size_bytes: 700_000_000,
+        size_bytes: 1_020_000_000,
         min_ram_gb: 2,
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 1B — compact enterprise model".into(),
@@ -7199,6 +7966,47 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         download_filename: String::new(),
     });
 
+    // DFlash-2 block-diffusion drafter for Qwen3.8-27B. Distinct from the
+    // target's *inline* MTP head (blk.<n>.nextn.*), which drafts one token at a
+    // time from the target's own weights: DFlash-2 drafts a whole block in a
+    // single pass and keeps the top candidates at every position, which is what
+    // lifts acceptance on prose, where a 1-token MTP draft degrades most.
+    //
+    // Q4_K_M (1.14 GB) rather than BF16 (3.86 GB): a drafter only proposes, and
+    // every token it proposes is verified by the target, so drafter precision
+    // costs acceptance rate and never correctness -- and 2.7 GB of resident
+    // budget is worth more here than a few points of acceptance.
+    catalog.push(HfModelEntry {
+        id: "qwen3.8-27b-dflash".into(),
+        name: "Qwen 3.8 27B DFlash-2 Drafter".into(),
+        family: "qwen3.8".into(),
+        hf_repo: "z-lab/Qwen3.8-27B-DFlash2-GGUF".into(),
+        hf_filename: "Qwen3.8-27B-DFlash2-Q4_K_M.gguf".into(),
+        parameters: "DFlash-2 drafter".into(),
+        architecture: ModelArchitecture::Llama,
+        context_length: 262144,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 1_140_000_000,
+        min_ram_gb: 4,
+        license: "Apache 2.0".into(),
+        description: "DFlash-2 block-diffusion speculative drafter for Qwen3.8-27B. Drafts a whole block per pass and keeps the top candidates at every position. Pair via `--spec-type draft-dflash`.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
     // Stamp every entry with its model-author-recommended serving profile.
     // The literals above carry a placeholder `ServingProfile::default()`;
     // this single pass is the source of truth for per-family sampler /
@@ -7371,6 +8179,63 @@ fn license_tier_for(license: &str, family: &str) -> (LicenseTier, Option<String>
 /// `license_tier` but no explicit id, so the acceptance-policy check needs a
 /// canonical id to match against `--accept-license <id>`. Returns `None` for
 /// permissive/attribution licenses (no id is required to admit those).
+/// The territorial grant attached to a custom licence id, if it has one.
+///
+/// Keyed on the **licence**, not the model: every model under a licence
+/// inherits the same territory, and a newly-restricted licence is a row here
+/// rather than a code change. A licence absent from this table is unrestricted,
+/// which is the correct default — most are.
+///
+/// ⚠ Adding a row is a compliance decision. Two questions decide it, and both
+/// are answered from the licence text rather than inferred:
+///
+/// 1. **Does the restriction reach outputs?** If it covers only the weights, a
+///    registration-time refusal discharges it and
+///    [`TerritorialScope::Weights`] is right. Only a grant that also limits
+///    outputs forces a per-request check.
+/// 2. **Is there an end-user carve-out?** Llama's EU restriction withholds
+///    rights from EU-*domiciled* companies but explicitly exempts "end users of
+///    a product or service that incorporates" the model — a test on who the
+///    operator is, so per-request blocking would solve a problem that does not
+///    exist. MiniMax H3 has no such carve-out.
+pub fn license_territory(license_id: &str) -> Option<tenzro_types::model::TerritorialGrant> {
+    use tenzro_types::model::{TerritorialGrant, TerritorialScope};
+    match license_id {
+        // MiniMax H3 Community License, verified against the LICENSE file.
+        //
+        // "Applicable Territory" is "worldwide, excluding the European Union,
+        // the United Kingdom, the Republic of Korea and the United States of
+        // America", and **§V.4** reads: "You may not use, reproduce, modify,
+        // distribute, or display the MiniMax H3 Works **or any of their Outputs
+        // or results** outside the Applicable Territory."
+        //
+        // Outputs are in scope and there is **no end-user carve-out**, so this
+        // is `WeightsAndOutputs` and every request has to be checked.
+        //
+        // The UK is listed separately from the EU in the licence itself — the
+        // drafters were alive to Brexit — so it is listed separately here
+        // rather than folded into the `EU` token.
+        "minimax-h3-community" => Some(TerritorialGrant {
+            excluded: vec!["EU".into(), "GB".into(), "KR".into(), "US".into()],
+            scope: TerritorialScope::WeightsAndOutputs,
+        }),
+        _ => None,
+    }
+}
+
+/// The licence id and territorial grant for a licence string, if it is
+/// territorially restricted.
+///
+/// One call so a caller cannot do half the job — resolving the id but never
+/// looking up the grant would leave enforcement silently off.
+pub fn license_territory_for(
+    license: &str,
+) -> Option<(String, tenzro_types::model::TerritorialGrant)> {
+    let id = custom_license_id(license)?;
+    let grant = license_territory(&id)?;
+    Some((id, grant))
+}
+
 pub fn custom_license_id(license: &str) -> Option<String> {
     let l = license.to_ascii_lowercase();
     if l.contains("flux") || l.contains("bfl") {
@@ -7423,6 +8288,11 @@ pub fn capabilities_for_family(family: &str) -> Vec<String> {
         // Qwen 3.8: dense flagship trained for agentic/competitive coding and
         // reasoning (27B, below the raw size floor but a strong-tier model).
         "qwen3.8" => vec!["code".into(), "reasoning".into(), "vision".into()],
+        // Flash-Next is a separate family string. Same capability set as the
+        // dense 27B — it is the MoE sibling, not a different kind of model —
+        // but without it the flagship carries no tags at all and the router
+        // cannot rank it for any use case.
+        "qwen3.8-flash-next" => vec!["code".into(), "reasoning".into(), "vision".into()],
         // Muse-Glimmer: already strong-tier by size; tags made explicit so
         // capability-based selection can see its coding/reasoning/tool profile.
         "muse-glimmer" => vec![
@@ -7459,6 +8329,13 @@ pub fn capability_prior(model_id: &str, use_case: &str) -> Option<f32> {
     let family = get_model_by_id(model_id)?.family;
     let score = match (family.as_str(), use_case) {
         ("qwen3.8", "code") => 61.7,
+        // Flash-Next's published deltas over the dense 27B on the same suites:
+        // agentic coding +16.5, repo-level codegen +5.8 — the wins are on
+        // long-horizon work rather than one-shot, which is what these priors
+        // rank. Research is scored level with the 27B: the card shows no
+        // comparable gain there, so it is not credited one.
+        ("qwen3.8-flash-next", "code") => 78.2,
+        ("qwen3.8-flash-next", "research") => 89.2,
         ("muse-glimmer", "code") => 51.2,
         ("muse-glimmer", "reasoning") => 94.7,
         ("qwen3.8", "research") => 89.2,
@@ -7500,6 +8377,79 @@ pub fn get_model_families() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two served families disagree on the template variable name, so a
+    /// resolver that returned only a value would set the wrong kwarg on one of
+    /// them and be silently ignored.
+    #[test]
+    fn effort_kwarg_name_is_per_family() {
+        let qwen = EffortPolicy::for_family("qwen3.8-flash-next");
+        assert_eq!(qwen.kwarg, "reasoning_effort");
+        let muse = EffortPolicy::for_family("muse-glimmer");
+        assert_eq!(muse.kwarg, "reasoning_strength");
+    }
+
+    /// `xhigh` is valid for both families; `high` is a real level for
+    /// muse-glimmer but only an alias on Qwen, whose template folds it into
+    /// `xhigh`. Both must round-trip to something the template accepts.
+    #[test]
+    fn effort_levels_and_aliases_resolve_per_family() {
+        let q = EffortPolicy::for_family("qwen3.8-flash-next");
+        assert_eq!(q.normalize("xhigh").as_deref(), Some("xhigh"));
+        assert_eq!(q.normalize("high").as_deref(), Some("xhigh"));
+        assert_eq!(q.normalize("low").as_deref(), Some("low"));
+
+        let m = EffortPolicy::for_family("muse-glimmer");
+        assert_eq!(m.normalize("high").as_deref(), Some("high"));
+        assert_eq!(m.normalize("xhigh").as_deref(), Some("xhigh"));
+    }
+
+    /// Case and surrounding space come from callers, not from us.
+    #[test]
+    fn effort_matching_is_case_and_space_insensitive() {
+        let q = EffortPolicy::for_family("qwen3.8-flash-next");
+        assert_eq!(q.normalize("  XHigh ").as_deref(), Some("xhigh"));
+    }
+
+    /// An unknown level must fall back to the template default rather than be
+    /// forwarded: Qwen's template raises on an unrecognised value, which would
+    /// turn a client typo into a failed generation.
+    #[test]
+    fn unknown_effort_falls_back_rather_than_forwarding() {
+        let q = EffortPolicy::for_family("qwen3.8-flash-next");
+        assert_eq!(q.normalize("turbo"), None);
+        assert_eq!(q.normalize(""), None);
+    }
+
+    /// A family with no declared policy must drop the value entirely — the
+    /// safe direction, since guessing a kwarg name can only mislead a template.
+    #[test]
+    fn family_without_effort_control_drops_the_value() {
+        let none = EffortPolicy::for_family("gemma4");
+        assert!(none.kwarg.is_empty());
+        assert_eq!(resolve_reasoning_effort("gemma4-12b", Some("low")), None);
+    }
+
+    /// End-to-end through the catalog: the *model id* must map to its family's
+    /// policy. This is the step that would silently disable the feature if a
+    /// family string were mistyped, since the fallback is "no effort control".
+    #[test]
+    fn resolve_maps_model_id_to_family_policy() {
+        assert_eq!(
+            resolve_reasoning_effort("qwen3.8-flash-next", Some("high")),
+            Some(("reasoning_effort".to_string(), "xhigh".to_string())),
+        );
+        assert_eq!(
+            resolve_reasoning_effort("muse-glimmer-30b", Some("low")),
+            Some(("reasoning_strength".to_string(), "low".to_string())),
+        );
+    }
+
+    /// An unknown model has no family, so there is nothing to validate against.
+    #[test]
+    fn unknown_model_resolves_to_none() {
+        assert_eq!(resolve_reasoning_effort("no-such-model", Some("low")), None);
+    }
 
     #[test]
     fn test_catalog_not_empty() {
@@ -7601,6 +8551,20 @@ mod tests {
         assert!(resolve_enable_thinking("muse-glimmer-30b", None));
         // Unknown id -> unchanged default.
         assert!(resolve_enable_thinking("does-not-exist", None));
+    }
+
+    /// Gemma 4 has a genuine `enable_thinking` template toggle, OFF by
+    /// default per Google's docs. Before the `"gemma4"` arm existed, the
+    /// family fell through to `Self::default()` and was misread the same
+    /// way muse-glimmer's channel-format reasoning is (`supports_thinking:
+    /// false` -> "no toggle, leave the flag at true") — forcing thinking on
+    /// for every request and, on the 12B+ variants, skipping the template's
+    /// own empty-thought-channel stabilization stub.
+    #[test]
+    fn gemma4_thinking_off_by_default() {
+        assert!(!resolve_enable_thinking("gemma4-12b-qat", None));
+        assert!(!resolve_enable_thinking("gemma4-12b-qat", Some(50)));
+        assert!(!resolve_enable_thinking("gemma4-12b-qat", Some(32_768)));
     }
 
     /// Serialises env-var access across the two tests that mutate
@@ -8420,6 +9384,10 @@ mod tests {
                 "flux2-dev",
                 "flux2-klein-4b",
                 "flux2-klein-9b",
+                // Quantised: the bf16 pipeline is ~50 GB loaded, which does
+                // not co-reside with a video model on a 121 GB box.
+                "flux2-klein-9b-gguf-q4",
+                "flux2-klein-9b-gguf-q8",
                 "flux2-klein-9b-kv",
                 "flux2-klein-base-4b",
                 "flux2-klein-base-9b",
@@ -8435,9 +9403,11 @@ mod tests {
                 // defaults (40 steps / CFG 4.0 vs a fixed 8-step, CFG 1.0
                 // schedule) and only dev accepts LoRAs.
                 "ltx-2.5-22b-dev",
+                "ltx-2.5-22b-dev-int8",
                 // LTX-2.5, from the upstream bf16 weights rather than a
                 // third-party GGUF. Listed but not yet verified to run.
                 "ltx-2.5-22b-distilled",
+                "ltx-2.5-22b-distilled-nvfp4",
                 // The one entry here that is listed *without* being servable.
                 // `MiniMaxH3ModularPipeline` is absent from the pinned
                 // diffusers 0.39, so the worker cannot build it at all; it is
@@ -8449,6 +9419,16 @@ mod tests {
                 // `min_vram_gb` floor and `--accept-license
                 // minimax-h3-community`. See the entry's own comment.
                 "minimax-h3",
+                // The quantised H3 variants. The bf16 entry above is guarded
+                // by a 144 GB floor no box here clears; these fit, so
+                // `--accept-license minimax-h3-community` is the only guard
+                // left. The `-gguf` pair and `-ref2va-fp8` declare
+                // `Image2Video`, not `Text2Video`: they quantise the FL2VA and
+                // Ref2VA task partitions rather than the base transformer.
+                "minimax-h3-fl2va-gguf",
+                "minimax-h3-fp8",
+                "minimax-h3-ref2va-fp8",
+                "minimax-h3-ref2va-gguf",
                 // Text-to-music, and the first audio entry here. Listed but
                 // not yet verified to run: see the entry for what was and
                 // was not checked.

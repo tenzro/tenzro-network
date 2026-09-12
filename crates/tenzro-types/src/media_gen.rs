@@ -743,7 +743,10 @@ mod tests {
             );
             let decoded: MediaGenKind =
                 serde_json::from_str(&format!("\"{displayed}\"")).expect("deserialize");
-            assert_eq!(decoded, kind, "{kind:?}: serde round-trip changed the value");
+            assert_eq!(
+                decoded, kind,
+                "{kind:?}: serde round-trip changed the value"
+            );
 
             // Labels are lowercase by convention; a stray capital is how the
             // original defect looked.
@@ -754,8 +757,6 @@ mod tests {
             );
         }
     }
-
-    
 
     fn sample_params(kind: MediaGenKind) -> MediaGenParams {
         MediaGenParams {

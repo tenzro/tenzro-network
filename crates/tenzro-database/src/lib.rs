@@ -85,8 +85,8 @@ pub use placement::{
     select_tiered_holders, should_replicate, should_replicate_tiered,
 };
 pub use pricing::{DatabasePricing, DatabaseUsageMeter, DatabaseUsageStats};
-pub use tenzro_types::resource_access::ResourceAccess;
 pub use runtime::{
     DatabaseEngine, HolderDispatch, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
     QueryRouter, WriteConsistency, WriteReceipt,
 };
+pub use tenzro_types::resource_access::ResourceAccess;

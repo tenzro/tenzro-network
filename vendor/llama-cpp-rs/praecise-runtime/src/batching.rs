@@ -24,8 +24,8 @@
 //! remaining batch capacity prefilling prompts, runs one `llama_decode`, then
 //! samples each sequence from its own logits with its own sampler.
 
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
+use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use tracing::{info, warn};
@@ -393,9 +394,14 @@ fn scheduler_loop(
         if active == 0 {
             match rx.recv_timeout(IDLE_POLL) {
                 Ok(req) => {
-                    if let Some(r) =
-                        admit(&model, ctx_size, &mut slots, &mut cached, req, enable_thinking)
-                    {
+                    if let Some(r) = admit(
+                        &model,
+                        ctx_size,
+                        &mut slots,
+                        &mut cached,
+                        req,
+                        enable_thinking,
+                    ) {
                         apply_prefix_reuse(&mut ctx, &mut slots, &mut cached, r);
                     }
                 }
@@ -407,9 +413,14 @@ fn scheduler_loop(
         while slots.iter().any(|s| s.is_none()) {
             match rx.try_recv() {
                 Ok(req) => {
-                    if let Some(r) =
-                        admit(&model, ctx_size, &mut slots, &mut cached, req, enable_thinking)
-                    {
+                    if let Some(r) = admit(
+                        &model,
+                        ctx_size,
+                        &mut slots,
+                        &mut cached,
+                        req,
+                        enable_thinking,
+                    ) {
                         apply_prefix_reuse(&mut ctx, &mut slots, &mut cached, r);
                     }
                 }
@@ -673,7 +684,18 @@ fn admit(
     };
     let seq_id = slot_idx as i32;
 
-    let prompt = match render_prompt(model, &req.prompt, enable_thinking) {
+    // The engine's thinking mode is the default; a request may override it.
+    // This is what lets one served model answer plainly to API callers and
+    // show its reasoning to a client that asked to see it.
+    let enable_thinking = req.config.enable_thinking.unwrap_or(enable_thinking);
+    // The effort level is a thinking-mode knob; with thinking off the template
+    // never reads it, and some templates reject it outright.
+    let reasoning_effort = if enable_thinking {
+        req.config.reasoning_effort.as_deref()
+    } else {
+        None
+    };
+    let prompt = match render_prompt(model, &req.prompt, enable_thinking, reasoning_effort) {
         Ok(p) => p,
         Err(e) => {
             let _ = req.result_tx.send(Err(e));
@@ -691,9 +713,7 @@ fn admit(
         }
     };
     if tokens.is_empty() {
-        let _ = req
-            .result_tx
-            .send(Err(Error::Other("empty prompt".into())));
+        let _ = req.result_tx.send(Err(Error::Other("empty prompt".into())));
         return None;
     }
 
@@ -718,7 +738,11 @@ fn admit(
     // A one-token overlap (the BOS) is not worth the bookkeeping, and reusing
     // the entire prompt would leave nothing to decode and no logits to sample
     // from — so always leave at least the final token to be processed.
-    let reuse = if reuse < 2 { 0 } else { reuse.min(tokens.len() - 1) };
+    let reuse = if reuse < 2 {
+        0
+    } else {
+        reuse.min(tokens.len() - 1)
+    };
 
     slots[slot_idx] = Some(Sequence {
         seq_id,
@@ -772,29 +796,75 @@ struct PrefixReuse {
 /// a [`BatchPrompt::Raw`]. `_enable_thinking` is reserved for templates that
 /// take a reasoning-toggle variable; this binding's `apply_chat_template` does
 /// not, so the model's template default applies.
+/// Render the prompt the engine will prefill.
+///
+/// The thinking switch and effort level are template variables, so they only
+/// exist if the render passes them: the model's own Jinja template reads
+/// `enable_thinking` (a Qwen-family template prefills `<think>\n\n</think>\n\n`
+/// when it is false, and opens a `<think>` block when it is true or absent)
+/// and `reasoning_effort`. The legacy three-argument render carries neither,
+/// which is how a model served here thought on every request whatever the
+/// caller sent — the flag was plumbed all the way to a function that dropped
+/// it. Measured on qwen3.8-flash-next: 1,200-3,800 characters of reasoning
+/// with `enable_thinking: false`, and an empty answer at a 300-token budget.
+///
+/// Rendering goes through the OpenAI-compatible entry point with the
+/// variables set; a template that cannot be applied that way falls back to
+/// the legacy render, then to ChatML, exactly as before.
 fn render_prompt(
     model: &LlamaModel,
     prompt: &BatchPrompt,
-    _enable_thinking: bool,
+    enable_thinking: bool,
+    reasoning_effort: Option<&str>,
 ) -> Result<String> {
     match prompt {
         BatchPrompt::Raw(s) => Ok(s.clone()),
         BatchPrompt::Chat(messages) => {
-            let llama_messages: Vec<LlamaChatMessage> = messages
-                .iter()
-                .map(|m| {
-                    LlamaChatMessage::new(m.role.clone(), m.content.clone())
-                        .map_err(|e| Error::Other(format!("Invalid chat message: {}", e)))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            if let Ok(tmpl) = model.chat_template(None) {
+                if let Ok(messages_json) = serde_json::to_string(messages) {
+                    let kwargs = reasoning_effort
+                        .and_then(|e| serde_json::to_string(&serde_json::json!({ "reasoning_effort": e })).ok());
+                    let params = OpenAIChatTemplateParams {
+                        messages_json: &messages_json,
+                        tools_json: None,
+                        tool_choice: None,
+                        json_schema: None,
+                        grammar: None,
+                        reasoning_format: None,
+                        chat_template_kwargs: kwargs.as_deref(),
+                        add_generation_prompt: true,
+                        use_jinja: true,
+                        parallel_tool_calls: false,
+                        enable_thinking,
+                        // The tokenizer adds BOS at prefill (`AddBos::Always`);
+                        // adding it here as well would double it.
+                        add_bos: false,
+                        add_eos: false,
+                        parse_tool_calls: false,
+                        force_pure_content: false,
+                    };
+                    if let Ok(rendered) = model.apply_chat_template_oaicompat(&tmpl, &params)
+                        && !rendered.prompt.trim().is_empty()
+                    {
+                        return Ok(rendered.prompt);
+                    }
+                }
 
-            // Prefer the GGUF's embedded template; fall back to ChatML when it
-            // is missing or renders empty.
-            if let Ok(tmpl) = model.chat_template(None)
-                && let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true)
-                && !rendered.trim().is_empty()
-            {
-                return Ok(rendered);
+                // Legacy render: no template variables, so thinking follows the
+                // template's own default. Kept only as the fallback for a
+                // template the Jinja path cannot apply.
+                let llama_messages: Vec<LlamaChatMessage> = messages
+                    .iter()
+                    .map(|m| {
+                        LlamaChatMessage::new(m.role.clone(), m.content.clone())
+                            .map_err(|e| Error::Other(format!("Invalid chat message: {}", e)))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true)
+                    && !rendered.trim().is_empty()
+                {
+                    return Ok(rendered);
+                }
             }
             Ok(render_chatml_prompt(messages))
         }
@@ -821,7 +891,11 @@ mod prefix_tests {
         // The agent case: turn two repeats turn one verbatim and appends.
         let turn1 = toks(&[1, 2, 3, 4, 5]);
         let turn2 = toks(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(reuse_for(&turn1, &turn2), 5, "the whole prior turn is already in KV");
+        assert_eq!(
+            reuse_for(&turn1, &turn2),
+            5,
+            "the whole prior turn is already in KV"
+        );
     }
 
     #[test]
@@ -891,6 +965,10 @@ mod prefix_tests {
         // Cache holds a long conversation; the new prompt is a prefix of it.
         let cached = toks(&[1, 2, 3, 4, 5, 6, 7]);
         let prompt = toks(&[1, 2, 3]);
-        assert_eq!(reuse_for(&cached, &prompt), 2, "never past the prompt's own end");
+        assert_eq!(
+            reuse_for(&cached, &prompt),
+            2,
+            "never past the prompt's own end"
+        );
     }
 }

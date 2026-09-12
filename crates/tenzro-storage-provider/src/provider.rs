@@ -208,6 +208,37 @@ impl StorageProvider {
             confidential,
         };
 
+        // An object id names one immutable object.
+        //
+        // Re-storing the *same* bytes is idempotent: a node re-announcing what
+        // it already published is ordinary, and the shard commitments are
+        // SHA-256 over the shard bytes, so identical content re-encodes to
+        // identical commitments. Re-storing *different* bytes is not a retry —
+        // it silently replaces a name other parties have already read and may
+        // have signed over. Boli anchors each epoch at
+        // `boli/epoch/{asset}/{n}`, so an unchecked overwrite let one attestor
+        // replace another's anchor and left the storage layer unable to
+        // witness the equivocation at all.
+        if let Some(existing) = self.objects.get(&object_id) {
+            let existing = existing.value();
+            let same = existing.shards.len() == descriptor.shards.len()
+                && existing
+                    .shards
+                    .iter()
+                    .zip(descriptor.shards.iter())
+                    .all(|(a, b)| a.index == b.index && a.commitment == b.commitment);
+            if !same {
+                return Err(StorageProviderError::ObjectAlreadyExists {
+                    object_id: object_id.clone(),
+                    stored_bytes: existing.size_bytes,
+                    offered_bytes: descriptor.size_bytes,
+                });
+            }
+            // Same content — return the stored descriptor rather than
+            // re-persisting, so a retry is free.
+            return Ok(existing.clone());
+        }
+
         self.objects.insert(object_id.clone(), descriptor.clone());
         self.persist_object(&descriptor);
         info!(

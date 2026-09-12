@@ -352,7 +352,7 @@ impl WorkflowExecutor {
     ///   came back in the step's output; the compensating call hits
     ///   the dispatcher's tool path with the identity-revoke tool. We
     ///   do not refund TNZO here because the parent's TNZO already
-    ///   crossed to the child's MPC wallet at registration — refund
+    ///   crossed to the child's permissionless wallet at registration — refund
     ///   would require the child to sign a transfer back, which is
     ///   out of scope at compensation time.
     /// - **`Wait` / `Compound`**: no side effect, no-op.

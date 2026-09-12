@@ -465,7 +465,7 @@ async fn service_key_rpcs_are_admin_gated() {
 /// their own settlement asset.
 ///
 /// This test is why the handler checks `public_keys` rather than
-/// `wallet_address`. The wallet address is the payee's MPC wallet, derived
+/// `wallet_address`. The wallet address is the payee's permissionless wallet, derived
 /// from threshold key material unrelated to the identity key — comparing
 /// against it refused every legitimate payee, and every unit test still passed.
 #[tokio::test]
@@ -485,6 +485,7 @@ async fn a_real_payee_can_set_their_own_settlement_asset() {
     let public_key = keypair.public_key().as_bytes().to_vec();
     let registered = registry
         .register_human_with_fee(
+            b"test-credential".to_vec(),
             public_key.clone(),
             "integration payee".to_string(),
             tenzro_types::identity::KycTier::Unverified,
@@ -560,6 +561,7 @@ async fn another_partys_key_cannot_change_a_payees_settlement_asset() {
     let victim = KeyPair::generate(KeyType::Ed25519).expect("keypair");
     let registered = registry
         .register_human_with_fee(
+            b"test-credential".to_vec(),
             victim.public_key().as_bytes().to_vec(),
             "victim".to_string(),
             tenzro_types::identity::KycTier::Unverified,
@@ -637,6 +639,7 @@ async fn a_stale_signed_preference_change_is_refused() {
     let public_key = keypair.public_key().as_bytes().to_vec();
     let registered = registry
         .register_human_with_fee(
+            b"test-credential".to_vec(),
             public_key.clone(),
             "payee".to_string(),
             tenzro_types::identity::KycTier::Unverified,

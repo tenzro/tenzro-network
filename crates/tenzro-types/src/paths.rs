@@ -82,6 +82,17 @@ use std::path::{Path, PathBuf};
 /// not the rest is how the scatter started.
 pub const TENZRO_HOME_ENV: &str = "TENZRO_HOME";
 
+/// Independent override for [`models_dir`] alone, leaving the rest of
+/// `$TENZRO_HOME` (keys, wallets, chain state) wherever it already is.
+///
+/// Model weights are the one thing under `$TENZRO_HOME` whose size has
+/// nothing to do with the rest of it — tens to hundreds of gigabytes on a
+/// volume that may be a different, larger disk than the one holding an
+/// operator's OS and fast/small state. `$TENZRO_HOME` alone forces both onto
+/// the same drive; this lets an operator split them without relocating
+/// everything else.
+pub const TENZRO_MODELS_DIR_ENV: &str = "TENZRO_MODELS_DIR";
+
 /// Directory name under `$HOME` when `$TENZRO_HOME` is unset.
 pub const DEFAULT_HOME_DIR_NAME: &str = ".tenzro";
 
@@ -192,7 +203,16 @@ pub fn tenzro_home() -> PathBuf {
 /// would multiply tens of gigabytes per instance for nothing. This is the path
 /// the CLI downloads into and the node serves from — previously two different
 /// directories.
+///
+/// `$TENZRO_MODELS_DIR` overrides this independently of `$TENZRO_HOME` — see
+/// [`TENZRO_MODELS_DIR_ENV`] for why that split matters. Falls back to
+/// `$TENZRO_HOME/models` when unset, same as every other subdirectory here.
 pub fn models_dir() -> PathBuf {
+    if let Some(v) = std::env::var_os(TENZRO_MODELS_DIR_ENV)
+        && !v.is_empty()
+    {
+        return expand_tilde(PathBuf::from(v));
+    }
     tenzro_home().join("models")
 }
 
@@ -608,20 +628,92 @@ mod tests {
     /// these tests share a process. Poisoning is ignored deliberately — a
     /// panic in one test must not cascade into unrelated failures here.
     fn temp_env(value: &str, f: impl FnOnce()) {
+        temp_env_var(TENZRO_HOME_ENV, value, f);
+    }
+
+    /// [`temp_env`], generalized to any variable — shares its mutex, so a
+    /// test touching `$TENZRO_MODELS_DIR` and one touching `$TENZRO_HOME`
+    /// still serialize against each other rather than racing (`models_dir`
+    /// reads both: its own override first, `$TENZRO_HOME` on fallthrough).
+    fn temp_env_var(key: &str, value: &str, f: impl FnOnce()) {
         use std::sync::Mutex;
         static LOCK: Mutex<()> = Mutex::new(());
         let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var_os(TENZRO_HOME_ENV);
+        let prior = std::env::var_os(key);
         // SAFETY: the mutex above serializes every mutation of this variable
         // within the test binary, and nothing else in this crate reads it
         // concurrently.
-        unsafe { std::env::set_var(TENZRO_HOME_ENV, value) };
+        unsafe { std::env::set_var(key, value) };
         f();
         unsafe {
             match prior {
-                Some(v) => std::env::set_var(TENZRO_HOME_ENV, v),
-                None => std::env::remove_var(TENZRO_HOME_ENV),
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
             }
         }
+    }
+
+    /// `$TENZRO_MODELS_DIR` wins over `$TENZRO_HOME/models` — the whole
+    /// point of the split (see [`TENZRO_MODELS_DIR_ENV`]): an operator
+    /// keeping keys/state under one root can still park model weights on a
+    /// different, larger volume.
+    ///
+    /// Sets both variables through one `temp_env_var` call rather than
+    /// nesting two: `temp_env`/`temp_env_var` share one non-reentrant
+    /// `Mutex`, and nesting them deadlocks the calling thread on its own
+    /// lock.
+    #[test]
+    fn models_dir_env_overrides_independently_of_tenzro_home() {
+        temp_env_var(TENZRO_HOME_ENV, "/srv/tenzro-d", || {
+            let prior = std::env::var_os(TENZRO_MODELS_DIR_ENV);
+            // SAFETY: this thread already holds temp_env_var's mutex for
+            // the outer TENZRO_HOME_ENV scope, which serializes every
+            // mutation of the process environment made by this test suite.
+            unsafe { std::env::set_var(TENZRO_MODELS_DIR_ENV, "/mnt/big-disk/models") };
+
+            assert_eq!(models_dir(), PathBuf::from("/mnt/big-disk/models"));
+            // Everything else must still resolve under $TENZRO_HOME — only
+            // models_dir splits off.
+            assert_eq!(hf_cache_dir(), PathBuf::from("/srv/tenzro-d/hf"));
+
+            unsafe {
+                match prior {
+                    Some(v) => std::env::set_var(TENZRO_MODELS_DIR_ENV, v),
+                    None => std::env::remove_var(TENZRO_MODELS_DIR_ENV),
+                }
+            }
+        });
+    }
+
+    /// With `$TENZRO_MODELS_DIR` unset, `models_dir` falls through to
+    /// `$TENZRO_HOME/models` exactly as before this override existed.
+    #[test]
+    fn models_dir_falls_back_to_tenzro_home_when_unset() {
+        temp_env("/srv/tenzro-e", || {
+            assert_eq!(models_dir(), PathBuf::from("/srv/tenzro-e/models"));
+        });
+    }
+
+    /// An empty `$TENZRO_MODELS_DIR` is unset, not a root of `""` — the
+    /// same rule [`empty_env_falls_through_to_home`] establishes for
+    /// `$TENZRO_HOME`, for the same reason. Same single-lock structure as
+    /// [`models_dir_env_overrides_independently_of_tenzro_home`], for the
+    /// same reason: nesting `temp_env`/`temp_env_var` deadlocks.
+    #[test]
+    fn empty_models_dir_env_falls_through() {
+        temp_env_var(TENZRO_HOME_ENV, "/srv/tenzro-f", || {
+            let prior = std::env::var_os(TENZRO_MODELS_DIR_ENV);
+            // SAFETY: see models_dir_env_overrides_independently_of_tenzro_home.
+            unsafe { std::env::set_var(TENZRO_MODELS_DIR_ENV, "") };
+
+            assert_eq!(models_dir(), PathBuf::from("/srv/tenzro-f/models"));
+
+            unsafe {
+                match prior {
+                    Some(v) => std::env::set_var(TENZRO_MODELS_DIR_ENV, v),
+                    None => std::env::remove_var(TENZRO_MODELS_DIR_ENV),
+                }
+            }
+        });
     }
 }

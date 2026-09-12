@@ -119,8 +119,11 @@ fn delegation_challenge(node_pubkey: &[u8], scope: &str, not_after: i64) -> [u8;
 /// The challenge as it appears in `clientDataJSON`: base64url, unpadded.
 pub fn delegation_challenge_b64url(node_pubkey: &[u8], scope: &str, not_after: i64) -> String {
     use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(delegation_challenge(node_pubkey, scope, not_after))
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(delegation_challenge(
+        node_pubkey,
+        scope,
+        not_after,
+    ))
 }
 
 impl NodeDelegation {
@@ -181,8 +184,7 @@ impl NodeDelegation {
         } else {
             tenzro_crypto::webauthn::WebAuthnRelyingParty::Origin(self.relying_party.clone())
         };
-        let expected =
-            delegation_challenge_b64url(&self.node_pubkey, &self.scope, self.not_after);
+        let expected = delegation_challenge_b64url(&self.node_pubkey, &self.scope, self.not_after);
 
         tenzro_crypto::webauthn::verify_webauthn_assertion_require_uv(
             &assertion,
@@ -209,10 +211,22 @@ mod tests {
 
         // Changing any field must change the challenge, or that field is not
         // actually bound and could be edited after the ceremony.
-        assert_ne!(base, delegation_challenge(&key_b, "/var/lib/tenzro/a", 1000));
-        assert_ne!(base, delegation_challenge(&key_a, "/var/lib/tenzro/b", 1000));
-        assert_ne!(base, delegation_challenge(&key_a, "/var/lib/tenzro/a", 1001));
-        assert_eq!(base, delegation_challenge(&key_a, "/var/lib/tenzro/a", 1000));
+        assert_ne!(
+            base,
+            delegation_challenge(&key_b, "/var/lib/tenzro/a", 1000)
+        );
+        assert_ne!(
+            base,
+            delegation_challenge(&key_a, "/var/lib/tenzro/b", 1000)
+        );
+        assert_ne!(
+            base,
+            delegation_challenge(&key_a, "/var/lib/tenzro/a", 1001)
+        );
+        assert_eq!(
+            base,
+            delegation_challenge(&key_a, "/var/lib/tenzro/a", 1000)
+        );
     }
 
     /// Length-prefixing matters: without it, (`node_pubkey`, `scope`)
@@ -249,7 +263,10 @@ mod tests {
         let key = [7u8; 32];
         let d = delegation_for(&key, "/var/lib/tenzro/a", 10_000);
 
-        let wrong_key = d.verify(&[8u8; 32], "/var/lib/tenzro/a", 0).unwrap_err().to_string();
+        let wrong_key = d
+            .verify(&[8u8; 32], "/var/lib/tenzro/a", 0)
+            .unwrap_err()
+            .to_string();
         assert!(wrong_key.contains("different node key"), "{wrong_key}");
 
         let wrong_scope = d
@@ -258,7 +275,10 @@ mod tests {
             .to_string();
         assert!(wrong_scope.contains("scoped to"), "{wrong_scope}");
 
-        let expired = d.verify(&key, "/var/lib/tenzro/a", 10_001).unwrap_err().to_string();
+        let expired = d
+            .verify(&key, "/var/lib/tenzro/a", 10_001)
+            .unwrap_err()
+            .to_string();
         assert!(expired.contains("expired"), "{expired}");
     }
 
@@ -268,7 +288,10 @@ mod tests {
     fn an_over_long_span_is_refused_even_while_unexpired() {
         let key = [7u8; 32];
         let d = delegation_for(&key, "/var/lib/tenzro/a", MAX_DELEGATION_SECS + 1);
-        let err = d.verify(&key, "/var/lib/tenzro/a", 0).unwrap_err().to_string();
+        let err = d
+            .verify(&key, "/var/lib/tenzro/a", 0)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("longer than the"), "{err}");
     }
 
@@ -380,7 +403,10 @@ mod tests {
         // rejection below is the signature and not the span check.
         d.not_after = 1_001;
 
-        let err = d.verify(&node, "/var/lib/tenzro/a", 0).unwrap_err().to_string();
+        let err = d
+            .verify(&node, "/var/lib/tenzro/a", 0)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("did not verify"), "{err}");
     }
 
@@ -393,7 +419,10 @@ mod tests {
         let node = [9u8; 32];
         let d = enrol(&kp, &node, "/var/lib/tenzro/a", 1_000, FLAG_UP);
 
-        let err = d.verify(&node, "/var/lib/tenzro/a", 0).unwrap_err().to_string();
+        let err = d
+            .verify(&node, "/var/lib/tenzro/a", 0)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("did not verify"), "{err}");
     }
 
@@ -414,7 +443,10 @@ mod tests {
         );
         d.passkey_pubkey_xy = impostor.public_key_bytes().to_vec();
 
-        let err = d.verify(&node, "/var/lib/tenzro/a", 0).unwrap_err().to_string();
+        let err = d
+            .verify(&node, "/var/lib/tenzro/a", 0)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("did not verify"), "{err}");
     }
 }

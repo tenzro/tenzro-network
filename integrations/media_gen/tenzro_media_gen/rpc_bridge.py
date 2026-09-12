@@ -24,7 +24,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-import requests
+import httpx
 
 from .types import (
     MediaGenExpertRole,
@@ -100,7 +100,7 @@ class RpcClient:
         if params is not None:
             payload["params"] = params
         headers = {"X-Tenzro-Admin-Token": self.admin_token} if self.admin_token else None
-        resp = requests.post(self.url, json=payload, headers=headers, timeout=self.timeout_secs)
+        resp = httpx.post(self.url, json=payload, headers=headers, timeout=self.timeout_secs)
         resp.raise_for_status()
         body = resp.json()
         if body.get("error") is not None:

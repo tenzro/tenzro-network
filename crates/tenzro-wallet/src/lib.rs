@@ -1,14 +1,14 @@
-//! MPC Wallet System for Tenzro Network
+//! Wallet System for Tenzro Network
 //!
-//! This crate provides auto-provisioned threshold wallets for Tenzro Network,
+//! This crate provides identity-bound wallets for Tenzro Network,
 //! an AI-Native, Agentic, Tokenized Settlement Layer blockchain.
 //!
 //! # Key Features
 //!
-//! - **Seamless Onboarding**: Auto-provisioned MPC wallets - no seed phrases to manage
-//! - **Threshold Signatures**: 2-of-3 (configurable) multi-party signing
+//! - **Seamless Onboarding**: Identity-bound wallets - no seed phrases to manage
+//! - **Hardware-Rooted Custody**: passkey (human) or secure element (machine)
 //! - **Multi-Asset Support**: TNZO (native settlement), plus USDC, USDT, and major tokens
-//! - **Encrypted Storage**: Password-protected keystore for key shares (Argon2id)
+//! - **Encrypted Storage**: Password-protected keystore (Argon2id)
 //! - **Transaction Validation**: Chain ID, nonce, gas, address, and data size checks
 //! - **Signature Verification**: Automatic post-signing cryptographic verification
 //! - **Nonce Management**: Per-address sequential nonces with replay protection
@@ -20,9 +20,16 @@
 //!
 //! # Architecture
 //!
-//! The wallet system uses Multi-Party Computation (MPC) to distribute key shares
-//! across multiple parties. A threshold number of shares (e.g., 2 out of 3) are
-//! required to generate signatures, providing security without single points of failure.
+//! Every wallet is bound to an identity at construction — there is no way to
+//! build one without. A human identity is rooted in a passkey; an autonomous
+//! machine identity is rooted in a TPM or Apple Secure Enclave key. The signing
+//! key never leaves that hardware and this crate never holds it: a wallet
+//! carries the public half plus the ML-DSA-65 and BLS legs, which have no
+//! hardware backing on any current platform.
+//!
+//! The binding is structural rather than a runtime check — see
+//! [`WalletIdentity`], which has no `Default` and no constructor that omits the
+//! key, so a wallet with no identity behind it does not typecheck.
 //!
 //! # Examples
 //!
@@ -35,12 +42,16 @@
 //! # async fn example() -> tenzro_wallet::error::Result<()> {
 //! let service = TenzroWalletService::new()?;
 //!
-//! // Auto-provision a new MPC wallet
-//! let wallet = service.provision_wallet().await?;
+//! // Provision a wallet bound to a human identity. The passkey holds the
+//! // signing key; only its public half is passed here.
+//! let identity = tenzro_wallet::WalletIdentity::human(
+//!     b"passkey-credential-id".to_vec(),
+//!     tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, vec![7u8; 32]),
+//! )?;
+//! let wallet = service.provision_wallet(identity).await?;
 //!
 //! println!("Wallet created: {}", wallet.wallet_id);
 //! println!("Address: {}", wallet.address);
-//! println!("Threshold: {}-of-{}", wallet.threshold, wallet.total_shares);
 //! # Ok(())
 //! # }
 //! ```
@@ -55,7 +66,11 @@
 //!
 //! # async fn example() -> tenzro_wallet::error::Result<()> {
 //! let service = TenzroWalletService::new()?;
-//! let wallet = service.provision_wallet().await?;
+//! let identity = tenzro_wallet::WalletIdentity::human(
+//!     b"passkey-credential-id".to_vec(),
+//!     tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, vec![7u8; 32]),
+//! )?;
+//! let wallet = service.provision_wallet(identity).await?;
 //!
 //! // Build a validated transfer transaction. `from_wallet_pq` binds the
 //! // wallet's classical address AND its ML-DSA-65 verifying key into the
@@ -67,7 +82,7 @@
 //!     .transfer(1000)
 //!     .build_validated()?;
 //!
-//! // Sign (validates, signs with MPC threshold + ML-DSA-65, verifies both legs)
+//! // Sign (validates, signs with the identity key + ML-DSA-65, verifies both legs)
 //! let signature = service.sign_transaction(&wallet.wallet_id, &tx).await?;
 //! println!(
 //!     "Signature: classical={} bytes, pq={} bytes",
@@ -82,13 +97,20 @@ pub mod asset_manager;
 pub mod balance;
 pub mod builder;
 pub mod contacts;
+pub mod device_custody;
+/// Secure Enclave backend for [`device_custody`]. Apple targets only; the
+/// pq-companion feature carries the ML-DSA leg.
+#[cfg(all(
+    any(target_os = "macos", target_os = "ios"),
+    feature = "device-custody-se"
+))]
+pub mod device_custody_se;
 pub mod error;
 pub mod history;
+pub mod identity_binding;
 pub mod keystore;
-pub mod mpc_signing;
 pub mod nonce;
 pub mod pluggable_signer;
-pub mod provisioning;
 pub mod rpc_provider;
 pub mod service;
 pub mod signing;
@@ -106,9 +128,7 @@ pub use contacts::{AddressBook, Contact};
 pub use error::{Result, WalletError};
 pub use history::{HistoryFilter, TransactionHistory, TxDirection, TxRecord, TxStatus};
 pub use keystore::Keystore;
-pub use mpc_signing::{MpcSigner, TransactionSigner};
 pub use nonce::NonceManager;
-pub use provisioning::{ProvisioningConfig, WalletProvisioner};
 pub use service::{TenzroWalletService, WalletServiceConfig};
 pub use signing::{HybridSignatureBytes, HybridSigner};
 pub use state_sync::{ChainStateProvider, LocalStateProvider, WalletStateSync};
@@ -117,7 +137,7 @@ pub use userop::{
     UserOp, UserOpBuilder, encode_user_op_json, pack_validator_signature, user_op_hash,
 };
 pub use validation::{TransactionValidator, ValidationConfig};
-pub use wallet::{KeyShare, MpcWallet, WalletId};
+pub use wallet::{Wallet, WalletId};
 
 #[cfg(test)]
 mod tests {
@@ -126,7 +146,6 @@ mod tests {
     #[test]
     fn test_crate_exports() {
         // Ensure main types are accessible
-        let _ = ProvisioningConfig::default();
         let _ = WalletServiceConfig::default();
         let _ = WalletId::new();
         let _ = ValidationConfig::default();
@@ -135,3 +154,5 @@ mod tests {
         let _ = AddressBook::new();
     }
 }
+
+pub use identity_binding::WalletIdentity;

@@ -63,6 +63,22 @@ pub enum FilePurpose {
     UserData,
 }
 
+/// SHA-256 of a stored payload, lowercase hex.
+///
+/// Over the decoded bytes, never the transport encoding they arrived in: a
+/// digest of the base64 would describe how the file was sent rather than what
+/// it contains, and two callers using different encodings would get different
+/// digests for identical content.
+///
+/// One function because both upload paths need it. Written inline twice, the
+/// two copies drift and the same bytes get two answers.
+pub(crate) fn content_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
 /// A stored file, in the shape OpenAI clients expect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileObject {
@@ -80,6 +96,17 @@ pub struct FileObject {
     pub object: &'static str,
     /// Size in bytes.
     pub bytes: u64,
+    /// SHA-256 of the stored payload, lowercase hex.
+    ///
+    /// A `file_id` names a location; this names the content. An agent that
+    /// offloads a tool result and hands the id to its next turn -- or to a
+    /// subagent it delegated to -- can check that what it reads back is what
+    /// was written, instead of trusting the index.
+    ///
+    /// Deliberately not `#[serde(default)]`: a record written before this
+    /// existed fails to load rather than loading with an empty digest, which
+    /// would read as "verified" against nothing.
+    pub sha256: String,
     /// Unix seconds.
     pub created_at: u64,
     /// Original filename.
@@ -227,11 +254,94 @@ pub fn object_id_from(file_id: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// The digest is over the payload, not the encoding it arrived in.
+    ///
+    /// The upload decodes base64 before storing, so hashing the wrong side is
+    /// a live mistake rather than a hypothetical one — and it would still
+    /// produce a plausible-looking digest. Comparing the two candidates is
+    /// what makes this test able to fail.
+    #[test]
+    fn the_digest_covers_the_decoded_payload_not_its_encoding() {
+        use base64::Engine as _;
+
+        let payload = b"the quick brown fox";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+
+        let of_payload = content_digest(payload);
+        let of_encoding = content_digest(encoded.as_bytes());
+
+        assert_ne!(
+            of_payload, of_encoding,
+            "the two candidates must differ or this proves nothing"
+        );
+        assert_eq!(
+            of_payload, "9ecb36561341d18eb65484e833efea61edc74b84cf5e6ae1b81c63533e25fc8f",
+            "the digest a caller verifies against must not move"
+        );
+    }
+
+    /// Both upload routes agree on the same bytes.
+    ///
+    /// This is the property the extraction exists to hold: a file uploaded
+    /// over JSON-RPC and the same file uploaded over REST must be addressable
+    /// by the same digest, or "verify this handle" means different things
+    /// depending on how the bytes got there.
+    ///
+    /// The property is held *by construction* — there is one
+    /// [`content_digest`] and both routes call it — so no value-level
+    /// assertion can fail. This previously compared `content_digest(bytes)`
+    /// against `content_digest(&bytes.to_vec())`, which is the same function
+    /// over the same `&[u8]`: it asserted that a pure function is
+    /// deterministic and would have passed just as happily with the two routes
+    /// hashing differently.
+    ///
+    /// What can actually regress is a route grinding its own digest inline, so
+    /// the guard is structural: each route must delegate here, and must not
+    /// construct a hasher of its own.
+    #[test]
+    fn every_upload_route_digests_identically() {
+        for (name, src) in [
+            ("files_routes.rs", include_str!("files_routes.rs")),
+            ("files_rpc.rs", include_str!("files_rpc.rs")),
+        ] {
+            let impl_only = src.split("#[cfg(test)]").next().unwrap();
+            // Self-check: if the file were empty or unreadable the two
+            // assertions below would pass vacuously, which is the failure mode
+            // that makes a structural guard worse than no guard.
+            assert!(
+                impl_only.len() > 500,
+                "{name} read as {} bytes — this guard is no longer reading the \
+                 route it claims to cover",
+                impl_only.len()
+            );
+            // Pins the binding, not merely a mention of the function: what
+            // regresses is a route computing `sha256` some other way, and
+            // `contains("content_digest(")` would still pass if the call
+            // survived somewhere unrelated while the stored digest changed.
+            //
+            // Deliberately *not* a blanket ban on `Sha256::new()` in these
+            // files. `files_routes.rs::renter_address` legitimately hashes a
+            // DID into a billing address under its own domain separator, so
+            // that ban fires on correct code — which is how a structural guard
+            // gets weakened or deleted rather than fixed.
+            assert!(
+                impl_only.contains("let sha256 = crate::files_api::content_digest("),
+                "{name} no longer binds its stored digest from \
+                 files_api::content_digest, so the two upload routes can \
+                 disagree on the digest a handle is verified against"
+            );
+        }
+    }
+
     fn file(owner: &str) -> FileObject {
         FileObject {
             id: "file-abc".to_string(),
             object: "file",
             bytes: 1024,
+            // sha256 of the empty string: a real digest of real bytes, so a
+            // test that later verifies one finds a value a payload could
+            // actually produce.
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
             created_at: 0,
             filename: "notes.txt".to_string(),
             purpose: FilePurpose::UserData,

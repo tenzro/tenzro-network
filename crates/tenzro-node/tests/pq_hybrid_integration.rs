@@ -283,7 +283,12 @@ async fn revocation_broadcast_signature_required() {
     // have revoked.
     let registry = IdentityRegistry::new();
     let identity = registry
-        .register_human_with_fee(vec![1u8; 32], "Alice".to_string(), KycTier::Basic)
+        .register_human_with_fee(
+            b"test-credential".to_vec(),
+            vec![1u8; 32],
+            "Alice".to_string(),
+            KycTier::Basic,
+        )
         .await
         .expect("register human")
         .identity;
@@ -322,7 +327,12 @@ async fn revocation_broadcast_signature_required() {
     // by mutating the entry after signing. The registry must reject it and
     // leave local state untouched.
     let identity2 = registry
-        .register_human_with_fee(vec![2u8; 32], "Bob".to_string(), KycTier::Basic)
+        .register_human_with_fee(
+            b"test-credential".to_vec(),
+            vec![2u8; 32],
+            "Bob".to_string(),
+            KycTier::Basic,
+        )
         .await
         .expect("register human")
         .identity;

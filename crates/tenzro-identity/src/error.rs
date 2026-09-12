@@ -28,6 +28,23 @@ pub enum IdentityError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// An autonomous machine identity was requested on a host with no
+    /// hardware root.
+    ///
+    /// The root folds to all zeroes when no per-unit identifier could be
+    /// read — no TPM, no Secure Enclave, no PPIN, no SMBIOS UUID. Every
+    /// such host folds to that same value, so deriving from it would give
+    /// every unrooted machine on the network one shared DID. There is no
+    /// random fallback by design: an identifier drawn at random would change
+    /// on every re-registration. Such a machine must be delegated by a human
+    /// or an institution instead of standing on its own hardware.
+    #[error(
+        "no hardware root: this machine has no TPM, Secure Enclave, or other per-unit \
+         identifier, so it cannot hold an autonomous identity; register it as a delegated \
+         machine under a human or institution controller instead"
+    )]
+    MissingHardwareRoot,
+
     /// Delegation scope violated
     #[error("delegation scope violation: {0}")]
     DelegationViolation(String),

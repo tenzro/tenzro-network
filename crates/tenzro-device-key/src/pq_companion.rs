@@ -6,35 +6,37 @@
 //! and to produce an ML-DSA-65 signature leg on every operation, so a future
 //! cryptographically-relevant quantum computer cannot forge the P-256 leg alone.
 //!
-//! ## Why the seed is sealed to the enclave key
+//! ## Why the seed is sealed to more than the enclave key
 //!
 //! ML-DSA-65 has no hardware backing on current Apple silicon, so the seed must
-//! live somewhere. Rather than store it in plaintext, we ECIES-wrap the 32-byte
-//! FIPS-204 seed to the device's Secure Enclave key (the same `wrap_secret` /
-//! `unwrap_secret` primitive [`SecureEnclaveUnlocker`] uses for the keystore
-//! password). The wrapped ciphertext is written to disk next to the wallet
-//! keystore; the plaintext seed only ever exists transiently in memory and is
-//! zeroized on drop.
+//! live somewhere. It is sealed into a [`crate::SealedSecret`] — a
+//! `tenzro-envelope/v2` addressed to this device's enclave **and** to a recovery
+//! recipient the operator holds.
+//!
+//! Sealing it to the enclave alone would be indefensible here specifically: the
+//! verifying key derived from this seed is **enrolled on-chain as a permanent
+//! identity**, so losing the seed does not lose a cache — it strands the
+//! account, with no way to produce the PQ signature leg every operation
+//! requires. A dead logic board would be terminal. Of everything this crate
+//! holds, this is the secret least able to tolerate a single point of failure.
+//!
+//! The plaintext seed exists only transiently in memory and is zeroized on drop.
 //!
 //! ## Lifecycle
 //!
-//! - **Create:** generate a fresh ML-DSA-65 seed, `wrap_secret` it to the SE key
-//!   (no biometric prompt — encryption only needs the public key), persist the
-//!   ciphertext, return the verifying key for on-chain enrollment.
-//! - **Open / sign:** read the ciphertext, [`crate::open`] the SE key (reopened
-//!   by label from the file keychain — see crate docs), `unwrap_secret` (Touch
-//!   ID) to recover the seed, rebuild the signing key.
-//!
-//! Persistence matches [`SecureEnclaveUnlocker`]: a plain Developer-ID build
-//! persists the SE key in the file keychain and reopens it across restarts. If
-//! the key is gone (different machine / reset login keychain), a later `open`
-//! returns [`DeviceKeyError::NotFound`].
+//! - **Enrol:** generate a fresh ML-DSA-65 seed and seal it to the enclave plus
+//!   the caller's recovery recipient. Sealing needs no hardware and prompts for
+//!   nothing. Returns the verifying key for on-chain enrollment.
+//! - **Open / sign:** open the envelope with the enclave, rebuild the signing key.
+//! - **Recover:** [`Self::open_with`] takes any recipient, so a machine whose
+//!   enclave is gone can still rebuild the identity from the recovery code.
 
 use std::path::{Path, PathBuf};
 
 use tenzro_crypto::pq::{ML_DSA_65_VK_LEN, MlDsaSigningKey};
 
-use crate::{DeviceKeyError, Result};
+use crate::envelope::{Decapsulator, Recipient};
+use crate::{DeviceKeyError, Result, SealedSecret};
 
 /// Default device-key label used to seal the ML-DSA companion seed. Distinct
 /// from the keystore-unlock label so the two ciphertexts bind to separate keys.
@@ -48,20 +50,29 @@ pub struct PqCompanion {
 }
 
 impl PqCompanion {
-    /// Generate a fresh companion key, seal its seed to the SE key tagged
-    /// `label`, and persist the wrapped seed at `ciphertext_path`.
+    /// Generate a fresh companion key and seal its seed to this device's
+    /// enclave **and** `recovery`.
+    ///
+    /// `recovery` is not optional and is not generated for you: the operator has
+    /// to keep the matching recovery code. A code minted here and discarded
+    /// would look like redundancy while providing none — worse than none, since
+    /// it would stop anyone asking the question again.
     ///
     /// Returns the live companion; call [`Self::verifying_key_bytes`] for the
     /// 1952-byte ML-DSA-65 public key to hand to `tenzro_enrollPasskey`.
-    pub fn create(label: impl Into<String>, ciphertext_path: impl Into<PathBuf>) -> Result<Self> {
+    pub fn enrol(
+        label: impl Into<String>,
+        ciphertext_path: impl Into<PathBuf>,
+        recovery: &Recipient,
+    ) -> Result<Self> {
         let label = label.into();
         let ciphertext_path = ciphertext_path.into();
 
         let signing_key = MlDsaSigningKey::generate();
-        let key = crate::create(&label)?;
-        // wrap_secret encrypts to the SE key's public key — no biometric prompt.
-        let ct = key.wrap_secret(signing_key.seed_bytes())?;
-        write_ciphertext(&ciphertext_path, &ct)?;
+        let sealed = SealedSecret::new(label.clone(), ciphertext_path.clone());
+        // Sealing is public-key-only: no enclave round-trip, no biometric prompt.
+        // `false` keeps the enclave key usable from a headless node.
+        sealed.enrol(signing_key.seed_bytes(), recovery, false)?;
 
         Ok(Self {
             label,
@@ -77,18 +88,37 @@ impl PqCompanion {
     pub fn open(label: impl Into<String>, ciphertext_path: impl Into<PathBuf>) -> Result<Self> {
         let label = label.into();
         let ciphertext_path = ciphertext_path.into();
+        let sealed = SealedSecret::new(label.clone(), ciphertext_path.clone());
+        let seed = sealed.open()?;
+        Self::from_seed(label, ciphertext_path, &seed)
+    }
 
-        let ct = std::fs::read(&ciphertext_path).map_err(|e| {
-            DeviceKeyError::NotFound(format!(
-                "no ML-DSA companion ciphertext at {}: {e}",
-                ciphertext_path.display()
-            ))
-        })?;
-        let key = crate::open(&label)?;
-        let seed = key.unwrap_secret(&ct)?;
-        let signing_key = MlDsaSigningKey::from_seed(&seed)
+    /// Rebuild the companion using any recipient — in practice the recovery key,
+    /// on a machine whose enclave is gone. This is the path that makes an
+    /// on-chain identity survive hardware death.
+    pub fn open_with(
+        label: impl Into<String>,
+        ciphertext_path: impl Into<PathBuf>,
+        d: &dyn Decapsulator,
+    ) -> Result<Self> {
+        let label = label.into();
+        let ciphertext_path = ciphertext_path.into();
+        let sealed = SealedSecret::new(label.clone(), ciphertext_path.clone());
+        let seed = sealed.open_with(d)?;
+        Self::from_seed(label, ciphertext_path, &seed)
+    }
+
+    /// Re-seal the seed to this device's enclave plus `recovery`, with a fresh
+    /// CEK. Use after re-enrolling on new hardware, or to retire a recovery code.
+    /// The ML-DSA identity is unchanged — only the envelope around it.
+    pub fn rotate(&self, opener: &dyn Decapsulator, recovery: &Recipient) -> Result<()> {
+        SealedSecret::new(self.label.clone(), self.ciphertext_path.clone())
+            .rotate(opener, recovery, false)
+    }
+
+    fn from_seed(label: String, ciphertext_path: PathBuf, seed: &[u8]) -> Result<Self> {
+        let signing_key = MlDsaSigningKey::from_seed(seed)
             .map_err(|e| DeviceKeyError::Enclave(format!("rebuild ML-DSA key: {e}")))?;
-
         Ok(Self {
             label,
             ciphertext_path,
@@ -98,8 +128,8 @@ impl PqCompanion {
 
     /// Convenience: seal the companion seed as `pq-companion.seed.enc` under
     /// `data_dir` with the default label.
-    pub fn create_under_data_dir(data_dir: impl AsRef<Path>) -> Result<Self> {
-        Self::create(DEFAULT_PQ_LABEL, companion_path(data_dir))
+    pub fn enrol_under_data_dir(data_dir: impl AsRef<Path>, recovery: &Recipient) -> Result<Self> {
+        Self::enrol(DEFAULT_PQ_LABEL, companion_path(data_dir), recovery)
     }
 
     /// Convenience: reopen the companion sealed by [`Self::create_under_data_dir`].
@@ -136,15 +166,6 @@ impl PqCompanion {
 
 fn companion_path(data_dir: impl AsRef<Path>) -> PathBuf {
     data_dir.as_ref().join("pq-companion.seed.enc")
-}
-
-fn write_ciphertext(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| DeviceKeyError::Enclave(format!("create dir: {e}")))?;
-    }
-    std::fs::write(path, bytes)
-        .map_err(|e| DeviceKeyError::Enclave(format!("write companion ciphertext: {e}")))
 }
 
 #[cfg(test)]

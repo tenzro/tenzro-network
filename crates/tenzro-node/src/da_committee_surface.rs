@@ -13,8 +13,7 @@
 //! both, so this is where the typed committee-DA types are encoded into the
 //! opaque `Vec<u8>` blobs the wire protocol carries (`DaCommitteeRequest` /
 //! `DaCommitteeResponse` in `tenzro_network::da_committee_relay`) and decoded
-//! back. This mirrors [`crate::mpc_libp2p_adapter::NetworkMpcSurface`], which
-//! does the same for the MPC relay.
+//! back.
 //!
 //! ## Index → address → PeerId
 //!

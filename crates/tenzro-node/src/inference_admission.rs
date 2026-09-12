@@ -80,7 +80,10 @@ impl NodeInferenceAdmission {
             if let Some(m) = model_id
                 && !rec.allows_model(m)
             {
-                return InferenceAccess::Refuse(403, format!("api key not authorized for model {m}"));
+                return InferenceAccess::Refuse(
+                    403,
+                    format!("api key not authorized for model {m}"),
+                );
             }
             if mgr.check_rate_limit(&rec).is_err() {
                 return InferenceAccess::Refuse(429, "api key rate limit exceeded".into());
@@ -139,7 +142,9 @@ impl NodeInferenceAdmission {
              * because then a caller's origin genuinely is unknown here.
              */
             Some(_) if self.listener_is_loopback() => InferenceAccess::Allow,
-            Some(_) => InferenceAccess::Refuse(403, format!("model {model} is not offered off-node")),
+            Some(_) => {
+                InferenceAccess::Refuse(403, format!("model {model} is not offered off-node"))
+            }
             // Unknown / not served here.
             None => InferenceAccess::Refuse(404, format!("model {model} not served here")),
         }
@@ -151,7 +156,9 @@ impl InferenceAdmission for NodeInferenceAdmission {
         // HTTP path: extract credentials from headers and delegate to the
         // transport-independent core. No behavior change from the original.
         let api_key = headers.get(API_KEY_HEADER).and_then(|h| h.to_str().ok());
-        let service_key = headers.get(SERVICE_KEY_HEADER).and_then(|h| h.to_str().ok());
+        let service_key = headers
+            .get(SERVICE_KEY_HEADER)
+            .and_then(|h| h.to_str().ok());
         self.decide_creds(api_key, service_key, model_id)
     }
 }

@@ -25,9 +25,13 @@ pub enum WalletError {
     #[error("Asset not supported: {0}")]
     AssetNotSupported(String),
 
-    /// Invalid key share
-    #[error("Invalid key share: {0}")]
-    InvalidKeyShare(String),
+    /// Invalid or unusable key material.
+    ///
+    /// Named for shares historically; there are none now. It covers a device
+    /// key that will not open, an identity missing its public half, and a
+    /// verifying key of the wrong length.
+    #[error("Invalid key material: {0}")]
+    InvalidKeyMaterial(String),
 
     /// Threshold not met
     #[error("Threshold not met: got {got}, need {need}")]

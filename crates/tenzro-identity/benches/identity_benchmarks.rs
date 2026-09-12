@@ -1,7 +1,8 @@
 //! Criterion benchmarks for the tenzro-identity hot path.
 //!
 //! - `TenzroDid::parse` — every RPC that takes a DID string runs this once.
-//! - `TenzroDid::new_human / new_machine / new_autonomous_machine` — UUID v4
+//! - `TenzroDid::new_human / new_machine` — UUID v4;
+//!   `from_hardware_root` — SHA-256 over the platform root
 //!   generation cost on the registration path.
 //! - `IdentityRegistry::resolve` — DashMap lookup, the per-RPC hot path.
 //! - `IdentityRegistry::enforce_operation` — runs on every binder-mediated
@@ -14,7 +15,9 @@ use tenzro_identity::{IdentityRegistry, TenzroDid};
 fn bench_did_parse(c: &mut Criterion) {
     let human = TenzroDid::new_human().to_string();
     let machine_under = TenzroDid::new_machine("controller-uuid-stub").to_string();
-    let autonomous = TenzroDid::new_autonomous_machine().to_string();
+    let autonomous = TenzroDid::from_hardware_root(&[0x5Au8; 32])
+        .expect("non-zero root")
+        .to_string();
     let mut group = c.benchmark_group("did_parse");
     group.bench_function("human", |b| {
         b.iter(|| {
@@ -41,9 +44,9 @@ fn bench_did_generate(c: &mut Criterion) {
             black_box(TenzroDid::new_human());
         });
     });
-    group.bench_function("autonomous_machine_new", |b| {
+    group.bench_function("autonomous_machine_from_hardware_root", |b| {
         b.iter(|| {
-            black_box(TenzroDid::new_autonomous_machine());
+            black_box(TenzroDid::from_hardware_root(&[0x5Au8; 32]));
         });
     });
     group.finish();
@@ -51,7 +54,7 @@ fn bench_did_generate(c: &mut Criterion) {
 
 /// Build a `(registry, machine_did_string)` pair by going through the registry's
 /// real async registration path. The default `IdentityRegistry::new()` uses the
-/// `DefaultWalletBinder`, which does an in-process MPC wallet provision — slow
+/// `DefaultWalletBinder`, which does an in-process wallet provision — slow
 /// but a one-time cost outside the benched inner loop.
 fn build_seeded_registry() -> (IdentityRegistry, String) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -64,10 +67,7 @@ fn build_seeded_registry() -> (IdentityRegistry, String) {
             .register_autonomous_machine(
                 vec![0xab; 32],
                 vec!["payment".to_string()],
-                tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .expect("register autonomous machine");

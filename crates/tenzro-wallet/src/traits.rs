@@ -6,8 +6,9 @@ use crate::balance::Balance;
 use crate::contacts::Contact;
 use crate::error::Result;
 use crate::history::{HistoryFilter, TxRecord};
+use crate::identity_binding::WalletIdentity;
 use crate::signing::HybridSignatureBytes;
-use crate::wallet::{MpcWallet, WalletId};
+use crate::wallet::{Wallet, WalletId};
 use async_trait::async_trait;
 use tenzro_types::AssetId;
 use tenzro_types::primitives::{Address, Hash, Nonce};
@@ -27,13 +28,21 @@ use tenzro_types::transaction::Transaction;
 pub trait WalletService: Send + Sync {
     // === Wallet Lifecycle ===
 
-    /// Automatically provision a new MPC wallet for a user.
+    /// Provision a wallet for an identity.
     ///
-    /// This is the seamless onboarding flow - no seed phrases required.
-    async fn provision_wallet(&self) -> Result<MpcWallet>;
+    /// **A wallet cannot be provisioned without one.** `identity` carries the
+    /// public key the wallet's signatures verify against — a passkey for a
+    /// human, a TPM or Secure Enclave key for a machine — and there is no
+    /// overload that omits it.
+    ///
+    /// The service never generates that key. A signing secret minted here would
+    /// sit in process memory and be custodial, which is precisely the design
+    /// this replaced; the private half stays with the identity holder, and the
+    /// wallet signs by binding a [`crate::signing::HybridSigner`].
+    async fn provision_wallet(&self, identity: WalletIdentity) -> Result<Wallet>;
 
     /// Get a wallet by its ID.
-    async fn get_wallet(&self, wallet_id: &WalletId) -> Result<Option<MpcWallet>>;
+    async fn get_wallet(&self, wallet_id: &WalletId) -> Result<Option<Wallet>>;
 
     /// Get all wallets managed by this service.
     async fn list_wallets(&self) -> Result<Vec<WalletId>>;
@@ -56,7 +65,7 @@ pub trait WalletService: Send + Sync {
 
     // === Signing ===
 
-    /// Sign a transaction using the wallet's MPC key shares **and** the
+    /// Sign a transaction using the wallet's identity key **and** the
     /// wallet's ML-DSA-65 (FIPS 204) signing key, producing a hybrid
     /// signature.
     ///

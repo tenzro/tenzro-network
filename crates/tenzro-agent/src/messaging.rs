@@ -1391,7 +1391,6 @@ mod tests {
         let sender = h.agent("sender");
         let recipient = h.agent("recipient");
 
-
         let message = AgentMessage::new(
             sender.clone(),
             recipient.clone(),
@@ -1412,7 +1411,6 @@ mod tests {
 
         let sender = h.agent("sender");
         let recipient = h.agent("recipient");
-
 
         assert_eq!(
             h.router.pending_message_count(&recipient.agent_id).unwrap(),
@@ -1450,7 +1448,6 @@ mod tests {
         let recipient1 = h.agent("recipient1");
         let recipient2 = h.agent("recipient2");
 
-
         let recipients = vec![recipient1.clone(), recipient2.clone()];
         let sender_signer = h
             .signers
@@ -1477,7 +1474,6 @@ mod tests {
 
         let sender = h.agent("sender");
         let recipient = h.agent("recipient");
-
 
         let message = AgentMessage::new(
             sender.clone(),
@@ -1540,7 +1536,11 @@ mod tests {
     async fn test_rate_limit_per_sender_burst() {
         let config = MessageRouterConfig::default().with_rate_limit(
             RateLimitConfig::default()
-                .with_per_sender(10, 3) // small burst
+                // rate=1 → one token per second. The burst is what is under
+                // test; a faster refill rate made this flaky, because the three
+                // real Ed25519 signings below can outlast a 100ms refill on a
+                // loaded machine and hand the 4th send a fresh token.
+                .with_per_sender(1, 3)
                 .with_per_recipient(1000, 1000)
                 .with_global(1000, 1000),
         );
@@ -1590,7 +1590,9 @@ mod tests {
         let config = MessageRouterConfig::default().with_rate_limit(
             RateLimitConfig::default()
                 .with_per_sender(1000, 1000)
-                .with_per_recipient(10, 2) // very small recipient burst
+                // rate=1 for the same reason as the per-sender burst test:
+                // the refill must not outpace the sends the test performs.
+                .with_per_recipient(1, 2)
                 .with_global(1000, 1000),
         );
         let mut h = SigningHarness::new(config);
@@ -1636,7 +1638,9 @@ mod tests {
             RateLimitConfig::default()
                 .with_per_sender(1000, 1000)
                 .with_per_recipient(1000, 1000)
-                .with_global(5, 3), // tight global cap
+                // rate=1 for the same reason as the per-sender/per-recipient
+                // burst tests: the refill must not outpace the sends.
+                .with_global(1, 3),
         );
         let mut h = SigningHarness::new(config);
 

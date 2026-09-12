@@ -82,7 +82,8 @@ mod tests {
             header.set_size(data.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
-            b.append_data(&mut header, "app/index.js", &data[..]).unwrap();
+            b.append_data(&mut header, "app/index.js", &data[..])
+                .unwrap();
             b.finish().unwrap();
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -115,7 +116,10 @@ mod tests {
         assert!(tmp.path().join("data/gone.txt").is_file());
         // Upper layer whites it out.
         unpack_tar(&tar_with("data/.wh.gone.txt", b""), false, tmp.path()).unwrap();
-        assert!(!tmp.path().join("data/gone.txt").exists(), "whiteout removed it");
+        assert!(
+            !tmp.path().join("data/gone.txt").exists(),
+            "whiteout removed it"
+        );
         assert!(tmp.path().join("data/keep.txt").is_file(), "sibling kept");
     }
 }

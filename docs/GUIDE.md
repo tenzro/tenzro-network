@@ -34,7 +34,7 @@ export TENZRO_RPC_URL=https://rpc.tenzro.xyz
 
 tenzro setup                             # guided setup — join, provide, validate, or bootstrap a network
 # or go straight in:
-tenzro join --name "Alice"               # provisions DID + MPC wallet
+tenzro join --name "Alice"               # provisions DID + permissionless wallet
 tenzro faucet                            # request testnet TNZO
 tenzro wallet balance
 tenzro model list
@@ -565,7 +565,7 @@ cargo install --path crates/tenzro-cli
 # Guided setup — join, provide, validate, or bootstrap a network (see §4.7)
 tenzro setup
 
-# Join the network (provisions identity + MPC wallet + hardware profile)
+# Join the network (provisions identity + permissionless wallet + hardware profile)
 tenzro join --name "Alice"
 
 # Join AND become an inference provider (bond + register + pricing + model
@@ -946,7 +946,7 @@ Logs go to stderr in human-readable format. Pipe to `jq` for structured filterin
 
 ### 14.1 Key material
 
-- The MPC wallet keystore at `~/.tenzro/keystore/` is encrypted with Argon2id-derived AES-256-GCM. The keystore password protects all signing keys; loss is unrecoverable.
+- The wallet is permissionless and no custody is held: the classical signing key lives in the holder's own hardware — a passkey (WebAuthn) for a human, a TPM 2.0 or Apple Secure Enclave for a node — and never leaves it, so the network never holds the secret. The PQ (ML-DSA-65) and BLS legs live in the keystore at `~/.tenzro/keystore/`, encrypted with Argon2id-derived AES-256-GCM. The hardware root is the wallet; losing it is unrecoverable, so guard it accordingly.
 - Set restrictive permissions: `chmod 700 ~/.tenzro && chmod 600 ~/.tenzro/keystore/*`.
 - Never commit `~/.tenzro/`, `data/`, or any `.toml` containing private keys.
 

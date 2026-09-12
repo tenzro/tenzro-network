@@ -483,13 +483,15 @@ def create_account(key_type: str = "ed25519") -> dict:
 
 
 def create_wallet() -> dict:
-    """Generate a new self-custody Tenzro wallet (2-of-3 FROST-Ed25519 (RFC 9591), 32-byte address).
+    """Generate a new permissionless Tenzro wallet (32-byte address; no custody held).
 
+    The classical key is held in the caller's own hardware — a passkey for a
+    human, a TPM 2.0 / Secure Enclave for a machine — and never leaves it.
     Returns the canonical Tenzro wallet shape: `wallet_id`, 32-byte hex
-    `address`, base58 `display_address`, `public_key`, `key_type` (always
-    `Ed25519` — FROST-Ed25519 is the only scheme), `threshold`, `total_shares`.
-    The wallet additionally carries a mandatory ML-DSA-65 post-quantum signing
-    key for hybrid signatures. The faucet, `eth_getBalance`, and all
+    `address`, base58 `display_address`, `public_key`, `key_type`
+    (`Ed25519` default, or `secp256k1`). The wallet additionally carries a
+    mandatory ML-DSA-65 post-quantum signing key (and a BLS leg) for hybrid
+    signatures. The faucet, `eth_getBalance`, and all
     transaction RPCs accept the 32-byte address directly.
     """
     return _rpc("tenzro_createWallet", {})
@@ -787,7 +789,7 @@ def register_identity(display_name: str | None = None,
         `delegation_scope` constrains spending and operations the machine
         may perform on behalf of the controller.
       - 'autonomous': requires `capabilities`. No human controller; the
-        machine acts purely on its own FROST-Ed25519 threshold-bound key.
+        machine acts purely on its own hardware-held key (TPM / Secure Enclave).
 
     delegation_scope shape (all keys optional):
       {
@@ -841,7 +843,7 @@ def join_as_micro_node(display_name: str = "Tenzro User",
                        participant_type: str = "human") -> dict:
     """Join the Tenzro Network as a MicroNode participant.
 
-    Zero-install — auto-provisions a TDIP DID and MPC wallet.
+    Zero-install — auto-provisions a TDIP DID and permissionless wallet.
     Returns full identity, wallet, capabilities, network endpoints, and chain ID.
     Falls back to tenzro_participate for older nodes.
     """
@@ -1732,7 +1734,7 @@ def register_agent(name: str, creator: str,
     Parameters:
         name: human-readable agent name
         creator: creator address (Solana-base58 or 0x-hex EVM); the runtime
-                 binds an MPC wallet under this owner
+                 binds a permissionless wallet under this owner
         capabilities: optional list of capability strings
         tenzro_did: optional TDIP machine DID to bind this agent to (must have
                     been registered via `register_identity(identity_type='machine')`)
@@ -5498,7 +5500,7 @@ def canton_list_api_key_analytics(key_id: str | None = None) -> dict:
 
 
 def sign_message(message_hex: str) -> dict:
-    """Sign a message with the auth-bound wallet (FROST-Ed25519 + ML-DSA-65 hybrid).
+    """Sign a message with the auth-bound wallet (Ed25519 + ML-DSA-65 hybrid).
 
     The signer is resolved from the bearer DID via OAuth/DPoP; raw private
     keys never travel over the wire. Returns the hybrid signature (classical
@@ -5628,20 +5630,16 @@ def list_zk_circuits() -> dict:
 # ── Custody ──────────────────────────────────────────────────────
 
 
-def create_mpc_wallet_advanced(threshold: int = 2,
-                               total_shares: int = 3,
-                               key_type: str = "ed25519") -> dict:
-    """Create a FROST-Ed25519 (RFC 9591) threshold wallet with custom config.
+def create_wallet_advanced(key_type: str = "ed25519") -> dict:
+    """Create a permissionless wallet; the classical key is held in the caller's
+    own hardware (passkey for a human, TPM / Secure Enclave for a machine) and
+    the node holds no custody.
 
-    Pairs the FROST-Ed25519 classical leg with a mandatory ML-DSA-65
-    post-quantum signing key for hybrid signatures. `key_type` is `ed25519`
-    (default) or `secp256k1`; any other value is rejected with `-32602`.
+    Pairs the classical leg with a mandatory ML-DSA-65 post-quantum signing key
+    for hybrid signatures. `key_type` is `ed25519` (default) or `secp256k1`;
+    any other value is rejected with `-32602`.
     """
-    return _rpc("tenzro_createMpcWallet", {
-        "threshold": threshold,
-        "total_shares": total_shares,
-        "key_type": key_type,
-    })
+    return _rpc("tenzro_createWallet", {"key_type": key_type})
 
 
 def export_keystore(wallet_id: str, password: str) -> dict:
@@ -5660,14 +5658,8 @@ def import_keystore(keystore_json: str, password: str) -> dict:
     })
 
 
-def get_key_shares(wallet_id: str) -> dict:
-    """Get key share metadata for an MPC wallet."""
-    return _rpc("tenzro_getKeyShares", {"wallet_id": wallet_id})
 
 
-def rotate_keys(wallet_id: str) -> dict:
-    """Rotate key shares of an MPC wallet."""
-    return _rpc("tenzro_rotateKeys", {"wallet_id": wallet_id})
 
 
 def set_spending_limits(wallet_id: str, daily_limit: float,
@@ -5814,7 +5806,7 @@ def decode_result(data_hex: str, output_types: list) -> dict:
 # ── OAuth 2.1 + DPoP Onboarding ──────────────────────────────────
 
 def onboard_human(display_name, dpop_jkt=None):
-    """Onboard a new human — provisions a TDIP DID + MPC wallet, returns
+    """Onboard a new human — provisions a TDIP DID + permissionless wallet, returns
     a DPoP-bound OAuth 2.1 access token."""
     params = {"display_name": display_name}
     if dpop_jkt:
@@ -5863,7 +5855,7 @@ def refresh_token(refresh_token_value, dpop_jkt=None):
 
 
 def link_wallet_for_auth(wallet_id, dpop_jkt=None, display_name=None, ttl_secs=None):
-    """Bind an existing MPC wallet to a fresh self-custody TDIP identity
+    """Bind an existing wallet to a fresh self-custody TDIP identity
     and mint an access JWT scoped for self-custody.
 
     Bridges ``tenzro_createWallet`` (which only returns ``wallet_id`` +
@@ -6046,42 +6038,6 @@ def get_passkey_session(session_id):
     expired), and — once terminal — the handler result or error.
     """
     return _rpc("tenzro_getPasskeySession", {"session_id": session_id})
-
-
-# ── MPC distributed key generation (DKLS23 secp256k1; admin-token-gated) ──
-
-
-def mpc_keygen(local_did, participant_dids, threshold,
-               finalized_block_hash, session_nonce, peer_bindings=None):
-    """Start a DKLS23 secp256k1 distributed-key-generation ceremony.
-
-    Operator-only — set TENZRO_ADMIN_TOKEN. Every participant's operator posts
-    identical params (same participant_dids, finalized_block_hash,
-    session_nonce, threshold) so the derived InstanceId matches byte-for-byte;
-    `peer_bindings` maps every remote participant DID to its libp2p PeerId (a
-    missing binding for any remote DID is rejected). Idempotent — re-posting
-    the same session returns the existing record.
-    """
-    return _rpc("tenzro_mpcKeygen", {
-        "local_did": local_did,
-        "participant_dids": participant_dids,
-        "threshold": threshold,
-        "finalized_block_hash": finalized_block_hash,
-        "session_nonce": session_nonce,
-        "peer_bindings": peer_bindings or {},
-    })
-
-
-def mpc_keygen_status(instance_id=None):
-    """Query MPC keygen session state.
-
-    Pass `instance_id` for a single session, or omit it to list every keygen
-    session on this node.
-    """
-    params = {}
-    if instance_id:
-        params["instance_id"] = instance_id
-    return _rpc("tenzro_mpcKeygenStatus", params)
 
 
 def forget_identity(did):
@@ -9323,18 +9279,6 @@ COMMANDS = {
         args[7] if len(args) > 7 else None,
     ),
     "get_passkey_session": lambda args: get_passkey_session(args[0]),
-    # MPC distributed key generation (operator: admin-token-gated)
-    "mpc_keygen": lambda args: mpc_keygen(
-        args[0],
-        args[1].split(","),
-        int(args[2]),
-        args[3],
-        args[4],
-        json.loads(args[5]) if len(args) > 5 and args[5] else None,
-    ),
-    "mpc_keygen_status": lambda args: mpc_keygen_status(
-        args[0] if len(args) > 0 else None
-    ),
     # Verification
     "verify_zk_proof": lambda args: verify_zk_proof(
         args[0],
@@ -10159,15 +10103,13 @@ COMMANDS = {
     ),
     "list_zk_circuits": lambda args: list_zk_circuits(),
     # ── Custody ──
-    "create_mpc_wallet_advanced": lambda args: create_mpc_wallet_advanced(
+    "create_wallet_advanced": lambda args: create_wallet_advanced(
         int(args[0]) if args else 2,
         int(args[1]) if len(args) > 1 else 3,
         args[2] if len(args) > 2 else "ed25519",
     ),
     "export_keystore": lambda args: export_keystore(args[0], args[1]),
     "import_keystore": lambda args: import_keystore(args[0], args[1]),
-    "get_key_shares": lambda args: get_key_shares(args[0]),
-    "rotate_keys": lambda args: rotate_keys(args[0]),
     "set_spending_limits": lambda args: set_spending_limits(
         args[0], float(args[1]), float(args[2]),
     ),

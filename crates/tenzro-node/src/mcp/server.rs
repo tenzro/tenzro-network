@@ -160,6 +160,17 @@ pub struct RegisterIdentityParams {
         description = "Controller DID (required for machine identities, e.g. did:tenzro:human:uuid)"
     )]
     pub controller_did: Option<String>,
+    #[schemars(
+        description = "Hex public key of the key that owns this identity — the passkey \
+                       (human) or the TPM / Secure Enclave key (machine). Required: this \
+                       node does not generate keys on your behalf."
+    )]
+    pub public_key: String,
+    #[schemars(
+        description = "Hex passkey credential id (human identities only). An autonomous \
+                       machine has no passkey and omits this."
+    )]
+    pub credential_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1129,6 +1140,17 @@ pub struct JoinAsMicroNodeParams {
     #[schemars(description = "Display name for this participant (human-readable, optional)")]
     pub display_name: Option<String>,
     #[schemars(
+        description = "Hex public key of the key that owns this participant — the passkey \
+                       (human) or the TPM / Secure Enclave key (agent/bot). Required: the \
+                       node does not generate keys on your behalf."
+    )]
+    pub public_key: String,
+    #[schemars(
+        description = "Hex passkey credential id. Required when participant_type is \
+                       'human'; omitted for an autonomous 'agent' / 'bot'."
+    )]
+    pub credential_id: Option<String>,
+    #[schemars(
         description = "Entry point: 'mcp' | 'claude' | 'clawbot' | 'a2a' | 'sdk' | 'api' | 'cli' | 'app'"
     )]
     pub origin: Option<String>,
@@ -1695,7 +1717,7 @@ pub struct RegisterAgentParams {
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[schemars(
-        description = "BYOK: optional 32-byte Ed25519 verifying key (hex). If supplied, `pq_public_key` and `bls_public_key` MUST also be supplied. When all three are present, no server-side wallet is provisioned and the agent is registered self-custodially with the caller's keys. When all three are absent, the node provisions a server-side hybrid (FROST Ed25519 + ML-DSA-65 + BLS12-381) wallet."
+        description = "32-byte Ed25519 verifying key (hex) — the agent's device key, held in its TPM or Secure Enclave. Supply `pq_public_key` and `bls_public_key` alongside it to register fully self-custodially. Supplying this key alone still binds the agent to it; the node derives only the ML-DSA-65 and BLS legs, which have no hardware backing on any current platform. Required either way: the node does not mint an agent's classical key."
     )]
     #[serde(default)]
     pub public_key: Option<String>,
@@ -3188,16 +3210,6 @@ pub struct ListZkCircuitsParams {
 // ─── Custody Params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CreateMpcWalletParams {
-    #[schemars(description = "Number of shares required to sign (e.g. 2)")]
-    pub threshold: Option<u32>,
-    #[schemars(description = "Total number of key shares (e.g. 3)")]
-    pub total_shares: Option<u32>,
-    #[schemars(description = "Key type: 'ed25519' (default) or 'secp256k1'")]
-    pub key_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExportKeystoreParams {
     #[schemars(description = "Wallet ID (UUID) to export")]
     pub wallet_id: String,
@@ -3211,18 +3223,6 @@ pub struct ImportKeystoreParams {
     pub keystore_json: String,
     #[schemars(description = "Password to decrypt the keystore file")]
     pub password: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GetKeySharesParams {
-    #[schemars(description = "Wallet ID (UUID) to query key shares for")]
-    pub wallet_id: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RotateKeysParams {
-    #[schemars(description = "Wallet ID (UUID) to rotate keys for")]
-    pub wallet_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -4745,102 +4745,286 @@ pub struct TenzroMcpServer {
 /// note in `mcp/iroh_transport.rs`.
 const IROH_READONLY_TOOLS: &[&str] = &[
     // ── Network / chain / node reads ──
-    "get_node_status", "get_node_did_document", "get_network_stats", "get_block",
-    "get_block_range", "get_fee_market", "get_transaction", "get_svm_cross_vm_program_info",
-    "get_validator_state", "list_validators", "list_active_validators", "get_router_metrics",
-    "get_provenance", "get_economic_policy", "local_peers", "node_reachability", "node_profile",
-    "cluster_plan", "list_snapshots", "get_snapshot_manifest", "get_snapshot_chunk", "get_events",
-    "settlement_networks", "get_interaction", "wallet_readiness",
+    "get_node_status",
+    "get_node_did_document",
+    "get_network_stats",
+    "get_block",
+    "get_block_range",
+    "get_fee_market",
+    "get_transaction",
+    "get_svm_cross_vm_program_info",
+    "get_validator_state",
+    "list_validators",
+    "list_active_validators",
+    "get_router_metrics",
+    "get_provenance",
+    "get_economic_policy",
+    "local_peers",
+    "node_reachability",
+    "node_profile",
+    "cluster_plan",
+    "list_snapshots",
+    "get_snapshot_manifest",
+    "get_snapshot_chunk",
+    "get_events",
+    "settlement_networks",
+    "get_interaction",
+    "wallet_readiness",
     // ── Balances / tokens (public reads) ──
-    "get_balance", "token_balance", "get_token_balance", "total_supply", "get_token_info",
-    "list_tokens", "get_nft_info", "list_nft_collections",
+    "get_balance",
+    "token_balance",
+    "get_token_balance",
+    "total_supply",
+    "get_token_info",
+    "list_tokens",
+    "get_nft_info",
+    "list_nft_collections",
     // ── Models / providers (catalog + status reads) ──
-    "list_models", "list_model_endpoints", "list_provider_capacity", "list_providers",
-    "get_model_hash", "list_model_hashes", "get_sealed_model", "list_sealed_models",
-    "model_recipient_key", "get_download_progress", "get_provider_stats", "get_compute_bond",
-    "get_provider_schedule", "get_provider_pricing", "discover_models", "discover_agents",
+    "list_models",
+    "list_model_endpoints",
+    "list_provider_capacity",
+    "list_providers",
+    "get_model_hash",
+    "list_model_hashes",
+    "get_sealed_model",
+    "list_sealed_models",
+    "model_recipient_key",
+    "get_download_progress",
+    "get_provider_stats",
+    "get_compute_bond",
+    "get_provider_schedule",
+    "get_provider_pricing",
+    "discover_models",
+    "discover_agents",
     "route_difficulty_stats",
     // ── MoE (planning + status reads; execute/load/prepare excluded) ──
-    "moe_shard_map", "moe_plan_dispatch", "moe_replication_policy", "moe_catalog_shape",
-    "moe_expert_status", "moe_prepare_status",
+    "moe_shard_map",
+    "moe_plan_dispatch",
+    "moe_replication_policy",
+    "moe_catalog_shape",
+    "moe_expert_status",
+    "moe_prepare_status",
     // ── Multi-modal (catalog + loaded-model listings; execute/load excluded) ──
-    "list_forecast_models", "list_forecast_catalog", "list_vision_models", "list_vision_catalog",
-    "list_text_embedding_models", "list_text_embedding_catalog", "list_segmentation_models",
-    "list_segmentation_catalog", "list_text_segmentation_models", "list_text_segmentation_catalog",
-    "list_detection_models", "list_detection_catalog", "list_audio_models", "list_audio_catalog",
-    "list_video_models", "list_video_catalog",
+    "list_forecast_models",
+    "list_forecast_catalog",
+    "list_vision_models",
+    "list_vision_catalog",
+    "list_text_embedding_models",
+    "list_text_embedding_catalog",
+    "list_segmentation_models",
+    "list_segmentation_catalog",
+    "list_text_segmentation_models",
+    "list_text_segmentation_catalog",
+    "list_detection_models",
+    "list_detection_catalog",
+    "list_audio_models",
+    "list_audio_catalog",
+    "list_video_models",
+    "list_video_catalog",
     // ── Governance reads ──
-    "list_proposals", "get_voting_power",
+    "list_proposals",
+    "get_voting_power",
     // ── Tasks / agents / templates / capabilities (reads) ──
-    "list_tasks", "get_task", "list_agent_templates", "get_agent_template",
-    "search_agent_templates", "get_agent_template_stats", "list_capabilities",
-    "get_capability_attestations", "get_agent_capability_attestations",
-    "find_best_agent_for_capability", "get_swarm_status", "get_agent_bond",
-    "get_agent_daily_spend", "list_agent_jwks", "get_agent_jwk",
+    "list_tasks",
+    "get_task",
+    "list_agent_templates",
+    "get_agent_template",
+    "search_agent_templates",
+    "get_agent_template_stats",
+    "list_capabilities",
+    "get_capability_attestations",
+    "get_agent_capability_attestations",
+    "find_best_agent_for_capability",
+    "get_swarm_status",
+    "get_agent_bond",
+    "get_agent_daily_spend",
+    "list_agent_jwks",
+    "get_agent_jwk",
     // ── Identity reads ──
-    "resolve_did", "resolve_username",
+    "resolve_did",
+    "resolve_username",
     // ── Payments / fees / bridge quotes (reads + pure quotes) ──
-    "list_payment_protocols", "list_x402_schemes", "x402_protocol_info",
-    "x402_discover_resources", "x402_verify_offer", "x402_payment_id", "get_fee_route",
-    "list_fee_routes", "compute_fee_route_payouts", "quote_bridge_fee_in_tnzo",
-    "list_bridge_sponsorship_pools", "get_bridge_routes", "list_bridge_adapters", "bridge_quote",
+    "list_payment_protocols",
+    "list_x402_schemes",
+    "x402_protocol_info",
+    "x402_discover_resources",
+    "x402_verify_offer",
+    "x402_payment_id",
+    "get_fee_route",
+    "list_fee_routes",
+    "compute_fee_route_payouts",
+    "quote_bridge_fee_in_tnzo",
+    "list_bridge_sponsorship_pools",
+    "get_bridge_routes",
+    "list_bridge_adapters",
+    "bridge_quote",
     "prepaid_balance",
     // ── Workflow / settlement / escrow reads ──
-    "get_workflow", "list_workflows_by_creator", "list_workflows_by_participant",
-    "list_workflows_by_status", "get_workflow_lifecycle", "get_workflow_saga",
-    "get_workflow_receipt", "list_workflow_receipts", "get_workflow_operational_metrics",
-    "get_obligation", "get_approval_gate", "get_approval_request", "get_privacy_domain",
-    "list_privacy_domains_for_did", "get_capital_intent", "get_reserve", "dvp_get_saga",
-    "dvp_list_sagas_by_creator", "netting_get_batch", "netting_list_batches", "get_dispute",
-    "list_disputes_by_channel", "get_escrow", "list_escrows_by_payer", "list_escrows_by_payee",
-    "get_approval", "list_pending_approvals",
+    "get_workflow",
+    "list_workflows_by_creator",
+    "list_workflows_by_participant",
+    "list_workflows_by_status",
+    "get_workflow_lifecycle",
+    "get_workflow_saga",
+    "get_workflow_receipt",
+    "list_workflow_receipts",
+    "get_workflow_operational_metrics",
+    "get_obligation",
+    "get_approval_gate",
+    "get_approval_request",
+    "get_privacy_domain",
+    "list_privacy_domains_for_did",
+    "get_capital_intent",
+    "get_reserve",
+    "dvp_get_saga",
+    "dvp_list_sagas_by_creator",
+    "netting_get_batch",
+    "netting_list_batches",
+    "get_dispute",
+    "list_disputes_by_channel",
+    "get_escrow",
+    "list_escrows_by_payer",
+    "list_escrows_by_payee",
+    "get_approval",
+    "list_pending_approvals",
     // ── Verification / pure-compute helpers (no state, no key material) ──
-    "verify_zk_proof", "get_zk_attestation", "verify_vrf_proof", "verify_signature",
-    "verify_did_envelope", "verify_tee_attestation", "detect_tee", "list_tee_providers",
-    "get_inference_commitment", "get_inference_challenge", "list_inference_challenges",
-    "list_zk_circuits", "hash_sha256", "hash_keccak256", "caip2", "caip10", "caip19",
-    "encode_function", "decode_result", "eip7702_protocol_info", "eip7702_signing_hash",
-    "eip7702_build_designator", "eip7702_parse_designator", "ap2_protocol_info", "ivms101_hash",
-    "permit2_domain_separator", "permit2_digest", "permit2_nonce_used",
-    "signed_agent_card_canonical_hash", "attested_clock_now", "wormhole_chain_id",
-    "wormhole_parse_vaa_id", "wormhole_ntt_list_chains",
+    "verify_zk_proof",
+    "get_zk_attestation",
+    "verify_vrf_proof",
+    "verify_signature",
+    "verify_did_envelope",
+    "verify_tee_attestation",
+    "detect_tee",
+    "list_tee_providers",
+    "get_inference_commitment",
+    "get_inference_challenge",
+    "list_inference_challenges",
+    "list_zk_circuits",
+    "hash_sha256",
+    "hash_keccak256",
+    "caip2",
+    "caip10",
+    "caip19",
+    "encode_function",
+    "decode_result",
+    "eip7702_protocol_info",
+    "eip7702_signing_hash",
+    "eip7702_build_designator",
+    "eip7702_parse_designator",
+    "ap2_protocol_info",
+    "ivms101_hash",
+    "permit2_domain_separator",
+    "permit2_digest",
+    "permit2_nonce_used",
+    "signed_agent_card_canonical_hash",
+    "attested_clock_now",
+    "wormhole_chain_id",
+    "wormhole_parse_vaa_id",
+    "wormhole_ntt_list_chains",
     // ── Cross-chain read/quote helpers (send/dispatch/pay excluded) ──
-    "erc7683_get_order", "erc7683_list_orders", "erc7683_get_fill", "erc7683_list_fills",
-    "ccip_get_fee", "ccip_supported_chains", "ccip_supported_tokens", "ccip_lanes",
-    "ccip_token_pool", "ccip_rate_limits", "ccip_track", "hyperlane_list_chains",
-    "hyperlane_quote_dispatch", "hyperlane_get_message", "axelar_list_chains",
-    "axelar_get_message", "babylon_get_finality_provider", "babylon_list_finality_providers",
-    "babylon_total_stake_for_provider", "babylon_list_delegations", "cct_list_pools",
-    "cct_get_pool", "urwa_is_kill_switched", "urwa_get_frozen_tokens",
+    "erc7683_get_order",
+    "erc7683_list_orders",
+    "erc7683_get_fill",
+    "erc7683_list_fills",
+    "ccip_get_fee",
+    "ccip_supported_chains",
+    "ccip_supported_tokens",
+    "ccip_lanes",
+    "ccip_token_pool",
+    "ccip_rate_limits",
+    "ccip_track",
+    "hyperlane_list_chains",
+    "hyperlane_quote_dispatch",
+    "hyperlane_get_message",
+    "axelar_list_chains",
+    "axelar_get_message",
+    "babylon_get_finality_provider",
+    "babylon_list_finality_providers",
+    "babylon_total_stake_for_provider",
+    "babylon_list_delegations",
+    "cct_list_pools",
+    "cct_get_pool",
+    "urwa_is_kill_switched",
+    "urwa_get_frozen_tokens",
     // ── ERC-8004 pure ABI encoders/decoders (stateless) ──
-    "erc8004_encode_register", "erc8004_encode_register_with_uri",
-    "erc8004_encode_register_with_metadata", "erc8004_encode_get_agent",
-    "erc8004_decode_get_agent", "erc8004_encode_set_agent_uri", "erc8004_encode_set_agent_wallet",
-    "erc8004_encode_set_metadata", "erc8004_encode_get_metadata", "erc8004_decode_get_metadata",
-    "erc8004_encode_get_agent_uri", "erc8004_encode_get_agent_wallet", "erc8004_encode_feedback",
-    "erc8004_encode_get_feedback", "erc8004_encode_get_feedback_count",
-    "erc8004_encode_revoke_feedback", "erc8004_encode_append_response",
-    "erc8004_encode_is_feedback_revoked", "erc8004_encode_get_feedback_responses",
-    "erc8004_encode_validation_request", "erc8004_encode_validation_response",
+    "erc8004_encode_register",
+    "erc8004_encode_register_with_uri",
+    "erc8004_encode_register_with_metadata",
+    "erc8004_encode_get_agent",
+    "erc8004_decode_get_agent",
+    "erc8004_encode_set_agent_uri",
+    "erc8004_encode_set_agent_wallet",
+    "erc8004_encode_set_metadata",
+    "erc8004_encode_get_metadata",
+    "erc8004_decode_get_metadata",
+    "erc8004_encode_get_agent_uri",
+    "erc8004_encode_get_agent_wallet",
+    "erc8004_encode_feedback",
+    "erc8004_encode_get_feedback",
+    "erc8004_encode_get_feedback_count",
+    "erc8004_encode_revoke_feedback",
+    "erc8004_encode_append_response",
+    "erc8004_encode_is_feedback_revoked",
+    "erc8004_encode_get_feedback_responses",
+    "erc8004_encode_validation_request",
+    "erc8004_encode_validation_response",
     "erc8004_encode_get_validation",
     // ── Canton / DA / training / media / seed / burn / SLA (reads) ──
-    "list_canton_domains", "list_daml_contracts", "da_list_challenges", "da_availability",
-    "da_committee", "da_list_blobs", "training_list_runs", "training_get_run",
-    "training_get_receipt", "training_get_sealed_manifest", "media_gen_list_catalog",
-    "media_gen_quote", "media_gen_list_jobs", "media_gen_get_job", "media_gen_list_workers",
-    "media_gen_get_receipt", "get_trainer_daemon_status", "list_bound_devices",
-    "seed_agent_get_earmark", "seed_agent_get_charter", "seed_agent_list_charters",
-    "seed_agent_list", "seed_agent_get_network_activity", "adaptive_burn_get_config",
-    "adaptive_burn_get_metrics", "adaptive_burn_get_recommendation", "adaptive_burn_list_proposals",
-    "sla_list_outstanding_probes", "sla_get_params",
+    "list_canton_domains",
+    "list_daml_contracts",
+    "da_list_challenges",
+    "da_availability",
+    "da_committee",
+    "da_list_blobs",
+    "training_list_runs",
+    "training_get_run",
+    "training_get_receipt",
+    "training_get_sealed_manifest",
+    "media_gen_list_catalog",
+    "media_gen_quote",
+    "media_gen_list_jobs",
+    "media_gen_get_job",
+    "media_gen_list_workers",
+    "media_gen_get_receipt",
+    "get_trainer_daemon_status",
+    "list_bound_devices",
+    "seed_agent_get_earmark",
+    "seed_agent_get_charter",
+    "seed_agent_list_charters",
+    "seed_agent_list",
+    "seed_agent_get_network_activity",
+    "adaptive_burn_get_config",
+    "adaptive_burn_get_metrics",
+    "adaptive_burn_get_recommendation",
+    "adaptive_burn_list_proposals",
+    "sla_list_outstanding_probes",
+    "sla_get_params",
     // ── Secure-mint / stable-asset reads ──
-    "get_secure_mint_policy", "secure_mint_check", "get_stable_asset",
+    "get_secure_mint_policy",
+    "secure_mint_check",
+    "get_stable_asset",
     // ── Sites / functions / machines / apps / leases / compute / storage (reads) ──
-    "site_get", "list_sites", "site_get_alias", "list_site_aliases", "site_get_placement",
-    "list_site_placements", "site_get_domain", "list_site_domains", "function_get",
-    "list_functions", "machine_get", "list_machines", "machine_status", "list_leases",
-    "get_leases_for_app", "get_app", "list_apps", "compute_get_rental", "compute_status",
-    "storage_get_deal", "storage_status",
+    "site_get",
+    "list_sites",
+    "site_get_alias",
+    "list_site_aliases",
+    "site_get_placement",
+    "list_site_placements",
+    "site_get_domain",
+    "list_site_domains",
+    "function_get",
+    "list_functions",
+    "machine_get",
+    "list_machines",
+    "machine_status",
+    "list_leases",
+    "get_leases_for_app",
+    "get_app",
+    "list_apps",
+    "compute_get_rental",
+    "compute_status",
+    "storage_get_deal",
+    "storage_status",
 ];
 
 /// Whether `tool` may be invoked over the unauthenticated iroh MCP
@@ -4884,6 +5068,17 @@ fn err_internal(msg: impl Into<String>) -> ErrorData {
 
 fn err_internal_data(msg: impl Into<String>) -> ErrorData {
     ErrorData::internal_error(msg.into(), None)
+}
+
+/// Caller supplied a bad or missing parameter.
+fn err_invalid_params(msg: impl Into<String>) -> ErrorData {
+    ErrorData::invalid_params(msg.into(), None)
+}
+
+/// Decode a hex-encoded field, tolerating a leading `0x`.
+fn decode_hex_field(value: &str, field: &str) -> std::result::Result<Vec<u8>, ErrorData> {
+    hex::decode(value.trim_start_matches("0x"))
+        .map_err(|e| err_invalid_params(format!("Invalid '{field}' hex: {e}")))
 }
 
 fn parse_vm_type(s: &str) -> std::result::Result<tenzro_token::TokenVmType, ErrorData> {
@@ -5025,6 +5220,8 @@ async fn rpc_dispatch(
         jsonrpc: "2.0".to_string(),
         method: method.to_string(),
         params: Some(params),
+        api_key: None,
+        service_key: None,
         id: serde_json::Value::Number(serde_json::Number::from(1)),
     };
     // Forward the inbound MCP request's Authorization + DPoP headers to
@@ -5912,40 +6109,6 @@ pub struct RemovePasskeyParams {
     pub credential_id_hex: String,
 }
 
-// ─── MPC distributed key generation (DKLS23 secp256k1) ───
-
-#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct McpKeygenParams {
-    #[schemars(description = "This participant's DID. Must also appear in participant_dids.")]
-    pub local_did: String,
-    #[schemars(
-        description = "Every participant DID in the group (including local_did). The node sorts + dedups; every party must pass the identical set so the derived InstanceId matches byte-for-byte."
-    )]
-    pub participant_dids: Vec<String>,
-    #[schemars(description = "Signing threshold t (2 <= t <= n <= 32).")]
-    pub threshold: u8,
-    #[schemars(
-        description = "32-byte finalized HotStuff-2 block hash (hex) anchoring the InstanceId. All parties pass the same value."
-    )]
-    pub finalized_block_hash: String,
-    #[schemars(description = "32-byte per-ceremony nonce (hex). All parties pass the same value.")]
-    pub session_nonce: String,
-    #[schemars(
-        description = "DID -> libp2p PeerId bindings, one entry per remote participant. Fail-closed: a missing binding for any remote DID is rejected."
-    )]
-    #[serde(default)]
-    pub peer_bindings: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct McpKeygenStatusParams {
-    #[schemars(
-        description = "Instance id (hex) of a specific keygen session. Omit to list all sessions on this node."
-    )]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instance_id: Option<String>,
-}
-
 // ─── Identity + credential lifecycle (admin-gated) ───
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -6364,16 +6527,25 @@ impl TenzroMcpServer {
 
         match params.identity_type.to_lowercase().as_str() {
             "human" => {
-                use tenzro_crypto::{KeyPair, KeyType};
-                let keypair = KeyPair::generate(KeyType::Ed25519).map_err(|e| ErrorData {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Key generation error: {}", e)),
-                    data: None,
-                })?;
-                let pub_key_bytes = keypair.public_key().as_bytes().to_vec();
+                // A human identity is rooted in a passkey the caller already
+                // holds. This used to generate an Ed25519 keypair here and drop
+                // the private half at end of scope, leaving an identity nobody
+                // could ever sign for.
+                let pub_key_bytes = decode_hex_field(&params.public_key, "public_key")?;
+                let credential_id = params
+                    .credential_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        err_invalid_params(
+                            "credential_id is required for a human identity: it names the \
+                             passkey that holds the key",
+                        )
+                    })
+                    .and_then(|c| decode_hex_field(c, "credential_id"))?;
 
                 let identity = registry
                     .register_human_with_fee(
+                        credential_id,
                         pub_key_bytes,
                         params.display_name.clone(),
                         tenzro_types::KycTier::Unverified,
@@ -7164,11 +7336,13 @@ impl TenzroMcpServer {
 
     #[tool(
         description = "Join the Tenzro Network as a MicroNode — a zero-install full participant. \
-        Auto-provisions a TDIP decentralized identity (DID) and MPC wallet. \
+        Provisions a TDIP decentralized identity (DID) and a wallet bound to a key you \
+        already hold — a passkey for a person, a TPM / Secure Enclave key for an agent. \
         Grants access to all 10 network capabilities: inference, payments, agent collaboration, \
         MCP tools, task execution, chain queries, smart contracts, TEE services, cross-chain bridge, \
         and governance. Works from any entry point: Claude, ClawBot, MCP, A2A, SDK, API, CLI, or app. \
-        No hardware, no binary installation required."
+        No binary installation required; you do need a key of your own, which the node \
+        never sees the private half of."
     )]
     async fn join_as_participant(
         &self,
@@ -7182,7 +7356,33 @@ impl TenzroMcpServer {
             .participant_type
             .unwrap_or_else(|| "human".to_string());
 
-        // Auto-provision MPC wallet
+        // The participant's own key roots both the wallet and the identity.
+        // A human is bound to a passkey; an autonomous agent or bot is bound to
+        // its secure element and has no passkey.
+        let public_key_bytes = decode_hex_field(&params.public_key, "public_key")?;
+        let public_key = tenzro_crypto::PublicKey::new(
+            tenzro_crypto::KeyType::Ed25519,
+            public_key_bytes.clone(),
+        );
+        let is_human = participant_type_str.eq_ignore_ascii_case("human");
+        let credential_id = match (&params.credential_id, is_human) {
+            (Some(c), _) => Some(decode_hex_field(c, "credential_id")?),
+            (None, true) => {
+                return Err(err_invalid_params(
+                    "credential_id is required for a human participant: it names the \
+                     passkey that holds the key",
+                ));
+            }
+            (None, false) => None,
+        };
+        let wallet_identity = match &credential_id {
+            Some(cred) => tenzro_wallet::WalletIdentity::human(cred.clone(), public_key),
+            None => {
+                tenzro_wallet::WalletIdentity::machine(format!("micronode:{origin}"), public_key)
+            }
+        }
+        .map_err(|e| err_invalid_params(format!("Invalid identity: {e}")))?;
+
         let wallet_service = self
             .node
             .wallet_service()
@@ -7190,7 +7390,7 @@ impl TenzroMcpServer {
 
         use tenzro_wallet::WalletService;
         let wallet = wallet_service
-            .provision_wallet()
+            .provision_wallet(wallet_identity)
             .await
             .map_err(|e| err_internal(format!("Wallet provisioning failed: {}", e)))?;
 
@@ -7200,15 +7400,37 @@ impl TenzroMcpServer {
             .identity_registry()
             .ok_or_else(|| err_internal("Identity registry not initialized"))?;
 
-        let mut identity = registry
-            .register_human_with_fee(
-                wallet.public_key.to_bytes(),
-                display_name.clone(),
-                tenzro_types::identity::KycTier::Unverified,
-            )
-            .await
-            .map_err(|e| err_internal(format!("Identity registration failed: {}", e)))?
-            .identity;
+        // A human participant registers against its passkey; an autonomous
+        // agent or bot registers as a machine against its secure element.
+        // Passing an empty credential to the human path would be rejected by
+        // `WalletIdentity::human`, and rightly so.
+        let mut identity = match &credential_id {
+            Some(cred) => {
+                registry
+                    .register_human_with_fee(
+                        cred.clone(),
+                        wallet.public_key.to_bytes(),
+                        display_name.clone(),
+                        tenzro_types::identity::KycTier::Unverified,
+                    )
+                    .await
+                    .map_err(|e| err_internal(format!("Identity registration failed: {}", e)))?
+                    .identity
+            }
+            None => {
+                registry
+                    .register_machine_via_binder(
+                        "self",
+                        format!("micronode:{origin}"),
+                        public_key_bytes.clone(),
+                        vec!["micro_node".to_string()],
+                        tenzro_identity::DelegationScope::default(),
+                    )
+                    .await
+                    .map_err(|e| err_internal(format!("Identity registration failed: {}", e)))?
+                    .identity
+            }
+        };
 
         // Attach MicroNode metadata
         identity
@@ -7252,7 +7474,14 @@ impl TenzroMcpServer {
                 u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]))
             };
             match runtime
-                .register_agent(display_name.clone(), wallet.address, caps, false, nonce)
+                .register_agent(
+                    display_name.clone(),
+                    wallet.address,
+                    public_key_bytes.clone(),
+                    caps,
+                    false,
+                    nonce,
+                )
                 .await
             {
                 Ok(agent) => {
@@ -8523,7 +8752,9 @@ impl TenzroMcpServer {
             } else {
                 let turn = [tenzro_model::ChatMessage {
                     role: "user".to_string(),
-                    content: message.clone(), ..Default::default() }];
+                    content: message.clone(),
+                    ..Default::default()
+                }];
                 model_runtime
                     .generate_chat_multimodal(&svc.model_id, &turn, &media, &[], &config)
                     .await
@@ -12047,7 +12278,14 @@ impl TenzroMcpServer {
                 tenzro_model::estimate_max_concurrent(entry.min_ram_gb, 4.0, 0.0, false)
             }
         };
-        let max_concurrent = params.max_concurrent.unwrap_or(max_concurrent);
+        // Capped at the serving path's real concurrency like every other
+        // registration site (`Node::serving_capacity_cap`); an operator value
+        // above it would admit requests the engine cannot run together.
+        let max_concurrent = params
+            .max_concurrent
+            .unwrap_or(max_concurrent)
+            .min(self.node.serving_capacity_cap(&entry))
+            .max(1);
         self.node
             .load_tracker
             .register_model(model_id, max_concurrent);
@@ -12279,7 +12517,7 @@ impl TenzroMcpServer {
     // ─── Agent Advanced Tools ───
 
     #[tool(
-        description = "Register a new AI agent identity on the Tenzro Network. Two modes: (1) provisioner — node provisions a server-side hybrid wallet (FROST Ed25519 + ML-DSA-65 + BLS12-381), returns the classical_public_key + pq_verifying_key_len + bls_verifying_key_len; (2) BYOK — caller supplies `public_key` (32B Ed25519), `pq_public_key` (1952B ML-DSA-65), and `bls_public_key` (48B BLS12-381 G1) hex, registration is self-custodial. Returns agent_id, wallet_address, tenzro_did, registration_fee, and `byok` flag."
+        description = "Register a new AI agent identity on the Tenzro Network. Two modes: (1) provisioner — node provisions a hybrid wallet (Ed25519 + ML-DSA-65 + BLS12-381), hardware-held key, no custody held, returns the classical_public_key + pq_verifying_key_len + bls_verifying_key_len; (2) BYOK — caller supplies `public_key` (32B Ed25519), `pq_public_key` (1952B ML-DSA-65), and `bls_public_key` (48B BLS12-381 G1) hex, registration is self-custodial. Returns agent_id, wallet_address, tenzro_did, registration_fee, and `byok` flag."
     )]
     async fn register_agent(
         &self,
@@ -12397,8 +12635,29 @@ impl TenzroMcpServer {
             }));
         }
 
+        // Reaching here means the caller supplied no full BYOK triple. An agent
+        // is still a machine, so it is bound to its own device key rather than
+        // one this node mints.
+        let device_public_key = params
+            .public_key
+            .as_deref()
+            .ok_or_else(|| {
+                err_invalid_params(
+                    "public_key is required: an agent is bound to its device key \
+                     (TPM / Secure Enclave). This node does not generate one.",
+                )
+            })
+            .and_then(|pk| decode_hex_field(pk, "public_key"))?;
+
         let agent = agent_runtime
-            .register_agent(params.name.clone(), creator, capabilities, false, 0)
+            .register_agent(
+                params.name.clone(),
+                creator,
+                device_public_key,
+                capabilities,
+                false,
+                0,
+            )
             .await
             .map_err(|e| err_internal(format!("Agent registration failed: {}", e)))?;
 
@@ -17665,27 +17924,6 @@ impl TenzroMcpServer {
     // ─── Custody Tools ───
 
     #[tool(
-        description = "Create a new MPC threshold wallet with configurable threshold and share count. Default is 2-of-3. Returns the wallet ID, address, and key share metadata."
-    )]
-    async fn create_mpc_wallet(
-        &self,
-        Parameters(params): Parameters<CreateMpcWalletParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(
-            &self.node,
-            "tenzro_createMpcWallet",
-            serde_json::json!({
-                "threshold": params.threshold.unwrap_or(2),
-                "total_shares": params.total_shares.unwrap_or(3),
-                "key_type": params.key_type.as_deref().unwrap_or("ed25519"),
-            }),
-        )
-        .await
-        .map_err(|e| err_internal(format!("createMpcWallet failed: {}", e)))?;
-        json_result(result)
-    }
-
-    #[tool(
         description = "Export a wallet's keystore as an encrypted JSON file. Uses Argon2id KDF for key derivation. The exported keystore can be imported on another node."
     )]
     async fn export_keystore(
@@ -17722,44 +17960,6 @@ impl TenzroMcpServer {
         )
         .await
         .map_err(|e| err_internal(format!("importKeystore failed: {}", e)))?;
-        json_result(result)
-    }
-
-    #[tool(
-        description = "Get the key share metadata for an MPC wallet. Returns the threshold, total shares, and share indices without exposing secret key material."
-    )]
-    async fn get_key_shares(
-        &self,
-        Parameters(params): Parameters<GetKeySharesParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(
-            &self.node,
-            "tenzro_getKeyShares",
-            serde_json::json!({
-                "wallet_id": params.wallet_id,
-            }),
-        )
-        .await
-        .map_err(|e| err_internal(format!("getKeyShares failed: {}", e)))?;
-        json_result(result)
-    }
-
-    #[tool(
-        description = "Rotate the key shares of an MPC wallet. Generates new shares while keeping the same public key and address. Old shares become invalid."
-    )]
-    async fn rotate_keys(
-        &self,
-        Parameters(params): Parameters<RotateKeysParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(
-            &self.node,
-            "tenzro_rotateKeys",
-            serde_json::json!({
-                "wallet_id": params.wallet_id,
-            }),
-        )
-        .await
-        .map_err(|e| err_internal(format!("rotateKeys failed: {}", e)))?;
         json_result(result)
     }
 
@@ -20280,38 +20480,6 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    // ─── MPC distributed key generation (DKLS23 secp256k1) ───
-
-    #[tool(
-        description = "Operator-only. Start a DKLS23 secp256k1 distributed-key-generation ceremony. Requires X-Tenzro-Admin-Token. Every participant's operator posts identical params (same participant_dids, finalized_block_hash, session_nonce, threshold) so the derived InstanceId matches byte-for-byte; peer_bindings must map every remote participant DID to its libp2p PeerId or the call is rejected. Idempotent — re-posting the same session returns the existing record."
-    )]
-    async fn mpc_keygen(
-        &self,
-        Parameters(params): Parameters<McpKeygenParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload =
-            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
-        let result = rpc_dispatch(&self.node, "tenzro_mpcKeygen", payload)
-            .await
-            .map_err(|e| err_internal(format!("mpcKeygen failed: {}", e)))?;
-        json_result(result)
-    }
-
-    #[tool(
-        description = "Query MPC keygen session state. Pass instance_id for a single session, or omit it to list every keygen session on this node. Each record carries status, threshold, total_parties, local_party_index, and — once completed — group_id, group_public_key, and the derived EIP-55 address."
-    )]
-    async fn mpc_keygen_status(
-        &self,
-        Parameters(params): Parameters<McpKeygenStatusParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload =
-            serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
-        let result = rpc_dispatch(&self.node, "tenzro_mpcKeygenStatus", payload)
-            .await
-            .map_err(|e| err_internal(format!("mpcKeygenStatus failed: {}", e)))?;
-        json_result(result)
-    }
-
     // ─── Identity + credential lifecycle (admin-gated) ───
 
     #[tool(
@@ -21695,11 +21863,8 @@ mod tests {
         let _schema = schemars::schema_for!(CreateZkProofParams);
         let _schema = schemars::schema_for!(ListZkCircuitsParams);
         // Custody params
-        let _schema = schemars::schema_for!(CreateMpcWalletParams);
         let _schema = schemars::schema_for!(ExportKeystoreParams);
         let _schema = schemars::schema_for!(ImportKeystoreParams);
-        let _schema = schemars::schema_for!(GetKeySharesParams);
-        let _schema = schemars::schema_for!(RotateKeysParams);
         let _schema = schemars::schema_for!(SetSpendingLimitsParams);
         let _schema = schemars::schema_for!(GetSpendingLimitsParams);
         let _schema = schemars::schema_for!(AuthorizeSessionParams);

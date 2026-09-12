@@ -69,7 +69,8 @@ pub struct SetupCmd {
 
     /// Who operates this machine: `self` (a human holds the passkey) or
     /// `autonomous` (the machine answers for itself via an attestable
-    /// hardware root). `autonomous` requires a usable TPM.
+    /// hardware root). `autonomous` requires a usable TPM 2.0 or, on Apple
+    /// hardware, a Secure Enclave.
     #[arg(long, value_parser = ["self", "autonomous"])]
     pub operator: Option<String>,
 
@@ -93,8 +94,11 @@ pub struct SetupCmd {
     #[arg(long)]
     pub chain_id: Option<u64>,
 
-    /// Node data directory. Defaults depend on the chosen path.
-    #[arg(long)]
+    /// Node data directory. Defaults depend on the chosen path. Also
+    /// settable via `$TENZRO_DATA_DIR`, the same variable `tenzro-node`
+    /// itself reads, so a setup and the node it bootstraps agree on where
+    /// state lives without repeating the flag.
+    #[arg(long, env = "TENZRO_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
     /// Genesis stake for the founding validator (whole TNZO units).
@@ -224,7 +228,7 @@ impl SetupCmd {
                 if anchor.autonomous_available {
                     let items = [
                         "I operate this machine — my passkey controls it",
-                        "Autonomous — the machine answers for itself via its TPM",
+                        "Autonomous — the machine answers for itself via its TPM or Secure Enclave",
                     ];
                     prompt_select(interactive, "Who operates this machine?", &items, 0)? == 1
                 } else {
@@ -274,9 +278,7 @@ impl SetupCmd {
             // on-chain machine identity — that would register against the live
             // network from an isolated/test sandbox. Skip the on-chain step;
             // the local keyset + scoped config are still written.
-            wiz_note(
-                "Scoped --data-dir run: skipping on-chain autonomous identity registration.",
-            );
+            wiz_note("Scoped --data-dir run: skipping on-chain autonomous identity registration.");
         } else if autonomous {
             // Deliberately not the `join` path: that provisions a MicroNode
             // whose `participant_type` is human/agent/bot, none of which
@@ -741,7 +743,8 @@ impl SetupCmd {
             let mut g = String::new();
             g.push_str(&format!(
                 "version = {}\nchain_id = {}\ntimestamp = 0\n\n",
-                tenzro_node::config::GENESIS_SCHEMA_VERSION, chain_id
+                tenzro_node::config::GENESIS_SCHEMA_VERSION,
+                chain_id
             ));
             g.push_str(&format!("# founding validator (peer_id={})\n", peer_id));
             g.push_str(&pubkeys.to_genesis_toml(self.stake));
@@ -971,6 +974,22 @@ struct MachineAnchorOptions {
 
 impl MachineAnchorOptions {
     fn detect(hw: &HardwareProfile) -> Self {
+        // On Apple hardware the machine root is the Secure Enclave, not a TPM.
+        // Sealing goes through the SEP-bound machine root (no external tooling),
+        // so a usable Secure Enclave is a complete autonomous anchor on its own.
+        // Detect it from the capabilities `hardware.rs` records for a live SEP.
+        let has_secure_enclave = hw
+            .tee_capabilities
+            .iter()
+            .any(|c| c == "secure_key_storage" || c == "hardware_attestation")
+            && cfg!(any(target_os = "macos", target_os = "ios"));
+        if has_secure_enclave {
+            return Self {
+                autonomous_available: true,
+                reason: String::new(),
+            };
+        }
+
         // `tpm_available` in the hardware profile means only that a TPM
         // device node exists. Sealing also shells out to tpm2-tools, so a
         // machine with the chip but not the tooling would pass a naive check
@@ -984,7 +1003,7 @@ impl MachineAnchorOptions {
             return Self {
                 autonomous_available: false,
                 reason: if cfg!(target_os = "macos") {
-                    "no TPM (Apple Secure Enclave is not yet wired as a machine anchor)".to_string()
+                    "no usable Secure Enclave detected on this Mac".to_string()
                 } else {
                     "no TPM detected on this machine".to_string()
                 },

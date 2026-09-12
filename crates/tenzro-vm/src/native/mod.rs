@@ -926,7 +926,8 @@ impl NativeExecutor {
         let mut tally = load_tally(state, &proposal_id);
         tally.apply_vote(weight, in_favour, previous);
         let (tally_blob, prior_tally) = store_tally(state, &proposal_id, &tally)?;
-        let (vote_blob, prior_vote) = store_vote(state, &proposal_id, &voter_hex, weight, in_favour);
+        let (vote_blob, prior_vote) =
+            store_vote(state, &proposal_id, &voter_hex, weight, in_favour);
 
         // Keep the stored proposal's status in step once the window shuts, so a
         // reader does not have to recompute the outcome to know it.
@@ -972,7 +973,11 @@ impl NativeExecutor {
         log_data.extend_from_slice(&tx.from);
         log_data.extend_from_slice(&weight.to_le_bytes());
         log_data.push(u8::from(in_favour));
-        let log = Log::new(SYSTEM_ADDRESS.to_vec(), vec![b"VoteCast".to_vec()], log_data);
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"VoteCast".to_vec()],
+            log_data,
+        );
 
         Ok(ExecutionResult::success(
             gas_meter.final_used(),
@@ -1053,7 +1058,11 @@ impl NativeExecutor {
         Ok(ExecutionResult::success(
             gas_meter.final_used(),
             Vec::new(),
-            vec![Log::new(SYSTEM_ADDRESS.to_vec(), vec![topic], tx.from.clone())],
+            vec![Log::new(
+                SYSTEM_ADDRESS.to_vec(),
+                vec![topic],
+                tx.from.clone(),
+            )],
             vec![StateChange::new(
                 SYSTEM_ADDRESS.to_vec(),
                 governance_paused_key().as_bytes().to_vec(),
@@ -1109,7 +1118,9 @@ impl NativeExecutor {
             )));
         }
         store_proposal(state, &proposal).map_err(|e| {
-            VmError::Internal(format!("failed to persist vetoed proposal {proposal_id}: {e}"))
+            VmError::Internal(format!(
+                "failed to persist vetoed proposal {proposal_id}: {e}"
+            ))
         })?;
 
         let mut log_data = Vec::new();
@@ -1218,7 +1229,9 @@ impl NativeExecutor {
             // and start the delay again, or worse, report success while nothing
             // was written.
             store_proposal(state, &proposal).map_err(|e| {
-                VmError::Internal(format!("failed to persist queued proposal {proposal_id}: {e}"))
+                VmError::Internal(format!(
+                    "failed to persist queued proposal {proposal_id}: {e}"
+                ))
             })?;
 
             let eta = proposal.eta_ms.unwrap_or_default();
@@ -1388,7 +1401,6 @@ impl NativeExecutor {
                 ));
                 (*amount, recipient_bytes)
             }
-
         };
 
         // Terminal, and written before returning: this is what stops the action
@@ -5683,8 +5695,8 @@ fn store_tally(
 ) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     let key = governance_tally_key(id);
     let previous = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes());
-    let blob = serde_json::to_vec(tally)
-        .map_err(|e| VmError::Internal(format!("encoding tally: {e}")))?;
+    let blob =
+        serde_json::to_vec(tally).map_err(|e| VmError::Internal(format!("encoding tally: {e}")))?;
     state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), blob.clone());
     Ok((blob, previous))
 }
@@ -5695,7 +5707,10 @@ fn store_tally(
 /// voter's bond at tally time. A validator who bonds more after voting must not
 /// have their already-cast ballot grow underneath them.
 fn load_vote(state: &dyn VmState, id: &str, voter_hex: &str) -> Option<(u128, bool)> {
-    let blob = state.get_storage(&SYSTEM_ADDRESS, governance_vote_key(id, voter_hex).as_bytes())?;
+    let blob = state.get_storage(
+        &SYSTEM_ADDRESS,
+        governance_vote_key(id, voter_hex).as_bytes(),
+    )?;
     if blob.len() != 17 {
         return None;
     }
@@ -5972,10 +5987,12 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_GOVERNANCE_PROPOSE => self.execute_propose(tx, state, &mut gas_meter).await,
             SELECTOR_GOVERNANCE_VOTE => self.execute_vote(tx, state, &mut gas_meter).await,
             SELECTOR_GOVERNANCE_PAUSE => {
-                self.execute_governance_pause(tx, state, &mut gas_meter).await
+                self.execute_governance_pause(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_GOVERNANCE_VETO => {
-                self.execute_governance_veto(tx, state, &mut gas_meter).await
+                self.execute_governance_veto(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_GOVERNANCE_EXECUTE => {
                 self.execute_governance_execute(tx, state, &mut gas_meter)
@@ -6038,7 +6055,8 @@ impl VmExecutor for NativeExecutor {
                     .await
             }
             SELECTOR_TREASURY_DEPOSIT => {
-                self.execute_treasury_deposit(tx, state, &mut gas_meter).await
+                self.execute_treasury_deposit(tx, state, &mut gas_meter)
+                    .await
             }
             SELECTOR_VALIDATOR_EXIT => self.execute_validator_exit(tx, state, &mut gas_meter).await,
             SELECTOR_VALIDATOR_UPDATE_METADATA => {
@@ -6373,7 +6391,10 @@ mod tests {
             (SELECTOR_GOVERNANCE_PROPOSE, "governance_propose"),
             (SELECTOR_GOVERNANCE_VOTE, "governance_vote"),
             (SELECTOR_GOVERNANCE_EXECUTE, "governance_execute"),
-            (SELECTOR_INCREASE_VALIDATOR_STAKE, "increase_validator_stake"),
+            (
+                SELECTOR_INCREASE_VALIDATOR_STAKE,
+                "increase_validator_stake",
+            ),
             (SELECTOR_ESCROW_CREATE, "escrow_create"),
             (SELECTOR_ESCROW_RELEASE, "escrow_release"),
             (SELECTOR_ESCROW_REFUND, "escrow_refund"),
@@ -6408,7 +6429,11 @@ mod tests {
     /// that bonds without crediting it would compute quorum against zero.
     fn gov_bond(state: &mut StateAdapter, who: &[u8], stake: u128) {
         let key = format!("staking_bond:{}", hex::encode(who));
-        state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), stake.to_le_bytes().to_vec());
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            key.as_bytes(),
+            stake.to_le_bytes().to_vec(),
+        );
         let vault = state.get_balance(&STAKING_VAULT_ADDRESS);
         state.set_balance(&STAKING_VAULT_ADDRESS, vault + stake);
         state.set_balance(who, GOV_GAS_BALANCE);
@@ -6512,7 +6537,10 @@ mod tests {
         };
         let tx = gov_tx(&stranger, gov_propose_data(&action), 100_000, 1_000);
         let err = executor.execute_transaction(&tx, &mut state).await;
-        assert!(err.is_err(), "an unbonded address must not be able to propose");
+        assert!(
+            err.is_err(),
+            "an unbonded address must not be able to propose"
+        );
     }
 
     /// The hole this closes: voting used to be open to any address at all, and
@@ -6575,7 +6603,10 @@ mod tests {
         assert_eq!(state.get_balance(&treasury), 0, "starts empty");
 
         let result = executor
-            .execute_transaction(&gov_tx(&donor, gov_deposit_data(5_000), 40_000, 0), &mut state)
+            .execute_transaction(
+                &gov_tx(&donor, gov_deposit_data(5_000), 40_000, 0),
+                &mut state,
+            )
             .await
             .unwrap();
 
@@ -6608,12 +6639,18 @@ mod tests {
             memo: "funded by deposit".into(),
         };
         let created = executor
-            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_propose_data(&action), 100_000, 0),
+                &mut state,
+            )
             .await
             .unwrap();
         let id = created.output.clone();
         executor
-            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_vote_data(&id, true), 30_000, 10),
+                &mut state,
+            )
             .await
             .unwrap();
 
@@ -6622,7 +6659,10 @@ mod tests {
         // be set and passed in the same instant.
         let after = crate::governance::VOTING_PERIOD_MS + 1;
         executor
-            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, after),
+                &mut state,
+            )
             .await
             .expect("queueing a passed proposal");
         let past_timelock = after + crate::governance::TIMELOCK_DELAY_MS + 1;
@@ -6635,7 +6675,10 @@ mod tests {
             .expect("a funded treasury must be able to pay");
 
         assert_eq!(state.get_balance(recipient.as_bytes()), 4_000);
-        assert_eq!(state.get_balance(derive_treasury_address().as_bytes()), 6_000);
+        assert_eq!(
+            state.get_balance(derive_treasury_address().as_bytes()),
+            6_000
+        );
     }
 
     /// A deposit of nothing moves nothing and should not consume a nonce.
@@ -6705,7 +6748,10 @@ mod tests {
             memo: "founding validator allocation".into(),
         };
         let created = executor
-            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_propose_data(&action), 100_000, 0),
+                &mut state,
+            )
             .await
             .unwrap();
         let id = created.output.clone();
@@ -6713,14 +6759,20 @@ mod tests {
         // Both validators vote yes: 100% of the electorate, well past 2/3.
         for voter in [&a, &b] {
             executor
-                .execute_transaction(&gov_tx(voter, gov_vote_data(&id, true), 30_000, 10), &mut state)
+                .execute_transaction(
+                    &gov_tx(voter, gov_vote_data(&id, true), 30_000, 10),
+                    &mut state,
+                )
                 .await
                 .unwrap();
         }
 
         let after = crate::governance::VOTING_PERIOD_MS + 1;
         executor
-            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, after),
+                &mut state,
+            )
             .await
             .expect("queueing a passed proposal");
         let past_timelock = after + crate::governance::TIMELOCK_DELAY_MS + 1;
@@ -6764,27 +6816,42 @@ mod tests {
             memo: String::new(),
         };
         let created = executor
-            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_propose_data(&action), 100_000, 0),
+                &mut state,
+            )
             .await
             .unwrap();
         let id = created.output.clone();
         executor
-            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_vote_data(&id, true), 30_000, 10),
+                &mut state,
+            )
             .await
             .unwrap();
 
         let after = crate::governance::VOTING_PERIOD_MS + 1;
         executor
-            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, after),
+                &mut state,
+            )
             .await
             .expect("queueing a passed proposal");
 
         // Inside the timelock the proposal is not yet enactable, and saying so
         // is the whole point of the window.
         let too_early = executor
-            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after + 1), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, after + 1),
+                &mut state,
+            )
             .await;
-        assert!(too_early.is_err(), "a queued proposal must wait out its timelock");
+        assert!(
+            too_early.is_err(),
+            "a queued proposal must wait out its timelock"
+        );
 
         let past_timelock = after + crate::governance::TIMELOCK_DELAY_MS + 1;
         executor
@@ -6828,19 +6895,28 @@ mod tests {
             memo: String::new(),
         };
         let created = executor
-            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_propose_data(&action), 100_000, 0),
+                &mut state,
+            )
             .await
             .unwrap();
         let id = created.output.clone();
         executor
-            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_vote_data(&id, true), 30_000, 10),
+                &mut state,
+            )
             .await
             .unwrap();
 
         let err = executor
             .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, 20), &mut state)
             .await;
-        assert!(err.is_err(), "enactment before the window closes must be refused");
+        assert!(
+            err.is_err(),
+            "enactment before the window closes must be refused"
+        );
         assert_eq!(state.get_balance(recipient.as_bytes()), 0);
     }
 
@@ -6864,24 +6940,36 @@ mod tests {
             memo: String::new(),
         };
         let created = executor
-            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_propose_data(&action), 100_000, 0),
+                &mut state,
+            )
             .await
             .unwrap();
         let id = created.output.clone();
 
         // 50/50 clears quorum but not the two-thirds threshold.
         executor
-            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_vote_data(&id, true), 30_000, 10),
+                &mut state,
+            )
             .await
             .unwrap();
         executor
-            .execute_transaction(&gov_tx(&b, gov_vote_data(&id, false), 30_000, 10), &mut state)
+            .execute_transaction(
+                &gov_tx(&b, gov_vote_data(&id, false), 30_000, 10),
+                &mut state,
+            )
             .await
             .unwrap();
 
         let after = crate::governance::VOTING_PERIOD_MS + 1;
         let err = executor
-            .execute_transaction(&gov_tx(&a, gov_execute_data(&id), 120_000, after), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_execute_data(&id), 120_000, after),
+                &mut state,
+            )
             .await;
         assert!(err.is_err(), "a split vote must not move the treasury");
         assert_eq!(state.get_balance(recipient.as_bytes()), 0);
@@ -6904,17 +6992,26 @@ mod tests {
             memo: String::new(),
         };
         let created = executor
-            .execute_transaction(&gov_tx(&a, gov_propose_data(&action), 100_000, 0), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_propose_data(&action), 100_000, 0),
+                &mut state,
+            )
             .await
             .unwrap();
         let id = created.output.clone();
 
         executor
-            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, true), 30_000, 10), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_vote_data(&id, true), 30_000, 10),
+                &mut state,
+            )
             .await
             .unwrap();
         executor
-            .execute_transaction(&gov_tx(&a, gov_vote_data(&id, false), 30_000, 20), &mut state)
+            .execute_transaction(
+                &gov_tx(&a, gov_vote_data(&id, false), 30_000, 20),
+                &mut state,
+            )
             .await
             .unwrap();
 
@@ -6924,7 +7021,11 @@ mod tests {
             (0, GOV_STAKE),
             "the earlier yes must be withdrawn, not kept alongside the no"
         );
-        assert_eq!(tally.participation(), GOV_STAKE, "one voter is one voter's worth");
+        assert_eq!(
+            tally.participation(),
+            GOV_STAKE,
+            "one voter is one voter's worth"
+        );
     }
 
     /// A payload that is not a valid action is refused rather than stored.
@@ -7056,7 +7157,12 @@ mod tests {
         data
     }
 
-    fn identity_register_tx(from: Vec<u8>, did: &str, controller: &[u8], nonce: u64) -> VmTransaction {
+    fn identity_register_tx(
+        from: Vec<u8>,
+        did: &str,
+        controller: &[u8],
+        nonce: u64,
+    ) -> VmTransaction {
         VmTransaction::new(
             from,
             None,
@@ -7095,7 +7201,8 @@ mod tests {
             result
                 .logs
                 .iter()
-                .any(|l| l.topics.first().map(|t| t.as_slice()) == Some(b"IdentityRegister".as_ref())),
+                .any(|l| l.topics.first().map(|t| t.as_slice())
+                    == Some(b"IdentityRegister".as_ref())),
             "IdentityRegister log must be emitted"
         );
     }
@@ -7110,13 +7217,22 @@ mod tests {
 
         // First registration by controller A succeeds.
         let tx1 = identity_register_tx(from.clone(), did, &[9u8; 32], 0);
-        assert!(executor.execute_transaction(&tx1, &mut state).await.unwrap().success);
+        assert!(
+            executor
+                .execute_transaction(&tx1, &mut state)
+                .await
+                .unwrap()
+                .success
+        );
 
         // Second registration of the SAME did by a DIFFERENT controller is
         // refused fail-closed (consensus-enforced DID uniqueness).
         let tx2 = identity_register_tx(from.clone(), did, &[8u8; 32], 1);
         assert!(
-            executor.execute_transaction(&tx2, &mut state).await.is_err(),
+            executor
+                .execute_transaction(&tx2, &mut state)
+                .await
+                .is_err(),
             "duplicate DID from a different controller must be rejected"
         );
     }
@@ -7130,11 +7246,21 @@ mod tests {
         let did = "did:tenzro:human:refresh";
 
         let tx1 = identity_register_tx(from.clone(), did, &[9u8; 32], 0);
-        assert!(executor.execute_transaction(&tx1, &mut state).await.unwrap().success);
+        assert!(
+            executor
+                .execute_transaction(&tx1, &mut state)
+                .await
+                .unwrap()
+                .success
+        );
         // Same controller re-registers — idempotent refresh, not a rejection.
         let tx2 = identity_register_tx(from.clone(), did, &[9u8; 32], 1);
         assert!(
-            executor.execute_transaction(&tx2, &mut state).await.unwrap().success,
+            executor
+                .execute_transaction(&tx2, &mut state)
+                .await
+                .unwrap()
+                .success,
             "same-controller re-registration must be allowed as a refresh"
         );
     }
@@ -7150,7 +7276,13 @@ mod tests {
 
         // Register (bonds the stake).
         let reg = register_tx(from.clone(), stake, 0);
-        assert!(executor.execute_transaction(&reg, &mut state).await.unwrap().success);
+        assert!(
+            executor
+                .execute_transaction(&reg, &mut state)
+                .await
+                .unwrap()
+                .success
+        );
         let after_register = state.get_balance(&from);
         assert_eq!(state.get_balance(&STAKING_VAULT_ADDRESS), stake);
 
@@ -7166,15 +7298,27 @@ mod tests {
             VmType::Evm,
             1337,
         );
-        assert!(executor.execute_transaction(&exit, &mut state).await.unwrap().success);
+        assert!(
+            executor
+                .execute_transaction(&exit, &mut state)
+                .await
+                .unwrap()
+                .success
+        );
 
-        assert_eq!(state.get_balance(&from), after_register - EXIT_GAS_COST + stake);
+        assert_eq!(
+            state.get_balance(&from),
+            after_register - EXIT_GAS_COST + stake
+        );
         assert_eq!(state.get_balance(&STAKING_VAULT_ADDRESS), 0);
         let bond = state.get_storage(
             &SYSTEM_ADDRESS,
             format!("staking_bond:{}", hex::encode(&from)).as_bytes(),
         );
-        assert!(bond.map(|b| b.is_empty()).unwrap_or(true), "bond record cleared");
+        assert!(
+            bond.map(|b| b.is_empty()).unwrap_or(true),
+            "bond record cleared"
+        );
     }
 
     // ---- Escrow handler tests ------------------------------------------------

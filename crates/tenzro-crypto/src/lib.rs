@@ -8,7 +8,6 @@
 //! - **WebAuthn**: FIDO2 / passkey assertion verification, the device-side primitive for self-custody
 //! - **Hashing**: SHA-256 and Keccak-256 (for EVM compatibility)
 //! - **Encryption**: AES-256-GCM symmetric encryption and X25519 key exchange
-//! - **FROST**: Real threshold Ed25519 signing (RFC 9591) where the secret key is never reconstructed
 //!
 //! # Examples
 //!
@@ -60,51 +59,11 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! ## FROST-Ed25519 Threshold Signing (RFC 9591)
-//!
-//! Real threshold signing — the secret key is **never** materialized in any
-//! single process. Output is a 64-byte standard Ed25519 signature that
-//! verifies under the group public key with `signatures::verify`.
-//!
-//! ```
-//! use tenzro_crypto::frost::{
-//!     keygen_with_trusted_dealer, round1_commit, build_signing_package,
-//!     round2_sign, aggregate_signature,
-//! };
-//! use tenzro_crypto::signatures;
-//!
-//! # fn main() -> tenzro_crypto::Result<()> {
-//! // 2-of-3 threshold key (trusted dealer; DKG variant in `frost::dkg_part1`).
-//! let (group_pkg, shares) = keygen_with_trusted_dealer(2, 3)?;
-//!
-//! // Round 1: each signer commits.
-//! let (n1, c1) = round1_commit(&shares[0])?;
-//! let (n2, c2) = round1_commit(&shares[1])?;
-//!
-//! // Coordinator builds the signing package over the message.
-//! let message = b"Tenzro Network FROST transaction";
-//! let signing_pkg = build_signing_package(message, &[c1, c2])?;
-//!
-//! // Round 2: each signer produces its signature share.
-//! let s1 = round2_sign(&signing_pkg, &n1, &shares[0])?;
-//! let s2 = round2_sign(&signing_pkg, &n2, &shares[1])?;
-//!
-//! // Aggregate to a single 64-byte standard Ed25519 signature.
-//! let sig = aggregate_signature(&signing_pkg, &[s1, s2], &group_pkg)?;
-//!
-//! // Verifies under the group public key with the standard Ed25519 verifier.
-//! let group_pk = group_pkg.group_public_key.as_public_key();
-//! signatures::verify(&group_pk, message, &sig)?;
-//! # Ok(())
-//! # }
-//! ```
 
 pub mod bls;
 pub mod composite;
 pub mod encryption;
 pub mod error;
-pub mod frost;
 pub mod hash;
 pub mod keys;
 pub mod p256;
@@ -120,17 +79,6 @@ pub use composite::{
     StandardHybridVerifier,
 };
 pub use error::{CryptoError, Result};
-pub use frost::{
-    DkgRound1, DkgRound1Public, DkgRound1Secret, DkgRound2, DkgRound2Secret, DkgRound2Unicast,
-    GroupPublicKey as FrostGroupPublicKey, PublicKeyPackage as FrostPublicKeyPackage,
-    SecretShare as FrostSecretShare, SignatureShare as FrostSignatureShare,
-    SignerIndex as FrostSignerIndex, SigningCommitments as FrostSigningCommitments,
-    SigningNonces as FrostSigningNonces, SigningPackage as FrostSigningPackage,
-    aggregate_signature as frost_aggregate, build_signing_package as frost_build_signing_package,
-    dkg_part1 as frost_dkg_part1, dkg_part2 as frost_dkg_part2, dkg_part3 as frost_dkg_part3,
-    keygen_with_trusted_dealer as frost_keygen, round1_commit as frost_round1_commit,
-    round2_sign as frost_round2_sign,
-};
 pub use hash::{Hash, Hasher, Keccak256, Sha256, keccak256, sha256};
 pub use keys::{Address, KeyPair, KeyType, PublicKey, SecretKey};
 pub use p256::{

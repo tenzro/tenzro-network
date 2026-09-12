@@ -32,6 +32,160 @@ pub enum LicenseTier {
     NonCommercial,
 }
 
+/// What a license's territorial restriction reaches.
+///
+/// The distinction decides *where* enforcement has to live, so it is a type
+/// rather than a comment. A weights-only restriction is discharged by not
+/// redistributing the weights — a registration-time concern. A restriction that
+/// also covers **outputs** cannot be: serving an inference to an excluded
+/// territory produces an output there, so every request has to be checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerritorialScope {
+    /// The grant limits distribution of the weights themselves. Enforced when
+    /// the model is registered and served, not per request.
+    #[default]
+    Weights,
+    /// The grant also limits the model's *outputs* — so a request served to an
+    /// excluded territory is itself a breach, regardless of where the weights
+    /// live. Forces a per-request check.
+    ///
+    /// MiniMax H3's §V.4 is this: "You may not use, reproduce, modify,
+    /// distribute, or display the MiniMax H3 Works **or any of their Outputs or
+    /// results** outside the Applicable Territory."
+    WeightsAndOutputs,
+}
+
+/// A license's territorial grant, as data.
+///
+/// Attached to a **license id** rather than a model, because the restriction is
+/// a property of the licence: every model under `minimax-h3-community` inherits
+/// the same territory, and a new restricted licence is a table entry rather
+/// than a code change.
+///
+/// ⚠ Not every territorial licence needs a per-request gate. Llama's EU
+/// restriction withholds rights from EU-*domiciled* companies but explicitly
+/// exempts "end users of a product or service that incorporates" the model —
+/// a test on who the operator is, not where each caller sits. Encode that as
+/// [`TerritorialScope::Weights`]. Reach for `WeightsAndOutputs` only when the
+/// licence covers outputs **and** grants no end-user carve-out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TerritorialGrant {
+    /// ISO 3166-1 alpha-2 codes and bloc tokens (e.g. `EU`) the grant does NOT
+    /// cover. Empty means unrestricted.
+    ///
+    /// Blocs are kept unexpanded here so the recorded value stays faithful to
+    /// the licence text; [`Self::excludes`] expands them at match time. That
+    /// also means a change in bloc membership is picked up by updating one
+    /// table rather than every licence that names the bloc.
+    pub excluded: Vec<String>,
+    /// Whether the restriction reaches outputs, and so whether it has to be
+    /// enforced per request.
+    pub scope: TerritorialScope,
+}
+
+/// Members of a bloc token used in [`TerritorialGrant::excluded`].
+///
+/// ⚠ Bloc membership drifts, and a licence naming a bloc is ambiguous about
+/// whether it means membership at signing or membership now. This resolves to
+/// **current** membership, which is the reading that keeps the operator inside
+/// the grant as the bloc grows — the conservative direction for a restriction.
+pub fn bloc_members(token: &str) -> Option<&'static [&'static str]> {
+    match token.to_ascii_uppercase().as_str() {
+        // EU-27 as of 2026. Deliberately spelled out rather than inferred from
+        // a crate: this list is a compliance artefact and must be reviewable.
+        "EU" => Some(&[
+            "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+            "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+        ]),
+        // The EEA adds Iceland, Liechtenstein and Norway to the EU. Present
+        // because some licences name the EEA rather than the EU.
+        "EEA" => Some(&[
+            "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+            "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "IS",
+            "LI", "NO",
+        ]),
+        _ => None,
+    }
+}
+
+impl TerritorialGrant {
+    /// Whether `country` (ISO 3166-1 alpha-2) is outside the grant.
+    ///
+    /// Case-insensitive, and expands bloc tokens. An empty `excluded` list is
+    /// unrestricted, so this returns false — the common case for the licences
+    /// that carry no territorial term at all.
+    pub fn excludes(&self, country: &str) -> bool {
+        let c = country.trim().to_ascii_uppercase();
+        if c.is_empty() {
+            return false;
+        }
+        self.excluded.iter().any(|token| {
+            let t = token.trim().to_ascii_uppercase();
+            if t == c {
+                return true;
+            }
+            bloc_members(&t).is_some_and(|members| members.contains(&c.as_str()))
+        })
+    }
+
+    /// Whether this grant has to be checked on every request.
+    pub fn is_per_request(&self) -> bool {
+        !self.excluded.is_empty() && self.scope == TerritorialScope::WeightsAndOutputs
+    }
+
+    /// Whether the grant restricts anything at all.
+    pub fn is_restricted(&self) -> bool {
+        !self.excluded.is_empty()
+    }
+}
+
+/// How a request's territory was established.
+///
+/// Recorded on every decision because §V.5-style clauses ("reasonable and
+/// proportionate technical and organizational safeguards") are **evidentiary**
+/// standards: what converts an implementation from an assertion of reasonable
+/// effort into proof of it is the record of what was decided and on what basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerritorySource {
+    /// Resolved from the caller's address against the geo database.
+    IpGeo,
+    /// Asserted by the operator for a local or private-network caller. An
+    /// attestation, not a bypass — and logged as one.
+    OperatorDeclared,
+    /// Relayed by a peer that saw the end user. The signature proves *who*
+    /// asserted it, never that the assertion is true.
+    PeerAsserted,
+    /// Could not be established.
+    Unknown,
+}
+
+/// One territorial-eligibility decision, kept as compliance evidence.
+///
+/// Deliberately minimal. This pairs an address-derived country with a request,
+/// which is personal data under the GDPR, so it records what a later audit
+/// needs and nothing more — no request body, no output, no full address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerritoryDecision {
+    /// The model the decision was about.
+    pub model_id: String,
+    /// The licence whose grant was applied.
+    pub license_id: String,
+    /// Resolved ISO 3166-1 alpha-2 country, if one was established.
+    pub country: Option<String>,
+    /// How that country was established.
+    pub source: TerritorySource,
+    /// Whether the request was served.
+    pub allowed: bool,
+    /// Provenance of the territory data, so a decision stays interpretable when
+    /// the database is later updated — a bloc's membership or an address's
+    /// allocation can both change under it.
+    pub database: String,
+    /// Unix seconds.
+    pub at: u64,
+}
+
 /// Operator-set acceptance policy consulted by the model registry when a
 /// model is registered. Absent an explicit acknowledgement, `NonCommercial`
 /// and unaccepted `CommercialCustom` models are refused at registration.
@@ -1911,8 +2065,7 @@ fn sanitize_prefix_nodes(nodes: Vec<PrefixCacheNode>) -> Vec<PrefixCacheNode> {
     let len = nodes.len();
     let sane = len <= MAX_ADVERTISED_PREFIX_NODES
         && nodes.iter().all(|n| {
-            n.run_len == PREFIX_RUN_BYTES as u32
-                && n.parent.is_none_or(|p| (p as usize) < len)
+            n.run_len == PREFIX_RUN_BYTES as u32 && n.parent.is_none_or(|p| (p as usize) < len)
         });
     if sane { nodes } else { Vec::new() }
 }
@@ -2513,6 +2666,12 @@ pub struct ToolSchema {
 }
 
 /// Reasoning effort budget for extended-thinking models.
+///
+/// The wire vocabulary is the union across served families; which levels a
+/// given model actually accepts, and the chat-template variable they are
+/// rendered into, is decided per family by the model catalog's effort policy.
+/// A level a model does not support is dropped there rather than rejected
+/// here, so this enum stays a transport type and not a per-model constraint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -2520,6 +2679,28 @@ pub enum ReasoningEffort {
     #[default]
     Medium,
     High,
+    /// Above `High`. Qwen 3.8 treats this as its default and folds `high` into
+    /// it; Muse-Glimmer exposes it as the top of a four-level ladder.
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl ReasoningEffort {
+    /// Lowercase wire form, matching the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// System-prompt content — either a plain string or a block array (so

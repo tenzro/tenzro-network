@@ -81,7 +81,12 @@ impl MoeTensorNaming {
             // Qwen3-Next replaces half the attention layers with gated
             // delta-net but leaves the MoE MLP block — and so its tensor
             // names — identical to the rest of the Qwen MoE line.
-            | ModelArchitecture::Qwen3Next => Some(Self::QwenMoe),
+            | ModelArchitecture::Qwen3Next
+            // qwen4_exp adds QSA, hyper-connections and per-layer embeddings,
+            // but the MoE MLP block is the same Qwen shape, so the expert
+            // tensor names are unchanged. Named explicitly rather than left
+            // to the `_ => None` arm, where it would silently extract nothing.
+            | ModelArchitecture::Qwen4Exp => Some(Self::QwenMoe),
             ModelArchitecture::DeepSeekV3 | ModelArchitecture::Kimi => Some(Self::DeepSeekMoe),
             _ => None,
         }

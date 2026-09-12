@@ -674,9 +674,31 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
         return oauth_error("invalid_grant", "PKCE verification failed");
     }
 
+    // The client's DPoP key is its identity anchor: an OAuth client is a
+    // machine holding its own key, so there is nothing for the node to mint.
+    let client_key = match session
+        .dpop_jkt
+        .as_deref()
+        .or(req.dpop_jkt.as_deref())
+        .map(|jkt| URL_SAFE_NO_PAD.decode(jkt))
+    {
+        Some(Ok(bytes)) => bytes,
+        Some(Err(_)) => {
+            return oauth_error("invalid_request", "dpop_jkt is not valid base64url");
+        }
+        None => {
+            return oauth_error(
+                "invalid_request",
+                "a DPoP-bound key is required: the client holds its own key and \
+                 the node does not mint one",
+            );
+        }
+    };
+
     let (did, address) = match provision_or_retrieve_identity(
         &state.node,
         &session.client_id,
+        client_key,
         state.web_state.faucet_amount,
     )
     .await
@@ -1112,9 +1134,18 @@ fn render_scope(details: &AuthorizationDetails) -> String {
 /// fresh one with `seed_tnzo` whole TNZO from the genesis faucet account so the
 /// user can pay gas on their first call. The seed tracks the node's configured
 /// faucet grant rather than a figure of its own.
+///
+/// An OAuth client is a **machine**, not a human: it authenticates with a
+/// client_id and a DPoP-bound key, not a passkey. It is registered as a machine
+/// identity keyed to `device_public_key` — the client's own DPoP key. The node
+/// previously generated an Ed25519 keypair here and dropped the private half at
+/// end of scope, which left every OAuth identity with a key nobody could ever
+/// sign with; requiring the client's key is what makes the identity usable as
+/// well as non-custodial.
 async fn provision_or_retrieve_identity(
     node: &TenzroNode,
     client_id: &str,
+    device_public_key: Vec<u8>,
     seed_tnzo: u128,
 ) -> std::result::Result<(String, String), NodeError> {
     let storage = node
@@ -1140,16 +1171,13 @@ async fn provision_or_retrieve_identity(
         .identity_registry()
         .ok_or_else(|| NodeError::Internal("Identity registry not initialized".to_string()))?;
 
-    let keypair = tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519)
-        .map_err(|e| NodeError::Internal(format!("Key generation failed: {}", e)))?;
-
-    let display_name = format!("MCP User {}", &client_id[..client_id.len().min(8)]);
-
     let identity = registry
-        .register_human_with_fee(
-            keypair.public_key().as_bytes().to_vec(),
-            display_name,
-            tenzro_types::identity::KycTier::Unverified,
+        .register_machine_via_binder(
+            "self",
+            format!("oauth-client:{client_id}"),
+            device_public_key,
+            vec!["mcp".to_string()],
+            tenzro_identity::DelegationScope::default(),
         )
         .await
         .map_err(|e| NodeError::Internal(format!("Identity registration failed: {}", e)))?

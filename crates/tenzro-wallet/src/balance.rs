@@ -1,4 +1,4 @@
-//! Balance tracking for MPC wallets in Tenzro Network.
+//! Balance tracking for identity-bound wallets in Tenzro Network.
 //!
 //! This module tracks balances across multiple assets (TNZO, USDC, USDT, etc.)
 //! for wallet addresses.

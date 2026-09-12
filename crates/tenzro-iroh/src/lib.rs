@@ -85,8 +85,8 @@ pub use gradient_store::IrohGradientStore;
 pub use jsonrpc::{
     ALPN_A2A, ALPN_HTTP, ALPN_INFER, ALPN_MCP, ALPN_MOE, DeferredHttpHandler,
     DeferredJsonRpcDispatcher, DeferredMcpHandler, HttpForwardHandler, HttpForwardProtocol,
-    JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler, call as jsonrpc_call,
-    open_http_stream,
+    JsonRpcDispatcher, JsonRpcProtocol, MAX_FRAME_BYTES, McpProtocol, McpStreamHandler,
+    call as jsonrpc_call, open_http_stream,
 };
 pub use media_gen_output_store::IrohMediaGenOutputStore;
 pub use resolver::{IrohBackedResolver, IrohResolver};

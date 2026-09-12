@@ -247,10 +247,7 @@ async fn privileged_scope_is_refused() {
             &client,
             &url,
             &caller,
-            rpc_request(
-                "tenzro_deployMintKey",
-                json!({ "scopes": [bad] }),
-            ),
+            rpc_request("tenzro_deployMintKey", json!({ "scopes": [bad] })),
         )
         .await;
         assert!(
@@ -324,7 +321,10 @@ async fn happy_path_mints_subject_pinned_bounded_expiring_key() {
     // Expiring: valid_until is in the future and within the requested TTL.
     let valid_until = r["valid_until"].as_i64().expect("valid_until");
     let now = now_unix_secs();
-    assert!(valid_until > now && valid_until <= now + 600 + 5, "ttl bounds");
+    assert!(
+        valid_until > now && valid_until <= now + 600 + 5,
+        "ttl bounds"
+    );
 
     // The minted key must show up under the caller's own subject listing.
     let mine = rpc_call_key(
@@ -409,7 +409,10 @@ async fn rate_limit_trips_per_caller() {
     // First two succeed.
     for i in 0..2 {
         let resp = rpc_call_key(&client, &url, &caller, mint(i)).await;
-        assert!(resp.get("error").is_none(), "mint {i} should succeed: {resp}");
+        assert!(
+            resp.get("error").is_none(),
+            "mint {i} should succeed: {resp}"
+        );
     }
     // Third trips the hourly ceiling.
     let resp = rpc_call_key(&client, &url, &caller, mint(2)).await;

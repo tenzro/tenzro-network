@@ -374,6 +374,11 @@ async fn a_challenge_signed_by_an_unenrolled_credential_is_refused() {
                         "client_data_json": [0],
                         "signature": [0],
                     },
+                    // Required now that the node never derives a PQ leg. A dummy
+                    // value is enough to pass the presence gate; it fails the
+                    // signature check below, which is exactly what these tests
+                    // assert they reach.
+                    "ml_dsa_signature_hex": hex_of(0x00, 3309),
                 },
             }),
         )
@@ -485,6 +490,11 @@ async fn an_authorized_add_reaches_the_signature_check() {
                         "client_data_json": [0],
                         "signature": [0],
                     },
+                    // Required now that the node never derives a PQ leg. A dummy
+                    // value is enough to pass the presence gate; it fails the
+                    // signature check below, which is exactly what these tests
+                    // assert they reach.
+                    "ml_dsa_signature_hex": hex_of(0x00, 3309),
                 },
             }),
         )
@@ -551,6 +561,10 @@ async fn a_custody_challenge_cannot_be_spent_twice() {
                     "client_data_json": [0],
                     "signature": [0],
                 },
+                // Required now that the node never derives a PQ leg. A dummy
+                // full-length value passes the presence/length gate; it fails
+                // the signature check, which is what this test asserts it reaches.
+                "ml_dsa_signature_hex": hex_of(0x00, 3309),
             },
         })
     };
@@ -611,6 +625,11 @@ async fn a_challenge_for_one_operation_does_not_authorize_another() {
                         "client_data_json": [0],
                         "signature": [0],
                     },
+                    // Required now that the node never derives a PQ leg. A dummy
+                    // value is enough to pass the presence gate; it fails the
+                    // signature check below, which is exactly what these tests
+                    // assert they reach.
+                    "ml_dsa_signature_hex": hex_of(0x00, 3309),
                 },
             }),
         )
@@ -658,6 +677,11 @@ async fn a_challenge_for_one_account_does_not_authorize_another() {
                         "client_data_json": [0],
                         "signature": [0],
                     },
+                    // Required now that the node never derives a PQ leg. A dummy
+                    // value is enough to pass the presence gate; it fails the
+                    // signature check below, which is exactly what these tests
+                    // assert they reach.
+                    "ml_dsa_signature_hex": hex_of(0x00, 3309),
                 },
             }),
         )

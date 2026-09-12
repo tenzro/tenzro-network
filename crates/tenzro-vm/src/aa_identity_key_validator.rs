@@ -93,7 +93,11 @@ impl IdentityKeyValidator {
     /// never verify anything, so accepting one would install an account that
     /// silently rejects every operation its owner makes — a lockout that
     /// presents as a signature bug.
-    pub fn install_for(&self, account: Vec<u8>, verifying_key: &[u8]) -> Result<(), ValidatorError> {
+    pub fn install_for(
+        &self,
+        account: Vec<u8>,
+        verifying_key: &[u8],
+    ) -> Result<(), ValidatorError> {
         if verifying_key.len() != 32 {
             return Err(ValidatorError::InvalidInput(format!(
                 "identity verifying key must be 32 bytes for Ed25519, got {}",
@@ -246,7 +250,10 @@ mod tests {
         let result = v
             .validate_user_op(&user_op(account, sig), &op_hash)
             .unwrap();
-        assert!(result.is_failure(), "a stranger's signature must not validate");
+        assert!(
+            result.is_failure(),
+            "a stranger's signature must not validate"
+        );
     }
 
     /// A signature over a different operation must not carry over to this one.
@@ -264,7 +271,10 @@ mod tests {
         let result = v
             .validate_user_op(&user_op(account, sig), &presented_hash)
             .unwrap();
-        assert!(result.is_failure(), "replaying a signature must not validate");
+        assert!(
+            result.is_failure(),
+            "replaying a signature must not validate"
+        );
     }
 
     /// An unconfigured account is a wiring error, not a rejected request.

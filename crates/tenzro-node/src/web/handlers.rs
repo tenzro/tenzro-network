@@ -45,26 +45,13 @@ pub struct WebState {
     pub faucet_amount: u128,
     /// Cooldown in seconds
     pub faucet_cooldown_secs: u64,
-    /// In-memory FROST(Ed25519, secp256k1) round coordinator. Each
-    /// `/wallet/frost/*` request reads or mutates a session here. The
-    /// coordinator is intentionally not durable on testnet — sessions
-    /// are short-lived (5 min TTL) and the wallet retries on
-    /// disconnect rather than resuming mid-round.
-    pub frost_coordinator: super::wallet_frost::FrostCoordinator,
-    /// In-memory passkey-share-unwrap escrow. Holds the per-call
-    /// nonces issued by `POST /wallet/share/escrow/challenge` and
-    /// consumed by `POST /wallet/share/escrow/unwrap`. Single-use,
-    /// 30-second TTL. Not durable on testnet — a node restart
-    /// invalidates all outstanding ceremonies, and the wallet just
-    /// re-prompts the user.
-    pub share_escrow: super::wallet_share::ShareEscrow,
     /// Passkey credentials this node accepts assertions from.
     ///
     /// Replaces a stub that derived a credential verifying key from the
     /// credential *id* — a public identifier echoed in every assertion, so
     /// anyone who had seen one could reconstruct the signing half and mint
     /// assertions that verified. Hydrated from `CF_CREDENTIALS` once a node is
-    /// attached, so a restart does not lock every wallet out of its share.
+    /// attached, so a restart does not lock a wallet out of its own credential.
     pub passkey_registry: super::passkey_registry::PasskeyRegistry,
 }
 
@@ -88,8 +75,6 @@ impl WebState {
             faucet_address: None,
             faucet_amount: 1_000,
             faucet_cooldown_secs: 86400, // 24 hours
-            frost_coordinator: super::wallet_frost::FrostCoordinator::new(),
-            share_escrow: super::wallet_share::ShareEscrow::new(),
             passkey_registry: super::passkey_registry::PasskeyRegistry::new(),
         }
     }

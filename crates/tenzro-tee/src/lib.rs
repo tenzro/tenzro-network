@@ -24,11 +24,14 @@ pub mod enclave_keystore;
 pub mod error;
 pub mod hardware_identity;
 pub mod platform_root;
-pub mod tpm_derive;
 pub mod registry;
+pub mod se_seal;
 pub mod sealed_agent_keypair;
 pub mod sealed_secp256k1;
+pub mod tpm_derive;
 pub mod tpm_seal;
+#[cfg(windows)]
+mod tpm_tbs_windows;
 pub mod traits;
 
 #[cfg(feature = "intel-tdx")]

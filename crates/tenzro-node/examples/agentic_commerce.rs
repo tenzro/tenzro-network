@@ -136,6 +136,8 @@ async fn identity_provision_and_wallet_bind() -> Result<(), Box<dyn std::error::
 
     let identity = registry
         .register_human_with_fee(
+            // Stand-in for the credential id a WebAuthn ceremony returns.
+            b"demo-passkey-alice-walkthrough".to_vec(),
             public_key.clone(),
             "Alice (walkthrough)".to_string(),
             KycTier::Enhanced,

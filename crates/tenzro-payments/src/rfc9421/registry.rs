@@ -256,7 +256,12 @@ mod tests {
         // Create a human identity first (required for machine registration)
         let human_public_key = vec![1u8; 32];
         let human = registry
-            .register_human_with_fee(human_public_key, "Test Human".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                human_public_key,
+                "Test Human".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -309,7 +314,12 @@ mod tests {
 
         // Create a human identity
         let human = registry
-            .register_human_with_fee(vec![1u8; 32], "Test Human".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1u8; 32],
+                "Test Human".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -354,7 +364,12 @@ mod tests {
 
         // Create a human identity
         let human = registry
-            .register_human_with_fee(vec![1u8; 32], "Test Human".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1u8; 32],
+                "Test Human".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;
@@ -384,7 +399,12 @@ mod tests {
 
         // Create a human identity
         let human = registry
-            .register_human_with_fee(vec![1u8; 32], "Test Human".to_string(), KycTier::Basic)
+            .register_human_with_fee(
+                b"test-credential".to_vec(),
+                vec![1u8; 32],
+                "Test Human".to_string(),
+                KycTier::Basic,
+            )
             .await
             .unwrap()
             .identity;

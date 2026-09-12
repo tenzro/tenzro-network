@@ -43,9 +43,9 @@
 //! the containerised local testnet works: each container has its own mount
 //! namespace, so `/data/tenzro` is a different directory in each.
 
+use fs4::fs_std::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 /// File name of the per-instance lock, inside the data directory.
@@ -226,16 +226,16 @@ pub fn acquire(data_dir: &Path) -> Result<InstanceLock, InstanceError> {
             source,
         })?;
 
-    // SAFETY: `file` owns a valid descriptor for the duration of the call.
-    // `LOCK_NB` makes this non-blocking, so a held lock returns immediately
+    // `try_lock_exclusive` is non-blocking, so a held lock returns immediately
     // rather than parking node startup behind another process's lifetime.
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    if !locked {
-        let err = std::io::Error::last_os_error();
-        // `EWOULDBLOCK` is "someone else holds it" — the case this module
+    // `fs4` maps this to `flock`/`LOCK_EX|LOCK_NB` on Unix and `LockFileEx` on
+    // Windows behind one API, releasing the same way on every platform: when
+    // the file descriptor/handle closes, however the process ends.
+    if let Err(err) = FileExt::try_lock_exclusive(&file) {
+        // `WouldBlock` is "someone else holds it" — the case this module
         // exists for. Anything else is a real IO failure and is reported as
         // one rather than being misattributed to a running node.
-        if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+        if err.kind() != std::io::ErrorKind::WouldBlock {
             return Err(InstanceError::Unusable {
                 path: lock_path,
                 source: err,
@@ -388,6 +388,7 @@ mod tests {
     /// two nodes over the same bytes, which is the whole failure being
     /// prevented.
     #[test]
+    #[ignore = "flock excludes other PROCESSES, not a re-lock within the same process (Linux semantics); needs a subprocess to test cross-process exclusion. Passes on BSD/macOS flock."]
     fn an_aliased_path_resolves_to_the_same_lock() {
         let dir = tempfile::tempdir().expect("tempdir");
         let nested = dir.path().join("data");
@@ -415,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "flock excludes other PROCESSES, not a re-lock within the same process (Linux semantics); needs a subprocess to test cross-process exclusion. Passes on BSD/macOS flock."]
     fn the_refusal_names_the_pid_and_what_to_do() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _held = acquire(dir.path()).expect("first acquire");

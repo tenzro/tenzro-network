@@ -307,7 +307,9 @@ impl PasskeyRegistry {
 
     /// The credential registered under `credential_id`, if any.
     pub fn get(&self, credential_id: &str) -> Option<PasskeyCredential> {
-        self.credentials.get(credential_id).map(|e| e.value().clone())
+        self.credentials
+            .get(credential_id)
+            .map(|e| e.value().clone())
     }
 
     /// Whether anything is registered under this ID.
@@ -468,7 +470,8 @@ fn verify_signature(credential: &PasskeyCredential, payload: &[u8], signature: &
             let Ok(sig_bytes): Result<[u8; 64], _> = signature.try_into() else {
                 return false;
             };
-            vk.verify(payload, &Signature::from_bytes(&sig_bytes)).is_ok()
+            vk.verify(payload, &Signature::from_bytes(&sig_bytes))
+                .is_ok()
         }
         CoseAlgorithm::Es256 => {
             use tenzro_crypto::p256::{P256Signature, P256Verifier};
@@ -522,10 +525,7 @@ mod tests {
     }
 
     fn client_data(origin: &str) -> Vec<u8> {
-        format!(
-            r#"{{"type":"webauthn.get","challenge":"abc","origin":"{origin}"}}"#
-        )
-        .into_bytes()
+        format!(r#"{{"type":"webauthn.get","challenge":"abc","origin":"{origin}"}}"#).into_bytes()
     }
 
     fn signed_payload(auth: &[u8], client: &[u8]) -> Vec<u8> {
@@ -710,7 +710,10 @@ mod tests {
         let payload = signed_payload(&auth, &client);
 
         let bad = stranger.sign(&payload).to_bytes().to_vec();
-        assert!(reg.verify_and_bump("cred-a", &auth, &client, &payload, &bad).is_err());
+        assert!(
+            reg.verify_and_bump("cred-a", &auth, &client, &payload, &bad)
+                .is_err()
+        );
         assert_eq!(reg.get("cred-a").unwrap().sign_count, 0);
 
         let good = sk.sign(&payload).to_bytes().to_vec();
@@ -721,7 +724,13 @@ mod tests {
     #[test]
     fn an_unregistered_credential_is_refused() {
         let reg = PasskeyRegistry::new();
-        let err = reg.verify_and_bump("nobody", &auth_data(RP_ID, FLAGS_UP_UV, 1), &client_data(ORIGIN), b"x", &[0u8; 64]);
+        let err = reg.verify_and_bump(
+            "nobody",
+            &auth_data(RP_ID, FLAGS_UP_UV, 1),
+            &client_data(ORIGIN),
+            b"x",
+            &[0u8; 64],
+        );
         assert!(matches!(err, Err(PasskeyError::UnknownCredential(_))));
     }
 
@@ -765,7 +774,11 @@ mod tests {
     fn unknown_cose_algorithms_are_rejected() {
         assert_eq!(CoseAlgorithm::from_cose(-8), Some(CoseAlgorithm::Ed25519));
         assert_eq!(CoseAlgorithm::from_cose(-7), Some(CoseAlgorithm::Es256));
-        assert_eq!(CoseAlgorithm::from_cose(-257), None, "RS256 is not accepted");
+        assert_eq!(
+            CoseAlgorithm::from_cose(-257),
+            None,
+            "RS256 is not accepted"
+        );
         assert_eq!(CoseAlgorithm::from_cose(0), None);
     }
 }

@@ -253,8 +253,8 @@ impl ValidatorRegisterCmd {
         let from_hex = signer.from_address_hex();
         let from_address = Address::from_bytes(signer.ed25519_public_key())
             .ok_or_else(|| anyhow!("local Ed25519 pubkey is not a valid 32-byte address"))?;
-        let to_address = Address::from_bytes(&[0u8; 32])
-            .ok_or_else(|| anyhow!("zero address invalid"))?;
+        let to_address =
+            Address::from_bytes(&[0u8; 32]).ok_or_else(|| anyhow!("zero address invalid"))?;
 
         let rpc = RpcClient::new(&self.rpc);
         let (nonce, chain_id) = crate::rpc::fetch_nonce_and_chain_id(&rpc, &from_hex).await;

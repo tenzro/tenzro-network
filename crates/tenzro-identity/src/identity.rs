@@ -196,6 +196,18 @@ pub enum MachineAnchor {
         /// [`tenzro_types::machine_id::IdentifierSource`] wire labels. At least
         /// one must grade as attestable.
         sources: Vec<String>,
+        /// The other roots this machine could present, hex-encoded, from the
+        /// identifiers that did not become `hardware_root_hex`.
+        ///
+        /// Carried so a machine stays recognisable when what it can read
+        /// changes. A TPM stops answering once its object contexts fill
+        /// (`TPM_RC_OBJECT_MEMORY`, until the host reboots) and the machine
+        /// drops to a DMI root; a registry holding the earlier TPM-derived
+        /// root recognises it from this list instead of minting a second
+        /// identity for the same box. Empty is valid and simply means no
+        /// weaker identifier was readable.
+        #[serde(default)]
+        alternate_roots_hex: Vec<String>,
     },
 }
 
@@ -209,6 +221,48 @@ impl MachineAnchor {
             MachineAnchor::Delegated { controller_did }
             | MachineAnchor::InstitutionDelegated { controller_did } => Some(controller_did),
             MachineAnchor::HardwareRooted { .. } => None,
+        }
+    }
+
+    /// A hardware anchor carrying no alternate roots.
+    ///
+    /// The common construction: a caller that knows only the root it derived.
+    /// Prefer [`hardware_rooted_with_alternates`](Self::hardware_rooted_with_alternates)
+    /// where the other readable identifiers are known, so the machine stays
+    /// recognisable if its strongest one later stops answering.
+    pub fn hardware_rooted(hardware_root_hex: String, sources: Vec<String>) -> Self {
+        MachineAnchor::HardwareRooted {
+            hardware_root_hex,
+            sources,
+            alternate_roots_hex: Vec::new(),
+        }
+    }
+
+    /// A hardware anchor that also names the other roots this machine could
+    /// present.
+    pub fn hardware_rooted_with_alternates(
+        hardware_root_hex: String,
+        sources: Vec<String>,
+        alternate_roots_hex: Vec<String>,
+    ) -> Self {
+        MachineAnchor::HardwareRooted {
+            hardware_root_hex,
+            sources,
+            alternate_roots_hex,
+        }
+    }
+
+    /// The other roots this machine could present, if any.
+    ///
+    /// Empty for a delegated anchor, and for a hardware anchor whose caller
+    /// knew only one identifier.
+    pub fn alternate_roots_hex(&self) -> &[String] {
+        match self {
+            MachineAnchor::HardwareRooted {
+                alternate_roots_hex,
+                ..
+            } => alternate_roots_hex,
+            _ => &[],
         }
     }
 
@@ -230,6 +284,7 @@ impl MachineAnchor {
             MachineAnchor::HardwareRooted {
                 hardware_root_hex,
                 sources,
+                ..
             } => {
                 hardware_root_hex.len() == 64
                     && hardware_root_hex.chars().all(|c| c.is_ascii_hexdigit())
@@ -430,6 +485,7 @@ impl OwnershipTransfer {
                 MachineAnchor::HardwareRooted {
                     hardware_root_hex: actual,
                     sources,
+                    ..
                 },
             ) => {
                 if hardware_root_hex != actual {
@@ -518,7 +574,7 @@ pub enum IdentityData {
 
 /// A signable wallet bound to an identity beyond its primary wallet.
 ///
-/// D2b: an identity may hold more than one MPC wallet so a lost or corrupt
+/// D2b: an identity may hold more than one identity-bound wallet so a lost or corrupt
 /// wallet is a degraded state, not a full lockout. The primary wallet still
 /// lives directly on [`TenzroIdentity`] (`wallet_id` / `wallet_address` and
 /// the two verifying keys); each *additional* wallet an identity accrues via
@@ -546,7 +602,7 @@ pub struct WalletRef {
 /// A unified Tenzro identity
 ///
 /// Represents both human and machine identities in a single type.
-/// Every identity has an auto-provisioned MPC wallet, a set of public keys,
+/// Every identity has an identity-bound wallet, a set of public keys,
 /// verifiable credentials, and optional W3C DID service endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenzroIdentity {
@@ -856,10 +912,7 @@ mod ownership_transfer_tests {
     }
 
     fn hardware() -> MachineAnchor {
-        MachineAnchor::HardwareRooted {
-            hardware_root_hex: root_hex(),
-            sources: vec!["tpm:ek".to_string()],
-        }
+        MachineAnchor::hardware_rooted(root_hex(), vec!["tpm:ek".to_string()])
     }
 
     fn transfer(to: &str, authority: TransferAuthority) -> OwnershipTransfer {

@@ -295,6 +295,9 @@ def _worker_config(args: argparse.Namespace) -> WorkerConfig:
         device=args.device,
         dtype=args.dtype,
         precision=args.precision,
+        text_encoder_precision=args.text_encoder_precision,
+        cpu_offload=args.cpu_offload,
+        admit_vram_gb=args.admit_vram_gb,
         cache_dir=args.cache_dir,
         poll_interval_secs=args.poll_interval,
     )
@@ -391,6 +394,34 @@ def _add_worker_args(p: argparse.ArgumentParser) -> None:
             "Transformer weight format. Defaults to --dtype. The nf4/int4/int8 "
             "tiers quantize through bitsandbytes, trading some fidelity for "
             "roughly a quarter to a half of the VRAM"
+        ),
+    )
+    p.add_argument(
+        "--text-encoder-precision",
+        default=None,
+        choices=["nf4", "int4", "int8"],
+        help=(
+            "Also quantize the text encoder through bitsandbytes. Off by default; "
+            "needed when the encoder itself (8 GB on FLUX.2 klein) is what does "
+            "not fit beside another model on the card"
+        ),
+    )
+    p.add_argument(
+        "--cpu-offload",
+        action="store_true",
+        help=(
+            "Keep components in host RAM and move each onto the GPU only for its "
+            "own pass, so peak VRAM is the largest component rather than the sum"
+        ),
+    )
+    p.add_argument(
+        "--admit-vram-gb",
+        type=float,
+        default=None,
+        help=(
+            "GB to record against the node's memory ledger per loaded pipeline, "
+            "overriding the catalog's full-precision min_vram_gb. For quantized "
+            "and offloaded configurations whose real peak is much lower"
         ),
     )
     p.add_argument("--cache-dir", default=None)

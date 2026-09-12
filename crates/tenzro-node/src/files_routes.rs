@@ -42,13 +42,13 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::api_key::ApiKeyScope;
-use crate::resource_authz::{Authorized, authorize_resource};
 use crate::files_api::{
     FileDeletion, FileObject, FilePurpose, UploadRejection, file_id_for, object_id_from,
     validate_upload,
 };
 use crate::files_store::DEFAULT_LIST_LIMIT;
 use crate::node::TenzroNode;
+use crate::resource_authz::{Authorized, authorize_resource};
 
 /// Data + parity shards a `/v1/files` upload is coded under.
 ///
@@ -338,10 +338,13 @@ async fn handle_files_upload(
         }
     };
 
+    let sha256 = crate::files_api::content_digest(&bytes);
+
     let record = FileObject {
         id: file_id_for(&object_id),
         object: "file",
         bytes: size,
+        sha256,
         created_at: now_secs(),
         filename,
         purpose,

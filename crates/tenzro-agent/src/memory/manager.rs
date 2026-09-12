@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tenzro_model::text_embedding_runtime::{TextEmbedConfig, TextEmbeddingRuntime};
+use tenzro_model::text_embedding_runtime::{EmbedRole, TextEmbedConfig, TextEmbeddingRuntime};
 use tenzro_storage::da::{DaBackend, ReceiptKind};
 
 use super::{
@@ -113,7 +113,9 @@ impl MemoryManager {
         metadata: serde_json::Value,
     ) -> Result<MemoryRecord> {
         let text = text.into();
-        let embedding = self.embed(&text).await?;
+        let embedding = self
+            .embed(&text, EmbedRole::Document { title: None })
+            .await?;
         let mut record =
             MemoryRecord::new(agent_did, kind, source, text, Some(embedding), metadata);
         self.vector.insert(&record).await?;
@@ -126,7 +128,7 @@ impl MemoryManager {
         Ok(record)
     }
 
-    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+    async fn embed(&self, text: &str, role: EmbedRole) -> Result<Vec<f32>> {
         let runtime = self
             .embedder
             .as_ref()
@@ -139,6 +141,7 @@ impl MemoryManager {
         let cfg = TextEmbedConfig {
             requested_dim: self.config.requested_dim,
             normalize: self.config.normalize_embeddings,
+            role,
         };
         let res = runtime
             .embed(model_id, vec![text.to_string()], cfg)
@@ -187,7 +190,7 @@ impl MemoryManager {
 
         let vector_hits = if want_vector {
             // Best-effort embed; if no embedder is configured, degrade to text-only.
-            match self.embed(&query).await {
+            match self.embed(&query, EmbedRole::Query { task: None }).await {
                 Ok(q) => self.vector.search_by_vector(&q, k, &filter).await?,
                 Err(MemoryError::NoEmbedder(_)) if want_text => Vec::new(),
                 Err(e) => return Err(e),

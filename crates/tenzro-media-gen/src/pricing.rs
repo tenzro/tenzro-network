@@ -261,7 +261,10 @@ mod tests {
             p.audio_duration_secs = Some(bad);
             let q = pixel_steps(MediaGenKind::Text2Audio, &p);
             assert!(q > 0, "duration {bad} produced a free job");
-            assert!(q < u128::from(u64::MAX), "duration {bad} produced a runaway quote");
+            assert!(
+                q < u128::from(u64::MAX),
+                "duration {bad} produced a runaway quote"
+            );
         }
 
         // An hour is the ceiling; asking for a year prices as an hour rather

@@ -53,7 +53,6 @@ pub enum ResourceAccess {
     Private,
 }
 
-
 impl ResourceAccess {
     /// Stable lowercase string form of the mode (without the price), for logs,
     /// error messages, and the bare-string operator surface.

@@ -121,6 +121,20 @@ impl IdentifierDomain {
     }
 }
 
+impl IdentifierDomain {
+    /// Whether an identifier from this domain proves possession of a key that
+    /// cannot be copied.
+    ///
+    /// Only [`Self::RootOfTrust`] does. A processor or platform identifier is a
+    /// serial number: it names a board, not a secret, so anything able to read
+    /// it can replay it. Those are the **secondary** tier — supported so edge
+    /// hardware with no secure element can still be identified, never as a
+    /// substitute for one.
+    pub fn is_hardware_rooted(self) -> bool {
+        matches!(self, Self::RootOfTrust)
+    }
+}
+
 impl fmt::Display for IdentifierDomain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

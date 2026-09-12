@@ -199,9 +199,9 @@ The Tenzro Decentralized Identity Protocol (TDIP) defines a single identity mode
 
 ### Four identity classes
 
-- **Human** — `did:tenzro:human:{uuid}`. Carries display name, KYC tier (Unverified / Basic / Enhanced / Full), and the set of machines the human controls. A human identity can issue verifiable credentials, can be the controller of any number of delegated agents, and signs with a passkey-bound MPC wallet.
+- **Human** — `did:tenzro:human:{uuid}`. Carries display name, KYC tier (Unverified / Basic / Enhanced / Full), and the set of machines the human controls. A human identity can issue verifiable credentials, can be the controller of any number of delegated agents, and signs with a passkey-bound permissionless wallet — no custody is held on its behalf.
 - **Delegated agent** — `did:tenzro:machine:{controller}:{uuid}`. An agent acting on a human's behalf. Carries a delegation scope inherited from the controller — per-transaction value cap, daily spend cap, allowed operations, allowed chains, allowed payment protocols, time bound, allowed counterparties. The controller can revoke at any time; revocation cascades.
-- **Autonomous agent** — `did:tenzro:machine:{uuid}`. An agent that owns itself. Same MPC wallet, same A2A surface, but no controller. Used for protocol-owned bootstrap agents and self-funded autonomous services. The `is_seed_agent` flag marks protocol-funded autonomous agents so organic-activity metrics can exclude bootstrap traffic.
+- **Autonomous agent** — `did:tenzro:machine:{uuid}`. An agent that owns itself. Same permissionless wallet — the signing key lives in its own TPM or Secure Enclave — same A2A surface, but no controller. Used for protocol-owned bootstrap agents and self-funded autonomous services. The `is_seed_agent` flag marks protocol-funded autonomous agents so organic-activity metrics can exclude bootstrap traffic.
 - **Institution** — `did:tenzro:institution:{lei}:{uuid}`. A legal entity anchored to its GLEIF Legal Entity Identifier (ISO 17442). The 20-character LEI is validated with ISO 7064 Mod 97-10 check digits at registration and at every transaction that consults the identity. One legal entity can hold many institution identities (one per desk, fund, or subsidiary) without re-issuing LEIs — the trailing UUID disambiguates. Institutions carry a KYB tier, an optional vLEI ACDC credential id binding to the GLEIF vLEI Ecosystem Governance Framework, an ISO 3166-1 alpha-2 country code, and the set of machines the institution controls. KYB-Full institutions act as trust roots for tokenized RWA flows, can serve as Canton tenants, and can attest reserve under Secure-Mint.
 
 DIDs resolve through standard W3C DID Documents. Verifiable Credentials carry KYC tier upgrades, attestations, and capability claims signed by trust roots. Trust chains traverse recursively with cycle detection, depth bound, and explicit anchoring to the configured trust roots.
@@ -212,13 +212,13 @@ A Universal Resolver-compatible HTTP surface (`/1.0/identifiers/{did}` and `/1.0
 
 Off-chain services authenticate Tenzro identities through SIWT — an EIP-4361-shaped message that the wallet signs and the relying party verifies against the registered identity. The canonical message carries the requesting domain, the Tenzro address, a nonce, the chain id, an issued-at timestamp, optional expiration and not-before bounds, and the resources the signer authorizes. Verification is non-stateful — the relying party stores the issued nonce, dispatches the signed message, and checks the signature against the resolved DID Document. Existing SIWE parsers consume SIWT messages byte-for-byte.
 
-### Wallets — passkey-first, MPC, post-quantum hybrid
+### Wallets — passkey-first, permissionless, post-quantum hybrid
 
-The default Tenzro wallet is a passkey-bound MPC threshold wallet. Account creation is one tap (Touch ID / Face ID / Windows Hello / Android biometric) using FIDO2 / WebAuthn — no seed phrase to write down, no extension to install, no email to verify. Cross-device sign-in uses caBLE QR, which is also the pairing path for the second device a wallet requires before it can be created (see “Devices bound to an identity” below). The on-chain twin of the passkey is a P-256 WebAuthn validator module (ERC-7579) that verifies the assertion signature directly inside the account validation path — though a passkey counts as hardware-bound only once its attestation has been verified against a pinned vendor root, not merely because it came from a platform authenticator.
+The default Tenzro wallet is a passkey-bound permissionless wallet — no custodian, no gatekeeper, and no share of the key held anywhere off the user's own hardware. Account creation is one tap (Touch ID / Face ID / Windows Hello / Android biometric) using FIDO2 / WebAuthn on a single device — no seed phrase to write down, no extension to install, no email to verify, and no second share-holder to enrol before the wallet exists. Cross-device sign-in uses caBLE QR, which is also the pairing path for an optional guardian device (see “Devices bound to an identity” below). The on-chain twin of the passkey is a P-256 WebAuthn validator module (ERC-7579) that verifies the assertion signature directly inside the account validation path — though a passkey counts as hardware-bound only once its attestation has been verified against a pinned vendor root, not merely because it came from a platform authenticator.
 
-Under the hood the wallet is a FROST-Ed25519 (or FROST-Secp256k1) 2-of-3 threshold split — one share on the user device, one share on the user's recovery factor (passkey-protected cloud), one share held by the protocol's MPC nodes. ML-DSA-65 is layered on every safety-critical signature, producing a post-quantum hybrid that satisfies both the classical and PQ verification paths simultaneously. Threshold signing also drives the cross-chain bridge side — DKLS23 t-of-n threshold ECDSA produces secp256k1 signatures for EVM destination chains without any single share ever holding the full key.
+Under the hood the classical signing key is held in the identity's own hardware — a passkey-backed platform authenticator for a human, a TPM 2.0 or Secure Enclave for a machine — and it never leaves the device. The network holds no share of it; the hardware root *is* the wallet. ML-DSA-65 is layered on every safety-critical signature, producing a post-quantum hybrid that satisfies both the classical and PQ verification paths simultaneously against that single hardware-held key. The cross-chain bridge side signs with a TEE-sealed single secp256k1 key (`SealedSecp256k1Key`, sealed by `TeeKeyshareSealer` in `tenzro-tee`), so an EVM destination chain sees an ordinary single-key signature while the secret stays inside the enclave — never plaintext, never exported.
 
-Two operational properties matter for production custody. **Pre-signing** caches DKLS23 round-1 output — which depends on the keyshare and a fresh randomness commitment but not on the message — so a signing request consumes a pre-computed tuple and immediately enters round 2, cutting the perceived signing latency by 30–40% for hot bridge flows. Each tuple is one-shot; re-use across two messages reveals the secret key, so the pool tracks per-tuple consumption and rotates on epoch change. **Proactive Key Refresh (PKR)** rotates shares on a governance-set cadence — default 24 hours of wall time or 100,000 signing instances per epoch, whichever comes first — so a long-running validator's keyshare exposure is bounded even if a single share holder is silently compromised. PKR preserves the group public key; clients see no change.
+Production custody rests on three live mechanisms rather than any protocol-held key material. The signing key is hardware-held and sealed to its root, so a stolen disk or a container escape yields ciphertext, not a usable key. Recovery runs through a guardian set — the social-recovery validator can replace the root key without changing the account address (below). And every user operation is gated by ERC-7579 policy modules at the EntryPoint, so custody is enforced on-chain at signing time, not by an off-chain quorum.
 
 ### What anchors a machine identity
 
@@ -289,13 +289,16 @@ removed them from application reach years ago, deliberately. The attested
 credential key *is* the device identity, which is why the attestation and not the
 serial is what gets checked.
 
-**A wallet cannot be created behind a single device.** The machine the user is
-already on is the first device; a genuinely separate hardware-bound device — a
-phone, another machine — must be bound before there is anything to lose. A wallet
-held behind one device is lost with that device, and two passkeys on one laptop
-are two ways into one box that a single failure takes together. The readiness
-check names the blocker and its remedy, so an interface says "scan the pairing QR
-code with your phone" rather than offering a button that fails.
+**A wallet is created behind a single device; a guardian is added, not required.**
+The machine the user is already on is enough to create the wallet — its hardware
+root holds the key from the first tap. What one device cannot do is survive its own
+loss: a wallet held behind one device alone is lost with that device, and two
+passkeys on one laptop are two ways into one box that a single failure takes
+together. So the interface treats a second hardware-bound device — a phone, another
+machine — as the recovery guardian to bind next, not as a share the wallet waits on
+to exist. The readiness check names that gap and its remedy, so an interface says
+"scan the pairing QR code with your phone to add recovery" rather than blocking
+creation.
 
 Sessions name the **bound device** that authorised them, not merely the identity.
 A session recording only that a user is signed in cannot be revoked when they
@@ -803,7 +806,7 @@ The enclave produces the witness, runs the prover inside the enclave, and signs 
 
 The Tenzro peer-to-peer layer runs on libp2p 0.56. Every node binds both TCP/9000 and QUIC/9000 by default — the universal transport set that lets cloud VMs, residential WiFi, mobile devices, and embedded boards reach the network through whichever transport NAT permits. Gossipsub carries blocks, transactions, consensus messages, attestations, training events, inference requests, agent messages, and SLA heartbeats. Kademlia DHT handles peer discovery; Identify gives observed-address discovery; AutoNAT v2 + Circuit Relay v2 + DCUtR give permissionless NAT traversal (hole punching for joiners behind home or corporate NAT).
 
-Storage is RocksDB with column families per concern (blocks, state, accounts, transactions, identities, agents, models, providers, tokens, settlements, validator modules, agent memory, audit, API keys, MPC keyshares, training runs, training receipts, training manifests, bridge nonces, equivocation evidence, and more). Durable writes go through `write_batch_sync` with `fdatasync`. Block writes are atomic. Auto-repair handles WAL corruption on startup.
+Storage is RocksDB with column families per concern (blocks, state, accounts, transactions, identities, agents, models, providers, tokens, settlements, validator modules, agent memory, audit, API keys, training runs, training receipts, training manifests, bridge nonces, equivocation evidence, and more). Durable writes go through `write_batch_sync` with `fdatasync`. Block writes are atomic. Auto-repair handles WAL corruption on startup.
 
 The DA layer abstracts behind a `DaBackend` trait. Receipts can be inline or off-loaded. The implemented backends are `InlineFallback` (safe pre-mainnet default, optional RocksDB-backed) and `IrohBlobs` over the iroh-blobs content-addressed transport. Iroh also carries the model-weight distribution path (peer-first with HuggingFace Hub fallback), the training gradient store, sealed-shard distribution, agent-memory archives, and the A2A / MCP transport — all on one shared QUIC endpoint per node, anchored to the node's TDIP key via Pkarr.
 
@@ -817,7 +820,7 @@ Tenzro exposes its capabilities through three concurrent surfaces, each picked f
 
 ### JSON-RPC
 
-The full RPC surface (855 methods) covers blockchain, EVM-compat, accounts, token, models and inference (every modality), distributed MoE (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`), app hosting (sites, functions, machines, leases), settlement, escrow, agents, identity, network, governance, payments, AP2, staking, Canton (30 methods), marketplaces, bridges (40+ methods covering all fifteen adapters plus the unified router), NFT, compliance, events, TEE, ZK, VRF, skills, tools, capital intent, workflow, ERC-7683, Permit2, EIP-7702, Secure-Mint, adaptive burn, SeedAgent, agent memory, SIWT, KERI, Universal Resolver, Institution-LEI validation, IBC-Eureka, BitVM2, Hyperbridge, NEAR Chain Signatures, Stargate V2, MPC pre-sign and PKR observability, and global-supply registry. Every method authorizes through TDIP and binds to the caller's identity. Body and concurrency limits cap DoS surface.
+The full RPC surface (855 methods) covers blockchain, EVM-compat, accounts, token, models and inference (every modality), distributed MoE (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`), app hosting (sites, functions, machines, leases), settlement, escrow, agents, identity, network, governance, payments, AP2, staking, Canton (30 methods), marketplaces, bridges (40+ methods covering all fifteen adapters plus the unified router), NFT, compliance, events, TEE, ZK, VRF, skills, tools, capital intent, workflow, ERC-7683, Permit2, EIP-7702, Secure-Mint, adaptive burn, SeedAgent, agent memory, SIWT, KERI, Universal Resolver, Institution-LEI validation, IBC-Eureka, BitVM2, Hyperbridge, NEAR Chain Signatures, Stargate V2, and global-supply registry. Every method authorizes through TDIP and binds to the caller's identity. Body and concurrency limits cap DoS surface.
 
 ### MCP (Model Context Protocol)
 
@@ -833,7 +836,7 @@ Both MCP and A2A can also be carried over iroh's QUIC-native transport via dedic
 
 `tenzro-agent-kit` is the agent template system. Reference templates — paid marketplace, intelligent payment router, MPP payment agent, autonomous RWA custodian, agentic inference marketplace, model inference proxy, bridge arbitrage scanner, multi-chain portfolio manager, yield rebalancer, cross-chain liquidity aggregator, Canton trade settler, agentic NAV calculator, agentic LC examiner, agentic treasury rebalancer, agentic margin call, agentic bond pricer RFQ, agentic best-execution router, DvP atomic-swap saga, and per-modality trainers — are ready-to-instantiate JSON manifests. Each manifest declares the execution backend, the delegation scope, the required tool tags, the required skill tags, and the ordered step set the agent walks at runtime.
 
-The spawner instantiates an agent: provisions its TDIP identity, mints its MPC wallet, installs the delegation scope, populates the runtime spending policy, discovers the matching tools and skills, and registers it with the runtime. The kit charges a 5% creator commission on paid invocations and routes the rest to the template's creator wallet.
+The spawner instantiates an agent: provisions its TDIP identity, provisions its permissionless wallet, installs the delegation scope, populates the runtime spending policy, discovers the matching tools and skills, and registers it with the runtime. The kit charges a 5% creator commission on paid invocations and routes the rest to the template's creator wallet.
 
 ### WASM skill runtime and WIT registry
 
@@ -986,7 +989,6 @@ These are not hypotheticals — every primitive named above is present in the cu
 - **BLS12-381** — Pairing-friendly elliptic curve used for signature aggregation.
 - **BitVM2 / Clementine** — Trust-minimised two-way Bitcoin peg with optimistic challenge protocol.
 - **Canton** — A privacy-preserving distributed ledger for institutional financial settlement, DAML-based.
-- **DKLS23** — Threshold ECDSA signing protocol (Doerner-Kondi-Lee-Shelat 2023).
 - **EIP-1559** — Ethereum fee-market upgrade with base-fee burn.
 - **EIP-2537** — BLS12-381 precompiles.
 - **EIP-4361** — Sign-In with Ethereum message format; the SIWT canonical form follows the same shape.
@@ -1010,7 +1012,6 @@ These are not hypotheticals — every primitive named above is present in the cu
 - **MPP** — Machine Payments Protocol; session-based HTTP 402 payment with credential / receipt.
 - **MTP** — Multi-Token Prediction; speculative decoding using a jointly-trained head sharing hidden state with the target.
 - **Pixel-step** — The work unit for generative media rendering: `width × height × steps × frames`, with `frames = 1` for image jobs.
-- **PKR** — Proactive Key Refresh; periodic rotation of DKLS23 keyshares that preserves the group public key.
 - **Plonky3** — Recursive STARK prover over the KoalaBear field.
 - **SIWT** — Sign-In With Tenzro; an EIP-4361-shaped message that off-chain services use to authenticate Tenzro identities.
 - **SP1** — Succinct's general-purpose zkVM used by IBC-Eureka to compress Tendermint header verification into a plonk proof.

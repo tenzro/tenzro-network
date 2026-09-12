@@ -10,7 +10,7 @@
 //! material, and neither provisions a server-side wallet.
 //!
 //! A machine with a TPM but no TEE had no such path. It fell through to
-//! `register_autonomous_machine_with_fee`, which mints a fresh MPC wallet from
+//! `register_autonomous_machine_with_fee`, which mints a fresh permissionless wallet from
 //! the binder — a wallet with no relationship to the hardware root that was
 //! just verified, or to the public key stored beside it as
 //! `public_keys[0]`. The identity was hardware-anchored and its wallet was not,
@@ -91,7 +91,9 @@ impl TpmValidatorWalletSigner {
         let keypair: KeyPair = crate::keygen::load_validator_keypair(data_dir)?;
         let classical_public_key = keypair.public_key().to_bytes();
         let classical = Ed25519SignerImpl::new(keypair).map_err(|e| {
-            NodeError::Other(format!("validator Ed25519 key is not usable as a signer: {e}"))
+            NodeError::Other(format!(
+                "validator Ed25519 key is not usable as a signer: {e}"
+            ))
         })?;
         let pq = crate::keygen::load_validator_pq_key(data_dir)?;
         let bls = crate::keygen::load_validator_bls_key(data_dir)?;

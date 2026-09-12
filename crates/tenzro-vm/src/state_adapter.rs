@@ -64,7 +64,6 @@ enum JournalEntry {
     Code(Vec<u8>, Option<Vec<u8>>),
 }
 
-
 pub struct StateAdapter {
     /// Account code cache
     code_cache: Arc<DashMap<Vec<u8>, Vec<u8>>>,
@@ -1012,7 +1011,11 @@ mod atomicity_tests {
             10_000_000,
             "the sender was not made whole by the revert"
         );
-        assert_eq!(a.get_balance(&vault), 0, "the vault kept a credit for a failed transfer");
+        assert_eq!(
+            a.get_balance(&vault),
+            0,
+            "the vault kept a credit for a failed transfer"
+        );
     }
 
     /// Reverting one transaction must not undo the ones before it in the block.
@@ -1036,8 +1039,16 @@ mod atomicity_tests {
         a.set_balance(&second, 900);
         a.revert_transaction();
 
-        assert_eq!(a.get_balance(&first), 500, "a committed transaction was undone");
-        assert_eq!(a.get_balance(&second), 0, "a reverted transaction persisted");
+        assert_eq!(
+            a.get_balance(&first),
+            500,
+            "a committed transaction was undone"
+        );
+        assert_eq!(
+            a.get_balance(&second),
+            0,
+            "a reverted transaction persisted"
+        );
     }
 
     /// Repeated writes to one key revert to the value from before the
@@ -1072,9 +1083,16 @@ mod atomicity_tests {
         a.revert_transaction();
 
         assert_eq!(a.get_balance(&fresh), 0);
-        assert!(!a.balance_cache.contains_key(&fresh), "an absent key was resurrected as zero");
+        assert!(
+            !a.balance_cache.contains_key(&fresh),
+            "an absent key was resurrected as zero"
+        );
         // The nonce is deliberately outside the revert boundary — see set_nonce.
-        assert_eq!(a.get_nonce(&fresh), 3, "the nonce must survive so the tx cannot replay");
+        assert_eq!(
+            a.get_nonce(&fresh),
+            3,
+            "the nonce must survive so the tx cannot replay"
+        );
     }
 
     /// Storage reverts; the nonce does not.
@@ -1093,7 +1111,11 @@ mod atomicity_tests {
         a.set_storage(&who, b"k", b"after".to_vec());
         a.revert_transaction();
 
-        assert_eq!(a.get_nonce(&who), 8, "the nonce was rolled back, enabling replay");
+        assert_eq!(
+            a.get_nonce(&who),
+            8,
+            "the nonce was rolled back, enabling replay"
+        );
         assert_eq!(a.get_storage(&who, b"k"), Some(b"before".to_vec()));
     }
 
@@ -1447,7 +1469,11 @@ mod tests {
         // the cache gets the value is via a read-through.
         let balance: u128 = 42_000;
         store
-            .put(CF_ACCOUNTS, &tnzo_balance_key(&addr), &balance.to_le_bytes())
+            .put(
+                CF_ACCOUNTS,
+                &tnzo_balance_key(&addr),
+                &balance.to_le_bytes(),
+            )
             .unwrap();
 
         // Cold: not yet cached.

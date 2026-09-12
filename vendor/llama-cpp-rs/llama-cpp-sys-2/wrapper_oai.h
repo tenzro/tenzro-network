@@ -70,6 +70,17 @@ struct llama_rs_chat_template_oaicompat_params {
     bool enable_thinking;
     bool add_bos;
     bool add_eos;
+    // Skip common_chat's per-family format auto-detection and hardcoded
+    // per-format prompt builders entirely: render the chat template
+    // directly via minja (Jinja) and treat everything the model writes
+    // after the generation-prompt marker as plain content, unparsed. This
+    // is llama.cpp's own generic escape hatch (`common_chat_templates_inputs
+    // ::force_pure_content` in common/chat.cpp) for a template the
+    // auto-detector gets wrong — no tool-call/reasoning parsing, no grammar,
+    // just "trust the template, take what comes back." A catalog entry
+    // opts a family into this via data (see tenzro-model's `TemplateFix`),
+    // not by adding a per-family branch here or in the Rust caller.
+    bool force_pure_content;
 };
 
 llama_rs_status llama_rs_apply_chat_template_with_tools_oaicompat(

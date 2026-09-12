@@ -26,11 +26,24 @@ import io
 import json
 import os
 import pathlib
+import platform
 import tempfile
 from dataclasses import dataclass, replace
 from typing import Any
 
 from .types import MediaGenExpertRole, MediaGenKind, MediaGenParams
+
+# safetensors' mmap-backed weight load can stall for minutes with the target
+# device sitting idle (huggingface/diffusers#12599, huggingface/safetensors#672)
+# — the loading process blocks in the kernel faulting pages in one at a time
+# rather than reading and transferring in bulk, which reads from the outside
+# as a hang rather than as merely slow. Reported for network-mounted volumes;
+# reproduced here on a local Windows NTFS volume too, likely because Windows'
+# mmap page-in path is far slower than Linux's. `disable_mmap` makes
+# `from_pretrained`/`from_single_file` use a plain buffered read instead. No
+# effect on macOS/Linux, where mmap loading does not exhibit this problem, so
+# it is left alone there.
+_DISABLE_MMAP_KWARGS = {"disable_mmap": True} if platform.system() == "Windows" else {}
 
 # A catalog entry names one pipeline class, but a few classes have a sibling
 # that handles the image-conditioned kind of the same model. Entries whose
@@ -309,6 +322,33 @@ def _quantization_for(precision: str, compute_dtype: Any) -> Any | None:
         # Quantizes the quantization constants too — a further ~0.4 bits per
         # weight for no measurable quality cost, which matters when the reason
         # to be at 4-bit is that the model did not otherwise fit.
+        bnb_4bit_use_double_quant=True,
+    )
+
+
+def _text_encoder_quantization_for(precision: str | None, compute_dtype: Any) -> Any | None:
+    """Build the *transformers* quantization config for a text encoder.
+
+    Text encoders are `transformers` models, and diffusers' pipeline-level
+    quantization mapping hands each component the config type of the library
+    that loads it — so this is `transformers.BitsAndBytesConfig`, not the
+    diffusers one `_quantization_for` builds. Same tiers, same semantics.
+    """
+    if precision is None:
+        return None
+    if precision not in _QUANTIZED_PRECISIONS:
+        raise ValueError(
+            f"unknown text-encoder precision {precision!r}; "
+            f"expected one of {sorted(_QUANTIZED_PRECISIONS)}"
+        )
+    from transformers import BitsAndBytesConfig
+
+    if precision == "int8":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4" if precision == "nf4" else "fp4",
+        bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=True,
     )
 
@@ -876,6 +916,53 @@ class Hunyuan3dAdapter(BackendAdapter):
 register_backend_adapter(Hunyuan3dAdapter())
 
 
+def _prefetch_repo_files(repo_id: str, cache_dir: str, token: str | None) -> None:
+    """Populate the local HF cache for ``repo_id`` before anything calls
+    ``from_pretrained``/``from_single_file`` on it.
+
+    ``from_pretrained`` on a repo with no local snapshot yet reaches for
+    ``huggingface_hub.snapshot_download`` internally, and on Windows that call
+    hangs indefinitely rather than erroring — confirmed to reproduce even with
+    the package-level `HF_HUB_DISABLE_XET` default (see `__init__.py`) already
+    in effect, and even with `max_workers=1`, which rules out both Xet and a
+    thread-pool deadlock as the whole story: something in
+    `snapshot_download`'s own multi-file orchestration hangs independent of
+    either. A single `hf_hub_download` call for one file, by contrast, was
+    reliable every time tested once Xet was disabled early enough. See
+    huggingface/huggingface_hub#3429 and huggingface/xet-core#446, #869 for
+    the Xet half of this; all three are open with no maintainer fix as of
+    writing, and none of them individually explain why `snapshot_download`
+    specifically still hangs with Xet off.
+
+    So this walks the same file list `snapshot_download` would, but fetches
+    each one through the reliable single-file path instead. Once every file
+    already exists in the local cache, `from_pretrained`'s own cache lookup —
+    a filesystem check, not a network round trip — finds a complete snapshot
+    and never invokes `snapshot_download` at all.
+
+    A no-op once a repo's files are already cached: `hf_hub_download` checks
+    the local cache before touching the network, so calling this on every
+    load is cheap after the first.
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+
+    api = HfApi()
+    for filename in api.list_repo_files(repo_id, token=token):
+        # `from_pretrained` reads `model_index.json` and the component
+        # subfolders it names. A repo's top level often also carries things
+        # the pipeline never opens — FLUX.2 klein ships a 7.75 GB single-file
+        # bundle of the same transformer for other UIs, plus sample JPEGs —
+        # and pulling those doubles the download for nothing.
+        if "/" not in filename and not filename.endswith(".json"):
+            continue
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            cache_dir=cache_dir,
+            token=token,
+        )
+
+
 def load_pipeline(
     entry: CatalogEntry,
     kind: MediaGenKind,
@@ -885,8 +972,24 @@ def load_pipeline(
     dtype: str = "bfloat16",
     precision: str | None = None,
     cache_dir: str | None = None,
+    text_encoder_precision: str | None = None,
+    cpu_offload: bool = False,
 ) -> LoadedPipeline:
     """Build the pipeline for one job.
+
+    ``text_encoder_precision`` (``nf4`` / ``int4`` / ``int8``) additionally
+    quantizes the text encoder through bitsandbytes. It is off by default
+    because the text encoder is where quantization costs prompt fidelity
+    first — but on a family whose encoder is a multi-billion-parameter LLM
+    (FLUX.2 klein carries an 8 GB Qwen3), the encoder alone can exceed the
+    VRAM left beside another resident model, and then it is the difference
+    between serving and not.
+
+    ``cpu_offload`` keeps every component in host memory and moves each one
+    onto ``device`` only for its own forward pass (diffusers'
+    ``enable_model_cpu_offload``), so peak VRAM is the largest component plus
+    activations rather than the sum of all of them. Costs a few hundred
+    milliseconds per job on PCIe; buys a card shared with an LLM.
 
     On a split model only the requested expert is loaded — the other slot stays
     empty, which is why the worker holding one half needs roughly half the VRAM
@@ -952,7 +1055,11 @@ def load_pipeline(
         str(pathlib.Path(cache_dir).expanduser()) if cache_dir else str(default_cache_dir())
     )
 
-    kwargs: dict[str, Any] = {"torch_dtype": torch_dtype, "cache_dir": resolved_cache}
+    kwargs: dict[str, Any] = {
+        "torch_dtype": torch_dtype,
+        "cache_dir": resolved_cache,
+        **_DISABLE_MMAP_KWARGS,
+    }
 
     # Gated checkpoints — FLUX.2 dev, the klein-9B line — need the operator's
     # own HuggingFace token. `diffusers` reads `HF_TOKEN` itself, but only for
@@ -974,12 +1081,15 @@ def load_pipeline(
             else entry.expert_pair.low_noise_component
         )
         transformer_cls = diffusers.WanTransformer3DModel
+        if entry.local_snapshot() is None:
+            _prefetch_repo_files(entry.hf_repo, resolved_cache, hf_token)
         expert = transformer_cls.from_pretrained(
             entry.hf_repo,
             subfolder=subfolder,
             torch_dtype=torch_dtype,
             **({"quantization_config": quant_config} if quant_config else {}),
             cache_dir=resolved_cache,
+            **_DISABLE_MMAP_KWARGS,
         )
         slot = "transformer" if role is MediaGenExpertRole.HIGH_NOISE else "transformer_2"
         other = "transformer_2" if role is MediaGenExpertRole.HIGH_NOISE else "transformer"
@@ -1017,38 +1127,52 @@ def load_pipeline(
             if local_gguf is not None and local_gguf.is_file()
             else f"https://huggingface.co/{entry.gguf_repo}/blob/main/{entry.gguf_file}"
         )
+        config_source = str(snapshot) if snapshot is not None else (entry.config_repo or entry.hf_repo)
+        if snapshot is None:
+            _prefetch_repo_files(config_source, resolved_cache, hf_token)
         kwargs["transformer"] = transformer_cls.from_single_file(
             source,
             quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
-            config=str(snapshot) if snapshot is not None else (entry.config_repo or entry.hf_repo),
+            config=config_source,
             subfolder="transformer",
             torch_dtype=torch_dtype,
             cache_dir=resolved_cache,
             **({"token": hf_token} if hf_token else {}),
+            **_DISABLE_MMAP_KWARGS,
         )
         # The bitsandbytes tiers quantize the transformer that was just built
         # from GGUF, which would be a second quantization of the same weights.
         quant_config = None
 
+    text_encoder_quant = _text_encoder_quantization_for(text_encoder_precision, torch_dtype)
+    quant_mapping: dict[str, Any] = {}
     if quant_config is not None and not entry.is_split:
         # A whole-model load quantizes the transformer through the pipeline's
         # own quantization mapping. The split path above already built its
         # expert with the config applied directly, so it is not repeated here.
+        quant_mapping["transformer"] = quant_config
+    if text_encoder_quant is not None:
+        quant_mapping["text_encoder"] = text_encoder_quant
+    if quant_mapping:
         from diffusers.quantizers import PipelineQuantizationConfig
 
-        kwargs["quantization_config"] = PipelineQuantizationConfig(
-            quant_mapping={"transformer": quant_config}
-        )
+        kwargs["quantization_config"] = PipelineQuantizationConfig(quant_mapping=quant_mapping)
 
     # A converted snapshot already holds every component in diffusers layout,
     # so it is the source; `hf_repo` stays the upstream id for provenance.
     snapshot = entry.local_snapshot()
+    if snapshot is None:
+        _prefetch_repo_files(entry.hf_repo, resolved_cache, hf_token)
     pipe = pipeline_cls.from_pretrained(
         str(snapshot) if snapshot is not None else entry.hf_repo, **kwargs
     )
     # A bitsandbytes-quantized module is already placed on its device by the
     # loader and cannot be moved afterwards; calling `.to()` on it raises.
-    if quant_config is None:
+    # Offload installs accelerate hooks instead of moving modules, which is
+    # allowed on quantized modules too.
+    if cpu_offload:
+        pipe.enable_model_cpu_offload(device=device)
+    elif not quant_mapping:
         pipe.to(device)
     # Family hooks that apply after the pipeline exists — a scheduler swap,
     # a flow shift. A family registering none declines and nothing happens.

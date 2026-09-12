@@ -2686,6 +2686,48 @@ async def use_skill(
     return result
 
 
+
+@mcp.tool
+async def authorize_tool_call(
+    tool: str,
+    resource_class: str = "tool",
+    amount_wei: str | None = None,
+    counterparty: str | None = None,
+    approval_id: str | None = None,
+) -> dict:
+    """Ask whether the caller may run a tool, before running it.
+
+    Answers from the delegation grant the caller's controller signed — the
+    parties it may act as, the commands it may use, the caps it may spend
+    under, and any action its oversight claim parks for a human. The same
+    authority that governs spending, applied to a tool call the network never
+    sees.
+
+    Returns `decision` as one of:
+
+      permit           — proceed.
+      require_approval — a human must approve first. `approval_id` is what the
+                         approver acts on; replay this call with that id once
+                         granted. Approvals are single-use.
+      deny             — refused; `reason` says why.
+
+    `require_approval` is an outcome, not an error: park the call and surface
+    the id, do not treat it as a failure.
+
+    Pass `amount_wei` when the call spends, so per-call ceilings apply. Omit it
+    for a tool that only reads or edits locally.
+    """
+    params: dict = {"tool": tool, "class": resource_class}
+    if amount_wei:
+        params["amount_wei"] = amount_wei
+    if counterparty:
+        params["counterparty"] = counterparty
+    if approval_id:
+        params["approval_id"] = approval_id
+    result = await rpc_call("tenzro_authorizeToolCall", params)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Tools Registry (5 tools)
 # ---------------------------------------------------------------------------

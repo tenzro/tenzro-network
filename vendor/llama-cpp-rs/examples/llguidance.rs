@@ -54,11 +54,13 @@ fn main() {
 }"#;
 
     // Build an LLGuidance sampler by getting the tok_env for our model (llama-cpp-2)
-    // and use plain `llguidance` to build the grammar, parser -> matcher -> sampler. 
+    // and use plain `llguidance` to build the grammar, parser -> matcher -> sampler.
     let grammar = TopLevelGrammar::from_tagged_str("json", schema).expect("invalid grammar");
     let tok_env = LlamaSampler::llguidance_tok_env(&model);
     let factory = ParserFactory::new_simple(&tok_env).expect("failed to build parser factory");
-    let parser = factory.create_parser(grammar).expect("failed to create parser");
+    let parser = factory
+        .create_parser(grammar)
+        .expect("failed to create parser");
     let matcher = Matcher::new(Ok(parser));
 
     let llg_sampler = LlamaSampler::from(matcher);

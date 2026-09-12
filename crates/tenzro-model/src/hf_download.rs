@@ -1546,7 +1546,6 @@ async fn download_one_file(
         }
     }
 
-
     std::fs::rename(tmp_path, dest_path).map_err(|e| {
         ModelError::DownloadError(format!(
             "Failed to rename {} -> {}: {}",

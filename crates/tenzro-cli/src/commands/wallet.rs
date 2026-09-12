@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 /// Wallet management commands
 #[derive(Debug, Subcommand)]
 pub enum WalletCommand {
-    /// Create a new MPC wallet
+    /// Create a new permissionless wallet
     Create(WalletCreateCmd),
     /// Import a wallet from a private key
     Import(WalletImportCmd),
@@ -49,7 +49,7 @@ impl WalletCommand {
     }
 }
 
-/// Create a new MPC wallet
+/// Create a new permissionless wallet
 #[derive(Debug, Parser)]
 pub struct WalletCreateCmd {
     /// Wallet name
@@ -73,9 +73,9 @@ impl WalletCreateCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
 
-        output::print_header("Creating New MPC Wallet");
+        output::print_header("Creating New Wallet");
 
-        let spinner = output::create_spinner("Generating MPC wallet...");
+        let spinner = output::create_spinner("Generating wallet...");
 
         // The node provisions and durably registers the wallet; its response
         // is the only identity that `auth link-wallet`, `wallet list`, and

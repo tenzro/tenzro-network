@@ -392,6 +392,21 @@ pub struct EnrollPasskeyRequest {
     /// (Coinbase Smart Wallet pattern + Tenzro PQ extension).
     #[serde(default)]
     pub ml_dsa_public_key_hex: Option<String>,
+    /// Optional Ed25519 verifying key, recorded on the identity for assertions.
+    ///
+    /// A passkey signs WebAuthn assertions and cannot sign raw bytes, so an
+    /// identity holding only its P-256 passkey can never sign a reserve
+    /// attestation — `submit_reserve_attestation` refuses it for having no
+    /// Ed25519 key on file. The holder derives one from the same credential and
+    /// passes its public half here.
+    ///
+    /// First write wins: if the identity already carries an Ed25519 assertion
+    /// key, only the same key is accepted here. A passkey's public key is not a
+    /// secret, so anyone holding it could otherwise re-enrol an existing DID and
+    /// substitute a key of their own; replacing one needs proof of control and
+    /// is deliberately not this path.
+    #[serde(default)]
+    pub ed25519_public_key_hex: Option<String>,
     /// CREATE2 salt — defaults to 0. Reusing the same passkey + non-zero
     /// salts yields multiple distinct accounts.
     #[serde(default)]
@@ -781,53 +796,44 @@ pub(crate) async fn handle_enroll_passkey(
     let display_name = req
         .display_name
         .unwrap_or_else(|| "Passkey User".to_string());
-    let did = tenzro_identity::TenzroDid::new_human();
+    // The identity IS the passkey: derive the DID from the normalized P-256
+    // public key (the same bytes the account owner binds to), so the same
+    // authenticator always resolves to the same identity — a remove-and-re-enrol
+    // returns the identical DID, never a fresh one.
+    let did = tenzro_identity::TenzroDid::from_passkey(&p256_xy);
     let did_string = did.to_string();
 
     // 3. The ML-DSA-65 verifying key: supplied, or derived from the DID.
     //
     //    Hybrid PQ custody is not in question — pairing each P-256 passkey with
-    //    an ML-DSA key is the right posture. What was wrong was requiring the
-    //    *client* to produce it. A WebAuthn authenticator signs P-256 and there
-    //    is no ML-DSA in WebCrypto, so no browser could ever satisfy this and
-    //    the whole custody path was unreachable from a wallet (issue #6).
-    //
-    //    The node can produce it, because the account's PQ key is derived from
-    //    its DID rather than stored. `handle_add_passkey` already works this way
-    //    and the Add branch of `handle_create_passkey_session` documents it;
-    //    enroll was the one path still asking the caller to do the impossible.
-    //
-    //    This is not a weakening. The derived key is the node's half of the
-    //    2-of-2 the custody model already claims: the WebAuthn leg is the
-    //    owner's and only their authenticator can produce it, this leg is the
-    //    node's and only the node can. Neither authorizes alone. A caller that
-    //    holds its own PQ key still supplies it and this never runs.
-    let ml_dsa_vk = match req.ml_dsa_public_key_hex.as_deref() {
-        Some(hex) => {
-            let vk = decode_hex(hex)?;
-            if vk.len() != ML_DSA_65_VK_LEN {
-                return Err(JsonRpcError {
-                    code: -32602,
-                    message: format!(
-                        "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
-                        ML_DSA_65_VK_LEN,
-                        vk.len()
-                    ),
-                    data: None,
-                });
-            }
-            vk
-        }
-        None => {
-            let key = crate::web::wallet_frost::ml_dsa_custody_key(&did_string).map_err(|e| {
-                JsonRpcError {
-                    code: -32603,
-                    message: format!("derive custody PQ key: {e:?}"),
-                    data: None,
-                }
+    //    The caller supplies the ML-DSA-65 verifying key: under hardware-rooted
+    //    custody the node never derives or holds a custody key. A Tenzro wallet
+    //    client (not raw WebCrypto) holds the PQ leg in its device keystore and
+    //    passes its public half here; the WebAuthn P-256 leg is the passkey's.
+    let ml_dsa_vk = {
+        let hex = req
+            .ml_dsa_public_key_hex
+            .as_deref()
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "ml_dsa_public_key is required: the caller must supply its own \
+                      ML-DSA-65 verifying key (the node does not derive custody keys)"
+                    .to_string(),
+                data: None,
             })?;
-            key.verifying_key_bytes().to_vec()
+        let vk = decode_hex(hex)?;
+        if vk.len() != ML_DSA_65_VK_LEN {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
+                    ML_DSA_65_VK_LEN,
+                    vk.len()
+                ),
+                data: None,
+            });
         }
+        vk
     };
     let account_key =
         WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| JsonRpcError {
@@ -911,6 +917,59 @@ pub(crate) async fn handle_enroll_passkey(
     let sa_addr = smart_account.address.as_slice();
     let sa_len = sa_addr.len().min(32);
     wallet_addr_bytes[..sa_len].copy_from_slice(&sa_addr[..sa_len]);
+    // Decoded here rather than trusted: a wrong length would be stored and
+    // then fail verification later, at a signature, where it reads as a bad
+    // attestation rather than a bad registration.
+    let ed25519_verifying_key = match req.ed25519_public_key_hex.as_deref() {
+        None => None,
+        Some(hexstr) => {
+            let raw = hex::decode(hexstr.trim_start_matches("0x")).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("ed25519_public_key_hex is not hex: {e}"),
+                data: None,
+            })?;
+            if raw.len() != 32 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "ed25519_public_key must be 32 bytes, got {}",
+                        raw.len()
+                    ),
+                    data: None,
+                });
+            }
+            // First write wins. Enrolment re-registers the identity from
+            // scratch, and a passkey's public key is not a secret, so without
+            // this anyone holding it could re-enrol an existing DID and
+            // substitute an assertion key of their own — then sign statements
+            // the DID's owner never made. Attaching a *different* key to an
+            // identity that already carries one needs proof of control and is
+            // deliberately not this path; re-sending the same key is the
+            // ordinary case (a second device, a re-enrol) and is allowed.
+            if let Ok(existing) = identity_registry.resolve(&did_string) {
+                if let Some(prior) = existing
+                    .public_keys
+                    .iter()
+                    .find(|k| {
+                        k.key_type == "Ed25519"
+                            && k.purposes
+                                .contains(&tenzro_identity::KeyPurpose::AssertionMethod)
+                    })
+                {
+                    if prior.public_key != raw {
+                        return Err(JsonRpcError {
+                            code: -32602,
+                            message: "this identity already has an Ed25519 assertion key; \n                                 replacing it is not part of enrolment"
+                                .to_string(),
+                            data: None,
+                        });
+                    }
+                }
+            }
+            Some(raw)
+        }
+    };
+
     let binding = tenzro_identity::WalletBinding {
         wallet_id: format!("0x{}", hex::encode(&smart_account.address)),
         address: tenzro_types::primitives::Address::new(wallet_addr_bytes),
@@ -918,6 +977,7 @@ pub(crate) async fn handle_enroll_passkey(
         key_type: "P-256".to_string(),
         pq_verifying_key: account_key.pq_pubkey.clone(),
         bls_verifying_key: Vec::new(),
+        ed25519_verifying_key,
     };
     identity_registry
         .register_human_with_binding(
@@ -1423,65 +1483,24 @@ pub(crate) async fn require_account_control(
     // assertion is.
     // The PQ leg, supplied by whoever can produce it.
     //
-    // The validator requires an ML-DSA-65 signature on every entry, and it
-    // checks the length *before* looking at the WebAuthn assertion — so an
-    // absent leg fails as "the assertion did not verify", naming the wrong half.
-    // A browser cannot produce this leg: WebAuthn signs P-256 and there is no
-    // ML-DSA in WebCrypto. That is issue #6, and it left the whole custody path
-    // unreachable from a wallet.
-    //
-    // The node can, because the account's PQ key is derived from its DID rather
-    // than stored. So when the caller has no signature — which is every browser
-    // — this signs the same digest the WebAuthn leg covers.
-    //
-    // That is not a weakening: the two legs are the two halves of the hybrid.
-    // The WebAuthn leg is the owner's and only their authenticator can produce
-    // it; this one is the node's and only the node can. Neither authorizes
-    // alone, which is the 2-of-2 the custody model already claims. A caller that
-    // holds its own PQ key still supplies it and this never runs.
-    let ml_dsa_signature = match auth.ml_dsa_signature_hex.as_deref() {
-        Some(hex) => decode_hex(hex)?,
-        None => {
-            let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
-                code: -32603,
-                message: "IdentityRegistry not initialized".to_string(),
+    // The validator requires an ML-DSA-65 signature on every entry. Under
+    // hardware-rooted custody the node never holds or derives a custody key, so
+    // the caller must supply this leg: a Tenzro wallet client holds the PQ key
+    // in its device keystore and signs the same digest the WebAuthn leg covers.
+    // (A raw browser cannot — WebCrypto has no ML-DSA — so the passkey flow runs
+    // through a Tenzro wallet client, not bare WebAuthn.)
+    let ml_dsa_signature = {
+        let hex = auth
+            .ml_dsa_signature_hex
+            .as_deref()
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "ml_dsa_signature is required: the caller must sign the digest with \
+                      its own ML-DSA-65 key (the node does not hold or derive custody keys)"
+                    .to_string(),
                 data: None,
             })?;
-            // Right-pad into the 32-byte slot, matching how enrolment stores
-            // `wallet_address`. A 20-byte smart-account address is the normal
-            // case here; `Address::from_bytes` alone takes 32 bytes and nothing
-            // else, so it rejected every one of them.
-            if account.len() > 32 {
-                return Err(JsonRpcError {
-                    code: -32602,
-                    message: format!(
-                        "account address is {} bytes; no address this registry stores is \
-                         longer than 32",
-                        account.len()
-                    ),
-                    data: None,
-                });
-            }
-            let mut account_slot = [0u8; 32];
-            account_slot[..account.len()].copy_from_slice(account);
-            let did = registry
-                .find_did_by_address(&tenzro_types::primitives::Address::new(account_slot))
-                .ok_or_else(|| JsonRpcError {
-                    code: -32001,
-                    message: "no identity is bound to this account, so its PQ custody \
-                              leg cannot be derived"
-                        .to_string(),
-                    data: None,
-                })?;
-            let key = crate::web::wallet_frost::ml_dsa_custody_key(&did).map_err(|e| {
-                JsonRpcError {
-                    code: -32603,
-                    message: format!("derive custody PQ key: {e:?}"),
-                    data: None,
-                }
-            })?;
-            key.sign(&digest)
-        }
+        decode_hex(hex)?
     };
 
     let legs = vec![HybridWebAuthnSignature {

@@ -60,7 +60,6 @@ use tenzro_types::{
     primitives::{Address, BlockHeight},
     principal_chain::{PrincipalChain, anonymous_chain_for_did},
 };
-use tenzro_wallet::WalletProvisioner;
 use tracing::{debug, info, warn};
 
 /// Status of an agent on the network
@@ -177,7 +176,7 @@ pub struct RegisteredAgent {
     pub principal_chain: PrincipalChain,
     /// Classical Ed25519 verifying key bound to this agent (32 bytes).
     ///
-    /// For provisioner-path agents this is the FROST aggregated group public
+    /// For provisioner-path agents this is the identity-bound public
     /// key (the same key the chain sees signing transactions). For BYOK
     /// agents this is the caller-supplied verifying key.
     ///
@@ -328,8 +327,6 @@ impl RegisteredAgent {
 pub struct AgentIdentityManager {
     /// Registered agents indexed by agent_id
     agents: Arc<DashMap<String, RegisteredAgent>>,
-    /// Wallet provisioner for creating agent wallets
-    wallet_provisioner: Arc<WalletProvisioner>,
     /// Storage path for persisting identities
     storage_path: Option<PathBuf>,
     /// Optional TDIP identity registry for blockchain-anchored agent identities (HIGH #105).
@@ -365,11 +362,8 @@ pub struct AgentIdentityManager {
 impl AgentIdentityManager {
     /// Creates a new agent identity manager
     pub fn new() -> Result<Self> {
-        let wallet_provisioner = WalletProvisioner::new();
-
         Ok(Self {
             agents: Arc::new(DashMap::new()),
-            wallet_provisioner: Arc::new(wallet_provisioner),
             storage_path: None,
             identity_registry: None,
             machine_anchor: None,
@@ -379,7 +373,6 @@ impl AgentIdentityManager {
 
     /// Creates a new agent identity manager with persistent storage
     pub fn with_storage_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let wallet_provisioner = WalletProvisioner::new();
         let storage_path = path.as_ref().to_path_buf();
 
         // Create storage directory if it doesn't exist
@@ -391,7 +384,6 @@ impl AgentIdentityManager {
 
         Ok(Self {
             agents: Arc::new(DashMap::new()),
-            wallet_provisioner: Arc::new(wallet_provisioner),
             storage_path: Some(storage_path),
             identity_registry: None,
             machine_anchor: None,
@@ -494,6 +486,7 @@ impl AgentIdentityManager {
         &self,
         name: String,
         creator: Address,
+        device_public_key: Vec<u8>,
         capabilities: Vec<Capability>,
         tee_backed: bool,
         nonce: u64,
@@ -501,6 +494,7 @@ impl AgentIdentityManager {
         self.register_agent_with_gas_policy(
             name,
             creator,
+            device_public_key,
             capabilities,
             tee_backed,
             nonce,
@@ -523,6 +517,7 @@ impl AgentIdentityManager {
         &self,
         name: String,
         creator: Address,
+        device_public_key: Vec<u8>,
         capabilities: Vec<Capability>,
         tee_backed: bool,
         nonce: u64,
@@ -538,16 +533,28 @@ impl AgentIdentityManager {
 
         debug!("Registering agent {} with ID {}", name, agent_id);
 
-        // Provision an MPC wallet for the agent
-        let wallet = self
-            .wallet_provisioner
-            .provision_wallet()
-            .map_err(|e| AgentError::WalletError(e.to_string()))?;
+        // An agent is an autonomous machine, so its wallet roots in this
+        // machine's secure element — TPM 2.0 or Apple Secure Enclave. The
+        // caller supplies the device key's public half; the private half cannot
+        // be exported and this manager never sees it. Minting one here would be
+        // custodial, which is the design this replaced.
+        let wallet = tenzro_wallet::Wallet::new(
+            tenzro_wallet::WalletId::new(),
+            creator,
+            tenzro_crypto::PublicKey::new(
+                tenzro_crypto::KeyType::Ed25519,
+                device_public_key.clone(),
+            ),
+            tenzro_crypto::pq::MlDsaSigningKey::generate(),
+            tenzro_crypto::bls::BlsKeyPair::generate()
+                .map_err(|e| AgentError::WalletError(e.to_string()))?,
+        )
+        .map_err(|e| AgentError::WalletError(e.to_string()))?;
 
         let wallet_address = wallet.address;
         let wallet_id = wallet.wallet_id.clone();
 
-        // Capture the wallet's classical (FROST aggregated Ed25519) and
+        // Capture the wallet's classical (identity-bound Ed25519) and
         // post-quantum (ML-DSA-65) verifying keys so the message router can
         // verify hybrid-signed AgentMessages produced by this agent.
         let classical_public_key = wallet.public_key.to_bytes();
@@ -576,7 +583,7 @@ impl AgentIdentityManager {
         if let Some(ref registry) = self.identity_registry {
             // Use the wallet's classical Ed25519 verifying key as the
             // identity's public key. The wallet provisioner returns a real
-            // FROST-aggregated key, so this binds the TDIP record to the
+            // identity-bound key, so this binds the TDIP record to the
             // same key material that signs both transactions and agent
             // messages — and lets the MessageRouter resolver round-trip
             // back to the same verifying key.
@@ -682,7 +689,7 @@ impl AgentIdentityManager {
     /// post-quantum verifying keys (BYOK path).
     ///
     /// Unlike [`Self::register_agent_with_gas_policy`], this method does
-    /// **not** invoke the wallet provisioner — no FROST shares are minted
+    /// **not** invoke the wallet provisioner — no key material is minted
     /// on the node and no signing key material lives server-side. The
     /// agent's `wallet_address` is derived deterministically from the
     /// supplied Ed25519 verifying key as `Address(SHA-256(public_key))`,
@@ -771,12 +778,19 @@ impl AgentIdentityManager {
         if let Some(ref registry) = self.identity_registry {
             let cap_strings: Vec<String> = capabilities.iter().map(capability_label).collect();
 
+            let anchor = self.machine_anchor.clone().ok_or_else(|| {
+                AgentError::BlockchainBindingFailed(format!(
+                    "cannot mint a TDIP identity for agent {}: this host offers no hardware root                      of trust. The submitted keys cannot stand in for one — a caller chooses                      those freely, so an identity derived from them would be an identity the                      caller picked rather than one the hardware proved.",
+                    agent.identity.agent_id
+                ))
+            })?;
             let registration = registry
                 .register_autonomous_machine_with_keys(
                     classical_public_key.clone(),
                     pq_verifying_key.clone(),
                     bls_verifying_key.clone(),
                     cap_strings,
+                    anchor,
                 )
                 .await
                 .map_err(|e| {
@@ -1097,7 +1111,14 @@ mod tests {
         let capabilities = vec![Capability::MultiAgentCoordination];
 
         let agent = manager
-            .register_agent("TestAgent".to_string(), creator, capabilities, false, 0)
+            .register_agent(
+                "TestAgent".to_string(),
+                creator,
+                vec![7u8; 32],
+                capabilities,
+                false,
+                0,
+            )
             .await
             .unwrap();
 
@@ -1134,6 +1155,7 @@ mod tests {
             .register_agent(
                 "Agent1".to_string(),
                 creator,
+                vec![7u8; 32],
                 capabilities.clone(),
                 false,
                 0,
@@ -1142,7 +1164,14 @@ mod tests {
             .unwrap();
 
         let result = manager
-            .register_agent("Agent2".to_string(), creator, capabilities, false, 0)
+            .register_agent(
+                "Agent2".to_string(),
+                creator,
+                vec![7u8; 32],
+                capabilities,
+                false,
+                0,
+            )
             .await;
 
         assert!(matches!(result, Err(AgentError::AgentAlreadyExists(_))));
@@ -1154,7 +1183,14 @@ mod tests {
         let creator = Address::from([1u8; 32]);
 
         let agent = manager
-            .register_agent("Agent".to_string(), creator, vec![], false, 0)
+            .register_agent(
+                "Agent".to_string(),
+                creator,
+                vec![7u8; 32],
+                vec![],
+                false,
+                0,
+            )
             .await
             .unwrap();
 
@@ -1192,6 +1228,7 @@ mod tests {
             .register_agent(
                 "LocalAgent".to_string(),
                 creator,
+                vec![7u8; 32],
                 vec![Capability::MultiAgentCoordination],
                 false,
                 0,
@@ -1220,16 +1257,14 @@ mod tests {
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry.clone())
-            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                hardware_root_hex: "ab".repeat(32),
-                sources: vec!["tpm:ek".to_string()],
-            });
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]));
 
         let creator = Address::from([8u8; 32]);
         let agent = manager
             .register_agent(
                 "BoundAgent".to_string(),
                 creator,
+                vec![7u8; 32],
                 vec![Capability::MultiAgentCoordination],
                 false,
                 0,
@@ -1272,10 +1307,7 @@ mod tests {
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry)
-            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                hardware_root_hex: "ab".repeat(32),
-                sources: vec!["tpm:ek".to_string()],
-            })
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]))
             .with_gas_policy(GasPolicy::PayUpTo(1));
 
         let creator = Address::from([9u8; 32]);
@@ -1283,6 +1315,7 @@ mod tests {
             .register_agent(
                 "BrokeAgent".to_string(),
                 creator,
+                vec![7u8; 32],
                 vec![Capability::SmartContractExecution],
                 false,
                 0,
@@ -1324,10 +1357,7 @@ mod tests {
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry)
-            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                hardware_root_hex: "ab".repeat(32),
-                sources: vec!["tpm:ek".to_string()],
-            })
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]))
             .with_gas_policy(GasPolicy::PayUpTo(big_budget));
 
         let creator = Address::from([10u8; 32]);
@@ -1335,6 +1365,7 @@ mod tests {
             .register_agent_with_gas_policy(
                 "RichAgent".to_string(),
                 creator,
+                vec![7u8; 32],
                 vec![],
                 false,
                 0,
@@ -1362,10 +1393,7 @@ mod tests {
         let manager = AgentIdentityManager::new()
             .unwrap()
             .with_identity_registry(registry)
-            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                hardware_root_hex: "ab".repeat(32),
-                sources: vec!["tpm:ek".to_string()],
-            });
+            .with_machine_anchor(tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]));
         // No `with_gas_policy` → defaults to AcceptAny.
 
         let creator = Address::from([11u8; 32]);
@@ -1373,6 +1401,7 @@ mod tests {
             .register_agent_with_gas_policy(
                 "PerCallAgent".to_string(),
                 creator,
+                vec![7u8; 32],
                 vec![],
                 false,
                 0,

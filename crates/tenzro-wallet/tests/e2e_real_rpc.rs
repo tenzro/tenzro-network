@@ -325,7 +325,35 @@ async fn e2e_signed_transaction_wire_format() {
     let wallet_dir = TempDir::new().expect("wallet tempdir");
     let cfg = WalletServiceConfig::new(wallet_dir.path().to_path_buf());
     let wallet_service = TenzroWalletService::with_config(cfg).expect("wallet service");
-    let wallet = wallet_service.provision_wallet().await.expect("provision");
+    // Wallets are bound to an identity at construction. This is an autonomous
+    // machine (a test node), so it roots in a secure-element key rather than a
+    // passkey. The service never holds the classical secret, so this test
+    // stands in for the hardware: it keeps the keypair locally, hands the
+    // wallet only the public half, and binds a signer that uses the private
+    // half — the same split a real Secure Enclave enforces.
+    let device_keypair =
+        tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519).expect("device keypair");
+    let device_public = device_keypair.public_key().clone();
+    // `KeyPair` is not `Clone`, so build the signer from it directly and keep
+    // only the public half for the identity below.
+    let identity = tenzro_wallet::WalletIdentity::machine("e2e-test-machine", device_public)
+        .expect("valid machine identity");
+    let wallet = wallet_service
+        .provision_wallet(identity)
+        .await
+        .expect("provision");
+    let device_signer =
+        tenzro_crypto::signatures::Ed25519SignerImpl::new(device_keypair).expect("ed25519 signer");
+    wallet_service.set_hybrid_signer(
+        wallet.wallet_id.clone(),
+        std::sync::Arc::new(E2eDeviceSigner {
+            signer: device_signer,
+            pq: wallet
+                .pq_signing_key
+                .clone()
+                .expect("wallet carries a PQ key"),
+        }),
+    );
 
     // Build a transfer transaction from the wallet to an arbitrary address.
     // Nonce = 0 because the wallet is fresh; chain_id falls back to 1337
@@ -409,5 +437,42 @@ async fn e2e_signed_transaction_wire_format() {
                 msg
             );
         }
+    }
+}
+
+/// Stands in for the machine's secure element in this test.
+///
+/// The wallet service deliberately cannot hold a classical secret, so signing
+/// goes through this seam. Here the "hardware" is an in-process keypair; on a
+/// real machine it is a TPM or Secure Enclave that never releases the key.
+struct E2eDeviceSigner {
+    signer: tenzro_crypto::signatures::Ed25519SignerImpl,
+    pq: tenzro_crypto::pq::MlDsaSigningKey,
+}
+
+#[async_trait::async_trait]
+impl tenzro_wallet::signing::HybridSigner for E2eDeviceSigner {
+    fn classical_public_key(&self) -> Vec<u8> {
+        use tenzro_crypto::signatures::Signer;
+        self.signer.public_key().as_bytes().to_vec()
+    }
+
+    fn pq_verifying_key(&self) -> Vec<u8> {
+        self.pq.verifying_key_bytes().to_vec()
+    }
+
+    async fn sign_hybrid(
+        &self,
+        message: &[u8],
+    ) -> tenzro_wallet::error::Result<tenzro_wallet::signing::HybridSignatureBytes> {
+        use tenzro_crypto::signatures::Signer;
+        let classical = self
+            .signer
+            .sign(message)
+            .map_err(|e| tenzro_wallet::error::WalletError::SignatureFailed(e.to_string()))?;
+        Ok(tenzro_wallet::signing::HybridSignatureBytes::new(
+            classical.as_bytes().to_vec(),
+            self.pq.sign(message),
+        ))
     }
 }

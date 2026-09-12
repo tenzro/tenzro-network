@@ -1,0 +1,29 @@
+[package]
+name = "tenzro-secure-enclave"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Apple Secure Enclave as a machine-identity root for Tenzro — the SEP counterpart to TPM 2.0, with no Apple Developer membership required"
+documentation = "https://docs.rs/tenzro-secure-enclave"
+readme = "README.md"
+keywords = ["tenzro", "secure-enclave", "machine-identity", "apple", "root-of-trust"]
+categories = ["cryptography", "hardware-support"]
+build = "build.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+tenzro-types = { path = "../tenzro-types", version = "0.2.0" }
+
+# The enclave itself. Apple targets only: on every other host this crate
+# compiles to the unavailable stubs and needs no Swift toolchain.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+
+[lints]
+workspace = true

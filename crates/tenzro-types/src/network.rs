@@ -56,7 +56,7 @@ pub enum NetworkRole {
     Bootstrap,
     /// Micro node / participant — ultra-lightweight, no P2P required.
     /// Humans or AI agents joining via MCP server, Claude, ClawBot,
-    /// or other agentic frameworks. Auto-provisioned DID + MPC wallet.
+    /// or other agentic frameworks. Auto-provisioned DID + permissionless wallet.
     MicroNode,
 }
 
@@ -587,7 +587,7 @@ impl Default for MicroNodeCapabilities {
 pub struct MicroNodeInfo {
     /// TDIP decentralized identifier (did:tenzro:...)
     pub did: String,
-    /// Auto-provisioned MPC wallet address
+    /// Auto-provisioned permissionless wallet address
     pub wallet_address: String,
     /// Human-readable display name (optional)
     pub display_name: String,

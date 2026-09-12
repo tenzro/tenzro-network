@@ -116,6 +116,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let human_pubkey = human_keypair.public_key().as_bytes().to_vec();
     let human = registry
         .register_human_with_fee(
+            // Stand-in for the credential id a WebAuthn ceremony returns; a
+            // human identity is rooted in a passkey, so there is no registration
+            // path that omits it.
+            b"demo-passkey-dca-strategist".to_vec(),
             human_pubkey,
             "DCA Strategist".to_string(),
             KycTier::Enhanced,

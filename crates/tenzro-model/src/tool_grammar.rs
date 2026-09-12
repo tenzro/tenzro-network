@@ -59,8 +59,8 @@
 //! the `<function=`/`<parameter=` form this module elicits, and they remain the
 //! only thing standing behind a model served through the fallback.
 
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::{AddBos, GrammarTrigger, GrammarTriggerType};
-use llama_cpp_2::model::{LlamaModel};
 use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
@@ -146,11 +146,29 @@ pub(crate) struct NativeChat {
 /// yields one that can be armed lazily.
 pub(crate) fn native_chat_prompt(
     model: &LlamaModel,
+    model_id: &str,
     messages: &[ChatMessage],
     tools: &[ToolDefinition],
     enable_thinking: bool,
+    // Template-level reasoning budget for families that expose one, as the
+    // `(variable, value)` pair resolved by `catalog::resolve_reasoning_effort`.
+    // The variable name differs across families (`reasoning_effort` vs
+    // `reasoning_strength`), so it is carried alongside the value rather than
+    // assumed here. Already validated against the family's policy; rendered
+    // verbatim.
+    reasoning_effort: Option<(&str, &str)>,
 ) -> Option<NativeChat> {
     let template = model.chat_template(None).ok()?;
+
+    // Data-driven, not a per-family branch here: the catalog names which
+    // families need llama.cpp's format auto-detection skipped entirely (see
+    // `TemplateFix::ForcePureContent`'s docs for why — the short version is
+    // that detection picks the wrong known format for some templates and
+    // corrupts both the render and the reply). This flag asks
+    // `apply_chat_template_oaicompat` to render via plain Jinja with no
+    // detection at all, so it's unaffected either way.
+    let force_pure_content = crate::catalog::get_model_by_id(model_id)
+        .is_some_and(|e| e.template_fix == crate::catalog::TemplateFix::ForcePureContent);
 
     let tools_json = if tools.is_empty() {
         None
@@ -171,6 +189,12 @@ pub(crate) fn native_chat_prompt(
     // path that threads `enable_thinking` into the template — so the qwen35
     // template emits its pre-closed empty `<think></think>` block and the model
     // answers directly. Both paths return the same `ChatTemplateResult`.
+    // The reasoning budget is a chat-template variable, not a sampler setting:
+    // the template turns it into a system-prompt line. Passing it anywhere else
+    // — a top-level field, a sampler param — is silently dropped, which is what
+    // left every request pinned to the template's own (most expensive) default.
+    let kwargs_json = reasoning_effort.map(|(k, v)| format!(r#"{{"{k}":"{v}"}}"#));
+
     let render = if enable_thinking {
         // Render from JSON rather than `LlamaChatMessage`, which carries only a
         // role and a string: a turn's `tool_calls`, and a `tool` turn's name and
@@ -191,7 +215,7 @@ pub(crate) fn native_chat_prompt(
             json_schema: None,
             grammar: None,
             reasoning_format: None,
-            chat_template_kwargs: None,
+            chat_template_kwargs: kwargs_json.as_deref(),
             add_generation_prompt: true,
             use_jinja: true,
             parallel_tool_calls: false,
@@ -199,6 +223,7 @@ pub(crate) fn native_chat_prompt(
             add_bos: true,
             add_eos: false,
             parse_tool_calls: tools_json.is_some(),
+            force_pure_content,
         };
         model
             .apply_chat_template_oaicompat(&template, &params)
@@ -216,7 +241,7 @@ pub(crate) fn native_chat_prompt(
             json_schema: None,
             grammar: None,
             reasoning_format: None,
-            chat_template_kwargs: None,
+            chat_template_kwargs: kwargs_json.as_deref(),
             add_generation_prompt: true,
             use_jinja: true,
             parallel_tool_calls: false,
@@ -224,6 +249,7 @@ pub(crate) fn native_chat_prompt(
             add_bos: true,
             add_eos: false,
             parse_tool_calls: tools_json.is_some(),
+            force_pure_content,
         };
         model
             .apply_chat_template_oaicompat(&template, &params)
@@ -317,10 +343,7 @@ fn messages_as_json(messages: &[ChatMessage]) -> Option<String> {
                 o.insert("name".into(), serde_json::Value::String(n.clone()));
             }
             if let Some(id) = &m.tool_call_id {
-                o.insert(
-                    "tool_call_id".into(),
-                    serde_json::Value::String(id.clone()),
-                );
+                o.insert("tool_call_id".into(), serde_json::Value::String(id.clone()));
             }
             serde_json::Value::Object(o)
         })
@@ -341,13 +364,14 @@ fn messages_as_json(messages: &[ChatMessage]) -> Option<String> {
 #[allow(dead_code)]
 pub(crate) fn native_tool_prompt(
     model: &LlamaModel,
+    model_id: &str,
     messages: &[ChatMessage],
     tools: &[ToolDefinition],
 ) -> Option<(String, Option<ToolGrammar>)> {
     if tools.is_empty() {
         return None;
     }
-    let nc = native_chat_prompt(model, messages, tools, true)?;
+    let nc = native_chat_prompt(model, model_id, messages, tools, true, None)?;
     Some((nc.prompt, nc.grammar))
 }
 
@@ -556,17 +580,24 @@ mod tests {
         }
 
         // The size-gate assigns this model thinking-OFF (0.8B < the 4B floor).
-        assert!(!crate::catalog::resolve_enable_thinking("qwen3.5-0.8b", None));
+        assert!(!crate::catalog::resolve_enable_thinking(
+            "qwen3.5-0.8b",
+            None
+        ));
 
         let backend = LlamaBackend::init().expect("backend");
         let model = LlamaModel::load_from_file(&backend, &path, &LlamaModelParams::default())
             .expect("load qwen3.5-0.8b");
         let msgs = vec![ChatMessage {
             role: "user".into(),
-            content: "Do you know javascript?".into(), ..Default::default() }];
+            content: "Do you know javascript?".into(),
+            ..Default::default()
+        }];
 
-        let on = native_chat_prompt(&model, &msgs, &[], true).expect("render thinking-on");
-        let off = native_chat_prompt(&model, &msgs, &[], false).expect("render thinking-off");
+        let on = native_chat_prompt(&model, "qwen3.5-0.8b", &msgs, &[], true, None)
+            .expect("render thinking-on");
+        let off = native_chat_prompt(&model, "qwen3.5-0.8b", &msgs, &[], false, None)
+            .expect("render thinking-off");
 
         let on_tail = &on.prompt[on.prompt.len().saturating_sub(48)..];
         let off_tail = &off.prompt[off.prompt.len().saturating_sub(48)..];
@@ -588,7 +619,6 @@ mod tests {
             "thinking-OFF must not leave <think> open; tail={off_tail:?}"
         );
     }
-
 
     /// Full end-to-end proof through the real batched serving path: load
     /// qwen3.5-0.8b into `ModelRuntime` (the Batched engine — its production
@@ -616,7 +646,9 @@ mod tests {
                 .expect("load qwen3.5-0.8b");
             let msgs = vec![ChatMessage {
                 role: "user".into(),
-                content: "Do you know javascript? Answer in one sentence.".into(), ..Default::default() }];
+                content: "Do you know javascript? Answer in one sentence.".into(),
+                ..Default::default()
+            }];
             let cfg = crate::runtime::GenerationConfig {
                 max_tokens: 80,
                 temperature: 0.6,

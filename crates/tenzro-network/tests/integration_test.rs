@@ -6,14 +6,15 @@ use tenzro_network::{
 
 #[tokio::test]
 async fn test_network_service_creation() {
-    let config = NetworkConfig::local();
+    let config = NetworkConfig::for_tests();
     let result = TenzroNetworkService::new(config).await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
+#[ignore = "needs a live libp2p swarm (binds sockets + drives the event loop); run with --ignored on a networked host"]
 async fn test_local_peer_id() {
-    let config = NetworkConfig::local();
+    let config = NetworkConfig::for_tests();
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     let peer_id = network.local_peer_id().await;
@@ -21,8 +22,9 @@ async fn test_local_peer_id() {
 }
 
 #[tokio::test]
+#[ignore = "needs a live libp2p swarm (binds sockets + drives the event loop); run with --ignored on a networked host"]
 async fn test_topic_subscription() {
-    let config = NetworkConfig::local();
+    let config = NetworkConfig::for_tests();
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     let result = network.subscribe("tenzro/test").await;
@@ -30,8 +32,9 @@ async fn test_topic_subscription() {
 }
 
 #[tokio::test]
+#[ignore = "needs a live libp2p swarm (binds sockets + drives the event loop); run with --ignored on a networked host"]
 async fn test_broadcast_message() {
-    let config = NetworkConfig::local();
+    let config = NetworkConfig::for_tests();
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     // Subscribe first
@@ -44,8 +47,9 @@ async fn test_broadcast_message() {
 }
 
 #[tokio::test]
+#[ignore = "needs a live libp2p swarm (binds sockets + drives the event loop); run with --ignored on a networked host"]
 async fn test_connected_peers() {
-    let config = NetworkConfig::local();
+    let config = NetworkConfig::for_tests();
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     let peers = network.connected_peers().await;
@@ -57,8 +61,9 @@ async fn test_connected_peers() {
 }
 
 #[tokio::test]
+#[ignore = "needs a live libp2p swarm (binds sockets + drives the event loop); run with --ignored on a networked host"]
 async fn test_peer_info() {
-    let config = NetworkConfig::local();
+    let config = NetworkConfig::for_tests();
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     let peer_id = network.local_peer_id().await.unwrap();
@@ -98,8 +103,9 @@ async fn test_message_serialization_roundtrip() {
 }
 
 #[tokio::test]
+#[ignore = "needs a live libp2p swarm (binds sockets + drives the event loop); run with --ignored on a networked host"]
 async fn test_multiple_subscriptions() {
-    let config = NetworkConfig::local();
+    let config = NetworkConfig::for_tests();
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     // Subscribe to multiple topics

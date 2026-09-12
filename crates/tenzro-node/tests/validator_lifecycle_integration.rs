@@ -270,7 +270,6 @@ async fn jail_blocks_reactivation_until_governance() {
     );
 }
 
-
 /// A stake increase on a validator that never leaves the set must reach
 /// consensus.
 ///

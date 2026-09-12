@@ -125,9 +125,9 @@ pub mod latency;
 pub mod library;
 pub mod lifecycle;
 pub mod load;
+pub mod ground;
 pub mod memory_budget;
 pub mod meta_router;
-pub mod muse_harmony;
 pub mod model_hash;
 pub mod moe_compute;
 #[cfg(all(feature = "moe-gpu", feature = "moe-cuda"))]
@@ -141,6 +141,7 @@ pub mod moe_quant;
 pub mod moe_receipt;
 pub mod moe_router;
 pub mod moe_shard;
+pub mod muse_harmony;
 pub mod onnx_session;
 pub mod pricing;
 pub mod provenance;
@@ -171,19 +172,18 @@ pub use audio_runtime::{
 };
 // The batching engine lives in praecise; re-exported so existing callers
 // (`tenzro_model::max_slots`, the node's capacity cap) keep working.
-pub use praecise_runtime::batching::{BatchEngine, BatchRequest, max_slots};
 pub use catalog::{
-    HfModelEntry, LicenseTier, MediaGenExpertPair, MediaGenModelEntry, ModelArchitecture, MoeShape,
-    MtpKind, OnnxAudioEntry, OnnxDetectionEntry, OnnxForecastEntry, OnnxSegmentationEntry,
-    OnnxTextEmbeddingEntry, OnnxTextSegmentationEntry, OnnxVideoEntry, OnnxVisionEntry,
-    TtsModelEntry, custom_license_id, get_audio_catalog, get_audio_model_by_id,
+    EmbeddingTemplate, HfModelEntry, LicenseTier, MediaGenExpertPair, MediaGenModelEntry,
+    ModelArchitecture, MoeShape, MtpKind, OnnxAudioEntry, OnnxDetectionEntry, OnnxForecastEntry,
+    OnnxSegmentationEntry, OnnxTextEmbeddingEntry, OnnxTextSegmentationEntry, OnnxVideoEntry,
+    OnnxVisionEntry, TtsModelEntry, custom_license_id, get_audio_catalog, get_audio_model_by_id,
     get_detection_catalog, get_detection_model_by_id, get_forecast_catalog,
     get_forecast_model_by_id, get_media_gen_catalog, get_media_gen_model_by_id,
     get_media_gen_models_for_kind, get_model_by_id, get_model_catalog, get_segmentation_catalog,
     get_segmentation_model_by_id, get_text_embedding_catalog, get_text_embedding_model_by_id,
     get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_tts_catalog,
     get_tts_model_by_id, get_video_catalog, get_video_model_by_id, get_vision_catalog,
-    get_vision_model_by_id, media_gen_model_splits,
+    get_vision_model_by_id, license_territory, license_territory_for, media_gen_model_splits,
 };
 pub use detection_runtime::{
     DetectResult, Detection, DetectionRuntime, Detector, DetrFamily, GenericDetrDetector,
@@ -229,6 +229,7 @@ pub use moe_router::{
     TokenSlot, plan_dispatch,
 };
 pub use moe_shard::{ExpertHolder, ExpertId, MoeShardView, RepairAssignment, ReplicationPolicy};
+pub use praecise_runtime::batching::{BatchEngine, BatchRequest, max_slots};
 pub use pricing::{PriceEstimate, PricingEngine};
 pub use provenance::{
     ASSERTION_AI_GENERATED, ASSERTION_DEEPFAKE, Ed25519ProvenanceSigner, ProvenanceError,
@@ -260,8 +261,8 @@ pub use sla::{
     SlaResult, response_signing_payload as sla_response_signing_payload,
 };
 pub use text_embedding_runtime::{
-    GenericTextEncoder, StubTextEncoder, TextEmbedConfig, TextEmbedResult, TextEmbeddingRuntime,
-    TextEncoder, TextEncoderFamily,
+    EmbedRole, GenericTextEncoder, StubTextEncoder, TextEmbedConfig, TextEmbedResult,
+    TextEmbeddingRuntime, TextEncoder, TextEncoderFamily, apply_embedding_template,
 };
 pub use text_segmentation_runtime::{
     Sam3Segmenter, StubTextSegmenter, TextPromptableSegmenter, TextSegmentBoxPrompt,

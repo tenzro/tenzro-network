@@ -17,6 +17,8 @@ pub enum ScheduleCommand {
     Enable(ScheduleEnableCmd),
     /// Disable schedule
     Disable(ScheduleDisableCmd),
+    /// Show model stacks: what is serving now, what runs next, and when
+    Stacks(StacksShowCmd),
 }
 
 impl ScheduleCommand {
@@ -26,7 +28,114 @@ impl ScheduleCommand {
             Self::Show(cmd) => cmd.execute().await,
             Self::Enable(cmd) => cmd.execute().await,
             Self::Disable(cmd) => cmd.execute().await,
+            Self::Stacks(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Show model stacks and their switch times.
+///
+/// A "stack" is a scheduling window's named set of models. The switch times are
+/// the point: an app that knows when its stack ends can drain in-flight work
+/// rather than discovering the change through failures.
+#[derive(Debug, Parser)]
+pub struct StacksShowCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    pub rpc: String,
+}
+
+impl StacksShowCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Model Stacks");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getModelStacks", serde_json::json!([]))
+            .await?;
+
+        let models_of = |v: &serde_json::Value| -> String {
+            v.get("models")
+                .and_then(|m| m.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let id = m.get("id")?.as_str()?;
+                            let state = m.get("state").and_then(|s| s.as_str()).unwrap_or("?");
+                            Some(format!("{id} ({state})"))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        };
+
+        println!();
+        match result.get("active") {
+            Some(a) if !a.is_null() => {
+                output::print_field(
+                    "Active stack",
+                    a.get("stack").and_then(|s| s.as_str()).unwrap_or("?"),
+                );
+                if let Some(u) = a.get("until").and_then(|u| u.as_str()) {
+                    output::print_field("Until", u);
+                }
+                output::print_field("Models", &models_of(a));
+            }
+            // Distinguished from "no stacks configured" below, because the two
+            // call for different fixes.
+            _ => output::print_field("Active stack", "none — no window is active now"),
+        }
+
+        println!();
+        match result.get("next") {
+            Some(n) if !n.is_null() => {
+                output::print_field(
+                    "Next stack",
+                    n.get("stack").and_then(|s| s.as_str()).unwrap_or("?"),
+                );
+                if let Some(t) = n.get("starts_at").and_then(|t| t.as_str()) {
+                    output::print_field("Starts at", t);
+                }
+                output::print_field("Models", &models_of(n));
+            }
+            _ => output::print_field("Next stack", "none scheduled"),
+        }
+
+        let configured = result
+            .get("stacks")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        println!();
+        if configured.is_empty() {
+            output::print_field("Configured", "no stacks — every model stays as-is");
+        } else {
+            for w in &configured {
+                let name = w.get("stack").and_then(|s| s.as_str()).unwrap_or("?");
+                let tz = w.get("timezone").and_then(|s| s.as_str()).unwrap_or("UTC");
+                let start = w.get("start_hour").and_then(|h| h.as_u64()).unwrap_or(0);
+                let end = w.get("end_hour").and_then(|h| h.as_u64()).unwrap_or(0);
+                let models = w
+                    .get("models")
+                    .and_then(|m| m.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|m| m.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                output::print_field(name, &format!("{start:02}:00-{end:02}:00 {tz} — {models}"));
+            }
+        }
+
+        if let Some(t) = result.get("node_time").and_then(|t| t.as_str()) {
+            println!();
+            output::print_field("Node time", t);
+        }
+
+        Ok(())
     }
 }
 
@@ -37,6 +146,12 @@ struct ProviderSchedule {
     end_hour: u8,
     timezone: String,
     days_of_week: [bool; 7],
+    /// Model stacks — the named windows that decide which models are resident
+    /// when. Carried through every `set` because the RPC replaces the whole
+    /// schedule: omitting the field here silently deleted every configured
+    /// stack, so a routine availability edit wiped the residency plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    windows: Vec<serde_json::Value>,
 }
 
 /// Set provider schedule
@@ -74,12 +189,28 @@ impl ScheduleSetCmd {
         // Parse days
         let days_of_week = parse_days(&self.days)?;
 
+        let rpc = RpcClient::new(&self.rpc);
+
+        // Read the current schedule first and carry its windows forward. The
+        // RPC replaces the schedule wholesale, so a `set` that did not do this
+        // would delete every model stack as a side effect of changing hours.
+        let existing: serde_json::Value = rpc
+            .call("tenzro_getProviderSchedule", serde_json::json!([]))
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        let windows = existing
+            .get("windows")
+            .and_then(|w| w.as_array())
+            .cloned()
+            .unwrap_or_default();
+
         let schedule = ProviderSchedule {
             enabled: true,
             start_hour,
             end_hour,
             timezone: self.timezone.clone(),
             days_of_week,
+            windows: windows.clone(),
         };
 
         println!();
@@ -87,11 +218,13 @@ impl ScheduleSetCmd {
         output::print_field("End Time", &format!("{:02}:00", end_hour));
         output::print_field("Timezone", &self.timezone);
         output::print_field("Days", &self.days);
+        if !windows.is_empty() {
+            output::print_field("Model stacks kept", &windows.len().to_string());
+        }
         println!();
 
         let spinner = output::create_spinner("Updating schedule...");
 
-        let rpc = RpcClient::new(&self.rpc);
         let _: serde_json::Value = rpc
             .call("tenzro_setProviderSchedule", serde_json::json!([schedule]))
             .await?;

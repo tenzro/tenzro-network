@@ -31,8 +31,8 @@ mod linux {
     use std::sync::atomic::{AtomicI32, Ordering};
     use std::time::Duration;
 
-    use tenzro_initagent::{assemble_env, parse_mmds, parse_run_json, unseal_all};
     use tenzro_initagent::mmds::{MMDS_ADDR, MMDS_TOKEN_PATH, MMDS_TOKEN_TTL_SECS};
+    use tenzro_initagent::{assemble_env, parse_mmds, parse_run_json, unseal_all};
 
     const RUN_JSON_PATH: &str = "/etc/tenzro/run.json";
     /// Optional guest sealing key (32 raw bytes) for guest-side unsealing. Absent
@@ -55,9 +55,10 @@ mod linux {
 
         install_signal_forwarding();
 
-        let run_spec = match std::fs::read(RUN_JSON_PATH).map_err(|e| e.to_string()).and_then(|b| {
-            parse_run_json(&b).map_err(|e| e.to_string())
-        }) {
+        let run_spec = match std::fs::read(RUN_JSON_PATH)
+            .map_err(|e| e.to_string())
+            .and_then(|b| parse_run_json(&b).map_err(|e| e.to_string()))
+        {
             Ok(s) => s,
             Err(e) => fatal(&format!("run.json ({RUN_JSON_PATH}): {e}")),
         };
@@ -166,8 +167,13 @@ mod linux {
 
     /// MMDS v2: PUT a token, then GET the document with it. Returns the plaintext
     /// env map and any sealed entries.
-    fn fetch_mmds() -> Result<(BTreeMap<String, String>, Vec<tenzro_initagent::SealedEnvVar>), String>
-    {
+    fn fetch_mmds() -> Result<
+        (
+            BTreeMap<String, String>,
+            Vec<tenzro_initagent::SealedEnvVar>,
+        ),
+        String,
+    > {
         let addr = format!("{MMDS_ADDR}:80");
         let sock = addr
             .to_socket_addrs()
@@ -205,10 +211,7 @@ mod linux {
 
     /// Minimal HTTP/1.1 client: send a request, return `(status, body)`. No
     /// dependency — the request set is tiny and fixed.
-    fn http_roundtrip(
-        sock: &std::net::SocketAddr,
-        req: &[u8],
-    ) -> Result<(u16, Vec<u8>), String> {
+    fn http_roundtrip(sock: &std::net::SocketAddr, req: &[u8]) -> Result<(u16, Vec<u8>), String> {
         let mut stream =
             TcpStream::connect_timeout(sock, Duration::from_secs(2)).map_err(|e| e.to_string())?;
         stream
@@ -313,8 +316,14 @@ mod linux {
     /// Forward SIGTERM/SIGINT to the app so a graceful node-side stop propagates.
     fn install_signal_forwarding() {
         unsafe {
-            libc::signal(libc::SIGTERM, forward_signal as *const () as libc::sighandler_t);
-            libc::signal(libc::SIGINT, forward_signal as *const () as libc::sighandler_t);
+            libc::signal(
+                libc::SIGTERM,
+                forward_signal as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGINT,
+                forward_signal as *const () as libc::sighandler_t,
+            );
         }
     }
 
@@ -340,7 +349,11 @@ mod linux {
             };
             for stream in listener.incoming().flatten() {
                 let up = APP_PID.load(Ordering::SeqCst) > 0;
-                let (code, ok) = if up { ("200 OK", "ok") } else { ("503 Service Unavailable", "down") };
+                let (code, ok) = if up {
+                    ("200 OK", "ok")
+                } else {
+                    ("503 Service Unavailable", "down")
+                };
                 let body = format!("{{\"status\":\"{ok}\"}}");
                 let resp = format!(
                     "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

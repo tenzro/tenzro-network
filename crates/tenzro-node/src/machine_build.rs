@@ -93,7 +93,11 @@ pub const ENV_BASES_DIR: &str = "TENZRO_MACHINE_BASES_DIR";
 // Used by the feature-gated build impl and the tests; unused in a default build.
 #[allow(dead_code)]
 fn validate_caid(caid: &str) -> Result<(), String> {
-    if caid.len() == 64 && caid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if caid.len() == 64
+        && caid
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         Ok(())
     } else {
         Err("app_caid must be 64 lowercase hex chars".into())
@@ -186,7 +190,12 @@ mod imp {
                 }
                 #[cfg(not(feature = "machine-builder-oci"))]
                 {
-                    let _ = (registry, repository, digest, std::marker::PhantomData::<OciRef>);
+                    let _ = (
+                        registry,
+                        repository,
+                        digest,
+                        std::marker::PhantomData::<OciRef>,
+                    );
                     return Err(
                         "OCI base pull requires the node `machine-builder-oci` feature; \
                          use a dir base or a prebuilt artifact_caid instead"
@@ -208,7 +217,9 @@ mod imp {
             app_dir,
             initagent_bin,
             run,
-            size_mib: req.size_mib.unwrap_or(tenzro_machine_builder::spec::DEFAULT_SIZE_MIB),
+            size_mib: req
+                .size_mib
+                .unwrap_or(tenzro_machine_builder::spec::DEFAULT_SIZE_MIB),
         };
         let out = tenzro_machine_builder::build_rootfs(&ctx, &work.path().join("build"))
             .await
@@ -245,10 +256,12 @@ pub async fn build_and_publish(
     _node: &std::sync::Arc<crate::node::TenzroNode>,
     _req: &MachineBuildRequest,
 ) -> Result<MachineBuildResult, String> {
-    Err("machine-class rootfs builder is not compiled into this node \
+    Err(
+        "machine-class rootfs builder is not compiled into this node \
          (rebuild with --features machine-builder). A prebuilt artifact_caid \
          still deploys directly."
-        .into())
+            .into(),
+    )
 }
 
 #[cfg(test)]
@@ -297,6 +310,9 @@ mod tests {
     fn caid_validation() {
         assert!(validate_caid(&"a".repeat(64)).is_ok());
         assert!(validate_caid("short").is_err());
-        assert!(validate_caid(&"A".repeat(64)).is_err(), "uppercase rejected");
+        assert!(
+            validate_caid(&"A".repeat(64)).is_err(),
+            "uppercase rejected"
+        );
     }
 }

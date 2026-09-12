@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let human_pubkey = human_keypair.public_key().as_bytes().to_vec();
     let human = registry
         .register_human_with_fee(
+            b"test-credential".to_vec(),
             human_pubkey,
             "Portfolio Owner".to_string(),
             KycTier::Enhanced,

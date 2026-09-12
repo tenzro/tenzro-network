@@ -111,6 +111,7 @@ impl TestNode {
             id: id.to_string(),
             object: "file",
             bytes: 42,
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
             created_at: 1,
             filename: format!("{id}.txt"),
             purpose: FilePurpose::UserData,

@@ -241,6 +241,16 @@ async fn gpu_cc_ready() -> bool {
 pub async fn detect_specific_tee(
     vendor: tenzro_types::tee::TeeVendor,
 ) -> Option<Box<dyn TeeProvider>> {
+    // Every arm that names a `TeeVendor` variant is vendor-gated, so with no
+    // vendor backend compiled in the match is the fallback alone and the import
+    // would be unused. That build is a real one: `tenzro-network` takes this
+    // crate for the TPM identity path only.
+    #[cfg(any(
+        feature = "intel-tdx",
+        feature = "amd-sev-snp",
+        feature = "aws-nitro",
+        feature = "nvidia-gpu"
+    ))]
     use tenzro_types::tee::TeeVendor;
 
     match vendor {
@@ -300,7 +310,17 @@ pub async fn is_tee_available() -> bool {
 
 /// Returns a list of all TEE vendors that are available on this system.
 pub async fn available_tee_vendors() -> Vec<tenzro_types::tee::TeeVendor> {
+    // Both the import and the `mut` are used only by the vendor-gated blocks
+    // below. With no vendor backend compiled in this correctly reports an
+    // empty list rather than failing to build.
+    #[cfg(any(
+        feature = "intel-tdx",
+        feature = "amd-sev-snp",
+        feature = "aws-nitro",
+        feature = "nvidia-gpu"
+    ))]
     use tenzro_types::tee::TeeVendor;
+    #[allow(unused_mut)]
     let mut vendors = Vec::new();
 
     #[cfg(feature = "intel-tdx")]

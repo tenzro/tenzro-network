@@ -1,4 +1,4 @@
-//! Auth commands: refresh access tokens and link an existing MPC wallet to
+//! Auth commands: refresh access tokens and link an existing wallet to
 //! a new auth session.
 //!
 //! Onboarding (humans, delegated agents, autonomous agents) goes through
@@ -27,7 +27,7 @@ pub struct AuthCommand {
 pub enum AuthAction {
     /// Exchange a refresh token for a fresh access token.
     Refresh(RefreshArgs),
-    /// Mint access + refresh tokens for an existing MPC wallet.
+    /// Mint access + refresh tokens for an existing wallet.
     LinkWallet(LinkWalletArgs),
     /// Show this machine's DPoP key, creating one on first use.
     ///
@@ -262,11 +262,14 @@ async fn execute_link_wallet(args: &LinkWalletArgs) -> Result<()> {
     Ok(())
 }
 
-/// Show (creating on first use) the DPoP key this machine signs proofs with.
+/// Show the DPoP key this machine signs proofs with.
+///
+/// There is no "creating on first use" any more: the key is derived from the
+/// TPM, so it is the same one on every call and there is no path to print.
 fn execute_dpop_key() -> Result<()> {
     let key = crate::dpop::DpopKey::load_or_create()?;
     output::print_success("DPoP key ready");
-    output::print_field("Path", &crate::dpop::key_path().display().to_string());
+    output::print_field("Source", "derived from this TPM, never stored");
     output::print_field("JWK", &key.jwk());
     output::print_field("Thumbprint (jkt)", &key.jkt());
     output::print_info(

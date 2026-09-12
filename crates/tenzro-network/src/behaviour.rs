@@ -31,7 +31,6 @@ use crate::consensus_direct_proto::{self, ConsensusDirectBehaviour};
 use crate::da_committee_relay::{self, DaCommitteeBehaviour};
 use crate::db_replicate_proto::{self, DbReplicateBehaviour};
 use crate::gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message};
-use crate::mpc_relay::{self, MpcRelayBehaviour};
 
 /// Topics on which ONLY validators may publish. Enforced in the gossip validation
 /// pipeline (`service.rs`) and by the peer scoring system (invalid messages → P4 penalty).
@@ -129,14 +128,6 @@ pub struct TenzroBehaviour {
     /// because every publisher has been migrated here. See
     /// `consensus_direct_proto.rs` for the wire types and concurrency limits.
     pub consensus_direct: ConsensusDirectBehaviour,
-
-    /// MPC relay request/response protocol (`/tenzro/mpc/req-resp/1.0.0`).
-    /// Carries DKLS23 round messages (DKG, signing, refresh, re-key)
-    /// between MPC quorum members addressed by TDIP DID. The bridge-side
-    /// `Transport` trait in `tenzro_bridge::mpc::transport` is implemented
-    /// by a node-layer adapter that calls into this behaviour. See
-    /// `mpc_relay.rs` for the wire types and concurrency limits.
-    pub mpc_relay: MpcRelayBehaviour,
 
     /// Cluster-tunnel request/response protocol
     /// (`/tenzro/cluster-tunnel/1.0.0`). Relays a cluster member's loopback
@@ -442,7 +433,6 @@ impl TenzroBehaviour {
         // node-injected resolver; the wire is point-to-point only — broadcast
         // rounds are unrolled into per-peer messages by the bridge-side
         // session driver.
-        let mpc_relay = mpc_relay::new_behaviour();
 
         // Cluster-tunnel protocol: relays a cluster member's loopback
         // rpc-server byte stream to the pipeline head over the encrypted
@@ -557,7 +547,6 @@ impl TenzroBehaviour {
             allow_block_list,
             block_sync,
             consensus_direct,
-            mpc_relay,
             cluster_tunnel,
             da_committee,
             db_replicate,

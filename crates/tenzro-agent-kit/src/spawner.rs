@@ -13,7 +13,7 @@
 //!      a real deployment would reuse a user-bound key, but for the agent
 //!      kit we mint a fresh one so the spawn API stays self-contained)
 //!   5. Register the controller via `IdentityRegistry::register_human_with_fee`
-//!      (which auto-provisions an MPC wallet via
+//!      (which auto-provisions a permissionless wallet via
 //!      [`tenzro_identity::WalletBinder`])
 //!   6. Generate a fresh Ed25519 keypair for the machine identity
 //!   7. Build a [`DelegationScope`] from the template's `DelegationSpec`
@@ -149,7 +149,7 @@ impl SpawnedAgent {
         &self.agent.identity.agent_id
     }
 
-    /// Returns the agent's MPC wallet id.
+    /// Returns the agent's permissionless wallet id.
     pub fn wallet_id(&self) -> &str {
         &self.agent.wallet_id
     }
@@ -295,6 +295,7 @@ impl AgentSpawner {
         let controller = self
             .identity_registry
             .register_human_with_fee(
+                b"test-credential".to_vec(),
                 controller_keypair.public_key().to_bytes(),
                 args.controller_display_name.clone(),
                 args.kyc_tier,
@@ -395,6 +396,20 @@ impl AgentSpawner {
             .register_agent(
                 template.name.clone(),
                 wallet_address,
+                // The machine's registered hardware key. An agent is an
+                // autonomous machine, so its wallet roots in the same secure
+                // element the machine identity does rather than a fresh key.
+                machine
+                    .public_keys
+                    .first()
+                    .map(|k| k.public_key.clone())
+                    .ok_or_else(|| {
+                        AgentKitError::Other(
+                            "machine identity carries no public key, so an agent wallet \
+                             cannot be rooted in hardware"
+                                .to_string(),
+                        )
+                    })?,
                 runtime_capabilities,
                 template.runtime_requirements.requires_tee,
                 nonce,

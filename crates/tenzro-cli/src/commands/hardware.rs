@@ -127,168 +127,207 @@ async fn detect_accelerators(
                 .output()
                 .await
                 && output.status.success()
-                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                        && let Some(displays) = json.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
-                            for display in displays {
-                                let name = display.get("sppci_model")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("Unknown GPU")
-                                    .to_string();
+                && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                && let Some(displays) = json.get("SPDisplaysDataType").and_then(|v| v.as_array())
+            {
+                for display in displays {
+                    let name = display
+                        .get("sppci_model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown GPU")
+                        .to_string();
 
-                                let mut memory_gb = display.get("spdisplays_vram")
-                                    .and_then(|v| v.as_str())
-                                    .map(parse_memory_string)
-                                    .unwrap_or(0.0);
+                    let mut memory_gb = display
+                        .get("spdisplays_vram")
+                        .and_then(|v| v.as_str())
+                        .map(parse_memory_string)
+                        .unwrap_or(0.0);
 
-                                if memory_gb == 0.0
-                                    && let Some(shared) = display.get("spdisplays_vram_shared")
-                                        .and_then(|v| v.as_str())
-                                    {
-                                        memory_gb = parse_memory_string(shared);
-                                        unified_memory = true;
-                                    }
+                    if memory_gb == 0.0
+                        && let Some(shared) = display
+                            .get("spdisplays_vram_shared")
+                            .and_then(|v| v.as_str())
+                    {
+                        memory_gb = parse_memory_string(shared);
+                        unified_memory = true;
+                    }
 
-                                if memory_gb == 0.0 {
-                                    let sys = sysinfo::System::new_with_specifics(
-                                        sysinfo::RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::everything()),
-                                    );
-                                    let total_gb = sys.total_memory() as f64 / 1_073_741_824.0;
-                                    memory_gb = (total_gb * 0.75 * 10.0).round() / 10.0;
-                                    unified_memory = true;
-                                }
+                    if memory_gb == 0.0 {
+                        let sys = sysinfo::System::new_with_specifics(
+                            sysinfo::RefreshKind::new()
+                                .with_memory(sysinfo::MemoryRefreshKind::everything()),
+                        );
+                        let total_gb = sys.total_memory() as f64 / 1_073_741_824.0;
+                        memory_gb = (total_gb * 0.75 * 10.0).round() / 10.0;
+                        unified_memory = true;
+                    }
 
-                                let compute_units = display.get("sppci_cores")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| s.parse::<u32>().ok())
-                                    .or_else(|| display.get("sppci_cores").and_then(|v| v.as_u64()).map(|v| v as u32));
+                    let compute_units = display
+                        .get("sppci_cores")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .or_else(|| {
+                            display
+                                .get("sppci_cores")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32)
+                        });
 
-                                gpus.push(AcceleratorInfo {
-                                    name,
-                                    kind: "gpu".to_string(),
-                                    memory_gb,
-                                    compute_units,
-                                });
-                            }
-                        }
+                    gpus.push(AcceleratorInfo {
+                        name,
+                        kind: "gpu".to_string(),
+                        memory_gb,
+                        compute_units,
+                    });
+                }
+            }
 
             // Detect Neural Engine via ioreg
             if let Ok(output) = tokio::process::Command::new("ioreg")
                 .args(["-r", "-d", "1", "-c", "AppleARMIODevice"])
                 .output()
                 .await
-                && output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    if stdout.contains("ane") || stdout.contains("neural-engine") || stdout.contains("ANE") {
-                        accelerators.push(AcceleratorInfo {
-                            name: "Neural Engine".to_string(),
-                            kind: "npu".to_string(),
-                            memory_gb: 0.0,
-                            compute_units: None,
-                        });
-                    }
+                && output.status.success()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("ane")
+                    || stdout.contains("neural-engine")
+                    || stdout.contains("ANE")
+                {
+                    accelerators.push(AcceleratorInfo {
+                        name: "Neural Engine".to_string(),
+                        kind: "npu".to_string(),
+                        memory_gb: 0.0,
+                        compute_units: None,
+                    });
                 }
-        },
+            }
+        }
         "linux" => {
             if let Ok(output) = tokio::process::Command::new("lspci")
                 .args(["-mm", "-nn"])
                 .output()
                 .await
-                && output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let lower = line.to_lowercase();
-                        let is_gpu = lower.contains("[0300]") || lower.contains("[0302]") || lower.contains("[0380]")
-                            || lower.contains("vga") || lower.contains("3d controller") || lower.contains("display controller");
-                        let is_accel = lower.contains("[1200]") || lower.contains("[0b40]")
-                            || lower.contains("processing accelerator") || lower.contains("co-processor");
+                && output.status.success()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let lower = line.to_lowercase();
+                    let is_gpu = lower.contains("[0300]")
+                        || lower.contains("[0302]")
+                        || lower.contains("[0380]")
+                        || lower.contains("vga")
+                        || lower.contains("3d controller")
+                        || lower.contains("display controller");
+                    let is_accel = lower.contains("[1200]")
+                        || lower.contains("[0b40]")
+                        || lower.contains("processing accelerator")
+                        || lower.contains("co-processor");
 
-                        if is_gpu || is_accel {
-                            let name = extract_lspci_device_name(line);
-                            let kind = if is_accel { "accelerator" } else { "gpu" };
-                            let entry = AcceleratorInfo {
-                                name,
-                                kind: kind.to_string(),
-                                memory_gb: 0.0,
-                                compute_units: None,
-                            };
-                            if is_accel { accelerators.push(entry); } else { gpus.push(entry); }
+                    if is_gpu || is_accel {
+                        let name = extract_lspci_device_name(line);
+                        let kind = if is_accel { "accelerator" } else { "gpu" };
+                        let entry = AcceleratorInfo {
+                            name,
+                            kind: kind.to_string(),
+                            memory_gb: 0.0,
+                            compute_units: None,
+                        };
+                        if is_accel {
+                            accelerators.push(entry);
+                        } else {
+                            gpus.push(entry);
                         }
                     }
                 }
+            }
 
             // nvidia-smi
             if let Ok(output) = tokio::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+                .args([
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ])
                 .output()
                 .await
-                && output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for (i, line) in stdout.lines().enumerate() {
-                        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-                        if parts.len() >= 2 {
-                            let name = parts[0].to_string();
+                && output.status.success()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for (i, line) in stdout.lines().enumerate() {
+                    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 2 {
+                        let name = parts[0].to_string();
 
-                            // A coherent CPU/GPU part has no separate VRAM to
-                            // report, so `nvidia-smi` answers `[N/A]` rather
-                            // than a number — GB10 does exactly this. The old
-                            // code ran `parse().unwrap_or(0.0)`, silently
-                            // recorded 0 GB, and the unified-memory rule below
-                            // then failed against `0.0 >= total * 0.875`. The
-                            // node advertised a GPU with no memory, and the
-                            // scheduler sized placement as if it had none.
-                            //
-                            // Treat an unparseable figure as "shared pool" and
-                            // count the system memory once, which is what it is.
-                            // A coherent CPU/GPU part has no separate VRAM to
-                            // report, so `nvidia-smi` answers `[N/A]` rather
-                            // than a number — GB10 does exactly this. The old
-                            // code ran `parse().unwrap_or(0.0)` and silently
-                            // recorded 0 GB. Leave it at 0 here; the shared-pool
-                            // rule after all vendor probes resolves it, so the
-                            // same handling covers every vendor.
-                            let memory_gb = parts[1]
-                                .parse::<f64>()
-                                .ok()
-                                .filter(|mb| *mb > 0.0)
-                                .map(|mb| (mb / 1024.0 * 10.0).round() / 10.0)
-                                .unwrap_or(0.0);
+                        // A coherent CPU/GPU part has no separate VRAM to
+                        // report, so `nvidia-smi` answers `[N/A]` rather
+                        // than a number — GB10 does exactly this. The old
+                        // code ran `parse().unwrap_or(0.0)`, silently
+                        // recorded 0 GB, and the unified-memory rule below
+                        // then failed against `0.0 >= total * 0.875`. The
+                        // node advertised a GPU with no memory, and the
+                        // scheduler sized placement as if it had none.
+                        //
+                        // Treat an unparseable figure as "shared pool" and
+                        // count the system memory once, which is what it is.
+                        // A coherent CPU/GPU part has no separate VRAM to
+                        // report, so `nvidia-smi` answers `[N/A]` rather
+                        // than a number — GB10 does exactly this. The old
+                        // code ran `parse().unwrap_or(0.0)` and silently
+                        // recorded 0 GB. Leave it at 0 here; the shared-pool
+                        // rule after all vendor probes resolves it, so the
+                        // same handling covers every vendor.
+                        let memory_gb = parts[1]
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|mb| *mb > 0.0)
+                            .map(|mb| (mb / 1024.0 * 10.0).round() / 10.0)
+                            .unwrap_or(0.0);
 
-                            let gpu_count = gpus.len();
-                            if let Some(gpu) = gpus.iter_mut().find(|g| g.name.contains(&name) || i < gpu_count) {
-                                gpu.memory_gb = memory_gb;
-                                // Prefer the vendor name. `lspci` on a part the
-                                // local PCI ID database does not know yields
-                                // "Device [2e12] NVIDIA Corporation [10de]";
-                                // the old guard only replaced empty/"Unknown",
-                                // so that raw ID was what reached the registry.
-                                if !name.is_empty() {
-                                    gpu.name = name;
-                                }
-                            } else {
-                                gpus.push(AcceleratorInfo { name, kind: "gpu".to_string(), memory_gb, compute_units: None });
+                        let gpu_count = gpus.len();
+                        if let Some(gpu) = gpus
+                            .iter_mut()
+                            .find(|g| g.name.contains(&name) || i < gpu_count)
+                        {
+                            gpu.memory_gb = memory_gb;
+                            // Prefer the vendor name. `lspci` on a part the
+                            // local PCI ID database does not know yields
+                            // "Device [2e12] NVIDIA Corporation [10de]";
+                            // the old guard only replaced empty/"Unknown",
+                            // so that raw ID was what reached the registry.
+                            if !name.is_empty() {
+                                gpu.name = name;
                             }
+                        } else {
+                            gpus.push(AcceleratorInfo {
+                                name,
+                                kind: "gpu".to_string(),
+                                memory_gb,
+                                compute_units: None,
+                            });
                         }
                     }
                 }
+            }
 
             // rocm-smi (AMD GPUs)
             if let Ok(output) = tokio::process::Command::new("rocm-smi")
                 .args(["--showproductname", "--showmeminfo", "vram", "--csv"])
                 .output()
                 .await
-                && output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines().skip(1) {
-                        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-                        if parts.len() >= 2 {
-                            let name = parts[0].to_string();
-                            let memory_gb = parse_memory_string(parts.get(1).unwrap_or(&"0"));
-                            if let Some(gpu) = gpus.iter_mut().find(|g| g.name.contains(&name)) {
-                                gpu.memory_gb = memory_gb;
-                            }
+                && output.status.success()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines().skip(1) {
+                    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 2 {
+                        let name = parts[0].to_string();
+                        let memory_gb = parse_memory_string(parts.get(1).unwrap_or(&"0"));
+                        if let Some(gpu) = gpus.iter_mut().find(|g| g.name.contains(&name)) {
+                            gpu.memory_gb = memory_gb;
                         }
                     }
                 }
+            }
 
             // Resolve unified vs discrete memory once, after every vendor
             // probe, so the rule is the same whoever made the part.
@@ -311,21 +350,41 @@ async fn detect_accelerators(
                     // accelerators on a DGX Spark, none of them real.
                     const NPU_CLASSES: &[&str] = &["accel", "npu", "habanalabs", "intel_vpu"];
                     if NPU_CLASSES.contains(&name.as_str())
-                        && let Ok(devices) = std::fs::read_dir(entry.path()) {
-                            for dev in devices.flatten() {
-                                let dev_name = dev.file_name().to_string_lossy().to_string();
-                                accelerators.push(AcceleratorInfo {
-                                    name: dev_name,
-                                    kind: "npu".to_string(),
-                                    memory_gb: 0.0,
-                                    compute_units: None,
-                                });
-                            }
+                        && let Ok(devices) = std::fs::read_dir(entry.path())
+                    {
+                        for dev in devices.flatten() {
+                            let dev_name = dev.file_name().to_string_lossy().to_string();
+                            accelerators.push(AcceleratorInfo {
+                                name: dev_name,
+                                kind: "npu".to_string(),
+                                memory_gb: 0.0,
+                                compute_units: None,
+                            });
                         }
+                    }
                 }
             }
-        },
+        }
         "windows" => {
+            // `Win32_VideoController.AdapterRAM` is a 32-bit DWORD — capped at
+            // 4,294,967,295 bytes — so any card with more than ~4 GB VRAM
+            // overflows and WMI reports a wrong, often exactly-4GB, figure.
+            // This is not a rare edge case: it silently mis-detects every
+            // current mid-range-or-better GPU (an RTX 5070 Ti's real 16 GB
+            // reports as 4 GB here), which then undersizes every model this
+            // node considers itself able to serve.
+            //
+            // The registry key HKLM\SYSTEM\...\Class\{4d36e968-...}\<NNNN>\
+            // HardwareInformation.qwMemorySize is a 64-bit value the vendor
+            // driver itself populates for exactly this reason, and does not
+            // overflow. It is fetched for every adapter subkey in one call
+            // (`registry_vram_by_name`) and matched to each WMI row by name,
+            // the same way this file already matches `nvidia-smi` output to
+            // `lspci` rows on Linux (below) — subkey enumeration order is
+            // not guaranteed to track `Win32_VideoController`'s, so name
+            // matching is the reliable join, not position.
+            let registry_vram = query_windows_adapter_vram_registry().await;
+
             if let Ok(output) = tokio::process::Command::new("powershell")
                 .args(["-NoProfile", "-Command",
                     "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json"])
@@ -340,7 +399,16 @@ async fn detect_accelerators(
                         for item in &items {
                             let name = item.get("Name").and_then(|v| v.as_str()).unwrap_or("Unknown GPU").to_string();
                             let adapter_ram = item.get("AdapterRAM").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let memory_gb = (adapter_ram as f64 / 1_073_741_824.0 * 10.0).round() / 10.0;
+                            let fallback_gb = (adapter_ram as f64 / 1_073_741_824.0 * 10.0).round() / 10.0;
+
+                            let memory_gb = registry_vram
+                                .iter()
+                                .find(|(reg_name, _)| reg_name.contains(&name) || name.contains(reg_name.as_str()))
+                                .map(|(_, bytes)| *bytes)
+                                .filter(|bytes| *bytes > adapter_ram) // only trust it if it beats the (possibly overflowed) WMI figure
+                                .map(|bytes| (bytes as f64 / 1_073_741_824.0 * 10.0).round() / 10.0)
+                                .unwrap_or(fallback_gb);
+
                             gpus.push(AcceleratorInfo {
                                 name,
                                 kind: "gpu".to_string(),
@@ -349,11 +417,81 @@ async fn detect_accelerators(
                             });
                         }
                     }
-        },
+        }
         _ => {}
     }
 
     (gpus, accelerators, unified_memory)
+}
+
+/// The true VRAM size for every GPU/display adapter registered on this
+/// Windows machine, keyed by the driver's own name for it.
+///
+/// `Win32_VideoController.AdapterRAM` is a 32-bit `DWORD` — capped at
+/// `u32::MAX` bytes, ~4 GiB — so WMI silently overflows and misreports the
+/// VRAM of every card above that size (an RTX 5070 Ti's real 16 GB reports
+/// as exactly 4 GB there). The vendor driver itself writes the true 64-bit
+/// figure to `HardwareInformation.qwMemorySize` under each adapter's own
+/// subkey of the display-class registry key precisely because of this WMI
+/// limitation, so that is read directly instead.
+///
+/// One subkey per adapter (`0000`, `0001`, ...), enumerated in one
+/// PowerShell call rather than probed per-index against the WMI list: the
+/// two enumeration orders are not guaranteed to match, so the caller joins
+/// on `DriverDesc` — the same name WMI's `Name` field carries — rather than
+/// position.
+async fn query_windows_adapter_vram_registry() -> Vec<(String, u64)> {
+    let script = r#"
+        $classKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+        Get-ChildItem $classKey -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSChildName -match '^\d{4}$' } |
+            ForEach-Object {
+                $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+                if ($p.'HardwareInformation.qwMemorySize' -and $p.DriverDesc) {
+                    [PSCustomObject]@{
+                        Name = $p.DriverDesc
+                        Bytes = $p.'HardwareInformation.qwMemorySize'
+                    }
+                }
+            } | ConvertTo-Json
+    "#;
+
+    let Ok(output) = tokio::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    // Deliberately not gated on `output.status.success()`: PowerShell can
+    // exit 1 even though `-ErrorAction SilentlyContinue` kept the pipeline's
+    // *output* clean — a non-terminating error on an unrelated subkey (a
+    // "Properties" child, a disabled port, anything without the fields this
+    // script filters for) still flips `$?` to false for the whole
+    // invocation, and that becomes the process exit code, even though
+    // stdout holds exactly the correct JSON. Confirmed by reproducing this
+    // exact script standalone: exit code 1, valid JSON in stdout, empty
+    // stderr. A registry read finding nothing real is not a hard error
+    // either way — the AdapterRAM fallback in the caller covers both cases
+    // — so trying to parse stdout regardless of exit status, and falling
+    // back to an empty Vec only if that parse itself fails, is the correct
+    // signal here rather than the exit code.
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    let items = match json {
+        serde_json::Value::Array(arr) => arr,
+        serde_json::Value::Null => Vec::new(),
+        single => vec![single],
+    };
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let name = item.get("Name")?.as_str()?.to_string();
+            let bytes = item.get("Bytes")?.as_u64()?;
+            Some((name, bytes))
+        })
+        .collect()
 }
 
 /// Detect TEE capabilities by probing OS device files.

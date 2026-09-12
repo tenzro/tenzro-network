@@ -74,7 +74,6 @@ pub mod error;
 pub mod gossip;
 pub mod message;
 pub mod metrics;
-pub mod mpc_relay;
 pub mod node_delegation;
 pub mod peer_binding;
 pub mod peer_manager;
@@ -89,8 +88,7 @@ pub use behaviour::{TenzroBehaviour, TenzroNetwork};
 pub use block_sync_proto::{
     BLOCK_SYNC_PROTOCOL, BlockSyncBehaviour, BlockSyncError, BlockSyncRequest, BlockSyncResponse,
     MAX_BLOCK_HASHES_PER_REQUEST, MAX_BLOCK_RANGE_BYTES, MAX_BLOCKS_PER_RANGE,
-    MAX_INBOUND_STREAMS_PER_PEER,
-    MAX_INFLIGHT_REQUESTS_PER_PEER,
+    MAX_INBOUND_STREAMS_PER_PEER, MAX_INFLIGHT_REQUESTS_PER_PEER,
 };
 pub use cluster_tunnel_proto::{
     CLUSTER_TUNNEL_PROTOCOL, ClusterTunnelBehaviour, ClusterTunnelError, ClusterTunnelRequest,
@@ -128,10 +126,6 @@ pub use message::{
     VoteType,
 };
 pub use metrics::NetworkMetrics;
-pub use mpc_relay::{
-    MPC_RELAY_GOSSIP_TOPIC_PREFIX, MPC_RELAY_PROTOCOL, MpcDidResolver, MpcRelayBehaviour,
-    MpcRelayError, MpcRelayRequest, MpcRelayResponse, session_topic as mpc_session_topic,
-};
 pub use peer_binding::{
     AGENT_BINDING_PREFIX, PEER_BINDING_DOMAIN, binding_payload, encode_agent_binding,
     parse_agent_binding, verify_peer_binding,

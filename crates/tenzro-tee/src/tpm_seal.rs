@@ -436,12 +436,14 @@ pub fn is_sealed(dir: &Path) -> bool {
     dir.join(SEALED_PUB).exists() && dir.join(SEALED_PRIV).exists()
 }
 
-/// Narrow a file to owner-only, best effort.
-fn restrict(path: &Path) {
+/// Narrow a file to owner-only, best effort. Windows has no POSIX mode bits
+/// to restrict here; ACL-based tightening for that platform is tracked as a
+/// separate follow-up rather than silently assumed equivalent.
+fn restrict(_path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600));
     }
 }
 

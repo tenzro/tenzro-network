@@ -378,6 +378,52 @@ impl MemoryBudget {
     /// The replacement is evaluated against the tier's usage *excluding* the
     /// old claim, so growing a commitment is checked honestly and shrinking
     /// one always succeeds.
+    /// Change the resident ceiling on a *live* budget, without a restart.
+    ///
+    /// WHY THIS EXISTS. Switching a node's resource profile — the thing
+    /// `tenzro-mode` does — used to require editing the config and restarting
+    /// tenzro-node, which drops the validator and every in-flight request. A
+    /// scheduled, per-window profile cannot restart at each boundary. The
+    /// budget already holds its config behind the same `Mutex<State>` every
+    /// other method locks, so the ceiling was always mutable in principle;
+    /// there was simply no method to move it. This is that method.
+    ///
+    /// It does NOT evict anything. Lowering the ceiling below what is already
+    /// committed is allowed and leaves existing residents in place — the
+    /// autotuner's `EvictIdle` reconciles the overcommit as models fall idle,
+    /// exactly as it does under load pressure. Refusing to lower the ceiling
+    /// while overcommitted would make a scheduled shrink impossible, which is
+    /// the opposite of the point; the overcommit is transient and self-heals.
+    ///
+    /// `None` restores the default split. The change is validated the same way
+    /// construction is, so an impossible ceiling (larger than the pool) is
+    /// rejected rather than silently clamped.
+    pub fn set_resident_ceiling(
+        &self,
+        ceiling_bytes: Option<u64>,
+    ) -> Result<(), BudgetConfigError> {
+        let mut state = self.state.lock();
+        // Validate a candidate config before committing it, so a live budget
+        // never holds an invalid one — same contract as `new`.
+        let mut candidate = state.config.clone();
+        candidate.resident_ceiling_bytes = ceiling_bytes;
+        // If resident returns to the default split, on-demand must too — leaving
+        // a stale explicit on-demand ceiling beside a defaulted resident one can
+        // make the two together exceed the pool. The default split is coherent
+        // by construction; a half-explicit one is not.
+        if ceiling_bytes.is_none() {
+            candidate.on_demand_ceiling_bytes = None;
+        }
+        candidate.validate()?;
+        state.config = candidate;
+        Ok(())
+    }
+
+    /// The resident ceiling currently in force (after any runtime change).
+    pub fn current_resident_ceiling(&self) -> u64 {
+        self.state.lock().config.resident_ceiling()
+    }
+
     pub fn admit(&self, key: &str, tier: Tier, bytes: u64) -> Result<(), AdmissionDenied> {
         let mut state = self.state.lock();
         let ceiling = state.ceiling_of(tier);
@@ -763,5 +809,77 @@ mod tests {
         );
         // The reserve is still whole: nothing was lent out of it.
         assert_eq!(snap.total_bytes - snap.pool_bytes, DEFAULT_RESERVE_BYTES);
+    }
+
+    #[test]
+    fn the_resident_ceiling_can_be_changed_on_a_live_budget_without_a_restart() {
+        // The whole point of scheduled profiles: move the ceiling on a running
+        // node. 121 GiB machine; start at a 47 GiB resident ceiling (tenzro-mode
+        // "code"), switch to 25 GiB ("video"), both while the budget is live.
+        let b = budget(121, 16, 47, 58);
+        assert_eq!(b.current_resident_ceiling(), 47 * GIB);
+
+        b.set_resident_ceiling(Some(25 * GIB))
+            .expect("shrink is valid");
+        assert_eq!(b.current_resident_ceiling(), 25 * GIB);
+
+        b.set_resident_ceiling(Some(47 * GIB))
+            .expect("grow back is valid");
+        assert_eq!(b.current_resident_ceiling(), 47 * GIB);
+    }
+
+    #[test]
+    fn a_ceiling_larger_than_the_pool_is_rejected_not_clamped() {
+        // A profile that promises more than the machine has must fail loudly at
+        // set time, the same way construction refuses it — never silently clamp.
+        let b = budget(121, 16, 47, 58);
+        let err = b.set_resident_ceiling(Some(200 * GIB)).unwrap_err();
+        // The ceiling did not move.
+        assert_eq!(b.current_resident_ceiling(), 47 * GIB);
+        let _ = err; // any BudgetConfigError is correct; the invariant is "unchanged".
+    }
+
+    #[test]
+    fn lowering_the_ceiling_below_what_is_committed_is_allowed_and_does_not_evict() {
+        // A scheduled shrink must be possible even while models are resident.
+        // The overcommit is transient; the autotuner's EvictIdle reconciles it
+        // as models fall idle. Refusing here would make a scheduled shrink
+        // impossible, which is the opposite of the feature.
+        let b = budget(121, 16, 47, 58);
+        b.admit("qwen3.8-27b", Tier::Resident, 18 * GIB)
+            .expect("fits under 47");
+        b.admit("muse-glimmer-30b", Tier::Resident, 17 * GIB)
+            .expect("35 total, fits");
+
+        // Now switch to a 25 GiB ceiling while 35 GiB is committed.
+        b.set_resident_ceiling(Some(25 * GIB))
+            .expect("shrink is allowed while overcommitted");
+        assert_eq!(b.current_resident_ceiling(), 25 * GIB);
+
+        // The residents are untouched — nothing was force-evicted; the
+        // committed total still reflects both models.
+        let snap = b.snapshot();
+        assert!(
+            snap.committed_bytes >= 35 * GIB,
+            "residents were not evicted"
+        );
+    }
+
+    #[test]
+    fn passing_none_restores_the_default_split() {
+        // Same reserve the budget() helper uses (16 GiB), so the default split
+        // is computed over the same pool.
+        let b = budget(121, 16, 47, 58);
+        b.set_resident_ceiling(None).expect("none is valid");
+        // With no explicit ceiling, resident_ceiling() applies DEFAULT_RESIDENT_PCT
+        // of the post-reserve pool: (121 - 16) GiB * pct.
+        let expected = BudgetConfig {
+            total_bytes: 121 * GIB,
+            reserve_bytes: 16 * GIB,
+            resident_ceiling_bytes: None,
+            on_demand_ceiling_bytes: None,
+        }
+        .resident_ceiling();
+        assert_eq!(b.current_resident_ceiling(), expected);
     }
 }

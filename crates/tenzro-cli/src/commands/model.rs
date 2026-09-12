@@ -3,6 +3,9 @@
 //! Uses tenzro-model crate directly for local model catalog, download, serve, and delete.
 
 use crate::output::{self};
+// `territory` is the one command here that asks the running node rather than
+// reading the local catalog: the policy is node state, not catalog data.
+use crate::rpc::RpcClient;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -11,6 +14,8 @@ use clap::{Parser, Subcommand};
 pub enum ModelCommand {
     /// List available models from catalog
     List(ModelListCmd),
+    /// Show this node's territorial licensing policy
+    Territory(ModelTerritoryCmd),
     /// Show detailed model information
     Info(ModelInfoCmd),
     /// Download a model from HuggingFace
@@ -57,6 +62,7 @@ impl ModelCommand {
     pub async fn execute(&self) -> Result<()> {
         match self {
             Self::List(cmd) => cmd.execute().await,
+            Self::Territory(cmd) => cmd.execute().await,
             Self::Info(cmd) => cmd.execute().await,
             Self::Download(cmd) => cmd.execute().await,
             Self::Serve(cmd) => cmd.execute().await,
@@ -319,7 +325,9 @@ impl ModelInfoCmd {
                     println!();
                     let flavour = match m.mtp_kind {
                         tenzro_model::catalog::MtpKind::DraftMtp => "MTP (joint draft head)",
-                        tenzro_model::catalog::MtpKind::DraftDflash => "DFlash (block-diffusion self-draft)",
+                        tenzro_model::catalog::MtpKind::DraftDflash => {
+                            "DFlash (block-diffusion self-draft)"
+                        }
                         tenzro_model::catalog::MtpKind::Generic => "Generic (two-model)",
                         tenzro_model::catalog::MtpKind::None => "None",
                     };
@@ -621,6 +629,13 @@ pub struct ModelServeCmd {
     /// Bearer token when the external engine was launched with an API key.
     #[arg(long, requires = "engine")]
     api_key: Option<String>,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`). `tenzro_serveModel` is
+    /// admin-gated — deciding what a node serves is an operator decision —
+    /// so this is required whenever `--rpc` targets a node with the admin
+    /// gate enabled. Has no effect on a local (`--rpc`-less) serve.
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
 }
 
 impl ModelServeCmd {
@@ -646,7 +661,10 @@ impl ModelServeCmd {
         output::print_field("Model", &self.model_id);
         println!();
 
-        let rpc = RpcClient::new(rpc_url);
+        let mut rpc = RpcClient::new(rpc_url);
+        if let Some(ref token) = self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
         let spinner = output::create_spinner(if self.engine.is_some() {
             "Registering external engine on node..."
         } else {
@@ -783,6 +801,12 @@ pub struct ModelStopCmd {
     /// RPC endpoint (omit for local-only stop)
     #[arg(long)]
     rpc: Option<String>,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`). `tenzro_stopModel` is
+    /// admin-gated the same way `tenzro_serveModel` is, so this is required
+    /// whenever `--rpc` targets a node with the admin gate enabled.
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
 }
 
 impl ModelStopCmd {
@@ -792,7 +816,10 @@ impl ModelStopCmd {
         // Call RPC to stop on node if rpc is specified
         if let Some(ref rpc_url) = self.rpc {
             use crate::rpc::RpcClient;
-            let rpc = RpcClient::new(rpc_url);
+            let mut rpc = RpcClient::new(rpc_url);
+            if let Some(ref token) = self.admin_token {
+                rpc = rpc.with_admin_token(token);
+            }
             let spinner = output::create_spinner("Stopping model on node...");
             let result: Result<serde_json::Value> = rpc
                 .call(
@@ -2021,5 +2048,94 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / 1_000_000.0)
     } else {
         format!("{} KB", bytes / 1_000)
+    }
+}
+
+/// Show this node's territorial licensing policy.
+///
+/// Reports the operator's posture and which licences carry a territorial term —
+/// never a caller's location or a past decision, which are personal data and
+/// stay in the node's log.
+#[derive(Debug, Parser)]
+pub struct ModelTerritoryCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    pub rpc: String,
+}
+
+impl ModelTerritoryCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Territorial Licensing Policy");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getTerritoryPolicy", serde_json::json!([]))
+            .await?;
+
+        let mode = result.get("mode").and_then(|m| m.as_str()).unwrap_or("?");
+        println!();
+        output::print_field("Mode", mode);
+        // Spell out what the mode means: "operator_asserts_compliance" reads as
+        // a setting, not as "restricted models are served unchecked".
+        let explanation = match mode {
+            "enforce" => "restricted models are checked per request",
+            "refuse_restricted" => "territorially-restricted models are not served at all",
+            "operator_asserts_compliance" => {
+                "restricted models are served WITHOUT a per-request check"
+            }
+            _ => "unrecognised mode",
+        };
+        output::print_field("Meaning", explanation);
+        output::print_field(
+            "Database",
+            result
+                .get("database")
+                .and_then(|d| d.as_str())
+                .unwrap_or("none"),
+        );
+        output::print_field(
+            "Trusted proxies",
+            &result
+                .get("trusted_proxies")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        );
+
+        let restricted = result
+            .get("restricted_licenses")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        println!();
+        if restricted.is_empty() {
+            output::print_field("Restricted licences", "none");
+        } else {
+            for l in &restricted {
+                let id = l.get("license_id").and_then(|i| i.as_str()).unwrap_or("?");
+                let excluded = l
+                    .get("excluded")
+                    .and_then(|e| e.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let per_request = l
+                    .get("per_request")
+                    .and_then(|p| p.as_bool())
+                    .unwrap_or(false);
+                let scope = if per_request {
+                    "per request"
+                } else {
+                    "at registration"
+                };
+                output::print_field(id, &format!("excludes {excluded} — enforced {scope}"));
+            }
+        }
+
+        Ok(())
     }
 }

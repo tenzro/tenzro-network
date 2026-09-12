@@ -214,7 +214,7 @@ impl AgentKeyHandle {
     /// Mint a hybrid signature over `message`: the Ed25519 leg and the
     /// ML-DSA-65 leg both sign the same bytes. This is the machine-class
     /// analogue of `WalletService::sign_data` — the node verifies the
-    /// pair instead of reconstructing FROST shares to mint it.
+    /// pair instead of reconstructing threshold shares to mint it.
     pub fn sign_hybrid(&self, message: &[u8]) -> SealedAgentHybridSignature {
         let classical = self.sign(message).to_bytes().to_vec();
         let pq = self.pq_signing_key.sign(message);

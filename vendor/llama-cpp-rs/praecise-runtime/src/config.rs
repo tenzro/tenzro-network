@@ -48,6 +48,31 @@ pub struct GenerationConfig {
     /// and check; `None` disables it (no commitment overhead).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commitment_k: Option<u8>,
+    /// Reasoning budget for model families whose chat template exposes one
+    /// (Qwen 3.8: `xhigh` — its own default — plus `medium` and `low`). This is
+    /// a template variable rather than a sampler setting, so it is rendered
+    /// into the prompt, not applied to logits. `None` leaves the template's
+    /// default in place; an unrecognised value is rejected by the template
+    /// itself rather than being silently dropped here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// OpenAI-style structured-output constraint (`{"type":"json_schema",…}`,
+    /// `{"type":"json_object"}`), forwarded verbatim to external engines —
+    /// SGLang enforces it at the sampler through its grammar backend
+    /// (xgrammar), so a constrained response cannot be malformed. The
+    /// in-process llama.cpp path does not enforce it yet and ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
+    /// Per-request override of the served model's thinking mode, for chat
+    /// templates with an `enable_thinking` toggle (Qwen 3.x, Gemma 4). `None`
+    /// keeps the engine's default — which an operator may have pinned off for
+    /// an API-facing model so plain callers get answers, not deliberation.
+    /// `Some(true)` is how a client that *renders* the reasoning (a coding
+    /// assistant showing its process) asks for it on a request-by-request
+    /// basis; the host returns it separately from the answer so the two never
+    /// mix in the caller's output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
 }
 
 impl Default for GenerationConfig {
@@ -66,6 +91,9 @@ impl Default for GenerationConfig {
             stop: Vec::new(),
             draft_n: None,
             commitment_k: None,
+            reasoning_effort: None,
+            response_format: None,
+            enable_thinking: None,
         }
     }
 }

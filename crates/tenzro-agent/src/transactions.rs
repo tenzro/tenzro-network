@@ -3,7 +3,7 @@
 //! This module provides the [`AgentTransactionExecutor`] that bridges agent wallets
 //! to on-chain transactions. Agents can autonomously submit token transfers, token
 //! creation, contract deployments, and cross-VM transfers using their provisioned
-//! MPC wallets, subject to spending policy enforcement.
+//! identity-bound wallets, subject to spending policy enforcement.
 //!
 //! # Architecture
 //!
@@ -548,7 +548,14 @@ mod tests {
         let creator = Address::from([1u8; 32]);
         let caps = vec![Capability::SmartContractExecution];
         let agent = mgr
-            .register_agent("test-agent".to_string(), creator, caps, false, 0)
+            .register_agent(
+                "test-agent".to_string(),
+                creator,
+                vec![7u8; 32],
+                caps,
+                false,
+                0,
+            )
             .await
             .unwrap();
         let agent_id = agent.identity.agent_id.clone();
@@ -658,7 +665,14 @@ mod tests {
         let mgr = make_mgr();
         let creator = Address::from([1u8; 32]);
         let agent = mgr
-            .register_agent("suspended-agent".to_string(), creator, vec![], false, 0)
+            .register_agent(
+                "suspended-agent".to_string(),
+                creator,
+                vec![7u8; 32],
+                vec![],
+                false,
+                0,
+            )
             .await
             .unwrap();
         let agent_id = agent.identity.agent_id.clone();

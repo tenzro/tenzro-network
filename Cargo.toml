@@ -3,7 +3,8 @@ resolver = "2"
 members = [
   "crates/tenzro-types",
   "crates/tenzro-crypto",
-  "crates/tenzro-tee",
+  "crates/tenzro-secure-enclave",
+    "crates/tenzro-tee",
   "crates/tenzro-zk",
   "crates/tenzro-network",
   "crates/tenzro-storage",
@@ -175,8 +176,6 @@ aes-gcm = "0.10"
 x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
-frost-ed25519 = "3"
-frost-secp256k1 = "3"
 blst = "0.3"
 argon2 = "0.5"
 subtle = "2.6"
@@ -296,6 +295,20 @@ hex = "0.4"
 bs58 = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# IANA timezone database. `ResourceWindow.timezone` was stored and serialized
+# but never applied — every window was evaluated in UTC, so a CEST schedule ran
+# one to two hours off depending on DST. Resolving the zone needs the real
+# database; a fixed offset cannot express DST.
+chrono-tz = "0.10"
+# mmdb reader for territorial licence enforcement (see tenzro-node/src/territory.rs).
+#
+# Despite the name this reads the mmdb *format*, not MaxMind data specifically —
+# the crate is ISC and the data licence is a separate question. ⛔ Do NOT ship
+# MaxMind GeoLite2: its EULA requires deleting superseded databases within 30
+# days of a release, which a distributed binary cannot honour, and redistribution
+# needs a paid licence. Use DB-IP Lite Country (CC BY 4.0) or sapics/ip-location-db
+# `user-country` (PDDL-1.0, public domain) instead.
+maxminddb = "0.30"
 dashmap = "6"
 parking_lot = "0.12"
 
@@ -376,6 +389,10 @@ num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
 flate2 = "1"
+# Cross-platform advisory file locking (flock on Unix, LockFileEx on Windows)
+# behind one API. Already resolved transitively at 0.13.1 (see Cargo.lock) —
+# this just exposes it as a direct dependency.
+fs4 = { version = "0.13.1", features = ["sync"] }
 
 # SVM execution — Anza solana-svm, gated behind the tenzro-vm `svm-full` feature.
 # The processor crates are pinned to an exact 4.1.2 release train; interface

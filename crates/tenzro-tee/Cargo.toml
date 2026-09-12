@@ -8,6 +8,7 @@ homepage.workspace = true
 description = "TEE abstraction layer for Tenzro Network — Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU, Intel Tiber Trust Authority"
 documentation = "https://docs.rs/tenzro-tee"
 readme = "README.md"
+build = "build.rs"
 keywords = ["tenzro", "tee", "intel-tdx", "sev-snp", "attestation"]
 categories = ["cryptography", "hardware-support"]
 
@@ -59,8 +60,22 @@ zeroize = { workspace = true }
 # Context files for the TPM sealing tools (tpm_seal.rs).
 tempfile = "3"
 
+[target.'cfg(windows)'.dependencies]
+# TBS (TPM Base Services) bindings for tpm_tbs_windows.rs — Windows' own
+# TPM access broker, used in place of the Unix path's shelled-out
+# tpm2_createprimary/tpm2_sign (no prebuilt Windows binary of those exists).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_TpmBaseServices",
+] }
+
 [features]
 default = ["all-tees"]
+# Deterministic software identity root for TESTS ONLY. Enabled solely from
+# another crate's [dev-dependencies] (tenzro-node) so `cargo test` derives
+# identity on a host with no TPM (CI sandboxes). NEVER in a release build —
+# production keeps failing closed with no TPM (TPM/SE/passkey-only invariant).
+test-tpm = []
 intel-tdx = ["reqwest"]
 amd-sev-snp = ["reqwest"]
 aws-nitro = []
@@ -71,6 +86,11 @@ nvidia-gpu = ["reqwest"]
 # quote-collection path to produce them.
 intel-tiber = ["intel-tdx", "jsonwebtoken"]
 all-tees = ["intel-tdx", "amd-sev-snp", "aws-nitro", "nvidia-gpu", "intel-tiber"]
+
+# Secure Enclave = the Apple counterpart to the TPM in the PRIMARY machine
+# identity tier. Apple targets only; every other host compiles without it.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+tenzro-secure-enclave = { path = "../tenzro-secure-enclave", version = "0.1.0" }
 
 [dev-dependencies]
 criterion = { workspace = true }

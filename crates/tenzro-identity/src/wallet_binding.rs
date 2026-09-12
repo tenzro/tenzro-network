@@ -1,6 +1,6 @@
 //! Wallet binding for the Tenzro Decentralized Identity Protocol
 //!
-//! Automatically provisions MPC wallets for new identities and binds
+//! Provisions identity-bound wallets for new identities and binds
 //! wallet addresses to identity DIDs.
 
 use crate::error::{IdentityError, Result};
@@ -23,6 +23,16 @@ pub struct WalletBinding {
     pub public_key: Vec<u8>,
     /// The classical public key type ("Ed25519" or "Secp256k1").
     pub key_type: String,
+    /// An Ed25519 key this identity signs *statements* with, when it has one.
+    ///
+    /// Separate from `public_key` because a P-256 passkey cannot sign raw
+    /// bytes — it signs WebAuthn assertions — so an identity rooted in one has
+    /// no key any plain verifier can check a signature against. A holder that
+    /// derives such a key from its credential supplies the public half here and
+    /// it is recorded for assertion only, never authentication.
+    ///
+    /// `None` on every wallet that does not need one, which is most of them.
+    pub ed25519_verifying_key: Option<Vec<u8>>,
     /// The wallet's ML-DSA-65 verifying key bytes (FIPS 204, exactly 1952 bytes).
     /// Mandatory under the hybrid migration — every wallet carries
     /// a PQ key, so identities bound to a wallet inherit it directly.
@@ -34,9 +44,9 @@ pub struct WalletBinding {
     pub bls_verifying_key: Vec<u8>,
 }
 
-/// Binds MPC wallets to TDIP identities
+/// Binds identity-bound wallets to TDIP identities
 ///
-/// Handles auto-provisioning of threshold wallets when new identities
+/// Handles auto-provisioning of permissionless wallets when new identities
 /// are registered, ensuring every identity has a wallet for on-chain operations.
 ///
 /// The binder holds an `Arc<TenzroWalletService>` so the registry and the
@@ -71,13 +81,27 @@ impl WalletBinder {
         Self { wallet_service }
     }
 
-    /// Provisions a new MPC wallet for an identity
-    pub async fn provision_wallet(&self, did: &str) -> Result<WalletBinding> {
-        info!("Provisioning wallet for identity: {}", did);
+    /// Provisions a wallet for an identity.
+    ///
+    /// `identity` carries the public key the wallet's signatures verify
+    /// against — a passkey for a human, a TPM or Secure Enclave key for a
+    /// machine. It is required: a wallet with no identity behind it cannot be
+    /// authorised by anyone, so the wallet service has no overload that omits
+    /// it. See `tenzro_wallet::WalletIdentity`.
+    pub async fn provision_wallet(
+        &self,
+        did: &str,
+        identity: tenzro_wallet::WalletIdentity,
+    ) -> Result<WalletBinding> {
+        info!(
+            "Provisioning {} wallet for identity: {}",
+            identity.kind(),
+            did
+        );
 
         let wallet = self
             .wallet_service
-            .provision_wallet()
+            .provision_wallet(identity)
             .await
             .map_err(|e| IdentityError::WalletError(e.to_string()))?;
 
@@ -101,6 +125,9 @@ impl WalletBinder {
             key_type,
             pq_verifying_key,
             bls_verifying_key,
+            // A wallet bound this way already signs with its own keypair, so
+            // there is nothing an assertion key would add.
+            ed25519_verifying_key: None,
         })
     }
 

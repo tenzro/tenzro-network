@@ -7025,9 +7025,7 @@ impl EventLoop {
             tenzro_types::TransactionType::BridgeTransfer { amount, .. } => ("bridge", *amount),
             tenzro_types::TransactionType::GovernancePropose { .. } => ("governance_propose", 0),
             tenzro_types::TransactionType::GovernanceVote { .. } => ("governance_vote", 0),
-            tenzro_types::TransactionType::GovernanceExecute { .. } => {
-                ("governance_execute", 0)
-            }
+            tenzro_types::TransactionType::GovernanceExecute { .. } => ("governance_execute", 0),
             tenzro_types::TransactionType::IncreaseValidatorStake { additional } => {
                 ("increase_validator_stake", *additional)
             }
@@ -7515,14 +7513,13 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
     use tenzro_vm::native::{
         SELECTOR_ESCROW_CREATE, SELECTOR_ESCROW_REFUND, SELECTOR_ESCROW_RELEASE,
         SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL, SELECTOR_GOVERNANCE_EXECUTE,
-        SELECTOR_INCREASE_VALIDATOR_STAKE, SELECTOR_TREASURY_DEPOSIT,
         SELECTOR_GOVERNANCE_PAUSE, SELECTOR_GOVERNANCE_PROPOSE, SELECTOR_GOVERNANCE_VETO,
-        SELECTOR_GOVERNANCE_VOTE, SELECTOR_INCREASE_AGENT_BOND,
-        SELECTOR_INCREASE_COMPUTE_BOND, SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE,
-        SELECTOR_IDENTITY_REGISTER, SELECTOR_KILLSWITCH_TERMINATE, SELECTOR_NODE_ALIAS_BIND,
-        SELECTOR_NODE_ALIAS_CLAIM,
-        SELECTOR_NODE_ALIAS_RELEASE, SELECTOR_PAY_INSURANCE_CLAIM, SELECTOR_POST_AGENT_BOND,
-        SELECTOR_POST_COMPUTE_BOND, SELECTOR_VALIDATOR_EXIT, SELECTOR_VALIDATOR_REGISTER,
+        SELECTOR_GOVERNANCE_VOTE, SELECTOR_IDENTITY_REGISTER, SELECTOR_INCREASE_AGENT_BOND,
+        SELECTOR_INCREASE_COMPUTE_BOND, SELECTOR_INCREASE_VALIDATOR_STAKE,
+        SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE, SELECTOR_KILLSWITCH_TERMINATE,
+        SELECTOR_NODE_ALIAS_BIND, SELECTOR_NODE_ALIAS_CLAIM, SELECTOR_NODE_ALIAS_RELEASE,
+        SELECTOR_PAY_INSURANCE_CLAIM, SELECTOR_POST_AGENT_BOND, SELECTOR_POST_COMPUTE_BOND,
+        SELECTOR_TREASURY_DEPOSIT, SELECTOR_VALIDATOR_EXIT, SELECTOR_VALIDATOR_REGISTER,
         SELECTOR_VALIDATOR_UPDATE_METADATA, SELECTOR_WITHDRAW_AGENT_BOND,
         SELECTOR_WITHDRAW_COMPUTE_BOND, SELECTOR_X402_SETTLE,
     };
@@ -8256,7 +8253,10 @@ mod epoch_staging_reconcile_tests {
             .expect("transition")
             .expect("set");
         assert_eq!(next.len(), 1);
-        assert_eq!(next.get_by_address(&addr).map(|v| v.stake), Some(10_000_000));
+        assert_eq!(
+            next.get_by_address(&addr).map(|v| v.stake),
+            Some(10_000_000)
+        );
     }
 }
 
@@ -8284,10 +8284,7 @@ mod validator_power_unit_tests {
     /// The validator-set floor, in the unit the set actually uses.
     #[test]
     fn the_minimum_stake_converts_to_its_whole_tnzo_figure() {
-        assert_eq!(
-            EventLoop::consensus_voting_power(10_000 * ONE_TNZO),
-            10_000
-        );
+        assert_eq!(EventLoop::consensus_voting_power(10_000 * ONE_TNZO), 10_000);
     }
 
     /// A validator with stake must never be seated unable to vote. Below the

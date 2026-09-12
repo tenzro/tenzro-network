@@ -27,11 +27,35 @@ CMAKE_ARGS = "-DGGML_NATIVE=OFF"
 # upstream fix landed in a later rocksdb; forcing the include is the
 # minimal equivalent and is a no-op on toolchains that already provide it.
 #
-# Safe on every target — `<cstdint>` is standard C++ everywhere — so this
-# stays in the global `[env]`. The companion x86-only ISA fix is handled by
-# advertising `pclmulqdq` in the x86_64 target section below, rather than by
-# forcing a `-m` flag here that an aarch64 compiler would reject.
-CXXFLAGS = "-include cstdint"
+# Per-target rather than a bare global `CXXFLAGS`: this is GCC/Clang syntax
+# (MSVC's forced-include is `/FI`, a different spelling entirely), and on
+# Windows/MSVC `cl.exe` doesn't just ignore it — it warns "ignoring unknown
+# option '-include'" and then tries to compile the *next* token, "cstdint",
+# as if it were a source file, which fails the whole build with
+# `error C1083: Cannot open source file: 'cstdint'`.
+#
+# A target-scoped `CXXFLAGS_<triple>` cannot override/cancel a bare global
+# `CXXFLAGS`, because the `cc` crate's `envflags()` concatenates every
+# matching variant (`CXXFLAGS_$TARGET`, `CXXFLAGS_$TARGET_underscored`,
+# `HOST_CXXFLAGS`, bare `CXXFLAGS`) rather than picking one winner — an empty
+# override alongside the global value still leaves the global value's flags
+# on the command line. So the only correct way to keep MSVC from ever seeing
+# this flag is to not set a bare `CXXFLAGS` at all, and instead set it only
+# on the target triples that actually need it: verified by isolating this
+# exact scenario in a throwaway crate against this workspace's pinned
+# `cc 1.2.64` — the bare-`CXXFLAGS` form leaked `-include cstdint` into
+# MSVC's `cl.exe` invocation every time, while this per-target form did not.
+#
+# This flag exists for a libstdc++-with-old-GCC gap specifically — Apple's
+# libc++ (macOS) and the MSVC STL (Windows) were never affected by it, so
+# every triple below the flag previously reached (via the removed global
+# rule) still gets the exact same flag; only Windows, a target this
+# workspace never built on before, is newly (and correctly) excluded.
+CXXFLAGS_x86_64-unknown-linux-gnu = "-include cstdint"
+CXXFLAGS_x86_64-unknown-linux-musl = "-include cstdint"
+CXXFLAGS_aarch64-unknown-linux-gnu = "-include cstdint"
+CXXFLAGS_aarch64-apple-darwin = "-include cstdint"
+CXXFLAGS_x86_64-apple-darwin = "-include cstdint"
 
 # Spawned-thread stack size, 32 MiB.
 #

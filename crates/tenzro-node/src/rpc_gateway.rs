@@ -181,6 +181,8 @@ pub(crate) async fn forward(
         jsonrpc: "2.0".to_string(),
         method: method.to_string(),
         params: Some(params),
+        api_key: None,
+        service_key: None,
         id: json!(1),
     };
     // Both gates, in the dispatcher's own order: admin first, then subject.

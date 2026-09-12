@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// A backend that mints a hybrid (classical + ML-DSA-65) signature without
-/// the wallet service reconstructing key shares.
+/// the wallet service ever holding the classical secret.
 ///
 /// This is the custody seam for wallets whose secret never enters node
 /// memory: the human device signer (P-256 enclave + keychain-sealed PQ
 /// seed) and the autonomous-machine sealed-agent signer (TEE-derived
 /// Ed25519 + ML-DSA-65) both implement it. Where the server-custodial path
-/// runs `Keystore::load_shares` → FROST → ML-DSA in node memory, a
+/// held the signing key in node memory, a
 /// `HybridSigner` produces the same [`HybridSignatureBytes`] shape from a
 /// key the node cannot read.
 ///
@@ -42,14 +42,15 @@ pub trait HybridSigner: Send + Sync {
 
 /// Output of a hybrid wallet signing operation.
 ///
-/// The `classical` leg is the threshold MPC signature bytes (Ed25519 64B or
-/// Secp256k1 64B depending on `KeyType`). The `pq` leg is the ML-DSA-65
+/// The `classical` leg is the identity key's signature bytes (Ed25519 64B or
+/// Secp256k1 64B depending on `KeyType`), produced by the passkey or secure
+/// element that holds the key. The `pq` leg is the ML-DSA-65
 /// signature bytes (always 3309 bytes; see `tenzro_crypto::pq::ML_DSA_65_SIG_LEN`).
 ///
 /// Both legs are mandatory — there is no classical-only fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HybridSignatureBytes {
-    /// Classical (threshold MPC) signature bytes.
+    /// Classical (identity key) signature bytes.
     pub classical: Vec<u8>,
     /// ML-DSA-65 (FIPS 204) signature bytes (3309 bytes).
     pub pq: Vec<u8>,

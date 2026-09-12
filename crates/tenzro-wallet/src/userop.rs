@@ -3,7 +3,7 @@
 //! This is the **self-custodial** path: the wallet (running on the user's
 //! device — desktop, mobile, or CLI) builds a `UserOp`, computes its EIP-712
 //! hash, signs that hash with a device-bound key (Secure Enclave / TPM /
-//! StrongBox / passkey / FROST share), packs the signature, and submits the
+//! StrongBox / passkey / Secure Enclave), packs the signature, and submits the
 //! finished op to the node via `eth_sendUserOperation`. The node never sees
 //! the signing key.
 //!

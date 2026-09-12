@@ -339,7 +339,9 @@ pub fn rpc_add_server(endpoint: &str) -> Result<()> {
     // failed (the backend reg was not produced).
     let reg = unsafe { llama_cpp_sys_2::ggml_backend_rpc_add_server(c_endpoint.as_ptr()) };
     if reg.is_null() {
-        return Err(LlamaCppError::BackendRpcAddServerFailed(endpoint.to_string()));
+        return Err(LlamaCppError::BackendRpcAddServerFailed(
+            endpoint.to_string(),
+        ));
     }
     Ok(())
 }

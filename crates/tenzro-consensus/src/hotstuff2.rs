@@ -2878,10 +2878,9 @@ impl HotStuff2Engine {
         if height <= epoch_start {
             return false;
         }
-        let (Some(started), Some(now)) = (
-            provider.get_block(epoch_start),
-            provider.get_block(height),
-        ) else {
+        let (Some(started), Some(now)) =
+            (provider.get_block(epoch_start), provider.get_block(height))
+        else {
             return false;
         };
         // Timestamps are signed and a block is not obliged to be monotonic
@@ -4739,14 +4738,9 @@ mod tests {
         let pq = MlDsaSigningKey::generate();
         let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let epoch_manager = EpochManager::new(create_test_validators(4), 100).unwrap();
-        let engine = HotStuff2Engine::new(
-            keypair,
-            pq,
-            bls,
-            ConsensusConfig::default(),
-            epoch_manager,
-        )
-        .with_epoch_plan_stager(std::sync::Arc::new(CountingStager(calls.clone())));
+        let engine =
+            HotStuff2Engine::new(keypair, pq, bls, ConsensusConfig::default(), epoch_manager)
+                .with_epoch_plan_stager(std::sync::Arc::new(CountingStager(calls.clone())));
 
         // Below the boundary there is no transition, so nothing to stage.
         assert!(
@@ -4754,7 +4748,11 @@ mod tests {
                 .transition_epoch_if_due(BlockHeight::from(50))
                 .unwrap()
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "staged without transitioning");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "staged without transitioning"
+        );
 
         // At the boundary: staged exactly once, before crossing.
         assert!(
@@ -4874,18 +4872,15 @@ mod tests {
         let pq = MlDsaSigningKey::generate();
         let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let epoch_manager = EpochManager::new(create_test_validators(4), 100).unwrap();
-        let engine = HotStuff2Engine::new(
-            keypair,
-            pq,
-            bls,
-            ConsensusConfig::default(),
-            epoch_manager,
-        )
-        .with_block_provider(provider);
+        let engine =
+            HotStuff2Engine::new(keypair, pq, bls, ConsensusConfig::default(), epoch_manager)
+                .with_block_provider(provider);
 
         assert_eq!(engine.epoch_manager().current_epoch().number, 0);
         assert!(
-            !engine.epoch_manager().should_transition(BlockHeight::from(5)),
+            !engine
+                .epoch_manager()
+                .should_transition(BlockHeight::from(5)),
             "height 5 must not be due by the height schedule"
         );
         assert!(

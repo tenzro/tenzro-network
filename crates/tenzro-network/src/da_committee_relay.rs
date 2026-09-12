@@ -5,13 +5,11 @@
 //! for it") and `FetchSliver` (reader → member: "return the sliver you hold")
 //! — as variants on [`DaCommitteeRequest`] / [`DaCommitteeResponse`].
 //!
-//! ## Why this shape (vs. the MPC relay's Ack-only pattern)
+//! ## Why this shape (request→reply-carrying)
 //!
-//! The MPC relay (`mpc_relay.rs`) is fire-and-forget: the response is a bare
-//! `Ack` and real replies flow back over a *separate* subscriber channel. The
-//! committee DA path is genuinely request→**reply-carrying**: a `StoreSliver`
-//! must return the member's signed [`WireMemberAttestation`] and a
-//! `FetchSliver` must return the actual sliver bytes. So the outbound side of
+//! The committee DA path is genuinely request→**reply-carrying**: a
+//! `StoreSliver` must return the member's signed [`WireMemberAttestation`] and
+//! a `FetchSliver` must return the actual sliver bytes. So the outbound side of
 //! this protocol uses per-request `oneshot` correlation (keyed by
 //! `OutboundRequestId`) — the caller awaits its own reply — rather than the
 //! block-sync-style broadcast result channel.

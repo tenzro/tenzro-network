@@ -203,7 +203,11 @@ impl RpcClient {
         let bearer_token = std::env::var("TENZRO_BEARER_JWT")
             .ok()
             .filter(|t| !t.is_empty())
-            .or_else(|| crate::config::load_config().access_token.filter(|t| !t.is_empty()));
+            .or_else(|| {
+                crate::config::load_config()
+                    .access_token
+                    .filter(|t| !t.is_empty())
+            });
         if let Some(ref bearer) = bearer_token {
             req = req.header("Authorization", format!("DPoP {}", bearer));
         }
@@ -240,9 +244,11 @@ impl RpcClient {
         {
             req = req.header("X-Tenzro-Api-Key", api_key);
         }
-        // Admin token for operator RPCs (`tenzro_createApiKey`,
-        // `tenzro_revokeApiKey`, `tenzro_listApiKeys`,
-        // `tenzro_resetCircuitBreaker`). See docs/api-keys.md.
+        // Admin token for operator RPCs — key issuance/revocation/listing,
+        // circuit-breaker reset, tenzro_serveModel/tenzro_stopModel, and
+        // others. The authoritative list is
+        // tenzro-node::rpc_gates::requires_admin_token, not this comment;
+        // see docs/api-keys.md.
         if let Some(ref admin) = self.admin_token_override {
             req = req.header("X-Tenzro-Admin-Token", admin);
         } else if let Ok(admin) = std::env::var("TENZRO_ADMIN_TOKEN")

@@ -620,10 +620,7 @@ pub fn may_set_pause(
 /// Pure over its inputs so the rule can be tested without a VM, and so the
 /// same rule is used by the handler and by anything that wants to show a
 /// caller in advance whether the button will work.
-pub fn may_veto(
-    role: Option<GuardianRole>,
-    proposal: &Proposal,
-) -> Result<(), VetoRefusal> {
+pub fn may_veto(role: Option<GuardianRole>, proposal: &Proposal) -> Result<(), VetoRefusal> {
     let Some(role) = role else {
         return Err(VetoRefusal::NotAGuardian);
     };
@@ -807,7 +804,10 @@ impl ProposalTrack {
     pub fn threshold(&self) -> (u128, u128) {
         match self {
             ProposalTrack::Standard => (THRESHOLD_NUMERATOR, THRESHOLD_DENOMINATOR),
-            ProposalTrack::Expedited => (EXPEDITED_THRESHOLD_NUMERATOR, EXPEDITED_THRESHOLD_DENOMINATOR),
+            ProposalTrack::Expedited => (
+                EXPEDITED_THRESHOLD_NUMERATOR,
+                EXPEDITED_THRESHOLD_DENOMINATOR,
+            ),
         }
     }
 
@@ -1183,7 +1183,10 @@ mod guardian_tests {
         let mut p = queued();
         assert!(p.veto());
         assert_eq!(p.status, ProposalStatus::Vetoed);
-        assert!(!p.is_executable_at(i64::MAX), "a vetoed proposal became executable");
+        assert!(
+            !p.is_executable_at(i64::MAX),
+            "a vetoed proposal became executable"
+        );
         assert!(!p.veto(), "vetoing twice must not succeed");
     }
 
@@ -1300,7 +1303,11 @@ mod guardian_tests {
     fn every_governed_parameter_has_a_sane_range() {
         for p in GOVERNED_PARAMS {
             assert!(p.min <= p.max, "{}: min exceeds max", p.key);
-            assert!(!p.description.is_empty(), "{}: no description to vote on", p.key);
+            assert!(
+                !p.description.is_empty(),
+                "{}: no description to vote on",
+                p.key
+            );
         }
     }
 
@@ -1317,7 +1324,12 @@ mod guardian_tests {
     /// vetoable, and closed to agents at every phase short of `All`.
     #[test]
     fn recovery_is_a_treasury_action_closed_to_agents() {
-        let a = recovery(Address::new([1u8; 32]), Address::new([2u8; 32]), 10, "vault imbalance");
+        let a = recovery(
+            Address::new([1u8; 32]),
+            Address::new([2u8; 32]),
+            10,
+            "vault imbalance",
+        );
         assert_eq!(a.domain(), ActionDomain::Treasury);
         assert!(!AgentPhase::None.permits(a.domain()));
         assert!(
@@ -1423,7 +1435,10 @@ mod guardian_tests {
         t.apply_vote(70, true, None);
         t.apply_vote(30, false, None);
 
-        assert!(t.threshold_met_on(ProposalTrack::Standard), "70% clears 2/3");
+        assert!(
+            t.threshold_met_on(ProposalTrack::Standard),
+            "70% clears 2/3"
+        );
         assert!(
             !t.threshold_met_on(ProposalTrack::Expedited),
             "70% must not clear the 4/5 expedited bar"

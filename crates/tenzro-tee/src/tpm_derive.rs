@@ -54,7 +54,9 @@
 //! when it is gone.
 
 use crate::error::{Result as TeeResult, TeeError};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use zeroize::Zeroizing;
@@ -85,6 +87,7 @@ use zeroize::Zeroizing;
 /// the TPM or the board that holds its non-volatile state, and a vendor
 /// firmware update that deliberately rolls the EPS. Retiring stays possible;
 /// it stops being accidental.
+#[cfg(unix)]
 const HIERARCHY: &str = "e";
 
 /// The template the primary is derived from.
@@ -134,12 +137,33 @@ const HKDF_SALT: &[u8] = b"tenzro/node-identity/v1";
 static ROOT: Mutex<Option<Zeroizing<Vec<u8>>>> = Mutex::new(None);
 
 /// Whether this machine can derive an identity it cannot lose.
+///
+/// Unix: shells out to `tpm2_createprimary`/`tpm2_sign`, so both the device
+/// node and the tools themselves have to be present. Windows: delegated to
+/// [`crate::tpm_tbs_windows`], which submits the same two operations
+/// directly to TBS rather than through those (Windows-unavailable) tools —
+/// see that module for why.
+#[cfg(all(unix, not(feature = "test-tpm")))]
 pub fn derivation_available() -> bool {
     (Path::new("/dev/tpmrm0").exists() || Path::new("/dev/tpm0").exists())
         && which_tool("tpm2_createprimary").is_some()
         && which_tool("tpm2_sign").is_some()
 }
 
+#[cfg(all(windows, not(feature = "test-tpm")))]
+pub fn derivation_available() -> bool {
+    crate::tpm_tbs_windows::derivation_available()
+}
+
+/// TEST ONLY (`test-tpm` feature): a deterministic software root stands in for
+/// the chip, so tests derive a stable identity on a host with no TPM. Compiled
+/// out of every release build — production keeps failing closed.
+#[cfg(feature = "test-tpm")]
+pub fn derivation_available() -> bool {
+    true
+}
+
+#[cfg(unix)]
 fn which_tool(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
@@ -148,6 +172,7 @@ fn which_tool(name: &str) -> Option<PathBuf> {
     })
 }
 
+#[cfg(unix)]
 fn run(tool: &str, args: &[&str]) -> TeeResult<Vec<u8>> {
     let out = Command::new(tool)
         .args(args)
@@ -165,10 +190,80 @@ fn run(tool: &str, args: &[&str]) -> TeeResult<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// One trip to the chip: create the primary, sign [`ROOT_LABEL`] with it,
+/// return the raw signature bytes. Unix shells out to `tpm2_createprimary` +
+/// `tpm2_sign`; Windows submits the same two operations directly via TBS —
+/// see [`crate::tpm_tbs_windows`] for why the paths differ instead of both
+/// shelling out.
+#[cfg(unix)]
+fn chip_signature() -> TeeResult<Vec<u8>> {
+    let dir = tempfile::Builder::new()
+        .prefix("tenzro-derive")
+        .tempdir()
+        .map_err(|e| TeeError::KeyGenerationFailed(format!("temporary directory: {e}")))?;
+    let ctx = dir.path().join("primary.ctx");
+    let label = dir.path().join("label");
+    let sig = dir.path().join("sig");
+    std::fs::write(&label, ROOT_LABEL)
+        .map_err(|e| TeeError::KeyGenerationFailed(format!("writing the label: {e}")))?;
+
+    run(
+        "tpm2_createprimary",
+        &[
+            "-C",
+            HIERARCHY,
+            "-G",
+            TEMPLATE,
+            "-g",
+            "sha256",
+            "-a",
+            ATTRIBUTES,
+            "-c",
+            &ctx.to_string_lossy(),
+        ],
+    )?;
+    run(
+        "tpm2_sign",
+        &[
+            "-c",
+            &ctx.to_string_lossy(),
+            "-g",
+            "sha256",
+            "-s",
+            "rsassa",
+            "-o",
+            &sig.to_string_lossy(),
+            &label.to_string_lossy(),
+        ],
+    )?;
+
+    std::fs::read(&sig)
+        .map_err(|e| TeeError::KeyGenerationFailed(format!("reading the signature: {e}")))
+}
+
+#[cfg(windows)]
+fn chip_signature() -> TeeResult<Vec<u8>> {
+    crate::tpm_tbs_windows::root_secret(ROOT_LABEL)
+}
+
 /// The secret this machine derives from its own chip.
 ///
 /// Deterministic: the same machine returns the same bytes for ever, and a
 /// different machine cannot return them at all.
+/// TEST ONLY (`test-tpm` feature): a fixed 32-byte software root, so
+/// `derive_secret` produces stable per-purpose keys without a TPM. Never
+/// compiled into a release build.
+#[cfg(feature = "test-tpm")]
+fn root_secret() -> TeeResult<Zeroizing<Vec<u8>>> {
+    // A constant, obviously-not-secret seed. Its only job is to let identity
+    // derivation run deterministically under `cargo test`; it is unreachable in
+    // production, where the real chip-backed root below is the only path.
+    Ok(Zeroizing::new(
+        b"tenzro/test-tpm/software-root/deterministic-32b".to_vec(),
+    ))
+}
+
+#[cfg(not(feature = "test-tpm"))]
 fn root_secret() -> TeeResult<Zeroizing<Vec<u8>>> {
     // The lock is held across the trip to the chip, not merely around the
     // cache read. Releasing it first let every concurrent first-caller miss
@@ -184,40 +279,7 @@ fn root_secret() -> TeeResult<Zeroizing<Vec<u8>>> {
         return Ok(cached);
     }
 
-    let dir = tempfile::Builder::new()
-        .prefix("tenzro-derive")
-        .tempdir()
-        .map_err(|e| TeeError::KeyGenerationFailed(format!("temporary directory: {e}")))?;
-    let ctx = dir.path().join("primary.ctx");
-    let label = dir.path().join("label");
-    let sig = dir.path().join("sig");
-    std::fs::write(&label, ROOT_LABEL)
-        .map_err(|e| TeeError::KeyGenerationFailed(format!("writing the label: {e}")))?;
-
-    run(
-        "tpm2_createprimary",
-        &[
-            "-C", HIERARCHY,
-            "-G", TEMPLATE,
-            "-g", "sha256",
-            "-a", ATTRIBUTES,
-            "-c", &ctx.to_string_lossy(),
-        ],
-    )?;
-    run(
-        "tpm2_sign",
-        &[
-            "-c", &ctx.to_string_lossy(),
-            "-g", "sha256",
-            "-s", "rsassa",
-            "-o", &sig.to_string_lossy(),
-            &label.to_string_lossy(),
-        ],
-    )?;
-
-    let bytes = Zeroizing::new(
-        std::fs::read(&sig).map_err(|e| TeeError::KeyGenerationFailed(format!("reading the signature: {e}")))?,
-    );
+    let bytes = Zeroizing::new(chip_signature()?);
     if bytes.len() < 32 {
         return Err(TeeError::KeyGenerationFailed(
             "the chip returned too little material to derive from".into(),
@@ -266,7 +328,10 @@ mod tests {
         assert_eq!(TEMPLATE, "rsa2048:rsassa-sha256:null");
         assert_eq!(ROOT_LABEL, b"tenzro/node-identity/v2/root");
         assert_eq!(HKDF_SALT, b"tenzro/node-identity/v1");
-        assert!(ATTRIBUTES.contains("fixedtpm"), "an identity that can move is not one");
+        assert!(
+            ATTRIBUTES.contains("fixedtpm"),
+            "an identity that can move is not one"
+        );
         assert!(ATTRIBUTES.contains("fixedparent"));
     }
 
@@ -276,6 +341,7 @@ mod tests {
     /// item — so an owner-rooted identity is destroyed by a routine firmware
     /// action. The endorsement seed survives it. This is the property the whole
     /// module exists for, and it is one character wide.
+    #[cfg(unix)]
     #[test]
     fn the_root_is_endorsement_rooted() {
         assert_eq!(
@@ -284,6 +350,11 @@ mod tests {
              hierarchy's seed does not survive TPM2_Clear"
         );
     }
+
+    // The Windows counterpart to this test lives in tpm_tbs_windows.rs,
+    // next to the numeric constants it checks — Windows never reads this
+    // CLI-flag string form, so asserting against it here would test nothing
+    // on that platform.
 
     #[test]
     fn the_signature_scheme_must_be_the_deterministic_one() {

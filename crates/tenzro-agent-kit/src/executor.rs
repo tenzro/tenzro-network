@@ -625,7 +625,7 @@ impl Executor {
         };
 
         // `from` is the agent's machine wallet — the same address that
-        // `register_machine_with_fee` bound a fresh MPC wallet to at spawn.
+        // `register_machine_with_fee` bound a fresh permissionless wallet to at spawn.
         let from_hex = format!(
             "0x{}",
             hex::encode(spawned.machine.wallet_address.as_bytes())

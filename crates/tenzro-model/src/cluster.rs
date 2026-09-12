@@ -142,6 +142,15 @@ pub struct ModelShape {
     /// Total weights footprint when loaded, in GB. Compared against a
     /// single member's VRAM for the fit policy.
     pub total_vram_gb: f32,
+    /// KV attention heads (`<arch>.attention.head_count_kv`). `None` when the
+    /// gguf did not declare it — the KV estimate is then unavailable, not zero.
+    pub head_count_kv: Option<u32>,
+    /// Per-head key/value dimension (`<arch>.attention.key_length`). `None` if
+    /// absent.
+    pub key_length: Option<u32>,
+    /// The model's trained context length (`<arch>.context_length`). `None` if
+    /// absent. Used as the default and the ceiling for a KV estimate.
+    pub context_length: Option<u32>,
 }
 
 impl ModelShape {
@@ -149,7 +158,44 @@ impl ModelShape {
     pub fn activation_bytes_per_token(&self) -> u32 {
         self.hidden_dim * ACTIVATION_DTYPE_BYTES
     }
+
+    /// Bytes of KV cache to hold `context_tokens` tokens.
+    ///
+    /// This is the term a naive "weights fit in VRAM" check omits, and it is
+    /// frequently the one that decides whether a model runs at the requested
+    /// context. Per layer, per token, the cache holds a key and a value vector
+    /// of `head_count_kv * key_length` elements each, at `KV_DTYPE_BYTES`:
+    ///
+    ///   2 (K and V) * layers * head_count_kv * key_length * KV_DTYPE_BYTES * tokens
+    ///
+    /// Returns `None` when the gguf omitted the attention metadata — the caller
+    /// must then say "KV unknown", never silently assume zero.
+    pub fn kv_cache_bytes(&self, context_tokens: u32) -> Option<u64> {
+        let heads = self.head_count_kv? as u64;
+        let key_dim = self.key_length? as u64;
+        let layers = self.layers as u64;
+        let tokens = context_tokens as u64;
+        Some(2 * layers * heads * key_dim * KV_DTYPE_BYTES as u64 * tokens)
+    }
+
+    /// The trained context, if known — the sensible default for a fit check.
+    pub fn default_context(&self) -> Option<u32> {
+        self.context_length
+    }
+
+    /// Bytes of KV cache per token, per layer — the real per-layer figure the
+    /// serve advisor needs to replace its representative 4096 constant.
+    /// when the gguf omitted the attention dimensions.
+    pub fn kv_bytes_per_token_per_layer(&self) -> Option<u64> {
+        let heads = self.head_count_kv? as u64;
+        let key_dim = self.key_length? as u64;
+        // 2 for K and V.
+        Some(2 * heads * key_dim * KV_DTYPE_BYTES as u64)
+    }
 }
+
+/// Bytes per KV cache element. GGUF KV cache defaults to fp16.
+const KV_DTYPE_BYTES: u32 = 2;
 
 /// Decision of the fit policy: whether a cluster is warranted at all.
 ///
@@ -809,6 +855,9 @@ mod tests {
 
     fn shape(layers: u32, hidden: u32, total_gb: f32) -> ModelShape {
         ModelShape {
+            head_count_kv: None,
+            key_length: None,
+            context_length: None,
             layers,
             hidden_dim: hidden,
             total_vram_gb: total_gb,

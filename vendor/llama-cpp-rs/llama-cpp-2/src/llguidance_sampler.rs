@@ -26,7 +26,7 @@ use crate::token::LlamaToken;
 /// order of hundreds of milliseconds for large vocabularies. Build it once per model and
 /// reuse the result (it's an `Arc`-backed [`TokEnv`], so cloning is cheap) across every
 /// grammar and request; don't call this per-request or per-grammar.
-/// 
+///
 /// This mirrors the logic in upstream `llguidance.cpp` — for each token:
 /// - Try normal detokenize (special=false)
 /// - If empty, detokenize with special=true and prefix with 0xFF marker byte

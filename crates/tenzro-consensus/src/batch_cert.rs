@@ -1083,9 +1083,9 @@ mod tests {
 
     fn tx_with_nonce(n: u64) -> SignedTransaction {
         use tenzro_crypto::pq::MlDsaSigningKey;
+        use tenzro_types::Signature;
         use tenzro_types::primitives::{ChainId, Nonce};
         use tenzro_types::transaction::{Transaction, TransactionType};
-        use tenzro_types::Signature;
 
         let pq_key = MlDsaSigningKey::generate();
         let tx = Transaction::new(
@@ -1116,13 +1116,20 @@ mod tests {
         let (fitted, deferred) = BatchCertStore::split_to_fit(many);
 
         assert!(!fitted.is_empty(), "a batch must make progress");
-        assert_eq!(fitted.len() + deferred.len(), offered, "nothing may be dropped");
+        assert_eq!(
+            fitted.len() + deferred.len(),
+            offered,
+            "nothing may be dropped"
+        );
 
         let size: usize = fitted
             .iter()
             .map(|t| serde_json::to_string(t).map(|s| s.len()).unwrap_or(0))
             .sum();
-        assert!(size <= MAX_BATCH_BYTES, "batch is {size} bytes, over the bound");
+        assert!(
+            size <= MAX_BATCH_BYTES,
+            "batch is {size} bytes, over the bound"
+        );
         // Compared against the live config rather than a literal, so this
         // tracks the real limit instead of a constant clippy can fold away.
         assert!(

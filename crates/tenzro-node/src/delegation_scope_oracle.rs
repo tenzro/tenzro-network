@@ -227,10 +227,7 @@ mod tests {
             .register_autonomous_machine(
                 pk,
                 vec!["test".to_string()],
-                tenzro_identity::identity::MachineAnchor::HardwareRooted {
-                    hardware_root_hex: "ab".repeat(32),
-                    sources: vec!["tpm:ek".to_string()],
-                },
+                tenzro_identity::identity::MachineAnchor::hardware_rooted("ab".repeat(32), vec!["tpm:ek".to_string()]),
             )
             .await
             .expect("register autonomous machine");
@@ -254,9 +251,7 @@ mod tests {
     fn make_registry() -> Arc<IdentityRegistry> {
         // Needs a binder: registration refuses without one rather than
         // assigning an address no key can sign for.
-        Arc::new(
-            IdentityRegistry::with_in_process_binder().expect("in-process wallet binder"),
-        )
+        Arc::new(IdentityRegistry::with_in_process_binder().expect("in-process wallet binder"))
     }
 
     #[tokio::test]

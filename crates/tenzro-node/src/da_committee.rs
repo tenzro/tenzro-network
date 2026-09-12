@@ -32,9 +32,8 @@
 //! - [`DaCommitteeSurface`] — the message-passing transport (send a sliver /
 //!   fetch a sliver / receive an attestation). The production impl is the
 //!   libp2p adapter (`/tenzro/da/committee` request_response); tests supply an
-//!   in-memory mesh. This mirrors [`crate::mpc_libp2p_adapter::NetworkMpcSurface`]:
-//!   the node crate is the only place that may depend on both the storage core
-//!   and the network layer.
+//!   in-memory mesh. The node crate is the only place that may depend on both
+//!   the storage core and the network layer.
 //!
 //! ## Persistence
 //!
@@ -146,8 +145,7 @@ pub trait CommitteeView: Send + Sync {
 /// The transport-agnostic message-passing surface the backend drives to place
 /// and retrieve slivers across the committee.
 ///
-/// Object-safe and async, mirroring
-/// [`tenzro_bridge::mpc::libp2p_relay::MpcLibp2pSurface`]. The production impl
+/// Object-safe and async. The production impl
 /// wraps the libp2p `/tenzro/da/committee` request_response protocol; tests
 /// supply an in-memory mesh. All methods address a member by its committee
 /// index — the concrete transport resolves index → validator address →

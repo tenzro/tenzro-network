@@ -4,33 +4,93 @@ use tempfile::TempDir;
 use tenzro_types::AssetId;
 use tenzro_types::primitives::Address;
 use tenzro_wallet::{
+    WalletId, WalletIdentity,
     builder::TransactionBuilder,
-    provisioning::WalletProvisioner,
     service::{TenzroWalletService, WalletServiceConfig},
+    signing::{HybridSignatureBytes, HybridSigner},
     traits::WalletService,
 };
 
+/// Stands in for a hardware-backed signer. Signing goes through this seam
+/// precisely so the service never holds the secret; a test has to bind one
+/// for the same reason a node does.
+struct TestHybridSigner {
+    classical_public_key: Vec<u8>,
+    pq: tenzro_crypto::pq::MlDsaSigningKey,
+}
+
+#[async_trait::async_trait]
+impl HybridSigner for TestHybridSigner {
+    fn classical_public_key(&self) -> Vec<u8> {
+        self.classical_public_key.clone()
+    }
+    fn pq_verifying_key(&self) -> Vec<u8> {
+        self.pq.verifying_key_bytes().to_vec()
+    }
+    async fn sign_hybrid(
+        &self,
+        message: &[u8],
+    ) -> tenzro_wallet::error::Result<HybridSignatureBytes> {
+        Ok(HybridSignatureBytes::new(
+            vec![1u8; 64],
+            self.pq.sign(message),
+        ))
+    }
+}
+
+/// Bind a signer for `wallet_id`, standing in for the passkey or secure
+/// element that holds the real key.
+fn bind_signer(service: &TenzroWalletService, wallet_id: &WalletId, public_key: Vec<u8>) {
+    service.set_hybrid_signer(
+        wallet_id.clone(),
+        std::sync::Arc::new(TestHybridSigner {
+            classical_public_key: public_key,
+            pq: tenzro_crypto::pq::MlDsaSigningKey::generate(),
+        }),
+    );
+}
+
+/// A human identity for tests. `seed` distinguishes one test identity from
+/// another — the wallet address derives from the identity key, so two wallets
+/// only differ if their identities do.
+fn human_identity(seed: u8) -> WalletIdentity {
+    WalletIdentity::human(
+        vec![seed; 16],
+        tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, vec![seed; 32]),
+    )
+    .unwrap()
+}
+
+/// A machine identity — rooted in a TPM / Secure Enclave key, no passkey.
+fn machine_identity(seed: u8) -> WalletIdentity {
+    WalletIdentity::machine(
+        format!("machine-{seed}"),
+        tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, vec![seed; 32]),
+    )
+    .unwrap()
+}
+
+fn service(temp_dir: &TempDir) -> TenzroWalletService {
+    let config = WalletServiceConfig::new(temp_dir.path().to_path_buf());
+    TenzroWalletService::with_config(config).unwrap()
+}
+
 #[tokio::test]
 async fn test_wallet_provisioning_and_signing() {
-    // Create a wallet service
     let temp_dir = TempDir::new().unwrap();
-    let config = WalletServiceConfig::new(temp_dir.path().to_path_buf());
-    let service = TenzroWalletService::with_config(config).unwrap();
+    let service = service(&temp_dir);
 
-    // Provision a wallet
-    let wallet = service.provision_wallet().await.unwrap();
+    let wallet = service.provision_wallet(human_identity(1)).await.unwrap();
 
-    // Verify wallet properties
-    assert_eq!(wallet.threshold, 2);
-    assert_eq!(wallet.total_shares, 3);
-    assert!(wallet.can_sign());
+    // The wallet carries the identity's public key, never its secret half.
+    assert_eq!(wallet.public_key.as_bytes(), &[1u8; 32]);
+    bind_signer(&service, &wallet.wallet_id, vec![1u8; 32]);
 
-    // Sign raw data using sign_data
     let data = b"test data for signing";
     let signature = service.sign_data(&wallet.wallet_id, data).await.unwrap();
 
-    // Hybrid signature: classical leg (sign_data uses MPC threshold combine —
-    // returns the combined classical signature) + mandatory ML-DSA-65 leg.
+    // Hybrid signature: classical leg from the identity signer + the
+    // mandatory ML-DSA-65 leg.
     assert!(!signature.classical.is_empty());
     assert_eq!(signature.pq.len(), 3309);
 }
@@ -38,14 +98,13 @@ async fn test_wallet_provisioning_and_signing() {
 #[tokio::test]
 async fn test_wallet_transaction_signing() {
     let temp_dir = TempDir::new().unwrap();
-    let config = WalletServiceConfig::new(temp_dir.path().to_path_buf());
-    let service = TenzroWalletService::with_config(config).unwrap();
+    let service = service(&temp_dir);
 
-    let wallet = service.provision_wallet().await.unwrap();
+    let wallet = service.provision_wallet(human_identity(2)).await.unwrap();
+    bind_signer(&service, &wallet.wallet_id, vec![2u8; 32]);
 
-    // Build a valid transaction using the builder. `from_wallet_pq` binds both
-    // the classical sender address and the wallet's ML-DSA-65 verifying key
-    // into the transaction so `sign_transaction` can match them at signing.
+    // `from_wallet_pq` binds both the classical sender address and the
+    // wallet's ML-DSA-65 verifying key so signing can match them.
     let nonce = service.next_nonce(&wallet.address);
     let tx = TransactionBuilder::default_chain()
         .from_wallet_pq(&wallet)
@@ -55,8 +114,6 @@ async fn test_wallet_transaction_signing() {
         .build_validated()
         .unwrap();
 
-    // Sign the transaction (validates, signs with MPC, verifies signature,
-    // then signs ML-DSA-65 over the same Transaction::hash() preimage).
     let signature = service
         .sign_transaction(&wallet.wallet_id, &tx)
         .await
@@ -69,23 +126,19 @@ async fn test_wallet_transaction_signing() {
 #[tokio::test]
 async fn test_balance_tracking() {
     let temp_dir = TempDir::new().unwrap();
-    let config = WalletServiceConfig::new(temp_dir.path().to_path_buf());
-    let service = TenzroWalletService::with_config(config).unwrap();
+    let service = service(&temp_dir);
 
-    let wallet = service.provision_wallet().await.unwrap();
+    let wallet = service.provision_wallet(human_identity(3)).await.unwrap();
 
-    // Check initial balance
     let balance = service
         .get_balance(&wallet.address, &AssetId::tnzo())
         .await
         .unwrap();
     assert_eq!(balance.available, 0);
 
-    // Add some balance
     let tracker = service.balance_tracker();
     tracker.add_balance(&wallet.address, &AssetId::tnzo(), 1000);
 
-    // Check updated balance
     let balance = service
         .get_balance(&wallet.address, &AssetId::tnzo())
         .await
@@ -93,40 +146,52 @@ async fn test_balance_tracking() {
     assert_eq!(balance.available, 1000);
 }
 
+/// A machine wallet needs no passkey: an autonomous machine roots its key in
+/// a TPM or Secure Enclave, so requiring a human credential would make
+/// unattended provisioning impossible.
+#[tokio::test]
+async fn test_machine_wallet_needs_no_passkey() {
+    let temp_dir = TempDir::new().unwrap();
+    let service = service(&temp_dir);
+
+    let identity = machine_identity(9);
+    assert!(identity.is_machine());
+    assert_eq!(identity.kind(), "machine:secure-element");
+
+    let wallet = service.provision_wallet(identity).await.unwrap();
+    assert_eq!(wallet.public_key.as_bytes(), &[9u8; 32]);
+}
+
+/// A wallet cannot be built without key material behind it. These are the
+/// constructor's refusals — the reason "no wallet without an identity" is a
+/// compile-time property rather than a runtime check.
 #[test]
-fn test_provisioner_custom_config() {
-    use tenzro_crypto::KeyType;
-    use tenzro_wallet::provisioning::ProvisioningConfig;
-
-    // Custom 3-of-5 FROST config (FROST-Ed25519 per RFC 9591).
-    let config = ProvisioningConfig::new(3, 5).unwrap();
-
-    let provisioner = WalletProvisioner::with_config(config).unwrap();
-    let wallet = provisioner.provision_wallet().unwrap();
-
-    assert_eq!(wallet.threshold, 3);
-    assert_eq!(wallet.total_shares, 5);
-    assert_eq!(wallet.key_type(), KeyType::Ed25519);
+fn test_identity_rejects_empty_credentials() {
+    let pk = tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, vec![1u8; 32]);
+    assert!(WalletIdentity::human(Vec::new(), pk.clone()).is_err());
+    assert!(WalletIdentity::machine("", pk.clone()).is_err());
+    assert!(WalletIdentity::machine("   ", pk).is_err());
 }
 
 #[tokio::test]
 async fn test_multiple_wallets() {
     let temp_dir = TempDir::new().unwrap();
-    let config = WalletServiceConfig::new(temp_dir.path().to_path_buf());
-    let service = TenzroWalletService::with_config(config).unwrap();
+    let service = service(&temp_dir);
 
-    // Provision multiple wallets
-    let wallet1 = service.provision_wallet().await.unwrap();
-    let wallet2 = service.provision_wallet().await.unwrap();
-    let wallet3 = service.provision_wallet().await.unwrap();
+    // Distinct identities — the address derives from the identity key, so
+    // two wallets differ exactly when their identities do.
+    let wallet1 = service.provision_wallet(human_identity(11)).await.unwrap();
+    let wallet2 = service.provision_wallet(human_identity(12)).await.unwrap();
+    let wallet3 = service
+        .provision_wallet(machine_identity(13))
+        .await
+        .unwrap();
 
-    // All should have unique IDs and addresses
     assert_ne!(wallet1.wallet_id, wallet2.wallet_id);
     assert_ne!(wallet2.wallet_id, wallet3.wallet_id);
     assert_ne!(wallet1.address, wallet2.address);
     assert_ne!(wallet2.address, wallet3.address);
 
-    // List wallets
     let wallets = service.list_wallets().await.unwrap();
     assert_eq!(wallets.len(), 3);
 }
@@ -134,17 +199,14 @@ async fn test_multiple_wallets() {
 #[tokio::test]
 async fn test_asset_support() {
     let temp_dir = TempDir::new().unwrap();
-    let config = WalletServiceConfig::new(temp_dir.path().to_path_buf());
-    let service = TenzroWalletService::with_config(config).unwrap();
+    let service = service(&temp_dir);
 
-    let wallet = service.provision_wallet().await.unwrap();
+    let wallet = service.provision_wallet(human_identity(4)).await.unwrap();
 
-    // Check default assets
     assert!(wallet.supports_asset(&AssetId::tnzo()));
     assert!(wallet.supports_asset(&AssetId::from("USDT")));
     assert!(wallet.supports_asset(&AssetId::from("USDC")));
 
-    // Supported assets should be available
     let assets = service.supported_assets().await;
     assert!(assets.contains(&AssetId::tnzo()));
 }

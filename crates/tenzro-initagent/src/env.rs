@@ -34,7 +34,9 @@ pub fn assemble_env(
         merged.insert(k.clone(), v.clone());
     }
     if let Some(p) = port {
-        merged.entry("PORT".to_string()).or_insert_with(|| p.to_string());
+        merged
+            .entry("PORT".to_string())
+            .or_insert_with(|| p.to_string());
     }
     merged.into_iter().collect()
 }
@@ -44,7 +46,10 @@ mod tests {
     use super::*;
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -77,6 +82,10 @@ mod tests {
     #[test]
     fn explicit_port_env_wins_over_run_spec() {
         let env = assemble_env(&map(&[("PORT", "3000")]), &[], Some(8080));
-        assert_eq!(get(&env, "PORT"), Some("3000"), "operator PORT beats run.json");
+        assert_eq!(
+            get(&env, "PORT"),
+            Some("3000"),
+            "operator PORT beats run.json"
+        );
     }
 }

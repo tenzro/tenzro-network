@@ -1,3 +1,11 @@
+//! Run with a raised descriptor limit: `ulimit -n 65536`.
+//!
+//! Every test here boots a full node with RocksDB and they run in parallel, so
+//! the suite's fd usage grows with the test count. At the common 1024 soft
+//! limit the run fails partway through with `Too many open files` while
+//! opening the db directory or reading a sealed key — which reads like storage
+//! corruption and is not. The same run passes once the limit is raised.
+
 //! Auth integration tests.
 //!
 //! Spins up a full TenzroNode (storage + RPC + auth engine) per test and
@@ -129,7 +137,7 @@ async fn rpc_call_admin(client: &reqwest::Client, url: &str, body: Value) -> Val
 
 /// An identity whose signing key the test holds.
 ///
-/// The onboarding RPCs auto-provision an MPC wallet and keep the key inside
+/// The onboarding RPCs auto-provision a permissionless wallet and keep the key inside
 /// the node, which is right for production and useless for a test that has to
 /// *prove* ownership. `tenzro_registerIdentity` accepts a caller-supplied
 /// public key, so registering through it leaves the private half here.
@@ -1250,4 +1258,84 @@ fn test_dpop_jkt_matches_manual_sha256() {
         holder.jkt, manual_jkt,
         "DpopProof::compute_jkt must match manual SHA-256 over canonical JWK (RFC 7638 §3)"
     );
+}
+
+/// An unauthenticated caller is refused, not waved through.
+///
+/// This is the property the whole pre-flight rests on. `tenzro_authorizeToolCall`
+/// is an Open method — any caller may ask — so the only thing stopping it being
+/// a free pass is that asking without a credential answers `deny`. If it
+/// answered `permit`, a harness could skip its own gate by presenting nothing.
+#[tokio::test]
+async fn authorize_tool_call_denies_a_caller_with_no_credential() {
+    let (url, shutdown, handle, _tmp, _node) = setup_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = rpc_call(
+        &client,
+        &url,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "tenzro_authorizeToolCall",
+            "params": { "tool": "edit_file" },
+            "id": 1
+        }),
+    )
+    .await;
+
+    let result = resp
+        .get("result")
+        .unwrap_or_else(|| panic!("expected a decision, got: {resp}"));
+
+    assert_eq!(
+        result.get("decision").and_then(|v| v.as_str()),
+        Some("deny"),
+        "an unauthenticated caller must be denied, not permitted: {resp}"
+    );
+    assert_eq!(
+        result.get("resource_id").and_then(|v| v.as_str()),
+        Some("tool:edit_file"),
+        "the decision must name what it was about: {resp}"
+    );
+
+    let _ = shutdown.send(());
+    let _ = handle.await;
+}
+
+/// A malformed request is an error, not a decision.
+///
+/// `deny` and "you asked wrong" have to stay distinguishable — a harness that
+/// cannot tell them apart will report a policy refusal for its own bug, or
+/// worse, treat a bug as policy and stop asking.
+#[tokio::test]
+async fn authorize_tool_call_rejects_a_request_naming_no_tool() {
+    let (url, shutdown, handle, _tmp, _node) = setup_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = rpc_call(
+        &client,
+        &url,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "tenzro_authorizeToolCall",
+            "params": {},
+            "id": 1
+        }),
+    )
+    .await;
+
+    assert!(
+        resp.get("result").is_none(),
+        "a malformed request must not produce a decision: {resp}"
+    );
+    assert_eq!(
+        resp.get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_i64()),
+        Some(-32602),
+        "expected an invalid-params error: {resp}"
+    );
+
+    let _ = shutdown.send(());
+    let _ = handle.await;
 }
