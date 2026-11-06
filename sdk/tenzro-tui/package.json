@@ -1,0 +1,25 @@
+{
+  "name": "tenzro-tui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Interactive terminal console for a Tenzro node and wallet, built on tenzro-sdk",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "tenzro-tui": "dist/cli.js" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && FORCE_COLOR=3 node --test --test-timeout=15000 --test-force-exit dist/test/*.test.js"
+  },
+  "dependencies": {
+    "ink": "^8.0.0",
+    "react": "^19.3.0",
+    "tenzro-sdk": "file:../tenzro-ts-sdk"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^19.3.0",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "^5.9.3"
+  }
+}

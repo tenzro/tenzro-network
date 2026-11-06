@@ -74,6 +74,26 @@ The Python capability packages carry the logic a client must run itself
 (signing, verification, payment gates, stream assembly); every other node
 method is a typed method on `tenzro.RpcClient`.
 
+## Terminal console
+
+`sdk/tenzro-tui` is an interactive terminal console for a node, built on the
+TypeScript SDK (`tenzro-tui`, Node 22 or newer). It reads and never signs or
+sends: keys stay in the `tenzro` CLI. It is not published to npm yet; build it
+from the repository:
+
+```
+cd sdk/tenzro-ts-sdk && npm ci
+cd ../tenzro-tui && npm ci && npm run build
+node dist/src/cli.js --rpc http://127.0.0.1:8545
+```
+
+Five screens, switched with 1 to 5 or Tab: Overview, Wallet, Models,
+Validators and Governance. r refreshes, ? shows the help, q quits. The header
+shows one status word (OK, WATCH, DOWN or UNKNOWN); `NO_COLOR` or `--no-color`
+removes colour and the words still carry the meaning. Without a terminal, or
+with `--plain`, it prints one text report and exits 0 when the node is OK and 1
+otherwise. See [tenzro-tui/README.md](tenzro-tui/README.md).
+
 ## Shared vectors
 
 `sdk/fixtures` holds the vectors all three SDKs and the node are tested
