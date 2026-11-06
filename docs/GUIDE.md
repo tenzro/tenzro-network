@@ -98,21 +98,21 @@ Every application on Tenzro uses the same open surfaces, with no privileged buil
 
 ## Prebuilt binaries
 
-Every release publishes the node and the CLI for each platform, in a CPU build
-and a GPU build. Both are official; nobody has to build from source.
+Every release publishes the node and the CLI as the archives below, and the
+release page lists exactly the archives of that release. Each archive is a CPU
+build or a GPU build, and both are official; nobody has to build from source.
+A build that is not in the table (a CPU build for Linux aarch64 or Windows,
+a Vulkan build, the light edge build) is built from source with the matching
+script in `scripts/release/`; see [light-build.md](operations/light-build.md)
+for the light tier.
 
 | Platform | CPU build | GPU build |
 |---|---|---|
 | Linux x86_64 | `tenzro-node-linux-x86_64-cpu.tar.gz` | `tenzro-node-linux-x86_64-cuda.tar.gz` (NVIDIA) |
-| Linux aarch64 | `tenzro-node-linux-aarch64-cpu.tar.gz` | `tenzro-node-linux-aarch64-cuda.tar.gz` (NVIDIA) |
-| Windows x86_64 | `tenzro-node-windows-x86_64-cpu.zip` | `tenzro-node-windows-x86_64-cuda.zip` (NVIDIA) |
+| Linux aarch64 | | `tenzro-node-linux-aarch64-cuda.tar.gz` (NVIDIA) |
+| Windows x86_64 | | `tenzro-node-windows-x86_64-cuda.zip` (NVIDIA) |
 | macOS Apple silicon | | `tenzro-node-macos-aarch64-metal.tar.gz` |
-
-Edge machines (single-board computers, Jetson-class modules, gateways) take the
-light build, `tenzro-node-linux-aarch64-edge.tar.gz`: no model engines, so it
-forwards model calls to providers and refuses the roles that run models.
-`tenzro-node-install` takes it for the edge role (`--role edge`, or by default on a
-machine without a GPU).
+| macOS Intel | `tenzro-node-macos-x86_64-cpu.tar.gz` | |
 
 Each archive holds `bin/tenzro-node` and `bin/tenzro`. A Linux CUDA archive
 also holds `lib/` (ONNX Runtime with its CUDA providers); keep it beside
@@ -555,7 +555,7 @@ tenzro setup --path local --network-name lab --yes
 ```
 
 This derives the validator's keys from the machine's hardware root (its TPM
-2.0 or Secure Enclave, or your passkey), assembles a schema-v1 `genesis.toml`
+2.0 or Secure Enclave; your passkey controls the operator account but never holds the key), assembles a schema-v1 `genesis.toml`
 with your node as the founding validator plus a funded account, and writes
 a service unit (launchd plist on macOS, systemd unit on Linux) into the data
 directory. It then prints three things:
@@ -606,7 +606,9 @@ a voting validator can need one: while the governed parameter
 validator registers only from an account that an enacted `ApproveValidators`
 proposal named. Governance sets it to 0 to open admission. The machine needs a TPM 2.0
 (or, on macOS, a Secure Enclave), provisioned once with
-`tenzro-node tpm provision` (§4.6): a node without one refuses to start. The
+`tenzro-node tpm provision` (§4.6), or its key held in another machine's TPM
+through a key holder (`--tpm-key-holder`; see [NODE.md](NODE.md#raspberry-pi-and-other-edge-devices) for its
+limits): a node with none of these refuses to start. The
 flow, and the behaviours that surprise first-time operators:
 
 1. **You join as a non-voting (verify-only) node first.** Start with the

@@ -17,7 +17,7 @@ The network has one job: to make a self-reinforcing loop turn. Demand from agent
 | Edge (light build) | Small, embedded and edge devices: single-board computers (the Raspberry Pi is the reference device), Jetson-class modules, mini PCs, NAS boxes, gateways | Identity, payments, agents, RPC, storage and following the chain; forwards inference to providers on the network |
 | Standard | CPU servers and workstations | Every role a CPU can serve, including models that fit it |
 | GPU provider | Consumer GPUs to data-center accelerators | Inference, compute rental, confidential computing, sharded serving of models too large for one machine |
-| Validator | Servers with a TPM that order blocks and sign checkpoints | Consensus, storage, relaying; bonded stake |
+| Validator | Servers whose consensus key is held in a TPM 2.0 or Secure Enclave (in the machine, or in another machine's TPM through a key holder) that order blocks and sign checkpoints | Consensus, storage, relaying; bonded stake |
 
 **Edge devices take part in the AI value chain.** Most AI is now used through model ladders: a cheap step routes, checks, filters or answers the easy cases, and a large model handles only what needs it. Tenzro is designed so that an edge device can be the cheap step: it hosts a deployable agent harness that orchestrates agents, small models and other nodes, and calls GPU providers for the hard part. One request then pays several parties from the caller's own budget: the author of the agent, the machine that orchestrated it, and the machine that ran the large model. Settlements carry the call chain (app, agent and tool) and pay each named party directly ([docs/AI.md](docs/AI.md#hybrid-jobs-edge-orchestration-and-model-ladders)). Because the design lets a device costing about a hundred dollars do paid work, more people can supply the network than where earning needs an expensive GPU.
 
@@ -237,6 +237,11 @@ self-stake (10,000 TNZO at genesis, governed as `stake.validator_tnzo`) plus
 gas. Once that account is funded the node registers itself as a validator on
 its next start, and the validator joins the active set at the next epoch
 boundary. `tenzro validator get <account>` shows the registration.
+
+The consensus key is held by hardware: the machine's own TPM 2.0 or Secure
+Enclave, or the TPM of another machine the operator owns, reached through a
+key holder (`--tpm-key-holder`, see [docs/NODE.md](docs/NODE.md#raspberry-pi-and-other-edge-devices)).
+A passkey is never a consensus key; it authorises the operator.
 
 Before it derives any key the wizard runs a preflight of the machine's
 hardware root and prints each unmet prerequisite with the lines that fix it:

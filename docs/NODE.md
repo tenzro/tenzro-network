@@ -279,6 +279,20 @@ session continuity or the MoE repair loop.
   starts with `--tpm-key-holder <socket> --tpm-label <label>`. The node can
   restart without a new grant; a reboot needs one.
 
+  **Validators.** The same delegation can hold a validator's consensus key.
+  The P-256 leg is a key in the provider's TPM and the ML-DSA-65 leg is
+  derived there for each use, so a machine with no TPM of its own can take
+  the validator role. The provider file must enrol the client with
+  `derived = true`. The limits: every signature is a round trip to the
+  provider, queued behind its other TPM commands, so the provider must stay
+  reachable; a grant lasts at most the provider's `max_grant_hours` (720 by
+  default), and after a reboot of the key holder, or when the grant ends,
+  the validator cannot sign until the operator installs a new one. The
+  ML-DSA-87 / P-384 consensus scheme is not available this way: it needs a
+  TPM in the validator's own machine that implements ML-DSA and P-384. A
+  passkey never holds a consensus key: the operator's passkey grants and
+  approves, and the key stays in a TPM or Secure Enclave.
+
   **Session delegation.** A TPM command takes seconds, so the key holder does
   not ask the provider for every signature. With `tenzro-node tpm key-holder
   --identity <did> --label <label>` it asks the provider once per session for
@@ -329,7 +343,7 @@ knowledge verifiers (risc0, plonky3, halo2) on 32-bit.
 
 ### Measurements
 
-Measured on spark (aarch64, 20 cores, Ubuntu 24.04) on 2026-10-18, against a
+Measured on an aarch64 host (20 cores, Ubuntu 24.04) on 2026-10-18, against a
 private network of three nodes on software TPMs (one validator, one full node
 serving the relay, and the node under test with `--roles light` and
 `[memory] total_gb` set to emulate a smaller machine). The node under test
@@ -368,7 +382,7 @@ What the numbers show:
 - `--size` saves another 28% of the binary with no loss in sync or RPC load
   that this host can resolve.
 - A light node following a chain that makes a block a second keeps about one
-  core busy on spark. That is block import, not idle overhead, and is the
+  core busy on that host. That is block import, not idle overhead, and is the
   figure to watch on a Pi 4.
 
 On the same network the validator (light build, validator role) held

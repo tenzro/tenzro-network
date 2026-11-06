@@ -6,7 +6,7 @@ This document defines both methods at the JSON-RPC layer. The same call shapes a
 
 ## Status
 
-Pre-alpha. Not version-locked. Names, fields, and event types may change without deprecation cycles until the network has live external users.
+Preview. Not version-locked. Names, fields, and event types may change without deprecation cycles until the network has live external users.
 
 ## Two call shapes
 

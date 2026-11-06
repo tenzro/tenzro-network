@@ -273,7 +273,7 @@ Every node persists its block history, state, and per-subsystem data through Roc
 - `CF_BLOCKS` — finalized blocks
 - `CF_STATE` — VM state (committed into the unified binary state trie, `CF_STATE_TRIE`)
 - `CF_METADATA` — chain id, genesis hash, configured weak-subjectivity anchor
-- `CF_VALIDATOR_MODULES` — passkey validator modules per account and passkey auth sessions
+- `CF_VALIDATOR_MODULES` — the validator modules installed on each account (the account-side signature checks, such as the WebAuthn passkey validator) and passkey auth sessions; unrelated to consensus validators, whose keys are in hardware
 - `CF_AGENTS` — agent registry
 - `CF_MODELS` / `CF_MODEL_SERVICES` — model catalog and provider serving declarations
 - `CF_PROVIDERS` — provider registry

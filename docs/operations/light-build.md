@@ -111,6 +111,20 @@ session continuity or the MoE repair loop.
   starts with `--tpm-key-holder <socket> --tpm-label <label>`. The node can
   restart without a new grant; a reboot needs one.
 
+  **Validators.** The same delegation can hold a validator's consensus key.
+  The P-256 leg is a key in the provider's TPM and the ML-DSA-65 leg is
+  derived there for each use, so a machine with no TPM of its own can take
+  the validator role. The provider file must enrol the client with
+  `derived = true`. The limits: every signature is a round trip to the
+  provider, queued behind its other TPM commands, so the provider must stay
+  reachable; a grant lasts at most the provider's `max_grant_hours` (720 by
+  default), and after a reboot of the key holder, or when the grant ends,
+  the validator cannot sign until the operator installs a new one. The
+  ML-DSA-87 / P-384 consensus scheme is not available this way: it needs a
+  TPM in the validator's own machine that implements ML-DSA and P-384. A
+  passkey never holds a consensus key: the operator's passkey grants and
+  approves, and the key stays in a TPM or Secure Enclave.
+
   **Session delegation.** A TPM command takes seconds, so the key holder does
   not ask the provider for every signature. With `tenzro-node tpm key-holder
   --identity <did> --label <label>` it asks the provider once per session for
