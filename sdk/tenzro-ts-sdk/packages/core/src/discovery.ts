@@ -1,10 +1,10 @@
 import type { RpcClient } from './rpc';
 
 /**
- * Discovery + helper RPCs for the Universal Resolver, SIWT, KERI, MPC
- * pre-sign / PKR, and Institution-identity modules.
+ * Discovery + helper RPCs for the Universal Resolver, SIWT, KERI,
+ * PKR, and Institution-identity modules.
  *
- * State-bearing dispatch (party allocation, threshold sign, mint apply)
+ * State-bearing dispatch (party allocation, mint apply)
  * lives on the individual adapter clients; this class gives wallets and
  * SDK consumers read access to the new modules.
  */

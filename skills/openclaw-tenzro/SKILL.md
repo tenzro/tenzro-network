@@ -419,10 +419,14 @@ curl -X POST https://rpc.tenzro.com \
     "identity": {
       "did": "did:tenzro:human:<uuid>",
       "display_name": "Alice",
-      "identity_type": "human",
+      "identity_type": "micro_node",
       "status": "active"
     },
-    "wallet": { "address": "0x<hex>", "wallet_type": "mpc", "balance": "0" },
+    "wallet": {
+      "wallet_id": "<id>",
+      "address": "0x<hex>",
+      "public_key": "0x<hex>"
+    },
     "capabilities": {
       "inference": true,
       "payments": true,
@@ -435,14 +439,16 @@ curl -X POST https://rpc.tenzro.com \
       "bridge": true,
       "governance": true
     },
+    "origin": "cli",
+    "participant_type": "human",
+    "role": "micro_node",
     "network": {
       "rpc": "https://rpc.tenzro.com",
       "mcp": "https://mcp.tenzro.com/mcp",
       "a2a": "https://a2a.tenzro.com"
-    },
-    "is_micro_node": true,
-    "chain_id": 13380
-  }
+    }
+  },
+  "id": 1
 }
 ```
 
