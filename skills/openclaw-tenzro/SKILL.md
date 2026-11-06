@@ -222,7 +222,7 @@ curl -X POST https://rpc.tenzro.com \
   -d '{"jsonrpc":"2.0","method":"eth_chainId","params":{},"id":1}'
 ```
 
-The answer is the chain id the network's genesis sets: `0x20aa9` (133801) on the preview network.
+The answer is the chain id the network's genesis sets: `0x3444` (13380) on the preview network.
 
 ### Get Node Info
 
@@ -441,7 +441,7 @@ curl -X POST https://rpc.tenzro.com \
       "a2a": "https://a2a.tenzro.com"
     },
     "is_micro_node": true,
-    "chain_id": 133801
+    "chain_id": 13380
   }
 }
 ```

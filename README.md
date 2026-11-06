@@ -41,7 +41,7 @@ The network has one job: to make a self-reinforcing loop turn. Demand from agent
 - **AI inference and generation as protocol-level economic activity**: providers earn TNZO for serving models (chat, vision, audio, forecasting, embeddings, segmentation, detection), rendering diffusion image and video jobs (generative media), and running TEE enclaves. Inference results, settlements, and identity claims are verifiable on-chain via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) — both anchored via `ZK_VERIFY` and `TEE_VERIFY` precompiles.
 - **Humans as peer identity class**: HITL escalation, guardian-quorum recovery, AP2 cart/intent/payment mandates, and delegation scopes are wire primitives, not adapter-layer features.
 
-Tenzro Network is also the reference implementation of the [Open Agent Network (OAN)](https://github.com/tenzro/open-agent-network) — the standards family (TNIP-001..022) for a hybrid human + agent coexisting network. OAN provides the governance framework; Tenzro Network is the working implementation. The wire stays open for other implementations.
+Tenzro Network is also the reference implementation of the [Open Agent Network (OAN)](https://github.com/tenzro/open-agent-network) — the draft standards family (TNIP-001..022, pre-publication) for a hybrid human + agent coexisting network. OAN provides the governance framework; Tenzro Network is the working implementation. The wire stays open for other implementations.
 
 ## What runs on it
 
@@ -140,13 +140,6 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-settlement-fuzz** | Property-based fuzzing of settlement plan operations against the native executor (not published) |
 
 ## Quick Start
-
-### Install from Homebrew
-
-```bash
-brew tap tenzro/tap
-brew install tenzro-cli
-```
 
 ### Download a release and verify it
 
@@ -564,7 +557,6 @@ there is no chunk RPC.
 | **Rust SDK**                   | [`sdk/tenzro-sdk`](sdk/tenzro-sdk/README.md)                                 | Rust                                                                  |
 | **TypeScript SDK**             | [`sdk/tenzro-ts-sdk`](sdk/tenzro-ts-sdk/README.md)                              | TypeScript                                                                  |
 | **Browser-extension provider** | [`sdk/tenzro-inject`](sdk/tenzro-inject/README.md)                              | `window.tenzro` for dApps — EIP-1193 / EIP-6963 / Wallet Standard / CAIP-25 |
-| **Homebrew**                   | [tenzro/homebrew-tap](https://github.com/tenzro/homebrew-tap)                   | `brew install tenzro-cli`                                                     |
 | **Desktop App**                | [`apps/tenzro-control`](apps/tenzro-control)                                     | Tauri + React          |
 
 ## Public endpoints

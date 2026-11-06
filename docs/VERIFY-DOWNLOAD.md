@@ -10,11 +10,9 @@ is signed. Check both before you unpack or install anything.
 | `tenzro-node-<platform>-<variant>.tar.gz` or `.zip` | the archive you install |
 | `SHA256SUMS` | one line per archive: its SHA-256 digest and name |
 | `SHA256SUMS.sig` | a cosign signature over `SHA256SUMS` |
-| `<archive>.sig` | a cosign signature over that archive |
 | `tenzro-release.pub` | the public key that verifies the signatures |
 | `matrix.json` | how each archive was built: commit, toolchain, features, lockfile digest |
-| `sbom-<commit>.spdx.json`, `provenance-<commit>.intoto.json` | the software bill of materials and the build provenance statement |
-| `provenance-<commit>.dsse.json` | the provenance statement, signed with the release key |
+| `sbom-<commit>.spdx.json`, `provenance-<commit>.intoto.json` | the software bill of materials and the build provenance statement (unsigned; the signed object is `SHA256SUMS`) |
 
 ## Steps on Linux and macOS
 
@@ -35,8 +33,10 @@ tenzro-node-linux-x86_64-cpu.tar.gz`. It refuses an archive that `SHA256SUMS` do
 with another hash, or whose manifest signature does not verify. It needs cosign for the signature.
 
 The release signature is made with a hardware-held key and is not uploaded to a transparency log, so `--insecure-ignore-tlog=true` is required: without it cosign 3 looks for a log entry and fails with "signature not found in transparency log". The check against the public key is complete without the log. Step 1 prints `Verified OK`. Step 2 prints `<archive>: OK` for each archive you downloaded. If either
-step prints anything else, delete the download and do not install it. To check a single archive
-against its own signature, run `cosign verify-blob --key tenzro-release.pub --insecure-ignore-tlog=true --signature <archive>.sig <archive>`.
+step prints anything else, delete the download and do not install it.
+
+The signature is a classical ECDSA P-256 signature from a hardware-held key. A post-quantum signature is planned as a follow-up; no quantum resistance is claimed. Archives have no signature of their own: `SHA256SUMS` is the signed object, and each archive is checked against it.
+
 
 ## Steps on Windows
 
@@ -51,18 +51,34 @@ Compare the printed hash, ignoring case, with the line for that archive in `SHA2
 
 ## Where the public key lives
 
-The release signing key is held in hardware (a PKCS#11 token) by the release signer; the private
-key never leaves it and is never on a build machine (`scripts/supply-chain/release.sh` refuses a
-key file). The public half is exported from that token with `cosign public-key` and published as
-`tenzro-release.pub` in each release next to the manifest.
+The release signing key is a P-256 key created inside the TPM 2.0 of a Tenzro-operated machine. It is
+non-exportable: the private key cannot leave the chip, is never on a build machine, and every use needs a
+passphrase typed by the release signer. The signer reads `SHA256SUMS` line by line before typing it, and
+signs only that manifest. The
+public half is published as `tenzro-release.pub` in each release next to the manifest and in
+[RELEASE-KEYS.md](RELEASE-KEYS.md).
 
-Status, stated plainly: the repository does not yet record the key's fingerprint or a second
-publication channel for it. A key that arrives in the same place as the archive proves the archive
-was not corrupted and was signed by whoever holds that key; it does not protect you if the release
-page itself were replaced. Until a fingerprint is published somewhere independent of the release
-page, treat the SHA-256 digest in the release notes as a second reference and compare it with the
-line in `SHA256SUMS`. Once you have verified one release, keep that copy of `tenzro-release.pub` and
-check later releases against your kept copy; a changed key is a reason to stop and ask.
+Release key fingerprint (SHA-256 of the DER encoding of the public key):
+
+```
+c88aaee70b3c0bf17a994bad44963a6a72359b2e1497df9a15a40ed099aeb72d
+```
+
+Compute it from the file you downloaded and compare it with the line above, with the same line in
+[RELEASE-KEYS.md](RELEASE-KEYS.md) in the public repository, with
+<https://tenzro.com/docs/verify-your-download> and with
+<https://downloads.tenzro.com/RELEASE-KEY.txt>:
+
+```bash
+openssl pkey -pubin -in tenzro-release.pub -outform DER | sha256sum
+```
+
+A key that arrives only in the same place as the archive proves the archive was not corrupted and was
+signed by whoever holds that key; it does not protect you if that one place were replaced. That is why the
+fingerprint is published in several places that do not share a server. If they do not agree, stop and ask.
+Once you have verified one release, keep that copy of `tenzro-release.pub` and check later releases against
+your kept copy; a changed key is a reason to stop and ask. [SIGNING-LOG.md](SIGNING-LOG.md) lists each
+manifest the key has signed.
 
 ## Windows code signing
 

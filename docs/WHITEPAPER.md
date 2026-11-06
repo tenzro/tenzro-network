@@ -162,7 +162,7 @@ TNZO has a single canonical native balance. The wTNZO ERC-20 pointer on the EVM 
 
 ## 5. Consensus
 
-Tenzro Ledger orders transactions with a signature-free DAG protocol and makes the ordering transferable with post-quantum checkpoint certificates. The design is described in [`architecture/consensus.md`](architecture/consensus.md); its latency and throughput are measured by the proof-gate runs of the network emulator in `tenzro-consensus`, not asserted here. Each network's genesis sets its chain ID; the preview network's is 133801.
+Tenzro Ledger orders transactions with a signature-free DAG protocol and makes the ordering transferable with post-quantum checkpoint certificates. The design is described in [`architecture/consensus.md`](architecture/consensus.md); its latency and throughput are measured by the proof-gate runs of the network emulator in `tenzro-consensus`, not asserted here. Each network's genesis sets its chain ID; the preview network's is 13380.
 
 ### Ordering
 

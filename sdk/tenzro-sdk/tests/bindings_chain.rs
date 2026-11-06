@@ -204,7 +204,7 @@ async fn chain_reads() {
         3
     );
     node.answer("web3_clientVersion", json!("tenzro-node/0.9.0"));
-    node.answer("eth_chainId", json!("0x20aa9"));
+    node.answer("eth_chainId", json!("0x3444"));
     node.answer("tenzro_syncing", json!(false));
     let info = node
         .check(
@@ -222,7 +222,7 @@ async fn chain_reads() {
             info.peer_count,
             info.syncing
         ),
-        ("tenzro-node/0.9.0", 133801, 9, 2, false)
+        ("tenzro-node/0.9.0", 13380, 9, 2, false)
     );
     assert_eq!(
         node.check(
@@ -1367,7 +1367,7 @@ async fn a_contract_deploy_sends_nothing_when_the_node_payload_does_not_match() 
     let node = Node::start().await;
     let c = node.client().await;
     node.answer("tenzro_getNonce", json!("0x2"));
-    node.answer("eth_chainId", json!("0x20aa9"));
+    node.answer("eth_chainId", json!("0x3444"));
     node.answer("eth_gasPrice", json!("0x1"));
     node.answer(
         "tenzro_getSigningPayload",

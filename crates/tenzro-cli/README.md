@@ -1012,7 +1012,7 @@ tenzro bridge route --adapter ccip --chain ethereum
 
 # Send TNZO out: prepare, sign the printed bytes with the holder's key, send
 tenzro bridge send --from <addr> --amount <amount> --to-chain base \
-  --recipient <hex> --nonce 1 --chain-id 133801 --request-out send.json
+  --recipient <hex> --nonce 1 --chain-id 13380 --request-out send.json
 tenzro bridge send --request-in send.json --public-key <hex> --signature <hex>
 
 # Deliver a committee-attested inbound transfer

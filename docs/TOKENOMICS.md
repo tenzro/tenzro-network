@@ -62,7 +62,7 @@ TNZO does not replace user-facing stablecoins. AP2 cart settlements, x402 USDC f
 | Decimals | 18 | u128 arithmetic throughout |
 | Maximum supply | 1,000,000,000 TNZO | Fixed cap |
 | Smallest unit | 10⁻¹⁸ TNZO | One wei-equivalent |
-| Chain ID | set by each network's genesis | 133801 on the preview network; `eth_chainId` returns it |
+| Chain ID | set by each network's genesis | 13380 on the preview network; `eth_chainId` returns it |
 | Network-rewards pool | 400,000,000 TNZO | Genesis-funded account; rewards are transfers out of it |
 
 Supply is fixed. Genesis allocates exactly the maximum supply: the accounts it names, including the network-rewards pool account (`tenzro_token::rewards_pool_address()`, 400M TNZO); genesis refuses a configuration whose allocations do not add up to 1,000,000,000 TNZO (`tnzo::check_genesis_supply`). There is no protocol-level mint authority beyond the genesis distribution: reward claims and vesting releases are transfers out of the pool and the vesting escrow account (see section 7), not mints. The only thing that changes total supply after genesis is burning (section 5), plus bridge mint and burn of tokens that crossed chains.

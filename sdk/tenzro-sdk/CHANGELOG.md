@@ -32,7 +32,7 @@ First release.
 
 ### Network
 - The default network is the preview network, `network::PREVIEW_NETWORK`:
-  chain id 133801, RPC `https://rpc.tenzro.com`, REST API
+  chain id 13380, RPC `https://rpc.tenzro.com`, REST API
   `https://api.tenzro.com`, MCP `https://mcp.tenzro.com/mcp`, A2A
   `https://a2a.tenzro.com`, relay `https://relay.tenzro.com`.
   `NetworkOptions::default()` and `network::NETWORK_CHAIN_ID` follow it, and

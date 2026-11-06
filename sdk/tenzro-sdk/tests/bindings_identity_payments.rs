@@ -55,7 +55,7 @@ fn decode_preimage() -> Vec<u8> {
 fn answer(method: &str, params: &Value) -> Value {
     match method {
         "tenzro_getBalance" | "tenzro_getNonce" => json!("0x5"),
-        "eth_chainId" => json!("0x20aa9"),
+        "eth_chainId" => json!("0x3444"),
         "eth_gasPrice" => json!("0x1"),
         "tenzro_getSigningPayload" => plain_payload(params),
         "tenzro_createCustodyChallenge" => json!({
@@ -628,7 +628,7 @@ async fn every_binding_sends_the_params_the_node_reads() {
     covered.insert("tenzro_getSigningPayload".into());
     let sent = node.last("tenzro_sendRawTransaction");
     assert_eq!(sent["public_key"], "07".repeat(64));
-    assert_eq!(sent["chain_id"], 133801);
+    assert_eq!(sent["chain_id"], 13380);
     assert_eq!(sent["nonce"], 5);
     covered.insert("tenzro_sendRawTransaction".into());
 
@@ -1088,7 +1088,7 @@ fn typed_reads_decode_the_nodes_shapes() {
                 "prev": "00",
                 "at": "2026-10-19T00:00:00.000Z",
                 "node": null,
-                "chain_id": 133801,
+                "chain_id": 13380,
                 "entry": { "kind": "opened", "data": { "version": "0.9.0", "after_unreadable_line": false } },
             },
             "hash": "aa",

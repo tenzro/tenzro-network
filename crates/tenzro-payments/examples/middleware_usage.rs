@@ -10,8 +10,8 @@ use tenzro_payments::{
     middleware::{PaymentGateConfig, PaymentGateMiddleware, payment_gate_handler},
 };
 
-/// The chain id the network's genesis sets; 133801 is the preview network.
-const CHAIN_ID: u64 = 133801;
+/// The chain id the network's genesis sets; 13380 is the preview network.
+const CHAIN_ID: u64 = 13380;
 
 /// Stands in for the node's reader of the keys accounts enrolled in chain
 /// state; here no account has enrolled an ML-DSA-65 key.

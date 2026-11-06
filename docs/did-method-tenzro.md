@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0
 **Status:** Ready for W3C Registration
-**Specification Location:** https://github.com/tenzro/did-method-tenzro/blob/main/spec.md
+**Specification Location:** https://github.com/tenzro/tenzro-network/blob/main/docs/did-method-tenzro.md
 
 ---
 
@@ -179,10 +179,9 @@ An implementation conforms to this specification if it:
 
 ## 7. Contact
 
-- **Repository**: https://github.com/tenzro/did-method-tenzro
-- **Specification**: https://github.com/tenzro/did-method-tenzro/blob/main/spec.md
+- **Specification**: this document (https://github.com/tenzro/tenzro-network/blob/main/docs/did-method-tenzro.md)
 - **Implementation**: https://github.com/tenzro/tenzro-network (`crates/tenzro-identity`)
-- **Issues**: https://github.com/tenzro/did-method-tenzro/issues
+- **Issues**: https://github.com/tenzro/tenzro-network/issues
 - **W3C Working Group**: W3C Credentials Community Group
 
 ---
@@ -196,14 +195,14 @@ The submission PR should be filed against
 methods table in `methods.md`:
 
 ```
-| tenzro | Tenzro Network | https://github.com/tenzro/did-method-tenzro | https://github.com/tenzro/did-method-tenzro/blob/main/spec.md | PROVISIONAL |
+| tenzro | Tenzro Network | https://github.com/tenzro/tenzro-network | https://github.com/tenzro/tenzro-network/blob/main/docs/did-method-tenzro.md | PROVISIONAL |
 ```
 
 ### Registration Checklist
 
 - [x] DID method name chosen and unique (no existing `did:tenzro`)
 - [x] Human-readable description provided
-- [x] Specification URL reachable and permanent (https://github.com/tenzro/did-method-tenzro/blob/main/spec.md)
+- [x] Specification URL reachable and permanent (https://github.com/tenzro/tenzro-network/blob/main/docs/did-method-tenzro.md)
 - [x] IPR affirmed (Apache-2.0 license)
 - [x] Security and privacy considerations documented (§4)
 - [x] CRUD semantics fully specified (§3)

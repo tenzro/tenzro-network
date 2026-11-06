@@ -23,8 +23,8 @@ use tenzro_vm::{
     VmConfig, VmExecutor, VmState, VmTransaction, VmType,
 };
 
-/// The chain id the network's genesis sets; 133801 is the preview network.
-const CHAIN_ID: u64 = 133801;
+/// The chain id the network's genesis sets; 13380 is the preview network.
+const CHAIN_ID: u64 = 13380;
 
 // ----------------------------------------------------------------------
 // Hand-rolled bytecode used by the EVM walkthroughs.

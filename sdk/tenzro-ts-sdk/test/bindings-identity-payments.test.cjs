@@ -62,7 +62,7 @@ function answer(method, params) {
     case "tenzro_getNonce":
       return "0x5";
     case "eth_chainId":
-      return "0x20aa9";
+      return "0x3444";
     case "eth_gasPrice":
       return "0x1";
     case "tenzro_getSigningPayload":
@@ -290,7 +290,7 @@ const CASES = [
     (c, s) => c.tx.send(s, { kind: "Transfer", fields: { amount: 1 } }),
     (p) => {
       assert.equal(p.public_key, "07".repeat(64));
-      assert.equal(p.chain_id, 133801);
+      assert.equal(p.chain_id, 13380);
       assert.equal(p.nonce, 5);
     },
   ],

@@ -32,7 +32,7 @@ const result = await detail.provider.request({ method: "eth_chainId" });
 const tenzro = await waitForTenzroProvider();
 await tenzro.multichain.createSession({
   scopes: {
-    "eip155:133801": { methods: ["eth_chainId", "eth_sendTransaction"], notifications: [] },
+    "eip155:13380": { methods: ["eth_chainId", "eth_sendTransaction"], notifications: [] },
   },
 });
 const balance = await tenzro.native.request("tenzro_getBalance", [address]);
@@ -105,7 +105,7 @@ Why this design and not an access token. The alternative was to have the passkey
 ## Multichain routing rules
 
 - `tenzro:mainnet` / `tenzro:testnet` — only `tenzro_*` methods accepted.
-- `eip155:<chain-id>` (`eip155:133801` on the preview network) — only `eth_*` / `personal_*` / `wallet_*` accepted.
+- `eip155:<chain-id>` (`eip155:13380` on the preview network) — only `eth_*` / `personal_*` / `wallet_*` accepted.
 
 The CAIP-2 `tenzro:` namespace is filed with `ChainAgnostic/namespaces` (`#184`); the reference documents are `tenzro/caip2.md`, `tenzro/caip10.md`, and `tenzro/caip19.md`.
 

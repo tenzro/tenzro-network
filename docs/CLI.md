@@ -9466,7 +9466,7 @@ Options:
       --network-name <NETWORK_NAME>
           Name for a new local or sovereign network
       --chain-id <CHAIN_ID>
-          Chain id for a new local or sovereign network. Defaults to a random five-digit id, so it collides with neither the local developer chain (1337) nor the preview network (133801)
+          Chain id for a new local or sovereign network. Defaults to a random five-digit id, so it collides with neither the local developer chain (1337) nor the preview network (13380)
       --data-dir <DATA_DIR>
           Node data directory. Defaults depend on the chosen path. Also settable via `$TENZRO_DATA_DIR`, the same variable `tenzro-node` itself reads, so a setup and the node it bootstraps agree on where state lives without repeating the flag [env: TENZRO_DATA_DIR=]
       --stake <STAKE>

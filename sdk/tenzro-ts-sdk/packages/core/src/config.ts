@@ -34,7 +34,7 @@ export interface NetworkPreset {
 /** The Tenzro preview network. */
 export const PREVIEW_NETWORK: Readonly<NetworkPreset> = Object.freeze({
   name: "preview",
-  chainId: 133801,
+  chainId: 13380,
   rpc: "https://rpc.tenzro.com",
   api: "https://api.tenzro.com",
   mcp: "https://mcp.tenzro.com/mcp",

@@ -90,7 +90,7 @@ pub struct SetupCmd {
 
     /// Chain id for a new local or sovereign network. Defaults to a
     /// random five-digit id, so it collides with neither the local
-    /// developer chain (1337) nor the preview network (133801).
+    /// developer chain (1337) nor the preview network (13380).
     #[arg(long)]
     pub chain_id: Option<u64>,
 

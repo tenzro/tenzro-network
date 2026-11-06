@@ -37,7 +37,7 @@ First release.
 
 ### Network
 - The default network is the preview network, `PREVIEW_NETWORK`: chain id
-  133801, RPC `https://rpc.tenzro.com`, REST API `https://api.tenzro.com`, MCP
+  13380, RPC `https://rpc.tenzro.com`, REST API `https://api.tenzro.com`, MCP
   `https://mcp.tenzro.com/mcp`, A2A `https://a2a.tenzro.com`, relay
   `https://relay.tenzro.com`. `connectToNetwork()`, `DEFAULT_NETWORK`,
   `NETWORK_CHAIN_ID` and `TenzroClient.fromInjected()` follow it, and

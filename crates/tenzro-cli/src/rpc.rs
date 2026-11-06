@@ -716,7 +716,7 @@ mod nonce_and_chain_id_tests {
     #[tokio::test]
     async fn the_nonce_and_chain_id_are_read_from_the_node() {
         let url = node_answering(&[
-            ("eth_chainId", r#""0x20aa9""#),
+            ("eth_chainId", r#""0x3444""#),
             ("eth_getTransactionCount", r#""0x7""#),
         ])
         .await;
@@ -725,11 +725,11 @@ mod nonce_and_chain_id_tests {
             fetch_nonce_and_chain_id(&rpc, ACCOUNT, None, None)
                 .await
                 .unwrap(),
-            (7, 133801)
+            (7, 13380)
         );
         // A fresh account reads as nonce zero like any other.
         let url = node_answering(&[
-            ("eth_chainId", r#""0x20aa9""#),
+            ("eth_chainId", r#""0x3444""#),
             ("eth_getTransactionCount", r#""0x0""#),
         ])
         .await;
@@ -738,7 +738,7 @@ mod nonce_and_chain_id_tests {
             fetch_nonce_and_chain_id(&rpc, ACCOUNT, None, None)
                 .await
                 .unwrap(),
-            (0, 133801)
+            (0, 13380)
         );
     }
 
@@ -789,19 +789,19 @@ mod nonce_and_chain_id_tests {
         // Both given: the node is not asked at all.
         let rpc = RpcClient::new(&closed_endpoint().await);
         assert_eq!(
-            fetch_nonce_and_chain_id(&rpc, ACCOUNT, Some(4), Some(133801))
+            fetch_nonce_and_chain_id(&rpc, ACCOUNT, Some(4), Some(13380))
                 .await
                 .unwrap(),
-            (4, 133801)
+            (4, 13380)
         );
         // One given: only the other is read.
         let url = node_answering(&[("eth_getTransactionCount", r#""0x9""#)]).await;
         let rpc = RpcClient::new(&url);
         assert_eq!(
-            fetch_nonce_and_chain_id(&rpc, ACCOUNT, None, Some(133801))
+            fetch_nonce_and_chain_id(&rpc, ACCOUNT, None, Some(13380))
                 .await
                 .unwrap(),
-            (9, 133801)
+            (9, 13380)
         );
         let url = node_answering(&[("eth_chainId", r#""0x539""#)]).await;
         let rpc = RpcClient::new(&url);

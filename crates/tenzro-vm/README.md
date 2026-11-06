@@ -82,7 +82,7 @@ The VM layer is designed with a pluggable executor architecture that implements 
 | Max gas price | 1000 Gwei | Maximum gas price (EIP-1559) |
 | Target gas | 15,000,000 | EIP-1559 target gas per block |
 | Max contract size | 24,576 bytes | Maximum contract bytecode size |
-| Default chain ID | 1337 | The local developer chain's id; a network's genesis sets its own (133801 on the preview network) |
+| Default chain ID | 1337 | The local developer chain's id; a network's genesis sets its own (13380 on the preview network) |
 | Max call depth | 1,024 | Maximum call stack depth |
 | Block-STM conflict threshold | 50% | Conflict rate for sequential fallback |
 | Block-STM max reexecutions | 16 | Maximum retry attempts |
@@ -104,9 +104,9 @@ use tenzro_vm::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create VM configuration
-    // The chain id the network's genesis sets; 133801 is the preview network.
+    // The chain id the network's genesis sets; 13380 is the preview network.
     let config = VmConfig::default()
-        .with_chain_id(133801)
+        .with_chain_id(13380)
         .with_debug(true);
 
     // Initialize multi-VM runtime
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         1_000_000_000,           // gas_price (1 Gwei)
         0,                       // nonce
         VmType::Evm,             // vm_type
-        133801,                  // chain_id
+        13380,                  // chain_id
     );
 
     // Execute transaction (automatically routed to EVM)

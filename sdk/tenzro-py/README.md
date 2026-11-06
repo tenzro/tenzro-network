@@ -42,7 +42,7 @@ SDK reads, builds and verifies, and refuses to sign.
 Read from the network: the client finds the staked RPC operators on chain,
 keeps those that report the expected chain id and agree on a checkpoint, and
 moves between them when one cannot be reached.
-The default is the preview network, `tenzro.PREVIEW_NETWORK`: chain id 133801,
+The default is the preview network, `tenzro.PREVIEW_NETWORK`: chain id 13380,
 RPC at `https://rpc.tenzro.com`, the REST API at `https://api.tenzro.com`, MCP
 at `https://mcp.tenzro.com/mcp`, A2A at `https://a2a.tenzro.com` and the relay
 at `https://relay.tenzro.com`. The default seed, `https://rpc.tenzro.com`, is
@@ -125,7 +125,7 @@ from tenzro.payments import AsyncPublisherGate, PaidRoute, PublisherPolicy, asyn
 from tenzro.payments.asgi import PublisherGateMiddleware
 
 policy = PublisherPolicy(
-    chain_id=133801,
+    chain_id=13380,
     pay_to="ab" * 32,
     facilitator=facilitator_url,  # base URL of the harness facilitator; the gate posts to its /settle
     routes=(PaidRoute("/articles/*", usd_e6=2_000, permits=("ai-input",), prohibits=("ai-train",), content_usage="train-ai=n"),),

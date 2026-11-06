@@ -374,7 +374,7 @@ Sei Network's April 2026 pivot to EVM-only — abandoning its earlier multi-VM a
 | Default gas limit | 10,000,000 | Default gas if unspecified |
 | Min gas price | 1 Gwei (10^9 wei) | Minimum gas price |
 | Max contract size | 24,576 bytes | EIP-170 contract size limit |
-| Chain ID | `<chain-id>` | Set by each network's genesis (133801 on the preview network, 1337 on the local developer chain); custody approvals are bound to it |
+| Chain ID | `<chain-id>` | Set by each network's genesis (13380 on the preview network, 1337 on the local developer chain); custody approvals are bound to it |
 | Max call depth | 1,024 | Maximum nested call depth |
 
 ### 4.3 Precompile Registry

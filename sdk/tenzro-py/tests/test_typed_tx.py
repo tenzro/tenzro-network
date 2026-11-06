@@ -134,9 +134,9 @@ class _CountingSigner:
     "answers, what",
     [
         ({"tenzro_getNonce": "0x5", "eth_chainId": RuntimeError("unavailable")}, "chain id"),
-        ({"tenzro_getNonce": RuntimeError("unavailable"), "eth_chainId": "0x20aa9"}, "nonce"),
+        ({"tenzro_getNonce": RuntimeError("unavailable"), "eth_chainId": "0x3444"}, "nonce"),
         ({"tenzro_getNonce": "0x5", "eth_chainId": "0xzz"}, "chain id"),
-        ({"tenzro_getNonce": "1_0", "eth_chainId": "0x20aa9"}, "nonce"),
+        ({"tenzro_getNonce": "1_0", "eth_chainId": "0x3444"}, "nonce"),
         ({"tenzro_getNonce": "0x5", "eth_chainId": None}, "chain id"),
     ],
 )
@@ -150,16 +150,16 @@ def test_a_failed_or_malformed_read_is_an_error_not_a_signed_transaction(answers
 
 
 def test_the_envelope_carries_the_nonce_and_chain_id_the_node_reports():
-    node = _Node({"tenzro_getNonce": "0x5", "eth_chainId": "0x20aa9", "eth_gasPrice": "0x3b9aca00"})
+    node = _Node({"tenzro_getNonce": "0x5", "eth_chainId": "0x3444", "eth_gasPrice": "0x3b9aca00"})
     node.answers["tenzro_getSigningPayload"] = RuntimeError("stop before signing")
     with pytest.raises(RuntimeError, match="stop before signing"):
         TypedTxClient(node).send(_CountingSigner(), TypedTransaction(kind="Transfer", fields={"amount": 1}))
     _, params = node.sent[-1]
-    assert params["nonce"] == 5 and params["chain_id"] == 133801
+    assert params["nonce"] == 5 and params["chain_id"] == 13380
 
 
 def test_a_quantity_is_hex_or_an_error():
-    assert parse_quantity("0x20aa9") == 133801
+    assert parse_quantity("0x3444") == 13380
     assert parse_quantity("ff") == 255
     for bad in ["", "0x", "0x+1", "0x1g", " 0x1", "1_0", None, 5]:
         with pytest.raises(ValueError):

@@ -36,7 +36,7 @@ class NetworkPreset:
 #: The Tenzro preview network.
 PREVIEW_NETWORK = NetworkPreset(
     name="preview",
-    chain_id=133801,
+    chain_id=13380,
     rpc="https://rpc.tenzro.com",
     api="https://api.tenzro.com",
     mcp="https://mcp.tenzro.com/mcp",

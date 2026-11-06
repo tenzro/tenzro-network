@@ -44,20 +44,20 @@ function signer() {
 const TO = "0x" + "03".repeat(32);
 
 test("self custody signs with the nonce and chain id the node reports", async () => {
-  const rpc = node({ tenzro_getNonce: "0x5", eth_chainId: "0x20aa9", tenzro_sendRawTransaction: "0xabc" });
+  const rpc = node({ tenzro_getNonce: "0x5", eth_chainId: "0x3444", tenzro_sendRawTransaction: "0xabc" });
   const s = signer();
   const out = await new sdk.WalletClient(rpc).sendSelfCustody({ signer: s, to: TO, value: 5n });
   assert.equal(out, "0xabc");
   assert.equal(s.signed, 1);
   const sent = rpc.sent.find((r) => r.method === "tenzro_sendRawTransaction").params;
   assert.equal(sent.nonce, 5);
-  assert.equal(sent.chain_id, 133801);
+  assert.equal(sent.chain_id, 13380);
 });
 
 test("self custody uses a nonce and chain id the caller passes", async () => {
   const rpc = node({ tenzro_sendRawTransaction: "0xabc" });
   const s = signer();
-  await new sdk.WalletClient(rpc).sendSelfCustody({ signer: s, to: TO, value: 5n, nonce: 2, chainId: 133801 });
+  await new sdk.WalletClient(rpc).sendSelfCustody({ signer: s, to: TO, value: 5n, nonce: 2, chainId: 13380 });
   const RECIPIENT_CHECK = ["tenzro_getNetworkParams", "tenzro_getTransactionHistory"];
   assert.deepEqual(
     rpc.sent.map((r) => r.method).filter((m) => !RECIPIENT_CHECK.includes(m)),
@@ -65,14 +65,14 @@ test("self custody uses a nonce and chain id the caller passes", async () => {
   );
   const sent = rpc.sent.find((r) => r.method === "tenzro_sendRawTransaction").params;
   assert.equal(sent.nonce, 2);
-  assert.equal(sent.chain_id, 133801);
+  assert.equal(sent.chain_id, 13380);
 });
 
 for (const [name, answers, what] of [
   ["the chain id read fails", { tenzro_getNonce: "0x5", eth_chainId: new Error("unavailable") }, "chain id"],
-  ["the nonce read fails", { tenzro_getNonce: new Error("unavailable"), eth_chainId: "0x20aa9" }, "nonce"],
+  ["the nonce read fails", { tenzro_getNonce: new Error("unavailable"), eth_chainId: "0x3444" }, "nonce"],
   ["the chain id is malformed", { tenzro_getNonce: "0x5", eth_chainId: "0xzz" }, "chain id"],
-  ["the nonce is malformed", { tenzro_getNonce: "12zz", eth_chainId: "0x20aa9" }, "nonce"],
+  ["the nonce is malformed", { tenzro_getNonce: "12zz", eth_chainId: "0x3444" }, "nonce"],
   ["the chain id is missing", { tenzro_getNonce: "0x5", eth_chainId: null }, "chain id"],
 ]) {
   test(`self custody does not sign when ${name}`, async () => {

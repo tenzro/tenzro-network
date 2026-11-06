@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn the_primary_cannot_be_its_own_secondary() {
         // Whichever chain id the node runs, and in either identifier form.
-        for primary in ["tenzro:133801", "tenzro:1337", "tenzro", "Tenzro"] {
+        for primary in ["tenzro:13380", "tenzro:1337", "tenzro", "Tenzro"] {
             let e =
                 MirrorPlan::native_only(vec![MirrorTarget::self_contained(primary)]).unwrap_err();
             assert_eq!(e, MirrorPlanError::PrimaryAsSecondary, "{primary}");
@@ -675,7 +675,7 @@ mod tests {
             NetworkFamily::Svm,
             NetworkFamily::Tenzro,
         ] {
-            let reachable = tenzro_types::settlement_network::settlement_networks(133801)
+            let reachable = tenzro_types::settlement_network::settlement_networks(13380)
                 .iter()
                 .any(|n| n.family == family);
             assert!(reachable, "{family:?} is executable but not settleable");

@@ -89,7 +89,7 @@ Every RPC method the client binds is listed, with its params, result and errors,
 ```typescript
 import { TenzroClient, connectToNetwork } from "tenzro-sdk";
 
-// The preview network: staked RPC operators found on chain, chain id 133801.
+// The preview network: staked RPC operators found on chain, chain id 13380.
 const preview = await connectToNetwork();
 // One endpoint of the preview network, with no discovery.
 const one = TenzroClient.preview();
@@ -308,14 +308,14 @@ npx tsx examples/intent-routing.ts          # route an intent to a model, or run
 
 ## Reaching the network
 
-The SDK defaults to the preview network, `PREVIEW_NETWORK`: chain id 133801,
+The SDK defaults to the preview network, `PREVIEW_NETWORK`: chain id 13380,
 RPC at `https://rpc.tenzro.com`, the REST API at `https://api.tenzro.com`, MCP
 at `https://mcp.tenzro.com/mcp`, A2A at `https://a2a.tenzro.com` and the relay
 at `https://relay.tenzro.com`.
 
 There is no single endpoint. RPC operators bond the `rpc` role and publish
 the URL they serve in consensus state; `connectToNetwork()` asks the seed for that
-list, keeps the operators that report chain id 133801 and agree on a
+list, keeps the operators that report chain id 13380 and agree on a
 checkpoint digest, and moves between them when one cannot be reached.
 
 The default seed, `https://rpc.tenzro.com`, is only a bootstrap hint: once

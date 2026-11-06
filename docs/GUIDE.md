@@ -30,7 +30,7 @@ CLI.
 | Python | `pip install tenzro` (`tenzro[device]` for the hardware signer) | `sdk/tenzro-py`, [README](../sdk/tenzro-py/README.md) |
 | Rust | `cargo add tenzro-sdk` | `sdk/tenzro-sdk`, [README](../sdk/tenzro-sdk/README.md), docs.rs |
 
-Each SDK defaults to the preview network (chain id 133801, `https://rpc.tenzro.com`)
+Each SDK defaults to the preview network (chain id 13380, `https://rpc.tenzro.com`)
 and finds the staked RPC operators on chain; each also takes one endpoint,
 such as the local chain `tenzro dev` serves (chain id 1337, `http://127.0.0.1:8545`):
 

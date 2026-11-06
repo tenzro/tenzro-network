@@ -361,7 +361,7 @@ describes.
 
 | Rail | CAIP-2 | Family | Carries natively | x402 |
 |---|---|---|---|---|
-| Tenzro Ledger | `tenzro:<chain-id>`, the chain id the network's genesis sets (`tenzro:133801` on the preview network; see `docs/caip2-namespace/README.md`) | tenzro | TNZO | yes |
+| Tenzro Ledger | `tenzro:<chain-id>`, the chain id the network's genesis sets (`tenzro:13380` on the preview network; see `docs/caip2-namespace/README.md`) | tenzro | TNZO | yes |
 | Stellar | `stellar:pubnet` | stellar | USDC, PYUSD, USDY | yes |
 | XRP Ledger | `xrpl:0` | xrpl | RLUSD | yes |
 | Solana | `solana:5eykt4Us…` | svm | USDC, PYUSD, USDG | yes |

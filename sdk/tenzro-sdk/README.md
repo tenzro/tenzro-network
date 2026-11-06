@@ -85,7 +85,7 @@ async fn send(
 # async fn run() -> tenzro_sdk::SdkResult<()> {
 use tenzro_sdk::{SdkConfig, TenzroClient};
 
-// The preview network: staked RPC operators found on chain, chain id 133801.
+// The preview network: staked RPC operators found on chain, chain id 13380.
 let preview = tenzro_sdk::network::connect_to_network(&tenzro_sdk::network::NetworkOptions::default()).await?;
 // One endpoint of the preview network, with no discovery.
 let one = TenzroClient::connect(SdkConfig::preview()).await?;
@@ -307,13 +307,13 @@ cargo run --example ai_inference
 ## Reaching the network
 
 The SDK defaults to the preview network, `network::PREVIEW_NETWORK`: chain id
-133801, RPC at `https://rpc.tenzro.com`, the REST API at
+13380, RPC at `https://rpc.tenzro.com`, the REST API at
 `https://api.tenzro.com`, MCP at `https://mcp.tenzro.com/mcp`, A2A at
 `https://a2a.tenzro.com` and the relay at `https://relay.tenzro.com`.
 
 There is no single endpoint. RPC operators bond the `rpc` role and publish
 the URL they serve in consensus state; `network::connect_to_network(&NetworkOptions::default())` asks the seed for that
-list, keeps the operators that report chain id 133801 and agree on a
+list, keeps the operators that report chain id 13380 and agree on a
 checkpoint digest, and moves between them when one cannot be reached.
 
 The default seed, `https://rpc.tenzro.com`, is only a bootstrap hint: once

@@ -62,7 +62,18 @@ Every npm project carries an `.npmrc` with `ignore-scripts=true`, and installs u
 
 ## Releases
 
-Release archives are built from a pinned commit with `--locked`, reproduced by
-`scripts/supply-chain/reproduce.sh`, and gated by `scripts/supply-chain/release.sh`. Signing the
-archives with a hardware-held key and recording the digest in the chain registry is tracked in the
-threat model (section G); until that lands the digest in the release notes is the reference. Users verify a download with [VERIFY-DOWNLOAD.md](VERIFY-DOWNLOAD.md).
+Release archives are built from a pinned commit with `--locked` and reproduced by
+`scripts/supply-chain/reproduce.sh`. The manifest `SHA256SUMS` is signed with a non-exportable P-256 key held
+in a TPM 2.0, by `scripts/supply-chain/sign-release-tpm.sh`. That script is the documented launch path: it
+needs only tpm2-tools and openssl on the signing host, shows the signer every line of the manifest and its
+SHA-256, takes the key passphrase from the terminal only, and writes a signature that
+`cosign verify-blob --key tenzro-release.pub --insecure-ignore-tlog=true` accepts. The key and its
+fingerprint are in [RELEASE-KEYS.md](RELEASE-KEYS.md); each signing is recorded in
+[SIGNING-LOG.md](SIGNING-LOG.md).
+
+`scripts/supply-chain/release.sh` is the other path: it runs the pins, cargo-deny, advisory-gate and
+cargo-vet checks and then signs with cosign. It accepts only a `pkcs11:` key URI and refuses anything else, so
+it does not sign with the TPM key above; for a release signed by `sign-release-tpm.sh` the gates it runs must
+be run separately and their result recorded in the release notes. Recording the digest in the chain registry
+is tracked in the threat model (section G); until that lands the digest in the release notes is a second
+reference. Users verify a download with [VERIFY-DOWNLOAD.md](VERIFY-DOWNLOAD.md).

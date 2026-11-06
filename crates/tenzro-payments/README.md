@@ -79,8 +79,8 @@ use tenzro_payments::gateway::{PaymentExpectation, TenzroPaymentGateway};
 use tenzro_payments::traits::{PaymentGateway, PaymentProtocol};
 use tenzro_payments::x402::X402PaymentServer;
 
-// The chain id the network's genesis sets; 133801 is the preview network.
-const CHAIN_ID: u64 = 133801;
+// The chain id the network's genesis sets; 13380 is the preview network.
+const CHAIN_ID: u64 = 13380;
 
 // A gateway with the node's ledger rail attached.
 let gateway = TenzroPaymentGateway::new(CHAIN_ID).with_rail(ledger_rail);

@@ -584,7 +584,7 @@ mod tests {
     async fn self_custody_signs_with_the_nonce_and_chain_id_the_node_reports() {
         let (out, requests, signed, _) = send_with(vec![
             serde_json::json!("0x5"),
-            serde_json::json!("0x20aa9"),
+            serde_json::json!("0x3444"),
             serde_json::json!("0xabc"),
         ])
         .await;
@@ -593,7 +593,7 @@ mod tests {
         let sent = &requests[2];
         assert_eq!(sent["method"], "tenzro_sendRawTransaction");
         assert_eq!(sent["params"]["nonce"], 5);
-        assert_eq!(sent["params"]["chain_id"], 133801);
+        assert_eq!(sent["params"]["chain_id"], 13380);
     }
 
     #[tokio::test]
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn a_quantity_is_hex_or_an_error() {
-        assert_eq!(parse_quantity("0x20aa9"), Ok(133801));
+        assert_eq!(parse_quantity("0x3444"), Ok(13380));
         assert_eq!(parse_quantity("ff"), Ok(255));
         for bad in ["", "0x", "0x+1", "0x1g", " 0x1", "0x1_0"] {
             assert!(parse_quantity(bad).is_err(), "{bad:?}");

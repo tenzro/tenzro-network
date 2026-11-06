@@ -31,7 +31,7 @@ all of them in lockstep.
 | Namespace identifier     | `tenzro`                                                              |
 | Testnet genesis state root | `bd7db8168a4fb61538147696bc8572700d644e6eb544d8c0469e816fd652036a`  |
 | Testnet CAIP-2 reference | `tenzro:bd7db8168a4fb61538147696bc857270` (first 16 bytes / 32 hex)   |
-| EVM chain ID             | `<chain-id>`, set by each network's genesis (`133801` on the preview network) |
+| EVM chain ID             | `<chain-id>`, set by each network's genesis (`13380` on the preview network) |
 | Mainnet CAIP-2 reference | TBD — populated at mainnet launch                                     |
 | Address width            | 32 bytes (hex `0x` + 64 chars OR 44-char base58btc)                   |
 | Native asset (slip44)    | `tenzro` (pre-registration; SLIP-44 PR pending)                       |
@@ -46,7 +46,7 @@ is upstreamed.
 
 | Surface | Identifier used | Source |
 | :--- | :--- | :--- |
-| Settlement networks, x402 `network`, micropayment routing | `tenzro:<chain-id>`, the chain id of the node's genesis (`tenzro:133801` on the preview network), not the genesis root | `crates/tenzro-types/src/settlement_network.rs` (`tenzro_caip2`) |
+| Settlement networks, x402 `network`, micropayment routing | `tenzro:<chain-id>`, the chain id of the node's genesis (`tenzro:13380` on the preview network), not the genesis root | `crates/tenzro-types/src/settlement_network.rs` (`tenzro_caip2`) |
 
 ## Upstreaming workflow
 

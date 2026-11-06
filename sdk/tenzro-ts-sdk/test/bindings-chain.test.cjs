@@ -316,7 +316,7 @@ test("tokens, reserves, economics, gateway and payments", async () => {
 });
 
 test("a contract deploy signs only the payload it checked, and sends nothing when the node payload does not match", async () => {
-  const n = node({ tenzro_getNonce: "0x2", eth_chainId: "0x20aa9", eth_gasPrice: "0x1", tenzro_getSigningPayload: { kind: "plain", tx_type_json: "{}" } });
+  const n = node({ tenzro_getNonce: "0x2", eth_chainId: "0x3444", eth_gasPrice: "0x1", tenzro_getSigningPayload: { kind: "plain", tx_type_json: "{}" } });
   let signed = false;
   const signer = {
     p256PublicKey: () => new Uint8Array(64).fill(7),

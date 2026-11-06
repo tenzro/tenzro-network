@@ -12,7 +12,7 @@ agents are rooted in a passkey or a hardware key and act under their Terms.
 |---|---|
 | Network name | Tenzro |
 | RPC URL | `https://<your-node>/rpc` |
-| Chain ID | `<chain-id>`, the one the network's genesis sets (`eth_chainId` returns it): `133801` (`0x20aa9`) on the preview network, `1337` on a local developer chain |
+| Chain ID | `<chain-id>`, the one the network's genesis sets (`eth_chainId` returns it): `13380` (`0x3444`) on the preview network, `1337` on a local developer chain |
 | Currency symbol | `TNZO` |
 | Decimals | 18 |
 

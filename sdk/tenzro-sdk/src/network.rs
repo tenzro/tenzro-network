@@ -74,7 +74,7 @@ impl NetworkPreset {
 /// The Tenzro preview network.
 pub const PREVIEW_NETWORK: NetworkPreset = NetworkPreset {
     name: "preview",
-    chain_id: 133801,
+    chain_id: 13380,
     rpc: "https://rpc.tenzro.com",
     api: "https://api.tenzro.com",
     mcp: "https://mcp.tenzro.com/mcp",

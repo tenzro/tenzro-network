@@ -77,7 +77,7 @@ class TestWallet(unittest.TestCase):
             pq_public_key="0xpqpub",
             timestamp=1_700_000_000_000,
             nonce=4,
-            chain_id=133801,
+            chain_id=13380,
         )
         self.assertEqual(len(result), 64)
         sent = mock_post.call_args.kwargs["json"]
@@ -86,7 +86,7 @@ class TestWallet(unittest.TestCase):
         self.assertEqual(params["from"], "0xfrom")
         self.assertEqual(params["value"], str(10**18))
         self.assertEqual(params["nonce"], 4)
-        self.assertEqual(params["chain_id"], 133801)
+        self.assertEqual(params["chain_id"], 13380)
         self.assertEqual(params["timestamp"], 1_700_000_000_000)
         self.assertEqual(params["public_key"], "0xedpub")
         self.assertEqual(params["signature"], "0xedsig")
@@ -131,9 +131,9 @@ class TestNodeStatus(unittest.TestCase):
 
     @patch("tenzro_rpc.requests.post")
     def test_chain_id(self, mock_post):
-        mock_post.return_value = _mock_rpc_response("0x20aa9")
+        mock_post.return_value = _mock_rpc_response("0x3444")
         result = tenzro_rpc.chain_id()
-        self.assertEqual(result["chain_id"], 133801)
+        self.assertEqual(result["chain_id"], 13380)
 
     @patch("tenzro_rpc.requests.post")
     def test_an_unreadable_chain_id_is_an_error_not_a_default(self, mock_post):

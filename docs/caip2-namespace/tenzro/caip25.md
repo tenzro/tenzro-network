@@ -154,7 +154,7 @@ Example CAIP-25 Response
       "tenzro:bd7db8168a4fb61538147696bc857270": {
         "vmFacades": ["evm", "svm"],
         "dpopBound": true,
-        "evmChainId": 133801,
+        "evmChainId": 13380,
         "nativeAssetCaip19": "tenzro:bd7db8168a4fb61538147696bc857270/slip44:tenzro"
       }
     }

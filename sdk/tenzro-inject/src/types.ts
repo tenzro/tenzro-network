@@ -118,7 +118,7 @@ export interface CAIP25Scope {
   readonly methods: readonly string[];
   readonly notifications: readonly string[];
   readonly accounts?: readonly string[];
-  /** CAIP-2 chains nested inside this scope (e.g. `eip155:133801`). */
+  /** CAIP-2 chains nested inside this scope (e.g. `eip155:13380`). */
   readonly chains?: readonly string[];
 }
 
@@ -142,7 +142,7 @@ export interface CAIP25CreateSessionResult {
 
 export interface CAIP27InvokeParams {
   readonly sessionId?: string;
-  /** CAIP-2 scope key — e.g. `eip155:133801`, `solana:tenzro-mainnet`, `tenzro:mainnet`. */
+  /** CAIP-2 scope key — e.g. `eip155:13380`, `solana:tenzro-mainnet`, `tenzro:mainnet`. */
   readonly scope: string;
   readonly request: {
     readonly method: string;
